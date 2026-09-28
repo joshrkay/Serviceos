@@ -191,7 +191,7 @@ export function Sidebar({
         title="Continue?"
         description={
           pendingStepId === 'identity'
-            ? 'Re-editing business identity will overwrite saved values when you save. Downstream setup (phone, billing, AI check) is not reset.'
+            ? 'Re-editing business identity will overwrite saved values when you save. Downstream setup (billing, phone, AI check) is not reset.'
             : 'Re-picking your trade may add another pack to your tenant but will not reset the job types and templates the previous pack seeded.'
         }
         confirmLabel="Continue"

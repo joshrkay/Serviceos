@@ -130,6 +130,16 @@ async function seedSettings(pool: Pool, tenantId: string): Promise<void> {
   );
 }
 
+/**
+ * PR #1438 moved number purchase to trial checkout: the worker now refuses
+ * (quietly, before any Twilio call) unless tenants.subscription_status is
+ * trialing/active/past_due. A challenger that reaches the DID-conflict path
+ * is therefore, by the new contract, a tenant that completed checkout.
+ */
+async function markCheckoutComplete(pool: Pool, tenantId: string): Promise<void> {
+  await pool.query(`UPDATE tenants SET subscription_status = 'trialing' WHERE id = $1`, [tenantId]);
+}
+
 /** Give `tenantId` the DID outright, as a completed provision would have. */
 async function seedIncumbent(pool: Pool, tenantId: string, phoneE164: string): Promise<void> {
   const client = await pool.connect();
@@ -189,6 +199,7 @@ describe('Postgres integration — provisioning onto a DID another tenant holds 
 
     const challenger = await createTestTenant(pool);
     await seedSettings(pool, challenger.tenantId);
+    await markCheckoutComplete(pool, challenger.tenantId);
     stubTwilioAccount([{ sid: 'PN555', phone_number: CONTESTED_DID }]);
 
     const worker = createProvisionTwilioWorker({ pool });
@@ -253,6 +264,7 @@ describe('Postgres integration — provisioning onto a DID another tenant holds 
 
     const challenger = await createTestTenant(pool);
     await seedSettings(pool, challenger.tenantId);
+    await markCheckoutComplete(pool, challenger.tenantId);
     const { fn: fetchMock, owned } = stubTwilioAccount([
       { sid: 'PN555', phone_number: '+15125559905' },
     ]);
@@ -286,6 +298,7 @@ describe('Postgres integration — provisioning onto a DID another tenant holds 
 
     const challenger = await createTestTenant(pool);
     await seedSettings(pool, challenger.tenantId);
+    await markCheckoutComplete(pool, challenger.tenantId);
     // ONE stateful account across both runs: run 2's list reflects whatever
     // run 1 left behind, so this cannot pass unless the orphan was released.
     stubTwilioAccount([
@@ -317,6 +330,7 @@ describe('Postgres integration — provisioning onto a DID another tenant holds 
 
     const challenger = await createTestTenant(pool);
     await seedSettings(pool, challenger.tenantId);
+    await markCheckoutComplete(pool, challenger.tenantId);
     stubTwilioAccount([{ sid: 'PN555', phone_number: '+15125559908' }], { releaseFails: true });
 
     await expect(
@@ -338,6 +352,46 @@ describe('Postgres integration — provisioning onto a DID another tenant holds 
     expect(rows[0].status).toBe('failed');
     // Names the SID an operator has to release by hand.
     expect(rows[0].last_error).toContain('PN555');
+  });
+
+  it('a tenant that has not completed checkout is refused before any Twilio spend — even for a contested DID', async () => {
+    const incumbent = await createTestTenant(pool);
+    await seedIncumbent(pool, incumbent.tenantId, '+15125559909');
+
+    const challenger = await createTestTenant(pool);
+    await seedSettings(pool, challenger.tenantId);
+    // No markCheckoutComplete: subscription_status stays NULL.
+    const { fn: fetchMock, owned } = stubTwilioAccount([
+      { sid: 'PN557', phone_number: '+15125559909' },
+    ]);
+
+    await expect(
+      createProvisionTwilioWorker({ pool }).handle(
+        buildMessage({
+          tenantId: challenger.tenantId,
+          region: null,
+          baseUrl: 'https://api.test',
+          phoneNumber: '+15125559909',
+        }),
+        logger,
+      ),
+    ).resolves.toBeUndefined();
+
+    // Nothing bought, nothing to orphan…
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect([...owned.keys()]).toEqual([]);
+    // …no integration row for the challenger, and the incumbent still holds the DID.
+    const challengerRows = await pool.query(
+      `SELECT 1 FROM tenant_integrations WHERE tenant_id = $1 AND provider = 'twilio'`,
+      [challenger.tenantId],
+    );
+    expect(challengerRows.rows).toHaveLength(0);
+    const holders = await pool.query<{ tenant_id: string }>(
+      `SELECT tenant_id FROM tenant_integrations
+        WHERE provider = 'twilio' AND provider_data->>'phoneE164' = $1`,
+      ['+15125559909'],
+    );
+    expect(holders.rows.map((r) => r.tenant_id)).toEqual([incumbent.tenantId]);
   });
 
   it('isDidAlreadyClaimed distinguishes the DID index from the tenant/provider unique', () => {

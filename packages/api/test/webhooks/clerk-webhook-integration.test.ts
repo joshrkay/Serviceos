@@ -689,9 +689,12 @@ describe('root provisioning enqueue — durable, awaited, and retry-safe', () =>
   });
 });
 
-// Exercise failed enqueue recovery and queued-message deduplication on replay.
-// Provider purchases and real PostgreSQL behavior require separate integration evidence.
-describe('Twilio subaccount provisioning enqueue — retry recovers a failed send', () => {
+// Twilio provisioning is intentionally NOT triggered at signup: the number is
+// a real, recurring cost, so it is only provisioned after trial checkout
+// (card on file), when the Stripe customer.subscription webhook fires. These
+// tests pin that the signup webhook neither enqueues the job nor fails when
+// the queue is unavailable.
+describe('Twilio subaccount provisioning is NOT enqueued at signup', () => {
   function signedRequest(app: express.Express, svixId: string, userId: string, email: string) {
     const svixTimestamp = String(Math.floor(Date.now() / 1000));
     const payload = userCreatedPayload(userId, email);
@@ -704,17 +707,14 @@ describe('Twilio subaccount provisioning enqueue — retry recovers a failed sen
       .send(payload);
   }
 
-  it('a standalone Twilio enqueue failure still fails the webhook, and the retry lands the job (not permanently skipped)', async () => {
+  it('signup never enqueues the Twilio provisioning job', async () => {
     const tenantRepo = new FakeTenantRepository();
 
     const sendCalls: Array<{ type: string; idempotencyKey?: string }> = [];
     const queue = {
       send: async <T>(type: string, _payload: T, idempotencyKey?: string) => {
         sendCalls.push({ type, idempotencyKey });
-        if (sendCalls.length === 1) {
-          throw new Error('twilio queue unavailable');
-        }
-        return 'msg-twilio-retry';
+        return 'msg-1';
       },
     };
 
@@ -723,33 +723,47 @@ describe('Twilio subaccount provisioning enqueue — retry recovers a failed sen
     const config = { CLERK_WEBHOOK_SECRET: WEBHOOK_SECRET, CLERK_SECRET_KEY: undefined } as unknown as AppConfig;
     app.use('/webhooks', createWebhookRouter(config, { tenantRepo, queue: queue as never }));
 
-    // Attempt 1: tenant bootstraps (created=true); the Twilio enqueue is
-    // awaited and rejects — the webhook must fail (500) so Clerk retries,
-    // and the tenant is already durably persisted.
-    const first = await signedRequest(
-      app, 'svix_twilio_retry_1', 'user_twilio_retry_1', 'twilioretry@example.com',
+    const res = await signedRequest(
+      app, 'svix_twilio_nosignup_1', 'user_twilio_nosignup_1', 'twilionosignup@example.com',
     );
-    expect(first.status).toBe(500);
-    expect(tenantRepo.created).toHaveLength(1); // tenant durably persisted despite the failed enqueue
-    expect(sendCalls).toHaveLength(1);
-    expect(sendCalls[0].type).toBe(PROVISION_TWILIO_JOB_TYPE);
+    expect(res.status).toBe(200);
+    expect(tenantRepo.created).toHaveLength(1);
+    expect(sendCalls.some((c) => c.type === PROVISION_TWILIO_JOB_TYPE)).toBe(false);
+  });
 
-    // Attempt 2 (Clerk retry, same svix-id): bootstrapTenant is idempotent,
-    // so result.created is false this time. The Twilio enqueue must still
-    // re-attempt (not permanently skipped) — same tenant, single tenant row.
+  it('a duplicate signup delivery still never enqueues the Twilio provisioning job', async () => {
+    const tenantRepo = new FakeTenantRepository();
+
+    const sendCalls: Array<{ type: string; idempotencyKey?: string }> = [];
+    const queue = {
+      send: async <T>(type: string, _payload: T, idempotencyKey?: string) => {
+        sendCalls.push({ type, idempotencyKey });
+        return 'msg-1';
+      },
+    };
+
+    const app = express();
+    app.use(express.json());
+    const config = { CLERK_WEBHOOK_SECRET: WEBHOOK_SECRET, CLERK_SECRET_KEY: undefined } as unknown as AppConfig;
+    app.use('/webhooks', createWebhookRouter(config, { tenantRepo, queue: queue as never }));
+
+    const first = await signedRequest(
+      app, 'svix_twilio_nosignup_2', 'user_twilio_nosignup_2', 'twilionosignup2@example.com',
+    );
+    expect(first.status).toBe(200);
+    // Same svix-id replayed (Clerk retry).
     const second = await signedRequest(
-      app, 'svix_twilio_retry_1', 'user_twilio_retry_1', 'twilioretry@example.com',
+      app, 'svix_twilio_nosignup_2', 'user_twilio_nosignup_2', 'twilionosignup2@example.com',
     );
     expect(second.status).toBe(200);
     expect(tenantRepo.created).toHaveLength(1); // still a single tenant — no duplicate created
-    expect(sendCalls).toHaveLength(2);
-    expect(sendCalls[1].type).toBe(PROVISION_TWILIO_JOB_TYPE);
-    expect(sendCalls[1].idempotencyKey).toBe(sendCalls[0].idempotencyKey);
+    expect(sendCalls.some((c) => c.type === PROVISION_TWILIO_JOB_TYPE)).toBe(false);
   });
 
-  it('a successful Twilio enqueue is deduped, not duplicated, when a later failure forces a retry', async () => {
-    // Uses the REAL InMemoryQueue so the dedupe assertion exercises the
-    // in-memory deduplication contract. This does not exercise provider purchases.
+  it('no Twilio job lands in the queue even when a later failure forces a retry', async () => {
+    // Uses the REAL InMemoryQueue. Previously the signup webhook enqueued the
+    // Twilio provisioning job here; now it must not — even across a Clerk
+    // retry of the same event.
     class UuidTenantRepository extends FakeTenantRepository {
       async create(data: { ownerId: string; ownerEmail: string; name: string }): Promise<Tenant> {
         const tenant = await super.create(data);
@@ -783,25 +797,33 @@ describe('Twilio subaccount provisioning enqueue — retry recovers a failed sen
       queue,
     }));
 
-    // Attempt 1: Twilio enqueue succeeds and durably lands; owner-insert then
-    // fails, forcing a Clerk retry of the same event.
+    // Attempt 1: owner-insert fails, forcing a Clerk retry of the same event.
+    // (A welcome-email job lands in the queue — the point is that no TWILIO
+    // job does.)
     const first = await signedRequest(
       app, 'svix_twilio_dedupe_1', 'user_twilio_dedupe_1', 'twiliodedupe@example.com',
     );
     expect(first.status).toBe(500);
-    const sizeAfterFirst = queue.size();
-    expect(sizeAfterFirst).toBeGreaterThanOrEqual(1); // at least the Twilio provisioning job landed
+    const typesAfterFirst: string[] = [];
+    let msg = await queue.receive();
+    while (msg) {
+      typesAfterFirst.push(msg.type);
+      msg = await queue.receive();
+    }
+    expect(typesAfterFirst).not.toContain(PROVISION_TWILIO_JOB_TYPE);
 
-    // Attempt 2 (Clerk retry, same svix-id): owner-insert now succeeds;
-    // bootstrapTenant is idempotent (created=false), so the un-gated Twilio
-    // enqueue re-attempts send() with the SAME idempotency key
-    // (`provision-twilio-${tenantId}`). The queue must dedupe it — no second
-    // Twilio provisioning message remains queued.
+    // Attempt 2 (Clerk retry, same svix-id): owner-insert now succeeds.
     behavior.failInsert = false;
     const second = await signedRequest(
       app, 'svix_twilio_dedupe_1', 'user_twilio_dedupe_1', 'twiliodedupe@example.com',
     );
     expect(second.status).toBe(200);
-    expect(queue.size()).toBe(sizeAfterFirst); // no growth — deduped, not duplicated
+    const typesAfterSecond: string[] = [];
+    let msg2 = await queue.receive();
+    while (msg2) {
+      typesAfterSecond.push(msg2.type);
+      msg2 = await queue.receive();
+    }
+    expect(typesAfterSecond).not.toContain(PROVISION_TWILIO_JOB_TYPE);
   });
 });

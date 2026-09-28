@@ -63,10 +63,16 @@ function buildApp(
   return { app, auditRepo };
 }
 
-/** Minimal Pool stub for routes that only read tenant_integrations status. */
-function fakePool(status: string | null): Pool {
+/** Minimal Pool stub: tenant_integrations status + tenants subscription_status. */
+function fakePool(status: string | null, subscriptionStatus: string | null = 'trialing'): Pool {
   return {
-    query: vi.fn(async () => ({ rows: status === null ? [] : [{ status }] })),
+    query: vi.fn(async (sql: unknown) => {
+      const s = typeof sql === 'string' ? sql : String(sql);
+      if (/subscription_status/i.test(s)) {
+        return { rows: subscriptionStatus === null ? [] : [{ subscription_status: subscriptionStatus }] };
+      }
+      return { rows: status === null ? [] : [{ status }] };
+    }),
   } as unknown as Pool;
 }
 
@@ -140,13 +146,23 @@ describe('POST /api/onboarding/phone/claim', () => {
     const msg = await queue.receive<{ tenantId: string; phoneNumber?: string }>();
     expect(msg?.type).toBe(PROVISION_TWILIO_JOB_TYPE);
     expect(msg?.payload.phoneNumber).toBe('+15125550123');
-    // Canonical key (shared with the signup auto-provision) so the production
-    // queue dedupes a claim against an in-flight provisioning job.
+    // Canonical key (shared with the trial-checkout auto-provision) so the
+    // production queue dedupes a claim against an in-flight provisioning job.
     expect(msg?.idempotencyKey).toBe(`provision-twilio-${TENANT_ID}`);
 
     expect(createSpy).toHaveBeenCalledWith(
       expect.objectContaining({ eventType: 'tenant.phone_number_claimed' }),
     );
+  });
+
+  it('409s with PHONE_BILLING_REQUIRED when the tenant has no live subscription', async () => {
+    const { app } = buildApp({ pool: fakePool('t0_requested', null), queue: new InMemoryQueue() });
+    const res = await request(app)
+      .post('/api/onboarding/phone/claim')
+      .send({ phoneNumber: '+15125550123' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('PHONE_BILLING_REQUIRED');
   });
 
   it('rejects a non-E.164 number with 400', async () => {
@@ -203,6 +219,27 @@ describe('POST /api/onboarding/phone/claim', () => {
     expect(res.status).toBe(403);
     // No provisioning job enqueued for a forbidden caller.
     expect(await queue.receive()).toBeNull();
+  });
+});
+
+describe('POST /api/onboarding/phone/retry', () => {
+  it('409s with PHONE_BILLING_REQUIRED when the tenant has no live subscription', async () => {
+    const { app } = buildApp({ pool: fakePool('failed', null), queue: new InMemoryQueue() });
+    const res = await request(app).post('/api/onboarding/phone/retry');
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('PHONE_BILLING_REQUIRED');
+  });
+
+  it('enqueues a retry when billing is live and provisioning failed', async () => {
+    const queue = new InMemoryQueue();
+    const { app } = buildApp({ pool: fakePool('failed'), queue });
+    const res = await request(app).post('/api/onboarding/phone/retry');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, enqueued: true });
+    const msg = await queue.receive();
+    expect(msg?.type).toBe(PROVISION_TWILIO_JOB_TYPE);
   });
 });
 
