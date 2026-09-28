@@ -197,7 +197,7 @@
 - [ ] **Search**: Can search by customer name, invoice number
 - [ ] **Sort**: Can sort by date, amount, status
 - [ ] **Download PDF**: Can download invoice as PDF
-- [ ] **Void invoice**: Can void paid invoice with audit trail
+- [ ] **Void invoice**: Can void an unpaid (open / partially paid) invoice with audit trail; a paid invoice offers no void and points to recording a refund (invoice state machine: paid → void is refused)
 - [ ] **Edit draft**: Can edit invoices not yet sent
 
 ---

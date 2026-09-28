@@ -1,6 +1,8 @@
 /**
  * #1400 — client-side "Download receipt" for a paid invoice, via the
  * browser's print pipeline (Save as PDF), same approach as estimatePdf.ts.
+ * #1402 §5 — the same document, labelled "Invoice" with its due date, is the
+ * operator's "Download PDF" for an invoice in any status.
  * Every amount is the API's integer cents (document totals, payments,
  * balance) — nothing here re-derives money from line items.
  */
@@ -11,6 +13,10 @@ export interface ReceiptPayment {
 }
 
 export interface InvoiceReceiptData {
+  /** 'receipt' (default) for a paid invoice; 'invoice' for the invoice PDF. */
+  kind?: 'receipt' | 'invoice';
+  /** ISO due date, printed on the invoice document via `formatDate`. */
+  dueDate?: string;
   invoiceNumber: string;
   customerName: string;
   businessName: string;
@@ -42,6 +48,7 @@ function usdCents(cents: number): string {
 /** Opens the print-ready receipt; returns false when the popup was blocked. */
 export function printInvoiceReceipt(data: InvoiceReceiptData): boolean {
   const { totals } = data;
+  const label = data.kind === 'invoice' ? 'Invoice' : 'Receipt';
   const lines = data.lineItems
     .map((li) => `<tr><td>${escapeHtml(li.description)}</td><td class="num">${li.quantity}</td><td class="num">${usdCents(li.totalCents)}</td></tr>`)
     .join('');
@@ -56,7 +63,7 @@ export function printInvoiceReceipt(data: InvoiceReceiptData): boolean {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Receipt ${escapeHtml(data.invoiceNumber)}</title>
+  <title>${label} ${escapeHtml(data.invoiceNumber)}</title>
   <style>
     * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #0f172a; margin: 0; padding: 40px; }
@@ -80,8 +87,9 @@ export function printInvoiceReceipt(data: InvoiceReceiptData): boolean {
       ${data.businessContact ? `<div class="muted">${escapeHtml(data.businessContact)}</div>` : ''}
     </div>
     <div style="text-align:right">
-      <div class="label">Receipt</div>
+      <div class="label">${label}</div>
       <div>${escapeHtml(data.invoiceNumber)}</div>
+      ${data.kind === 'invoice' && data.dueDate ? `<div class="muted">Due ${escapeHtml(data.formatDate(data.dueDate))}</div>` : ''}
     </div>
   </div>
   <div class="label">Billed to</div>
