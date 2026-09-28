@@ -134,6 +134,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
             activatedAt: null,
             aiConfigPresent: Boolean(settings?.aiModel),
             aiVerificationStatus: null,
+            aiVerificationSkippedAt: null,
           });
           res.set('Cache-Control', 'private, max-age=2');
           res.json(status);
@@ -779,6 +780,68 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         res.status(500).json({
           error: 'AI_CHECK_RETRY_FAILED',
           message: error instanceof Error ? error.message : 'Failed to retry AI verification',
+        });
+      }
+    },
+  );
+
+  /**
+   * POST /api/onboarding/ai-check/skip
+   *
+   * Escape hatch for a failed/flaky AI check: records the skip so the
+   * ai_check step completes and onboarding can finish. Verification stays
+   * retryable — POST /api/onboarding/ai-check/retry still works, and the
+   * Settings surface shows the skipped state with a retry action. Skipping
+   * never flips ai_verification_status, so a later pass still records
+   * 'passed' on top of the skip.
+   */
+  router.post(
+    '/ai-check/skip',
+    requireAuth,
+    requireTenant,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!pool) {
+          res.status(503).json({
+            error: 'ONBOARDING_NOT_CONFIGURED',
+            message: 'AI check skip requires database',
+          });
+          return;
+        }
+        const tenantId = req.auth!.tenantId;
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+          await client.query(
+            `UPDATE tenant_settings
+               SET ai_verification_skipped_at = now(),
+                   updated_at = now()
+             WHERE tenant_id = $1`,
+            [tenantId],
+          );
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK').catch(() => {});
+          throw err;
+        } finally {
+          client.release();
+        }
+        await auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId: req.auth!.userId,
+            actorRole: 'owner',
+            eventType: 'tenant.ai_verification_skipped',
+            entityType: 'tenant_settings',
+            entityId: tenantId,
+          }),
+        );
+        res.json({ ok: true, skipped: true });
+      } catch (error: unknown) {
+        res.status(500).json({
+          error: 'AI_CHECK_SKIP_FAILED',
+          message: error instanceof Error ? error.message : 'Failed to skip AI verification',
         });
       }
     },

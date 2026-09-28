@@ -32,6 +32,49 @@ export function AiCheckStep({ status, onRetryComplete, onGoToStep }: AiCheckStep
   const step = status.steps.find((s) => s.id === 'ai_check');
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [skipping, setSkipping] = useState(false);
+
+  /**
+   * Escape hatch: a failed or flaky verification must never trap the tenant
+   * in incomplete setup. Skipping completes the ai_check step; verification
+   * stays retryable — the Settings page surfaces it as a checklist item
+   * with a retry action.
+   */
+  async function skipForNow() {
+    setSkipping(true);
+    setRetryError(null);
+    try {
+      const res = await apiFetch('/api/onboarding/ai-check/skip', { method: 'POST' });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { message?: string };
+        setRetryError(body.message ?? `Skip failed (HTTP ${res.status})`);
+        return;
+      }
+      onRetryComplete?.();
+    } catch (err) {
+      setRetryError(err instanceof Error ? err.message : 'Skip failed. Check your connection.');
+    } finally {
+      setSkipping(false);
+    }
+  }
+
+  async function retryVerification() {
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      const res = await apiFetch('/api/onboarding/ai-check/retry', { method: 'POST' });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { message?: string };
+        setRetryError(body.message ?? `Retry failed (HTTP ${res.status})`);
+        return;
+      }
+      onRetryComplete?.();
+    } catch (err) {
+      setRetryError(err instanceof Error ? err.message : 'Retry failed. Check your connection.');
+    } finally {
+      setRetrying(false);
+    }
+  }
 
   if (!step) return null;
 
@@ -68,27 +111,50 @@ export function AiCheckStep({ status, onRetryComplete, onGoToStep }: AiCheckStep
           {detail && <p className="mt-2 text-xs text-red-600">{detail}</p>}
         </div>
         {retryError && <p className="text-sm text-red-600">{retryError}</p>}
+        <div className="space-y-3">
+          <Button
+            variant="primary"
+            size="lg"
+            loading={retrying}
+            onClick={retryVerification}
+          >
+            {retrying ? 'Retrying…' : 'Retry verification'}
+          </Button>
+          <div>
+            <button
+              type="button"
+              onClick={skipForNow}
+              disabled={skipping}
+              className="text-sm text-slate-500 underline underline-offset-2 hover:text-slate-700 disabled:opacity-50"
+            >
+              {skipping ? 'Skipping…' : 'Skip for now'}
+            </button>
+            <p className="mt-1 text-xs text-slate-400">
+              Finish setup and re-run the check later from Settings.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Skipped via the escape hatch — revisiting the step shows what happened
+  // and offers the retry, rather than the misleading "running" spinner.
+  if (step.status === 'skipped') {
+    return (
+      <div className="space-y-5 max-w-md">
+        <header>
+          <h1 className="text-2xl font-medium tracking-tight text-slate-900">AI check skipped</h1>
+          <p className="text-sm text-slate-500 mt-2">
+            You finished setup without the AI check. Re-run it here, or any time from Settings.
+          </p>
+        </header>
+        {retryError && <p className="text-sm text-red-600">{retryError}</p>}
         <Button
           variant="primary"
           size="lg"
           loading={retrying}
-          onClick={async () => {
-            setRetrying(true);
-            setRetryError(null);
-            try {
-              const res = await apiFetch('/api/onboarding/ai-check/retry', { method: 'POST' });
-              if (!res.ok) {
-                const body = (await res.json().catch(() => ({}))) as { message?: string };
-                setRetryError(body.message ?? `Retry failed (HTTP ${res.status})`);
-                return;
-              }
-              onRetryComplete?.();
-            } catch (err) {
-              setRetryError(err instanceof Error ? err.message : 'Retry failed. Check your connection.');
-            } finally {
-              setRetrying(false);
-            }
-          }}
+          onClick={retryVerification}
         >
           {retrying ? 'Retrying…' : 'Retry verification'}
         </Button>
@@ -135,6 +201,20 @@ export function AiCheckStep({ status, onRetryComplete, onGoToStep }: AiCheckStep
         <p className="text-sm text-slate-700">Running the check… usually a few seconds.</p>
       </div>
       <p className="text-xs text-slate-500">This page refreshes automatically when the check completes.</p>
+      {retryError && <p className="text-sm text-red-600">{retryError}</p>}
+      <div>
+        <button
+          type="button"
+          onClick={skipForNow}
+          disabled={skipping}
+          className="text-sm text-slate-500 underline underline-offset-2 hover:text-slate-700 disabled:opacity-50"
+        >
+          {skipping ? 'Skipping…' : 'Skip for now'}
+        </button>
+        <p className="mt-1 text-xs text-slate-400">
+          Stuck? Finish setup and re-run the check later from Settings.
+        </p>
+      </div>
       <VoiceConfigPanel />
       <VoiceApprovalPinPanel />
     </div>

@@ -5,9 +5,42 @@ import type { LLMGateway, LLMResponse } from '../../src/ai/gateway';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { createLogger } from '../../src/logging/logger';
 import { QueueMessage } from '../../src/queues/queue';
+import type { SentryClient } from '../../src/monitoring/sentry';
 
 const TENANT = '11111111-1111-1111-1111-111111111111';
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
+
+/** Sentry spy: records each withScope capture (tags + error) for assertions. */
+function makeSentrySpy() {
+  const events: { tags: Record<string, string>; error: Error | null }[] = [];
+  const sentry = {
+    captureException: () => 'spy',
+    captureMessage: () => 'spy',
+    setTag: () => {},
+    setUser: () => {},
+    startTransaction: () => ({ finish() {}, setStatus() {} }),
+    withScope(
+      cb: (scope: {
+        setTag(key: string, value: string): void;
+        captureException(error: Error): string;
+      }) => void,
+    ): void {
+      const tags: Record<string, string> = {};
+      let error: Error | null = null;
+      cb({
+        setTag: (key, value) => {
+          tags[key] = value;
+        },
+        captureException: (e) => {
+          error = e;
+          return 'spy';
+        },
+      });
+      events.push({ tags, error });
+    },
+  } as unknown as SentryClient;
+  return { sentry, events };
+}
 
 interface UpdateCall {
   sql: string;
@@ -133,5 +166,55 @@ describe('verify-ai worker', () => {
     const missingWrite = updates.find((u) => /ai_config_missing/i.test(u.sql));
     expect(missingWrite).toBeDefined();
     expect(lastStatusWrite(updates)).toBe('failed');
+  });
+
+  it('provider throws → failure reported to Sentry with tenant, step, reason', async () => {
+    const { pool } = makePool({ ai_model: 'gpt-4o-mini', ai_verification_status: null });
+    const auditRepo = new InMemoryAuditRepository();
+    const { sentry, events } = makeSentrySpy();
+    const worker = createVerifyAiWorker({
+      pool,
+      gateway: gatewayThrowing('provider boom'),
+      auditRepo,
+      sentry,
+    });
+
+    await expect(worker.handle(buildMessage(), logger)).rejects.toThrow('provider boom');
+
+    expect(events).toHaveLength(1);
+    expect(events[0].tags.tenant_id).toBe(TENANT);
+    expect(events[0].tags.step).toBe('ai_check');
+    expect(events[0].tags.failure_reason).toContain('provider boom');
+    expect(events[0].error?.message).toContain('provider boom');
+  });
+
+  it('no ai_model → failure reported to Sentry with ai_config_missing reason', async () => {
+    const { pool } = makePool({ ai_model: null, ai_verification_status: null });
+    const auditRepo = new InMemoryAuditRepository();
+    const { sentry, events } = makeSentrySpy();
+    const worker = createVerifyAiWorker({
+      pool,
+      gateway: gatewayReturning('pong'),
+      auditRepo,
+      sentry,
+    });
+
+    await worker.handle(buildMessage(), logger);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].tags.tenant_id).toBe(TENANT);
+    expect(events[0].tags.step).toBe('ai_check');
+    expect(events[0].tags.failure_reason).toBe('ai_config_missing');
+  });
+
+  it('pass → nothing reported to Sentry', async () => {
+    const { pool } = makePool({ ai_model: 'gpt-4o-mini', ai_verification_status: null });
+    const auditRepo = new InMemoryAuditRepository();
+    const { sentry, events } = makeSentrySpy();
+    const worker = createVerifyAiWorker({ pool, gateway: gatewayReturning('pong'), auditRepo, sentry });
+
+    await worker.handle(buildMessage(), logger);
+
+    expect(events).toHaveLength(0);
   });
 });

@@ -193,6 +193,13 @@ export function SettingsPage() {
   // settings document loads; the subtitle must never show made-up data).
   const [serviceArea, setServiceArea] = useState<ServiceAreaFields | null>(null);
   const [voiceAgentLive, setVoiceAgentLive] = useState<boolean | null>(null);
+  // AI-check escape hatch surface: when the tenant skipped or failed the
+  // onboarding AI check, Settings shows it as a retryable checklist item
+  // (the onboarding sidebar is done/complete at that point, so this is the
+  // way back to a verified AI).
+  const [aiCheckStatus, setAiCheckStatus] = useState<string | null>(null);
+  const [aiCheckRetrying, setAiCheckRetrying] = useState(false);
+  const [aiCheckRetryError, setAiCheckRetryError] = useState<string | null>(null);
   // #877 — live actions are confirm-gated: which voice transition is
   // awaiting confirmation (null = no dialog), and in-flight markers so
   // the dialogs can't be double-submitted or dismissed mid-request.
@@ -318,8 +325,12 @@ export function SettingsPage() {
           setVoiceAgentLive(false);
           return;
         }
-        const status = (await statusRes.json()) as { voiceAgentLive?: boolean };
+        const status = (await statusRes.json()) as {
+          voiceAgentLive?: boolean;
+          steps?: { id: string; status: string }[];
+        };
         setVoiceAgentLive(status.voiceAgentLive ?? false);
+        setAiCheckStatus(status.steps?.find((s) => s.id === 'ai_check')?.status ?? null);
       } catch {
         // Settings still usable when onboarding status unavailable.
       }
@@ -747,6 +758,34 @@ export function SettingsPage() {
     }
   }
 
+  /**
+   * AI-check escape hatch (Settings checklist item): re-runs the onboarding
+   * verification for a tenant who skipped it or saw it fail, then refreshes
+   * the step status so the banner clears when the check passes.
+   */
+  async function retryAiVerification() {
+    setAiCheckRetrying(true);
+    setAiCheckRetryError(null);
+    try {
+      const res = await apiFetch('/api/onboarding/ai-check/retry', { method: 'POST' });
+      if (!res.ok) {
+        throw new Error(`Retry failed (HTTP ${res.status})`);
+      }
+      const statusRes = await apiFetch('/api/onboarding/status');
+      if (statusRes.ok) {
+        const status = (await statusRes.json()) as {
+          steps?: { id: string; status: string }[];
+        };
+        setAiCheckStatus(status.steps?.find((s) => s.id === 'ai_check')?.status ?? null);
+      }
+      toast.success('Verification re-running — it usually takes a few seconds');
+    } catch (err) {
+      setAiCheckRetryError(err instanceof Error ? err.message : 'Could not re-run verification');
+    } finally {
+      setAiCheckRetrying(false);
+    }
+  }
+
   async function saveReviewUrls() {
     setSavingReviews(true);
     setReviewsError('');
@@ -1067,6 +1106,43 @@ export function SettingsPage() {
           </div>
           <ChevronRight size={14} className="text-indigo-400 group-hover:text-indigo-600 transition-colors shrink-0" />
         </button>
+
+        {/* AI-check escape hatch: a failed or skipped verification leaves
+            onboarding complete but the AI unverified — surface it here as a
+            retryable checklist item so the tenant can confirm the assistant
+            before it takes real calls. */}
+        {(aiCheckStatus === 'error' || aiCheckStatus === 'skipped') && (
+          <div
+            data-testid="ai-checklist-item"
+            className="w-full flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3.5 mb-5"
+          >
+            <div className="flex size-9 items-center justify-center rounded-xl bg-amber-500 shrink-0">
+              <Zap size={16} className="text-white" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-amber-900">
+                {aiCheckStatus === 'error' ? 'AI check needs another look' : 'AI check was skipped'}
+              </p>
+              <p className="text-xs text-amber-700 mt-0.5">
+                {aiCheckStatus === 'error'
+                  ? 'Your AI didn\u2019t answer the test prompt during setup. Re-run the check to confirm it\u2019s ready for real calls.'
+                  : 'Setup finished without the AI check. Re-run it here to confirm your assistant answers correctly.'}
+              </p>
+              {aiCheckRetryError && (
+                <p className="text-xs text-red-600 mt-1">{aiCheckRetryError}</p>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={retryAiVerification}
+              disabled={aiCheckRetrying}
+              data-testid="ai-checklist-retry"
+              className="shrink-0 min-h-11 rounded-lg bg-amber-600 px-3 py-2 text-sm text-white hover:bg-amber-700 disabled:opacity-50 transition-colors"
+            >
+              {aiCheckRetrying ? 'Re-running…' : 'Retry verification'}
+            </button>
+          </div>
+        )}
 
         {/* ── Templates & Customization — hero entry point ── */}
         <button
