@@ -170,6 +170,37 @@ export interface AppointmentWriteOptions {
    * Write operations still succeed when warnings are present.
    */
   onValidationWarnings?: (warnings: string[]) => void;
+  /**
+   * #1402 §3/§15 — refuse a start in the past (typed ValidationError → 400).
+   * Applies to a create, and to an update only when it MOVES the start, so
+   * cancelling / annotating a visit that already happened is unaffected.
+   * Opt-in: operator routes and proposal execution set it; seeding, fixtures
+   * and history-replaying paths do not.
+   */
+  rejectPastStart?: boolean;
+  /** Clock for `rejectPastStart`; defaults to the current time. */
+  now?: Date;
+}
+
+/**
+ * Grace window for `rejectPastStart`: a start a few minutes behind the clock
+ * ("booking the visit that is starting right now", form-fill latency, client
+ * clock skew) is not "in the past" for scheduling purposes.
+ */
+export const PAST_START_GRACE_MS = 5 * 60 * 1000;
+
+export const PAST_START_MESSAGE = 'Appointment start cannot be in the past';
+
+/** True when `start` is further behind `now` than PAST_START_GRACE_MS. */
+export function isStartInPast(start: Date, now: Date = new Date()): boolean {
+  return start.getTime() < now.getTime() - PAST_START_GRACE_MS;
+}
+
+function assertStartNotInPast(start: Date, options?: AppointmentWriteOptions): void {
+  if (!options?.rejectPastStart) return;
+  if (isStartInPast(start, options.now)) {
+    throw new ValidationError(`Validation failed: ${PAST_START_MESSAGE}`);
+  }
 }
 
 export function validateAppointmentInput(input: CreateAppointmentInput): string[] {
@@ -216,6 +247,7 @@ export async function createAppointment(
   const timeValidation = validateAppointmentTimes(input);
   errors.push(...timeValidation.errors);
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
+  assertStartNotInPast(input.scheduledStart, options);
 
   if (timeValidation.warnings.length > 0) {
     options?.onValidationWarnings?.(timeValidation.warnings);
@@ -301,6 +333,11 @@ export async function updateAppointment(
 
   const validation = validateAppointmentUpdateInput(existing, input);
   if (validation.errors.length > 0) throw new ValidationError(`Validation failed: ${validation.errors.join(', ')}`);
+  // Only a MOVED start is checked: re-sending the persisted start (a form
+  // that posts every field when editing notes) is not a reschedule.
+  if (input.scheduledStart && input.scheduledStart.getTime() !== existing.scheduledStart.getTime()) {
+    assertStartNotInPast(input.scheduledStart, options);
+  }
 
   // Status lifecycle enforcement. When a status is supplied AND differs
   // from the persisted value, ensure the transition is in the allowed set
