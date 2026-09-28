@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import type { Logger } from '../logging/logger';
 import type { StorageProvider } from '../files/file-service';
 import { decrypt } from '../integrations/crypto';
+import { getSentryClient } from '../monitoring/sentry';
 import {
   releasePhoneNumber as realReleasePhoneNumber,
   closeSubaccount as realCloseSubaccount,
@@ -166,6 +167,21 @@ export async function deprovisionTenant(
       }
     } else {
       twilioError = 'Twilio credentials not configured';
+    }
+
+    // A failed Twilio release is an operator-actionable signal — the number
+    // may still be billing. Report it to Sentry (in addition to the
+    // structured log below) BEFORE the deliberate manual_admin guard throws,
+    // so the signal is never lost. Monitoring failures are swallowed so they
+    // can never break deprovisioning.
+    if (twilioError) {
+      try {
+        getSentryClient().withScope((scope) => {
+          scope.setTag('tenant_id', tenantId);
+          scope.setTag('job', 'deprovision_tenant');
+          scope.captureException(new Error(`Twilio release failed: ${twilioError}`));
+        });
+      } catch { /* ignore */ }
     }
 
     if (!twilioReleased && !input.force && reason === 'manual_admin') {

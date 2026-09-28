@@ -48,6 +48,8 @@ function makePool(
     failOnStatusFailed?: boolean;
     /** Row returned for the Step 4.5 `SELECT ... FROM tenant_settings`. */
     settingsRow?: Record<string, unknown>;
+    /** subscription_status returned for the trial-checkout billing gate. */
+    subscriptionStatus?: string | null;
   } = {},
 ) {
   const calls: Call[] = [];
@@ -60,6 +62,13 @@ function makePool(
       calls.push({ sql: s, params });
       if (opts.failOnStatusFailed && /status = 'failed'/i.test(s)) {
         throw new Error('db write failed');
+      }
+      // Trial-checkout billing gate: the worker only buys a number for a
+      // tenant that has completed billing. Default the mock to 'trialing'
+      // (the post-checkout state); tests pin the gate by overriding.
+      if (/FROM tenants/i.test(s) && /subscription_status/i.test(s)) {
+        const status = opts.subscriptionStatus === undefined ? 'trialing' : opts.subscriptionStatus;
+        return { rows: status === null ? [] : [{ subscription_status: status }] };
       }
       if (/INSERT INTO tenant_integrations/i.test(s) && /RETURNING/i.test(s)) {
         return { rows: [{ subaccount_sid: null, auth_token_primary_enc: null, provider_data: {} }] };
@@ -686,4 +695,75 @@ describe('provision-twilio worker — number picker', () => {
     );
     expect(activeWrite).toBeDefined();
   });
+});
+
+describe('provision-twilio worker — trial-checkout billing gate', () => {
+  const restore: Array<[string, string | undefined]> = [];
+  function setEnv(k: string, v: string | undefined): void {
+    restore.push([k, process.env[k]]);
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    while (restore.length) {
+      const [k, v] = restore.pop()!;
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  function configureTwilio(): void {
+    setEnv('TWILIO_ACCOUNT_SID', 'ACmaster');
+    setEnv('TWILIO_AUTH_TOKEN', 'mastertoken');
+    setEnv('TENANT_ENCRYPTION_KEY', KEY);
+    setEnv('VAPI_API_KEY', undefined);
+  }
+
+  it.each(['trialing', 'active', 'past_due'])(
+    'provisions when subscription_status is %s',
+    async (subscriptionStatus) => {
+      configureTwilio();
+      const fetchFn = mockFetch(...twilioHappyPath());
+      const { pool } = makePool({ subscriptionStatus });
+      const worker = createProvisionTwilioWorker({ pool });
+      await worker.handle(
+        buildMessage({
+          tenantId: TENANT,
+          region: null,
+          baseUrl: 'https://api.test',
+          phoneNumber: '+15125550123',
+        }),
+        logger,
+      );
+      // A subaccount create means the gate passed and real provisioning ran.
+      expect(
+        fetchFn.mock.calls.some((c) => String(c[0]).includes('/Accounts.json')),
+      ).toBe(true);
+    },
+  );
+
+  it.each([['canceled'], ['incomplete'], [null]])(
+    'skips provisioning (no Twilio spend) when subscription_status is %s',
+    async (subscriptionStatus) => {
+      configureTwilio();
+      const fetchFn = mockFetch(...twilioHappyPath());
+      const { pool, calls } = makePool({ subscriptionStatus });
+      const worker = createProvisionTwilioWorker({ pool });
+      // Must resolve (not throw): the checkout webhook re-enqueues once
+      // billing goes live.
+      await expect(
+        worker.handle(
+          buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test' }),
+          logger,
+        ),
+      ).resolves.toBeUndefined();
+      // No Twilio HTTP happened at all — no money spent.
+      expect(fetchFn).not.toHaveBeenCalled();
+      // And no provisioning state was written.
+      expect(
+        calls.some((c) => /tenant_integrations/i.test(c.sql) && /INSERT|UPDATE/i.test(c.sql)),
+      ).toBe(false);
+    },
+  );
 });

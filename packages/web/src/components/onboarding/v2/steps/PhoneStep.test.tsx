@@ -7,7 +7,7 @@ vi.mock('../../../../lib/apiClient', () => ({ useApiClient: () => apiFetchMock }
 import { PhoneStep } from './PhoneStep';
 import type { OnboardingStatusResponse } from '../../../../types/onboarding';
 
-const STEP_IDS = ['signup', 'identity', 'pack', 'phone', 'billing', 'ai_check', 'test_call'] as const;
+const STEP_IDS = ['signup', 'identity', 'pack', 'billing', 'phone', 'ai_check', 'test_call'] as const;
 
 function makeStatus(phone: {
   status: string;

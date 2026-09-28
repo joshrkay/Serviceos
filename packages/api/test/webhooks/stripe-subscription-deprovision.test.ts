@@ -13,6 +13,7 @@ import { createWebhookRouter } from '../../src/webhooks/routes';
 import { createWebhookSignature } from '../../src/webhooks/webhook-handler';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { DEPROVISION_TENANT_JOB_TYPE } from '../../src/workers/deprovision-tenant';
+import { RELEASE_TWILIO_NUMBER_JOB_TYPE } from '../../src/workers/release-twilio-number';
 
 const STRIPE_SECRET = 'whsec_test_sub';
 const TENANT = '22222222-2222-2222-2222-222222222222';
@@ -84,13 +85,25 @@ describe('Stripe auto-deprovision trigger', () => {
     );
   });
 
-  it('does NOT enqueue when the flag is off', async () => {
+  it('does NOT enqueue the hard-purge job when the flag is off (Twilio release still fires)', async () => {
     process.env.AUTO_DEPROVISION_ON_CANCEL = '';
-    const send = vi.fn(async () => 'job-1');
+    const send: ReturnType<typeof vi.fn> = vi.fn(async () => 'job-1');
     const app = buildApp(send);
     const res = await postSigned(app, subEvent('customer.subscription.deleted', 'canceled'));
     expect(res.status).toBe(200);
-    expect(send).not.toHaveBeenCalled();
+    // The hard tenant purge stays gated behind AUTO_DEPROVISION_ON_CANCEL…
+    expect(
+      send.mock.calls.some((c) => c[0] === DEPROVISION_TENANT_JOB_TYPE),
+    ).toBe(false);
+    // …but the cheap, reversible Twilio number release is NOT gated by it —
+    // a trial that never converts must not keep burning Twilio money.
+    expect(
+      send.mock.calls.some(
+        (c) =>
+          c[0] === RELEASE_TWILIO_NUMBER_JOB_TYPE &&
+          (c[1] as { tenantId?: string } | undefined)?.tenantId === TENANT,
+      ),
+    ).toBe(true);
   });
 
   it('does NOT enqueue on a past_due dunning update', async () => {

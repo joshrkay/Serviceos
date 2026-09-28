@@ -47,6 +47,10 @@ import {
   DEPROVISION_TENANT_JOB_TYPE,
   type DeprovisionTenantPayload,
 } from '../workers/deprovision-tenant';
+import {
+  RELEASE_TWILIO_NUMBER_JOB_TYPE,
+  type ReleaseTwilioNumberPayload,
+} from '../workers/release-twilio-number';
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
 import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
 import { recordFunnelEvent } from '../analytics/posthog';
@@ -260,6 +264,56 @@ export interface WebhookRouterDeps {
    */
   paymentLinkProvider?: PaymentLinkProvider;
   connectAccountResolver?: ConnectAccountResolver;
+}
+
+/**
+ * Release the Twilio number on a true cancellation (deleted event, or status
+ * 'canceled') — including trials that never convert. The number is a
+ * recurring cost; unlike the hard purge below this is NOT gated behind
+ * AUTO_DEPROVISION_ON_CANCEL because it is cheaply reversible (a resubscribe
+ * re-provisions a fresh number) and never touches tenant data. Never acts on
+ * dunning states (past_due / unpaid / incomplete). Enqueues a background job;
+ * never throws (must not 500 the webhook → Stripe would retry forever). The
+ * worker is idempotent and failure-tolerant: a missing number is a no-op, and
+ * Twilio failures are logged + sent to Sentry without failing the job.
+ */
+async function enqueueTwilioNumberRelease(
+  deps: Pick<WebhookRouterDeps, 'queue' | 'pool'>,
+  sub: { customer?: string; status?: string },
+  eventType: string,
+): Promise<void> {
+  if (!deps.queue || !deps.pool) return;
+  try {
+    const tenantRow = await deps.pool.query<{ id: string }>(
+      `SELECT id FROM tenants WHERE stripe_customer_id = $1 LIMIT 1`,
+      [sub.customer],
+    );
+    const tenantId = tenantRow.rows[0]?.id;
+    if (tenantId) {
+      const payload: ReleaseTwilioNumberPayload = {
+        tenantId,
+        reason:
+          eventType === 'customer.subscription.deleted'
+            ? 'stripe_subscription_deleted'
+            : 'stripe_subscription_canceled',
+      };
+      await deps.queue.send(
+        RELEASE_TWILIO_NUMBER_JOB_TYPE,
+        payload,
+        `release-twilio-${tenantId}`,
+      );
+      logger.info('Twilio number release enqueued on subscription cancellation', {
+        tenantId,
+        customerId: sub.customer,
+        type: eventType,
+      });
+    }
+  } catch (err) {
+    logger.error('Failed to enqueue Twilio number release', {
+      customerId: sub.customer,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
@@ -883,34 +937,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             });
           }
 
-          // Retry enqueue even when bootstrapTenant finds an existing tenant:
-          // an earlier delivery may have persisted it before enqueue failed.
-          // Awaiting send propagates failures to the webhook retry handler.
-          // Keep the stable tenant key to dedupe a message still in the queue;
-          // the worker also checks existing provisioning before doing work.
-          if (deps.queue) {
-            const region = (userData.unsafe_metadata as Record<string, unknown>)?.region as string | undefined;
-            // Twilio callbacks land on the API origin and signatures are
-            // verified against PUBLIC_API_URL (see reconstructWebhookUrl in
-            // recordTwilio). Prefer that; fall back to appBaseUrl/APP_PUBLIC_URL
-            // for single-origin dev/staging deployments.
-            const callbackBaseUrl =
-              process.env.PUBLIC_API_URL ??
-              deps.appBaseUrl ??
-              process.env.APP_PUBLIC_URL ??
-              'http://localhost:3000';
-            const payload: ProvisionTwilioPayload = {
-              tenantId: result.tenantId,
-              region: region ?? null,
-              baseUrl: callbackBaseUrl,
-            };
-            await deps.queue.send(
-              PROVISION_TWILIO_JOB_TYPE,
-              payload,
-              `provision-twilio-${result.tenantId}`
-            );
-            logger.info('Twilio provisioning job enqueued', { tenantId: result.tenantId, region });
-          }
+          // Twilio provisioning is intentionally NOT enqueued here. The number
+          // is a real, recurring cost — it is provisioned only after trial
+          // checkout (card on file), when the Stripe customer.subscription
+          // webhook fires with a live (trialing/active) status. Enqueuing at
+          // signup would spend money on every tire-kicker who never starts a
+          // trial.
 
           // Welcome email — enqueue for brand-new tenants only. The worker
           // claims the lifecycle_emails ledger before sending, so a webhook
@@ -2474,6 +2506,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           // the platform default and enqueue the onboarding AI self-check.
           // Idempotent: the worker skips if already passed and the COALESCE
           // never clobbers a model already chosen for the tenant.
+          //
+          // Trial-checkout is also the trigger for Twilio provisioning: the
+          // number is a real, recurring cost, so it is bought only now that
+          // the tenant has a card on file — never at signup. Idempotent: the
+          // worker skips when the integration is already 'full_readiness',
+          // and the stable per-tenant key collapses duplicate enqueues.
           if ((sub.status === 'trialing' || sub.status === 'active') && deps.pool && deps.queue) {
             const tenantRes = await deps.pool.query<{ id: string }>(
               `SELECT id FROM tenants WHERE stripe_customer_id = $1 LIMIT 1`,
@@ -2492,12 +2530,43 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               const verifyPayload: VerifyAiPayload = { tenantId };
               await deps.queue.send(VERIFY_AI_JOB_TYPE, verifyPayload, `verify-ai-${tenantId}`);
               logger.info('AI verification job enqueued', { tenantId, status: sub.status });
+
+              // Twilio callbacks land on the API origin and signatures are
+              // verified against PUBLIC_API_URL (see reconstructWebhookUrl in
+              // recordTwilio). Prefer that; fall back to appBaseUrl/APP_PUBLIC_URL
+              // for single-origin dev/staging deployments.
+              const callbackBaseUrl =
+                process.env.PUBLIC_API_URL ??
+                deps.appBaseUrl ??
+                process.env.APP_PUBLIC_URL ??
+                'http://localhost:3000';
+              const provisionPayload: ProvisionTwilioPayload = {
+                tenantId,
+                region: null,
+                baseUrl: callbackBaseUrl,
+              };
+              await deps.queue.send(
+                PROVISION_TWILIO_JOB_TYPE,
+                provisionPayload,
+                `provision-twilio-${tenantId}`,
+              );
+              logger.info('Twilio provisioning job enqueued (trial checkout complete)', {
+                tenantId,
+                status: sub.status,
+              });
             }
           }
         } else {
           logger.warn('customer.subscription.* missing fields', {
             eventId: event.id, type: event.type,
           });
+        }
+
+        // Release the Twilio number on a true cancellation — see
+        // enqueueTwilioNumberRelease above. Deliberately NOT gated behind
+        // AUTO_DEPROVISION_ON_CANCEL (unlike the hard purge below).
+        if (event.type === 'customer.subscription.deleted' || sub.status === 'canceled') {
+          await enqueueTwilioNumberRelease(deps, sub, event.type);
         }
 
         // Auto-deprovision on cancellation. Gated behind a flag (default off)

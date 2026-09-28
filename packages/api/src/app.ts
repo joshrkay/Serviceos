@@ -222,6 +222,7 @@ import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { processMessage, type QueueMessage } from './queues/queue';
 import { createProvisionTwilioWorker } from './workers/provision-twilio';
 import { createDeprovisionTenantWorker } from './workers/deprovision-tenant';
+import { createReleaseTwilioNumberWorker } from './workers/release-twilio-number';
 import { createVerifyAiWorker } from './workers/verify-ai';
 import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
 import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
@@ -2325,8 +2326,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     moneyReconciliation: 590026,
     voiceCostReconciliation: 590027,
     // Billing resilience — dunning sweep (day-of/+3d/+7d payment-failure
-    // emails). DISTINCT key per the collision discipline above.
-    dunning: 590028,
+    // emails). DISTINCT key per the collision discipline above — 590028 was
+    // taken on main by clerkMetadataBackfill (#1434), so this owns 590030.
+    dunning: 590030,
     // Billing resilience — AI-minute overage settlement reconciliation
     // (stale-retry + gap backfill). DISTINCT key per the collision
     // discipline above.
@@ -2872,6 +2874,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     workerRegistry.set(
       deprovisionTenantWorker.type,
       deprovisionTenantWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+
+    // Releases the tenant's Twilio number (not the subaccount) when a
+    // subscription is canceled — e.g. a trial that never converts — so the
+    // platform stops paying for the line. Best-effort and idempotent.
+    const releaseTwilioNumberWorker = createReleaseTwilioNumberWorker({ pool });
+    workerRegistry.set(
+      releaseTwilioNumberWorker.type,
+      releaseTwilioNumberWorker as import('./queues/queue').WorkerHandler<unknown>
     );
   }
 

@@ -306,7 +306,7 @@ test.describe('onboarding identity (1.2) — real Postgres', () => {
  * `_retry` audit rows against real Postgres via `request(app)` — never
  * through a browser. This spec proves the SAME capability reachable by
  * walking the real `/onboarding` wizard: identity (API, already proven at
- * the UI by the 1.2 spec above) -> pack -> phone -> billing -> AI check.
+ * the UI by the 1.2 spec above) -> pack -> billing -> phone -> AI check.
  *
  * Two steps in that chain have no self-service UI path to a hermetic
  * pass and are cleared the same way a real deployment's own async
@@ -314,8 +314,12 @@ test.describe('onboarding identity (1.2) — real Postgres', () => {
  *
  *   - phone: `workers/provision-twilio.ts` writes the deterministic
  *     +15005550006 stub automatically (no TWILIO_ACCOUNT_SID/TOKEN in this
- *     harness) — the in-process queue poll loop (app.ts) runs it, so the
- *     browser just waits.
+ *     harness) — but only once the trial webhook below mirrors the
+ *     subscription into `trialing`: provisioning is triggered by trial
+ *     checkout (a number is real, recurring money), never by signup. The
+ *     in-process queue poll loop (app.ts) runs the worker, so the browser
+ *     just waits — until billing completes, the phone step sits `pending`
+ *     with no number.
  *   - billing: `BillingStep` redirects to a REAL Stripe Checkout page,
  *     which this sandbox cannot reach. Rather than clicking "Start trial"
  *     (which would need a live Stripe secret and network egress), this
@@ -444,8 +448,9 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
 
   /**
    * T2 control, phase 1 — gets a tenant to the real onboarding gate's
-   * `billing` step over the API (identity + pack; the phone dev-stub
-   * already ran on signup). Deliberately does NOT fire the trial webhook —
+   * `billing` step over the API (identity + pack; the phone dev-stub does
+   * NOT run until the trial webhook — no number is bought at signup).
+   * Deliberately does NOT fire the trial webhook —
    * see fireTrialWebhook() below. Split into phases (rather than one
    * function that also fires the webhook) so the test can hold the
    * neighbour here and release its webhook at the SAME instant as the
@@ -469,8 +474,10 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
     });
     expect(packRes.ok(), `POST pack (${businessName}) -> ${packRes.status()}`).toBeTruthy();
 
-    // Phone stub provisioning runs on signup already; poll status until it
-    // (and pack) land so this tenant is ready for the webhook below.
+    // No number is provisioned before billing — provisioning is triggered
+    // by the trial webhook, never by signup — so poll status until the
+    // wizard derives `billing` as the current step (pack done, phone still
+    // pending); that is the real billing gate this tenant is held at.
     await expect
       .poll(
         async () => {
@@ -530,6 +537,38 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
     expect(whRes.status(), `${businessName} signed trial webhook -> ${await whRes.text()}`).toBe(200);
   }
 
+  /** Post-billing — polls until the provision worker (enqueued by the trial
+   * webhook in the same tick as verify_ai) writes the number, then asserts it
+   * is the deterministic dev stub. Runtime proof the phone leg took the stub
+   * path rather than a real purchase: isTwilioTestNumber() is the SAME
+   * predicate provision-twilio.ts's real (non-stub) path uses to refuse ever
+   * persisting one — if this is ever anything else, a real number was bought
+   * and the test must fail loudly, not silently pass. (Codex correctly noted
+   * the pre-flight env check can't see a packages/api/.env or an
+   * already-running, reused server — packages/api/package.json's `dev`
+   * script loads `.env` via --env-file-if-exists, invisible to this test
+   * process.) */
+  async function pollPhoneStubNumber(
+    request: import('@playwright/test').APIRequestContext,
+    tenant: { authHeaders: Record<string, string> },
+    businessName: string,
+  ): Promise<void> {
+    await expect
+      .poll(
+        async () => {
+          const res = await request.get(`${API_URL}/api/onboarding/status`, {
+            headers: tenant.authHeaders,
+          });
+          const body = (await res.json()) as {
+            steps?: { id: string; metadata?: { phoneNumber?: string } }[];
+          };
+          return body.steps?.find((s) => s.id === 'phone')?.metadata?.phoneNumber;
+        },
+        { message: `${businessName} phone number provisioned (dev stub)`, timeout: 30_000 },
+      )
+      .toBe('+15005550006');
+  }
+
   /** T2 control, phase 3 — polls until ai_check is done. */
   async function pollAiCheckDone(
     request: import('@playwright/test').APIRequestContext,
@@ -551,13 +590,13 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
   }
 
   test(
-    'identity -> pack -> phone (Twilio stub) -> billing (signed trial webhook) -> AI check ' +
+    'identity -> pack -> billing (signed trial webhook) -> phone (Twilio stub) -> AI check ' +
       'passes at real Postgres with its tenant.ai_verified audit row; a neighbour tenant on a ' +
       'DIFFERENT pack, whose trial webhook is submitted together with this one via Promise.all, ' +
       'reaches its own correct AI-check state without changing this tenant\'s answer (T2)',
     async ({ page, baseURL }, testInfo) => {
-      // Default 30s is too short for a full identity->pack->phone(stub
-      // provisioning)->billing->ai_check(worker) walk TWICE (neighbour +
+      // Default 30s is too short for a full identity->pack->billing->phone(stub
+      // provisioning)->ai_check(worker) walk TWICE (neighbour +
       // tenant under test); the phone step alone documents "usually 30
       // seconds, occasionally up to a minute".
       testInfo.setTimeout(180_000);
@@ -613,44 +652,31 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
       const packRes = await packRequest;
       expect(packRes.status(), `POST pack -> ${packRes.status()}`).toBeLessThan(300);
 
-      // ── Phone — the dev-stub provisioning worker runs on the in-process
-      //    queue poll loop and is triggered on SIGNUP (webhooks/routes.ts),
-      //    well before pack is even picked — the RED run showed it lands
-      //    inside the same second as bootstrapOwner's webhook, so by the
-      //    time the wizard re-derives status after the pack POST, `phone`
-      //    is already `done` and the wizard advances straight past
-      //    PhoneStep into BillingStep without ever rendering it. Handle
-      //    both shapes: click "Continue to billing" only if PhoneStep
-      //    actually renders first.
-      const phoneReady = page.getByRole('heading', { name: /your business number is ready/i });
-      if (await phoneReady.isVisible({ timeout: 5_000 }).catch(() => false)) {
-        await page.screenshot({
-          path: 'docs/audit/lane-reports/setup-8-1/1.8-phone-ready.png',
-          fullPage: true,
-        });
-        await page.getByRole('button', { name: /continue to billing/i }).click();
-      }
-
-      // Runtime proof the phone leg actually took the dev-stub path, rather
-      // than trusting the pre-flight env check alone (Codex correctly noted
-      // that check can't see a packages/api/.env or an already-running,
-      // reused server — packages/api/package.json's `dev` script loads
-      // `.env` via --env-file-if-exists, invisible to this test process).
-      // isTwilioTestNumber() is the SAME predicate provision-twilio.ts's
-      // real (non-stub) path uses to refuse ever persisting one — if this
-      // is ever anything else, a real number was purchased and the test
-      // must fail loudly, not silently pass.
-      const phoneStatusRes = await page.request.get(`${API_URL}/api/onboarding/status`, {
+      // ── Phone (pre-billing) — provisioning is triggered by trial
+      //    checkout, never by signup: the dev-stub worker only runs once
+      //    the subscription webhook below mirrors the subscription into
+      //    `trialing` (webhooks/routes.ts). So at this point the phone step
+      //    is `pending` with no number, and the wizard advances straight
+      //    from pack into BillingStep — PhoneStep sits AFTER billing in the
+      //    step order (signup > identity > pack > billing > phone >
+      //    ai_check), so it can never render before the billing gate and
+      //    there is no "both shapes" case to handle. Assert the absence: a
+      //    number here would mean a real purchase for a tenant with no card
+      //    on file.
+      const preBillStatusRes = await page.request.get(`${API_URL}/api/onboarding/status`, {
         headers: owner.authHeaders,
       });
-      const phoneStatusBody = (await phoneStatusRes.json()) as {
-        steps?: { id: string; metadata?: { phoneNumber?: string } }[];
+      const preBillStatusBody = (await preBillStatusRes.json()) as {
+        currentStep?: string;
+        steps?: { id: string; status: string; metadata?: { phoneNumber?: string } }[];
       };
-      const phoneNumber = phoneStatusBody.steps?.find((s) => s.id === 'phone')?.metadata?.phoneNumber;
+      const preBillPhoneStep = preBillStatusBody.steps?.find((s) => s.id === 'phone');
+      expect(preBillStatusBody.currentStep, 'wizard sits at the billing gate after pack').toBe('billing');
+      expect(preBillPhoneStep?.status, 'phone step is pending before trial checkout').toBe('pending');
       expect(
-        phoneNumber,
-        'phone leg used the deterministic dev-stub number, not a real Twilio purchase',
-      ).toBe('+15005550006');
+        preBillPhoneStep?.metadata?.phoneNumber,
+        'no number provisioned before trial checkout — nothing bought for a cardless signup',
+      ).toBeUndefined();
 
       // ── Billing — reached at the real surface; cleared by a self-signed
       //    Stripe-shaped webhook rather than a real Checkout redirect. ──────
@@ -677,6 +703,11 @@ test.describe('onboarding AI check (1.8) — reachable through the real onboardi
       await Promise.all([
         pollAiCheckDone(page.request, owner, 'AI Check Journey HVAC'),
         pollAiCheckDone(page.request, neighbour, 'Neighbour Plumbing Co'),
+        // The trial webhook above also enqueued the provision-twilio job
+        // (same tick as verify_ai) — the number lands on the same
+        // in-process poll loop; assert it is the deterministic dev stub,
+        // never a real purchase.
+        pollPhoneStubNumber(page.request, owner, 'AI Check Journey HVAC'),
       ]);
 
       pollDbSnapshotHere(

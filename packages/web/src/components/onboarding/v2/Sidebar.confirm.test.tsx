@@ -11,7 +11,7 @@ import { MemoryRouter } from 'react-router';
 import { Sidebar } from './Sidebar';
 import type { OnboardingStatusResponse, OnboardingStepId, OnboardingStepStatus } from '../../../types/onboarding';
 
-const STEP_IDS = ['signup', 'identity', 'pack', 'phone', 'billing', 'ai_check', 'test_call'] as const;
+const STEP_IDS = ['signup', 'identity', 'pack', 'billing', 'phone', 'ai_check', 'test_call'] as const;
 
 function makeStatus(overrides: Partial<Record<OnboardingStepId, OnboardingStepStatus>> = {}): OnboardingStatusResponse {
   return {
@@ -40,7 +40,7 @@ describe('Sidebar — downstream-invalidation ConfirmDialog (#907)', () => {
 
     expect(onSelect).not.toHaveBeenCalled();
     expect(
-      screen.getByText(/Downstream setup \(phone, billing, AI check\) is not reset/i),
+      screen.getByText(/Downstream setup \(billing, phone, AI check\) is not reset/i),
     ).toBeInTheDocument();
   });
 

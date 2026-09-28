@@ -152,11 +152,41 @@ describe("Postgres integration — AI minute overage settlement", () => {
     expect(stripe.items()).toHaveLength(1);
   });
 
-  it("retries a failed Stripe attempt and charges exactly once, at the original amount", async () => {
-    await recordTwoMinuteCalls(11);
-    stripe.failNextRequests(1);
+  // PR #1437 (billing resilience, Part B): the invoice-item POST now retries
+  // in-process — 3 attempts, full-jitter backoff, one idempotency key. The
+  // invariant this block protects is unchanged: however many attempts it
+  // takes, the period is charged exactly once, at the originally computed
+  // amount. Math.random is pinned to 0 so the jittered backoff sleeps 0ms.
+  it("absorbs a single transient Stripe failure in-process and charges exactly once", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      await recordTwoMinuteCalls(11);
+      stripe.failNextRequests(1);
 
-    await expect(settle()).rejects.toThrow(/Stripe AI minute overage invoice item failed \(503\)/);
+      const result = await settle();
+
+      expect(result).toMatchObject({ overageMinutes: 2, customerChargeCents: 250 });
+      expect(stripe.requests()).toBe(2);
+      expect(stripe.items()).toEqual([
+        { id: "ii_1", amount: 250, customer: `cus_${tenant.tenantId.slice(0, 8)}` },
+      ]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("rejects after 3 failed attempts; a later redelivery charges exactly once, at the original amount", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      await recordTwoMinuteCalls(11);
+      stripe.failNextRequests(3);
+
+      await expect(settle()).rejects.toThrow(/Stripe AI minute overage invoice item failed \(503\)/);
+      expect(stripe.requests()).toBe(3);
+      expect(stripe.items()).toEqual([]);
+    } finally {
+      vi.restoreAllMocks();
+    }
     // A late ledger write between attempts must not change what is charged.
     await ledger.recordCallEnded({
       tenantId: tenant.tenantId, callId: `late-${periodIndex}`, channel: "voice_inbound",
