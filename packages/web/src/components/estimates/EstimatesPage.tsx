@@ -637,7 +637,7 @@ function EstimateDocPreview({ est, lineItems, totals, onClose }: {
   // fabricated rivet.ai share link with a working Copy button (QA
   // 2026-07-02). The real share link only exists once the estimate is
   // sent (the send endpoint mints the view token), so none is shown here.
-  const [business, setBusiness] = useState<{ name: string; contact: string } | null>(null);
+  const [business, setBusiness] = useState<{ name: string; contact: string; address: string } | null>(null);
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -646,11 +646,16 @@ function EstimateDocPreview({ est, lineItems, totals, onClose }: {
         if (!res.ok || !alive) return;
         const data = (await res.json()) as {
           businessName?: string | null; businessPhone?: string | null;
+          businessAddress?: string | null;
         };
         if (!alive) return;
         const name = data.businessName?.trim();
         if (name) {
-          setBusiness({ name, contact: data.businessPhone?.trim() ?? '' });
+          setBusiness({
+            name,
+            contact: data.businessPhone?.trim() ?? '',
+            address: data.businessAddress?.trim() ?? '',
+          });
         }
       } catch {
         /* non-fatal — preview falls back to name-only header */
@@ -660,6 +665,7 @@ function EstimateDocPreview({ est, lineItems, totals, onClose }: {
   }, []);
   const businessName = business?.name ?? 'Your business';
   const businessContact = business?.contact ?? '';
+  const businessAddress = business?.address ?? '';
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center p-4" onClick={onClose}>
@@ -683,6 +689,7 @@ function EstimateDocPreview({ est, lineItems, totals, onClose }: {
                 customerName: est.customer,
                 businessName,
                 businessContact,
+                businessAddress,
                 description: est.description,
                 validUntil: est.validUntil,
                 documentLabel: estimateTerm,
@@ -713,6 +720,14 @@ function EstimateDocPreview({ est, lineItems, totals, onClose }: {
                 </div>
                 <p className="text-sm text-foreground">{businessName}</p>
               </div>
+              {businessAddress && (
+                <p
+                  data-testid="business-address"
+                  className="text-xs text-muted-foreground whitespace-pre-line break-words"
+                >
+                  {businessAddress}
+                </p>
+              )}
               {businessContact && <p className="text-xs text-muted-foreground">{businessContact}</p>}
             </div>
             <div className="text-right">

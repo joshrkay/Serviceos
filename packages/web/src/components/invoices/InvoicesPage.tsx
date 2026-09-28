@@ -935,12 +935,18 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
     if (!inv) return;
     let businessName = 'Your business';
     let businessContact: string | undefined;
+    let businessAddress: string | undefined;
     try {
       const res = await apiFetch('/api/settings');
       if (res.ok) {
-        const data = (await res.json()) as { businessName?: string | null; businessPhone?: string | null };
+        const data = (await res.json()) as {
+          businessName?: string | null;
+          businessPhone?: string | null;
+          businessAddress?: string | null;
+        };
         businessName = data.businessName?.trim() || businessName;
         businessContact = data.businessPhone?.trim() || undefined;
+        businessAddress = data.businessAddress?.trim() || undefined;
       }
     } catch {
       /* non-fatal — the receipt prints with a generic header */
@@ -950,6 +956,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
       customerName: invCompat.customer,
       businessName,
       businessContact,
+      businessAddress,
       lineItems: inv.lineItems.map((li) => ({ description: li.description, quantity: li.quantity, totalCents: li.totalCents })),
       totals: inv.totals,
       amountPaidCents,

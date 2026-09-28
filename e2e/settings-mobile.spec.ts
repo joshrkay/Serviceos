@@ -141,4 +141,72 @@ test.describe('settings — mobile viewport', () => {
     }));
     await expectNoHorizontalOverflow(scrollWidth, clientWidth);
   });
+
+  // #1402 §13 — the Team members deactivate control and its confirm step fit
+  // 320px and clear the 44px tap bar. The roster is stubbed so the row exists
+  // regardless of what the dev stack seeded.
+  test('Team members: the deactivate control and its confirm step fit 320px at 44px (#1402)', async ({
+    page,
+  }) => {
+    await page.route('**/api/users', (route) =>
+      route.request().method() === 'GET'
+        ? route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              data: [
+                { id: 'u-tech-1402', email: 'alexander.technician-long-name@example.com', role: 'technician', canFieldServe: false },
+              ],
+            }),
+          })
+        : route.fallback(),
+    );
+    await page.route('**/api/users/invitations', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }),
+    );
+    await page.goto('/settings');
+    if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+    await dismissWhatsNewModal(page);
+
+    await page.getByRole('button', { name: /team members/i }).first().click();
+    const start = page.getByRole('button', { name: /Deactivate alexander/i });
+    if (!(await start.count())) test.skip(true, 'Signed-in dev user is not an owner in this run');
+    expect((await start.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+
+    await start.click();
+    for (const name of [/Yes, deactivate/i, /^Keep$/i]) {
+      const box = await page.getByRole('button', { name }).boundingBox();
+      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+      expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(320);
+    }
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    await expectNoHorizontalOverflow(scrollWidth, clientWidth);
+  });
+
+  // #1402 §13 — the Payment terms sheet fits 320px; input + buttons clear 44px.
+  test('Payment terms sheet fits 320px and its controls clear 44px (#1402)', async ({ page }) => {
+    await page.goto('/settings');
+    if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+    await dismissWhatsNewModal(page);
+
+    await page.getByRole('button', { name: /payment terms/i }).first().click();
+    const input = page.getByLabel(/Payment due within/i);
+    await expect(input).toBeVisible();
+    for (const box of [
+      await input.boundingBox(),
+      await page.getByRole('button', { name: 'Save' }).boundingBox(),
+      await page.getByRole('button', { name: 'Cancel' }).boundingBox(),
+    ]) {
+      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    await expectNoHorizontalOverflow(scrollWidth, clientWidth);
+  });
 });
+

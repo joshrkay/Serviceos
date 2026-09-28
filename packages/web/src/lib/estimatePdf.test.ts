@@ -172,3 +172,18 @@ describe('printEstimateDocument', () => {
     expect(html).toContain('&lt;script&gt;');
   });
 });
+
+describe('printEstimateDocument — #1402 §13 business address', () => {
+  it('prints the business address under the business name, one line per line, escaped', () => {
+    const { win, writes } = makeFakeWindow();
+    vi.spyOn(window, 'open').mockReturnValue(win as unknown as Window);
+
+    printEstimateDocument({ ...base, businessAddress: '1200 W Main St\nMesa, AZ <85201>' });
+
+    const html = writes.join('');
+    expect(html).toContain(
+      '<div class="muted address">1200 W Main St<br>Mesa, AZ &lt;85201&gt;</div>',
+    );
+    expect(html.indexOf('Rivet Pro Services')).toBeLessThan(html.indexOf('1200 W Main St'));
+  });
+});
