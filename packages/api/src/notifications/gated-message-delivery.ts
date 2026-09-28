@@ -73,6 +73,7 @@ import {
   resolveOutboundConsent,
   type ConsentLedgerEventLike,
 } from '../compliance/resolve-outbound-consent';
+import type { RecipientSmsVolumeLedger } from './recipient-sms-volume';
 import {
   DeliveryResult,
   EmailMessage,
@@ -89,7 +90,9 @@ export type SmsSuppressionReason =
   /** WS12 — standing cross-channel (sms/marketing) revocation in the ledger. */
   | 'revoked'
   /** Runtime kill switch — TELEPHONY_ENABLED=false. Applies to owner sends too. */
-  | 'channel_disabled';
+  | 'channel_disabled'
+  /** #1402 §18 — the number already got the per-window maximum of customer texts. */
+  | 'recipient_volume_cap';
 
 /** The two outbound channels the kill switch gates, independently. */
 export type OutboundChannel = 'sms' | 'email';
@@ -178,6 +181,18 @@ export interface GatedMessageDeliveryDeps {
    */
   consentLedger?: ConsentLedgerLookup;
   /**
+   * #1402 §18 — per-recipient volume cap: at most `maxPerWindow` customer
+   * texts to one number per tenant in a rolling `windowHours`. Optional so
+   * existing construction sites keep their behaviour; `maxPerWindow <= 0`
+   * disables it. Owner-class sends (digests, approvals, E1 emergency pages to
+   * the owner) are never capped.
+   */
+  recipientVolumeCap?: {
+    ledger: RecipientSmsVolumeLedger;
+    maxPerWindow: number;
+    windowHours: number;
+  };
+  /**
    * Sink for kill-switch suppression logs. Optional so existing construction
    * sites and tests are unchanged; defaults to a module-scoped logger.
    */
@@ -238,7 +253,7 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
 
     // Customer send. 'off' preserves legacy behavior exactly — no gate, no audit.
     if (this.deps.enforcement === 'off') {
-      return this.deps.base.sendSms(message);
+      return this.sendWithinVolumeCap(message);
     }
 
     const reason = await this.evaluate(message);
@@ -246,14 +261,53 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
       if (this.deps.enforcement === 'warn') {
         // Would block, but warn mode only observes — audit then send.
         await this.audit('sms.suppressed-would-block', reason, message);
-        return this.deps.base.sendSms(message);
+        return this.sendWithinVolumeCap(message);
       }
       // block mode — suppress.
       await this.audit('sms.suppressed', reason, message);
       throw new SmsSuppressedError(reason, message.recipientClass);
     }
 
-    return this.deps.base.sendSms(message);
+    return this.sendWithinVolumeCap(message);
+  }
+
+  /**
+   * #1402 §18 — the last step of every CUSTOMER send: reserve a slot in the
+   * recipient's rolling window, then send. Over the cap → audited
+   * `sms.suppressed` (reason `recipient_volume_cap`) + SmsSuppressedError, so
+   * callers record the suppression exactly like a consent/DNC block — never a
+   * silent drop. It applies in every enforcement mode: it is a volume/cost
+   * control, not the TCPA consent observation `warn` mode exists for.
+   */
+  private async sendWithinVolumeCap(message: SmsMessage): Promise<DeliveryResult> {
+    const cap = this.deps.recipientVolumeCap;
+    if (!cap || cap.maxPerWindow <= 0 || !message.tenantId) {
+      return this.deps.base.sendSms(message);
+    }
+    const reservation = await cap.ledger.reserve(message.tenantId, normalizePhone(message.to), {
+      maxPerWindow: cap.maxPerWindow,
+      windowHours: cap.windowHours,
+    });
+    if (!reservation.allowed) {
+      await this.audit('sms.suppressed', 'recipient_volume_cap', message, {
+        maxPerWindow: cap.maxPerWindow,
+        windowHours: cap.windowHours,
+        sentInWindow: reservation.sentInWindow,
+      });
+      throw new SmsSuppressedError('recipient_volume_cap', message.recipientClass);
+    }
+    try {
+      return await this.deps.base.sendSms(message);
+    } catch (err) {
+      // Nothing went out — give the slot back so a carrier error does not
+      // burn the customer's allowance. Best-effort: the send error wins.
+      if (reservation.reservationId) {
+        await cap.ledger
+          .release(message.tenantId, reservation.reservationId)
+          .catch(() => undefined);
+      }
+      throw err;
+    }
   }
 
   async sendEmail(message: EmailMessage): Promise<DeliveryResult> {
@@ -347,6 +401,7 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
     eventType: 'sms.suppressed' | 'sms.suppressed-would-block',
     reason: SmsSuppressionReason,
     message: SmsMessage,
+    extra: Record<string, number> = {},
   ): Promise<void> {
     // Best-effort: never let an audit-write failure mask (or unmask) a
     // suppression decision. PII-minimizing — only the phone's last 4 digits.
@@ -367,6 +422,7 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
             phoneLast4: last4,
             tenantId,
             mode: eventType === 'sms.suppressed-would-block' ? 'warn' : 'block',
+            ...extra,
           },
         }),
       );

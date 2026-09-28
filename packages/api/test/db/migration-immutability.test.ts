@@ -568,6 +568,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['297_ai_check_skip', '9c44e3dfd7e7bcee64a4346685d1ea939395558af95b83b7aeb832570afb7600'],
   // #1402 §13 — tenant_settings.business_address (printed on estimates/invoices).
   ['299_tenant_settings_business_address', '9e1632bc16b5616a7a14a6114e2d679435efe29cc2cf96d17d7e3bf172f82463'],
+  // #1402 §18 — per-recipient SMS volume ledger (sms_recipient_sends).
+  ['300_sms_recipient_sends', 'fa81cb555d36784af228249bbd086acc43f83c5238b20cfd765491bf755f8d05'],
 ];
 
 function hashMigration(value: string): string {

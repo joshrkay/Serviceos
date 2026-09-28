@@ -262,6 +262,10 @@ import { NoopFeedbackDispatcher, MessageDeliveryFeedbackDispatcher } from './fee
 import { MessageDeliveryProvider } from './notifications/delivery-provider';
 import { createMessageDeliveryProvider } from './notifications/delivery-provider-factory';
 import { GatedMessageDelivery } from './notifications/gated-message-delivery';
+import {
+  InMemoryRecipientSmsVolumeLedger,
+  PgRecipientSmsVolumeLedger,
+} from './notifications/recipient-sms-volume';
 import { SendService } from './notifications/send-service';
 import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
@@ -1463,6 +1467,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         auditRepo,
         enforcement: config.TCPA_CONSENT_ENFORCEMENT,
         consentLedger: consentEventRepo,
+        // #1402 §18 — per-recipient volume cap on customer texts (owner-class
+        // sends, incl. E1 emergency pages, are never capped).
+        recipientVolumeCap: {
+          ledger: pool
+            ? new PgRecipientSmsVolumeLedger(pool)
+            : new InMemoryRecipientSmsVolumeLedger(),
+          maxPerWindow: config.SMS_RECIPIENT_CAP_PER_WINDOW,
+          windowHours: config.SMS_RECIPIENT_CAP_WINDOW_HOURS,
+        },
       })
     : null;
 
