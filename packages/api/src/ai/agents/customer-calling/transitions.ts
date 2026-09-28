@@ -18,7 +18,7 @@ import type { EntityKind } from '../../resolution/entity-resolver';
 import { redactByTier } from '../../../logging/redact';
 import { selectRepairTemplate } from './repair-templates';
 import { EMERGENCY_SAFETY_LINE } from './emergency-detector';
-import { SENTENCE_CATALOG_ES } from './tts-copy';
+import { SENTENCE_CATALOG_ES, WHICH_APPOINTMENT_COPY } from './tts-copy';
 
 /**
  * #1220 review — the catalogued Spanish rendering of the RV-142 911 line
@@ -990,6 +990,8 @@ function transitionIntentCapture(
         // "yes". Unconditional for the same reason lastAiRunId is: a
         // re-classification must not inherit the previous turn's words.
         lastUtterance: event.utterance,
+        // A fresh request has not been asked "which record?" yet.
+        pendingEntityRequest: undefined,
         retryCount: 0,
       };
       return {
@@ -1166,6 +1168,7 @@ function transitionEntityResolution(
         ...context,
         extractedEntities: { ...context.extractedEntities, ...event.refs },
         pendingEntityAmbiguity: undefined,
+        pendingEntityRequest: undefined,
         // SCH-03 — stash the resolved job on the sticky session-level
         // jobId (same persistence as customerId) so a later turn's
         // non-date appointment reference ("that job") can fall back to it.
@@ -1191,6 +1194,7 @@ function transitionEntityResolution(
       ],
       updatedContext: {
         ...context,
+        pendingEntityRequest: undefined,
         pendingEntityAmbiguity: {
           entityKind: event.entityKind as EntityKind,
           reference: event.reference,
@@ -1198,6 +1202,34 @@ function transitionEntityResolution(
           candidates: event.candidates,
           partialRefs: event.partialRefs,
           attemptCount: event.retry ? priorAttempt + 1 : 0,
+        },
+      },
+    };
+  }
+
+  // #1015 row 3.10 — the request names no record yet: ask WHICH one (once),
+  // stay in entity_resolution, and park the question for the answer turn.
+  if (event.type === 'entity_reference_requested') {
+    const intent = context.currentIntent;
+    const question =
+      intent === 'reschedule_appointment' || intent === 'cancel_appointment'
+        ? WHICH_APPOINTMENT_COPY[intent]
+        : WHICH_APPOINTMENT_COPY.default;
+    return {
+      nextState: 'entity_resolution',
+      sideEffects: [
+        auditLog(context, 'entity_resolution', 'entity_resolution', 'entity_reference_requested', {
+          entityKind: event.entityKind,
+          intentType: intent,
+        }),
+        ttsPlay(question),
+      ],
+      updatedContext: {
+        ...context,
+        pendingEntityRequest: {
+          entityKind: event.entityKind,
+          referenceKey: event.referenceKey,
+          partialRefs: event.partialRefs,
         },
       },
     };
@@ -1231,6 +1263,7 @@ function transitionEntityResolution(
       ],
       updatedContext: {
         ...context,
+        pendingEntityRequest: undefined,
         pendingEntityConfirmation: {
           entityKind: event.entityKind,
           candidate: event.candidate,
