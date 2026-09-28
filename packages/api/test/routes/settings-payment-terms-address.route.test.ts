@@ -45,4 +45,14 @@ describe('PUT /api/settings — #1402 §13 payment terms + business address', ()
     expect((await request(app).put('/api/settings').send({ defaultPaymentTermDays: 0 })).body
       .defaultPaymentTermDays).toBe(0);
   });
+
+  it('stores the business address and returns it on GET', async () => {
+    const put = await request(app)
+      .put('/api/settings')
+      .send({ businessAddress: '  1200 W Main St, Suite 4\nMesa, AZ 85201  ' });
+
+    expect(put.status).toBe(200);
+    const after = await request(app).get('/api/settings');
+    expect(after.body.businessAddress).toBe('1200 W Main St, Suite 4\nMesa, AZ 85201');
+  });
 });

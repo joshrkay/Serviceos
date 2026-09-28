@@ -7246,6 +7246,20 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS ai_verification_skipped_at TIMESTAMPTZ;
   `,
+  // #1402 §13 — the business's mailing address, printed under the business
+  // name on estimates and invoices (public pages + print/PDF). Free-form,
+  // newline-separated; the API trims and caps it at 300 chars and the CHECK
+  // backs that up for writes that bypass the route. Additive + nullable, so
+  // existing rows are unaffected. tenant_settings already FORCEs RLS.
+  '299_tenant_settings_business_address': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS business_address TEXT;
+    DO $$ BEGIN
+      ALTER TABLE tenant_settings
+        ADD CONSTRAINT tenant_settings_business_address_len
+        CHECK (business_address IS NULL OR char_length(business_address) <= 300);
+    EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
