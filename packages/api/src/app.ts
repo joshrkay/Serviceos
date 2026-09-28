@@ -137,7 +137,11 @@ import { OnboardingConversationOrchestrator } from './ai/orchestration/onboardin
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
-import { invoiceReferenceCheck, serviceLocationReferenceCheck } from './proposals/approval-reference-checks';
+import {
+  invoiceReferenceCheck,
+  serviceLocationReferenceCheck,
+  technicianReferenceCheck,
+} from './proposals/approval-reference-checks';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
@@ -1024,6 +1028,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // #1271 — a resolved estimate/invoice with no job cannot approve without
     // a service location to open the job at.
     serviceLocationReferenceCheck(locationRepo),
+    // #1463 — a technician assignee must be an active technician of this tenant.
+    technicianReferenceCheck(userRepo),
   ];
 
   const webhookSettingsRepo = settingsRepo;
@@ -4941,7 +4947,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     },
     customerRepo)
   );
-  app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
+  app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo, userRepo));
   // P10-001: portal session creation/revocation. Mounted at
   // `/api/portal-sessions` (NOT `/api/customers/:id/portal-session`)
   // because routes/customers.ts is on the freeze list — the body
@@ -4962,7 +4968,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       sendService,
     }),
   );
-  app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo, locationRepo));
+  app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo, locationRepo, userRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership, auditRepo));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo, {
     estimateRepo,
@@ -5700,6 +5706,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // DunningConfigRepository.upsert. Same repo instance the overdue sweep
       // reads, so a saved policy applies on the next sweep tick.
       { dunningConfigRepo },
+      // #1463 — backupSupervisorUserId must name an active tenant member.
+      { userRepo },
     ),
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
