@@ -11,11 +11,13 @@
  * fallback together) and `extractLaunchSlots` (the production projection of
  * classifier entities onto the launch-slot shape). Neither touches the DB, so
  * importing them here is safe in the offline sandbox. The real network gateway
- * is constructed in the runner scripts (createRealLayerTwoGateway) and injected,
- * so these functions — and their tests — never open a socket.
+ * is built by buildLiveGateway (the production createLLMGateway factory, or the
+ * Anthropic harness fallback) in the runner scripts and injected into the run
+ * loops, so those loops — and their tests — never open a socket.
  */
 import type { LLMGateway } from '../api/src/ai/gateway/gateway';
 import type { ClassifyContext } from '../api/src/ai/orchestration/intent-classifier';
+import type { PathSmokeProviderSelection } from '../api/src/ai/voice-quality/path-smoke/provider';
 import { stableHash } from './metrics';
 
 // The production entry points are imported DYNAMICALLY inside the run loops
@@ -27,11 +29,12 @@ import { stableHash } from './metrics';
 // are safe to keep static.
 
 // The classifier never touches the DB or RLS, so a synthetic tenant is safe.
-// We use the shared system tenant id ('system') so the Layer-2 gateway's
-// tenant override (which pins every tier to the configured Claude model)
-// applies — otherwise an unknown tenant would resolve to a default model name
-// that the Anthropic OpenAI-compat endpoint would reject. See
-// packages/api/src/ai/gateway/real-layer-two-factory.ts.
+// We use the shared system tenant id ('system') — the same tenant the
+// real-LLM path smoke uses (PATH_SMOKE_TENANT_ID) — which both the production
+// gateway (createLLMGateway stores AI_DEFAULT_MODEL under the system tenant's
+// override; per-tier AI_*_MODEL vars win when all three are set) and the Anthropic
+// harness fallback (its tenant override pinning the Claude model) route
+// explicitly.
 export const SYNTHETIC_TENANT_ID = 'system';
 
 export const LIVE_INTENT_TARGET = 0.92;
@@ -48,11 +51,11 @@ export const LIVE_SLOT_TARGET = 0.88;
 export const LIVE_SLOTS = ['name', 'address', 'time_window', 'problem_description'] as const;
 
 // --- Cost model -------------------------------------------------------------
-// Mirrors the Haiku pricing in packages/api/src/ai/gateway/real-layer-two-factory.ts
-// (HAIKU_*_CENTS_PER_MTOKEN). Duplicated as plain constants so this module (and
-// its offline tests) never has to import the `openai`-bearing factory.
-export const HAIKU_INPUT_CENTS_PER_MTOKEN = 300;
-export const HAIKU_OUTPUT_CENTS_PER_MTOKEN = 1500;
+// Per-model rates are NOT duplicated here: the projection prices through the
+// path-smoke rate table (packages/api/src/ai/voice-quality/path-smoke/
+// provider.ts — gpt-4o-mini $0.15/$0.60, gpt-4o $2.50/$10, claude-haiku-4-5 at
+// the pinned $3/$15 harness rate), loaded dynamically so the offline path
+// never pulls in api src value modules.
 
 // Conservative per-call token estimate for the pre-flight cost projection. The
 // classifier system prompt is large (~500 lines of intent taxonomy); we assume
@@ -80,7 +83,7 @@ export const HAIKU_OUTPUT_CENTS_PER_MTOKEN = 1500;
 // 2026-07-17: 35,309 chars ≈ 8,828 tokens.) The live eval path
 // (SYNTHETIC_TENANT_ID, no vertical/plan/owner/extended context) sends only
 // that base prompt, nothing more. A larger EST_SYSTEM_PROMPT_TOKENS shrinks
-// the utterances-per-cost-cap in projectRunCents/checkCostCap below — that's
+// the utterances-per-cost-cap in checkCostCap below — that's
 // the SAFE direction for a preflight cost cap (it fails closed sooner, never
 // later). This constant is pinned by a test
 // (packages/api/test/voice-quality/voice-eval-live.test.ts) that imports the
@@ -108,23 +111,9 @@ export function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / CHARS_PER_TOKEN));
 }
 
-/** Conservative cents for a single classify call over `utteranceChars`. */
-export function projectCallCents(utteranceChars: number): number {
-  const inputTokens = EST_SYSTEM_PROMPT_TOKENS + Math.ceil(utteranceChars / CHARS_PER_TOKEN);
-  const inputCents = (inputTokens / 1_000_000) * HAIKU_INPUT_CENTS_PER_MTOKEN;
-  const outputCents = (EST_OUTPUT_TOKENS_PER_CALL / 1_000_000) * HAIKU_OUTPUT_CENTS_PER_MTOKEN;
-  return inputCents + outputCents;
-}
-
-/** Conservative projected cents for a whole run over the given utterances. */
-export function projectRunCents(utterances: string[]): number {
-  let cents = 0;
-  for (const u of utterances) cents += projectCallCents(u.length);
-  return cents;
-}
-
 export interface CostCapResult {
-  projectedCents: number;
+  /** Null when `model` has no known price — the cap cannot be enforced. */
+  projectedCents: number | null;
   capCents: number;
   withinCap: boolean;
 }
@@ -143,10 +132,25 @@ export function assertActualCostWithinCap(spentCents: number, capCents: number):
   if (spentCents > capCents) throw new ActualCostCapExceededError(capCents, spentCents);
 }
 
-/** Pure cost-cap check. Does not throw — the caller decides how to abort. */
-export function checkCostCap(utterances: string[], capCents: number): CostCapResult {
-  const projectedCents = projectRunCents(utterances);
-  return { projectedCents, capCents, withinCap: projectedCents <= capCents };
+/**
+ * Conservative (no prompt-cache) pre-flight projection for classifying every
+ * utterance with `model`, checked against `capCents`. Does not throw — the
+ * caller decides how to abort. An unpriced model is never within cap: the run
+ * refuses rather than enforce the cap against a guessed rate.
+ */
+export async function checkCostCap(
+  utterances: readonly string[],
+  capCents: number,
+  model: string,
+): Promise<CostCapResult> {
+  const { projectPathSmokeCents } = await import('../api/src/ai/voice-quality/path-smoke/provider');
+  const projectedCents = projectPathSmokeCents({
+    model,
+    utterances,
+    systemPromptTokens: EST_SYSTEM_PROMPT_TOKENS,
+    outputTokensPerCall: EST_OUTPUT_TOKENS_PER_CALL,
+  });
+  return { projectedCents, capCents, withinCap: projectedCents !== null && projectedCents <= capCents };
 }
 
 /** Resolve the cost cap (cents) from the environment, defaulting conservatively. */
@@ -157,29 +161,93 @@ export function resolveCostCapCents(env: NodeJS.ProcessEnv = process.env): numbe
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_COST_CAP_CENTS;
 }
 
-// --- Credential resolution --------------------------------------------------
-export interface ResolvedKey {
-  key: string;
-  source: string;
+// --- Provider selection -----------------------------------------------------
+/**
+ * Which provider/model the live eval exercises. Reuses the path-smoke selector
+ * (#1426) so both real-LLM gates share ONE definition of "the production
+ * provider": AI_PROVIDER_API_KEY + AI_PROVIDER_BASE_URL + AI_*_MODEL, the
+ * config Railway prod/dev run (api.openai.com, gpt-4o-mini for classify) and
+ * that `createLLMGateway` consumes. ANTHROPIC_API_KEY (the Layer-2 harness,
+ * Haiku via Anthropic's OpenAI-compat endpoint) is an explicit local fallback
+ * only. Returns null when neither key is set — the caller fails fast (exit 2).
+ */
+export type LiveProviderSelection = PathSmokeProviderSelection;
+
+export async function selectLiveProvider(
+  env: Record<string, string | undefined> = process.env,
+): Promise<LiveProviderSelection | null> {
+  const { selectPathSmokeProvider } = await import('../api/src/ai/voice-quality/path-smoke/provider');
+  return selectPathSmokeProvider(env);
+}
+
+export const LIVE_FALLBACK_WARNING =
+  '⚠️  ANTHROPIC_API_KEY fallback — this does NOT exercise the provider production runs.\n' +
+  '   Set AI_PROVIDER_API_KEY (+ AI_PROVIDER_BASE_URL / AI_*_MODEL) to measure production.';
+
+/** One-line, key-free description of the provider a live run exercises. */
+export async function describeLiveProvider(selection: LiveProviderSelection): Promise<string> {
+  const { describePathSmokeProvider } = await import('../api/src/ai/voice-quality/path-smoke/provider');
+  return describePathSmokeProvider(selection);
 }
 
 /**
- * Resolve the live LLM API key from the environment. The live gateway is the
- * Layer-2 real gateway (Anthropic via the OpenAI-compat endpoint), so
- * ANTHROPIC_API_KEY is preferred; AI_PROVIDER_API_KEY (the production factory's
- * variable) is accepted as a fallback so a deploy-configured environment works
- * unchanged. Returns null when no usable key is present — the caller fails fast.
+ * Build the classifier's gateway for the selected provider, recording each
+ * call's actual spend via `addCents`. The production selection goes through
+ * `createLLMGateway(loadConfig(env))` — the exact factory app.ts uses
+ * (resilience stack, tier routing, provider/model mismatch check) — wrapped in
+ * the path-smoke spend tracker (per-model pricing of the served model id).
+ * The Anthropic fallback uses the Layer-2 harness gateway. Loaded lazily so
+ * offline runs never import the `openai`-bearing factories.
  */
-export function resolveLiveApiKey(env: NodeJS.ProcessEnv = process.env): ResolvedKey | null {
-  const candidates: Array<[string, string | undefined]> = [
-    ['ANTHROPIC_API_KEY', env.ANTHROPIC_API_KEY],
-    ['AI_PROVIDER_API_KEY', env.AI_PROVIDER_API_KEY],
-  ];
-  for (const [source, key] of candidates) {
-    if (key && key.trim() !== '') return { key: key.trim(), source };
+export async function buildLiveGateway(
+  selection: LiveProviderSelection,
+  addCents: (cents: number) => void,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<LLMGateway> {
+  if (selection.kind === 'production') {
+    const { createLLMGateway } = await import('../api/src/ai/gateway/factory');
+    const { loadConfig } = await import('../api/src/shared/config');
+    const { withPathSmokeSpendTracking } = await import('../api/src/ai/voice-quality/path-smoke/provider');
+    return withPathSmokeSpendTracking(createLLMGateway(loadConfig(env)), {
+      fallbackModel: selection.model,
+      addCents,
+    });
   }
-  return null;
+  const { createRealLayerTwoGateway } = await import('../api/src/ai/gateway/real-layer-two-factory');
+  const { AgentEventBus } = await import('../api/src/ai/voice-quality/event-bus');
+  let harnessCents = 0;
+  return createRealLayerTwoGateway({
+    apiKey: selection.apiKey,
+    bus: new AgentEventBus(),
+    costTracker: {
+      addCents: (n) => {
+        harnessCents += n;
+        addCents(n);
+      },
+      totalCents: () => harnessCents,
+    },
+  });
 }
+
+/**
+ * How the owner records each live baseline locally — the same provider env,
+ * per-step cost cap and sample size as .github/workflows/voice-eval-live.yml
+ * (pinned together by ci-workflow-voice-eval-live.test.ts). The placeholder
+ * baselines carry this string, and writeBaseline keeps it on record.
+ */
+const LIVE_PROVIDER_ENV =
+  'AI_PROVIDER_API_KEY=... AI_PROVIDER_BASE_URL=https://api.openai.com/v1 AI_DEFAULT_MODEL=gpt-4o-mini ' +
+  'AI_LIGHTWEIGHT_MODEL=gpt-4o-mini AI_STANDARD_MODEL=gpt-4o-mini AI_COMPLEX_MODEL=gpt-4o ' +
+  'AI_CLASSIFY_INTENT_DEADLINE_MS=12000';
+
+export const LIVE_RECORD_COMMANDS = {
+  intent:
+    `${LIVE_PROVIDER_ENV} VOICE_EVAL_COST_CAP_CENTS=150 npx tsx packages/voice-eval/run-intent-eval.ts ` +
+    '--live --max-utterances 200 --record-baseline packages/voice-eval/baselines/intent-live.json',
+  slot:
+    `${LIVE_PROVIDER_ENV} VOICE_EVAL_COST_CAP_CENTS=80 npx tsx packages/voice-eval/run-slot-eval.ts ` +
+    '--live --max-utterances 100 --record-baseline packages/voice-eval/baselines/slot-live.json',
+} as const;
 
 // --- Deterministic sampling -------------------------------------------------
 /** Parse `--max-utterances N` / `--max-utterances=N` from argv. */
