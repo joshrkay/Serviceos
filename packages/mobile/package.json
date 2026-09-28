@@ -22,7 +22,7 @@
     "@expo-google-fonts/bricolage-grotesque": "^0.4.1",
     "@expo-google-fonts/hanken-grotesk": "^0.4.3",
     "@expo/metro-runtime": "~4.0.1",
-    "@react-native-community/netinfo": "11.4.1",
+    "@react-native-community/netinfo": "12.0.1",
     "@stripe/stripe-terminal-react-native": "^0.0.1-beta.31",
     "expo": "~52.0.0",
     "expo-asset": "~11.0.5",
