@@ -517,7 +517,9 @@ export const updateSettingsSchema = z.object({
     .optional(),
   estimatePrefix: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),
-  defaultPaymentTermDays: z.number().int().nonnegative().optional(),
+  // #1402 §13 — 0 = due on receipt; capped at a year so a typo (e.g. 3000)
+  // can never push every new invoice's due date years out.
+  defaultPaymentTermDays: z.number().int().min(0).max(365).optional(),
   // #1288 — tenant default tax rate (basis points; 825 = 8.25%).
   defaultTaxRateBps: z.number().int().min(0).max(10000).optional(),
   terminologyPreferences: z.record(z.string()).optional(),
