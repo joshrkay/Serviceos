@@ -14,6 +14,8 @@ import {
   buildTemplateInputFromEstimate,
 } from '../templates/estimate-template';
 import { toErrorResponse } from '../shared/errors';
+import { parseListSortQuery } from '../shared/list-sort';
+import { ESTIMATE_LIST_SORT } from '@ai-service-os/shared';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createEstimate,
@@ -322,7 +324,8 @@ export function createEstimateRouter(
         const customerId = typeof req.query.customerId === 'string' ? req.query.customerId : undefined;
         const status = typeof req.query.status === 'string' ? req.query.status as EstimateStatus : undefined;
         const search = typeof req.query.search === 'string' ? req.query.search : undefined;
-        const sort: 'asc' | 'desc' = req.query.sort === 'asc' ? 'asc' : 'desc';
+        // #1402 — shared list sort: `?sortBy=<allowlisted field>&sort=asc|desc`.
+        const { field: sortBy, direction: sort } = parseListSortQuery(ESTIMATE_LIST_SORT, req.query);
         // #1400 — derived tab bucket (Sent / Viewed / Expired).
         const stageRaw = req.query.stage;
         let stage: EstimateListStageFilter | undefined;
@@ -397,7 +400,7 @@ export function createEstimateRouter(
           }
         }
 
-        const baseOptions = { status, stage, jobId, jobIds, search, sort };
+        const baseOptions = { status, stage, jobId, jobIds, search, sortBy, sort };
 
         if (wantsPaginated) {
           const result = await listEstimatesWithMeta(req.auth!.tenantId, estimateRepo, {

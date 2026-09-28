@@ -1,6 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AuditEventInput, AuditRepository, createAuditEvent } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
+import { CUSTOMER_LIST_SORT, type CustomerSortField } from '@ai-service-os/shared';
+import { compareByListSort } from '../shared/list-sort';
 import type { ConsentEventRepository } from '../compliance/consent-events';
 import {
   checkCustomerDuplicatesPg,
@@ -180,7 +182,9 @@ export interface CustomerListOptions {
   limit?: number;
   /** Pagination offset. Default 0. */
   offset?: number;
-  /** Sort direction applied to the canonical sort column (display_name). */
+  /** #1402 — allowlisted sort field (CUSTOMER_LIST_SORT); default name. */
+  sortBy?: CustomerSortField;
+  /** Sort direction; defaults to the field's natural direction. */
   sort?: 'asc' | 'desc';
 }
 
@@ -631,6 +635,11 @@ export async function searchCustomers(
   return repository.search(tenantId, query);
 }
 
+const CUSTOMER_SORT_ACCESSORS: Record<CustomerSortField, (c: Customer) => string | Date> = {
+  name: (c) => c.displayName,
+  created: (c) => c.createdAt,
+};
+
 export class InMemoryCustomerRepository implements CustomerRepository {
   private customers: Map<string, Customer> = new Map();
 
@@ -662,9 +671,14 @@ export class InMemoryCustomerRepository implements CustomerRepository {
           (c.primaryPhone && c.primaryPhone.toLowerCase().includes(q))
       );
     }
-    // Default sort: name ASC. P1-018 lets callers flip direction.
-    const sortDir = options?.sort === 'desc' ? -1 : 1;
-    results.sort((a, b) => sortDir * a.displayName.localeCompare(b.displayName));
+    // #1402 — shared list sort (default name ASC; P1-018 `sort` flips).
+    const sortBy = options?.sortBy ?? CUSTOMER_LIST_SORT.defaultField;
+    results.sort(
+      compareByListSort<Customer, CustomerSortField>(
+        { field: sortBy, direction: options?.sort ?? CUSTOMER_LIST_SORT.fields[sortBy] },
+        CUSTOMER_SORT_ACCESSORS,
+      ),
+    );
     if (options?.offset !== undefined || options?.limit !== undefined) {
       const offset = options?.offset ?? 0;
       const limit = options?.limit !== undefined
