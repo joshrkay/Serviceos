@@ -215,6 +215,19 @@ export const INAPP_INCOMPLETE_DRAFT_COPY =
  * The caller cannot fill the card, so the honest next step is a person
  * following up — never a promised confirmation.
  */
+/**
+ * #1015 row 3.10 — the ONE question asked when a move/cancel names no
+ * appointment ("I need to cancel my appointment"). The answer is resolved
+ * through the entity resolver; nothing is read back until it is.
+ */
+export const WHICH_APPOINTMENT_COPY = {
+  reschedule_appointment:
+    "Which appointment would you like to reschedule? You can tell me the customer's name.",
+  cancel_appointment:
+    "Which appointment would you like to cancel? You can tell me the customer's name.",
+  default: "Which appointment is this about? You can tell me the customer's name.",
+} as const;
+
 export const CALLER_INCOMPLETE_REQUEST_COPY =
   "I've passed that along, but a few details still need to be sorted out before it's final — someone from our team will follow up with you. Is there anything else I can help you with?";
 
@@ -287,6 +300,12 @@ export const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Lo dejé como borrador, pero le faltan algunos datos antes de poder aprobarlo — abra la tarjeta para completarlos. ¿Hay algo más en lo que pueda ayudarle?',
   [CALLER_INCOMPLETE_REQUEST_COPY]:
     'Ya pasé su solicitud, pero faltan algunos detalles antes de que quede lista — alguien de nuestro equipo se comunicará con usted. ¿Hay algo más en lo que pueda ayudarle?',
+  [WHICH_APPOINTMENT_COPY.reschedule_appointment]:
+    '¿Qué cita quiere reprogramar? Puede decirme el nombre del cliente.',
+  [WHICH_APPOINTMENT_COPY.cancel_appointment]:
+    '¿Qué cita quiere cancelar? Puede decirme el nombre del cliente.',
+  [WHICH_APPOINTMENT_COPY.default]:
+    '¿De qué cita se trata? Puede decirme el nombre del cliente.',
 };
 
 /**

@@ -100,6 +100,20 @@ export type CallingAgentEvent =
       refKey: string;
       partialRefs: Record<string, string>;
     }
+  /**
+   * #1015 row 3.10 — the request needs an existing record nobody has named
+   * yet ("I need to cancel my appointment": WHICH appointment?). The FSM stays
+   * in `entity_resolution`, asks ONE question and parks
+   * `pendingEntityRequest`; the next turn is the answer, which the adapter
+   * resolves through the shared entity resolver (never a guess).
+   */
+  | {
+      type: 'entity_reference_requested';
+      entityKind: EntityKind;
+      /** The extracted-entity key the answer is stored under (`appointmentReference`). */
+      referenceKey: string;
+      partialRefs: Record<string, string>;
+    }
   /** Caller affirmed the `entity_confirm` readback ("yes, that's the one"). */
   | { type: 'entity_confirm_affirmed' }
   /** Caller declined, was unclear, or timed out on the `entity_confirm` readback. */
@@ -298,6 +312,17 @@ export interface CallingAgentContext {
    * ordinal, phone hint) rather than a fresh intent classification.
    */
   pendingEntityAmbiguity?: PendingEntityAmbiguity;
+  /**
+   * #1015 row 3.10 — set by `entity_reference_requested`: the FSM asked WHICH
+   * record the request is about. The next caller turn is that answer (stored
+   * under `referenceKey`, then resolved), not a fresh intent classification.
+   * Asked at most once per request; cleared by every resolution outcome.
+   */
+  pendingEntityRequest?: {
+    entityKind: EntityKind;
+    referenceKey: string;
+    partialRefs: Record<string, string>;
+  };
   /**
    * Set when a free-text entity reference resolved to exactly one candidate
    * in the middle confidence band (τ_ent_confirm_low <= score < τ_ent). The
