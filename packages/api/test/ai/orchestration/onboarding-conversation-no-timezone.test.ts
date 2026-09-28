@@ -378,5 +378,6 @@ function factsFrom(identity: OnboardingFacts['identity']): OnboardingFacts {
     activatedAt: NOW,
     aiConfigPresent: true,
     aiVerificationStatus: 'passed',
+    aiVerificationSkippedAt: null,
   };
 }

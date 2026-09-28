@@ -81,9 +81,20 @@ export interface BusinessIdentityInput {
   ownerPhone?: string;
 }
 
-export type PackId = 'hvac' | 'plumbing';
+export type PackId =
+  | 'hvac'
+  | 'plumbing'
+  | 'electrical'
+  | 'roofing'
+  | 'painting'
+  | 'gc_remodel'
+  | 'landscaping'
+  | 'concrete'
+  | 'other';
 export interface PackPickInput {
   packId: PackId;
+  /** Free-text trade name the operator typed in the "Other" picker. */
+  tradeLabel?: string;
 }
 
 /**

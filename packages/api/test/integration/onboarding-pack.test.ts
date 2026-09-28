@@ -71,12 +71,37 @@ describe('POST /api/onboarding/pack', () => {
     await closeSharedTestDb();
   });
 
-  it('rejects unknown packId with 400 VALIDATION_ERROR', async () => {
+  // 'electrical' was the "unknown" example until PR #1433 made it a real
+  // trade. Offering more trades must not mean accepting arbitrary ids: a
+  // packId outside the offered set (PackIdSchema) still 400s and writes
+  // nothing.
+  it('rejects unknown packId with 400 VALIDATION_ERROR and activates nothing', async () => {
     const res = await request(app).post('/api/onboarding/pack').send({
-      packId: 'electrical',
+      packId: 'underwater_welding',
     });
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('VALIDATION_ERROR');
+
+    const packRows = await pool.query(
+      `SELECT pack_id FROM pack_activations WHERE tenant_id=$1`,
+      [currentTenant.tenantId],
+    );
+    expect(packRows.rows).toHaveLength(0);
+  });
+
+  it('accepts a newly offered trade (electrical) and activates it', async () => {
+    const res = await request(app).post('/api/onboarding/pack').send({
+      packId: 'electrical',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.packId).toBe('electrical');
+
+    const packRow = await pool.query(
+      `SELECT status FROM pack_activations WHERE tenant_id=$1 AND pack_id=$2`,
+      [currentTenant.tenantId, 'electrical'],
+    );
+    expect(packRow.rows).toHaveLength(1);
+    expect(packRow.rows[0].status).toBe('active');
   });
 
   it('activates hvac pack and step 3 becomes done', async () => {

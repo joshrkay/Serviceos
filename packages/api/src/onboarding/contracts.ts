@@ -53,8 +53,38 @@ export const BusinessIdentityInputSchema = z.object({
 });
 export type BusinessIdentityInput = z.infer<typeof BusinessIdentityInputSchema>;
 
+/**
+ * PackId — the trades offered in the onboarding "Pick your trade" step.
+ * 'hvac' | 'plumbing' are the original packs; the rest were added so
+ * electricians, roofers, painters, remodelers, landscapers, concrete
+ * crews, and everyone else can complete setup honestly. 'other' is the
+ * catch-all and may carry a free-text `tradeLabel` from the client.
+ *
+ * Migration safety: existing tenants store 'hvac'/'plumbing' verbatim in
+ * tenant_settings.active_vertical_packs and pack_activations.pack_id (both
+ * free-text columns, no CHECK constraint), so adding members to this enum
+ * never invalidates stored values.
+ */
+export const PackIdSchema = z.enum([
+  'hvac',
+  'plumbing',
+  'electrical',
+  'roofing',
+  'painting',
+  'gc_remodel',
+  'landscaping',
+  'concrete',
+  'other',
+]);
+export type PackId = z.infer<typeof PackIdSchema>;
+
 export const PackPickInputSchema = z.object({
-  packId: z.enum(['hvac', 'plumbing']),
+  packId: PackIdSchema,
+  // Free-text trade name typed by the operator in the "Other" picker.
+  // Trimmed server-side by the schema (.trim()); only meaningful when
+  // packId is 'other' and ignored for seeded packs. Max 80 chars keeps
+  // it usable in catalog-item names without DB bloat.
+  tradeLabel: z.string().trim().min(1).max(80).optional(),
 });
 export type PackPickInput = z.infer<typeof PackPickInputSchema>;
 
