@@ -22,10 +22,8 @@ import {
   estimateTokens,
   evaluateGate,
   parseMaxUtterances,
-  projectCallCents,
-  projectRunCents,
   resolveCostCapCents,
-  resolveLiveApiKey,
+  selectLiveProvider,
   runLiveIntentEval,
   runLiveSlotEval,
   sampleDeterministic,
@@ -44,17 +42,40 @@ function mockGateway(content: string): LLMGateway {
   } as unknown as LLMGateway;
 }
 
-describe('voice-eval live plumbing — credential resolution', () => {
-  it('returns null when no key is present (fail-fast trigger)', () => {
-    expect(resolveLiveApiKey({} as NodeJS.ProcessEnv)).toBeNull();
-    expect(resolveLiveApiKey({ ANTHROPIC_API_KEY: '  ' } as NodeJS.ProcessEnv)).toBeNull();
+/** Railway prod/dev AI env, as of 2026-09 (what voice-eval-live.yml mirrors). */
+const PROD_AI_ENV = {
+  AI_PROVIDER_API_KEY: 'sk-prod-test',
+  AI_PROVIDER_BASE_URL: 'https://api.openai.com/v1',
+  AI_DEFAULT_MODEL: 'gpt-4o-mini',
+  AI_LIGHTWEIGHT_MODEL: 'gpt-4o-mini',
+  AI_STANDARD_MODEL: 'gpt-4o-mini',
+  AI_COMPLEX_MODEL: 'gpt-4o',
+};
+
+describe('voice-eval live plumbing — provider selection', () => {
+  it('uses the production provider config (OpenAI, gpt-4o-mini for classify) even when ANTHROPIC_API_KEY is also set', async () => {
+    const sel = await selectLiveProvider({ ...PROD_AI_ENV, ANTHROPIC_API_KEY: 'sk-ant-test' });
+    expect(sel).toEqual({
+      kind: 'production',
+      keySource: 'AI_PROVIDER_API_KEY',
+      apiKey: 'sk-prod-test',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o-mini',
+    });
   });
 
-  it('prefers ANTHROPIC_API_KEY, falls back to AI_PROVIDER_API_KEY', () => {
-    expect(resolveLiveApiKey({ ANTHROPIC_API_KEY: 'a', AI_PROVIDER_API_KEY: 'b' } as NodeJS.ProcessEnv))
-      .toEqual({ key: 'a', source: 'ANTHROPIC_API_KEY' });
-    expect(resolveLiveApiKey({ AI_PROVIDER_API_KEY: 'b' } as NodeJS.ProcessEnv))
-      .toEqual({ key: 'b', source: 'AI_PROVIDER_API_KEY' });
+  it('falls back to the Anthropic harness (Haiku 4.5) only when no AI_PROVIDER_API_KEY is set', async () => {
+    const sel = await selectLiveProvider({ ANTHROPIC_API_KEY: 'sk-ant-test' });
+    expect(sel).toMatchObject({
+      kind: 'anthropic-fallback',
+      keySource: 'ANTHROPIC_API_KEY',
+      model: 'claude-haiku-4-5-20251001',
+    });
+  });
+
+  it('returns null when no key is present (fail-fast trigger, exit 2)', async () => {
+    expect(await selectLiveProvider({})).toBeNull();
+    expect(await selectLiveProvider({ ANTHROPIC_API_KEY: '  ', AI_PROVIDER_API_KEY: '' })).toBeNull();
   });
 });
 
@@ -92,26 +113,34 @@ describe('voice-eval live plumbing — --max-utterances parsing', () => {
 });
 
 describe('voice-eval live plumbing — cost cap', () => {
-  it('projectCallCents grows with utterance length and is positive', () => {
-    const short = projectCallCents(10);
-    const long = projectCallCents(1000);
-    expect(short).toBeGreaterThan(0);
-    expect(long).toBeGreaterThan(short);
+  // Expected values are worked by hand from OpenAI / Anthropic-harness list
+  // rates, not recomputed the way the code does. One 4-char utterance = 1
+  // token, so each call sends EST_SYSTEM_PROMPT_TOKENS (20,000) + 1 input
+  // tokens and is assumed to return 250 output tokens.
+  it('prices gpt-4o-mini at OpenAI rates ($0.15 / $0.60 per MTok), not Haiku rates', async () => {
+    // 20,001 × 15¢/MTok = 0.300015¢ ; 250 × 60¢/MTok = 0.015¢
+    const cost = await checkCostCap(['abcd'], 100, 'gpt-4o-mini');
+    expect(cost.projectedCents).toBeCloseTo(0.315015, 6);
+    expect(cost.withinCap).toBe(true);
   });
 
-  it('projectRunCents is the sum over utterances', () => {
-    const us = ['aaaa', 'bbbbbbbb'];
-    expect(projectRunCents(us)).toBeCloseTo(projectCallCents(4) + projectCallCents(8), 6);
+  it('prices the Anthropic fallback (claude-haiku-4-5) at the pinned $3 / $15 harness rate', async () => {
+    // 20,001 × 300¢/MTok = 6.0003¢ ; 250 × 1500¢/MTok = 0.375¢
+    const cost = await checkCostCap(['abcd'], 100, 'claude-haiku-4-5-20251001');
+    expect(cost.projectedCents).toBeCloseTo(6.3753, 6);
   });
 
-  it('checkCostCap flags over-cap vs within-cap correctly', () => {
-    const many = Array.from({ length: 1000 }, () => 'x'.repeat(200));
-    const over = checkCostCap(many, 100);
+  it('flags a run whose projection exceeds the cap', async () => {
+    // 1,000 gpt-4o-mini calls ≈ 315¢ > 100¢
+    const many = Array.from({ length: 1000 }, () => 'abcd');
+    const over = await checkCostCap(many, 100, 'gpt-4o-mini');
     expect(over.withinCap).toBe(false);
-    expect(over.projectedCents).toBeGreaterThan(100);
+    expect(over.projectedCents).toBeCloseTo(315.015, 3);
+  });
 
-    const within = checkCostCap(['short'], 100000);
-    expect(within.withinCap).toBe(true);
+  it('refuses (never within cap) for a model with no known price', async () => {
+    const cost = await checkCostCap(['abcd'], 100000, 'mystery-model');
+    expect(cost).toEqual({ projectedCents: null, capCents: 100000, withinCap: false });
   });
 
   it('resolveCostCapCents defaults conservatively and honors valid overrides', () => {
