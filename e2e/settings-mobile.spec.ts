@@ -142,6 +142,21 @@ test.describe('settings — mobile viewport', () => {
     await expectNoHorizontalOverflow(scrollWidth, clientWidth);
   });
 
+  /**
+   * #1402 — under a loaded machine the "what's new" modal can mount after
+   * dismissWhatsNewModal's 1.5s wait and swallow the next click. Wait for the
+   * page to render first, then give the modal a longer window to appear.
+   */
+  async function openSettingsSettled(page: import('@playwright/test').Page): Promise<void> {
+    await page.goto('/settings');
+    if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+    await expect(page.getByText('Service area', { exact: true }).first()).toBeVisible();
+    await page
+      .getByRole('button', { name: 'Got it', exact: true })
+      .click({ timeout: 5_000 })
+      .catch(() => undefined);
+  }
+
   // #1402 §13 — the Team members deactivate control and its confirm step fit
   // 320px and clear the 44px tap bar. The roster is stubbed so the row exists
   // regardless of what the dev stack seeded.
@@ -164,9 +179,7 @@ test.describe('settings — mobile viewport', () => {
     await page.route('**/api/users/invitations', (route) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }),
     );
-    await page.goto('/settings');
-    if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
-    await dismissWhatsNewModal(page);
+    await openSettingsSettled(page);
 
     await page.getByRole('button', { name: /team members/i }).first().click();
     const start = page.getByRole('button', { name: /Deactivate alexander/i });
@@ -188,17 +201,16 @@ test.describe('settings — mobile viewport', () => {
 
   // #1402 §13 — the Payment terms sheet fits 320px; input + buttons clear 44px.
   test('Payment terms sheet fits 320px and its controls clear 44px (#1402)', async ({ page }) => {
-    await page.goto('/settings');
-    if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
-    await dismissWhatsNewModal(page);
+    await openSettingsSettled(page);
 
     await page.getByRole('button', { name: /payment terms/i }).first().click();
-    const input = page.getByLabel(/Payment due within/i);
+    const dialog = page.getByRole('dialog', { name: /Payment terms/i });
+    const input = dialog.getByLabel(/Payment due within/i);
     await expect(input).toBeVisible();
     for (const box of [
       await input.boundingBox(),
-      await page.getByRole('button', { name: 'Save' }).boundingBox(),
-      await page.getByRole('button', { name: 'Cancel' }).boundingBox(),
+      await dialog.getByRole('button', { name: 'Save' }).boundingBox(),
+      await dialog.getByRole('button', { name: 'Cancel' }).boundingBox(),
     ]) {
       expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
     }

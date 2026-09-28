@@ -313,7 +313,11 @@ describe('#866 — actor stamped at session establishment (both transports share
     expect(session.actorUserId).toBe('clerk-backup');
   });
 
-  it('a suspended backup supervisor gets NO actor even though the owner line still bridges (ownerSession unaffected)', async () => {
+  // #1402 §13 — owners can now deactivate (suspend) a teammate from Team
+  // members. A deactivated backup supervisor's phone must stop being an
+  // approver line, so it no longer opens an owner session either (previously
+  // pinned as "ownerSession unaffected", when suspension had no UI path).
+  it('a suspended backup supervisor gets NO actor and NO owner session (#1402: deactivated phone is not an approver)', async () => {
     const { adapter, store } = makeAdapter({
       settingsRepo: stubSettingsRepo({ backupSupervisorUserId: BACKUP_USER_ID }),
       userRepo: usersRepo([
@@ -331,7 +335,7 @@ describe('#866 — actor stamped at session establishment (both transports share
     await adapter.handleInbound({ callSid: 'CA-actor-backup-suspended', from: BACKUP_MOBILE, to: '+15125550000', tenantId: TENANT, stirVerstat: A_ATTESTED });
 
     const session = store.findByCallSid('CA-actor-backup-suspended')!;
-    expect(session.machine.currentContext.ownerSession).toBe(true);
+    expect(session.machine.currentContext.ownerSession).not.toBe(true);
     expect(session.actorUserId).toBeUndefined();
   });
 
