@@ -7237,7 +7237,7 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS past_due_grace_until TIMESTAMPTZ;
     CREATE INDEX IF NOT EXISTS idx_tenants_past_due_grace
       ON tenants (past_due_grace_until) WHERE past_due_grace_until IS NOT NULL;
-
+  `,
   '297_ai_check_skip': `
     -- AI-check escape hatch: records when the tenant skips verification so a
     -- failed or flaky gateway call can never trap onboarding in incomplete
