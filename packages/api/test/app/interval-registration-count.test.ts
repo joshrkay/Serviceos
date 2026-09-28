@@ -54,8 +54,14 @@ import { resetConfig } from '../../src/shared/config';
  * The number is pinned anyway because the refactor being guarded does not
  * change configuration — it moves construction. Any movement in this figure
  * under identical env is a real behaviour change.
+ *
+ * 21 → 23 (PR #1437, billing resilience): two new hourly, leader-gated,
+ * `shouldRunWorkers`-only sweeps — the dunning sweep (`runDunningSweep`,
+ * day-of/+3d/+7d payment-failed emails) and the overage-settlement
+ * reconciliation sweep (retries stale settlements, backfills gap periods).
+ * Both register once per worker-role boot; web/voice stay at zero.
  */
-const EXPECTED_WORKER_INTERVALS_HERMETIC = 21;
+const EXPECTED_WORKER_INTERVALS_HERMETIC = 23;
 
 describe('characterization — background interval registration', () => {
   const originalDatabaseUrl = process.env.DATABASE_URL;
