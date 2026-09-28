@@ -7228,6 +7228,15 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_material_items_job
       ON material_items (tenant_id, job_id, created_at) WHERE job_id IS NOT NULL;
   `,
+
+  '297_ai_check_skip': `
+    -- AI-check escape hatch: records when the tenant skips verification so a
+    -- failed or flaky gateway call can never trap onboarding in incomplete
+    -- setup forever. A skip completes the ai_check step; the verification
+    -- remains retryable from Settings.
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS ai_verification_skipped_at TIMESTAMPTZ;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
