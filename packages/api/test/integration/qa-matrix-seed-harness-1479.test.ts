@@ -69,4 +69,22 @@ describe('Postgres integration — QA matrix seed harness (#1479)', () => {
       'Rowan Twinsley',
     ]);
   });
+
+  it('a run can give the seeded customer its own recipient number; a re-seed moves the SAME customer', async () => {
+    const slug = `qa-matrix-t1479-${randomUUID().slice(0, 8)}-A`;
+
+    const defaulted = await ensureTenantFixture(pool, slug);
+    expect(defaulted.customerPhone).toBe('555-0100');
+
+    const run1 = await ensureTenantFixture(pool, slug, { customerPhone: '555-1101' });
+    const run2 = await ensureTenantFixture(pool, slug, { customerPhone: '555-1102' });
+
+    expect(run1.customerId).toBe(defaulted.customerId);
+    expect(run2.customerId).toBe(defaulted.customerId);
+    expect(run2.customerPhone).toBe('555-1102');
+    // Exactly one customer answers to the run's number (callerPhone must resolve
+    // to one match), and the previous run's number is released.
+    expect(await namesOnPhone(defaulted.tenantId, '555-1102')).toEqual([`${slug}-customer`]);
+    expect(await namesOnPhone(defaulted.tenantId, '555-1101')).toEqual([]);
+  });
 });
