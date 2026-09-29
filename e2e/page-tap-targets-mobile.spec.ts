@@ -42,11 +42,8 @@ const STATIC_ROUTES = [
  * target, matched on `${tag} "${accessible name}"`.
  */
 const ALLOWLIST: RegExp[] = [
-  // /settings — inline-text links inside a sentence of the intake / booking
-  // link cards ("…appear in your Lead Pipeline automatically", "…an approval
-  // in your approval queue…"). Each sits next to its card's full-size actions.
-  /^button "Lead Pipeline" /,
-  /^button "approval queue" /,
+  // (empty) #1481 made the /settings intake / booking cards' in-sentence
+  // links ("Lead Pipeline", "approval queue") full 44px targets.
 ];
 
 const INTERACTIVE =

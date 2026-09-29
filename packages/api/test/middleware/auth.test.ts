@@ -165,6 +165,21 @@ describe('P0-003 — Auth middleware', () => {
       expect(next).not.toHaveBeenCalled();
     });
 
+    // #1481 — the web needs to tell "your access was removed" apart from a
+    // generic load failure; the body carries a stable machine code for it.
+    it('deactivated (suspended) user → 403 carries code ACCESS_REVOKED', async () => {
+      setAuthorizationLoader(async () => ({
+        userId: '550e8400-e29b-41d4-a716-446655440010',
+        role: 'technician',
+        deleted: false,
+        status: 'suspended',
+      }));
+      const { req, res, next } = mockReqRes({ userId: 'u1', sessionId: 's1', tenantId: 't1', role: 'technician' });
+      await resolveAuthorization(req, res, next);
+      expect((res as any).statusCode).toBe(403);
+      expect((res as any).body).toMatchObject({ error: 'FORBIDDEN', code: 'ACCESS_REVOKED' });
+    });
+
     it('user with no membership row → 403 and no next()', async () => {
       setAuthorizationLoader(async () => null);
       const { req, res, next } = mockReqRes({

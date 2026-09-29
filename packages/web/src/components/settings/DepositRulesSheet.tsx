@@ -192,7 +192,7 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
           <button
             onClick={onClose}
             aria-label="Close"
-            className="flex size-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
+            className="flex size-11 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
           >
             <X size={16} />
           </button>
@@ -225,7 +225,7 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
                   return (
                     <label
                       key={opt.id}
-                      className={`flex w-full cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 transition-colors ${
+                      className={`relative flex w-full min-h-11 cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 transition-colors ${
                         active ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 hover:border-slate-300'
                       }`}
                     >
@@ -235,8 +235,18 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
                         value={opt.id}
                         checked={active}
                         onChange={() => setFields((f) => ({ ...f, strategy: opt.id }))}
-                        className="mt-0.5"
+                        className="peer sr-only"
                       />
+                      {/* #1481 — the native radio is visually hidden so the whole row is the
+                          ≥44px tap target; this dot is its visual stand-in. */}
+                      <span
+                        aria-hidden="true"
+                        className={`mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-400 ${
+                          active ? 'border-indigo-600' : 'border-slate-400'
+                        }`}
+                      >
+                        {active && <span className="size-2 rounded-full bg-indigo-600" />}
+                      </span>
                       <div className="flex-1">
                         <p className={`text-sm ${active ? 'text-indigo-900' : 'text-slate-800'}`}>
                           {opt.label}
@@ -265,7 +275,7 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
                         setFields((f) => ({ ...f, percentagePercent: e.target.value }))
                       }
                       placeholder="25"
-                      className="w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                      className="w-full min-h-11 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
                     />
                     <span className="text-sm text-slate-500" aria-hidden="true">%</span>
                   </div>
@@ -289,7 +299,7 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
                         setFields((f) => ({ ...f, fixedDollars: e.target.value }))
                       }
                       placeholder="500.00"
-                      className="w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                      className="w-full min-h-11 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
                     />
                   </div>
                 </div>
@@ -318,7 +328,7 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
                     return (
                       <label
                         key={opt.id}
-                        className={`flex w-full cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 transition-colors ${
+                        className={`relative flex w-full min-h-11 cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 transition-colors ${
                           active ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 hover:border-slate-300'
                         }`}
                       >
@@ -328,8 +338,18 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
                           value={opt.id}
                           checked={active}
                           onChange={() => setFields((f) => ({ ...f, timingPolicy: opt.id }))}
-                          className="mt-0.5"
+                          className="peer sr-only"
                         />
+                        {/* #1481 — the native radio is visually hidden so the whole row is the
+                            ≥44px tap target; this dot is its visual stand-in. */}
+                        <span
+                          aria-hidden="true"
+                          className={`mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-400 ${
+                            active ? 'border-indigo-600' : 'border-slate-400'
+                          }`}
+                        >
+                          {active && <span className="size-2 rounded-full bg-indigo-600" />}
+                        </span>
                         <div className="flex-1">
                           <p className={`text-sm ${active ? 'text-indigo-900' : 'text-slate-800'}`}>
                             {opt.label}
@@ -359,7 +379,7 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
                         setFields((f) => ({ ...f, requiredAboveDollars: e.target.value }))
                       }
                       placeholder="Leave blank to apply to every estimate"
-                      className="w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                      className="w-full min-h-11 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
                     />
                   </div>
                   <p className="block text-xs text-slate-400 mt-1">
@@ -381,7 +401,7 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
           <button
             type="button"
             onClick={onClose}
-            className="rounded-xl px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+            className="min-h-11 min-w-11 rounded-xl px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
           >
             Cancel
           </button>
@@ -389,7 +409,7 @@ export function DepositRulesSheet({ onClose }: DepositRulesSheetProps) {
             type="button"
             onClick={save}
             disabled={saving || loading}
-            className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
+            className="min-h-11 min-w-11 rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
           >
             {saving ? 'Saving…' : 'Save'}
           </button>

@@ -136,4 +136,20 @@ describe('RouteErrorElement', () => {
     fireEvent.click(screen.getByRole('button', { name: /go back/i }));
     expect(useNavigateMock).toHaveBeenCalledWith(-1);
   });
+
+  // #1481 — an offline hard navigation to a route whose chunk isn't cached
+  // crashed into the generic fallback with the raw TypeError. Show the
+  // offline state instead.
+  it('shows the offline state when a route chunk fails to load while offline', () => {
+    vi.spyOn(window.navigator, 'onLine', 'get').mockReturnValue(false);
+    useRouteErrorMock.mockReturnValue(
+      new TypeError('Failed to fetch dynamically imported module: https://app.example/assets/JobsPage-abc123.js'),
+    );
+    renderElement();
+
+    expect(screen.getByText(/you're offline/i)).toBeInTheDocument();
+    expect(screen.queryByText('Something went wrong')).not.toBeInTheDocument();
+    expect(screen.queryByText(/dynamically imported module/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
+  });
 });

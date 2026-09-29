@@ -149,7 +149,7 @@ export function TerminologySheet({ onClose }: TerminologySheetProps) {
           <button
             onClick={onClose}
             aria-label="Close"
-            className="flex size-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
+            className="flex size-11 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
           >
             <X size={16} />
           </button>
@@ -176,7 +176,7 @@ export function TerminologySheet({ onClose }: TerminologySheetProps) {
                   value={fields[f.key]}
                   onChange={(e) => setFields((s) => ({ ...s, [f.key]: e.target.value }))}
                   placeholder={f.defaultValue}
-                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                  className="mt-1.5 w-full min-h-11 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
                 />
                 <span className="block text-xs text-slate-400 mt-1">{f.hint}</span>
               </label>
@@ -194,7 +194,7 @@ export function TerminologySheet({ onClose }: TerminologySheetProps) {
           <button
             type="button"
             onClick={onClose}
-            className="rounded-xl px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+            className="min-h-11 min-w-11 rounded-xl px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
           >
             Cancel
           </button>
@@ -202,7 +202,7 @@ export function TerminologySheet({ onClose }: TerminologySheetProps) {
             type="button"
             onClick={save}
             disabled={saving || loading}
-            className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
+            className="min-h-11 min-w-11 rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
           >
             {saving ? 'Saving…' : 'Save'}
           </button>

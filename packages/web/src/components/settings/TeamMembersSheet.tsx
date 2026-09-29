@@ -263,7 +263,7 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
                 setShowInviteDialog(true);
               }}
               data-testid="team-members-invite-button"
-              className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs text-white hover:bg-slate-700"
+              className="flex min-h-11 min-w-11 items-center gap-1.5 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs text-white hover:bg-slate-700"
             >
               <UserPlus size={14} /> Invite
             </button>
@@ -271,7 +271,7 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
           <button
             onClick={onClose}
             aria-label="Close"
-            className="flex size-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
+            className="flex size-11 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
           >
             <X size={16} />
           </button>
@@ -330,7 +330,7 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
                           value={editingRole}
                           onChange={(e) => setEditingRole(e.target.value as Role)}
                           disabled={isSaving}
-                          className="text-xs rounded-lg border border-slate-200 px-2 py-1"
+                          className="min-h-11 min-w-11 text-xs rounded-lg border border-slate-200 px-2 py-1"
                         >
                           <option value="owner">Owner</option>
                           <option value="dispatcher">Dispatcher</option>
@@ -340,7 +340,7 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
                           type="button"
                           onClick={() => saveRole(u)}
                           disabled={isSaving}
-                          className="text-xs rounded-lg bg-slate-900 text-white px-2 py-1 hover:bg-slate-700 disabled:opacity-60"
+                          className="min-h-11 min-w-11 text-xs rounded-lg bg-slate-900 text-white px-2 py-1 hover:bg-slate-700 disabled:opacity-60"
                         >
                           {isSaving ? '…' : 'Save'}
                         </button>
@@ -348,7 +348,7 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
                           type="button"
                           onClick={cancelEdit}
                           disabled={isSaving}
-                          className="text-xs rounded-lg border border-slate-200 px-2 py-1 hover:bg-slate-50"
+                          className="min-h-11 min-w-11 text-xs rounded-lg border border-slate-200 px-2 py-1 hover:bg-slate-50"
                         >
                           Cancel
                         </button>
@@ -371,7 +371,7 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
                             onClick={() => startEdit(u)}
                             aria-label={`Edit role for ${displayName(u)}`}
                             data-testid={`team-member-edit-${u.id}`}
-                            className="ml-1 flex size-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                            className="ml-1 flex size-11 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
                           >
                             <Pencil size={14} />
                           </button>
@@ -409,7 +409,7 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
                             onClick={() => setConfirmDeactivateId(u.id)}
                             aria-label={`Deactivate ${displayName(u)}`}
                             data-testid={`team-member-deactivate-${u.id}`}
-                            className="min-h-11 flex items-center gap-1.5 rounded-xl px-3 text-xs text-red-700 hover:bg-red-50"
+                            className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-xl px-3 text-xs text-red-700 hover:bg-red-50"
                           >
                             <UserX size={14} /> Deactivate
                           </button>
@@ -541,7 +541,7 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
           <button
             type="button"
             onClick={onClose}
-            className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 transition-colors"
+            className="min-h-11 min-w-11 rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 transition-colors"
           >
             Close
           </button>
