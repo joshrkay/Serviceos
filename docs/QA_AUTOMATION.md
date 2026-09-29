@@ -174,9 +174,19 @@ Example:
 
 Every QA run **compares against the previous run** to detect new failures (regressions).
 
+### How Regression Detection Works
+
+1. **Prior Artifact Restoration**: Workflow downloads the last successful run's artifact (`qa/reports/*/`)
+2. **Baseline Comparison**: `scripts/qa-comparison.sh` loads prior `qa-status.json` and compares current results
+3. **Regression Detection**: Any test that passed before but fails now is flagged
+4. **Documentation**: Findings logged in `QA_LOG.md` regression tracking table
+5. **Scope**: Only applies to test suites actually executed in both runs; missing suites are noted separately
+
+**Implementation Detail**: The workflow runs daily (schedule: `0 4 * * *`) with an internal 48-hour gate (checks if last successful run was 48+ hours ago). This preserves the 2-day cadence across month boundaries and ensures prior artifacts are available for comparison.
+
 ### What Is a Regression?
 
-- **Feature was passing** on 2026-09-27
+- **Feature was passing** on 2026-09-27 AND on 2026-09-29 run's baseline
 - **Feature is failing** on 2026-09-29
 - **Conclusion**: A recent code change broke it
 
@@ -184,17 +194,20 @@ Every QA run **compares against the previous run** to detect new failures (regre
 
 - Feature was failing on 2026-09-27 and still failing on 2026-09-29 (known issue, not new)
 - Feature is new (no prior run to compare against)
+- Test suite not executed in both runs (e.g., API tests skipped in one run; cannot compare)
 
 ### Regression Workflow
 
-1. **Test Execution**: Run full suite
-2. **Comparison**: Compare results vs. previous run
-3. **Detection**: Flag any new failures
-4. **Documentation**: Log in `QA_LOG.md` regression tracking table
-5. **Investigation**: Review recent commits to identify root cause
-6. **Escalation**: Alert on Slack if critical
-7. **Fix**: Engineer investigates and fixes
-8. **Verification**: Next QA run confirms fix
+1. **Prior Artifacts Restored**: Download last successful run's results
+2. **Test Execution**: Run current test suite
+3. **Comparison**: Compare current vs. prior on matching lanes only
+4. **Detection**: Flag any new failures (only in suites present in both runs)
+5. **Scope Note**: If API was skipped in prior run, API results in current run start clean (no regression possible)
+6. **Documentation**: Log in `QA_LOG.md` regression tracking table
+7. **Investigation**: Review recent commits to identify root cause
+8. **Escalation**: Alert on Slack if critical
+9. **Fix**: Engineer investigates and fixes
+10. **Verification**: Next QA run confirms fix
 
 ---
 

@@ -44,18 +44,25 @@
 
 ## Automated Test Execution (✅ COMPLETE)
 
-All tests executed successfully via `npm run test`. Results:
+Partial suite execution via `npm run test`. Results:
 
-**Executed Test Suites**:
-- ✅ Unit tests (API, web, shared, mobile) — 2,637 tests passed
-- ✅ Contract validation (Zod schemas) — All passed
-- ✅ Component tests (React) — 2,463 web tests passed
+**Executed Test Suites** ✅:
+- Web package: 342 files, 2,463 tests → 100% pass
+- Shared package: 16 files, 174 tests → 100% pass
+- **Total executed: 2,637 tests, 100% pass rate**
+- ✅ Contract validation (Zod schemas) — Verified via type checks
 
-**Not Executed** (CI environment limitations):
-- Integration tests on real Postgres (requires Docker DB)
-- E2E tests (Playwright; requires browser launch)
-- Voice quality gate (requires LLM endpoint)
-- Load tests (requires dedicated load environment)
+**Verified API coverage note**: While API tests exist (14,158 unit tests in packages/api), this run did NOT execute the full API test suite. The reported pass rate applies only to web + shared packages.
+
+**Not Executed** (CI environment limitations or incomplete run):
+- ❌ API unit tests (14,158 tests) — Not run in this execution
+- ❌ Mobile tests (826 tests) — Not run in this execution  
+- ❌ Integration tests on real Postgres (1,218 tests) — Requires Docker DB
+- ❌ E2E tests (19 scenarios) — Requires browser launch
+- ❌ Voice quality gate (85 scenarios) — Requires LLM endpoint
+- ❌ Load tests — Requires dedicated load environment
+
+**Critical Note**: Claiming "zero regressions" is valid only for web + shared packages. API and mobile regressions cannot be ruled out until those suites actually execute.
 
 **Duration**: Started 04:23:09, completed 04:25:47 UTC (~2 min 40 sec)
 
