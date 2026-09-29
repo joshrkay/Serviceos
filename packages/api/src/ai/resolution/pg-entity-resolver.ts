@@ -791,17 +791,18 @@ export class PgEntityResolver implements EntityResolver {
    * customer's name words are dropped from the reference and the jobs are
    * ranked by what is left — the JOB words — against summary and job number.
    *
-   * Never not_found while the customer has jobs: one job is that job; job
-   * words that pick one resolve it (or confirm it, in the mid band); anything
-   * else is a picker of the customer's best-ranked jobs (most recent first
-   * among equals) — a narrowing question, not a dead end.
+   * A reference naming only the customer is never not_found while they have
+   * jobs: one job is that job, several are a picker of their most recent (a
+   * narrowing question, not a dead end). Job words that pick one resolve it
+   * (or confirm it, in the mid band); job words naming none of their jobs are
+   * not_found, said honestly (#1416).
    */
   private async resolveJobForCustomer(
     tenantId: string,
     reference: string,
     customerId: string,
   ): Promise<EntityResolverResult> {
-    const { rows } = await withTenantConnection(this.pool, tenantId, async (client) => {
+    const { rows, jobWords } = await withTenantConnection(this.pool, tenantId, async (client) => {
       const customer = await client.query<{ display_name: string | null; company_name: string | null }>(
         `SELECT display_name, company_name FROM customers WHERE tenant_id = $1 AND id = $2`,
         [tenantId, customerId],
@@ -816,7 +817,7 @@ export class PgEntityResolver implements EntityResolver {
         .split(/\s+/)
         .filter((w) => w.length > 0 && !nameWords.has(w))
         .join(' ');
-      return client.query<{
+      const result = await client.query<{
         id: string;
         summary: string;
         job_number: string | null;
@@ -838,6 +839,7 @@ export class PgEntityResolver implements EntityResolver {
           LIMIT ${MAX_JOB_CANDIDATES + 1}`,
         [tenantId, customerId, jobWords, reference],
       );
+      return { rows: result.rows, jobWords };
     });
 
     if (rows.length === 0) return { kind: 'not_found', reference };
@@ -848,13 +850,15 @@ export class PgEntityResolver implements EntityResolver {
       hint: [row.job_number, row.status].filter(Boolean).join(' · ') || undefined,
       score: Number(row.score),
     }));
-    if (Number(rows[0].total) === 1) return { kind: 'resolved', candidate: candidates[0] };
-
-    const ranked = this.toResult(candidates, reference);
-    if (ranked.kind === 'resolved' || ranked.kind === 'low_confidence') return ranked;
-    if (ranked.kind === 'ambiguous') {
+    // Job words that name none of their jobs are a job that does not exist
+    // (#1416): say so, never answer with a stand-in — not even their only one.
+    if (jobWords !== '') {
+      const ranked = this.toResult(candidates, reference);
+      if (ranked.kind !== 'ambiguous') return ranked;
       return { kind: 'ambiguous', candidates: ranked.candidates.slice(0, MAX_JOB_CANDIDATES) };
     }
+    // The reference named only the customer: their one job, or a picker.
+    if (Number(rows[0].total) === 1) return { kind: 'resolved', candidate: candidates[0] };
     return { kind: 'ambiguous', candidates: candidates.slice(0, MAX_JOB_CANDIDATES) };
   }
 

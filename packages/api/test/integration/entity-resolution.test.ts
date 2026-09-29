@@ -1769,6 +1769,21 @@ describe('Postgres integration — entity resolution (P8)', () => {
           expect(result.kind).toBe('resolved');
           if (result.kind === 'resolved') expect(result.candidate.id).toBe(ids[4]); // 'Attic insulation'
         });
+
+        // #1416 stays true: job words that name NO job of theirs are said
+        // honestly, never answered with some other job (even their only one).
+        it('job words naming none of their jobs are not_found — not a stand-in job', async () => {
+          const { seed } = await customerWithJobs(['Water heater replacement']);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the QA Matrix sprinkler job',
+            kind: 'job',
+            customerId: seed.customerId,
+          });
+
+          expect(result.kind).toBe('not_found');
+        });
       });
 
       it('never resolves a job by customer name across tenants', async () => {
