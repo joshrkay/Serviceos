@@ -185,6 +185,9 @@ async function travelTimeIssues(
   const siblings = (await loadTechnicianAppointmentsInWindow(
     deps, input.tenantId, input.proposedTechnicianId, windowStart, windowEnd,
   )).filter((a) => a.id !== input.appointment.id)
+    // #1478 — a canceled / no-show visit is not a stop the technician
+    // drives from or to (completed ones still are).
+    .filter((a) => a.status !== 'canceled' && a.status !== 'no_show')
     .sort((a, b) => a.scheduledStart.getTime() - b.scheduledStart.getTime());
 
   const prev = [...siblings].reverse().find((a) => a.scheduledEnd <= input.proposedScheduledStart) ?? null;

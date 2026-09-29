@@ -32,6 +32,7 @@ import { PgUserRepository } from '../../src/users/pg-user';
 import { createAppointmentRouter } from '../../src/routes/appointments';
 import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
 import { withTenantTransaction } from '../../src/middleware/tenant-context';
+import { MIGRATIONS } from '../../src/db/schema';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 const DAY = '2026-11-18';
@@ -128,9 +129,12 @@ describe('Postgres integration — reschedule into a double-booking (#1472)', ()
       updatedAt: new Date(),
     });
 
-    // Legacy migration-129 trigger, verbatim except for the tenant guard.
+    // Legacy migration-129 trigger under its real names, verbatim except for
+    // the tenant guard. (Names matter: Postgres fires same-timing triggers
+    // in NAME order, so it runs after trg_assignment_sync_appointment_fields
+    // has filled the window — exactly as on the dev DB.)
     await pool.query(`
-      CREATE OR REPLACE FUNCTION test_1472_legacy_check_no_double_booking()
+      CREATE OR REPLACE FUNCTION check_no_double_booking()
       RETURNS TRIGGER LANGUAGE plpgsql AS $$
       DECLARE conflict_count INTEGER;
       BEGIN
@@ -153,10 +157,10 @@ describe('Postgres integration — reschedule into a double-booking (#1472)', ()
         RETURN NEW;
       END;
       $$;
-      DROP TRIGGER IF EXISTS test_1472_legacy_no_double_booking ON appointment_assignments;
-      CREATE TRIGGER test_1472_legacy_no_double_booking
+      DROP TRIGGER IF EXISTS trg_no_double_booking ON appointment_assignments;
+      CREATE TRIGGER trg_no_double_booking
         BEFORE INSERT OR UPDATE ON appointment_assignments
-        FOR EACH ROW EXECUTE FUNCTION test_1472_legacy_check_no_double_booking();
+        FOR EACH ROW EXECUTE FUNCTION check_no_double_booking();
     `);
 
     app = express();
@@ -187,8 +191,8 @@ describe('Postgres integration — reschedule into a double-booking (#1472)', ()
 
   afterAll(async () => {
     await pool.query(`
-      DROP TRIGGER IF EXISTS test_1472_legacy_no_double_booking ON appointment_assignments;
-      DROP FUNCTION IF EXISTS test_1472_legacy_check_no_double_booking();
+      DROP TRIGGER IF EXISTS trg_no_double_booking ON appointment_assignments;
+      DROP FUNCTION IF EXISTS check_no_double_booking();
     `);
   });
 
@@ -219,5 +223,42 @@ describe('Postgres integration — reschedule into a double-booking (#1472)', ()
       scheduledEnd: at('10:30').toISOString(),
     });
     expect(res.status).toBe(200);
+  });
+
+  // #1478 — the legacy trigger only skipped 'cancelled_by_*' statuses that no
+  // longer exist, so a canceled visit kept blocking its technician's slot.
+  // Migration 301 repairs the legacy function in place (where it exists).
+  describe('with migration 301 applied (#1478)', () => {
+    beforeAll(async () => {
+      await pool.query(MIGRATIONS['301_legacy_double_booking_trigger_statuses']);
+    });
+
+    it('after canceling an assigned appointment, the same technician can be rebooked into its slot', async () => {
+      const techId = await makeTechnician();
+      const a = await bookFor(techId, '18:00', '19:00');
+
+      const cancel = await request(app).put(`/api/appointments/${a}`).send({ status: 'canceled' });
+      expect(cancel.status).toBe(200);
+
+      const rebook = await request(app).post('/api/appointments').send({
+        jobId: await makeJob(),
+        scheduledStart: at('18:00').toISOString(),
+        scheduledEnd: at('19:00').toISOString(),
+        timezone: 'UTC',
+        technicianId: techId,
+      });
+      expect(rebook.status).toBe(201);
+    });
+
+    it('a genuine overlap is still refused with 409', async () => {
+      const techId = await makeTechnician();
+      const a = await bookFor(techId, '06:00', '07:00');
+      await bookFor(techId, '07:30', '08:00');
+      const res = await request(app).put(`/api/appointments/${a}`).send({
+        scheduledStart: at('06:30').toISOString(),
+        scheduledEnd: at('07:45').toISOString(),
+      });
+      expect(res.status).toBe(409);
+    });
   });
 });

@@ -96,6 +96,29 @@ describe('checkFeasibility — travel-time sub-check', () => {
     expect(r.info.some((i) => i.check === 'travel_time' && (i.metadata as any)?.reason === 'missing_coords')).toBe(true);
   });
 
+  // #1478 — a canceled visit is not a stop the technician drives from/to.
+  it('ignores a canceled appointment as a travel neighbor', async () => {
+    const target = mkAppt({ jobId: 'j-target' });
+    const canceledNext = mkAppt({
+      id: 'a-canceled', jobId: 'j-next', status: 'canceled',
+      scheduledStart: new Date('2026-05-17T11:05:00Z'),
+      scheduledEnd: new Date('2026-05-17T12:00:00Z'),
+    });
+    const r = await checkFeasibility(
+      { tenantId: 't-1', appointment: target, proposedTechnicianId: 'tech-1',
+        proposedScheduledStart: target.scheduledStart, proposedScheduledEnd: target.scheduledEnd },
+      depsWithNeighbor({
+        neighbor: canceledNext,
+        jobs: { 'j-target': { locationId: 'L-target' }, 'j-next': { locationId: 'L-next' } },
+        locations: { 'L-target': SF, 'L-next': OAK },
+        travelSeconds: 1200,
+      }),
+    );
+    expect(r.warnings.some((w) => w.check === 'travel_time')).toBe(false);
+    expect(r.info.some((i) => i.conflictingEntityId === 'a-canceled')).toBe(false);
+    expect(r.travelTime?.toNextSeconds).toBeNull();
+  });
+
   it('returns travelTime null when there are no neighbors', async () => {
     const target = mkAppt({ jobId: 'j-target' });
     const r = await checkFeasibility(

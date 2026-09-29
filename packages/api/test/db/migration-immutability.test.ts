@@ -570,6 +570,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['299_tenant_settings_business_address', '228ea79d8c77951587fb737fddb3f5a4714404a42b0a40694218f367b4205788'],
   // #1402 §18 — per-recipient SMS volume ledger (sms_recipient_sends).
   ['300_sms_recipient_sends', 'fa81cb555d36784af228249bbd086acc43f83c5238b20cfd765491bf755f8d05'],
+  // #1478 — repair the legacy trg_no_double_booking function's status set in place.
+  ['301_legacy_double_booking_trigger_statuses', '9ce706b061f7ac1a8db7850127a141c16dcd4e784eb3a8bf15dbce31b1a26303'],
 ];
 
 function hashMigration(value: string): string {
