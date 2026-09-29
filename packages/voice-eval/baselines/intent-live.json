@@ -2,10 +2,16 @@
   "schemaVersion": 1,
   "eval": "intent",
   "mode": "live",
-  "status": "placeholder",
-  "recordedAt": null,
-  "goldenSet": null,
-  "metrics": {},
+  "status": "recorded",
+  "recordedAt": "2026-09-29T00:54:54.120Z",
+  "goldenSet": {
+    "rows": 200,
+    "fingerprint": "ff7df997c6df9aca"
+  },
+  "metrics": {
+    "accuracy": 0.895,
+    "macroF1": 0.8835690970913352
+  },
   "tolerance": 0.05,
   "recordCommand": "AI_PROVIDER_API_KEY=... AI_PROVIDER_BASE_URL=https://api.openai.com/v1 AI_DEFAULT_MODEL=gpt-4o-mini AI_LIGHTWEIGHT_MODEL=gpt-4o-mini AI_STANDARD_MODEL=gpt-4o-mini AI_COMPLEX_MODEL=gpt-4o AI_CLASSIFY_INTENT_DEADLINE_MS=12000 VOICE_EVAL_COST_CAP_CENTS=150 npx tsx packages/voice-eval/run-intent-eval.ts --live --max-utterances 200 --record-baseline packages/voice-eval/baselines/intent-live.json"
 }
