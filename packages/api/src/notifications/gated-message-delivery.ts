@@ -69,6 +69,7 @@
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { createLogger, type Logger } from '../logging/logger';
 import { normalizePhone } from '../compliance/dnc';
+import { runOutsideRequestTransaction } from '../middleware/tenant-context';
 import {
   resolveOutboundConsent,
   type ConsentLedgerEventLike,
@@ -212,6 +213,15 @@ function defaultKillSwitchLogger(): Pick<Logger, 'info'> {
     environment: process.env.NODE_ENV || 'development',
   });
   return fallbackLogger;
+}
+
+let auditFailureLoggerInstance: Logger | undefined;
+function auditFailureLogger(): Logger {
+  auditFailureLoggerInstance ??= createLogger({
+    service: 'sms-gate',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  return auditFailureLoggerInstance;
 }
 
 export class GatedMessageDelivery implements MessageDeliveryProvider {
@@ -408,7 +418,11 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
     const last4 = normalizePhone(message.to).slice(-4);
     const tenantId = message.tenantId ?? 'unknown';
     try {
-      await this.deps.auditRepo.create(
+      // #1482 — ALWAYS its own committed transaction. A suppression usually
+      // ends the caller's request with a >= 400 answer, and the /api request
+      // transaction rolls back every write of such a request — so a write that
+      // joined it vanished together with the refusal it was recording.
+      await runOutsideRequestTransaction(() => this.deps.auditRepo.create(
         createAuditEvent({
           tenantId,
           actorId: 'system:sms-gate',
@@ -425,9 +439,18 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
             ...extra,
           },
         }),
-      );
-    } catch {
-      /* best-effort audit */
+      ));
+    } catch (err) {
+      // Best-effort — but never silent: a missing suppression row is a
+      // compliance gap an operator must be able to find (#1482).
+      auditFailureLogger().error('SMS suppression audit write failed', {
+        eventType,
+        reason,
+        tenantId,
+        recipientClass: message.recipientClass,
+        phoneLast4: last4,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 }

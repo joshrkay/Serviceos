@@ -421,6 +421,11 @@ export function createConversationRouter(
         res.status(201).json(result);
       } catch (err) {
         if (err instanceof ConversationReplyError) {
+          // #1482 — a refused/failed reply's only writes are its own records
+          // (the suppressed/failed audit row and the failed dispatch row).
+          // They must outlive the >= 400 answer, which would otherwise roll
+          // the request transaction back and erase the trail.
+          res.locals.forceCommit = true;
           res
             .status(REPLY_ERROR_STATUS[err.code])
             .json({ error: err.code.toUpperCase(), message: err.message });
