@@ -201,6 +201,24 @@ describe('voice-eval live plumbing — intent run loop (mocked gateway)', () => 
     expect(res.fastPathHits).toBe(0);
   });
 
+  // #1469 — five of the live run's known misses were "X ⇒ unknown". Whether
+  // the model picked X below the 0.6 confidence floor or picked unknown
+  // outright are different fixes, so a miss to unknown carries the reason
+  // and the intent the model leaned toward.
+  it('records why a miss landed on unknown and which intent the model leaned toward', async () => {
+    const gw = mockGateway('{"intentType":"lookup_jobs","confidence":0.4}');
+    const res = await runLiveIntentEval([{ utterance: 'Pull up the Henderson work order.', intent: 'lookup_jobs' }], gw);
+    expect(res.misses).toEqual([
+      {
+        utterance: 'Pull up the Henderson work order.',
+        gold: 'lookup_jobs',
+        pred: 'unknown',
+        unknownReason: 'low_confidence',
+        modelIntent: 'lookup_jobs',
+      },
+    ]);
+  });
+
   it('counts a fast-path hit (empty transcript short-circuits before the LLM)', async () => {
     const gw = mockGateway('{"intentType":"create_invoice","confidence":0.9}');
     const rows = [
