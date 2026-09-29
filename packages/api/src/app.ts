@@ -5175,6 +5175,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       delayNotificationCoordinator,
       // #1279 — canonical appointment-level assignment writes.
       assignment: { assignmentRepo, userRepo, workingHoursRepo, unavailableBlockRepo },
+      // #1402 — outside-business-hours warning on create/reschedule.
+      settingsRepo,
     }, auditRepo)
   );
   // UC-3 — presence store goes cluster-wide when REDIS_URL is set (in-memory

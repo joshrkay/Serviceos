@@ -1,7 +1,12 @@
 import { Proposal, ProposalType } from '../proposal';
 import { resolveSurface } from '../surface';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
-import { AppointmentRepository, updateAppointment } from '../../appointments/appointment';
+import {
+  AppointmentRepository,
+  isStartInPast,
+  PAST_START_MESSAGE,
+  updateAppointment,
+} from '../../appointments/appointment';
 import { AssignmentRepository } from '../../appointments/assignment';
 import { validateAppointmentTimes } from '../../appointments/validation';
 import { checkSchedulingProposalFreshness } from '../../ai/guardrails/scheduling-staleness';
@@ -171,6 +176,16 @@ export class RescheduleAppointmentExecutionHandler implements ExecutionHandler {
           error:
             'Reschedule has no new time selected — pick a new slot before approving.',
         };
+      }
+
+      // #1402 §3/§15 — same no-past-start rule as the operator routes. Only a
+      // MOVED start is checked, so re-executing an already-applied reschedule
+      // stays idempotent after its time has passed.
+      if (
+        startDate.getTime() !== appointment.scheduledStart.getTime() &&
+        isStartInPast(startDate)
+      ) {
+        return { success: false, error: PAST_START_MESSAGE };
       }
 
       // Conflict / feasibility check — delegate to the checkFeasibility composer

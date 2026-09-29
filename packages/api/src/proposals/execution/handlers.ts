@@ -53,7 +53,12 @@ import { JobTimelineRepository } from '../../jobs/job-lifecycle';
 import { JobCompletionEffectsDeps } from '../../jobs/completion-effects';
 import { TimeEntryRepository } from '../../time-tracking/time-entry';
 import { RefreshJobMoneyStateDeps } from '../../jobs/job-money-state';
-import { AppointmentRepository, createAppointment } from '../../appointments/appointment';
+import {
+  AppointmentRepository,
+  createAppointment,
+  isStartInPast,
+  PAST_START_MESSAGE,
+} from '../../appointments/appointment';
 import {
   AssignmentRepository,
   assignTechnician,
@@ -421,6 +426,12 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
     const { payload } = proposal;
+    // #1402 §3/§15 — the operator routes' no-past-start rule, applied at
+    // execution (a proposal approved after its slot passed must not book a
+    // visit in the past). Checked first so no job is auto-opened either.
+    if (typeof payload.scheduledStart === 'string' && isStartInPast(new Date(payload.scheduledStart))) {
+      return { success: false, error: PAST_START_MESSAGE };
+    }
     // RV-081 — a revisit books an appointment against an EXISTING job: when
     // linkedJobId is present it is the job the appointment attaches to (no
     // new job is created), overriding jobId.

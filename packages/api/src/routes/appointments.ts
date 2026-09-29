@@ -41,6 +41,8 @@ import { ensurePrimaryTechnician } from '../jobs/job-appointment-sync';
 import { requireActiveTechnician } from '../users/tenant-member';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
 import { runAfterCommit } from '../middleware/tenant-context';
+import type { SettingsRepository } from '../settings/settings';
+import { appointmentHoursWarnings } from '../appointments/business-hours-warning';
 export interface DelayNotificationEnqueuer {
   enqueueDelayNotice(input: {
     tenantId: string;
@@ -65,6 +67,11 @@ interface AppointmentRouterOptions {
     workingHoursRepo?: WorkingHoursRepository;
     unavailableBlockRepo?: UnavailableBlockRepository;
   };
+  /**
+   * #1402 — tenant settings read for the non-blocking outside-business-hours
+   * warning on create/reschedule. Absent → no warnings.
+   */
+  settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
 }
 
 // Body for POST /:id/running-late. Not the shared delayMinutesSchema
@@ -288,7 +295,7 @@ export function createAppointmentRouter(
             createdBy: req.auth!.userId,
           },
           appointmentRepo,
-          undefined,
+          { rejectPastStart: true },
           auditRepo,
           req.auth!.role,
         );
@@ -312,7 +319,12 @@ export function createAppointmentRouter(
         runAfterCommit(res, () =>
           notifyDispatchBoardChanged(req.auth!.tenantId, result.scheduledStart, result.timezone),
         );
-        res.status(201).json(result);
+        const warnings = await appointmentHoursWarnings(options?.settingsRepo, req.auth!.tenantId, {
+          start: result.scheduledStart,
+          end: result.scheduledEnd,
+          timezone: result.timezone,
+        });
+        res.status(201).json(warnings.length > 0 ? { ...result, warnings } : result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -469,7 +481,7 @@ export function createAppointmentRouter(
           req.params.id,
           updates,
           appointmentRepo,
-          undefined,
+          { rejectPastStart: true },
           auditRepo,
           req.auth!.userId,
           req.auth!.role,
@@ -478,7 +490,16 @@ export function createAppointmentRouter(
           res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
           return;
         }
-        res.json(result);
+        // Warn only when this write moved the visit's time.
+        const warnings =
+          updates.scheduledStart || updates.scheduledEnd
+            ? await appointmentHoursWarnings(options?.settingsRepo, req.auth!.tenantId, {
+                start: result.scheduledStart,
+                end: result.scheduledEnd,
+                timezone: result.timezone,
+              })
+            : [];
+        res.json(warnings.length > 0 ? { ...result, warnings } : result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

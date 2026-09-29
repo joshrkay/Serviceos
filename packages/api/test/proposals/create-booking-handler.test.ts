@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CreateBookingExecutionHandler } from '../../src/proposals/execution/create-booking-handler';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -7,6 +7,16 @@ import type { Appointment } from '../../src/appointments/appointment';
 import { createProposal } from '../../src/proposals/proposal';
 import { getDispatchBoardEventBus } from '../../src/dispatch/board-event-bus';
 import type { SchedulingConfirmationNotifier } from '../../src/proposals/execution/scheduling-notifications';
+
+// Held-slot fixtures below are literal 2026-06-01 instants. #1402 refuses to
+// confirm a hold whose slot has already started, so pin "now" before them.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const tenantA = '00000000-0000-4000-8000-00000000000a';
 
@@ -234,5 +244,38 @@ describe('CreateBookingExecutionHandler', () => {
       executedBy: 'owner-1',
     });
     expect(result.success).toBe(true);
+  });
+});
+
+describe('#1402 — approving a held booking whose slot has already started', () => {
+  it('fails and leaves the hold pending (no appointment.booked audit)', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const handler = new CreateBookingExecutionHandler(appointmentRepo, auditRepo);
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const held = await createAppointment(
+      {
+        tenantId: tenantA,
+        jobId: '00000000-0000-4000-8000-0000000000j1',
+        scheduledStart: yesterday,
+        scheduledEnd: new Date(yesterday.getTime() + 60 * 60 * 1000),
+        timezone: 'UTC',
+        createdBy: 'agent-1',
+        holdPendingApproval: true,
+        holdExpiryAt: new Date('2099-01-01T00:00:00Z'),
+      },
+      appointmentRepo,
+    );
+
+    const result = await handler.execute(bookingProposal(held.id), {
+      tenantId: tenantA,
+      executedBy: 'owner-1',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/in the past/i);
+    expect((await appointmentRepo.findById(tenantA, held.id))?.holdPendingApproval).toBe(true);
+    const events = await auditRepo.findByEntity(tenantA, 'appointment', held.id);
+    expect(events.map((e) => e.eventType)).not.toContain('appointment.booked');
   });
 });

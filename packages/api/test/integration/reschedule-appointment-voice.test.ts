@@ -61,7 +61,7 @@
  * asks for is provable; that isolation is itself evidence of the gap, not a
  * workaround for a test-only issue.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
@@ -97,6 +97,18 @@ const PHRASE = 'Thursday at 10';
 const ORIGINAL_DURATION_MIN = 120;
 const EXPECTED_START_UTC = '2026-08-06T15:00:00.000Z';
 const EXPECTED_END_UTC = '2026-08-06T17:00:00.000Z';
+
+// #1402 — execution refuses to book or move a visit to a start in the past.
+// The spoken phrase resolves against the fixed NOW above, so pin the wall
+// clock to that same instant for each test (Date only; timers stay real, and
+// the suite's DB/container setup in beforeAll runs on the real clock).
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW);
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe(provesExecution('reschedule_appointment') + 'Integration — voice reschedule_appointment (real Postgres)', () => {
   let pool: Pool;

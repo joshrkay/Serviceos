@@ -64,8 +64,10 @@ import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { createExecutionHandlerRegistry, type ExecutionContext } from '../../src/proposals/execution/handlers';
 import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
 
-const NOW = new Date('2026-09-12T14:00:00.000Z');
-const BOARD_DATE = '2026-09-12';
+// #1402 — far-future anchor: the reschedule proposal below would otherwise move a
+// visit to a start in the past, which execution now refuses.
+const NOW = new Date('2099-09-12T14:00:00.000Z');
+const BOARD_DATE = '2099-09-12';
 
 describe('Real Redis + real Postgres — dispatch presence & revision-token ordering (row 4.3)', () => {
   let redisContainer: StartedTestContainer;
