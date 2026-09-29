@@ -59,6 +59,31 @@ describe('AddCrewDialog', () => {
     expect(body.payload.technicianId).toBe('tech-free');
   });
 
+  // #1463 — a deactivated (suspended) member is not an assignable technician.
+  it('does not offer a suspended technician', async () => {
+    mockFetch((url) => {
+      if (url.startsWith('/api/users')) {
+        return {
+          ok: true,
+          json: () => Promise.resolve({
+            data: [
+              { id: 'tech-active', name: 'Mo', status: 'active' },
+              { id: 'tech-suspended', name: 'Ex', status: 'suspended' },
+            ],
+          }),
+        };
+      }
+      return { ok: true, json: () => Promise.resolve({ id: 'x' }) };
+    });
+
+    render(<AddCrewDialog appointmentId="appt-1" />);
+    const select = (await screen.findByLabelText('crewTechnicianId')) as HTMLSelectElement;
+    await waitFor(() => {
+      expect(Array.from(select.options).map((o) => o.value)).toContain('tech-active');
+    });
+    expect(Array.from(select.options).map((o) => o.value)).not.toContain('tech-suspended');
+  });
+
   it('shows an error when submitted without a selection', async () => {
     mockFetch((url) => {
       if (url.startsWith('/api/users')) return { ok: true, json: () => Promise.resolve({ data: [] }) };

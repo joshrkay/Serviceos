@@ -126,8 +126,8 @@ describe('owner loop critical path — §11 smoke', () => {
       {
         tenantId: TENANT,
         jobId: job.id,
-        scheduledStart: new Date('2026-06-10T17:00:00Z'),
-        scheduledEnd: new Date('2026-06-10T18:00:00Z'),
+        scheduledStart: new Date('2099-06-10T17:00:00Z'),
+        scheduledEnd: new Date('2099-06-10T18:00:00Z'),
         timezone: 'UTC',
         createdBy: 'agent-1',
         holdPendingApproval: true,
@@ -269,8 +269,8 @@ describe('owner loop critical path — §11 smoke', () => {
       proposalType: 'create_appointment',
       payload: {
         jobId: job.id,
-        scheduledStart: '2026-06-11T14:00:00Z',
-        scheduledEnd: '2026-06-11T15:00:00Z',
+        scheduledStart: '2099-06-11T14:00:00Z',
+        scheduledEnd: '2099-06-11T15:00:00Z',
         timezone: 'UTC',
       },
       summary: 'Book visit',

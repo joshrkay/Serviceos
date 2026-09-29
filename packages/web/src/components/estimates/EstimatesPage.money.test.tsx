@@ -71,6 +71,31 @@ describe('EstimatesPage money (#1400)', () => {
     expect(html).toMatch(/<span>Total<\/span>\s*<span>\$325\.82<\/span>/);
   });
 
+  it('#1402 §13 — the preview and downloaded PDF carry the tenant business address', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) =>
+      new Response(
+        JSON.stringify(
+          String(input).includes('/api/settings')
+            ? { businessName: 'Acme HVAC', businessAddress: '1200 W Main St\nMesa, AZ 85201' }
+            : {},
+        ),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )));
+    const written: string[] = [];
+    vi.spyOn(window, 'open').mockReturnValue({
+      document: { write: (html: string) => written.push(html), close: () => {} },
+      focus: () => {},
+      print: () => {},
+    } as unknown as Window);
+    renderDetail();
+    fireEvent.click(await screen.findByRole('button', { name: /Preview document/ }));
+    const preview = screen.getByRole('dialog', { name: 'Customer preview' });
+
+    expect(await within(preview).findByTestId('business-address')).toHaveTextContent('Mesa, AZ 85201');
+    fireEvent.click(within(preview).getByRole('button', { name: /PDF/ }));
+    expect(written.join('')).toContain('1200 W Main St<br>Mesa, AZ 85201');
+  });
+
   it('the approval tracker shows the real sent / viewed / approved dates (they were hard-coded blank)', async () => {
     renderDetail(apiEstimate({
       id: '00000000-0000-4000-8000-0000000000e2',

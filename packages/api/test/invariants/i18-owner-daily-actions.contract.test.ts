@@ -109,7 +109,8 @@ const INVENTORY_PATH = path.resolve(REPO_ROOT, 'docs/reference/owner-daily-actio
 const OWNER_REQUIRED_DAILY_WEB_ACTIONS = 1;
 const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 6;
 // #1386: +2 (PUT/DELETE /api/settings/e1-script — occasional, reviewed E1 script).
-const OWNER_ONLY_ROUTES = 59;
+// #1402 §13: +1 (POST /api/users/:id/deactivate — occasional, offboarding).
+const OWNER_ONLY_ROUTES = 60;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 
@@ -757,9 +758,12 @@ describe('I18: owner daily actions ↔ code contract', () => {
       // owner-only action. Both occurrences listed; a third must be classified.
       "packages/api/src/routes/users.ts :: if (targetId !== actor.id && req.auth!.role !== 'owner') {",
       "packages/api/src/routes/users.ts :: if (targetId !== actor.id && req.auth!.role !== 'owner') {",
-      // Domain rules on the target user (role changes, last-owner protection).
+      // Domain rules on the target user (role changes, last-owner protection
+      // on self-deletion and on #1402 deactivation — one pair each).
       "packages/api/src/users/user.ts :: if (target?.role === 'owner') {",
       "packages/api/src/users/user.ts :: if (u.role === 'owner') {",
+      "packages/api/src/users/user.ts :: if (u.role === 'owner') {",
+      "packages/api/src/users/user.ts :: other.role === 'owner' &&",
       "packages/api/src/users/user.ts :: other.role === 'owner' &&",
     ]);
   });

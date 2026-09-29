@@ -3,7 +3,7 @@
  * pending invitations that clear as Clerk webhooks join invitees.
  */
 import { useEffect, useState } from 'react';
-import { X, Users, Pencil, UserPlus } from 'lucide-react';
+import { X, Users, Pencil, UserPlus, UserX } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
 
@@ -16,6 +16,8 @@ interface TeamUser {
   firstName?: string;
   lastName?: string;
   canFieldServe: boolean;
+  /** 'suspended' = deactivated by an owner (#1402 §13); absent ⇒ active. */
+  status?: 'active' | 'suspended';
 }
 
 interface PendingInvitation {
@@ -75,6 +77,42 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
   const [inviteRole, setInviteRole] = useState<Role>('technician');
   const [inviting, setInviting] = useState(false);
   const [inviteError, setInviteError] = useState<string>('');
+  // #1402 §13 — deactivation: which row is asking "are you sure?", and
+  // which one is in flight.
+  const [confirmDeactivateId, setConfirmDeactivateId] = useState<string | null>(null);
+  const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
+
+  async function deactivate(u: TeamUser) {
+    setDeactivatingId(u.id);
+    setSaveError('');
+    try {
+      const res = await apiFetch(`/api/users/${encodeURIComponent(u.id)}/deactivate`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = typeof body?.message === 'string' ? body.message : '';
+        } catch {
+          /* non-JSON body */
+        }
+        throw new Error(detail || `Deactivate failed (${res.status})`);
+      }
+      const updated = (await res.json()) as TeamUser;
+      setUsers((prev) =>
+        prev.map((row) => (row.id === u.id ? { ...row, ...updated, status: 'suspended' } : row)),
+      );
+      setConfirmDeactivateId(null);
+      toast.success(`${displayName(u)} deactivated`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not deactivate';
+      setSaveError(msg);
+      toast.error(msg);
+    } finally {
+      setDeactivatingId(null);
+    }
+  }
 
   function startEdit(u: TeamUser) {
     setEditingId(u.id);
@@ -263,11 +301,16 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
               {users.map((u) => {
                 const isEditing = editingId === u.id;
                 const isSaving = savingId === u.id;
+                const isSuspended = u.status === 'suspended';
+                const isConfirming = confirmDeactivateId === u.id;
+                const isDeactivating = deactivatingId === u.id;
                 return (
                   <li
                     key={u.id}
                     data-testid={`team-member-row-${u.id}`}
-                    className="flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3"
+                    className={`flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 px-4 py-3 ${
+                      isSuspended ? 'bg-slate-50' : ''
+                    }`}
                   >
                     <span className="flex size-9 items-center justify-center rounded-full bg-slate-100 text-sm text-slate-600">
                       {displayName(u).charAt(0).toUpperCase()}
@@ -317,7 +360,12 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
                         >
                           {ROLE_LABEL[u.role]}
                         </span>
-                        {canEditRoles && (
+                        {isSuspended && (
+                          <span className="text-xs rounded-full px-2 py-0.5 bg-slate-200 text-slate-700">
+                            Deactivated
+                          </span>
+                        )}
+                        {canEditRoles && !isSuspended && (
                           <button
                             type="button"
                             onClick={() => startEdit(u)}
@@ -329,6 +377,44 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
                           </button>
                         )}
                       </>
+                    )}
+                    {canEditRoles && !isSuspended && !isEditing && (
+                      <div className="w-full flex flex-wrap items-center justify-end gap-2">
+                        {isConfirming ? (
+                          <>
+                            <p className="w-full text-xs text-slate-600">
+                              Deactivate {displayName(u)}? They can no longer sign in. Their jobs
+                              and history stay, and their seat is freed.
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeactivateId(null)}
+                              disabled={isDeactivating}
+                              className="min-h-11 rounded-xl border border-slate-200 px-4 text-sm text-slate-600 hover:bg-slate-50"
+                            >
+                              Keep
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => deactivate(u)}
+                              disabled={isDeactivating}
+                              className="min-h-11 rounded-xl bg-red-600 px-4 text-sm text-white hover:bg-red-700 disabled:opacity-60"
+                            >
+                              {isDeactivating ? 'Deactivating…' : 'Yes, deactivate'}
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeactivateId(u.id)}
+                            aria-label={`Deactivate ${displayName(u)}`}
+                            data-testid={`team-member-deactivate-${u.id}`}
+                            className="min-h-11 flex items-center gap-1.5 rounded-xl px-3 text-xs text-red-700 hover:bg-red-50"
+                          >
+                            <UserX size={14} /> Deactivate
+                          </button>
+                        )}
+                      </div>
                     )}
                   </li>
                 );

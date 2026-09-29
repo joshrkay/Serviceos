@@ -19,6 +19,8 @@
 import type { Proposal, ProposalType } from './proposal';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { LocationRepository } from '../locations/location';
+import type { UserRepository } from '../users/user';
+import { findActiveTenantMember } from '../users/tenant-member';
 import { isChainRefToken } from './chain';
 
 export type ApprovalReferenceCheck = (tenantId: string, proposal: Proposal) => Promise<string[]>;
@@ -74,6 +76,33 @@ export function serviceLocationReferenceCheck(
     if (isChainRefToken(customerId)) return [];
     const locations = await locationRepo.findByCustomer(tenantId, customerId);
     return locations.some((loc) => !loc.isArchived) ? [] : ['locationId'];
+  };
+}
+
+/**
+ * #1463 — payload fields that ASSIGN a technician, per proposal type. Their
+ * executors write the assignment with a hardcoded technician role and never
+ * look the user up, so approval is where a uuid naming another tenant's user,
+ * a suspended member, or nobody is refused. (`remove_crew_member` only
+ * detaches an existing assignment, so it is deliberately absent.)
+ */
+const TECHNICIAN_ASSIGNEE_FIELDS: Partial<Record<ProposalType, string>> = {
+  create_appointment: 'technicianId',
+  add_crew_member: 'technicianId',
+  reassign_appointment: 'toTechnicianId',
+};
+
+export function technicianReferenceCheck(
+  userRepo: Pick<UserRepository, 'findById'>,
+): ApprovalReferenceCheck {
+  return async (tenantId, proposal) => {
+    const field = TECHNICIAN_ASSIGNEE_FIELDS[proposal.proposalType];
+    if (!field) return [];
+    const id = proposal.payload[field];
+    if (typeof id !== 'string' || id.length === 0) return [];
+    if (isChainRefToken(id)) return [];
+    const user = await findActiveTenantMember(userRepo, tenantId, id);
+    return user && user.role === 'technician' ? [] : [field];
   };
 }
 

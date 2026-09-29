@@ -21,6 +21,8 @@ export interface PublicInvoiceView {
   businessName: string;
   businessPhone?: string;
   businessEmail?: string;
+  /** #1402 §13 — tenant mailing address, newline-separated; printed under the name. */
+  businessAddress?: string;
   lineItems: Array<{
     description: string;
     quantity: number;
@@ -439,6 +441,7 @@ export class PublicInvoiceService {
       // string columns; coalesce to undefined for the wire shape.
       businessPhone: settings?.businessPhone ?? undefined,
       businessEmail: settings?.businessEmail ?? undefined,
+      businessAddress: settings?.businessAddress ?? undefined,
       lineItems: invoice.lineItems.map((li) => ({
         description: li.description,
         quantity: li.quantity,

@@ -15,6 +15,7 @@ import request from 'supertest';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgTimeEntryRepository } from '../../src/time-tracking/pg-time-entry';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryUserRepository } from '../../src/users/user';
 import { createTimeEntriesRouter } from '../../src/routes/time-entries';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { TimeEntry } from '../../src/time-tracking/time-entry';
@@ -40,7 +41,7 @@ describe('Postgres integration — GET /api/time-entries?jobId=', () => {
       };
       next();
     });
-    app.use('/api/time-entries', createTimeEntriesRouter(repo, new InMemoryAuditRepository()));
+    app.use('/api/time-entries', createTimeEntriesRouter(repo, new InMemoryAuditRepository(), new InMemoryUserRepository()));
     return app;
   }
 

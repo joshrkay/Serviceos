@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
 import { useCreateCrewProposal } from './useCreateCrewProposal';
+import { isAssignableMember } from '../../utils/assignable-member';
 
 interface UserOption {
   id: string;
   name?: string;
   email?: string;
+  status?: string;
 }
 
 export interface AddCrewDialogProps {
@@ -44,7 +46,7 @@ export function AddCrewDialog({
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
         const list: UserOption[] = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
-        if (!cancelled) setUsers(list);
+        if (!cancelled) setUsers(list.filter(isAssignableMember));
       } catch (err) {
         if (!cancelled) setUsersError(err instanceof Error ? err.message : 'Failed to load users');
       }

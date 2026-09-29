@@ -45,7 +45,7 @@
  * runbook (docs/runbooks/voice-inbound-appointment-verification.md); CI proves
  * everything that doesn't require real telephony.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgAppointmentRepository } from '../../src/appointments/pg-appointment';
@@ -92,6 +92,18 @@ const BOOKING_NOW = new Date('2026-08-03T17:00:00.000Z');
 const BOOKING_TZ = 'America/Chicago';
 const BOOKING_START_UTC = '2026-08-06T15:00:00.000Z';
 const BOOKING_END_UTC = '2026-08-06T16:00:00.000Z';
+
+// #1402 — execution refuses to book or move a visit to a start in the past.
+// The spoken phrase resolves against the fixed BOOKING_NOW above, so pin the wall
+// clock to that same instant for each test (Date only; timers stay real, and
+// the suite's DB/container setup in beforeAll runs on the real clock).
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(BOOKING_NOW);
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 const SPOKEN_CUSTOMER = 'Marisol Vega';
 const SPOKEN_BOOKING = `Book ${SPOKEN_CUSTOMER} for a leaking water heater Thursday at 10 AM`;
 /**

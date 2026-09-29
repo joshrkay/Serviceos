@@ -94,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **59** |
+| Owner-only routes in code | **60** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **6** |
-| `cadence: occasional` | **51** |
+| `cadence: occasional` | **52** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **6** |
 
@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 59,
+  "ownerOnlyRoutes": 60,
   "daily": 2,
   "onboarding": 6,
-  "occasional": 51,
+  "occasional": 52,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 6
 }
@@ -170,6 +170,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `POST /api/onboarding/conversation/turn` | occasional | The conversational variant of the wizard. An alternative path through onboarding, not an additional required step. | false | none | |
 | `POST /api/settings/brand-voice/rollback` | occasional | Reverts a brand-voice change — a correction path. | false | none | |
 | `POST /api/standing-instructions/` | occasional | Creates a persistent agent instruction — a policy change. Listed as occasional rather than daily even though voice can reach it. | true | voice_intent:create_standing_instruction | |
+| `POST /api/users/:id/deactivate` | occasional | Offboarding a departed teammate (#1402 §13); rare in a 1–3-truck shop. | false | none | |
 | `POST /api/users/invitations` | occasional | Team growth; rare in a 1–3-truck shop. | false | none | |
 | `POST /api/vertical-training-assets/` | occasional | Uploads a training asset for review. | false | none | |
 | `POST /api/vertical-training-assets/:id/activate` | occasional | Training-asset lifecycle. | false | none | |

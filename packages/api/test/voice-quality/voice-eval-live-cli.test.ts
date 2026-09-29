@@ -144,13 +144,16 @@ describe('run-intent-eval.ts --live (CLI seam, stub provider)', () => {
   it('exits non-zero — never a silent green — when the provider keeps failing, and records nothing', async () => {
     behaviour = { rateLimitFirst: 'all' };
     const baseline = freshBaselinePath('intent-live.json');
+    const before = fs.readFileSync(baseline, 'utf-8');
 
     const r = await runCli('run-intent-eval.ts', ['--live', '--max-utterances', '3', '--record-baseline', baseline]);
 
     expect(r.code).not.toBe(0);
     expect(r.code).not.toBeNull();
     expect(r.stderr).toMatch(/rate limit/i);
-    expect(readBaseline(baseline).status).toBe('placeholder');
+    // "records nothing": the baseline file is byte-identical to what it was
+    // (placeholder or a previously recorded run — #839 committed a real one).
+    expect(fs.readFileSync(baseline, 'utf-8')).toBe(before);
   }, 60_000);
 });
 
