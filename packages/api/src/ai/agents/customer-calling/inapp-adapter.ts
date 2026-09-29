@@ -23,6 +23,11 @@ import type { ProposalRepository } from '../../../proposals/proposal';
 import { createProposal as buildProposal, missingFieldsFor } from '../../../proposals/proposal';
 import type { ProposalType } from '../../../proposals/proposal';
 import type { ProposalSurface } from '../../../proposals/surface';
+import {
+  askForExecutabilityGaps,
+  holdForExecutability,
+  type ApprovalReferenceCheck,
+} from '../../../proposals/approval-reference-checks';
 // THE shared voice → proposal payload contract, also used by the real Twilio
 // path (ai/voice-turn/create-voice-turn-processor.ts). Exactly one copy of the
 // promotion / alias / line-item translation exists, and it lives next to the
@@ -308,6 +313,13 @@ export interface InAppAdapterDeps {
    * rather than silently keeping an ungrounded guess.
    */
   catalogRepo?: CatalogItemRepository;
+  /**
+   * #1485 — the approval-time reference checks (app.ts), run before a drafted
+   * card persists (`holdForExecutability`) so the close asks for what is
+   * missing — a service location, a recipient — instead of "taken care of".
+   * Absent → no checks (tests and harnesses that do not wire them).
+   */
+  approvalReferenceChecks?: readonly ApprovalReferenceCheck[];
   /**
    * QA-2026-07-26 — tenant-scoped customer repository, consulted at
    * `startSession` when the caller supplies a `callerPhone`: exactly one
@@ -987,6 +999,15 @@ export class InAppVoiceAdapter {
   private readonly sessionTimezones = new WeakMap<
     VoiceSession,
     Promise<string | undefined>
+  >();
+
+  /**
+   * #1485 — the executability ask for the proposal this session last
+   * persisted with gaps, read (once) by the proposal_queued close.
+   */
+  private readonly executabilityAsks = new WeakMap<
+    VoiceSession,
+    { proposalId: string; ask: string }
   >();
 
   private resolveSessionTimezone(
@@ -2301,10 +2322,18 @@ export class InAppVoiceAdapter {
         .findById(session.tenantId, lastProposalId)
         .catch(() => null);
       const incomplete = queued ? missingFieldsFor(queued).length > 0 : false;
+      // #1485 — a card the executability check found gaps on asks for them.
+      const gapAsk = this.executabilityAsks.get(session);
+      this.executabilityAsks.delete(session);
+      const executabilityAsk = gapAsk?.proposalId === lastProposalId ? gapAsk.ask : undefined;
       const effects3 = session.machine.dispatch({
         type: 'proposal_queued',
         proposalId: lastProposalId,
-        ...(incomplete ? { utterance: INAPP_INCOMPLETE_DRAFT_COPY } : {}),
+        ...(executabilityAsk
+          ? { utterance: `I've drafted that. ${executabilityAsk}` }
+          : incomplete
+            ? { utterance: INAPP_INCOMPLETE_DRAFT_COPY }
+            : {}),
       });
       allSideEffects.push(...effects3);
       await this.executeSideEffects(session, effects3);
@@ -3214,7 +3243,21 @@ export class InAppVoiceAdapter {
         createdBy: this.proposalActorId(session),
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
-      let stored = await this.deps.proposalRepo.create(proposal);
+      // #1485 — the ONE executability check a tap runs, run before persisting
+      // (the chat route's mechanism): an auto-approved card that cannot
+      // execute is held, and the close asks for the missing piece.
+      const held = await holdForExecutability(
+        session.tenantId,
+        proposal,
+        this.deps.approvalReferenceChecks,
+      );
+      let stored = await this.deps.proposalRepo.create(held.proposal);
+      if (held.gaps.length > 0) {
+        this.executabilityAsks.set(session, {
+          proposalId: stored.id,
+          ask: askForExecutabilityGaps(held.gaps, held.proposal.payload),
+        });
+      }
       // QA-2026-06-05: parity with the AI-task pipeline's guardrail promote
       // step (ai/guardrails/low-confidence.ts) which the calling-agent path
       // does not run. Proposals that initialProposalStatus left in 'draft'

@@ -7076,6 +7076,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // written back as, or on what a "104 Cedar" answer is matched against.
     // Replaces the adapter's own `service_locations` query.
     locationRepo,
+    // #1485 — the same approval-time checks, run before a drafted card
+    // persists, so the close asks for what is missing.
+    approvalReferenceChecks,
     // U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
     // read once per session, so the in-app live path books "Thursday at 2pm"
     // in the tenant's zone exactly like the recorded-memo path.

@@ -15,6 +15,8 @@ import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/vo
 import { InMemoryProposalRepository } from '../../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../../../src/oncall/rotation';
+import { InMemoryLocationRepository } from '../../../../src/locations/location';
+import { serviceLocationReferenceCheck } from '../../../../src/proposals/approval-reference-checks';
 import type { LLMGateway, LLMResponse } from '../../../../src/ai/gateway/gateway';
 import type {
   EntityResolver,
@@ -31,6 +33,16 @@ const ESTIMATE_FOR_NAMED_JOB = JSON.stringify({
   extractedEntities: {
     customerName: 'Dana Whitfield',
     jobReference: 'attic fan job',
+    lineItemDescriptions: ['attic fan replacement'],
+  },
+});
+
+const ESTIMATE_FOR_CUSTOMER = JSON.stringify({
+  intentType: 'draft_estimate',
+  confidence: 0.9,
+  extractedEntities: {
+    customerName: 'Dana Whitfield',
+    amount: 45000,
     lineItemDescriptions: ['attic fan replacement'],
   },
 });
@@ -87,5 +99,28 @@ describe('InAppVoiceAdapter — executability before the close (#1485)', () => {
     expect(turn1.state).not.toBe('intent_confirm');
     expect(turn1.ttsText).toMatch(/couldn't find a matching job for attic fan job/i);
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  it('a confirmed estimate for a customer with no service location asks for the address instead of "taken care of"', async () => {
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway: scriptedGateway([ESTIMATE_FOR_CUSTOMER]),
+      proposalRepo,
+      auditRepo: new InMemoryAuditRepository(),
+      onCallRepo: new InMemoryOnCallRepository(new Map()),
+      entityResolver: resolverByKind({ customer: DANA }),
+      // Dana has no service location on file.
+      approvalReferenceChecks: [serviceLocationReferenceCheck(new InMemoryLocationRepository())],
+    });
+    const { sessionId } = await adapter.startSession(TENANT, OPERATOR);
+    const turn1 = await adapter.handleInput(sessionId, 'Draft an estimate for Dana Whitfield for an attic fan replacement.');
+    expect(turn1.state).toBe('intent_confirm');
+
+    const turn2 = await adapter.handleInput(sessionId, 'yes');
+    expect(turn2.ttsText).toMatch(/no service location yet — what's the service address\?/);
+    expect(turn2.ttsText).not.toMatch(/taken care of/i);
+    const [proposal] = await proposalRepo.findByTenant(TENANT);
+    expect(proposal?.proposalType).toBe('draft_estimate');
+    expect(proposal?.status).not.toBe('approved');
   });
 });
