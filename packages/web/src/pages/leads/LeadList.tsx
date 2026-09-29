@@ -3,6 +3,7 @@ import { Plus } from 'lucide-react';
 import { LeadStageColumn } from '../../components/leads/LeadStageColumn';
 import { LeadCardData } from '../../components/leads/LeadCard';
 import { apiFetch } from '../../utils/api-fetch';
+import { useTeamMembers } from '../../hooks/useTeamMembers';
 import { Button, Select, Spinner } from '../../components/ui';
 
 const STAGES: { key: string; label: string }[] = [
@@ -25,46 +26,6 @@ const SOURCES = [
   'customer_portal',
   'sms',
 ];
-
-interface TeamMember {
-  id: string;
-  name: string;
-}
-
-/**
- * #1416 — the team members a lead can be assigned to, by NAME, for the
- * assignee filter (it used to be a raw "user id" text box). Best-effort: a
- * caller who cannot list users just gets the "Anyone" option.
- */
-function useTeamMembers(): TeamMember[] {
-  const [members, setMembers] = useState<TeamMember[]>([]);
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await apiFetch('/api/users');
-        if (!res?.ok) return;
-        const json = (await res.json()) as
-          | { data?: Array<{ id: string; firstName?: string; lastName?: string; email?: string }> }
-          | Array<{ id: string; firstName?: string; lastName?: string; email?: string }>;
-        const users = Array.isArray(json) ? json : json?.data ?? [];
-        const mapped = users
-          .map((u) => ({
-            id: u.id,
-            name: [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.email || 'Team member',
-          }))
-          .sort((a, b) => a.name.localeCompare(b.name));
-        if (!cancelled) setMembers(mapped);
-      } catch {
-        /* best-effort — the filter still offers "Anyone" */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  return members;
-}
 
 interface LeadResponse extends LeadCardData {
   stage: string;

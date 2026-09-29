@@ -39,6 +39,7 @@ import {
   CreateDispatchInput,
 } from '../notifications/dispatch-repository';
 import { MessageDeliveryProvider } from '../notifications/delivery-provider';
+import { SmsSuppressedError } from '../notifications/gated-message-delivery';
 import type { Customer } from '../customers/customer';
 import type { Lead } from '../leads/lead';
 import { UNMATCHED_SMS_ENTITY_TYPE } from '../sms/inbound-capture';
@@ -57,6 +58,8 @@ export type ConversationReplyErrorCode =
   | 'channel_selection_required'
   | 'dnc_blocked'
   | 'sms_consent_required'
+  /** #1479 — the number already got the per-window maximum of customer texts (#1402 §18). */
+  | 'sms_volume_cap'
   | 'delivery_failed';
 
 export class ConversationReplyError extends Error {
@@ -573,6 +576,12 @@ export async function sendConversationReply(
     } catch {
       /* best-effort failure record */
     }
+    // #1479 — the per-recipient volume cap is a policy refusal, not a
+    // provider outage: tell the owner in plain words instead of a 502 with
+    // the gate's machine reason.
+    const volumeCapped =
+      err instanceof SmsSuppressedError && err.reason === 'recipient_volume_cap';
+    const code: ConversationReplyErrorCode = volumeCapped ? 'sms_volume_cap' : 'delivery_failed';
     await auditReplyRefusal(deps, {
       tenantId: input.tenantId,
       conversationId: input.conversationId,
@@ -581,12 +590,16 @@ export async function sendConversationReply(
       eventType: 'conversation.reply.failed',
       channel: target.channel,
       recipient: target.recipient,
-      reason: 'delivery_failed',
+      reason: code,
       ...(failedDispatchId ? { dispatchId: failedDispatchId } : {}),
     });
     throw new ConversationReplyError(
-      'delivery_failed',
-      err instanceof Error ? err.message : 'Reply delivery failed',
+      code,
+      volumeCapped
+        ? 'This customer has already received the maximum number of texts for now. Try again later, or reach them by email or phone.'
+        : err instanceof Error
+          ? err.message
+          : 'Reply delivery failed',
     );
   }
 

@@ -18,8 +18,8 @@ describe('P11-007 RescheduleDialog', () => {
     render(
       <RescheduleDialog
         appointmentId="a-1"
-        initialStart="2026-06-01T15:00:00Z"
-        initialEnd="2026-06-01T16:00:00Z"
+        initialStart="2099-06-01T15:00:00Z"
+        initialEnd="2099-06-01T16:00:00Z"
       />
     );
     expect(screen.getByLabelText('scheduledStart')).toBeInTheDocument();
@@ -29,10 +29,10 @@ describe('P11-007 RescheduleDialog', () => {
   it('disables save when end is not after start', () => {
     render(<RescheduleDialog appointmentId="a-1" />);
     fireEvent.change(screen.getByLabelText('scheduledStart'), {
-      target: { value: '2026-06-01T15:00' },
+      target: { value: '2099-06-01T15:00' },
     });
     fireEvent.change(screen.getByLabelText('scheduledEnd'), {
-      target: { value: '2026-06-01T14:00' },
+      target: { value: '2099-06-01T14:00' },
     });
     expect(screen.getByRole('button', { name: /save/i })).toBeDisabled();
   });
@@ -48,10 +48,10 @@ describe('P11-007 RescheduleDialog', () => {
     render(<RescheduleDialog appointmentId="a-1" onSaved={onSaved} />);
 
     fireEvent.change(screen.getByLabelText('scheduledStart'), {
-      target: { value: '2026-06-01T15:00' },
+      target: { value: '2099-06-01T15:00' },
     });
     fireEvent.change(screen.getByLabelText('scheduledEnd'), {
-      target: { value: '2026-06-01T16:00' },
+      target: { value: '2099-06-01T16:00' },
     });
 
     fireEvent.click(screen.getByRole('button', { name: /save/i }));
@@ -78,12 +78,39 @@ describe('P11-007 RescheduleDialog', () => {
 
     render(<RescheduleDialog appointmentId="a-1" />);
     fireEvent.change(screen.getByLabelText('scheduledStart'), {
-      target: { value: '2026-06-01T15:00' },
+      target: { value: '2099-06-01T15:00' },
     });
     fireEvent.change(screen.getByLabelText('scheduledEnd'), {
-      target: { value: '2026-06-01T16:00' },
+      target: { value: '2099-06-01T16:00' },
     });
     fireEvent.click(screen.getByRole('button', { name: /save/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');
+  });
+
+  it('#1472 — a double-booking 409 shows the conflict message and keeps the dialog open', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        error: 'CONFLICT',
+        message: 'Schedule conflict: the assigned technician is already booked during this time.',
+      }),
+    } as unknown as Response);
+
+    const onSaved = vi.fn();
+    render(<RescheduleDialog appointmentId="a-1" onSaved={onSaved} />);
+    fireEvent.change(screen.getByLabelText('scheduledStart'), {
+      target: { value: '2099-06-01T15:00' },
+    });
+    fireEvent.change(screen.getByLabelText('scheduledEnd'), {
+      target: { value: '2099-06-01T16:30' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('the assigned technician is already booked during this time');
+    expect(alert).not.toHaveTextContent(/unexpected error/i);
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /save/i })).toBeEnabled();
   });
 });

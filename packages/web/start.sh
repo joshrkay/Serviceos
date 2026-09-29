@@ -11,6 +11,10 @@ envsubst '${PORT} ${API_URL}' \
   < /etc/nginx/templates/default.conf.template \
     > /etc/nginx/conf.d/default.conf
 
+# #1481 — allow the API's public origin in the CSP connect-src so presigned
+# dev-storage uploads (PUT ${PUBLIC_API_URL}/storage-dev/...) are not blocked.
+/render-security-headers.sh /etc/nginx/security-headers.conf
+
     echo "=== RENDERED NGINX CONFIG ==="
     cat /etc/nginx/conf.d/default.conf
     echo "=== END CONFIG ==="

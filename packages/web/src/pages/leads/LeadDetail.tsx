@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
+import { useTeamMembers } from '../../hooks/useTeamMembers';
 import { LanguageBadge } from '../../components/customers/LanguageBadge';
 import { formatCurrency } from '../../utils/currency';
 import {
@@ -142,31 +143,39 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
     void refetch();
   }, [refetch]);
 
-  // #1406 D10 — show the assignee's name, never the raw user id. Best-effort:
-  // a caller who can't list users sees a neutral label instead.
-  const [assigneeName, setAssigneeName] = useState<string | null>(null);
-  const assignedUserId = lead?.assignedUserId;
-  useEffect(() => {
-    setAssigneeName(null);
-    if (!assignedUserId) return;
-    let cancelled = false;
-    void (async () => {
+  // #1406 D10 / #1402 §7 — the assignee is shown and picked by NAME, never
+  // the raw user id (team members load best-effort).
+  const teamMembers = useTeamMembers();
+  const [assignSaving, setAssignSaving] = useState(false);
+  const handleAssign = useCallback(
+    async (nextUserId: string) => {
+      if (!lead) return;
+      const next = nextUserId || null;
+      if ((lead.assignedUserId ?? null) === next) return;
+      const previous = lead.assignedUserId;
+      setLead({ ...lead, assignedUserId: next ?? undefined });
+      setAssignSaving(true);
+      setError(null);
       try {
-        const res = await apiFetch('/api/users');
-        if (!res.ok) return;
-        const json = (await res.json()) as
-          | { data?: Array<{ id: string; firstName?: string; lastName?: string; email?: string }> }
-          | Array<{ id: string; firstName?: string; lastName?: string; email?: string }>;
-        const users = Array.isArray(json) ? json : json?.data ?? [];
-        const user = users.find((u) => u.id === assignedUserId);
-        const name = user
-          ? [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || user.email || null
-          : null;
-        if (!cancelled && name) setAssigneeName(name);
-      } catch { /* best-effort */ }
-    })();
-    return () => { cancelled = true; };
-  }, [assignedUserId]);
+        const res = await apiFetch(`/api/leads/${leadId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ assignedUserId: next }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        setLead(await res.json());
+        const name = teamMembers.find((m) => m.id === next)?.name;
+        toast.success(name ? `Assigned to ${name}` : 'Lead unassigned');
+      } catch (err) {
+        setLead((prev) => (prev ? { ...prev, assignedUserId: previous } : prev));
+        const message = err instanceof Error ? err.message : 'Failed to assign lead';
+        setError(message);
+        toast.error(message);
+      } finally {
+        setAssignSaving(false);
+      }
+    },
+    [lead, leadId, teamMembers],
+  );
 
   const openConvertConfirm = useCallback(() => {
     if (lead) setConvertAddress(addressFromLead(lead));
@@ -431,9 +440,32 @@ export function LeadDetail({ leadId, onConverted, onBack }: LeadDetailProps) {
                 ? formatCurrency(lead.estimatedValueCents)
                 : '—'}
             </p>
-            <p className="text-sm text-slate-700">
-              Assigned user: {lead.assignedUserId ? assigneeName ?? 'Team member' : '—'}
-            </p>
+            <div className="flex items-center gap-2">
+              <label htmlFor="lead-assign" className="text-sm text-slate-700 shrink-0">
+                Assigned to:
+              </label>
+              <div className="min-w-0 flex-1 max-w-56">
+                <Select
+                  id="lead-assign"
+                  aria-label="Assign lead"
+                  value={lead.assignedUserId ?? ''}
+                  disabled={assignSaving}
+                  onChange={(e) => void handleAssign(e.target.value)}
+                  className="min-h-11 w-full"
+                >
+                  <option value="">Unassigned</option>
+                  {lead.assignedUserId && !teamMembers.some((m) => m.id === lead.assignedUserId) && (
+                    // Not (yet) in the loaded roster — a neutral label, never the id.
+                    <option value={lead.assignedUserId}>Team member</option>
+                  )}
+                  {teamMembers.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            </div>
             {lead.lostReason && (
               <p className="mt-2 text-sm text-red-700">Lost reason: {lead.lostReason}</p>
             )}

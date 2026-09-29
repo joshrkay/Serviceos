@@ -24,6 +24,20 @@ import { PgSeatUsageReader, assertSeatAvailable } from '../../../packages/api/sr
  * keeps resolving to exactly one customer for SCH-02/SMS-01's callerPhone.
  */
 const AMBIGUOUS_PHONE = '555-0200';
+/**
+ * The primary customer's default number. A run may override it
+ * (E2E_MATRIX_CUSTOMER_PHONE, set per run by scripts/qa-matrix-run.sh) so
+ * repeated runs do not exhaust the #1464 per-recipient SMS cap on one number
+ * — the cap is product behaviour and is never relaxed for the matrix.
+ */
+const DEFAULT_CUSTOMER_PHONE = '555-0100';
+// VOX-13 pair (#1322 / #1479). `legacySuffix` is the old display_name tail the
+// seeder migrates away from; the new names must never share a token with the
+// tenant slug or with "QA Matrix".
+const AMBIGUOUS_PAIR = [
+  { legacySuffix: 'ambiguous-1', firstName: 'Riley', lastName: 'Twinsley' },
+  { legacySuffix: 'ambiguous-2', firstName: 'Rowan', lastName: 'Twinsley' },
+] as const;
 
 async function main() {
   const connectionString = process.env.E2E_DB_URL_READWRITE;
@@ -33,12 +47,13 @@ async function main() {
   }
 
   const prefix = process.env.QA_MATRIX_SEED_PREFIX ?? 'qa-matrix';
+  const customerPhone = process.env.E2E_MATRIX_CUSTOMER_PHONE || DEFAULT_CUSTOMER_PHONE;
   const client = new Pool({ connectionString, max: 2 });
 
   try {
     const result = {
-      tenantA: await ensureTenantFixture(client, `${prefix}-A`),
-      tenantB: await ensureTenantFixture(client, `${prefix}-B`),
+      tenantA: await ensureTenantFixture(client, `${prefix}-A`, { customerPhone }),
+      tenantB: await ensureTenantFixture(client, `${prefix}-B`, { customerPhone }),
     };
 
     console.log('\n# Paste into your shell before running npm run e2e:qa-matrix:\n');
@@ -50,6 +65,7 @@ async function main() {
     console.log(`export E2E_TENANT_B_JOB_ID=${result.tenantB.jobId}`);
     console.log(`export E2E_TENANT_A_TECHNICIAN_USER_ID=${result.tenantA.technicianUserId}`);
     console.log(`export E2E_TENANT_B_TECHNICIAN_USER_ID=${result.tenantB.technicianUserId}`);
+    console.log(`export E2E_MATRIX_CUSTOMER_PHONE=${customerPhone}`);
     console.log('\n# Clerk test tokens must be exported separately (see qa/README.md).');
   } finally {
     await client.end();
@@ -62,6 +78,13 @@ export interface Fixture {
   jobId: string;
   /** #1401 — the tenant's seeded technician (users.id), for §3 conflict/reassign rows. */
   technicianUserId: string;
+  /** #1479 — the primary customer's number for this run (callerPhone / SMS recipient). */
+  customerPhone: string;
+}
+
+export interface EnsureTenantFixtureOptions {
+  /** Primary customer's phone; defaults to '555-0100'. Re-seeding moves the same customer. */
+  customerPhone?: string;
 }
 
 /**
@@ -75,7 +98,12 @@ export interface Fixture {
  */
 const MATRIX_PLAN_ID = 'growth';
 
-export async function ensureTenantFixture(client: Pool, slug: string): Promise<Fixture> {
+export async function ensureTenantFixture(
+  client: Pool,
+  slug: string,
+  opts: EnsureTenantFixtureOptions = {},
+): Promise<Fixture> {
+  const customerPhone = opts.customerPhone ?? DEFAULT_CUSTOMER_PHONE;
   // Tenants are identified by owner_id (UNIQUE, TEXT). We use a synthetic
   // owner_id derived from the slug so re-runs are idempotent.
   const ownerId = `qa:${slug}`;
@@ -161,12 +189,20 @@ export async function ensureTenantFixture(client: Pool, slug: string): Promise<F
           'QA',
           slug,
           customerDisplay,
-          '555-0100',
+          customerPhone,
           `${customerDisplay}@qa.serviceos.local`,
           systemUser,
         ]
       )
       .then((r) => r.rows[0].id));
+  // #1479 — a run's recipient number moves the SAME customer (the cap counts
+  // per number, so a fresh number per run keeps the matrix under it). Only
+  // this customer ever holds the run's number: callerPhone must match once.
+  await client.query(
+    `UPDATE customers SET primary_phone = $3, updated_at = now()
+      WHERE tenant_id = $1 AND id = $2 AND primary_phone IS DISTINCT FROM $3`,
+    [tenantId, customerId, customerPhone]
+  );
 
   // Ambiguous-phone pair (VOX-13): two customers on the SAME tenant sharing
   // one phone number, distinct from the primary customer's '555-0100' above
@@ -174,21 +210,34 @@ export async function ensureTenantFixture(client: Pool, slug: string): Promise<F
   // resolution). Exercises the "0 or 2+ matches are left unresolved" branch
   // of InAppVoiceAdapter.startSession — the adapter must never guess between
   // them. display_name is the idempotency handle, same pattern as above.
-  for (const suffix of ['ambiguous-1', 'ambiguous-2']) {
-    const display = `${slug}-${suffix}`;
+  //
+  // The names deliberately share no token with the tenant slug or with
+  // "QA Matrix": the pair used to be `${slug}-ambiguous-1/2` (first name
+  // "QA"), which made every "the QA Matrix job" utterance a three-way
+  // customer tie the resolver correctly refused to guess (#1268 / #1479).
+  // A pre-rename row is migrated in place so an existing tenant never ends
+  // up with a third customer on the shared phone.
+  for (const pair of AMBIGUOUS_PAIR) {
+    const display = `${pair.firstName} ${pair.lastName}`;
     const existingAmbiguous = await client.query(
       `SELECT id FROM customers WHERE tenant_id = $1 AND display_name = $2 LIMIT 1`,
       [tenantId, display]
     );
-    if (!existingAmbiguous.rows[0]) {
-      await client.query(
-        `INSERT INTO customers
-           (id, tenant_id, first_name, last_name, display_name, primary_phone, preferred_channel,
-            sms_consent, is_archived, created_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'none', false, false, $7, now(), now())`,
-        [randomUUID(), tenantId, 'QA', suffix, display, AMBIGUOUS_PHONE, systemUser]
-      );
-    }
+    if (existingAmbiguous.rows[0]) continue;
+    const migrated = await client.query(
+      `UPDATE customers
+          SET first_name = $3, last_name = $4, display_name = $5, updated_at = now()
+        WHERE tenant_id = $1 AND display_name = $2`,
+      [tenantId, `${slug}-${pair.legacySuffix}`, pair.firstName, pair.lastName, display]
+    );
+    if (migrated.rowCount) continue;
+    await client.query(
+      `INSERT INTO customers
+         (id, tenant_id, first_name, last_name, display_name, primary_phone, preferred_channel,
+          sms_consent, is_archived, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'none', false, false, $7, now(), now())`,
+      [randomUUID(), tenantId, pair.firstName, pair.lastName, display, AMBIGUOUS_PHONE, systemUser]
+    );
   }
 
   // Service location (jobs require a location_id).
@@ -230,7 +279,7 @@ export async function ensureTenantFixture(client: Pool, slug: string): Promise<F
 
   const technicianUserId = await ensureTechnicianUser(client, tenantId, slug);
 
-  return { tenantId, customerId, jobId, technicianUserId };
+  return { tenantId, customerId, jobId, technicianUserId, customerPhone };
 }
 
 /**

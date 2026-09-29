@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { tenantWallClockToUtc, utcToTenantWallClock } from '../../utils/formatInTenantTz';
+import { appointmentWarnings, isPastStart, PAST_START_ERROR } from '../../utils/appointmentRules';
 
 export interface RescheduleDialogProps {
   appointmentId: string;
@@ -35,6 +36,9 @@ export function RescheduleDialog({
   const [end, setEnd] = useState(() => toLocalInputValue(initialEnd, tz));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // #1402 — non-blocking warnings (e.g. outside business hours) returned by a
+  // successful save; the dialog stays open on them until the operator taps Done.
+  const [savedWarnings, setSavedWarnings] = useState<string[]>([]);
 
   // `useTenantTimezone` returns a fallback synchronously and resolves the real
   // tenant tz after /api/me. Re-seed the wall-clock inputs when the tz (or the
@@ -61,23 +65,35 @@ export function RescheduleDialog({
         return;
       }
 
+      // The entered wall-clock times are TENANT-local (core pattern: stored
+      // UTC, rendered in tenant tz). `new Date(start)` interpreted them in
+      // the BROWSER tz, posting the wrong instant when the two zones differ.
+      const [startDate, startTime] = start.split('T');
+      const [endDate, endTime] = end.split('T');
+      const startUtc = tenantWallClockToUtc(startDate, startTime, tz);
+      // #1402 — the API refuses a past start; say so before the round trip.
+      if (isPastStart(startUtc)) {
+        setError(PAST_START_ERROR);
+        return;
+      }
+
       setSubmitting(true);
       try {
-        // The entered wall-clock times are TENANT-local (core pattern: stored
-        // UTC, rendered in tenant tz). `new Date(start)` interpreted them in
-        // the BROWSER tz, posting the wrong instant when the two zones differ.
-        const [startDate, startTime] = start.split('T');
-        const [endDate, endTime] = end.split('T');
         const res = await apiFetch(`/api/appointments/${appointmentId}`, {
           method: 'PUT',
           body: JSON.stringify({
-            scheduledStart: tenantWallClockToUtc(startDate, startTime, tz).toISOString(),
+            scheduledStart: startUtc.toISOString(),
             scheduledEnd: tenantWallClockToUtc(endDate, endTime, tz).toISOString(),
           }),
         });
+        const json = await res.json().catch(() => ({}));
         if (!res.ok) {
-          const json = await res.json().catch(() => ({}));
           throw new Error(json?.message ?? `HTTP ${res.status}`);
+        }
+        const warnings = appointmentWarnings(json);
+        if (warnings.length > 0) {
+          setSavedWarnings(warnings);
+          return;
         }
         onSaved?.();
       } catch (err) {
@@ -89,7 +105,25 @@ export function RescheduleDialog({
     [appointmentId, start, end, valid, onSaved, tz]
   );
 
-  const inputCls = 'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm';
+  const inputCls = 'w-full min-h-11 rounded-lg border border-slate-200 px-3 py-2 text-sm';
+
+  if (savedWarnings.length > 0) {
+    return (
+      <div data-testid="reschedule-dialog" className="space-y-3">
+        <h2 className="text-base text-slate-900">Reschedule Appointment</h2>
+        <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          Saved. {savedWarnings.join(' ')}
+        </div>
+        <button
+          type="button"
+          onClick={() => onSaved?.()}
+          className="min-h-11 min-w-11 rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800"
+        >
+          Done
+        </button>
+      </div>
+    );
+  }
 
   return (
     <form onSubmit={handleSubmit} data-testid="reschedule-dialog" className="space-y-3">
@@ -124,14 +158,14 @@ export function RescheduleDialog({
         <button
           type="submit"
           disabled={submitting || !valid}
-          className="rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800 disabled:opacity-50"
+          className="min-h-11 min-w-11 rounded-lg bg-slate-900 text-white text-sm px-4 py-2 hover:bg-slate-800 disabled:opacity-50"
         >
           {submitting ? 'Saving…' : 'Save'}
         </button>
         <button
           type="button"
           onClick={onCancel}
-          className="rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
+          className="min-h-11 min-w-11 rounded-lg border border-slate-200 text-slate-700 text-sm px-4 py-2 hover:bg-slate-50"
         >
           Cancel
         </button>

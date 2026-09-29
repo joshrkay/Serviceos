@@ -196,4 +196,42 @@ describe('BusinessProfileSheet', () => {
       ownerPhone: '+15125551234',
     });
   });
+
+  it('#1402 §13 — loads, edits and saves the business address (multi-line)', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({ businessName: 'Acme', businessAddress: '1 Old Rd\nMesa, AZ 85201' }),
+    );
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ businessName: 'Acme' }));
+    const onClose = vi.fn();
+    render(<BusinessProfileSheet onClose={onClose} />);
+
+    const address = (await screen.findByLabelText(/Business address/i)) as HTMLTextAreaElement;
+    expect(address.value).toBe('1 Old Rd\nMesa, AZ 85201');
+    fireEvent.change(address, { target: { value: '1200 W Main St\nMesa, AZ 85201' } });
+    fireEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    const putCall = apiFetchMock.mock.calls.find(
+      (c) => c[1] && (c[1] as RequestInit).method === 'PUT',
+    );
+    const body = JSON.parse((putCall![1] as RequestInit).body as string);
+    expect(body.businessAddress).toBe('1200 W Main St\nMesa, AZ 85201');
+  });
+
+  it('#1402 §13 — a cleared address is sent as null so the API clears it', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ businessName: 'Acme', businessAddress: '1 Old Rd' }));
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ businessName: 'Acme' }));
+    render(<BusinessProfileSheet onClose={vi.fn()} />);
+
+    fireEvent.change(await screen.findByLabelText(/Business address/i), { target: { value: '  ' } });
+    fireEvent.click(screen.getByText('Save'));
+
+    await waitFor(() =>
+      expect(apiFetchMock).toHaveBeenCalledWith('/api/settings', expect.objectContaining({ method: 'PUT' })),
+    );
+    const putCall = apiFetchMock.mock.calls.find(
+      (c) => c[1] && (c[1] as RequestInit).method === 'PUT',
+    );
+    expect(JSON.parse((putCall![1] as RequestInit).body as string).businessAddress).toBeNull();
+  });
 });

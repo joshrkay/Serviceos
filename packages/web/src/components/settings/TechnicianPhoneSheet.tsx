@@ -112,7 +112,7 @@ export function TechnicianPhoneSheet({ onClose, onSaved }: TechnicianPhoneSheetP
           <button
             onClick={onClose}
             aria-label="Close"
-            className="flex min-h-11 size-9 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
+            className="flex size-11 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
           >
             <X size={16} />
           </button>
@@ -153,7 +153,7 @@ export function TechnicianPhoneSheet({ onClose, onSaved }: TechnicianPhoneSheetP
           <button
             type="button"
             onClick={onClose}
-            className="min-h-11 rounded-xl px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+            className="min-h-11 min-w-11 rounded-xl px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
           >
             Cancel
           </button>
@@ -161,7 +161,7 @@ export function TechnicianPhoneSheet({ onClose, onSaved }: TechnicianPhoneSheetP
             type="button"
             onClick={save}
             disabled={saving || loading}
-            className="min-h-11 rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
+            className="min-h-11 min-w-11 rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
           >
             {saving ? 'Saving…' : 'Save'}
           </button>

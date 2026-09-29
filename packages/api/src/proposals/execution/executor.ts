@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg';
 import { Proposal, ProposalRepository } from '../proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from '../lifecycle';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
@@ -332,7 +333,18 @@ export class ProposalExecutor {
           tenantId: keyedProposal.tenantId,
           auditRepo: this.auditRepo,
           stateChange: async () => {
+            // #1490 — a handler that CATCHES a failed statement (a unique
+            // violation, say) and returns `{success:false}` leaves this
+            // transaction aborted. The status write below then dies with
+            // "current transaction is aborted", the real reason is lost, the
+            // whole unit rolls back, and the row sits in 'executing' to be
+            // retried. A savepoint around the handler lets a failed handler's
+            // doomed writes be discarded so its failure is recorded.
+            await lockClient.query(`SAVEPOINT ${HANDLER_SAVEPOINT}`);
             const handlerResult = await handler.execute(keyedProposal, context);
+            if (!handlerResult.success) {
+              await discardIfAborted(lockClient);
+            }
             await recordAndTransition(handlerResult);
             return handlerResult;
           },
@@ -494,6 +506,22 @@ export class ProposalExecutor {
     }
 
     return { proposal: updatedProposal, result, alreadyExecuted };
+  }
+}
+
+const HANDLER_SAVEPOINT = 'proposal_handler';
+
+/**
+ * #1490 — after a handler reported failure: keep its writes when the
+ * transaction is healthy (RELEASE succeeds — pre-#1490 behaviour), and roll
+ * back to before the handler when a failed statement aborted it (RELEASE is
+ * refused in an aborted transaction, ROLLBACK TO is not).
+ */
+async function discardIfAborted(client: PoolClient): Promise<void> {
+  try {
+    await client.query(`RELEASE SAVEPOINT ${HANDLER_SAVEPOINT}`);
+  } catch {
+    await client.query(`ROLLBACK TO SAVEPOINT ${HANDLER_SAVEPOINT}`);
   }
 }
 

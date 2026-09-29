@@ -14,6 +14,11 @@ import {
 } from '../proposals/autonomous-lane';
 import { createOneTapUndoToken } from '../proposals/one-tap-undo';
 import { createAuditEvent } from '../audit/audit';
+import {
+  askForExecutabilityGaps,
+  holdForExecutability,
+  type ApprovalReferenceCheck,
+} from '../proposals/approval-reference-checks';
 import { renderProposalSms, renderChainSms } from '../proposals/sms/render';
 import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
@@ -465,6 +470,13 @@ export interface VoiceActionRouterDeps {
   userRepo?: Pick<UserRepository, 'findByTenant'>;
   assignmentRepo?: Pick<AssignmentRepository, 'findByTechnician'>;
   enRouteCoordinator?: EnRouteEnqueuer;
+  /**
+   * #1485 — the approval-time reference checks (app.ts), run on every routed
+   * proposal before it persists (`holdForExecutability`): a card that cannot
+   * execute is never auto-approved, and the owner's SMS asks for the gap.
+   * Absent → no checks (tests that do not wire them).
+   */
+  approvalReferenceChecks?: readonly ApprovalReferenceCheck[];
 }
 
 // THE intent → proposal-type map now lives in `proposals/voice-intent-map.ts`
@@ -1140,6 +1152,8 @@ type SegmentOutcome =
       classification: IntentClassification;
       /** Tenant-wide presence at routing time (P12-004 unsupervised routing). */
       supervisorPresent: boolean;
+      /** #1485 — what the executability check found missing (empty when none). */
+      executabilityGaps: string[];
     }
   // The classifier could not route this segment — a voice_clarification
   // was emitted in its place (single path) or should be (chain path; see
@@ -1881,14 +1895,21 @@ async function processSegment(
   // U9 — the untrusted-source guard runs LAST so a voicemail-sourced
   // proposal can never leave here 'approved', including through the
   // autonomous-lane exception holdIfUnsupervised deliberately preserves.
+  //
+  // #1485 — then the ONE executability check a tap runs (the chat route's
+  // mechanism): a card that cannot execute is held, never auto-approved into
+  // an execution failure.
+  const held = await holdForExecutability(
+    tenantId,
+    holdIfUntrustedSource(holdIfUnsupervised(annotated, supervisorPresent), params.sourceChannel),
+    deps.approvalReferenceChecks,
+  );
   return {
     kind: 'proposal',
-    proposal: holdIfUntrustedSource(
-      holdIfUnsupervised(annotated, supervisorPresent),
-      params.sourceChannel,
-    ),
+    proposal: held.proposal,
     classification,
     supervisorPresent,
+    executabilityGaps: held.gaps,
   };
 }
 
@@ -2592,6 +2613,14 @@ export function createVoiceActionRouterWorker(
             // Use the gate-reviewed proposal (carries any N-002 supervisor
             // markers) so the rendered SMS reflects the supervisor findings.
             const proposal = reviewedProposal;
+            // #1485 — a card the executability check found gaps on cannot be
+            // approved (the tap re-runs the check and refuses), so the owner
+            // is asked for the missing piece instead of offered a Y / one-tap
+            // approve: the review form, plus the same ask the chat reply makes.
+            const executabilityAsk =
+              outcome.executabilityGaps.length > 0
+                ? askForExecutabilityGaps(outcome.executabilityGaps, proposal.payload)
+                : undefined;
             await routeUnsupervisedProposal(
               {
                 auditRepo: ur.auditRepo,
@@ -2638,8 +2667,12 @@ export function createVoiceActionRouterWorker(
                       summary: proposal.summary,
                       payload: proposal.payload,
                     },
-                    { approveUrl: approveUrl || undefined },
+                    {
+                      approveUrl: approveUrl || undefined,
+                      ...(executabilityAsk ? { blockedBy: executabilityAsk } : {}),
+                    },
                   ),
+                ...(executabilityAsk ? { suppressApproveLink: true } : {}),
                 // RV-074 (F-4) — pass payload so the routing site can guard
                 // low/very_low proposals against one-tap Y-able links.
                 payload: proposal.payload,

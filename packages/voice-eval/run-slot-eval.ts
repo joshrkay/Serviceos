@@ -49,7 +49,6 @@ import {
   type EvalMode,
 } from './baseline';
 import {
-  ActualCostCapExceededError,
   assertActualCostWithinCap,
   LIVE_SLOTS,
   LIVE_SLOT_TARGET,
@@ -62,6 +61,7 @@ import {
   evaluateGate,
   parseMaxUtterances,
   resolveCostCapCents,
+  runEvalCli,
   runLiveSlotEval,
   selectLiveProvider,
   sampleDeterministic,
@@ -131,13 +131,13 @@ const LIVE_NO_KEY =
   '   extractLaunchSlots. Set AI_PROVIDER_API_KEY (+ AI_PROVIDER_BASE_URL / AI_*_MODEL,\n' +
   '   as in baselines/slot-live.json recordCommand) to run it.';
 
-async function runLive(gate: boolean): Promise<void> {
+async function runLive(gate: boolean): Promise<number> {
   const selection = await selectLiveProvider();
-  if (!selection) { console.error(`ℹ️  ${LIVE_NO_KEY}`); process.exit(2); }
+  if (!selection) { console.error(`ℹ️  ${LIVE_NO_KEY}`); return 2; }
 
   const maxUtterances = parseMaxUtterances(process.argv);
   const all = loadTranscripts();
-  if (all.length === 0) { console.error('❌ no transcripts found'); process.exit(1); }
+  if (all.length === 0) { console.error('❌ no transcripts found'); return 1; }
   const sampled = sampleDeterministic(all, (t) => t.transcript, maxUtterances);
 
   const capCents = resolveCostCapCents();
@@ -148,7 +148,7 @@ async function runLive(gate: boolean): Promise<void> {
   console.log(`   transcripts:     ${all.length}${maxUtterances ? ` (sampled ${sampled.length})` : ''}`);
   if (cost.projectedCents === null) {
     console.error(`\n❌ ABORT: no known price for model ${selection.model} — cannot enforce the cost cap.`);
-    process.exit(3);
+    return 3;
   }
   console.log(`   projected cost:  ${cost.projectedCents.toFixed(1)}c (cap ${capCents}c, conservative/no-cache)`);
   if (!cost.withinCap) {
@@ -156,7 +156,7 @@ async function runLive(gate: boolean): Promise<void> {
       `\n❌ ABORT: projected ${cost.projectedCents.toFixed(1)}c exceeds cap ${capCents}c.\n` +
       `   Lower the sample with --max-utterances N, or raise VOICE_EVAL_COST_CAP_CENTS.`,
     );
-    process.exit(3);
+    return 3;
   }
 
   let spentCents = 0;
@@ -183,15 +183,16 @@ async function runLive(gate: boolean): Promise<void> {
   const baselineExit = baselineStep('live', sampled, report, slots);
   const g = evaluateGate(report.microF1, LIVE_SLOT_TARGET, gate);
   console.log(`   ${gate ? 'threshold' : 'reference target'}: ${(g.target * 100).toFixed(0)}%`);
-  if (baselineExit !== 0) process.exit(baselineExit);
+  if (baselineExit !== 0) return baselineExit;
   if (!g.pass) {
     console.error(`\n❌ FAIL: micro F1 ${(report.microF1 * 100).toFixed(1)}% < ${(g.target * 100).toFixed(0)}%`);
-    process.exit(1);
+    return 1;
   }
   console.log(`\n✅ ${gate ? 'PASS (live, gated)' : 'reported (live, not gated)'}.\n`);
+  return 0;
 }
 
-function runOffline(gate: boolean): void {
+function runOffline(gate: boolean): number {
   const transcripts = loadTranscripts();
   const examples = transcripts.map((t) => {
     const gold = goldSlots(t);
@@ -215,28 +216,19 @@ function runOffline(gate: boolean): void {
   const baselineExit = baselineStep('offline', transcripts, report, CRITICAL);
   const g = evaluateGate(report.microF1, OFFLINE_FLOOR, gate);
   console.log(`   ${gate ? 'threshold' : 'reference target'}: ${(g.target * 100).toFixed(0)}%  (LIVE target ${LIVE_SLOT_TARGET * 100}% / offline floor ${OFFLINE_FLOOR * 100}%)`);
-  if (baselineExit !== 0) process.exit(baselineExit);
+  if (baselineExit !== 0) return baselineExit;
   if (!g.pass) {
     console.error(`\n❌ FAIL: micro F1 ${(report.microF1 * 100).toFixed(1)}% < ${(g.target * 100).toFixed(0)}%`);
-    process.exit(1);
+    return 1;
   }
   console.log(`\n✅ ${gate ? 'PASS' : 'reported (offline, not gated)'}.\n`);
+  return 0;
 }
 
-async function main(): Promise<void> {
+async function main(): Promise<number> {
   const live = process.argv.includes('--live');
   const gate = process.argv.includes('--gate');
-  if (live) await runLive(gate);
-  else runOffline(gate);
+  return live ? runLive(gate) : runOffline(gate);
 }
 
-main()
-  .then(() => {
-    // The production gateway's resilience/quota stack may hold timers; this is
-    // a one-shot CLI, so exit explicitly once the report is printed.
-    process.exit(0);
-  })
-  .catch((e) => {
-    console.error(e);
-    process.exit(e instanceof ActualCostCapExceededError ? 3 : 1);
-  });
+runEvalCli(main);

@@ -477,6 +477,16 @@ export const updateSettingsSchema = z.object({
   // so an explicit null is the only path to "clear this field".
   businessPhone: z.string().nullable().optional(),
   businessEmail: z.union([z.string().email(), z.null()]).optional(),
+  // #1402 §13 — printed under the business name on estimates and invoices.
+  // Free-form (street, suite, city/state/ZIP on separate lines). Blank or
+  // null clears it.
+  businessAddress: z
+    .string()
+    .trim()
+    .max(300)
+    .nullable()
+    .optional()
+    .transform((v) => (v === '' ? null : v)),
   // P8-016 — owner's personal cell for emergency triage. Accepts any
   // human format; normalized to E.164 server-side. Empty string or
   // explicit null clears the value; omit to leave untouched.
@@ -517,7 +527,9 @@ export const updateSettingsSchema = z.object({
     .optional(),
   estimatePrefix: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),
-  defaultPaymentTermDays: z.number().int().nonnegative().optional(),
+  // #1402 §13 — 0 = due on receipt; capped at a year so a typo (e.g. 3000)
+  // can never push every new invoice's due date years out.
+  defaultPaymentTermDays: z.number().int().min(0).max(365).optional(),
   // #1288 — tenant default tax rate (basis points; 825 = 8.25%).
   defaultTaxRateBps: z.number().int().min(0).max(10000).optional(),
   terminologyPreferences: z.record(z.string()).optional(),

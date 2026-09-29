@@ -33,7 +33,7 @@ export const INVOICE_STATUS_MAP: Record<string, string> = {
   open:            'Unpaid',
   partially_paid:  'Unpaid',
   paid:            'Paid',
-  void:            'Canceled',
+  void:            'Void',
   canceled:        'Canceled',
 };
 

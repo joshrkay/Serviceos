@@ -740,6 +740,24 @@ export function LiveTemplateDetailModal({
   );
 }
 
+type TemplateVertical = 'hvac' | 'plumbing';
+
+/**
+ * #1481 — active pack ids come in more than one convention: onboarding
+ * activates the bare vertical ('hvac'), Settings → Vertical packs the
+ * versioned canonical id ('hvac-v1'), the rich helper '{type}-pack'. Map each
+ * to its vertical (deduped) so every convention loads that vertical's
+ * templates — mirrors the API's resolve-active-pack reconciliation.
+ */
+function verticalsOfActivePacks(packIds: string[]): TemplateVertical[] {
+  const out = new Set<TemplateVertical>();
+  for (const id of packIds) {
+    const vertical = id.toLowerCase().replace(/-(v\d+|pack)$/, '');
+    if (vertical === 'hvac' || vertical === 'plumbing') out.add(vertical);
+  }
+  return Array.from(out);
+}
+
 export function LiveTemplatesSection() {
   const { me } = useMe();
   // Gate template-wording edits on the real backend permission (estimates:update),
@@ -762,9 +780,7 @@ export function LiveTemplatesSection() {
         const settingsRes = await apiFetch('/api/settings');
         if (!settingsRes.ok) throw new Error(`Settings load failed (HTTP ${settingsRes.status})`);
         const settings = (await settingsRes.json()) as LiveSettingsResponse;
-        const packs = (settings.activeVerticalPacks ?? []).filter(
-          (p): p is 'hvac' | 'plumbing' => p === 'hvac' || p === 'plumbing',
-        );
+        const packs = verticalsOfActivePacks(settings.activeVerticalPacks ?? []);
         if (cancelled) return;
         setActivePacks(packs);
 

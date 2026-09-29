@@ -106,6 +106,9 @@ const REPLY_ERROR_STATUS: Record<ConversationReplyErrorCode, number> = {
   dnc_blocked: 403,
   // #680 — owner-initiated text to a customer with no recorded SMS consent.
   sms_consent_required: 403,
+  // #1479 — per-recipient SMS volume cap: a rate limit on that number, so the
+  // UI shows the plain-language message instead of a delivery failure.
+  sms_volume_cap: 429,
   delivery_failed: 502,
 };
 
@@ -418,6 +421,11 @@ export function createConversationRouter(
         res.status(201).json(result);
       } catch (err) {
         if (err instanceof ConversationReplyError) {
+          // #1482 — a refused/failed reply's only writes are its own records
+          // (the suppressed/failed audit row and the failed dispatch row).
+          // They must outlive the >= 400 answer, which would otherwise roll
+          // the request transaction back and erase the trail.
+          res.locals.forceCommit = true;
           res
             .status(REPLY_ERROR_STATUS[err.code])
             .json({ error: err.code.toUpperCase(), message: err.message });
