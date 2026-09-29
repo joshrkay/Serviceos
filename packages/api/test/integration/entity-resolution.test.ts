@@ -2169,7 +2169,13 @@ describe('Postgres integration — entity resolution (P8)', () => {
 
       it('"my Tuesday 2pm furnace appointment" resolves the visit at that time', async () => {
         const seed = await seedRealisticTenant({ displayName: PRIYA, jobSummary: 'furnace tune-up', timezone: ZONE });
-        const twoPm = DateTime.fromJSDate(nextLocalWeekdayNoon(2)).setZone(ZONE).set({ hour: 14 }).toJSDate();
+        // "Tuesday 2pm" said ON a Tuesday before 2pm means today (the resolver
+        // anchors on tenant-local now), so the target is the next Tuesday 14:00
+        // still ahead — counting today. nextLocalWeekdayNoon skips today, which
+        // made this case fail whenever CI ran on a Chicago Tuesday morning.
+        let twoPmLocal = DateTime.now().setZone(ZONE).set({ hour: 14, minute: 0, second: 0, millisecond: 0 });
+        while (twoPmLocal.weekday !== 2 || twoPmLocal <= DateTime.now()) twoPmLocal = twoPmLocal.plus({ days: 1 });
+        const twoPm = twoPmLocal.toJSDate();
         const target = await seedAppointmentAt(seed, seed.jobId, twoPm);
         await seedAppointmentAt(seed, seed.jobId, nextLocalWeekdayNoon(4));
 
