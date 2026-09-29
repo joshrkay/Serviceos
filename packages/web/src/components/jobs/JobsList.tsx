@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 import {
   Search, Plus, ChevronRight, Camera, Clock,
   AlertCircle, Mic,
@@ -11,6 +11,9 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { Spinner, EmptyState, Input } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { NewJobFlow } from './NewJobFlow';
+import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { dayWindowUtc } from '../../utils/formatInTenantTz';
 
 // UI tab-label union (distinct from the API status values mapped in TAB_API_STATUS).
 type JobStatus = 'New' | 'Scheduled' | 'In Progress' | 'Completed' | 'Canceled';
@@ -34,6 +37,44 @@ const TAB_API_STATUS: Record<string, string> = {
   'Canceled':   'canceled',
 };
 
+// #1402 §8 — the list's filters live in the URL (`status` = API status,
+// `from` / `to` = tenant-local YYYY-MM-DD, inclusive; `tech` = user id) so a
+// filtered view survives reload and can be shared. All are applied
+// server-side and combine (AND).
+interface JobListFilters {
+  status?: string;
+  from?: string;
+  to?: string;
+  tech?: string;
+}
+
+const URL_KEYS: Array<keyof JobListFilters> = ['status', 'from', 'to', 'tech'];
+
+function filtersFromUrl(params: URLSearchParams): JobListFilters {
+  const f: JobListFilters = {};
+  for (const k of URL_KEYS) {
+    const v = params.get(k);
+    if (v) f[k] = v;
+  }
+  return f;
+}
+
+function toApiFilters(f: JobListFilters, timezone: string): Record<string, string> {
+  return {
+    ...(f.status ? { status: f.status } : {}),
+    ...(f.from ? { scheduledFrom: dayWindowUtc(f.from, timezone).startUtc } : {}),
+    ...(f.to ? { scheduledTo: dayWindowUtc(f.to, timezone).endUtc } : {}),
+    ...(f.tech ? { technicianId: f.tech } : {}),
+  };
+}
+
+const TAB_FOR_API_STATUS: Record<string, JobStatus> = Object.fromEntries(
+  Object.entries(TAB_API_STATUS).map(([label, api]) => [api, label as JobStatus]),
+);
+
+const FILTER_CONTROL =
+  'w-full min-w-0 min-h-11 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary';
+
 const TABS: { label: string; value: JobStatus | 'All' }[] = [
   { label: 'All',         value: 'All' },
   { label: 'New',         value: 'New' },
@@ -45,8 +86,13 @@ const TABS: { label: string; value: JobStatus | 'All' }[] = [
 
 export function JobsList() {
   const navigate = useNavigate();
-  const [tab,     setTab]     = useState<JobStatus | 'All'>('All');
+  const tz = useTenantTimezone();
+  const { technicians } = useTechnicianRoster();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showNew, setShowNew] = useState(false);
+
+  const current = filtersFromUrl(searchParams);
+  const tab: JobStatus | 'All' = (current.status && TAB_FOR_API_STATUS[current.status]) || 'All';
 
   const { data, isLoading, error, refetch, setSearch, setFilters } = useListQuery<JobListItem>(
     '/api/jobs',
@@ -54,17 +100,30 @@ export function JobsList() {
       // Live refresh so a dispatcher sees status changes without a manual
       // reload. Background refetch keeps cards mounted (no spinner flash).
       refetchInterval: 60_000,
+      // #1402 §8 — a filtered URL loads filtered on first fetch.
+      filters: toApiFilters(current, tz),
     },
   );
 
-  const applyTabFilter = (nextTab: JobStatus | 'All') => {
-    setTab(nextTab);
-    if (nextTab !== 'All') {
-      setFilters({ status: TAB_API_STATUS[nextTab] ?? nextTab.toLowerCase() });
-    } else {
-      setFilters({});
+  /** Merge a change into the URL filters and re-query server-side. */
+  const updateFilters = (patch: JobListFilters) => {
+    const next = { ...current, ...patch };
+    const params = new URLSearchParams(searchParams);
+    for (const k of URL_KEYS) {
+      if (next[k]) params.set(k, next[k]!);
+      else params.delete(k);
     }
+    setSearchParams(params, { replace: true });
+    setFilters(toApiFilters(next, tz));
   };
+
+  const applyTabFilter = (nextTab: JobStatus | 'All') => {
+    updateFilters({
+      status: nextTab !== 'All' ? TAB_API_STATUS[nextTab] ?? nextTab.toLowerCase() : undefined,
+    });
+  };
+
+  const hasExtraFilters = Boolean(current.from || current.to || current.tech);
 
   const normalizedData = data.map(j => ({
     ...j,
@@ -124,6 +183,54 @@ export function JobsList() {
             placeholder="Search by customer, description, or job #…"
             className="min-h-11"
           />
+        </div>
+
+        {/* Technician + scheduled-date filters (#1402 §8) */}
+        <div className="grid grid-cols-2 gap-2 mb-3">
+          <div className="col-span-2 min-w-0">
+            <select
+              aria-label="Technician"
+              value={current.tech ?? ''}
+              onChange={e => updateFilters({ tech: e.target.value || undefined })}
+              className={FILTER_CONTROL}
+            >
+              <option value="">All technicians</option>
+              {technicians.map(t => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </div>
+          <label className="min-w-0 flex flex-col gap-1 text-xs text-muted-foreground">
+            <span>From</span>
+            <input
+              type="date"
+              aria-label="From"
+              value={current.from ?? ''}
+              max={current.to}
+              onChange={e => updateFilters({ from: e.target.value || undefined })}
+              className={FILTER_CONTROL}
+            />
+          </label>
+          <label className="min-w-0 flex flex-col gap-1 text-xs text-muted-foreground">
+            <span>To</span>
+            <input
+              type="date"
+              aria-label="To"
+              value={current.to ?? ''}
+              min={current.from}
+              onChange={e => updateFilters({ to: e.target.value || undefined })}
+              className={FILTER_CONTROL}
+            />
+          </label>
+          {hasExtraFilters && (
+            <button
+              type="button"
+              onClick={() => updateFilters({ status: undefined, from: undefined, to: undefined, tech: undefined })}
+              className="col-span-2 min-h-11 rounded-lg border border-border bg-card px-3 text-sm text-foreground hover:bg-secondary"
+            >
+              Clear filters
+            </button>
+          )}
         </div>
 
         {/* Tab filter */}

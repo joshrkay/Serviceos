@@ -10,6 +10,7 @@ import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { JobPicker, type JobOption } from '../forms/JobPicker';
 import { formatInTenantTz, formatTimeInTenantTz, tenantWallClockToUtc, dateKeyInTz, dayWindowUtc } from '../../utils/formatInTenantTz';
+import { appointmentWarnings, isPastStart, PAST_START_ERROR } from '../../utils/appointmentRules';
 
 const SERVICE_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 
@@ -196,6 +197,9 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
   const [endTime,   setEndTime]   = useState('12:00');
   const [saving, setSaving]     = useState(false);
   const [error,  setError]      = useState<string | null>(null);
+  // #1402 — non-blocking warnings from a successful create (e.g. outside
+  // business hours). The form stays open on them until the operator taps Done.
+  const [createdWarnings, setCreatedWarnings] = useState<string[]>([]);
 
   async function save() {
     const jobId = job?.id ?? '';
@@ -210,6 +214,8 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
       const start = tenantWallClockToUtc(selectedDate, startTime, tz);
       const end   = tenantWallClockToUtc(selectedDate, endTime, tz);
       if (end <= start) { setError('End time must be after start time'); setSaving(false); return; }
+      // #1402 — the API refuses a past start; say so before the round trip.
+      if (isPastStart(start)) { setError(PAST_START_ERROR); setSaving(false); return; }
 
       // #1279 — create the appointment AND its primary technician in one
       // request. The API writes appointment_assignments (the canonical
@@ -225,18 +231,39 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
           ...(techId ? { technicianId: techId } : {}),
         }),
       });
+      const j = await apptRes.json().catch(() => ({}));
       if (!apptRes.ok) {
-        const j = await apptRes.json().catch(() => ({}));
         throw new Error(j?.message ?? `HTTP ${apptRes.status}`);
       }
 
       onCreated();
+      const warnings = appointmentWarnings(j);
+      if (warnings.length > 0) {
+        setCreatedWarnings(warnings);
+        return;
+      }
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create appointment');
     } finally {
       setSaving(false);
     }
+  }
+
+  if (createdWarnings.length > 0) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-white p-4 mb-4">
+        <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          Appointment created. {createdWarnings.join(' ')}
+        </div>
+        <button
+          onClick={onClose}
+          className="mt-3 w-full min-h-11 rounded-xl bg-slate-900 text-white py-2.5 text-sm hover:bg-slate-700 transition-colors"
+        >
+          Done
+        </button>
+      </div>
+    );
   }
 
   return (

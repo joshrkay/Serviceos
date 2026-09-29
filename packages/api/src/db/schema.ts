@@ -7246,6 +7246,96 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS ai_verification_skipped_at TIMESTAMPTZ;
   `,
+  // #1402 §13 — the business's mailing address, printed under the business
+  // name on estimates and invoices (public pages + print/PDF). Free-form,
+  // newline-separated; the API trims and caps it at 300 chars and the CHECK
+  // backs that up for writes that bypass the route. Additive + nullable, so
+  // existing rows are unaffected. tenant_settings already FORCEs RLS.
+  '299_tenant_settings_business_address': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS business_address TEXT;
+    DO $$ BEGIN
+      ALTER TABLE tenant_settings
+        ADD CONSTRAINT tenant_settings_business_address_len
+        CHECK (business_address IS NULL OR char_length(business_address) <= 300) NOT VALID;
+    EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+  `,
+  // #1402 §18 — per-recipient outbound SMS volume ledger. One row per
+  // customer text actually handed to the carrier; GatedMessageDelivery counts
+  // a number's rows in the rolling window before each send and suppresses
+  // (audited) once the cap is reached. phone is the normalized number (the
+  // same normalizePhone() the DNC list uses). Rows older than a week are
+  // pruned on the next reserve for that number.
+  '300_sms_recipient_sends': `
+    CREATE TABLE IF NOT EXISTS sms_recipient_sends (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      phone TEXT NOT NULL,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_sms_recipient_sends_window
+      ON sms_recipient_sends (tenant_id, phone, sent_at);
+    ALTER TABLE sms_recipient_sends ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE sms_recipient_sends FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_sms_recipient_sends ON sms_recipient_sends;
+    CREATE POLICY tenant_isolation_sms_recipient_sends ON sms_recipient_sends
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // #1478 / #1472 — databases that once ran the withdrawn migration
+  // '129_double_booking_exclusion' still carry its BEFORE INSERT OR UPDATE
+  // trigger trg_no_double_booking (confirmed on the dev DB). Its function
+  // skipped only 'cancelled_by_customer' / 'cancelled_by_business' — statuses
+  // that no longer exist — so a CANCELED visit kept blocking its technician's
+  // slot (rebooking it failed). Migration 131's no_double_booking EXCLUDE
+  // constraint is the authoritative guard and already ignores
+  // canceled / no_show via appointment_assignments.appointment_status.
+  //
+  // Non-destructive repair: where (and only where) the legacy trigger exists,
+  // replace its function body with the same semantics as the EXCLUDE
+  // constraint. Nothing is dropped; on a database without the legacy trigger
+  // this is a no-op. Idempotent, so safe under the ledger-less runner.
+  '301_legacy_double_booking_trigger_statuses': `
+    DO $mig301$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        WHERE t.tgname = 'trg_no_double_booking'
+          AND c.relname = 'appointment_assignments'
+          AND NOT t.tgisinternal
+      ) THEN
+        EXECUTE $fn$
+          CREATE OR REPLACE FUNCTION check_no_double_booking()
+          RETURNS TRIGGER LANGUAGE plpgsql AS $body$
+          BEGIN
+            IF NEW.appointment_status IN ('canceled', 'no_show') THEN
+              RETURN NEW;
+            END IF;
+            IF NEW.scheduled_start IS NULL OR NEW.scheduled_end IS NULL THEN
+              RETURN NEW;
+            END IF;
+            IF EXISTS (
+              SELECT 1 FROM appointment_assignments aa
+              WHERE aa.tenant_id = NEW.tenant_id
+                AND aa.technician_id = NEW.technician_id
+                AND aa.id <> NEW.id
+                AND aa.appointment_status NOT IN ('canceled', 'no_show')
+                AND tstzrange(aa.scheduled_start, aa.scheduled_end)
+                    && tstzrange(NEW.scheduled_start, NEW.scheduled_end)
+            ) THEN
+              RAISE EXCEPTION 'DOUBLE_BOOKING: technician % already has an active assignment overlapping [%, %]',
+                NEW.technician_id, NEW.scheduled_start, NEW.scheduled_end
+                USING ERRCODE = 'exclusion_violation';
+            END IF;
+            RETURN NEW;
+          END;
+          $body$;
+        $fn$;
+      END IF;
+    END
+    $mig301$;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

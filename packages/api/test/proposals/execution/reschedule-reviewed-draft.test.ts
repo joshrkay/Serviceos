@@ -7,7 +7,7 @@
  * Seam: RescheduleAppointmentExecutionHandler.execute → the SMS the real
  * TransactionalCommsService hands to the delivery provider.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import { RescheduleAppointmentExecutionHandler } from '../../../src/proposals/execution/reschedule-handler';
 import type { Proposal } from '../../../src/proposals/proposal';
@@ -23,6 +23,17 @@ import { InMemorySettingsRepository } from '../../../src/settings/settings';
 import { InMemoryInvoiceRepository } from '../../../src/invoices/invoice';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { createLogger } from '../../../src/logging/logger';
+
+// The fixtures below are literal 2026 instants. #1402 refuses to book or move a visit to a start in the past, so pin
+// the wall clock before every fixture slot — these tests describe behaviour at
+// a fixed clock, not at whatever day CI happens to run.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const TENANT = 'tenant-432';
 const DRAFT = "Hi Sam, your tech is out sick today — sorry! We've moved your visit.";

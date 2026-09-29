@@ -89,6 +89,12 @@ const configSchema = z.object({
   // without express consent on file. Off-by-default so production behavior is
   // unchanged until an operator explicitly opts in.
   TCPA_CONSENT_ENFORCEMENT: z.enum(['off', 'warn', 'block']).default('off'),
+  // #1402 §18 — per-recipient outbound SMS volume cap, enforced in
+  // GatedMessageDelivery on top of consent/DNC: at most this many CUSTOMER
+  // texts to one number per tenant in a rolling window. Owner-class sends
+  // (digests, approvals, E1 emergency pages) are never capped. 0 disables.
+  SMS_RECIPIENT_CAP_PER_WINDOW: z.coerce.number().int().min(0).default(20),
+  SMS_RECIPIENT_CAP_WINDOW_HOURS: z.coerce.number().int().min(1).max(720).default(24),
   // WS2 — process-role split. One image, up to three Railway services: 'web'
   // serves the HTTP/voice/WS surface only, 'worker' runs the background sweeps
   // + queue poll loop only, 'all' (default) runs both — byte-for-byte

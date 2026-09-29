@@ -117,4 +117,35 @@ describe('useDispatchBoard', () => {
     expect(result.current.error).toBe('retry failure');
     expect(result.current.isLoading).toBe(false);
   });
+
+  it('#1477 — clears loading and shows the new date when a background refetch fires during a date-change load', async () => {
+    apiFetch.mockResolvedValueOnce(boardResponse('2026-03-14'));
+    const { result, rerender } = renderHook(({ d }) => useDispatchBoard(d), {
+      initialProps: { d: new Date('2026-03-14T12:00:00Z') },
+    });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    // Date change → foreground load in flight.
+    let resolveForeground: (r: Response) => void = () => {};
+    apiFetch.mockReturnValueOnce(new Promise<Response>((res) => { resolveForeground = res; }));
+    rerender({ d: new Date('2026-03-15T12:00:00Z') });
+    expect(result.current.isLoading).toBe(true);
+
+    // SSE / presence refresh fires while the foreground load is still pending.
+    let resolveBackground: (r: Response) => void = () => {};
+    apiFetch.mockReturnValueOnce(new Promise<Response>((res) => { resolveBackground = res; }));
+    act(() => {
+      result.current.refetch();
+    });
+
+    await act(async () => {
+      resolveForeground(boardResponse('2026-03-15'));
+    });
+    await act(async () => {
+      resolveBackground(boardResponse('2026-03-15'));
+    });
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.data?.date).toBe('2026-03-15');
+  });
 });

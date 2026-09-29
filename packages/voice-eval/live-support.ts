@@ -194,7 +194,9 @@ export async function describeLiveProvider(selection: LiveProviderSelection): Pr
  * Build the classifier's gateway for the selected provider, recording each
  * call's actual spend via `addCents`. The production selection goes through
  * `createLLMGateway(loadConfig(env))` — the exact factory app.ts uses
- * (resilience stack, tier routing, provider/model mismatch check) — wrapped in
+ * (resilience stack, tier routing, provider/model mismatch check), via
+ * createHarnessLLMGateway so the per-tenant token bucket is replaced by a
+ * harness quota (the cost caps bound spend) — wrapped in
  * the path-smoke spend tracker (per-model pricing of the served model id).
  * The Anthropic fallback uses the Layer-2 harness gateway. Loaded lazily so
  * offline runs never import the `openai`-bearing factories.
@@ -205,10 +207,12 @@ export async function buildLiveGateway(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<LLMGateway> {
   if (selection.kind === 'production') {
-    const { createLLMGateway } = await import('../api/src/ai/gateway/factory');
+    // Harness quota (not the per-tenant fairness bucket): a sequential sample
+    // on one pseudo-tenant would otherwise drain the classifier budget.
+    const { createHarnessLLMGateway } = await import('../api/src/ai/gateway/harness-gateway');
     const { loadConfig } = await import('../api/src/shared/config');
     const { withPathSmokeSpendTracking } = await import('../api/src/ai/voice-quality/path-smoke/provider');
-    return withPathSmokeSpendTracking(createLLMGateway(loadConfig(env)), {
+    return withPathSmokeSpendTracking(createHarnessLLMGateway(loadConfig(env)), {
       fallbackModel: selection.model,
       addCents,
     });
@@ -389,4 +393,58 @@ export async function runLiveSlotEval(
     afterRow?.();
   }
   return { examples: out, fastPathHits, llmCalls };
+}
+
+// --- CLI entry --------------------------------------------------------------
+/** Resolve once everything already queued on `stream` has been flushed. */
+function drain(stream: NodeJS.WriteStream): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      stream.write('', () => resolve());
+    } catch {
+      resolve();
+    }
+  });
+}
+
+/**
+ * Run a runner script's `main` as a one-shot CLI and exit with the code it
+ * returns (a thrown error exits 1, or 3 for an actual-spend cap breach).
+ *
+ * Why this exists: the production gateway's resilience stack sleeps its retry
+ * backoff (and arms its deadline) on UNREF'D timers — right for a long-lived
+ * server, fatal for a script. When the provider rate-limited a call, that
+ * unref'd backoff timer was the only thing left in the event loop, so Node
+ * drained the loop and exited 0 with `main` still pending: header printed, no
+ * report, no baseline written, green CI step (voice-eval-live.yml baseline
+ * run, 2026-09-28). A ref'd keepalive holds the loop open until `main`
+ * settles, and as a last line of defence an `exit` hook turns any exit that
+ * happens while `main` is still unsettled into a loud non-zero failure.
+ * stdout/stderr are drained before the explicit exit (the gateway may still
+ * hold timers, so we cannot wait for the loop to empty on its own), so the
+ * report is never truncated through a `| tee` pipe.
+ */
+export function runEvalCli(main: () => Promise<number>): void {
+  let settled = false;
+  const keepalive = setInterval(() => {}, 60_000);
+  process.on('exit', (code) => {
+    if (settled) return;
+    process.stderr.write(
+      `\n❌ voice-eval exited (code ${code}) before the run finished — no report or baseline was produced.\n`,
+    );
+    if (!code) process.exitCode = 1;
+  });
+  const finish = async (code: number): Promise<never> => {
+    settled = true;
+    clearInterval(keepalive);
+    await Promise.all([drain(process.stdout), drain(process.stderr)]);
+    process.exit(code);
+  };
+  main().then(
+    (code) => finish(code),
+    (e: unknown) => {
+      console.error(e);
+      return finish(e instanceof ActualCostCapExceededError ? 3 : 1);
+    },
+  );
 }

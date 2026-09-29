@@ -7,6 +7,8 @@ import {
 } from '../shared/billing-engine';
 import { AuditRepository, createAuditEvent, createAuditEventBestEffort } from '../audit/audit';
 import { ValidationError } from '../shared/errors';
+import { INVOICE_LIST_SORT, type InvoiceSortField } from '@ai-service-os/shared';
+import { compareByListSort } from '../shared/list-sort';
 import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
 import { buildOriginationMetadata } from '../leads/attribution-metadata';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
@@ -94,13 +96,20 @@ export interface InvoiceListOptions {
   fromDueDate?: Date;
   /** ISO date — invoices with `due_date <= toDueDate` are included. */
   toDueDate?: Date;
-  /** ILIKE search across invoice_number / customer_message. */
+  /**
+   * Free-text search: ILIKE on invoice_number / customer_message and, since
+   * #1402 (Pg), the customer's name — parity with estimates (#1400). The AI
+   * candidate picker (candidatesForReference) shares it; candidates never
+   * lift a gate, so a name match only widens the review card's picker.
+   */
   search?: string;
   /** Pagination cap. Default 50, hard-capped server-side at 200. */
   limit?: number;
   /** Pagination offset. Default 0. */
   offset?: number;
-  /** Sort direction applied to the canonical sort column (created_at). */
+  /** #1402 — allowlisted sort field (INVOICE_LIST_SORT); default created. */
+  sortBy?: InvoiceSortField;
+  /** Sort direction; defaults to the field's natural direction. */
   sort?: 'asc' | 'desc';
 }
 
@@ -667,6 +676,14 @@ export async function transitionInvoiceStatus(
   return updated;
 }
 
+const INVOICE_SORT_ACCESSORS: Record<InvoiceSortField, (i: Invoice) => Date | number | undefined> = {
+  created: (i) => i.createdAt,
+  due: (i) => i.dueDate,
+  total: (i) => i.totals.totalCents,
+  // The in-memory repo has no job→customer join; rows keep their id order.
+  customer: () => undefined,
+};
+
 export class InMemoryInvoiceRepository implements InvoiceRepository {
   private invoices: Map<string, Invoice> = new Map();
 
@@ -714,9 +731,14 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
           (i.customerMessage && i.customerMessage.toLowerCase().includes(q))
       );
     }
-    // Default sort: createdAt DESC. P1-018 lets callers flip to ASC.
-    const sortDir = options?.sort === 'asc' ? 1 : -1;
-    results.sort((a, b) => sortDir * (a.createdAt.getTime() - b.createdAt.getTime()));
+    // #1402 — shared list sort (default createdAt DESC; P1-018 `sort` flips).
+    const sortBy = options?.sortBy ?? INVOICE_LIST_SORT.defaultField;
+    results.sort(
+      compareByListSort<Invoice, InvoiceSortField>(
+        { field: sortBy, direction: options?.sort ?? INVOICE_LIST_SORT.fields[sortBy] },
+        INVOICE_SORT_ACCESSORS,
+      ),
+    );
     if (options?.offset !== undefined || options?.limit !== undefined) {
       const offset = options?.offset ?? 0;
       const limit = options?.limit !== undefined

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CreateAppointmentExecutionHandler } from '../../../src/proposals/execution/handlers';
 import { Proposal } from '../../../src/proposals/proposal';
 import { InMemoryAppointmentRepository, createAppointment } from '../../../src/appointments/appointment';
@@ -7,6 +7,17 @@ import { ConflictError } from '../../../src/shared/errors';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { InMemoryJobRepository } from '../../../src/jobs/job';
 import { InMemoryLocationRepository, createLocation } from '../../../src/locations/location';
+
+// The fixtures below are literal 2026 instants. #1402 refuses to book or move
+// a visit to a start in the past, so pin "now" before every fixture date —
+// the tests describe behaviour at a fixed clock, not at wall-clock time.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('CreateAppointmentExecutionHandler', () => {
   const tenantId = '550e8400-e29b-41d4-a716-446655440000';
@@ -775,5 +786,41 @@ describe('CreateAppointmentExecutionHandler — jobTitle-no-jobId auto-open-a-jo
     expect(appointment?.jobId).toBe(existingJob.id);
     // No new job was created — only the pre-existing one.
     expect(await jobRepo.findByTenant(tenantId)).toHaveLength(1);
+  });
+});
+
+describe('CreateAppointmentExecutionHandler — #1402 no past start at execution', () => {
+  const tenantId = '550e8400-e29b-41d4-a716-446655440000';
+  const jobId = '11111111-1111-4111-8111-111111111111';
+
+  it('fails (no appointment written, no confirmation sent) when the approved start is already in the past', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const enqueue = vi.fn(async () => {});
+    const handler = new CreateAppointmentExecutionHandler(appointmentRepo, new InMemoryAssignmentRepository(), { enqueue });
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const result = await handler.execute(
+      {
+        id: 'prop-1402',
+        tenantId,
+        proposalType: 'create_appointment',
+        status: 'approved',
+        payload: {
+          jobId,
+          scheduledStart: yesterday.toISOString(),
+          scheduledEnd: new Date(yesterday.getTime() + 60 * 60 * 1000).toISOString(),
+        },
+        summary: 'Create appointment',
+        createdBy: 'user-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      { tenantId, executedBy: 'user-1' },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/in the past/i);
+    expect(await appointmentRepo.findByJob(tenantId, jobId)).toHaveLength(0);
+    expect(enqueue).not.toHaveBeenCalled();
   });
 });

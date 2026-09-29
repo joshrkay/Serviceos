@@ -34,6 +34,12 @@ export function useDispatchBoard(
   // load, or a Retry after the first load failed, would suppress the loading
   // clear and the error and leave an empty, errorless board.
   const hasDataRef = useRef(false);
+  // True while a foreground load (mount, date change, retry-from-empty) has not
+  // yet been settled by the latest request. A background refresh that starts
+  // in that window supersedes the foreground request, so it must take over the
+  // foreground duties (clear loading, surface errors) — otherwise the board is
+  // stuck on "Loading dispatch board..." (#1477).
+  const foregroundPendingRef = useRef(false);
 
   const dateParam = toDateParam(selectedDate);
 
@@ -45,8 +51,12 @@ export function useDispatchBoard(
       // and surfaces errors; background refreshes (focus, SSE board_updated,
       // proposal events) keep the current board mounted so an in-progress drag
       // and scroll position survive.
-      const background = opts?.background === true && hasDataRef.current;
-      if (!background) setIsLoading(true);
+      const background =
+        opts?.background === true && hasDataRef.current && !foregroundPendingRef.current;
+      if (!background) {
+        foregroundPendingRef.current = true;
+        setIsLoading(true);
+      }
       setError(null);
 
       try {
@@ -75,6 +85,7 @@ export function useDispatchBoard(
         setError(err instanceof Error ? err.message : 'Failed to load dispatch board');
       } finally {
         if (myVersion === requestVersionRef.current && !background) {
+          foregroundPendingRef.current = false;
           setIsLoading(false);
         }
       }

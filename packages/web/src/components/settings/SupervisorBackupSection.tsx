@@ -19,6 +19,7 @@ import {
   type AuthedFetch,
   type UnsupervisedProposalRouting,
 } from '../../api/tenant-settings';
+import { isAssignableMember } from '../../utils/assignable-member';
 
 interface SupervisorBackupSectionProps {
   /** Initial value from `me.backup_supervisor_user_id`. */
@@ -34,6 +35,7 @@ interface RosterUser {
   role: 'owner' | 'dispatcher' | 'technician';
   firstName?: string;
   lastName?: string;
+  status?: string;
 }
 
 /** Roles that can act as a supervisor. Technicians cannot. */
@@ -115,7 +117,8 @@ export function SupervisorBackupSection({
         const list = Array.isArray(json) ? json : (json?.data ?? []);
         if (!cancelled) {
           setUsers(
-            list.filter((u) => SUPERVISE_CAPABLE_ROLES.includes(u.role)),
+            // #1463 — only ACTIVE supervise-capable members are assignable.
+            list.filter((u) => SUPERVISE_CAPABLE_ROLES.includes(u.role) && isAssignableMember(u)),
           );
           setUsersError(false);
         }

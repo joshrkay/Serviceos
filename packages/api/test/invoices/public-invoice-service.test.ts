@@ -161,3 +161,49 @@ describe('PublicInvoiceService.toView — B7.5 descriptive unit', () => {
     expect(line.quantity * line.unitPriceCents).toBe(line.totalCents);
   });
 });
+
+describe('PublicInvoiceService.getByToken — #1402 §13 business address', () => {
+  it('carries the tenant business address to the customer pay page', async () => {
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const settingsRepo = new InMemorySettingsRepository();
+    await settingsRepo.create({
+      id: uuidv4(),
+      tenantId: TENANT,
+      businessName: 'Acme HVAC',
+      businessAddress: '1200 W Main St\nMesa, AZ 85201',
+      timezone: 'America/Phoenix',
+      estimatePrefix: 'EST',
+      invoicePrefix: 'INV',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const jobId = uuidv4();
+    await jobRepo.create({
+      id: jobId, tenantId: TENANT, customerId: uuidv4(), locationId: uuidv4(),
+      jobNumber: 'JOB-0002', summary: 'Service', status: 'completed', priority: 'normal',
+      createdBy: 'user-1', createdAt: new Date(), updatedAt: new Date(),
+    } as Job);
+    await invoiceRepo.create({
+      id: uuidv4(), tenantId: TENANT, jobId, invoiceNumber: 'INV-0002', status: 'open',
+      lineItems: [],
+      totals: { subtotalCents: 0, taxableSubtotalCents: 0, discountCents: 0, taxRateBps: 0, taxCents: 0, totalCents: 0 },
+      amountPaidCents: 0, amountDueCents: 0, viewToken: 'address-token-1402-abcdefghijkl',
+      createdBy: 'user-1', createdAt: new Date(), updatedAt: new Date(),
+    } as Invoice);
+    const service = new PublicInvoiceService({
+      invoiceRepo,
+      jobRepo,
+      customerRepo: new InMemoryCustomerRepository(),
+      settingsRepo,
+      paymentRepo: new InMemoryPaymentRepository(),
+    });
+
+    const view = await service.getByToken('address-token-1402-abcdefghijkl');
+
+    expect(view.businessAddress).toBe('1200 W Main St\nMesa, AZ 85201');
+  });
+});

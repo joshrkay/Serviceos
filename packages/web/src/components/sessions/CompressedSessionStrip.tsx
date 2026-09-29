@@ -45,7 +45,7 @@ function MiniCard({ session }: MiniCardProps): JSX.Element {
     <NavLink
       to={`/sessions/${session.id}`}
       data-testid="session-mini-card"
-      className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-white border border-slate-200 hover:border-slate-300 min-w-0"
+      className="flex items-center gap-2 px-2.5 py-1.5 min-h-11 min-w-11 rounded-md bg-white border border-slate-200 hover:border-slate-300"
     >
       <Icon size={12} className="text-slate-500 shrink-0" />
       <span className="text-xs text-slate-800 truncate min-w-0">
@@ -108,7 +108,7 @@ export function CompressedSessionStrip(): JSX.Element | null {
       {pendingProposalCount > 0 && (
         <NavLink
           to="/assistant"
-          className="ml-auto text-xs text-blue-600 shrink-0"
+          className="ml-auto inline-flex items-center min-h-11 min-w-11 text-xs text-blue-600 shrink-0"
           data-testid="pending-proposal-link"
         >
           {pendingProposalCount} pending review

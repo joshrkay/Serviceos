@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { CompressedSessionStrip } from './CompressedSessionStrip';
 import type { ActiveSessionSummary } from '../../hooks/useActiveSessions';
+import { expectAllTapTargets } from '../../test-utils/tap-target';
 
 vi.mock('../../hooks/useActiveSessions', () => ({
   useActiveSessions: vi.fn(),
@@ -86,5 +87,14 @@ describe('P12-003 — CompressedSessionStrip', () => {
   it('shows the connecting state when no sessions yet and isConnecting=true', () => {
     setup([], 0, true);
     expect(screen.getByText('Connecting…')).toBeInTheDocument();
+  });
+});
+
+// #1481 — the session chips ("Caller") measured 53x30 at 375px; every control
+// in the strip must meet the 44px mobile tap-target bar.
+describe('#1481 — CompressedSessionStrip tap targets', () => {
+  it('every session chip and link is ≥44×44', () => {
+    const { container } = setup([{ ...sampleSession, customerLabel: 'Caller' }], 2);
+    expectAllTapTargets(container, 'session strip');
   });
 });

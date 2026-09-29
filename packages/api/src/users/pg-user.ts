@@ -211,6 +211,45 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
    * `tenants` is RLS-exempt and nothing else locks it FOR UPDATE, so there
    * is no lock-ordering conflict.
    */
+  /**
+   * #1402 §13 — deactivate (suspend) a teammate. Same serialization anchor as
+   * softDeleteSelf / demoteOwnerIfAnotherExists: every owner-removing
+   * operation takes the tenant-row lock first, so a deactivation racing a
+   * demotion or deletion cannot each see the other's owner as still live and
+   * leave the tenant with no owner who can act.
+   */
+  async deactivateMember(tenantId: string, id: string): Promise<User | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      await client.query(`SELECT id FROM tenants WHERE id = $1 FOR UPDATE`, [tenantId]);
+      const result = await client.query(
+        `UPDATE users SET status = 'suspended', updated_at = NOW()
+         WHERE id = $1
+           AND tenant_id = $2
+           AND deleted_at IS NULL
+           AND status = 'active'
+           AND (
+             role != 'owner'
+             OR EXISTS (
+               SELECT 1 FROM users u2
+               WHERE u2.tenant_id = $2
+                 AND u2.role = 'owner'
+                 AND u2.id != $1
+                 AND u2.deleted_at IS NULL
+                 AND u2.status = 'active'
+             )
+           )
+         RETURNING id, tenant_id, clerk_user_id, email, role, first_name, last_name,
+                   COALESCE(can_field_serve, false) AS can_field_serve,
+                   mobile_number, status, deleted_at,
+                   created_at, updated_at`,
+        [id, tenantId],
+      );
+      return result.rows.length > 0
+        ? mapRow(result.rows[0] as Record<string, unknown>)
+        : null;
+    });
+  }
+
   async softDeleteSelf(tenantId: string, id: string): Promise<User | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       await client.query(`SELECT id FROM tenants WHERE id = $1 FOR UPDATE`, [tenantId]);

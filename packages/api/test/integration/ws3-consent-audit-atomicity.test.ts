@@ -321,15 +321,24 @@ describe(provesExecution('update_customer', 'confirm_appointment', 'request_feed
     );
     const ctx: ExecutionContext = { tenantId: t.tenantId, executedBy: t.userId };
 
-    await expect(executor.execute(proposal, ctx)).rejects.toThrow();
+    // #1490 — the handler catches the failed write and reports failure; the
+    // executor rolls back to before the handler (so nothing below survives)
+    // and settles the proposal execution_failed WITH the database's reason.
+    // It used to die on "current transaction is aborted" instead, which hid
+    // the cause and left the proposal to be retried into the same failure.
+    const outcome = await executor.execute(proposal, ctx);
+    expect(outcome.result.success).toBe(false);
 
     // Nothing survived the rollback.
     const row = await getCustomerRow(pool, t.tenantId, customerId);
     expect(row?.email).toBeNull();
     expect(row?.sms_consent).toBe(false);
     expect(await countConsentRows(pool, t.tenantId, customerId)).toBe(0);
-    const stranded = await proposalRepo.findById(t.tenantId, proposal.id);
-    expect(stranded?.status).toBe('approved');
+    const settled = await proposalRepo.findById(t.tenantId, proposal.id);
+    expect(settled?.status).toBe('execution_failed');
+    // The bad write's own refusal (NOT NULL, or the RLS policy when the
+    // runtime role is on) — never the aborted-transaction mask.
+    expect(settled?.executionError).toMatch(/null value|row-level security/);
     const marker = await executionRepo.findByIdempotencyKey(t.tenantId, proposal.idempotencyKey!);
     expect(marker).toBeNull();
   });
@@ -353,7 +362,13 @@ describe(provesExecution('update_customer', 'confirm_appointment', 'request_feed
     );
     const ctx: ExecutionContext = { tenantId: t.tenantId, executedBy: t.userId };
 
-    await expect(executor.execute(proposal, ctx)).rejects.toThrow();
+    // #1490 — the handler catches the failed write and reports failure; the
+    // executor rolls back to before the handler (so nothing below survives)
+    // and settles the proposal execution_failed WITH the database's reason.
+    // It used to die on "current transaction is aborted" instead, which hid
+    // the cause and left the proposal to be retried into the same failure.
+    const outcome = await executor.execute(proposal, ctx);
+    expect(outcome.result.success).toBe(false);
 
     const row = await getCustomerRow(pool, t.tenantId, customerId);
     expect(row?.email).toBeNull();
@@ -362,8 +377,11 @@ describe(provesExecution('update_customer', 'confirm_appointment', 'request_feed
     expect(await auditRowsByType(pool, t.tenantId, 'customer', customerId)).not.toContain(
       'customer.updated',
     );
-    const stranded = await proposalRepo.findById(t.tenantId, proposal.id);
-    expect(stranded?.status).toBe('approved');
+    const settled = await proposalRepo.findById(t.tenantId, proposal.id);
+    expect(settled?.status).toBe('execution_failed');
+    // The bad write's own refusal (NOT NULL, or the RLS policy when the
+    // runtime role is on) — never the aborted-transaction mask.
+    expect(settled?.executionError).toMatch(/null value|row-level security/);
   });
 
   it('(d) re-executing the same proposal is idempotent — no duplicate audit/consent rows', async () => {
@@ -480,9 +498,13 @@ describe(provesExecution('update_customer', 'confirm_appointment', 'request_feed
       `ws3-confirm-fail-${randomUUID()}`,
     );
 
-    await expect(
-      executor.execute(proposal, { tenantId: t.tenantId, executedBy: t.userId }),
-    ).rejects.toThrow();
+    // #1490 — the handler catches the failed write and reports failure; the
+    // executor rolls back to before the handler (so nothing below survives)
+    // and settles the proposal execution_failed WITH the database's reason.
+    // It used to die on "current transaction is aborted" instead, which hid
+    // the cause and left the proposal to be retried into the same failure.
+    const outcome = await executor.execute(proposal, { tenantId: t.tenantId, executedBy: t.userId });
+    expect(outcome.result.success).toBe(false);
 
     const status = await withTenantRead(pool, t.tenantId, async (client) => {
       const res = await client.query<{ status: string }>(
@@ -493,8 +515,11 @@ describe(provesExecution('update_customer', 'confirm_appointment', 'request_feed
     });
     // Rolled back to the seeded status — the confirm never committed.
     expect(status).toBe('scheduled');
-    const stranded = await proposalRepo.findById(t.tenantId, proposal.id);
-    expect(stranded?.status).toBe('approved');
+    const settled = await proposalRepo.findById(t.tenantId, proposal.id);
+    expect(settled?.status).toBe('execution_failed');
+    // The bad write's own refusal (NOT NULL, or the RLS policy when the
+    // runtime role is on) — never the aborted-transaction mask.
+    expect(settled?.executionError).toMatch(/null value|row-level security/);
   });
 
   it('(e4) request_feedback commits the feedback request + feedback_request.created audit', async () => {
