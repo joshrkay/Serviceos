@@ -22,27 +22,33 @@ jobs:
         id: gate
         run: |
           # Daily schedule; internal gate ensures ~48-hour spacing across month boundaries.
-          # Fetch the timestamp of the last successful QA workflow run.
-          LAST_RUN=$(gh run list \
-            --workflow qa-recurring.yml \
-            --status success \
-            --limit 1 \
-            --json completedAt \
-            --jq '.[0].completedAt' 2>/dev/null || echo "")
+          # Query for runs that produced actual QA reports (not gate-only skips).
+          LAST_RUN=""
+          for run_id in $(gh run list --workflow qa-recurring.yml --status success --limit 50 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$run_id" --dir /tmp/qa-check --pattern 'qa-status.json' 2>/dev/null; then
+              LAST_RUN="$run_id"
+              break
+            fi
+          done
 
           if [ -z "$LAST_RUN" ] || [ "$FORCE_RUN" = "true" ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
-            LAST_EPOCH=$(date -d "$LAST_RUN" +%s 2>/dev/null || echo "0")
-            NOW_EPOCH=$(date +%s)
-            DIFF_SECONDS=$((NOW_EPOCH - LAST_EPOCH))
-            DIFF_HOURS=$((DIFF_SECONDS / 3600))
-
-            if [ "$DIFF_HOURS" -ge 48 ]; then
+            LAST_TS=$(gh run view "$LAST_RUN" --json completedAt --jq '.completedAt' 2>/dev/null || echo "")
+            if [ -z "$LAST_TS" ]; then
               echo "should_run=true" >> "$GITHUB_OUTPUT"
             else
-              echo "should_run=false" >> "$GITHUB_OUTPUT"
-              echo "Last QA run was $DIFF_HOURS hours ago (need 48+); skipping."
+              LAST_EPOCH=$(date -d "$LAST_TS" +%s 2>/dev/null || echo "0")
+              NOW_EPOCH=$(date +%s)
+              DIFF_SECONDS=$((NOW_EPOCH - LAST_EPOCH))
+              DIFF_HOURS=$((DIFF_SECONDS / 3600))
+
+              if [ "$DIFF_HOURS" -ge 48 ]; then
+                echo "should_run=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "should_run=false" >> "$GITHUB_OUTPUT"
+                echo "Last QA test execution was $DIFF_HOURS hours ago (need 48+); skipping."
+              fi
             fi
           fi
         env:
@@ -64,12 +70,24 @@ jobs:
         if: steps.gate.outputs.should_run == 'true'
         run: |
           mkdir -p qa/reports/previous
-          gh run download \
-            --dir qa/reports/previous \
-            --name qa-reports-* \
-            --pattern 'qa-reports-*' \
-            --repo ${{ github.repository }} \
-            2>/dev/null || echo "No previous artifacts found (first run)."
+          # Find the latest run that has an actual QA report artifact
+          LAST_RUN=""
+          for run_id in $(gh run list --workflow qa-recurring.yml --status success --limit 50 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$run_id" --dir /tmp/qa-latest --pattern 'qa-status.json' 2>/dev/null; then
+              LAST_RUN="$run_id"
+              break
+            fi
+          done
+
+          if [ -n "$LAST_RUN" ]; then
+            # Extract the artifact and flatten it into the expected directory
+            gh run download "$LAST_RUN" --dir /tmp/qa-extract --repo ${{ github.repository }} 2>/dev/null
+            # Copy qa-status.json to the comparison script's expected location
+            find /tmp/qa-extract -name 'qa-status.json' -exec cp {} qa/reports/previous/qa-status.json \;
+            echo "Restored previous QA report from run $LAST_RUN"
+          else
+            echo "No previous QA artifacts found (first run)."
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
 

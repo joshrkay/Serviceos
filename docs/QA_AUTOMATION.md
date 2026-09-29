@@ -105,22 +105,30 @@ The script:
 
 ## What Gets Tested (Every Run)
 
-### ✅ Automated Test Coverage
+### ✅ Suites Invoked by Recurring QA Runner
+
+The scheduled runner invokes `scripts/qa-comparison.sh`, which includes:
 
 | Category | Coverage | Evidence |
 |----------|----------|----------|
-| **API Unit Tests** | 14,158 tests | `packages/api/**/*.test.ts` |
-| **Integration Tests** | 1,218 tests | Real Postgres database |
-| **Web/Shared/Mobile** | 3,057 tests | Component + unit tests |
-| **Voice Quality Gate** | 73/73 scenarios | Launch gate (no regressions) |
-| **E2E (Playwright)** | 19/19 scenarios | Hermetic browser tests |
-| **Build Verification** | 2 checks | `npm run build`, TypeScript |
-| **Type Safety** | tsc check | Production config |
-| **Contract Validation** | Zod schemas | Request/response validation |
+| **TypeScript Type Check** | Production build config | `tsc --project tsconfig.build.json` |
+| **Web Unit Tests** | ~2,463 tests | `packages/web/**/*.test.ts` |
+| **Shared Unit Tests** | ~174 tests | `packages/shared/**/*.test.ts` |
+| **API Unit Tests (Optional)** | ~14,158 tests | Included in script but may not execute in all CI environments |
+| **Integration Tests (Optional)** | ~1,218 tests | Real Postgres; requires Docker, often skipped |
+| **E2E Tests (Optional)** | ~19 scenarios | Playwright; requires browser, often skipped |
+| **Comparison** | Previous vs. current | Regression detection (if prior artifacts available) |
 
-**Total Test Cases**: ~18,500+
+**Actual test count per run**: Depends on CI environment. Recurring runner typically executes web+shared (~2,637) + type checks.
 
-**Pass Rate Target**: >95% (>92% is acceptable for staging)
+**NOT included in recurring runs** (requires manual QA with staging credentials):
+- Build verification
+- Voice quality gate (73 scenarios)
+- Mobile tests (826 tests)
+- Contract validation lane
+- Provider-dependent tests (Clerk, Stripe, Twilio, LLM)
+
+**Pass Rate Target**: >95% (>92% is acceptable for staging, applies only to executed suites)
 
 ### ⚠️ Manual Testing NOT Included (CI Environment)
 
