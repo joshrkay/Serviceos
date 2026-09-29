@@ -171,6 +171,14 @@ export interface JobListOptions {
   customerId?: string;
   technicianId?: string;
   search?: string;
+  /**
+   * #1402 §8 — scheduled-date window: jobs with a live (non-canceled)
+   * appointment whose start is >= scheduledFrom and < scheduledTo. A job's
+   * schedule lives on its appointments, so the in-memory repository (which
+   * has none) matches nothing when either bound is set.
+   */
+  scheduledFrom?: Date;
+  scheduledTo?: Date;
   /** Pagination cap. Default 50, hard-capped server-side at 200. */
   limit?: number;
   /** Pagination offset. Default 0. */
@@ -493,6 +501,7 @@ export class InMemoryJobRepository implements JobRepository {
     if (options?.status) results = results.filter((j) => j.status === options.status);
     if (options?.customerId) results = results.filter((j) => j.customerId === options.customerId);
     if (options?.technicianId) results = results.filter((j) => j.assignedTechnicianId === options.technicianId);
+    if (options?.scheduledFrom || options?.scheduledTo) results = [];
     if (options?.search) {
       const q = options.search.toLowerCase();
       const matches = await Promise.all(results.map((j) => this.matchesSearch(j, q)));

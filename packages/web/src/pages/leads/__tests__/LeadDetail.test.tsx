@@ -63,6 +63,8 @@ describe('Leads — LeadDetail (P9-001)', () => {
         postalCode: '78701',
       }),
     } as unknown as Response);
+    // #1402 §7 — the assign picker loads the team roster on mount.
+    vi.mocked(apiFetch).mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) } as unknown as Response);
     vi.mocked(apiFetch).mockResolvedValueOnce({
       ok: true,
       status: 201,
@@ -344,7 +346,53 @@ describe('Leads — LeadDetail (P9-001)', () => {
 
     render(<LeadDetail leadId="lead-1" />);
 
-    expect(await screen.findByText('Assigned user: Maya Chen')).toBeInTheDocument();
+    // #1402 §7 — the assignee now lives in the assign picker, selected by name.
+    const picker = (await screen.findByLabelText('Assign lead')) as HTMLSelectElement;
+    await waitFor(() => expect(picker.selectedOptions[0]?.textContent).toBe('Maya Chen'));
     expect(screen.queryByText(/user-9f3c/)).not.toBeInTheDocument();
+  });
+
+  it('#1402 §7 — assigns the lead by picking a team member by NAME (PATCH assignedUserId), and can unassign', async () => {
+    const patches: unknown[] = [];
+    let current: Record<string, unknown> = { ...baseLead };
+    vi.mocked(apiFetch).mockImplementation((async (url: string, init?: RequestInit) => {
+      if (url === '/api/leads/lead-1' && init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body));
+        patches.push(body);
+        current = { ...current, assignedUserId: body.assignedUserId ?? undefined };
+        return { ok: true, status: 200, json: async () => current };
+      }
+      if (url === '/api/leads/lead-1') {
+        return { ok: true, status: 200, json: async () => current };
+      }
+      if (url === '/api/users') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [
+              { id: 'user-9f3c', firstName: 'Maya', lastName: 'Chen', email: 'maya@example.com' },
+              { id: 'user-2b7a', firstName: 'Diego', lastName: 'Ruiz', email: 'diego@example.com' },
+            ],
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    }) as never);
+
+    render(<LeadDetail leadId="lead-1" />);
+
+    const picker = (await screen.findByLabelText('Assign lead')) as HTMLSelectElement;
+    await screen.findByRole('option', { name: 'Diego Ruiz' });
+    // Options are names only — never raw ids.
+    expect(Array.from(picker.options).map((o) => o.textContent)).toEqual(['Unassigned', 'Diego Ruiz', 'Maya Chen']);
+    expect(picker.className).toMatch(/\bmin-h-11\b/);
+
+    fireEvent.change(picker, { target: { value: 'user-2b7a' } });
+    await waitFor(() => expect(patches).toEqual([{ assignedUserId: 'user-2b7a' }]));
+    await waitFor(() => expect(picker.value).toBe('user-2b7a'));
+
+    fireEvent.change(picker, { target: { value: '' } });
+    await waitFor(() => expect(patches).toEqual([{ assignedUserId: 'user-2b7a' }, { assignedUserId: null }]));
   });
 });

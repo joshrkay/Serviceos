@@ -13,6 +13,16 @@ import {
 } from './invoice';
 import { LineItem } from '../shared/billing-engine';
 import { mapLineItemRow, mapDocumentTotalsRow } from '../shared/document-row-mappers';
+import { INVOICE_LIST_SORT, type InvoiceSortField } from '@ai-service-os/shared';
+import { sqlOrderBy, customerNameViaJobSql } from '../shared/list-sort';
+
+/** #1402 — allowlisted sort field → SQL. Never built from request text. */
+const INVOICE_SORT_COLUMNS: Record<InvoiceSortField, string> = {
+  created: 'created_at',
+  due: 'due_date',
+  total: 'total_cents',
+  customer: customerNameViaJobSql('invoices'),
+};
 
 export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepository {
   constructor(pool: Pool) {
@@ -142,8 +152,19 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
 
     if (options?.search) {
       const searchParam = `%${options.search}%`;
+      // #1402 — also match the customer's name (as #1400 did for estimates).
+      // Invoices carry only job_id, so resolve through jobs → customers
+      // (tenant-scoped on both hops, alongside RLS).
       conditions.push(
-        `(invoice_number ILIKE $${paramIndex} OR customer_message ILIKE $${paramIndex})`
+        `(invoice_number ILIKE $${paramIndex} OR customer_message ILIKE $${paramIndex}
+          OR job_id IN (
+            SELECT j.id FROM jobs j
+            JOIN customers c ON c.id = j.customer_id AND c.tenant_id = j.tenant_id
+            WHERE j.tenant_id = $1
+              AND (c.display_name ILIKE $${paramIndex}
+                OR c.company_name ILIKE $${paramIndex}
+                OR (c.first_name || ' ' || c.last_name) ILIKE $${paramIndex})
+          ))`
       );
       params.push(searchParam);
       paramIndex++;
@@ -164,9 +185,13 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     options?: InvoiceListOptions
   ): Promise<Invoice[]> {
     const { where, params } = this.buildListWhere(tenantId, options);
-    const sortDirection = options?.sort === 'asc' ? 'ASC' : 'DESC';
+    const sortBy = options?.sortBy ?? INVOICE_LIST_SORT.defaultField;
+    const orderBy = sqlOrderBy(
+      { field: sortBy, direction: options?.sort ?? INVOICE_LIST_SORT.fields[sortBy] },
+      INVOICE_SORT_COLUMNS,
+    );
     const usePagination = options?.limit !== undefined || options?.offset !== undefined;
-    let sql = `SELECT * FROM invoices ${where} ORDER BY created_at ${sortDirection}`;
+    let sql = `SELECT * FROM invoices ${where} ${orderBy}`;
     let queryParams = params;
     if (usePagination) {
       const limit = Math.min(options?.limit ?? DEFAULT_INVOICE_LIMIT, MAX_INVOICE_LIMIT);

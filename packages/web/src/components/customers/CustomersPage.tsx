@@ -9,6 +9,20 @@ import {
 import type { ServiceType } from '../../types/job-ui';
 import type { Customer, CustomerListItem } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
+import { CUSTOMER_LIST_SORT, type CustomerSortField, type ListSort } from '@ai-service-os/shared';
+import { ListSortSelect, listSortParams, type ListSortOption } from '../shared/ListSortSelect';
+
+// #1402 — server-side sort options (shared list-sort control).
+const SORT_OPTIONS: ReadonlyArray<ListSortOption<CustomerSortField>> = [
+  { field: 'name',    direction: 'asc',  label: 'Name A–Z' },
+  { field: 'name',    direction: 'desc', label: 'Name Z–A' },
+  { field: 'created', direction: 'desc', label: 'Newest first' },
+  { field: 'created', direction: 'asc',  label: 'Oldest first' },
+];
+const DEFAULT_SORT: ListSort<CustomerSortField> = {
+  field: CUSTOMER_LIST_SORT.defaultField,
+  direction: CUSTOMER_LIST_SORT.fields[CUSTOMER_LIST_SORT.defaultField],
+};
 import { useMutation } from '../../hooks/useMutation';
 import { nameSimilarity, FUZZY_NAME_THRESHOLD } from '../../utils/name-similarity';
 import { Spinner, EmptyState } from '../ui';
@@ -523,16 +537,19 @@ export function CustomersPage() {
   // #1281 — the Archived view: the only place an archived customer is listed
   // (and so the way to reach its Restore control).
   const [showArchived, setShowArchived] = useState(false);
+  const [sort,         setSort]         = useState<ListSort<CustomerSortField>>(DEFAULT_SORT);
 
   const { data, total, isLoading, error, setSearch, setFilters, refetch } = useListQuery<CustomerListItem>('/api/customers');
 
   // #1401 — service-type chips and the Archived view both filter server-side
   // (`?serviceType=` / `?archived=only`), so a paginated list's data and
   // total agree. They compose into one filter set.
-  const applyFilters = (svc: Filter, archived: boolean) => {
+  // #1402 — the sort composes into the same server-side filter set.
+  const applyFilters = (svc: Filter, archived: boolean, s: ListSort<CustomerSortField> = sort) => {
     setFilters({
       ...(svc !== 'All' ? { serviceType: svc } : {}),
       ...(archived ? { archived: 'only' } : {}),
+      ...listSortParams(CUSTOMER_LIST_SORT, s),
     });
   };
 
@@ -545,6 +562,11 @@ export function CustomersPage() {
   const selectFilter = (next: Filter) => {
     setFilter(next);
     applyFilters(next, showArchived);
+  };
+
+  const selectSort = (next: ListSort<CustomerSortField>) => {
+    setSort(next);
+    applyFilters(filter, showArchived, next);
   };
 
   // customer_search_run (U6) — a debounced "search executed" signal, once the
@@ -601,6 +623,11 @@ export function CustomersPage() {
             placeholder="Search name, address, phone…"
             className="flex-1 min-h-11 text-sm text-foreground placeholder:text-muted-foreground outline-none bg-transparent"
           />
+        </div>
+
+        {/* sort (#1402) — server-side via the shared list-sort control */}
+        <div className="mt-3">
+          <ListSortSelect label="Sort customers" options={SORT_OPTIONS} value={sort} onChange={selectSort} />
         </div>
 
         {/* filter chips */}
