@@ -8,6 +8,8 @@ import {
 import type { EstimateResponse, LineItem as EstimateLineItem, CatalogUnitValue, EstimateListStage } from '@ai-service-os/shared';
 import { estimateListStage } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
+import { ESTIMATE_LIST_SORT, type EstimateSortField, type ListSort } from '@ai-service-os/shared';
+import { ListSortSelect, listSortParams, type ListSortOption } from '../shared/ListSortSelect';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { Spinner, EmptyState, ConfirmDialog } from '../ui';
@@ -637,7 +639,7 @@ function EstimateDocPreview({ est, lineItems, totals, onClose }: {
   // fabricated rivet.ai share link with a working Copy button (QA
   // 2026-07-02). The real share link only exists once the estimate is
   // sent (the send endpoint mints the view token), so none is shown here.
-  const [business, setBusiness] = useState<{ name: string; contact: string } | null>(null);
+  const [business, setBusiness] = useState<{ name: string; contact: string; address: string } | null>(null);
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -646,11 +648,16 @@ function EstimateDocPreview({ est, lineItems, totals, onClose }: {
         if (!res.ok || !alive) return;
         const data = (await res.json()) as {
           businessName?: string | null; businessPhone?: string | null;
+          businessAddress?: string | null;
         };
         if (!alive) return;
         const name = data.businessName?.trim();
         if (name) {
-          setBusiness({ name, contact: data.businessPhone?.trim() ?? '' });
+          setBusiness({
+            name,
+            contact: data.businessPhone?.trim() ?? '',
+            address: data.businessAddress?.trim() ?? '',
+          });
         }
       } catch {
         /* non-fatal — preview falls back to name-only header */
@@ -660,6 +667,7 @@ function EstimateDocPreview({ est, lineItems, totals, onClose }: {
   }, []);
   const businessName = business?.name ?? 'Your business';
   const businessContact = business?.contact ?? '';
+  const businessAddress = business?.address ?? '';
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end md:items-center justify-center p-4" onClick={onClose}>
@@ -683,6 +691,7 @@ function EstimateDocPreview({ est, lineItems, totals, onClose }: {
                 customerName: est.customer,
                 businessName,
                 businessContact,
+                businessAddress,
                 description: est.description,
                 validUntil: est.validUntil,
                 documentLabel: estimateTerm,
@@ -713,6 +722,14 @@ function EstimateDocPreview({ est, lineItems, totals, onClose }: {
                 </div>
                 <p className="text-sm text-foreground">{businessName}</p>
               </div>
+              {businessAddress && (
+                <p
+                  data-testid="business-address"
+                  className="text-xs text-muted-foreground whitespace-pre-line break-words"
+                >
+                  {businessAddress}
+                </p>
+              )}
               {businessContact && <p className="text-xs text-muted-foreground">{businessContact}</p>}
             </div>
             <div className="text-right">
@@ -1723,6 +1740,19 @@ const TAB_FILTERS: Record<EstimateStatus | 'All', Record<string, string>> = {
   Expired:  { stage: 'expired' },
 };
 
+// #1402 — server-side sort options (shared list-sort control).
+const SORT_OPTIONS: ReadonlyArray<ListSortOption<EstimateSortField>> = [
+  { field: 'created',  direction: 'desc', label: 'Newest first' },
+  { field: 'created',  direction: 'asc',  label: 'Oldest first' },
+  { field: 'total',    direction: 'desc', label: 'Highest total' },
+  { field: 'total',    direction: 'asc',  label: 'Lowest total' },
+  { field: 'customer', direction: 'asc',  label: 'Customer A–Z' },
+];
+const DEFAULT_SORT: ListSort<EstimateSortField> = {
+  field: ESTIMATE_LIST_SORT.defaultField,
+  direction: ESTIMATE_LIST_SORT.fields[ESTIMATE_LIST_SORT.defaultField],
+};
+
 const STAGE_LABEL: Record<EstimateListStage, EstimateStatus> = {
   draft: 'Draft',
   sent: 'Sent',
@@ -1749,6 +1779,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
   const estimateTermPlural = `${estimateTerm}s`;
   const [tab,              setTab]           = useState<EstimateStatus | 'All'>('All');
   const [customerFilter,   setCustomerFilter] = useState<string>('all');
+  const [sort,             setSort]          = useState<ListSort<EstimateSortField>>(DEFAULT_SORT);
   const [selected,         setSelected]      = useState<string | null>(defaultSelectedId ?? null);
   const [newEstimateOpen,  setNewEstimate]   = useState(false);
 
@@ -1840,6 +1871,19 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
           </div>
         )}
 
+        {/* Sort (#1402) — server-side via the shared list-sort control. */}
+        <div className="mb-3">
+          <ListSortSelect
+            label={`Sort ${estimateTermPlural.toLowerCase()}`}
+            options={SORT_OPTIONS}
+            value={sort}
+            onChange={next => {
+              setSort(next);
+              setFilters({ ...TAB_FILTERS[tab], ...listSortParams(ESTIMATE_LIST_SORT, next) });
+            }}
+          />
+        </div>
+
         {/* Tabs */}
         <div className="flex gap-1 mb-4 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
           {TABS.map(t => (
@@ -1847,7 +1891,7 @@ export function EstimatesPage({ defaultSelectedId }: { defaultSelectedId?: strin
               key={t.value}
               onClick={() => {
                 setTab(t.value);
-                setFilters(TAB_FILTERS[t.value]);
+                setFilters({ ...TAB_FILTERS[t.value], ...listSortParams(ESTIMATE_LIST_SORT, sort) });
               }}
               className={`shrink-0 min-h-11 min-w-11 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value ? 'bg-primary text-primary-foreground' : 'bg-card border border-border text-foreground hover:bg-secondary'

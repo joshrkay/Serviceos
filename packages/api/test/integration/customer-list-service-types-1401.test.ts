@@ -125,4 +125,45 @@ describe('Postgres integration — customer list service-type chips (#1401)', ()
     expect(painting.status).toBe(200);
     expect((painting.body as Array<{ id: string }>).map((r) => r.id)).toEqual([plumb.customerId]);
   });
+
+  // #1473 item 3 — the add-customer sheet stores 'HVAC' / 'Plumbing', but a
+  // direct POST /api/locations stored 'plumbing', so the Plumbing chip
+  // returned 0 rows.
+  it('normalises service types on write to the canonical chip label', async () => {
+    const c = appFor(await createTestTenant(pool));
+    const loc = await customerWithLocation(c, 'Lowercase', ['plumbing', ' hvac ', 'PLUMBING']);
+    expect(loc.locationBody.serviceTypes).toEqual(['Plumbing', 'HVAC']);
+
+    const filtered = await request(c).get('/api/customers?serviceType=Plumbing');
+    expect((filtered.body as Array<{ id: string }>).map((r) => r.id)).toEqual([loc.customerId]);
+  });
+
+  it('filters case-insensitively, so rows stored before normalisation still match their chip', async () => {
+    const tenant = await createTestTenant(pool);
+    const c = appFor(tenant);
+    const cust = await request(c).post('/api/customers').send({ firstName: 'Legacy', lastName: 'Case' });
+    expect(cust.status).toBe(201);
+    // A row written before #1473 kept the caller's casing.
+    await new PgLocationRepository(pool).create({
+      id: crypto.randomUUID(),
+      tenantId: tenant.tenantId,
+      customerId: cust.body.id,
+      street1: '2 Main St',
+      city: 'Phoenix',
+      state: 'AZ',
+      postalCode: '85001',
+      country: 'US',
+      isPrimary: true,
+      addressType: 'service',
+      serviceTypes: ['plumbing'],
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    const res = await request(c).get('/api/customers?paginated=true&serviceType=Plumbing');
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect((res.body.data as Array<{ id: string }>).map((r) => r.id)).toEqual([cust.body.id]);
+  });
 });

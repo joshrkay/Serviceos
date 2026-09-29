@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { JobPhotoUploader } from '../JobPhotoUploader';
 import type { JobPhoto } from '../../../api/job-photos';
+import { expectAllTapTargets } from '../../../test-utils/tap-target';
 
 function makeFile(): File {
   return new File(['x'], 'photo.jpg', { type: 'image/jpeg' });
@@ -70,5 +71,17 @@ describe('JobPhotoUploader (P12-001)', () => {
     await waitFor(() =>
       expect(screen.getByTestId('job-photo-error')).toHaveTextContent('S3 PUT failed')
     );
+  });
+
+  // #1481 — the photos page measured the category select 33px, notes 34px
+  // and the bare file input 24px tall at 320/375px.
+  it('category, notes and the photo picker are ≥44px tap targets', () => {
+    render(<JobPhotoUploader jobId="job-1" />);
+    const root = screen.getByTestId('job-photo-uploader');
+    expectAllTapTargets(root, 'photo uploader');
+    // The picker is reached through its visible label, not a bare 24px input.
+    const file = screen.getByTestId('job-photo-file-input');
+    expect(file.getAttribute('class') ?? '').toMatch(/(^|\s)sr-only(\s|$)/);
+    expect(screen.getByText(/take or choose a photo/i).closest('label')?.getAttribute('for')).toBe(file.id);
   });
 });

@@ -25,6 +25,9 @@ export function createUserPhoneDispatcherResolver(
 ): DispatcherPhoneResolver {
   return async (tenantId: string, userId: string): Promise<string | null> => {
     const user = await userRepo.findById(tenantId, userId);
+    // #1402 §13 — a deactivated (suspended) teammate is never dialed; the
+    // rotation walk advances past them like a numberless entry.
+    if ((user?.status ?? 'active') !== 'active') return null;
     const phone = user?.mobileNumber?.trim();
     return phone && phone.length > 0 ? phone : null;
   };

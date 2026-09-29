@@ -11,7 +11,7 @@ import { CALL_PLAN_USAGE, type CallPlanId } from '../billing/call-usage-pricing'
 
 export interface SeatUsage {
   planId: CallPlanId | null;
-  /** Non-deleted users plus unexpired, unaccepted invitations. */
+  /** Active (non-deleted, non-deactivated) users plus unexpired, unaccepted invitations. */
   seatsUsed: number;
 }
 
@@ -29,7 +29,8 @@ export class PgSeatUsageReader extends PgBaseRepository implements SeatUsageRead
       const result = await client.query<{ plan_id: CallPlanId | null; seats_used: string }>(
         `SELECT t.plan_id,
                 ((SELECT COUNT(*) FROM users u
-                   WHERE u.tenant_id = t.id AND u.deleted_at IS NULL)
+                   WHERE u.tenant_id = t.id AND u.deleted_at IS NULL
+                     AND u.status = 'active')
                + (SELECT COUNT(*) FROM pending_invitations p
                    WHERE p.tenant_id = t.id AND p.accepted_at IS NULL
                      AND p.expires_at > NOW()))::text AS seats_used

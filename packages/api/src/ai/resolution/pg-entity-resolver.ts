@@ -31,6 +31,7 @@ import {
   TAU_ENT,
   TAU_ENT_CONFIRM_LOW,
 } from './entity-resolver';
+import { MARGIN } from './catalog-resolver';
 
 /** Minimum similarity score to even consider a candidate (pre-filter). */
 const SIMILARITY_PREFILTER = 0.3;
@@ -41,6 +42,16 @@ const SIMILARITY_PREFILTER = 0.3;
  * detect overflow.
  */
 const MAX_JOB_CANDIDATES = 5;
+
+/**
+ * #1494 — how far the best of a customer's jobs must lead the next one on
+ * the FULL reference (summary / job number) before a reference naming only
+ * the customer resolves it without a picker. The catalog resolver's
+ * MARGIN, so one "clearly best" rule answers both. The lead is measured
+ * only once the leader clears `SIMILARITY_PREFILTER`: trigram noise below
+ * it never resolves anything, however far ahead.
+ */
+const JOB_REFERENCE_MARGIN = MARGIN;
 
 /**
  * Most estimates a one-tap picker may honestly offer. Same ceiling and same
@@ -571,7 +582,9 @@ export class PgEntityResolver implements EntityResolver {
       case 'customer':
         return this.resolveCustomer(tenantId, reference);
       case 'job':
-        return this.resolveJob(tenantId, reference);
+        return customerId
+          ? this.resolveJobForCustomer(tenantId, reference, customerId)
+          : this.resolveJob(tenantId, reference);
       case 'invoice':
         // A verified customer anchor IS the scope when the operator named the
         // person and no paperwork ("nudge Khan", "remind Johnson"): the
@@ -779,6 +792,103 @@ export class PgEntityResolver implements EntityResolver {
     if (confident.length > MAX_JOB_CANDIDATES) return { kind: 'not_found', reference };
 
     return this.toResult(candidates.slice(0, MAX_JOB_CANDIDATES), reference);
+  }
+
+  /**
+   * #1476 P2 / #1490 P2 — a job reference with the customer ALREADY picked.
+   * Scoped to that customer's jobs, the customer's own name no longer tells
+   * any of them apart (it scored every one 1.000, so a customer with more
+   * than five jobs overflowed into not_found — live VOX-05/VOX-07). So the
+   * customer's name words are dropped from the reference and the jobs are
+   * ranked by what is left — the JOB words — against summary and job number.
+   *
+   * A reference naming only the customer is never not_found while they have
+   * jobs: one job is that job, several are a picker of their most recent (a
+   * narrowing question, not a dead end). Job words that pick one resolve it
+   * (or confirm it, in the mid band); job words naming none of their jobs are
+   * not_found, said honestly (#1416).
+   *
+   * #1494 — ties on the job words (always, for a reference naming only the
+   * customer) are broken by the similarity of the FULL reference to the job's
+   * summary / number, and only then by recency: "the QA Matrix job" for
+   * customer qa-matrix-A-customer names their job "QA Matrix job for
+   * qa-matrix-A" even when it is the oldest of fifteen. A reference naming
+   * only the customer whose best job leads the rest by
+   * `JOB_REFERENCE_MARGIN` resolves it; otherwise that job leads the picker.
+   */
+  private async resolveJobForCustomer(
+    tenantId: string,
+    reference: string,
+    customerId: string,
+  ): Promise<EntityResolverResult> {
+    const { rows, jobWords } = await withTenantConnection(this.pool, tenantId, async (client) => {
+      const customer = await client.query<{ display_name: string | null; company_name: string | null }>(
+        `SELECT display_name, company_name FROM customers WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, customerId],
+      );
+      const nameWords = new Set(
+        `${customer.rows[0]?.display_name ?? ''} ${customer.rows[0]?.company_name ?? ''}`
+          .toLowerCase()
+          .split(/[^a-z0-9']+/)
+          .filter(Boolean),
+      );
+      const jobWords = (extractNameLikeToken(reference) ?? '')
+        .split(/\s+/)
+        .filter((w) => w.length > 0 && !nameWords.has(w))
+        .join(' ');
+      const result = await client.query<{
+        id: string;
+        summary: string;
+        job_number: string | null;
+        status: string | null;
+        score: number;
+        reference_score: number;
+        total: number;
+      }>(
+        `SELECT j.id, j.summary, j.job_number, j.status,
+                CASE WHEN $3 = '' THEN 0 ELSE GREATEST(
+                  strict_word_similarity($3, j.summary),
+                  strict_word_similarity($3, COALESCE(j.job_number, '')),
+                  similarity(COALESCE(j.job_number, ''), $4)
+                ) END AS score,
+                GREATEST(
+                  similarity(j.summary, $4),
+                  similarity(COALESCE(j.job_number, ''), $4)
+                ) AS reference_score,
+                count(*) OVER ()::int AS total
+           FROM jobs j
+          WHERE j.tenant_id = $1
+            AND j.customer_id = $2
+          ORDER BY score DESC, reference_score DESC, j.created_at DESC
+          LIMIT ${MAX_JOB_CANDIDATES + 1}`,
+        [tenantId, customerId, jobWords, reference],
+      );
+      return { rows: result.rows, jobWords };
+    });
+
+    if (rows.length === 0) return { kind: 'not_found', reference };
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      kind: 'job' as EntityKind,
+      label: row.summary,
+      hint: [row.job_number, row.status].filter(Boolean).join(' · ') || undefined,
+      score: Number(row.score),
+    }));
+    // Job words that name none of their jobs are a job that does not exist
+    // (#1416): say so, never answer with a stand-in — not even their only one.
+    if (jobWords !== '') {
+      const ranked = this.toResult(candidates, reference);
+      if (ranked.kind !== 'ambiguous') return ranked;
+      return { kind: 'ambiguous', candidates: ranked.candidates.slice(0, MAX_JOB_CANDIDATES) };
+    }
+    // The reference named only the customer: their one job, or a picker.
+    if (Number(rows[0].total) === 1) return { kind: 'resolved', candidate: candidates[0] };
+    const best = Number(rows[0].reference_score);
+    const next = Number(rows[1].reference_score);
+    if (best > SIMILARITY_PREFILTER && best - next >= JOB_REFERENCE_MARGIN) {
+      return { kind: 'resolved', candidate: candidates[0] };
+    }
+    return { kind: 'ambiguous', candidates: candidates.slice(0, MAX_JOB_CANDIDATES) };
   }
 
   private async resolveInvoice(

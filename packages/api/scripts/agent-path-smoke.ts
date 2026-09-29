@@ -35,7 +35,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { LLMGateway } from '../src/ai/gateway/gateway';
-import { createLLMGateway } from '../src/ai/gateway/factory';
+import { createHarnessLLMGateway } from '../src/ai/gateway/harness-gateway';
 import { createRealLayerTwoGateway } from '../src/ai/gateway/real-layer-two-factory';
 import { AgentEventBus } from '../src/ai/voice-quality/event-bus';
 import {
@@ -97,14 +97,16 @@ function resolvePassRatio(): number {
  * Build the gateway for the selected provider. The production selection goes
  * through `createLLMGateway` — the exact factory app.ts uses (resilience
  * stack, tier routing, provider/model mismatch check) — never a hand-rolled
- * client.
+ * client. It is built via createHarnessLLMGateway: the per-tenant token bucket
+ * (a fairness cap for real tenants) is swapped for the harness quota; the
+ * cost cap bounds spend.
  */
 function buildGateway(
   selection: PathSmokeProviderSelection,
   addCents: (n: number) => void,
 ): LLMGateway {
   if (selection.kind === 'production') {
-    return withPathSmokeSpendTracking(createLLMGateway(loadConfig(process.env)), {
+    return withPathSmokeSpendTracking(createHarnessLLMGateway(loadConfig(process.env)), {
       fallbackModel: selection.model,
       addCents,
     });

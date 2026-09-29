@@ -138,14 +138,52 @@ export async function verifyCriticalConstraints(client: PoolClient): Promise<voi
   );
 }
 
+/**
+ * SQLSTATEs for a transient lock conflict with live traffic: deadlock_detected
+ * and lock_not_available (our own `lock_timeout`). The corpus runs as one
+ * implicit transaction that re-takes table locks on every boot, so a request
+ * writing ai_runs → audit_events can cross it (dev deploy 29f482c8,
+ * 2026-09-29). Postgres rolls the whole corpus back, so retrying is safe.
+ */
+const TRANSIENT_LOCK_CODES = new Set(['40P01', '55P03']);
+
+function isTransientLockError(err: unknown): boolean {
+  return TRANSIENT_LOCK_CODES.has((err as { code?: string } | null)?.code ?? '');
+}
+
+export interface ApplyMigrationsOptions {
+  /** Total corpus attempts before a lock conflict fails the deploy. */
+  maxAttempts?: number;
+  /** Base backoff between attempts (grows linearly, plus jitter). */
+  retryDelayMs?: number;
+}
+
 /** Apply the full migration corpus on the given client. Exit-free + testable. */
-export async function applyMigrations(client: PoolClient): Promise<void> {
+export async function applyMigrations(
+  client: PoolClient,
+  { maxAttempts = 5, retryDelayMs = 2_000 }: ApplyMigrationsOptions = {},
+): Promise<void> {
   // Prevent DDL lock waits from stalling startup: ALTER TABLE ENABLE RLS
   // and CREATE POLICY acquire ACCESS EXCLUSIVE locks that can queue if the
   // previous deployment still holds open connections.
   await client.query("SET lock_timeout = '5s'");
   await client.query("SET statement_timeout = '25s'");
-  await client.query(getMigrationSQL());
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await client.query(getMigrationSQL());
+      break;
+    } catch (err) {
+      if (!isTransientLockError(err) || attempt >= maxAttempts) throw err;
+      console.warn(
+        `[migrate] transient lock conflict (${(err as { code: string }).code}) on attempt ` +
+          `${attempt}/${maxAttempts} — corpus rolled back, retrying`,
+      );
+      // Defensive: clear any explicit transaction the failed corpus left open.
+      await client.query('ROLLBACK').catch(() => undefined);
+      const delay = retryDelayMs * attempt + Math.floor(Math.random() * retryDelayMs);
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+    }
+  }
   await verifyCriticalConstraints(client);
 }
 

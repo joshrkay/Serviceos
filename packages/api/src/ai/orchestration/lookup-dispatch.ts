@@ -224,6 +224,41 @@ export interface DispatchAssistantLookupInput {
   userId: string;
   intent: IntentType;
   extractedEntities?: Record<string, unknown>;
+  /** The operator's own words this turn — read only where an entity is missing. */
+  message?: string;
+}
+
+/**
+ * #1490 item 4 — the item a price question names: "How much is a water heater
+ * flush?" → "water heater flush". The classifier's `catalogItemReference`
+ * wins when it gave one; this reads the operator's own sentence otherwise.
+ * `undefined` when the question names no item (a catalog browse).
+ */
+const PRICE_QUESTION_RE = new RegExp(
+  [
+    '^\\s*(?:',
+    // "how much is / does / for / do we charge for …"
+    'how\\s+much\\s+(?:is|are|does|do|for|would)(?:\\s+we\\s+charge(?:\\s+for)?)?',
+    // "what's / what is the price (or cost / rate) of / for …"
+    "|what(?:'s|\\s+is)\\s+the\\s+(?:price|cost|rate)\\s+(?:of|for)",
+    // "what do we charge for …"
+    '|what\\s+do(?:es)?\\s+we\\s+charge\\s+for',
+    // "what does … cost"
+    '|what\\s+does(?=.+\\s(?:cost|run)\\s*[?.!]*\\s*$)',
+    ')\\s+(?:a\\s+|an\\s+|the\\s+|our\\s+)?(.+?)',
+    '(?:\\s+(?:cost|costs|run|go\\s+for))?\\s*[?.!]*\\s*$',
+  ].join(''),
+  'i',
+);
+
+export function catalogSearchTerm(
+  entities: Record<string, unknown>,
+  message: string | undefined,
+): string | undefined {
+  const named = entities.catalogItemReference;
+  if (typeof named === 'string' && named.trim().length > 0) return named.trim();
+  const item = message?.match(PRICE_QUESTION_RE)?.[1]?.trim();
+  return item && item.length > 0 ? item : undefined;
 }
 
 /**
@@ -274,6 +309,8 @@ export async function dispatchAssistantLookup(
         : undefined;
     const dateTimeDescription =
       typeof entities.dateTimeDescription === 'string' ? entities.dateTimeDescription : undefined;
+    const catalogSearch =
+      intent === 'lookup_catalog' ? catalogSearchTerm(entities, input.message) : undefined;
 
     // Customer-scoped ask with nothing to resolve → chat-specific clarification.
     if (CUSTOMER_SCOPED_LOOKUP_INTENTS.has(intent) && !customerReference) {
@@ -352,6 +389,7 @@ export async function dispatchAssistantLookup(
         ...(technicianReference ? { technicianReference } : {}),
         ...(dateTimeDescription ? { dateTimeDescription } : {}),
         ...(timezone ? { timezone } : {}),
+        ...(catalogSearch ? { catalogSearch } : {}),
         now: deps.now ? deps.now() : new Date(),
       },
       deps.answers,

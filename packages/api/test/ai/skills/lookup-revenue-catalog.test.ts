@@ -61,3 +61,23 @@ describe('lookupCatalog skill', () => {
     expect(res.summary).toContain('AC Tune-Up');
   });
 });
+
+describe('lookupCatalog — "how much is X?" (#1480 item 5)', () => {
+  it('answers a searched item with its catalog price, not just its name', async () => {
+    const repo = new InMemoryCatalogItemRepository();
+    await repo.create(
+      createCatalogItem({
+        tenantId: 't-1',
+        name: 'Diagnostic Visit',
+        category: 'labor',
+        unit: 'each',
+        unitPriceCents: 8900,
+      }),
+    );
+    const res = await lookupCatalog({ tenantId: 't-1', search: 'Diagnostic Visit' }, { catalogRepo: repo });
+    expect(res.status).toBe('found');
+    expect(res.summary).toContain('Diagnostic Visit');
+    expect(res.summary).toContain('$89.00');
+  });
+});
+

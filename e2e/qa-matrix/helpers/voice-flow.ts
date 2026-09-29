@@ -44,12 +44,17 @@ export async function startVoiceSession(
 
 export interface VoiceInputOptions {
   /**
-   * The record id this row means. When the turn comes back as an entity
-   * disambiguation question and this id is among the candidates, the helper
-   * answers with that candidate's name.
+   * The record ids this row means. When a turn comes back as an entity
+   * disambiguation question and one of these ids is among the candidates, the
+   * helper answers with that candidate's name. Customer-then-job
+   * disambiguation (#1492) asks twice — which customer, then which of their
+   * jobs — so a row names both records.
    */
-  pickCandidateId?: string;
+  pickCandidateIds?: string[];
 }
+
+/** Bound on successive disambiguation answers in one voiceInput call. */
+const MAX_RESOLUTION_ROUNDS = 3;
 
 interface VoiceTurnBody {
   proposalIds?: string[];
@@ -92,23 +97,25 @@ export async function voiceInput(
   // the product correctly asks "which one?" (D-029) instead of drafting. When
   // the row knows which record it means, answer the question the way an
   // operator would — by the candidate's own name — and only if that record is
-  // actually one of the offered candidates (never a guess).
-  if (body.state === 'entity_resolution' && opts.pickCandidateId) {
-    const pick = disambiguationCandidates(body).find((c) => c.id === opts.pickCandidateId);
-    if (pick) {
-      h.evidence.note(`Answered disambiguation with "${pick.name}" (expected record ${pick.id}).`);
-      const pickRes = await h.api.call({
-        method: 'POST',
-        path: `/api/voice/sessions/${sessionId}/input`,
-        body: { text: pick.name },
-        token,
-        label: `${label}-vinput-disambiguate`,
-        expectStatus: [200, 400, 403, 404],
-      });
-      body = pickRes.response.body as VoiceTurnBody;
-      const pickedIds = body.proposalIds ?? [];
-      if (pickedIds.length > 0) return pickedIds;
-    }
+  // actually one of the offered candidates (never a guess). #1492 — the
+  // customer-then-job path asks successive questions (which customer, then
+  // which of their jobs); each round is answered the same way, bounded.
+  const meant = new Set(opts.pickCandidateIds ?? []);
+  for (let round = 1; round <= MAX_RESOLUTION_ROUNDS && body.state === 'entity_resolution'; round++) {
+    const pick = disambiguationCandidates(body).find((c) => meant.has(c.id));
+    if (!pick) break;
+    h.evidence.note(`Answered disambiguation round ${round} with "${pick.name}" (expected record ${pick.id}).`);
+    const pickRes = await h.api.call({
+      method: 'POST',
+      path: `/api/voice/sessions/${sessionId}/input`,
+      body: { text: pick.name },
+      token,
+      label: round === 1 ? `${label}-vinput-disambiguate` : `${label}-vinput-disambiguate-${round}`,
+      expectStatus: [200, 400, 403, 404],
+    });
+    body = pickRes.response.body as VoiceTurnBody;
+    const pickedIds = body.proposalIds ?? [];
+    if (pickedIds.length > 0) return pickedIds;
   }
 
   // A free-text entity reference that lands in the middle confidence band

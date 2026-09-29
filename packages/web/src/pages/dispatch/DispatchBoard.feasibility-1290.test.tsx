@@ -146,4 +146,25 @@ describe('#1290 — board surfaces travel-time and skill checks on technician la
     // Warnings must be acknowledged before a proposal can be created.
     expect(screen.getByTestId('confirm-proposal-confirm')).toBeDisabled();
   });
+
+  it('#1477 — a cross-lane hover checks feasibility at the appointment\'s own window (reassign moves no time)', () => {
+    render(<DispatchBoard />);
+    const lanes = screen.getAllByTestId('technician-lane');
+    const source = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-1')!;
+    const target = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-2')!;
+    const card = source.querySelector('[data-appointment-id="appt-1"]') as HTMLElement;
+
+    drag(card, target, 'appt-1');
+
+    const forTarget = previewInputs.filter(
+      (i) => (i as { proposedTechnicianId?: string } | null)?.proposedTechnicianId === 'tech-2',
+    );
+    expect(forTarget.length).toBeGreaterThan(0);
+    for (const input of forTarget) {
+      expect(input).toMatchObject({
+        proposedScheduledStart: '2026-10-14T10:30:00Z',
+        proposedScheduledEnd: '2026-10-14T11:30:00Z',
+      });
+    }
+  });
 });

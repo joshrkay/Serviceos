@@ -410,8 +410,18 @@ export class InvoiceTaskHandler implements TaskHandler {
       resolvedCustomerId,
       context.message,
     );
+    // #1480 — ids this handler read off TENANT RECORDS (the estimate's job,
+    // that job's customer), never off model text. Stamped into
+    // `sourceContext.verifiedIds` — the B4 allowlist — because the assistant
+    // route's `dropUnverifiedIds` otherwise strips any id the operator did not
+    // literally say, which left "invoice from the accepted estimate" with
+    // neither a jobId nor a customerId: auto-approved, then failed execution.
+    const repoDerivedIds: Record<string, string> = {};
     if (sourceEstimate) {
       copyEstimateOntoInvoicePayload(payload, sourceEstimate);
+      if (!resolvedJobId && payload.jobId === sourceEstimate.jobId) {
+        repoDerivedIds.jobId = sourceEstimate.jobId;
+      }
       // #1399 N4 — the estimate names its customer through its job. With no
       // resolved customer, take that one (a verified tenant record, never the
       // model's) instead of gating approval on a customerId nobody can fill.
@@ -419,6 +429,7 @@ export class InvoiceTaskHandler implements TaskHandler {
         const estimateCustomerId = await this.customerOfJob(context.tenantId, sourceEstimate.jobId);
         if (estimateCustomerId) {
           payload.customerId = estimateCustomerId;
+          repoDerivedIds.customerId = estimateCustomerId;
           delete payload.customerReference;
           missingFields.splice(missingFields.indexOf('customerId'), 1);
         }
@@ -618,6 +629,7 @@ export class InvoiceTaskHandler implements TaskHandler {
 
     const sourceContext: Record<string, unknown> = {
       ...(context.conversationId ? { conversationId: context.conversationId } : {}),
+      ...(Object.keys(repoDerivedIds).length > 0 ? { verifiedIds: repoDerivedIds } : {}),
       // Ambiguous-line candidates for the review UI's "pick the right
       // catalog item" prompt. Rides sourceContext (like missingFields)
       // so no schema migration is needed.

@@ -1,6 +1,11 @@
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
-import { AppointmentRepository, updateAppointment } from '../../appointments/appointment';
+import {
+  AppointmentRepository,
+  updateAppointment,
+  isStartInPast,
+  PAST_START_MESSAGE,
+} from '../../appointments/appointment';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { SchedulingConfirmationNotifier } from './scheduling-notifications';
 import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
@@ -90,6 +95,12 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
         success: false,
         error: `Hold on appointment ${appointmentId} has expired — re-book the slot`,
       };
+    }
+
+    // #1402 §3/§15 — a hold approved after its slot started would confirm a
+    // visit in the past; refuse it like the operator routes do.
+    if (isStartInPast(appointment.scheduledStart)) {
+      return { success: false, error: `${PAST_START_MESSAGE} — re-book the slot` };
     }
 
     const updated = await updateAppointment(

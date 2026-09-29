@@ -78,7 +78,14 @@ const APPROVAL_QUEUE_PATHS = ['/inbox', '/proposals'] as const;
 
 function OnboardingGuard() {
   const location = useLocation();
-  const { data, isLoading } = useOnboardingStatus(30_000, true);
+  const { data, isLoading, accessRevoked } = useOnboardingStatus(30_000, true);
+
+  // #1490 — a deactivated member gets 403 ACCESS_REVOKED from every endpoint.
+  // /onboarding is the screen that explains it ("Your access was removed");
+  // anywhere else they would sit in a shell of failing fetches.
+  if (accessRevoked && !location.pathname.startsWith('/onboarding')) {
+    return <Navigate to="/onboarding" replace />;
+  }
 
   // While loading, render outlet — letting the user see the app one render
   // late is preferable to blocking the whole shell on a status fetch.

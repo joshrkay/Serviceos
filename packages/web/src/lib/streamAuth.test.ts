@@ -115,4 +115,25 @@ describe('fetchWithAuthRetry', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(signOut).toHaveBeenCalledTimes(1);
   });
+
+  // #1490 item 6 — a deactivated member's 403 ACCESS_REVOKED is not a stale
+  // token: signing them out dropped them on /login with no explanation
+  // instead of the "Your access was removed" screen.
+  it('a 403 ACCESS_REVOKED is returned without signing the user out', async () => {
+    fetchMock.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ error: 'FORBIDDEN', code: 'ACCESS_REVOKED' }), {
+          status: 403,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    const getToken = vi.fn(async () => 'tok-valid');
+    const signOut = vi.fn(async () => undefined);
+    setSignOutHandler(signOut);
+
+    const res = await fetchWithAuthRetry(getToken, '/api/escalations/events');
+
+    expect(res.status).toBe(403);
+    expect(signOut).not.toHaveBeenCalled();
+  });
 });

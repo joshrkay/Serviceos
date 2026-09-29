@@ -484,6 +484,67 @@ describe('journey QA bug 4 — new appointment posts tenant-tz-converted UTC', (
   });
 });
 
+// ─── #1402 §3/§15: no past starts; outside business hours warns ─────────────
+
+describe('#1402 — new appointment scheduling integrity', () => {
+  async function openFormWithJob() {
+    render(
+      <MemoryRouter>
+        <TenantTimezoneProvider overrideTimezone="UTC">
+          <SchedulePage />
+        </TenantTimezoneProvider>
+      </MemoryRouter>,
+    );
+    await screen.findByText('Alice Smith');
+    fireEvent.click(screen.getByRole('button', { name: /new appointment/i }));
+    fireEvent.change(screen.getByLabelText('job-search'), { target: { value: 'JOB-001' } });
+    fireEvent.click(await screen.findByTestId('job-option-j1'));
+  }
+
+  function setTimes(start: string, end: string) {
+    const timeInputs = document.querySelectorAll('input[type="time"]');
+    fireEvent.change(timeInputs[0], { target: { value: start } });
+    fireEvent.change(timeInputs[1], { target: { value: end } });
+  }
+
+  const posted = () =>
+    vi.mocked(apiFetch).mock.calls.some(([url, init]) => url === '/api/appointments' && init?.method === 'POST');
+
+  it('refuses a start earlier today (clock is 12:00Z) without posting', async () => {
+    await openFormWithJob();
+    setTimes('09:00', '10:00');
+
+    fireEvent.click(screen.getByRole('button', { name: /create appointment/i }));
+
+    expect(await screen.findByText(/in the past/i)).toBeInTheDocument();
+    expect(posted()).toBe(false);
+  });
+
+  it('shows the outside-business-hours warning after a successful create, closing on Done', async () => {
+    const baseImpl = vi.mocked(apiFetch).getMockImplementation()!;
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      if (String(input) === '/api/appointments' && init?.method === 'POST') {
+        return mockResponse({ id: 'new-1', warnings: ['Appointment is outside business hours'] }, true, 201);
+      }
+      return baseImpl(input, init);
+    });
+    await openFormWithJob();
+    setTimes('22:00', '23:00');
+
+    fireEvent.click(screen.getByRole('button', { name: /create appointment/i }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Appointment created. Appointment is outside business hours',
+    );
+    const done = screen.getByRole('button', { name: /^done$/i });
+    expect(done.className).toContain('min-h-11');
+    fireEvent.click(done);
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /create appointment/i })).not.toBeInTheDocument(),
+    );
+  });
+});
+
 // ─── #879: the Job field is a searchable picker, not a raw-UUID input ────────
 
 describe('#879 — new appointment job selection', () => {

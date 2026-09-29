@@ -241,6 +241,9 @@ export async function resolveAuthorization(
     });
     res.status(403).json({
       error: 'FORBIDDEN',
+      // #1481 — stable machine code so the web can say "your access was
+      // removed" instead of a generic "couldn't load" state.
+      code: 'ACCESS_REVOKED',
       message: 'User access has been revoked',
     });
     return;

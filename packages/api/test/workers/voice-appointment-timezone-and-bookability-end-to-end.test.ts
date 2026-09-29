@@ -49,7 +49,7 @@
  * and an Eastern control case asserts the opposite (offset DOES shift), so a
  * fixed-offset implementation cannot make this file green.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { buildTaskHandlers } from '../../src/ai/orchestration/handler-registry';
 import { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
@@ -74,6 +74,17 @@ import { InMemoryLocationRepository } from '../../src/locations/location';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+
+// Slots here are drafted against fixed JAN_NOW/JUL_NOW clocks (2026). #1402 refuses to book or move a visit to a start in the past, so pin
+// the wall clock before every fixture slot — these tests describe behaviour at
+// a fixed clock, not at whatever day CI happens to run.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-01-05T12:00:00.000Z'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 const APPROVER = '22222222-2222-4222-8222-222222222222';

@@ -389,7 +389,13 @@ export function resolveLineItemToCatalog(
     if (!allSamePrice) {
       return { query, tier: 'ambiguous', candidates: contenders.slice(0, MAX_CANDIDATES) };
     }
-    const winner = [...contenders].sort((a, b) => a.item.name.localeCompare(b.item.name))[0];
+    // #1490 — the money outcome is the same, but the ITEM is still the one
+    // the operator named: the best-ranked match wins; alphabetical only
+    // breaks a genuine tie (same match type, same score). Otherwise an
+    // exact name lost to an older one-edit near-duplicate ("qa28 …").
+    const winner = contenders
+      .filter((c) => c.matchType === best.matchType && c.score === best.score)
+      .sort((a, b) => a.item.name.localeCompare(b.item.name))[0];
     return { query, tier: best.matchType === 'exact' ? 'exact' : 'high', match: winner.item };
   }
 
