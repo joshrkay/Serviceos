@@ -21,6 +21,8 @@ import type { InvoiceRepository } from '../invoices/invoice';
 import type { JobRepository } from '../jobs/job';
 import type { CustomerRepository } from '../customers/customer';
 import type { LocationRepository } from '../locations/location';
+import type { EstimateRepository } from '../estimates/estimate';
+import { findInvoiceHoldingEstimate } from '../invoices/estimate-invoice-link';
 import type { UserRepository } from '../users/user';
 import { findActiveTenantMember } from '../users/tenant-member';
 import { isChainRefToken } from './chain';
@@ -156,8 +158,38 @@ export function sendRecipientReferenceCheck(deps: {
   };
 }
 
+/**
+ * #1490 — a draft_invoice naming an estimate that ANOTHER invoice already
+ * bills. uq_invoices_estimate allows one invoice per estimate, so execution
+ * could only collide (live: the collision then masked itself as "current
+ * transaction is aborted" and the proposal sat in 'executing'). The gap is a
+ * sentence, not a field: the fix is the existing invoice, not an edit here.
+ */
+export function estimateInvoicedReferenceCheck(deps: {
+  estimateRepo: Pick<EstimateRepository, 'findById'>;
+  invoiceRepo: Pick<InvoiceRepository, 'findByJob'>;
+}): ApprovalReferenceCheck {
+  return async (tenantId, proposal) => {
+    if (proposal.proposalType !== 'draft_invoice') return [];
+    const estimateId = proposal.payload.estimateId;
+    if (typeof estimateId !== 'string' || estimateId.length === 0 || isChainRefToken(estimateId)) return [];
+    const held = await findInvoiceHoldingEstimate(tenantId, estimateId, deps);
+    return held ? [ESTIMATE_ALREADY_INVOICED] : [];
+  };
+}
+
+const ESTIMATE_ALREADY_INVOICED = 'estimateAlreadyInvoiced';
+
 /** Gaps that are a missing piece to supply, not an id naming nothing. */
-const SENTENCE_GAPS: ReadonlySet<string> = new Set(['locationId', 'recipient', 'customerId']);
+const SENTENCE_GAPS: ReadonlySet<string> = new Set([
+  'locationId',
+  'recipient',
+  'customerId',
+  ESTIMATE_ALREADY_INVOICED,
+]);
+
+const ESTIMATE_ALREADY_INVOICED_SENTENCE =
+  'the estimate is already invoiced — open that invoice instead of drafting a second one';
 
 /**
  * The operator-facing refusal for a set of dangling references. A missing
@@ -177,6 +209,7 @@ export function describeDanglingReferences(fields: readonly string[]): string {
   if (fields.includes('locationId')) {
     parts.push('the customer has no service location — add one before approving');
   }
+  if (fields.includes(ESTIMATE_ALREADY_INVOICED)) parts.push(ESTIMATE_ALREADY_INVOICED_SENTENCE);
   return `Cannot approve proposal: ${parts.join('; ')}`;
 }
 
@@ -233,6 +266,7 @@ export function askForExecutabilityGaps(
   if (gaps.includes('customerId')) {
     asks.push("it isn't linked to a customer or a job yet — which customer is it for?");
   }
+  if (gaps.includes(ESTIMATE_ALREADY_INVOICED)) asks.push(ESTIMATE_ALREADY_INVOICED_SENTENCE);
   const unknown = gaps.filter((g) => !SENTENCE_GAPS.has(g));
   if (unknown.length > 0) asks.push(`${unknown.join(', ')} does not name an existing record`);
   return `This can't go ahead yet: ${asks.join('; ')}`;
