@@ -52,6 +52,8 @@ export interface PublicEstimateView {
   businessName: string;
   businessPhone?: string;
   businessEmail?: string;
+  /** #1402 §13 — tenant mailing address, newline-separated; printed under the name. */
+  businessAddress?: string;
   /**
    * Tenant's customer-facing document word (e.g. 'Quote', 'Bid'), resolved
    * from terminologyPreferences.estimateTerm. Defaults to 'Estimate'. The
@@ -307,6 +309,7 @@ export class PublicEstimateService {
     if (siblings.some((s) => s.id !== estimate.id && s.status === 'accepted')) {
       throw new ConflictError(
         'Another estimate on this job has already been accepted. Please contact us — this estimate may no longer be current.',
+        { reason: 'job_already_accepted' },
       );
     }
     // Stale-revision guard. Once an estimate has been revised, a caller MUST
@@ -318,6 +321,7 @@ export class PublicEstimateService {
     if (hasBeenRevised && input.expectedVersion === undefined) {
       throw new ConflictError(
         'This estimate was updated. Please reload to review the latest version before accepting.',
+        { reason: 'estimate_revised' },
       );
     }
     if (
@@ -326,6 +330,7 @@ export class PublicEstimateService {
     ) {
       throw new ConflictError(
         'This estimate was updated after you opened it. Please review the latest version before accepting.',
+        { reason: 'estimate_revised' },
       );
     }
     const trimmed = input.acceptedByName.trim();
@@ -415,6 +420,7 @@ export class PublicEstimateService {
       if ((err as { code?: string } | undefined)?.code === '23505') {
         throw new ConflictError(
           'Another estimate on this job has already been accepted. Please contact us — this estimate may no longer be current.',
+          { reason: 'job_already_accepted' },
         );
       }
       throw err;
@@ -701,6 +707,7 @@ export class PublicEstimateService {
       // that surfaces a null value.
       businessPhone: settings?.businessPhone ?? undefined,
       businessEmail: settings?.businessEmail ?? undefined,
+      businessAddress: settings?.businessAddress ?? undefined,
       // Story 7.4 — flow the tenant's document word into the customer-facing
       // page. `settings` is already loaded above (businessName), so this adds
       // no extra query. Falls back to the canonical 'Estimate'.

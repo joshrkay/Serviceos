@@ -10,6 +10,7 @@ import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { PackActivationRepository } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { resolveCanonicalUser, type UserRepository } from '../users/user';
+import { requireActiveTenantMember } from '../users/tenant-member';
 import { z } from 'zod';
 import {
   getSettings,
@@ -329,6 +330,13 @@ export function createSettingsRouter(
   auditRepo?: AuditRepository,
   capabilityDeps?: SettingsCapabilityDependencies,
   dunningDeps?: SettingsDunningDependencies,
+  /**
+   * #1463 — when wired (app.ts always does), `backupSupervisorUserId` must
+   * name an active member of the caller's tenant. Readers already scope the
+   * lookup to the tenant, but the write must not persist another tenant's
+   * user id (or 500 on the FK for an id naming nobody).
+   */
+  memberDeps?: { userRepo: Pick<UserRepository, 'findById'> },
 ): Router {
   const router = Router();
 
@@ -518,6 +526,15 @@ export function createSettingsRouter(
               );
             }
           }
+        }
+
+        if (parsed.backupSupervisorUserId && memberDeps) {
+          await requireActiveTenantMember(
+            memberDeps.userRepo,
+            req.auth!.tenantId,
+            parsed.backupSupervisorUserId,
+            'backupSupervisorUserId',
+          );
         }
 
         if (parsed.terminologyPreferences) {

@@ -160,6 +160,8 @@ describe('JobsList', () => {
     renderPage();
     expect(vi.mocked(useListQuery)).toHaveBeenCalledWith('/api/jobs', {
       refetchInterval: 60_000,
+      // #1402 §8 — URL-backed filters; an unfiltered URL sends none.
+      filters: {},
     });
   });
 

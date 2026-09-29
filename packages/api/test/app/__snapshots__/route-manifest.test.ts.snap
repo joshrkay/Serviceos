@@ -287,6 +287,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ GET /:id/phone
          └─ GET /invitations
          └─ PATCH /:id
+         └─ POST /:id/deactivate
          └─ POST /invitations
          └─ PUT /:id/phone
 071  authenticated use    /api/calendar-integrations    [router: router]

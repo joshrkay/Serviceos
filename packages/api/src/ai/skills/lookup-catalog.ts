@@ -9,6 +9,7 @@
  */
 import type { CatalogItemRepository } from '../../catalog/catalog-item';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
+import { formatCents } from './spoken-format';
 
 export interface LookupCatalogInput {
   tenantId: string;
@@ -99,10 +100,19 @@ export async function lookupCatalog(
       category: i.category,
     }));
     const noun = active.length === 1 ? 'item' : 'items';
+    // #1480 item 5 — a SEARCHED lookup is "how much is X?": answer with the
+    // catalog's own price (integer cents, never a guess), not the name alone.
+    const spoken = input.search
+      ? active
+          .slice(0, MAX_SPOKEN_NAMES)
+          .map((i) => `${i.name} is ${formatCents(i.unitPriceCents)} per ${i.unit}`)
+      : names;
     const summary =
-      active.length <= MAX_SPOKEN_NAMES
-        ? `You have ${active.length} catalog ${noun}: ${names.join(', ')}.`
-        : `You have ${active.length} catalog items, including ${names.join(', ')}.`;
+      input.search && active.length === 1
+        ? `${spoken[0]}.`
+        : active.length <= MAX_SPOKEN_NAMES
+          ? `You have ${active.length} catalog ${noun}: ${spoken.join(', ')}.`
+          : `You have ${active.length} catalog items, including ${spoken.join(', ')}.`;
     await record('found', active.length, summary);
     return {
       status: 'found',

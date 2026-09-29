@@ -38,6 +38,7 @@ export type InvoiceStatus =
   | 'Unpaid'
   | 'Paid'
   | 'Overdue'
+  | 'Void'
   | 'Canceled';
 
 export interface MaterialItem {

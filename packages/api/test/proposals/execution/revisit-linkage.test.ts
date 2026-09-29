@@ -4,13 +4,24 @@
  * The handler validates the job exists tenant-scoped, attaches the
  * appointment to it, and audits the revisit.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CreateAppointmentExecutionHandler } from '../../../src/proposals/execution/handlers';
 import { createAppointmentPayloadSchema } from '../../../src/proposals/contracts';
 import type { Proposal } from '../../../src/proposals/proposal';
 import { InMemoryAppointmentRepository } from '../../../src/appointments/appointment';
 import { InMemoryJobRepository, Job } from '../../../src/jobs/job';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
+
+// The fixtures below are literal 2026 instants. #1402 refuses to book or move a visit to a start in the past, so pin
+// the wall clock before every fixture slot — these tests describe behaviour at
+// a fixed clock, not at whatever day CI happens to run.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const TENANT = '550e8400-e29b-41d4-a716-446655440000';
 const OTHER_TENANT = '770e8400-e29b-41d4-a716-446655440099';

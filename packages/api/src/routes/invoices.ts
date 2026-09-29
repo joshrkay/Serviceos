@@ -5,6 +5,8 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { createInvoiceSchema, updateInvoiceSchema } from '../shared/contracts';
 import { ConflictError, toErrorResponse } from '../shared/errors';
+import { parseListSortQuery } from '../shared/list-sort';
+import { INVOICE_LIST_SORT } from '@ai-service-os/shared';
 import { TenantOwnership } from '../shared/tenant-ownership';
 import {
   createInvoiceWithNextNumber,
@@ -312,7 +314,8 @@ export function createInvoiceRouter(
         const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
         const status = typeof req.query.status === 'string' ? req.query.status as InvoiceStatus : undefined;
         const search = typeof req.query.search === 'string' ? req.query.search : undefined;
-        const sort: 'asc' | 'desc' = req.query.sort === 'asc' ? 'asc' : 'desc';
+        // #1402 — shared list sort: `?sortBy=<allowlisted field>&sort=asc|desc`.
+        const { field: sortBy, direction: sort } = parseListSortQuery(INVOICE_LIST_SORT, req.query);
 
         // P1-018 — date range filters: dueAfter / dueBefore (ISO).
         const dueAfter = typeof req.query.dueAfter === 'string' ? req.query.dueAfter : undefined;
@@ -388,7 +391,7 @@ export function createInvoiceRouter(
           return;
         }
 
-        const baseOptions = { status, jobId, search, fromDueDate, toDueDate, sort } as const;
+        const baseOptions = { status, jobId, search, fromDueDate, toDueDate, sortBy, sort } as const;
 
         if (wantsPaginated) {
           const result = await listInvoicesWithMeta(req.auth!.tenantId, invoiceRepo, {

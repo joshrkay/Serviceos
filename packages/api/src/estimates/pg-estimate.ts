@@ -12,6 +12,15 @@ import {
 } from './estimate';
 import { LineItem } from '../shared/billing-engine';
 import { mapLineItemRow, mapDocumentTotalsRow } from '../shared/document-row-mappers';
+import { ESTIMATE_LIST_SORT, type EstimateSortField } from '@ai-service-os/shared';
+import { sqlOrderBy, customerNameViaJobSql } from '../shared/list-sort';
+
+/** #1402 — allowlisted sort field → SQL. Never built from request text. */
+const ESTIMATE_SORT_COLUMNS: Record<EstimateSortField, string> = {
+  created: 'created_at',
+  total: 'total_cents',
+  customer: customerNameViaJobSql('estimates'),
+};
 
 export class PgEstimateRepository extends PgBaseRepository implements EstimateRepository {
   constructor(pool: Pool) {
@@ -239,9 +248,13 @@ export class PgEstimateRepository extends PgBaseRepository implements EstimateRe
     options?: EstimateListOptions
   ): Promise<Estimate[]> {
     const { where, params } = this.buildListWhere(tenantId, options);
-    const sortDirection = options?.sort === 'asc' ? 'ASC' : 'DESC';
+    const sortBy = options?.sortBy ?? ESTIMATE_LIST_SORT.defaultField;
+    const orderBy = sqlOrderBy(
+      { field: sortBy, direction: options?.sort ?? ESTIMATE_LIST_SORT.fields[sortBy] },
+      ESTIMATE_SORT_COLUMNS,
+    );
     const usePagination = options?.limit !== undefined || options?.offset !== undefined;
-    let sql = `SELECT * FROM estimates ${where} ORDER BY created_at ${sortDirection}`;
+    let sql = `SELECT * FROM estimates ${where} ${orderBy}`;
     let queryParams = params;
     if (usePagination) {
       const limit = Math.min(options?.limit ?? DEFAULT_ESTIMATE_LIMIT, MAX_ESTIMATE_LIMIT);

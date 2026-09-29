@@ -137,7 +137,15 @@ import { OnboardingConversationOrchestrator } from './ai/orchestration/onboardin
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
 import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
-import { invoiceReferenceCheck, serviceLocationReferenceCheck } from './proposals/approval-reference-checks';
+import {
+  invoiceReferenceCheck,
+  serviceLocationReferenceCheck,
+  sendRecipientReferenceCheck,
+  executionAnchorReferenceCheck,
+  technicianReferenceCheck,
+  estimateInvoicedReferenceCheck,
+  estimateReferenceCheck,
+} from './proposals/approval-reference-checks';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
 import { createFilesRouter, createDevStorageRouter } from './routes/files';
@@ -262,6 +270,10 @@ import { NoopFeedbackDispatcher, MessageDeliveryFeedbackDispatcher } from './fee
 import { MessageDeliveryProvider } from './notifications/delivery-provider';
 import { createMessageDeliveryProvider } from './notifications/delivery-provider-factory';
 import { GatedMessageDelivery } from './notifications/gated-message-delivery';
+import {
+  InMemoryRecipientSmsVolumeLedger,
+  PgRecipientSmsVolumeLedger,
+} from './notifications/recipient-sms-volume';
 import { SendService } from './notifications/send-service';
 import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
@@ -1024,6 +1036,16 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // #1271 — a resolved estimate/invoice with no job cannot approve without
     // a service location to open the job at.
     serviceLocationReferenceCheck(locationRepo),
+    // #1463 — a technician assignee must be an active technician of this tenant.
+    technicianReferenceCheck(userRepo),
+    // #1480 — a send_invoice with no recipient must have one on file.
+    sendRecipientReferenceCheck({ invoiceRepo, jobRepo, customerRepo }),
+    // #1476 / #1480 — an estimate/invoice/booking with no job and no customer.
+    executionAnchorReferenceCheck(),
+    // #1490 — a second invoice from an estimate that is already invoiced.
+    estimateInvoicedReferenceCheck({ estimateRepo, invoiceRepo }),
+    // #1490 — send_estimate / send_estimate_nudge must name a real estimate.
+    estimateReferenceCheck(estimateRepo),
   ];
 
   const webhookSettingsRepo = settingsRepo;
@@ -1463,6 +1485,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         auditRepo,
         enforcement: config.TCPA_CONSENT_ENFORCEMENT,
         consentLedger: consentEventRepo,
+        // #1402 §18 — per-recipient volume cap on customer texts (owner-class
+        // sends, incl. E1 emergency pages, are never capped).
+        recipientVolumeCap: {
+          ledger: pool
+            ? new PgRecipientSmsVolumeLedger(pool)
+            : new InMemoryRecipientSmsVolumeLedger(),
+          maxPerWindow: config.SMS_RECIPIENT_CAP_PER_WINDOW,
+          windowHours: config.SMS_RECIPIENT_CAP_WINDOW_HOURS,
+        },
       })
     : null;
 
@@ -2708,6 +2739,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
+    // #1485 — the same approval-time checks, run before a routed proposal
+    // persists, so an auto-approve can't skip what a tap refuses.
+    approvalReferenceChecks,
     // B8 — create_customer draft-time duplicate detection parity: the SAME
     // customerRepo the telephony FSM (twilio-adapter.ts) already uses to
     // build its duplicateLoader, so the worker's create_customer proposals
@@ -4941,7 +4975,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     },
     customerRepo)
   );
-  app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo));
+  app.use('/api/time-entries', createTimeEntriesRouter(timeEntryRepo, auditRepo, userRepo));
   // P10-001: portal session creation/revocation. Mounted at
   // `/api/portal-sessions` (NOT `/api/customers/:id/portal-session`)
   // because routes/customers.ts is on the freeze list — the body
@@ -4962,7 +4996,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       sendService,
     }),
   );
-  app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo, locationRepo));
+  app.use('/api/leads', createLeadsRouter(leadRepo, customerRepo, auditRepo, locationRepo, userRepo));
   app.use('/api/locations', createLocationRouter(locationRepo, ownership, auditRepo));
   app.use('/api/jobs', createJobRouter(jobRepo, timelineRepo, auditRepo, ownership, queue, feedbackDispatcher, customerRepo, locationRepo, {
     estimateRepo,
@@ -5156,6 +5190,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       delayNotificationCoordinator,
       // #1279 — canonical appointment-level assignment writes.
       assignment: { assignmentRepo, userRepo, workingHoursRepo, unavailableBlockRepo },
+      // #1402 — outside-business-hours warning on create/reschedule.
+      settingsRepo,
     }, auditRepo)
   );
   // UC-3 — presence store goes cluster-wide when REDIS_URL is set (in-memory
@@ -5700,6 +5736,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // DunningConfigRepository.upsert. Same repo instance the overdue sweep
       // reads, so a saved policy applies on the next sweep tick.
       { dunningConfigRepo },
+      // #1463 — backupSupervisorUserId must name an active tenant member.
+      { userRepo },
     ),
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
@@ -5816,6 +5854,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // be booked — without this repo the drafting handler cannot see the gap
       // and the proposal auto-approves into a guaranteed execution failure.
       locationRepo,
+      // #1480 — the same approval-time checks, run before a drafted card
+      // persists, so "approved automatically" can't skip what a tap refuses.
+      approvalReferenceChecks,
       // #1045 — back-to-back travel warning on held slots.
       feasibilityDeps,
       // #1173 — the files repo + object storage an Assistant chat photo was
@@ -7038,6 +7079,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // written back as, or on what a "104 Cedar" answer is matched against.
     // Replaces the adapter's own `service_locations` query.
     locationRepo,
+    // #1485 — the same approval-time checks, run before a drafted card
+    // persists, so the close asks for what is missing.
+    approvalReferenceChecks,
     // U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
     // read once per session, so the in-app live path books "Thursday at 2pm"
     // in the tenant's zone exactly like the recorded-memo path.

@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express, { Express, Request, Response, NextFunction } from 'express';
 import request from 'supertest';
-import { createConversationRouter } from '../../src/routes/conversations';
+import { createConversationRouter, type ConversationReplyRouterDeps } from '../../src/routes/conversations';
+import { SmsSuppressedError } from '../../src/notifications/gated-message-delivery';
 import {
   InMemoryConversationRepository,
 } from '../../src/conversations/conversation-service';
@@ -524,5 +525,62 @@ describe('malformed :id never reaches Postgres as a raw uuid comparison (#882)',
     );
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('NOT_FOUND');
+  });
+});
+
+describe('POST /api/conversations/:id/reply — per-recipient SMS cap (#1479)', () => {
+  it('answers 429 with plain-language copy (not 502 DELIVERY_FAILED) when the cap blocks the text', async () => {
+    const conversationRepo = new InMemoryConversationRepository();
+    const conv = await conversationRepo.createConversation({
+      tenantId: TENANT_ID,
+      title: 'Sam Smith',
+      entityType: 'customer',
+      entityId: 'cust-1',
+      createdBy: USER_ID,
+    });
+    const app: Express = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: USER_ID,
+        sessionId: 'session-conv-1',
+        tenantId: TENANT_ID,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use(
+      '/api/conversations',
+      createConversationRouter(conversationRepo, new InMemoryAuditRepository(), undefined, {
+        customerRepo: {
+          findById: vi.fn().mockResolvedValue({
+            id: 'cust-1',
+            tenantId: TENANT_ID,
+            displayName: 'Sam Smith',
+            preferredChannel: 'sms',
+            smsConsent: true,
+            isArchived: false,
+            primaryPhone: '+15555550123',
+          }),
+        },
+        dncRepo: { isOnDnc: vi.fn().mockResolvedValue(false) },
+        dispatchRepo: {
+          create: vi.fn().mockImplementation(async (input) => ({ id: 'disp-1', ...input })),
+        },
+        delivery: {
+          sendSms: vi.fn().mockRejectedValue(new SmsSuppressedError('recipient_volume_cap')),
+          sendEmail: vi.fn(),
+        },
+      } as unknown as ConversationReplyRouterDeps),
+    );
+
+    const res = await request(app)
+      .post(`/api/conversations/${conv.id}/reply`)
+      .send({ body: 'On our way!', channel: 'sms' });
+
+    expect(res.status).toBe(429);
+    expect(res.body.error).toBe('SMS_VOLUME_CAP');
+    expect(res.body.message).toMatch(/maximum number of texts/i);
+    expect(res.body.message).not.toMatch(/suppressed|recipient_volume_cap/);
   });
 });

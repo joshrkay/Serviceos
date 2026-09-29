@@ -1,5 +1,6 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
 import { startVoiceSession, voiceInput, approveAndAwaitExecution, ensureTenantTimezone } from './helpers/voice-flow';
+import { matrixCustomerPhone } from './fixtures/tokens';
 
 /**
  * SMS-01 — outbound SMS dispatch records: create a consenting customer + job +
@@ -116,11 +117,11 @@ matrixTest('SMS-01', 'Outbound SMS dispatch records + entity_type CHECK', async 
   // Execution fires the confirmation through scheduling-notifications.
   await chain(h, true, '01');
   // QA-2026-07-26 — callerPhone = the seeded customer's phone (fixtures/
-  // seed.ts: '555-0100') so InAppVoiceAdapter resolves the caller up front;
+  // seed.ts, per run: matrixCustomerPhone()) so InAppVoiceAdapter resolves the caller up front;
   // otherwise "our customer" below has no name to fall back on.
   // Spoken times resolve only in the tenant's own zone — see ensureTenantTimezone.
   await ensureTenantTimezone(h, h.tenantA.token, '01');
-  const sessionId = await startVoiceSession(h, h.tenantA.token, '01', '555-0100');
+  const sessionId = await startVoiceSession(h, h.tenantA.token, '01', matrixCustomerPhone());
   if (!sessionId) return void h.evidence.fail('Voice session could not be started.');
   const proposalIds = await voiceInput(
     h,

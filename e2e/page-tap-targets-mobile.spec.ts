@@ -42,11 +42,8 @@ const STATIC_ROUTES = [
  * target, matched on `${tag} "${accessible name}"`.
  */
 const ALLOWLIST: RegExp[] = [
-  // /settings — inline-text links inside a sentence of the intake / booking
-  // link cards ("…appear in your Lead Pipeline automatically", "…an approval
-  // in your approval queue…"). Each sits next to its card's full-size actions.
-  /^button "Lead Pipeline" /,
-  /^button "approval queue" /,
+  // (empty) #1481 made the /settings intake / booking cards' in-sentence
+  // links ("Lead Pipeline", "approval queue") full 44px targets.
 ];
 
 const INTERACTIVE =
@@ -176,6 +173,32 @@ test.describe('page-level tap targets — mobile bar (#1398)', () => {
         const box = await button.boundingBox();
         expect(Math.round(box!.width)).toBeGreaterThanOrEqual(MIN);
         expect(Math.round(box!.height)).toBeGreaterThanOrEqual(MIN);
+      });
+
+      // #1402 §7 — the lead detail's assign-by-name picker. No lead is seeded,
+      // so create one through the API first, then measure the page.
+      test('lead detail (assign picker) — every visible control is ≥44×44, no horizontal overflow', async ({
+        page,
+        request,
+      }) => {
+        const apiURL = process.env.E2E_DEVAUTH_API_URL ?? 'http://127.0.0.1:3001';
+        const created = await request.post(`${apiURL}/api/leads`, {
+          headers: { Authorization: `Bearer ${DEV_TOKEN}` },
+          data: { firstName: 'Tap', lastName: 'Target', source: 'phone_call' },
+        });
+        expect(created.ok(), `create lead: ${created.status()}`).toBe(true);
+        const { id } = (await created.json()) as { id: string };
+
+        await page.goto(`/leads/${id}`);
+        if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+        await dismissWhatsNewModal(page);
+        await expect(page.getByLabel('Assign lead')).toBeVisible();
+        await page.waitForTimeout(1_000);
+        await dismissWhatsNewModal(page);
+
+        const small = (await smallTargets(page)).filter((s) => !ALLOWLIST.some((re) => re.test(s)));
+        expect(small, `/leads/${id} at ${width}px:\n${small.join('\n')}`).toEqual([]);
+        expect(await horizontalOverflow(page), 'lead detail horizontal overflow').toBeLessThanOrEqual(0);
       });
 
       test('/customers add-customer sheet — the SMS-consent row is ≥44 tall and full width', async ({ page }) => {

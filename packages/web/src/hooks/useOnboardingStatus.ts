@@ -6,7 +6,30 @@ export interface OnboardingStatusResult {
   data: OnboardingStatusResponse | null;
   isLoading: boolean;
   error: string | null;
+  /**
+   * #1481 — the API refused the caller because their membership was
+   * deactivated (403 `code: 'ACCESS_REVOKED'`), not a transient failure.
+   */
+  accessRevoked: boolean;
   refetch: () => Promise<void>;
+}
+
+/** Thrown when the API says the caller's access to the tenant was removed. */
+class AccessRevokedError extends Error {
+  constructor() {
+    super('ACCESS_REVOKED');
+    this.name = 'AccessRevokedError';
+  }
+}
+
+async function isAccessRevoked(res: Response): Promise<boolean> {
+  if (res.status !== 403) return false;
+  try {
+    const body = (await res.json()) as { code?: unknown };
+    return body.code === 'ACCESS_REVOKED';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -42,7 +65,10 @@ function fetchStatusCoalesced(
     inflightStatus = (async () => {
       try {
         const res = await apiFetch('/api/onboarding/status');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          if (await isAccessRevoked(res)) throw new AccessRevokedError();
+          throw new Error(`HTTP ${res.status}`);
+        }
         const body = (await res.json()) as OnboardingStatusResponse;
         lastStatus = { body, at: Date.now() };
         return body;
@@ -74,6 +100,7 @@ export function useOnboardingStatus(
   const [data, setData] = useState<OnboardingStatusResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [accessRevoked, setAccessRevoked] = useState(false);
   const requestVersionRef = useRef(0);
 
   // Error backoff: the interval keeps ticking, but after consecutive
@@ -97,6 +124,7 @@ export function useOnboardingStatus(
         nextAttemptAtRef.current = 0;
         setData(body);
         setError(null);
+        setAccessRevoked(false);
       } catch (err) {
         if (myVersion !== requestVersionRef.current) return;
         if (err instanceof DOMException && err.name === 'AbortError') return;
@@ -104,6 +132,7 @@ export function useOnboardingStatus(
         nextAttemptAtRef.current =
           Date.now() + Math.min(Math.max(pollIntervalMs, 1000) * 2 ** failures, BACKOFF_CAP_MS);
         setError(err instanceof Error ? err.message : 'Unknown error');
+        setAccessRevoked(err instanceof AccessRevokedError);
       } finally {
         if (myVersion === requestVersionRef.current) setIsLoading(false);
       }
@@ -128,5 +157,5 @@ export function useOnboardingStatus(
     return () => clearInterval(id);
   }, [load, pollIntervalMs, enabled]);
 
-  return { data, isLoading, error, refetch };
+  return { data, isLoading, error, accessRevoked, refetch };
 }

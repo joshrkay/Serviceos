@@ -29,12 +29,16 @@ import {
   LeadStage,
 } from '../leads/enums';
 import { LocationRepository } from '../locations/location';
+import { UserRepository } from '../users/user';
+import { requireActiveTenantMember } from '../users/tenant-member';
 
 export function createLeadsRouter(
   leadRepo: LeadRepository,
   customerRepo: CustomerRepository,
   auditRepo: AuditRepository,
-  locationRepo: LocationRepository
+  locationRepo: LocationRepository,
+  // #1463 — an assignee must be an active member of the caller's tenant.
+  userRepo: Pick<UserRepository, 'findById'>
 ): Router {
   const router = Router();
 
@@ -47,6 +51,14 @@ export function createLeadsRouter(
     requirePermission('customers:create'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = createLeadSchema.parse(req.body);
+      if (parsed.assignedUserId) {
+        await requireActiveTenantMember(
+          userRepo,
+          req.auth!.tenantId,
+          parsed.assignedUserId,
+          'assignedUserId'
+        );
+      }
       const { lead, outcome } = await captureLead(
         {
           ...parsed,
@@ -153,6 +165,14 @@ export function createLeadsRouter(
     notFoundOnMalformedId('Lead not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = updateLeadSchema.parse(req.body);
+      if (parsed.assignedUserId) {
+        await requireActiveTenantMember(
+          userRepo,
+          req.auth!.tenantId,
+          parsed.assignedUserId,
+          'assignedUserId'
+        );
+      }
       const updated = await updateLead(
         req.auth!.tenantId,
         req.params.id,

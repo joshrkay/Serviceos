@@ -25,6 +25,11 @@ import { Proposal, ProposalRepository, ProposalType, missingFieldsFor } from '..
 import { applyChainMetadata } from '../proposals/chain';
 import { validateProposalPayload } from '../proposals/contracts';
 import { clearSatisfiedMissingFields } from '../proposals/missing-fields';
+import {
+  askForExecutabilityGaps,
+  holdForExecutability,
+  type ApprovalReferenceCheck,
+} from '../proposals/approval-reference-checks';
 // Aliased — the card field this feeds is also called `undoExpiresAt`.
 import {
   undoExpiresAt as undoWindowCloseAt,
@@ -593,6 +598,13 @@ export interface AssistantRouterDeps {
    * auto-approving into a guaranteed failure. Optional; absent → no gate.
    */
   locationRepo?: LocationRepository;
+  /**
+   * #1480 — the approval-time reference checks app.ts wires for every
+   * approval channel. Run against each drafted proposal before it persists,
+   * so a card its status decision auto-approved is held (and the reply asks
+   * for the missing piece) when a tap would have been refused.
+   */
+  approvalReferenceChecks?: ApprovalReferenceCheck[];
   /** #1045 — see HandlerRegistryDeps.feasibilityDeps. */
   feasibilityDeps?: FeasibilityDependencies;
   /**
@@ -3069,6 +3081,7 @@ async function generateAssistantReply(
             tenantId,
             userId,
             intent: classification.intentType,
+            message: lastUserText,
             ...(classification.extractedEntities
               ? { extractedEntities: classification.extractedEntities as Record<string, unknown> }
               : {}),
@@ -3521,6 +3534,11 @@ async function generateAssistantReply(
           // A caller without the direct permission never gets a self-executing
           // proposal — their draft waits for the approval tap instead.
           downgradeIfCallerLacksDirectPermission(proposal, callerRole);
+          // #1480 — the same executability check a tap runs.
+          Object.assign(
+            proposal,
+            (await holdForExecutability(tenantId, proposal, deps.approvalReferenceChecks)).proposal,
+          );
           await deps.proposalRepo.create(proposal);
           if (proposal.status === 'draft') {
             await deps.proposalRepo.updateStatus(tenantId, proposal.id, 'ready_for_review');
@@ -3753,6 +3771,15 @@ async function generateAssistantReply(
         // A caller without the direct permission never gets a self-executing
         // proposal — their draft waits for the approval tap instead.
         downgradeIfCallerLacksDirectPermission(proposal, callerRole);
+        // #1480 — the ONE executability check a human tap runs
+        // (approveProposal), run here too, so a card that cannot execute is
+        // never "approved automatically" and the reply asks for what is missing.
+        const { proposal: executable, gaps: executionGaps } = await holdForExecutability(
+          tenantId,
+          proposal,
+          deps.approvalReferenceChecks,
+        );
+        Object.assign(proposal, executable);
         // ONE REQUEST, ONE CARD — the correction half. The operator said "no,
         // make it Thursday": they have ONE booking in mind, so the thread ends
         // up with ONE card, rewritten in place. The row keeps its id (anything
@@ -3813,7 +3840,9 @@ async function generateAssistantReply(
             content:
               (clarification
                 ? `${uiProposal.title}.\n\n${clarification}`
-                : `${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`) +
+                : executionGaps.length > 0
+                  ? `${uiProposal.title}. ${askForExecutabilityGaps(executionGaps, proposal.payload)}`
+                  : `${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`) +
               (createAndSend ? CREATE_AND_SEND_NEXT_STEP : ''),
             reasoning: classification.reasoning,
             proposal: uiProposal,

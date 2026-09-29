@@ -112,6 +112,21 @@ describe('LiveTemplatesSection — fetch + filter by active vertical packs', () 
     expect(allItems[1]).toHaveTextContent('used 3×');
   });
 
+  // #1481 — Settings → Vertical packs activates versioned pack ids
+  // ('hvac-v1'); the page only matched bare 'hvac'/'plumbing' and told an
+  // HVAC tenant "No vertical pack is active".
+  it('treats versioned pack ids (hvac-v1) as their vertical and loads its templates', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse({ activeVerticalPacks: ['hvac-v1'] }))
+      .mockResolvedValueOnce(jsonResponse([hvacTemplate]));
+
+    render(<LiveTemplatesSection />);
+
+    expect(await screen.findByText('AC Tune-Up')).toBeInTheDocument();
+    expect(screen.queryByText(/No vertical pack is active/i)).not.toBeInTheDocument();
+    expect(apiFetchMock.mock.calls.some((c) => c[0] === '/api/templates?verticalType=hvac')).toBe(true);
+  });
+
   it('renders the activation nudge when no vertical pack is active', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ activeVerticalPacks: [] }));
 

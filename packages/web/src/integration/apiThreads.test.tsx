@@ -25,9 +25,14 @@ import { InvoicesPage } from '../components/invoices/InvoicesPage';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-/** Mock every fetch() to resolve with the same JSON body (a bare array). */
+/**
+ * Mock every fetch() to resolve with the same JSON body (a bare array). A
+ * FRESH Response per call: a page that fires more than one request on mount
+ * (JobsList also loads the technician roster, #1402) would otherwise find the
+ * shared body already consumed.
+ */
 function mockFetch(body: unknown, status = 200) {
-  return vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
     new Response(JSON.stringify(body), {
       status,
       headers: { 'Content-Type': 'application/json' },

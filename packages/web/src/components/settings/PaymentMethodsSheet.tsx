@@ -137,7 +137,7 @@ export function PaymentMethodsSheet({ onClose }: PaymentMethodsSheetProps) {
           <button
             onClick={onClose}
             aria-label="Close"
-            className="flex size-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+            className="flex size-11 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
           >
             <X size={16} />
           </button>
@@ -223,7 +223,7 @@ export function PaymentMethodsSheet({ onClose }: PaymentMethodsSheetProps) {
               onClick={disconnect}
               disabled={busy}
               data-testid="payment-methods-disconnect"
-              className="rounded-xl border border-red-200 bg-white px-4 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-60"
+              className="min-h-11 min-w-11 rounded-xl border border-red-200 bg-white px-4 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-60"
             >
               {busy ? 'Disconnecting…' : 'Disconnect'}
             </button>
@@ -233,7 +233,7 @@ export function PaymentMethodsSheet({ onClose }: PaymentMethodsSheetProps) {
               onClick={startOnboarding}
               disabled={busy}
               data-testid="payment-methods-connect"
-              className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-60"
+              className="min-h-11 min-w-11 rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-60"
             >
               {busy
                 ? 'Redirecting…'
