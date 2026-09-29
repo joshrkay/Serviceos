@@ -218,7 +218,7 @@ function SignatureCanvas({ onChange, canvasRef: externalRef }: {
 
 // ─── Approval sheet ───────────────────────────────────────────────────────
 function ApprovalSheet({
-  estimateNumber, customer, total, token, expectedVersion, selectedLineItemIds, onStale, onClose, onConfirm,
+  estimateNumber, customer, total, token, expectedVersion, selectedLineItemIds, onStale, onBlocked, onClose, onConfirm,
 }: {
   estimateNumber: string; customer: string; total: number;
   /** When set, submit calls the real /public/estimates/:token/approve endpoint. */
@@ -229,6 +229,9 @@ function ApprovalSheet({
   selectedLineItemIds?: string[];
   /** Called when the server reports the estimate changed (409) since load. */
   onStale?: () => void;
+  /** Called for any OTHER 409 (e.g. the job already has an accepted estimate):
+   *  the estimate can't be accepted, and re-offering Accept would loop. */
+  onBlocked?: (message: string) => void;
   onClose: () => void; onConfirm: (view?: PublicEstimateView) => void;
 }) {
   const sigRef = useRef<HTMLCanvasElement | null>(null);
@@ -258,10 +261,17 @@ function ApprovalSheet({
           }),
         });
         if (res.status === 409) {
-          // The estimate was revised after the customer opened it. Bounce
-          // back to the page so they review the latest version first.
+          // #1473 — 409 has several causes; the API names them in
+          // details.reason. Only a revision bounces back to review the
+          // latest version (a reason-less 409 keeps that legacy meaning).
+          const body = await res.json().catch(() => ({} as any));
+          const reason: string | undefined = body?.details?.reason;
           setLoading(false);
-          onStale?.();
+          if (reason === undefined || reason === 'estimate_revised') {
+            onStale?.();
+          } else {
+            onBlocked?.(body.message ?? 'This estimate can no longer be accepted. Please contact us.');
+          }
           return;
         }
         if (!res.ok) {
@@ -616,6 +626,9 @@ export function EstimateApprovalPage() {
   // (version bumped) after the customer opened the page. The banner asks
   // them to review the latest version; approve is also blocked server-side.
   const [revised, setRevised] = useState(false);
+  // #1473 — a non-revision 409 on approve (e.g. another estimate on the job
+  // was already accepted): show the server's reason and stop offering Accept.
+  const [blockedMessage, setBlockedMessage] = useState<string | null>(null);
   // Good-better-best: the line-item ids the customer has chosen. Null
   // until the estimate loads, then seeded from the server's defaults.
   const [selectedIds, setSelectedIds] = useState<string[] | null>(null);
@@ -890,6 +903,11 @@ export function EstimateApprovalPage() {
   return (
     <>
       <div className="min-h-screen bg-background">
+        {blockedMessage && (
+          <div role="alert" className="bg-red-50 border-b border-red-200 px-5 py-3 text-center">
+            <p className="text-sm text-red-800 max-w-lg mx-auto">{blockedMessage}</p>
+          </div>
+        )}
         {revised && (
           <div className="bg-amber-50 border-b border-amber-200 px-5 py-3 text-center">
             <p className="text-sm text-amber-800 max-w-lg mx-auto">
@@ -1222,7 +1240,7 @@ export function EstimateApprovalPage() {
 
         {/* Fixed CTA */}
         {(() => {
-          if (isExpired || isAlreadyDeclined) return null;
+          if (isExpired || isAlreadyDeclined || blockedMessage) return null;
 
           // Show the Pay-deposit CTA whenever the
           // deposit is payable (policy-agnostic, computed server-side). For
@@ -1288,6 +1306,7 @@ export function EstimateApprovalPage() {
           expectedVersion={apiView?.version}
           selectedLineItemIds={hasSelectable ? (selectedIds ?? []) : undefined}
           onStale={() => { setRevised(true); setAppr(false); }}
+          onBlocked={(message) => { setBlockedMessage(message); setAppr(false); }}
           onClose={() => setAppr(false)}
           onConfirm={(view) => {
             if (view) setApiView(view);

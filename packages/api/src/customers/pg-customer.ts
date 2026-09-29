@@ -205,12 +205,15 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
     }
 
     // #1401 — service-type chip filter: a live location tagged with the type.
+    // #1473 — case-insensitive: rows written before write-normalisation kept
+    // the caller's casing ('plumbing' vs the 'Plumbing' chip).
     if (options?.serviceType) {
       conditions.push(
         `EXISTS (SELECT 1 FROM service_locations sl
                  WHERE sl.tenant_id = $1 AND sl.customer_id = customers.id
                    AND sl.is_archived = false
-                   AND sl.service_types @> ARRAY[$${paramIndex}]::text[])`
+                   AND EXISTS (SELECT 1 FROM unnest(sl.service_types) AS st(v)
+                               WHERE lower(st.v) = lower($${paramIndex})))`
       );
       params.push(options.serviceType);
       paramIndex++;

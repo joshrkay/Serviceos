@@ -17,6 +17,7 @@
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { usePendingProposals, _resetPendingProposalsCacheForTests } from './usePendingProposals';
+import { emitProposalsChanged } from '../lib/proposal-events';
 
 interface ProposalRow {
   id: string;
@@ -194,5 +195,20 @@ describe('P2-033 — usePendingProposals', () => {
 
     await waitFor(() => expect(result.current.error).toBe('HTTP 500'));
     expect(result.current.count).toBe(0);
+  });
+
+  // #1473 item 5 — the Shell badge (a separate hook instance) kept the old
+  // count after a proposal was dismissed in the inbox until the next poll.
+  it('refetches immediately when proposals change elsewhere in the app', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(makeList([row('p1'), row('p2')]))
+      .mockResolvedValueOnce(makeList([row('p2')]));
+
+    const { result } = renderHook(() => usePendingProposals({ pollIntervalMs: 60_000 }));
+    await waitFor(() => expect(result.current.count).toBe(2));
+
+    act(() => emitProposalsChanged());
+
+    await waitFor(() => expect(result.current.count).toBe(1));
   });
 });

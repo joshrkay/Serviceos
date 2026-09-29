@@ -16,7 +16,11 @@ import { createLogger } from '../logging/logger';
 import { computeCorrections } from './corrections/correction';
 import type { CorrectionRepository } from './corrections/correction';
 import { clearSatisfiedMissingFields } from './missing-fields';
-import { describeDanglingReferences, type ApprovalOptions } from './approval-reference-checks';
+import {
+  describeDanglingReferences,
+  executabilityGaps,
+  type ApprovalOptions,
+} from './approval-reference-checks';
 import {
   clearPendingReferencesForEdit,
   type EntityAliasCandidateCapture,
@@ -323,16 +327,14 @@ export async function approveProposal(
   // tenant owns is an unfilled gate wearing a UUID. Refuse it the same way,
   // so the review card's edit path takes over instead of an execution
   // failure after the human's tap (see approval-reference-checks.ts).
-  if (options?.referenceChecks?.length) {
-    const dangling = (
-      await Promise.all(options.referenceChecks.map((check) => check(tenantId, proposal)))
-    ).flat();
-    if (dangling.length > 0) {
-      throw new ValidationError(
-        describeDanglingReferences(dangling),
-        { missingFields: dangling },
-      );
-    }
+  // #1480 — the SAME executabilityGaps a drafting surface runs before it
+  // lets a status decision auto-approve (holdIfNotExecutable).
+  const dangling = await executabilityGaps(tenantId, proposal, options?.referenceChecks);
+  if (dangling.length > 0) {
+    throw new ValidationError(
+      describeDanglingReferences(dangling),
+      { missingFields: dangling },
+    );
   }
 
   const transitioned = transitionProposal(proposal, 'approved', actorId);

@@ -571,7 +571,7 @@ export class PgEntityResolver implements EntityResolver {
       case 'customer':
         return this.resolveCustomer(tenantId, reference);
       case 'job':
-        return this.resolveJob(tenantId, reference);
+        return this.resolveJob(tenantId, reference, undefined, customerId);
       case 'invoice':
         // A verified customer anchor IS the scope when the operator named the
         // person and no paperwork ("nudge Khan", "remind Johnson"): the
@@ -720,6 +720,14 @@ export class PgEntityResolver implements EntityResolver {
     tenantId: string,
     reference: string,
     customerNeedleOverride?: string,
+    /**
+     * #1476 P2 — the customer the operator already picked. Scopes the lookup
+     * to THAT customer's jobs: "the QA Matrix job" after choosing the QA
+     * Matrix customer must not compete with every other QA Matrix job in the
+     * tenant (live: seven matches overflowed the picker into not_found while
+     * the chosen customer had four).
+     */
+    customerId?: string,
   ): Promise<EntityResolverResult> {
     // '' when the reference is pure filler ("that job"): strict_word_similarity
     // of an empty needle is 0, so such a reference keeps exactly today's
@@ -751,9 +759,12 @@ export class PgEntityResolver implements EntityResolver {
               AND c.is_archived = false
             WHERE j.tenant_id = $1
               AND ${SCORE_EXPR} > $3
+              ${customerId ? 'AND j.customer_id = $5' : ''}
             ORDER BY score DESC
             LIMIT ${MAX_JOB_CANDIDATES + 1}`,
-          [tenantId, reference, SIMILARITY_PREFILTER, needle],
+          customerId
+            ? [tenantId, reference, SIMILARITY_PREFILTER, needle, customerId]
+            : [tenantId, reference, SIMILARITY_PREFILTER, needle],
         )
         .then((r) => r.rows),
     );

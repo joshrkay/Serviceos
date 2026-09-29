@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiClient } from '../lib/apiClient';
+import { PROPOSALS_CHANGED } from '../lib/proposal-events';
 
 export interface PendingProposalSummary {
   id: string;
@@ -253,12 +254,21 @@ export function usePendingProposals(
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', onVisibilityChange);
     }
+    // #1473 — an approve / reject / dismiss anywhere in the app (inbox,
+    // assistant, dispatch) emits PROPOSALS_CHANGED; refetch at once so every
+    // badge instance (Shell, home cards) drops the stale count without
+    // waiting for the next poll. Forced, so the 2s response cache is bypassed.
+    const onProposalsChanged = () => {
+      void fetchOnce(true);
+    };
+    window.addEventListener(PROPOSALS_CHANGED, onProposalsChanged);
 
     return () => {
       stop();
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', onVisibilityChange);
       }
+      window.removeEventListener(PROPOSALS_CHANGED, onProposalsChanged);
     };
   }, [enabled, fetchOnce, pollIntervalMs]);
 
