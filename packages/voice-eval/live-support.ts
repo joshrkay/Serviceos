@@ -312,8 +312,21 @@ export interface IntentRow {
   intent: string;
 }
 
+/** One row the classifier got wrong — enough to bucket it without a re-run (#1469). */
+export interface LiveIntentMiss {
+  utterance: string;
+  gold: string;
+  pred: string;
+  /** When pred is 'unknown': why the classifier fell through (low_confidence, intent_off_surface, parse_failed, unknown_intent…). */
+  unknownReason?: string;
+  /** When pred is 'unknown': the intent the model actually picked (below the confidence floor / off the surface). */
+  modelIntent?: string;
+}
+
 export interface LiveIntentResult {
   pairs: { gold: string; pred: string }[];
+  /** Every row whose prediction differs from gold, in sample order. */
+  misses: LiveIntentMiss[];
   /** Count of rows resolved by a deterministic short-circuit (no LLM call). */
   fastPathHits: number;
   llmCalls: number;
@@ -335,16 +348,24 @@ export async function runLiveIntentEval(
 ): Promise<LiveIntentResult> {
   const { classifyIntent } = await import('../api/src/ai/orchestration/intent-classifier');
   const pairs: { gold: string; pred: string }[] = [];
+  const misses: LiveIntentMiss[] = [];
   let fastPathHits = 0;
   let llmCalls = 0;
   for (const r of rows) {
     const res = await classifyIntent(r.utterance, ctx, gateway);
     pairs.push({ gold: r.intent, pred: res.intentType });
+    if (res.intentType !== r.intent) {
+      const miss: LiveIntentMiss = { utterance: r.utterance, gold: r.intent, pred: res.intentType };
+      if (res.unknownReason) miss.unknownReason = res.unknownReason;
+      const modelIntent = res.lowConfidenceIntent ?? res.offSurfaceIntent;
+      if (modelIntent) miss.modelIntent = modelIntent;
+      misses.push(miss);
+    }
     if (res.tokenUsage) llmCalls++;
     else fastPathHits++;
     afterRow?.();
   }
-  return { pairs, fastPathHits, llmCalls };
+  return { pairs, misses, fastPathHits, llmCalls };
 }
 
 export interface SlotExample {
