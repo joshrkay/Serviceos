@@ -25,7 +25,7 @@ jobs:
           # Query for runs that produced actual QA reports (not gate-only skips).
           LAST_RUN=""
           for run_id in $(gh run list --workflow qa-recurring.yml --status success --limit 50 --json databaseId --jq '.[].databaseId'); do
-            if gh run download "$run_id" --dir /tmp/qa-check --pattern 'qa-status.json' 2>/dev/null; then
+            if gh run download "$run_id" --dir /tmp/qa-check --pattern '**/qa-status.json' 2>/dev/null; then
               LAST_RUN="$run_id"
               break
             fi
@@ -73,7 +73,7 @@ jobs:
           # Find the latest run that has an actual QA report artifact
           LAST_RUN=""
           for run_id in $(gh run list --workflow qa-recurring.yml --status success --limit 50 --json databaseId --jq '.[].databaseId'); do
-            if gh run download "$run_id" --dir /tmp/qa-latest --pattern 'qa-status.json' 2>/dev/null; then
+            if gh run download "$run_id" --dir /tmp/qa-latest --pattern '**/qa-status.json' 2>/dev/null; then
               LAST_RUN="$run_id"
               break
             fi
