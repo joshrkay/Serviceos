@@ -106,6 +106,9 @@ const REPLY_ERROR_STATUS: Record<ConversationReplyErrorCode, number> = {
   dnc_blocked: 403,
   // #680 — owner-initiated text to a customer with no recorded SMS consent.
   sms_consent_required: 403,
+  // #1479 — per-recipient SMS volume cap: a rate limit on that number, so the
+  // UI shows the plain-language message instead of a delivery failure.
+  sms_volume_cap: 429,
   delivery_failed: 502,
 };
 
