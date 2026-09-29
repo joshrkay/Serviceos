@@ -27,3 +27,4 @@ export * from './contracts/entity-alias.js';
 export * from './contracts/negotiation-event.js';
 export * from './contracts/notification.js';
 export * from './contracts/voice-answer.js';
+export * from './contracts/list-sort.js';

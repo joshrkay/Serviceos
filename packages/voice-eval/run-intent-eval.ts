@@ -46,7 +46,6 @@ import {
   type EvalMode,
 } from './baseline';
 import {
-  ActualCostCapExceededError,
   assertActualCostWithinCap,
   LIVE_INTENT_TARGET,
   LIVE_FALLBACK_WARNING,
@@ -58,6 +57,7 @@ import {
   evaluateGate,
   parseMaxUtterances,
   resolveCostCapCents,
+  runEvalCli,
   runLiveIntentEval,
   selectLiveProvider,
   sampleDeterministic,
@@ -101,13 +101,13 @@ const LIVE_NO_KEY =
   '   (classifyIntent) behind the production gateway. Set AI_PROVIDER_API_KEY\n' +
   '   (+ AI_PROVIDER_BASE_URL / AI_*_MODEL, as in baselines/intent-live.json recordCommand) to run it.';
 
-async function runLive(gate: boolean): Promise<void> {
+async function runLive(gate: boolean): Promise<number> {
   const selection = await selectLiveProvider();
-  if (!selection) { console.error(`ℹ️  ${LIVE_NO_KEY}`); process.exit(2); }
+  if (!selection) { console.error(`ℹ️  ${LIVE_NO_KEY}`); return 2; }
 
   const maxUtterances = parseMaxUtterances(process.argv);
   const full = loadTestSplit();
-  if (full.length === 0) { console.error('❌ empty test split; run generate-utterances.ts'); process.exit(1); }
+  if (full.length === 0) { console.error('❌ empty test split; run generate-utterances.ts'); return 1; }
   const sample = sampleDeterministic(full, (r) => r.utterance, maxUtterances);
 
   // Pre-flight cost cap — abort BEFORE spending if the projection is over cap
@@ -120,7 +120,7 @@ async function runLive(gate: boolean): Promise<void> {
   console.log(`   held-out rows:      ${full.length}${maxUtterances ? ` (sampled ${sample.length})` : ''}`);
   if (cost.projectedCents === null) {
     console.error(`\n❌ ABORT: no known price for model ${selection.model} — cannot enforce the cost cap.`);
-    process.exit(3);
+    return 3;
   }
   console.log(`   projected cost:     ${cost.projectedCents.toFixed(1)}c (cap ${capCents}c, conservative/no-cache)`);
   if (!cost.withinCap) {
@@ -128,7 +128,7 @@ async function runLive(gate: boolean): Promise<void> {
       `\n❌ ABORT: projected ${cost.projectedCents.toFixed(1)}c exceeds cap ${capCents}c.\n` +
       `   Lower the sample with --max-utterances N, or raise VOICE_EVAL_COST_CAP_CENTS.`,
     );
-    process.exit(3);
+    return 3;
   }
 
   // Build the real gateway lazily (imports the openai-bearing factory only on
@@ -152,17 +152,18 @@ async function runLive(gate: boolean): Promise<void> {
   const baselineExit = baselineStep('live', sample, report);
   const g = evaluateGate(report.accuracy, LIVE_INTENT_TARGET, gate);
   console.log(`   ${gate ? 'threshold' : 'reference target'}: ${(g.target * 100).toFixed(0)}%`);
-  if (baselineExit !== 0) process.exit(baselineExit);
+  if (baselineExit !== 0) return baselineExit;
   if (!g.pass) {
     console.error(`\n❌ FAIL: accuracy ${(report.accuracy * 100).toFixed(1)}% < ${(g.target * 100).toFixed(0)}%`);
-    process.exit(1);
+    return 1;
   }
   console.log(`\n✅ ${gate ? 'PASS (live, gated)' : 'reported (live, not gated)'}.\n`);
+  return 0;
 }
 
-function runOffline(gate: boolean): void {
+function runOffline(gate: boolean): number {
   const test = loadTestSplit();
-  if (test.length === 0) { console.error('❌ empty test split; run generate-utterances.ts'); process.exit(1); }
+  if (test.length === 0) { console.error('❌ empty test split; run generate-utterances.ts'); return 1; }
 
   const pairs: { gold: string; pred: string }[] = [];
   for (const r of test) pairs.push({ gold: r.intent, pred: classifyBaseline(r.utterance) });
@@ -179,28 +180,19 @@ function runOffline(gate: boolean): void {
   const g = evaluateGate(report.accuracy, OFFLINE_FLOOR, gate);
   console.log(`   ${gate ? 'threshold' : 'reference target'}: ${(g.target * 100).toFixed(0)}%  ` +
     `(LIVE target ${LIVE_INTENT_TARGET * 100}% / offline floor ${OFFLINE_FLOOR * 100}%)`);
-  if (baselineExit !== 0) process.exit(baselineExit);
+  if (baselineExit !== 0) return baselineExit;
   if (!g.pass) {
     console.error(`\n❌ FAIL: accuracy ${(report.accuracy * 100).toFixed(1)}% < ${(g.target * 100).toFixed(0)}%`);
-    process.exit(1);
+    return 1;
   }
   console.log(`\n✅ ${gate ? 'PASS' : 'reported (offline, not gated)'}.\n`);
+  return 0;
 }
 
-async function main(): Promise<void> {
+async function main(): Promise<number> {
   const live = process.argv.includes('--live');
   const gate = process.argv.includes('--gate');
-  if (live) await runLive(gate);
-  else runOffline(gate);
+  return live ? runLive(gate) : runOffline(gate);
 }
 
-main()
-  .then(() => {
-    // The production gateway's resilience/quota stack may hold timers; this is
-    // a one-shot CLI, so exit explicitly once the report is printed.
-    process.exit(0);
-  })
-  .catch((e) => {
-    console.error(e);
-    process.exit(e instanceof ActualCostCapExceededError ? 3 : 1);
-  });
+runEvalCli(main);
