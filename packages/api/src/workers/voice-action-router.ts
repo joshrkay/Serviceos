@@ -2613,6 +2613,14 @@ export function createVoiceActionRouterWorker(
             // Use the gate-reviewed proposal (carries any N-002 supervisor
             // markers) so the rendered SMS reflects the supervisor findings.
             const proposal = reviewedProposal;
+            // #1485 — a card the executability check found gaps on cannot be
+            // approved (the tap re-runs the check and refuses), so the owner
+            // is asked for the missing piece instead of offered a Y / one-tap
+            // approve: the review form, plus the same ask the chat reply makes.
+            const executabilityAsk =
+              outcome.executabilityGaps.length > 0
+                ? askForExecutabilityGaps(outcome.executabilityGaps, proposal.payload)
+                : undefined;
             await routeUnsupervisedProposal(
               {
                 auditRepo: ur.auditRepo,
@@ -2659,8 +2667,12 @@ export function createVoiceActionRouterWorker(
                       summary: proposal.summary,
                       payload: proposal.payload,
                     },
-                    { approveUrl: approveUrl || undefined },
+                    {
+                      approveUrl: approveUrl || undefined,
+                      ...(executabilityAsk ? { blockedBy: executabilityAsk } : {}),
+                    },
                   ),
+                ...(executabilityAsk ? { suppressApproveLink: true } : {}),
                 // RV-074 (F-4) — pass payload so the routing site can guard
                 // low/very_low proposals against one-tap Y-able links.
                 payload: proposal.payload,

@@ -132,4 +132,34 @@ describe('#1485 — voice-action-router: drafts that cannot execute are held and
     expect(proposal?.proposalType).toBe('draft_estimate');
     expect(proposal?.status).toBe('ready_for_review');
   });
+
+  it('unsupervised: the owner SMS asks for the service address and carries no one-tap approve link', async () => {
+    setSupervisorPresenceLoader(async () => false);
+    const sendSms = vi.fn(async (_to: string, _body: string) => {});
+    const worker = createVoiceActionRouterWorker({
+      gateway: gatewayByTask(ESTIMATE_REPLIES),
+      proposalRepo,
+      catalogRepo,
+      locationRepo,
+      entityResolver: resolvesNolo,
+      approvalReferenceChecks: [serviceLocationReferenceCheck(locationRepo)],
+      unsupervisedRouting: {
+        auditRepo: new InMemoryAuditRepository(),
+        sendSms,
+        secret: 'test-secret',
+        buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
+        resolveOwnerPhone: async () => '+15125550100',
+        resolveRouting: async () => 'queue_and_sms',
+      },
+    });
+
+    await worker.handle(msg('Draft an estimate for Nolo Cation: 1 Diagnostic Visit'), silentLogger());
+
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    const [, body] = sendSms.mock.calls[0];
+    expect(body).toMatch(/no service location yet — what's the service address\?/);
+    expect(body).not.toContain('https://api.example.com/approve?token=');
+    // A texted Y would be refused too — the SMS must not invite one.
+    expect(body).not.toMatch(/Reply Y/i);
+  });
 });
