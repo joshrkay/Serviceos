@@ -20,6 +20,11 @@ import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
 import type { LLMGateway, LLMRequest } from '../../../src/ai/gateway/gateway';
+import { InMemoryLocationRepository } from '../../../src/locations/location';
+import {
+  serviceLocationReferenceCheck,
+  type ApprovalReferenceCheck,
+} from '../../../src/proposals/approval-reference-checks';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
 import type {
   EntityResolver,
@@ -44,13 +49,13 @@ const INVOICE_CLASSIFIER = JSON.stringify({
 });
 const CONFIRM_YES = JSON.stringify({ answer: 'yes', reasoning: 'affirmative' });
 
-function phoneGateway(): LLMGateway {
+function phoneGateway(classifier: string): LLMGateway {
   return {
     complete: vi.fn(async (req: LLMRequest) => ({
       content:
         (req.metadata as { skill?: string } | undefined)?.skill === 'confirm_intent'
           ? CONFIRM_YES
-          : INVOICE_CLASSIFIER,
+          : classifier,
       model: 'mock',
       provider: 'mock',
       tokenUsage: { input: 1, output: 1, total: 2 },
@@ -78,7 +83,10 @@ afterEach(() => {
   for (const s of stores.splice(0)) s.dispose();
 });
 
-function makePhone(resolver: EntityResolver) {
+function makePhone(
+  resolver: EntityResolver,
+  opts: { classifier?: string; approvalReferenceChecks?: ApprovalReferenceCheck[] } = {},
+) {
   const store = new VoiceSessionStore({ startInterval: false });
   stores.push(store);
   const auditRepo = new InMemoryAuditRepository();
@@ -95,12 +103,13 @@ function makePhone(resolver: EntityResolver) {
   session.machine.dispatch({ type: 'caller_known', customerId: 'owner-cust' });
   const processor = createVoiceTurnProcessor({
     store,
-    gateway: phoneGateway(),
+    gateway: phoneGateway(opts.classifier ?? INVOICE_CLASSIFIER),
     businessName: 'Acme Plumbing',
     systemActorId: 'test-actor',
     auditRepo,
     proposalRepo,
     entityResolver: resolver,
+    ...(opts.approvalReferenceChecks ? { approvalReferenceChecks: opts.approvalReferenceChecks } : {}),
   });
   const turn = (speechResult: string) =>
     processor.speechTurn({ session, speechResult, callSid: 'CA-1485', tenantId: TENANT });
@@ -134,5 +143,42 @@ describe('#1485 — phone: a named job that matches nothing on the first turn', 
     expect(lines).toMatch(/wasn't able to find the record/i);
     expect(lines).not.toMatch(/Is that right\?/);
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+});
+
+const INVOICE_FOR_CUSTOMER = JSON.stringify({
+  intentType: 'create_invoice',
+  confidence: 0.93,
+  extractedEntities: {
+    customerName: 'QA Matrix North',
+    amount: 35000,
+    lineItemDescriptions: ['completed furnace repair'],
+  },
+});
+
+describe('#1485 — phone: the executability check runs before the close', () => {
+  it('an owner-line invoice for a customer with no service location asks for the address — never "taken care of"', async () => {
+    const { proposalRepo, turn } = makePhone(
+      resolverByKind({
+        customer: {
+          kind: 'resolved',
+          candidate: { id: CUST_NORTH, kind: 'customer', label: 'QA Matrix North', score: 0.97 },
+        },
+      }),
+      {
+        classifier: INVOICE_FOR_CUSTOMER,
+        // QA Matrix North has no service location on file.
+        approvalReferenceChecks: [serviceLocationReferenceCheck(new InMemoryLocationRepository())],
+      },
+    );
+
+    await turn('Invoice QA Matrix North 350 dollars for the completed furnace repair.');
+    const close = spoken(await turn('yes')).join(' ');
+
+    expect(close).toMatch(/no service location yet — what's the service address\?/);
+    expect(close).not.toMatch(/taken care of|confirmation shortly/i);
+    const [proposal] = await proposalRepo.findByTenant(TENANT);
+    expect(proposal?.proposalType).toBe('draft_invoice');
+    expect(proposal?.status).not.toBe('approved');
   });
 });
