@@ -42,7 +42,7 @@
  *     something", which `missingFields` alone (or a `voice_clarification`
  *     degrade) already proves.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { INTENT_TO_PROPOSAL_TYPE } from '../../src/proposals/voice-intent-map';
 import { buildTaskHandlers, HandlerRegistryDeps } from '../../src/ai/orchestration/handler-registry';
 import { TaskContext, TaskResult } from '../../src/ai/tasks/task-handlers';
@@ -115,6 +115,17 @@ import { buildLineItem, calculateDocumentTotals, type LineItem } from '../../src
 import type { AppointmentRepository } from '../../src/appointments/appointment';
 import type { JobRepository } from '../../src/jobs/job';
 import type { InvoicingQueueDeps } from '../../src/invoices/invoicing-queue';
+
+// Slots here are drafted against the fixed NOW (2026-06-01T12:00Z) below. #1402 refuses to book or move a visit to a start in the past, so pin
+// the wall clock before every fixture slot — these tests describe behaviour at
+// a fixed clock, not at whatever day CI happens to run.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-06-01T12:00:00.000Z'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const TENANT_ID = 't-1';
 const USER_ID = 'u-1';

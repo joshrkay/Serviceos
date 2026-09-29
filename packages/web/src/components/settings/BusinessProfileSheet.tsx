@@ -1,8 +1,9 @@
 /**
- * Business Profile editor — name, phone, email, timezone.
+ * Business Profile editor — name, phone, email, mailing address, timezone.
  *
- * Fields mirror what the backend accepts at PUT /api/settings.
- * Address + logo are a follow-up (need a backend schema extension).
+ * Fields mirror what the backend accepts at PUT /api/settings. The address
+ * (#1402 §13) is printed under the business name on estimates and invoices.
+ * Logo is a follow-up.
  *
  * Pattern: GET on open, PUT on save, Sonner toast on success/failure.
  */
@@ -15,6 +16,7 @@ interface BusinessProfileFields {
   businessName: string;
   businessPhone: string;
   businessEmail: string;
+  businessAddress: string;
   ownerPhone: string;
   timezone: string;
 }
@@ -23,6 +25,7 @@ const EMPTY: BusinessProfileFields = {
   businessName: '',
   businessPhone: '',
   businessEmail: '',
+  businessAddress: '',
   ownerPhone: '',
   timezone: '',
 };
@@ -73,6 +76,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
           businessName: data.businessName ?? '',
           businessPhone: data.businessPhone ?? '',
           businessEmail: data.businessEmail ?? '',
+          businessAddress: data.businessAddress ?? '',
           ownerPhone: data.ownerPhone ? formatPhoneForDisplay(data.ownerPhone) : '',
           timezone: data.timezone ?? '',
         });
@@ -108,6 +112,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
           businessName: fields.businessName.trim(),
           businessPhone: fields.businessPhone.trim() || null,
           businessEmail: fields.businessEmail.trim() || null,
+          businessAddress: fields.businessAddress.trim() || null,
           ownerPhone: fields.ownerPhone.trim() || null,
           timezone: fields.timezone || null,
         }),
@@ -133,6 +138,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
         businessName: storedOr('businessName', fields.businessName.trim()),
         businessPhone: storedOr('businessPhone', fields.businessPhone.trim()),
         businessEmail: storedOr('businessEmail', fields.businessEmail.trim()),
+        businessAddress: storedOr('businessAddress', fields.businessAddress.trim()),
         ownerPhone: storedOr('ownerPhone', fields.ownerPhone.trim()),
         timezone: storedOr('timezone', fields.timezone),
       });
@@ -235,6 +241,23 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
                   onChange={(e) => setFields((f) => ({ ...f, businessEmail: e.target.value }))}
                   placeholder="hello@ortega-hvac.com"
                   className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                />
+              </label>
+
+              <label htmlFor="bp-address" className="block">
+                <span className="text-sm text-slate-700">Business address</span>
+                <span className="block text-xs text-slate-500 mt-0.5">
+                  Printed on your estimates and invoices, under your company name.
+                </span>
+                <textarea
+                  id="bp-address"
+                  rows={3}
+                  maxLength={300}
+                  autoComplete="street-address"
+                  value={fields.businessAddress}
+                  onChange={(e) => setFields((f) => ({ ...f, businessAddress: e.target.value }))}
+                  placeholder={'1200 W Main St, Suite 4\nMesa, AZ 85201'}
+                  className="mt-1.5 min-h-11 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
                 />
               </label>
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiFetch } from '../utils/api-fetch';
+import { isAssignableMember } from '../utils/assignable-member';
 
 export interface TechnicianOption {
   id: string;
@@ -10,7 +11,7 @@ export interface TechnicianOption {
 }
 
 /**
- * Loads field technicians from GET /api/users?role=technician.
+ * Loads the ASSIGNABLE (active) field technicians from GET /api/users?role=technician.
  */
 export function useTechnicianRoster(): {
   technicians: TechnicianOption[];
@@ -31,7 +32,8 @@ export function useTechnicianRoster(): {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
         const list = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
-        const mapped: TechnicianOption[] = list.map(
+        // #1463 — suspended (deactivated) members are not assignable.
+        const mapped: TechnicianOption[] = list.filter(isAssignableMember).map(
           (u: { id: string; firstName?: string; lastName?: string; email?: string }) => {
             const name = [u.firstName, u.lastName].filter(Boolean).join(' ') || u.email || u.id;
             const parts = name.split(/\s+/).filter(Boolean);

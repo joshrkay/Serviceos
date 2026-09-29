@@ -22,6 +22,7 @@ import { InMemoryCustomerRepository, createCustomer } from '../../src/customers/
 import { InMemoryLocationRepository } from '../../src/locations/location';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { InMemoryUserRepository } from '../../src/users/user';
 
 const TENANT_ID = 'tenant-leads-1';
 const USER_ID = 'user-leads-1';
@@ -63,6 +64,7 @@ function buildPgLikeApp(): Express {
       new InMemoryCustomerRepository(),
       new InMemoryAuditRepository(),
       new InMemoryLocationRepository(),
+      new InMemoryUserRepository(),
     ),
   );
   return app;
@@ -133,6 +135,7 @@ describe('POST /api/leads with a phone already on file (#1406 D1)', () => {
         customers,
         new InMemoryAuditRepository(),
         new InMemoryLocationRepository(),
+        new InMemoryUserRepository(),
       ),
     );
   });
@@ -170,5 +173,88 @@ describe('POST /api/leads with a phone already on file (#1406 D1)', () => {
     expect(res.body.warnings).toEqual([
       { code: 'MATCHES_EXISTING_CUSTOMER', customerId: customer.id },
     ]);
+  });
+});
+
+describe('assignedUserId must name an active member of the caller\'s tenant (#1463)', () => {
+  let app: Express;
+  let users: InMemoryUserRepository;
+
+  async function addUser(tenantId: string, status: 'active' | 'suspended' = 'active'): Promise<string> {
+    const user = await users.create({
+      id: crypto.randomUUID(),
+      tenantId,
+      clerkUserId: `clerk-${crypto.randomUUID()}`,
+      email: 'member@example.com',
+      role: 'dispatcher',
+      canFieldServe: false,
+      status,
+    });
+    return user.id;
+  }
+
+  beforeEach(() => {
+    users = new InMemoryUserRepository();
+    app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: USER_ID,
+        sessionId: 'session-leads-1',
+        tenantId: TENANT_ID,
+        role: 'owner',
+      };
+      next();
+    });
+    app.use(
+      '/api/leads',
+      createLeadsRouter(
+        new InMemoryLeadRepository(),
+        new InMemoryCustomerRepository(),
+        new InMemoryAuditRepository(),
+        new InMemoryLocationRepository(),
+        users,
+      ),
+    );
+  });
+
+  async function newLead(): Promise<string> {
+    const res = await request(app).post('/api/leads').send({ firstName: 'Pat', source: 'web_form' });
+    return res.body.id as string;
+  }
+
+  it('PATCH refuses another tenant\'s user with a typed 400', async () => {
+    const leadId = await newLead();
+    const outsider = await addUser('tenant-leads-other');
+    const res = await request(app).patch(`/api/leads/${leadId}`).send({ assignedUserId: outsider });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      error: 'VALIDATION_ERROR',
+      message: 'assignedUserId must reference an active member of this tenant',
+    });
+  });
+
+  it('PATCH refuses a suspended member of the same tenant', async () => {
+    const leadId = await newLead();
+    const suspended = await addUser(TENANT_ID, 'suspended');
+    const res = await request(app).patch(`/api/leads/${leadId}`).send({ assignedUserId: suspended });
+    expect(res.status).toBe(400);
+  });
+
+  it('PATCH assigns an active member of the same tenant', async () => {
+    const leadId = await newLead();
+    const member = await addUser(TENANT_ID);
+    const res = await request(app).patch(`/api/leads/${leadId}`).send({ assignedUserId: member });
+    expect(res.status).toBe(200);
+    expect(res.body.assignedUserId).toBe(member);
+  });
+
+  it('POST refuses another tenant\'s user with a typed 400', async () => {
+    const outsider = await addUser('tenant-leads-other');
+    const res = await request(app)
+      .post('/api/leads')
+      .send({ firstName: 'Pat', source: 'web_form', assignedUserId: outsider });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
   });
 });

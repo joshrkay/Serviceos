@@ -18,8 +18,8 @@ describe('P11-007 RescheduleDialog', () => {
     render(
       <RescheduleDialog
         appointmentId="a-1"
-        initialStart="2026-06-01T15:00:00Z"
-        initialEnd="2026-06-01T16:00:00Z"
+        initialStart="2099-06-01T15:00:00Z"
+        initialEnd="2099-06-01T16:00:00Z"
       />
     );
     expect(screen.getByLabelText('scheduledStart')).toBeInTheDocument();
@@ -29,10 +29,10 @@ describe('P11-007 RescheduleDialog', () => {
   it('disables save when end is not after start', () => {
     render(<RescheduleDialog appointmentId="a-1" />);
     fireEvent.change(screen.getByLabelText('scheduledStart'), {
-      target: { value: '2026-06-01T15:00' },
+      target: { value: '2099-06-01T15:00' },
     });
     fireEvent.change(screen.getByLabelText('scheduledEnd'), {
-      target: { value: '2026-06-01T14:00' },
+      target: { value: '2099-06-01T14:00' },
     });
     expect(screen.getByRole('button', { name: /save/i })).toBeDisabled();
   });
@@ -48,10 +48,10 @@ describe('P11-007 RescheduleDialog', () => {
     render(<RescheduleDialog appointmentId="a-1" onSaved={onSaved} />);
 
     fireEvent.change(screen.getByLabelText('scheduledStart'), {
-      target: { value: '2026-06-01T15:00' },
+      target: { value: '2099-06-01T15:00' },
     });
     fireEvent.change(screen.getByLabelText('scheduledEnd'), {
-      target: { value: '2026-06-01T16:00' },
+      target: { value: '2099-06-01T16:00' },
     });
 
     fireEvent.click(screen.getByRole('button', { name: /save/i }));
@@ -78,10 +78,10 @@ describe('P11-007 RescheduleDialog', () => {
 
     render(<RescheduleDialog appointmentId="a-1" />);
     fireEvent.change(screen.getByLabelText('scheduledStart'), {
-      target: { value: '2026-06-01T15:00' },
+      target: { value: '2099-06-01T15:00' },
     });
     fireEvent.change(screen.getByLabelText('scheduledEnd'), {
-      target: { value: '2026-06-01T16:00' },
+      target: { value: '2099-06-01T16:00' },
     });
     fireEvent.click(screen.getByRole('button', { name: /save/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');

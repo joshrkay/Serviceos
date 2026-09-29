@@ -30,6 +30,7 @@ import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
 import { TaxRateSheet } from './TaxRateSheet';
+import { PaymentTermsSheet } from './PaymentTermsSheet';
 import { DunningLateFeeSheet } from './DunningLateFeeSheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
@@ -600,6 +601,7 @@ export function SettingsPage() {
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
   const [taxRateOpen, setTaxRateOpen] = useState(false);
+  const [paymentTermsOpen, setPaymentTermsOpen] = useState(false);
   const [lateFeesOpen, setLateFeesOpen] = useState(false);
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
@@ -959,6 +961,8 @@ export function SettingsPage() {
         { icon: FileText,   label: 'Deposit rules',          description: 'Require deposit on estimates over $X', action: () => setDepositRulesOpen(true) },
         { icon: FileText,   label: 'Discount policy',        description: 'Bounds for AI-proposed discounts', action: () => setDiscountPolicyOpen(true) },
         { icon: FileText,   label: 'Tax rate',               description: 'Default tax rate for new estimates and invoices', action: () => setTaxRateOpen(true) },
+        // #1402 §13 — defaultPaymentTermDays sets the due date on new invoices.
+        { icon: FileText,   label: 'Payment terms',          description: 'Days customers have to pay a new invoice', action: () => setPaymentTermsOpen(true) },
         // #1143 (row 8.10) — the only surface that sets the tenant's late-fee
         // policy; the overdue sweep drafts each fee for owner approval.
         { icon: FileText,   label: 'Late fees',              description: 'Fee on invoices still unpaid after a grace period', action: () => setLateFeesOpen(true) },
@@ -1748,6 +1752,9 @@ export function SettingsPage() {
 
       {/* #1288 — tenant default tax rate for new estimates/invoices. */}
       {taxRateOpen && <TaxRateSheet onClose={() => setTaxRateOpen(false)} />}
+
+      {/* #1402 §13 — default payment terms (days) for new invoices. */}
+      {paymentTermsOpen && <PaymentTermsSheet onClose={() => setPaymentTermsOpen(false)} />}
 
       {/* Late fees sheet — dunning late-fee policy (type, amount, grace, cap). */}
       {lateFeesOpen && (

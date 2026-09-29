@@ -8,6 +8,7 @@ import {
   ExternalLink, Lock, Building2, Smartphone, Briefcase, Search,
 } from 'lucide-react';
 import type { InvoiceResponse, LineItem as InvoiceLineItem, CatalogUnitValue } from '@ai-service-os/shared';
+import { centsToInputValue, parseMoneyToCents } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
 import { INVOICE_LIST_SORT, type InvoiceSortField, type ListSort } from '@ai-service-os/shared';
 import { ListSortSelect, listSortParams, type ListSortOption } from '../shared/ListSortSelect';
@@ -650,9 +651,14 @@ function MarkPaidSheet({
   amountDueCents: number;
   inv: InvCompat;
   onClose: () => void;
-  onPaid: () => void | Promise<void>;
+  /** Called after the API accepted the payment, with the amount recorded. */
+  onPaid: (amountCents: number) => void | Promise<void>;
 }) {
   const [method, setMethod] = useState<'card' | 'ach' | 'cash' | 'check'>('cash');
+  // #1402 §5 — the operator can record LESS than the balance (a deposit, a
+  // partial cash payment). Defaults to the full balance; parsed to integer
+  // cents with string math (parseMoneyToCents), never `Number(x) * 100`.
+  const [amountText, setAmountText] = useState(() => centsToInputValue(amountDueCents));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -664,9 +670,13 @@ function MarkPaidSheet({
   ] as const;
 
   async function handleSave() {
-    const amountCents = amountDueCents;
-    if (amountCents <= 0) {
+    if (amountDueCents <= 0) {
       setError('Nothing due on this invoice.');
+      return;
+    }
+    const amountCents = parseMoneyToCents(amountText);
+    if (amountCents === null || amountCents <= 0) {
+      setError('Enter the amount received, e.g. 40.00');
       return;
     }
     setSaving(true);
@@ -687,7 +697,7 @@ function MarkPaidSheet({
           typeof body?.message === 'string' ? body.message : `Payment failed (HTTP ${res.status})`,
         );
       }
-      await onPaid();
+      await onPaid(amountCents);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to record payment');
@@ -713,6 +723,20 @@ function MarkPaidSheet({
             </div>
             <p className="text-lg text-success">{centsToDisplay(amountDueCents)}</p>
           </div>
+
+          <label className="block">
+            <span className="text-xs text-muted-foreground">Amount received</span>
+            <input
+              aria-label="Amount received"
+              inputMode="decimal"
+              value={amountText}
+              onChange={(e) => setAmountText(e.target.value)}
+              className="mt-1.5 w-full min-h-11 rounded-lg border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary"
+            />
+            <span className="mt-1 block text-xs text-muted-foreground">
+              Less than {centsToDisplay(amountDueCents)} records a partial payment.
+            </span>
+          </label>
 
           <div>
             <p className="text-xs text-muted-foreground mb-2">Payment method received</p>
@@ -751,6 +775,99 @@ function MarkPaidSheet({
             {saving ? 'Saving…' : <><CheckCircle2 size={15} /> Confirm payment received</>}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Void (#1402 §5) ──────────────────────────────────────────────────────
+/**
+ * Offers "Void invoice" only where the API's invoice state machine allows it
+ * (INVOICE_STATUS_TRANSITIONS: open / partially_paid → void). Voiding goes
+ * through POST /api/invoices/:id/transition, which audits the change and
+ * kills any hosted payment link.
+ */
+const VOIDABLE_API_STATUSES = new Set(['open', 'partially_paid']);
+
+function VoidInvoiceAction({ invoiceId, invoiceNumber, apiStatus, onVoided }: {
+  invoiceId: string;
+  invoiceNumber: string;
+  apiStatus: string;
+  onVoided: () => void | Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [voiding, setVoiding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (apiStatus === 'paid') {
+    // paid → void is refused by the state machine; money goes back through
+    // a refund (the assistant's record_refund proposal), not a void.
+    return (
+      <p className="text-xs text-muted-foreground px-1">
+        Paid invoices can’t be voided. To give money back, record a refund — e.g. ask the
+        assistant “Refund $50 on {invoiceNumber}”.
+      </p>
+    );
+  }
+  if (!VOIDABLE_API_STATUSES.has(apiStatus)) return null;
+
+  async function confirmVoid() {
+    setVoiding(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/invoices/${invoiceId}/transition`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'void' }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(typeof body?.message === 'string' ? body.message : `Void failed (HTTP ${res.status})`);
+      }
+      setConfirming(false);
+      await onVoided();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to void invoice');
+    } finally {
+      setVoiding(false);
+    }
+  }
+
+  if (!confirming) {
+    return (
+      <button
+        type="button"
+        onClick={() => setConfirming(true)}
+        className="flex items-center justify-center gap-2 min-h-11 rounded-xl border border-border bg-card text-destructive py-3 text-sm hover:bg-secondary transition-colors"
+      >
+        Void invoice
+      </button>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 flex flex-col gap-2">
+      <p className="text-sm text-foreground">
+        Void {invoiceNumber}? The customer can no longer pay it and this can’t be undone.
+      </p>
+      {error && <p className="text-xs text-destructive">{error}</p>}
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={() => void confirmVoid()}
+          disabled={voiding}
+          className="flex-1 min-h-11 rounded-lg bg-destructive text-primary-foreground text-sm disabled:opacity-50"
+        >
+          {voiding ? 'Voiding…' : `Yes, void ${invoiceNumber}`}
+        </button>
+        <button
+          type="button"
+          onClick={() => setConfirming(false)}
+          disabled={voiding}
+          className="flex-1 min-h-11 rounded-lg border border-border text-sm text-foreground"
+        >
+          Keep it
+        </button>
       </div>
     </div>
   );
@@ -933,25 +1050,36 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
 
   // #1400 — "Download receipt" had no handler. Prints the API's totals and
   // each recorded payment; the business header comes from tenant settings.
-  async function downloadReceipt() {
+  // #1402 §5 — the same document labelled "Invoice" (with its due date) is
+  // the invoice PDF, available in every status.
+  async function printDocument(kind: 'receipt' | 'invoice') {
     if (!inv) return;
     let businessName = 'Your business';
     let businessContact: string | undefined;
+    let businessAddress: string | undefined;
     try {
       const res = await apiFetch('/api/settings');
       if (res.ok) {
-        const data = (await res.json()) as { businessName?: string | null; businessPhone?: string | null };
+        const data = (await res.json()) as {
+          businessName?: string | null;
+          businessPhone?: string | null;
+          businessAddress?: string | null;
+        };
         businessName = data.businessName?.trim() || businessName;
         businessContact = data.businessPhone?.trim() || undefined;
+        businessAddress = data.businessAddress?.trim() || undefined;
       }
     } catch {
       /* non-fatal — the receipt prints with a generic header */
     }
     const ok = printInvoiceReceipt({
+      kind,
+      dueDate: inv.dueDate ?? undefined,
       invoiceNumber: inv.invoiceNumber,
       customerName: invCompat.customer,
       businessName,
       businessContact,
+      businessAddress,
       lineItems: inv.lineItems.map((li) => ({ description: li.description, quantity: li.quantity, totalCents: li.totalCents })),
       totals: inv.totals,
       amountPaidCents,
@@ -960,7 +1088,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
       formatDate: (iso) => formatDateInTenantTz(iso, tz, { withYear: true }),
       methodLabel: (m) => PAYMENT_METHOD_LABEL[m] ?? m,
     });
-    if (!ok) toast.error('Allow pop-ups to download the receipt');
+    if (!ok) toast.error(`Allow pop-ups to download the ${kind}`);
   }
 
   return (
@@ -1187,12 +1315,24 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                 )}
                 {status === 'Paid' && (
                   <button
-                    onClick={() => void downloadReceipt()}
+                    onClick={() => void printDocument('receipt')}
                     className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card text-foreground py-3 text-sm hover:bg-secondary transition-colors"
                   >
                     <FileText size={14} /> Download receipt
                   </button>
                 )}
+                <button
+                  onClick={() => void printDocument('invoice')}
+                  className="flex items-center justify-center gap-2 min-h-11 rounded-xl border border-border bg-card text-foreground py-3 text-sm hover:bg-secondary transition-colors"
+                >
+                  <FileText size={14} /> Download PDF
+                </button>
+                <VoidInvoiceAction
+                  invoiceId={inv.id}
+                  invoiceNumber={inv.invoiceNumber}
+                  apiStatus={apiStatus}
+                  onVoided={async () => { await refetch(); }}
+                />
               </div>
             </div>
           </div>
@@ -1218,8 +1358,10 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
           amountDueCents={amountDueCents}
           inv={invCompat}
           onClose={() => setMarkOpen(false)}
-          onPaid={async () => {
-            setPaid(true);
+          onPaid={async (amountCents) => {
+            // #1402 — only a payment that clears the balance is "paid"; a
+            // partial one leaves the page on whatever the refetch returns.
+            if (amountCents >= amountDueCents) setPaid(true);
             await refetch();
             loadPayments();
           }}

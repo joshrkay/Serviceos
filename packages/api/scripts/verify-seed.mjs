@@ -86,7 +86,7 @@ function wallClockToUtc(y, mo, d, h, mi, tz) {
 }
 
 // Today's calendar date (y,mo,d) as observed in tz.
-function todayInTz(tz) {
+function todayInTz(tz, offsetDays = 0) {
   const dtf = new Intl.DateTimeFormat('en-CA', {
     timeZone: tz,
     year: 'numeric',
@@ -94,7 +94,9 @@ function todayInTz(tz) {
     day: '2-digit',
   });
   const map = {};
-  for (const p of dtf.formatToParts(new Date())) map[p.type] = p.value;
+  for (const p of dtf.formatToParts(new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000))) {
+    map[p.type] = p.value;
+  }
   return { y: Number(map.year), mo: Number(map.month), d: Number(map.day) };
 }
 
@@ -182,11 +184,13 @@ async function main() {
   });
   out.jobs = { A: jobA.id, B: jobB.id, C: jobC.id };
 
-  // 5) Appointments for A (today midday) and B (23:30 tenant-local -> crosses
+  // 5) Appointments for A (midday) and B (23:30 tenant-local -> crosses
   //    the UTC day boundary in America/New_York, exercising tz bucketing).
-  const t = todayInTz(tz);
+  //    #1402 — booked TOMORROW (tenant-local): the API refuses a start in the
+  //    past, and "today 14:00" is already past for any run after 2pm.
+  const t = todayInTz(tz, 1);
 
-  // Job A: today 14:00–16:00 local
+  // Job A: tomorrow 14:00–16:00 local
   const aStart = wallClockToUtc(t.y, t.mo, t.d, 14, 0, tz);
   const aEnd = new Date(aStart.getTime() + 2 * 60 * 60 * 1000);
   const apptAPayload = {
@@ -198,7 +202,7 @@ async function main() {
   };
   const apptA = await req('POST', '/api/appointments', apptAPayload);
 
-  // Job B: today 23:30–00:30 local (start is next UTC day in EDT)
+  // Job B: tomorrow 23:30–00:30 local (start is next UTC day in EDT)
   const bStart = wallClockToUtc(t.y, t.mo, t.d, 23, 30, tz);
   const bEnd = new Date(bStart.getTime() + 60 * 60 * 1000);
   const apptBPayload = {
@@ -244,10 +248,10 @@ async function main() {
   const estimatesList = await req('GET', '/api/estimates');
   const invoicesList = await req('GET', '/api/invoices');
 
-  // Appointments list: window from yesterday to +2 days (UTC) so both the
+  // Appointments list: window from yesterday to +3 days (UTC) so both the
   // midday and the boundary-crossing appointment fall inside.
   const from = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const to = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
+  const to = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
   const apptList = await req(
     'GET',
     `/api/appointments?fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}`,

@@ -130,6 +130,32 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     expect(result.appointment.scheduledEnd.getTime() - result.appointment.scheduledStart.getTime()).toBe(90 * 60_000);
   });
 
+  // #1463 — a suspended member is not an assignable technician.
+  it('refuses an operator-specified technician whose membership is suspended', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+
+    await expect(
+      convertEstimateToScheduledJob(deps([{ ...tech(TECH_1), status: 'suspended' }]), {
+        tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', actorRole: 'owner',
+        technicianId: TECH_1, now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+  });
+
+  it('auto-pick never lands on a suspended technician', async () => {
+    const job = await jobRepo.create(makeJob());
+    const est = await seedSentEstimate(job.id);
+
+    // TECH_1 is listed first (the default pick) but suspended.
+    const result = await convertEstimateToScheduledJob(
+      deps([{ ...tech(TECH_1), status: 'suspended' }, tech(TECH_2)]),
+      { tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', actorRole: 'owner', now: NOW },
+    );
+
+    expect(result.assignment.technicianId).toBe(TECH_2);
+  });
+
   it('rejects a draft estimate (must be sent first)', async () => {
     const job = await jobRepo.create(makeJob());
     const est = await createEstimate(

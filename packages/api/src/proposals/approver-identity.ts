@@ -43,7 +43,10 @@ export async function resolveApproverPhones(
   if (settings?.ownerPhone) phones.push(settings.ownerPhone);
   if (settings?.backupSupervisorUserId && deps.userRepo) {
     const backup = await deps.userRepo.findById(tenantId, settings.backupSupervisorUserId);
-    if (backup?.mobileNumber) phones.push(backup.mobileNumber);
+    // #1402 §13 — a deactivated backup supervisor's phone approves nothing.
+    if (backup?.mobileNumber && (backup.status ?? 'active') === 'active') {
+      phones.push(backup.mobileNumber);
+    }
   }
   return phones;
 }
