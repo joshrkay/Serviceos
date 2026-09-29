@@ -79,7 +79,7 @@ import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 import {
-  pickFollowUpNotFoundIsTerminal,
+  namedJobNotFoundIsTerminal,
   acceptsNetNewCustomer,
   requiresExistingEntity,
   resolveSchedulingEntities,
@@ -1060,8 +1060,6 @@ export class InAppVoiceAdapter {
     tenantId: string,
     intent: string,
     resolution: SchedulingEntityResolution,
-    /** #1416 — this resolution re-ran after a pick/confirm (pinnedRefs). */
-    afterPick = false,
   ): Promise<CallingAgentEvent> {
     if (resolution.status === 'ambiguous' && resolution.ambiguous) {
       const refKey = refKeyForEntityKind(resolution.ambiguous.entityKind);
@@ -1105,8 +1103,9 @@ export class InAppVoiceAdapter {
     // surface they become the spoken "I couldn't find a matching customer
     // for Patel" instead of a page to on-call (transitions.ts
     // `escalateEntityNotFound`).
-    // #1416 — after a pick, a job the operator NAMED on an invoice/estimate
-    // is also terminal (pickFollowUpNotFoundIsTerminal): never a placeholder.
+    // #1416 / #1485 — a job the operator NAMED on an invoice/estimate is also
+    // terminal (namedJobNotFoundIsTerminal), on the first turn as after a
+    // pick: never a placeholder.
     // #1476 — and on EVERY turn, a creation intent whose unresolved
     // reference was its only anchor: with no customerId and no jobId in hand
     // the draft cannot execute (lacksExecutionAnchor — the same predicate the
@@ -1115,9 +1114,8 @@ export class InAppVoiceAdapter {
     // — except where a net-new customer is the designed path (a booking,
     // book-04), which keeps its gated draft.
     const notFoundIsTerminal =
-      (afterPick
-        ? pickFollowUpNotFoundIsTerminal(intent, resolution.notFound?.entityKind)
-        : requiresExistingEntity(intent)) ||
+      requiresExistingEntity(intent) ||
+      namedJobNotFoundIsTerminal(intent, resolution.notFound?.entityKind) ||
       (lacksExecutionAnchor(intentToProposalType(intent), resolution.refs) &&
         !acceptsNetNewCustomer(intent));
     if (resolution.status === 'not_found' && notFoundIsTerminal) {
@@ -1966,7 +1964,6 @@ export class InAppVoiceAdapter {
             session,
             pinned,
           ),
-          true,
         );
       } else {
         fsmEvent = { type: 'entity_confirm_affirmed' };
@@ -2007,7 +2004,6 @@ export class InAppVoiceAdapter {
                   session,
                   pickedRefs,
                 ),
-                true,
               )
             : { type: 'entity_resolved', refs: pickedRefs };
         } else if (pending.attemptCount >= MAX_DISAMBIGUATION_ATTEMPTS) {

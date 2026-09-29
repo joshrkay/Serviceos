@@ -435,16 +435,15 @@ export function acceptsNetNewCustomer(intent: string): boolean {
 }
 
 /**
- * #1416 — the not-found rule for the references still outstanding AFTER a
- * disambiguation pick. Everything `requiresExistingEntity` covers, plus the
- * one creation-intent case where the caller named an EXISTING record: the
- * job in "invoice / estimate the QA Matrix job". A creation intent normally
- * proceeds without a match (a new job is auto-opened at execution), but a
- * job the caller explicitly named that does not exist must be said honestly
- * — never silently replaced by a placeholder job.
+ * #1416 / #1485 — the one creation-intent case where the caller named an
+ * EXISTING record: the job in "invoice / estimate the QA Matrix job". A
+ * creation intent normally proceeds without a match (a new job is auto-opened
+ * at execution), but a job the caller explicitly named that does not exist
+ * must be said honestly — never silently replaced by a placeholder job. #1416
+ * applied this only after a disambiguation pick; #1485 applies it on every
+ * turn, including the first (a customer that resolves + a job that does not).
  */
-export function pickFollowUpNotFoundIsTerminal(intent: string, entityKind?: string): boolean {
-  if (requiresExistingEntity(intent)) return true;
+export function namedJobNotFoundIsTerminal(intent: string, entityKind?: string): boolean {
   return entityKind === 'job' && (intent === 'create_invoice' || intent === 'draft_estimate');
 }
 

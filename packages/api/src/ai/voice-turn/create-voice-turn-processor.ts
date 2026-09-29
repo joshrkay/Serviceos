@@ -238,7 +238,8 @@ import type { LocationRepository } from '../../locations/location';
 import {
   MAX_DISAMBIGUATION_ATTEMPTS,
   refKeyForEntityKind,
-  pickFollowUpNotFoundIsTerminal,
+  namedJobNotFoundIsTerminal,
+  requiresExistingEntity,
   resolveDisambiguationFollowUp,
   resolveSchedulingEntities,
   type PendingEntityAmbiguity,
@@ -1641,11 +1642,13 @@ export function createVoiceTurnProcessor(
     // that matches nothing is said honestly (the in-app adapter's
     // `toResolutionEvent` rule, plus a named job on an invoice/estimate)
     // instead of reading back a request that would draft against a
-    // placeholder job.
+    // placeholder job. #1485 — on the FIRST turn too: a resolved customer
+    // plus a named job that matches nothing is never read back into a draft
+    // whose executor would open a new job.
     if (
-      pinnedRefs &&
       resolution.status === 'not_found' &&
-      pickFollowUpNotFoundIsTerminal(intent, resolution.notFound?.entityKind)
+      ((pinnedRefs && requiresExistingEntity(intent)) ||
+        namedJobNotFoundIsTerminal(intent, resolution.notFound?.entityKind))
     ) {
       return {
         type: 'entity_not_found',
