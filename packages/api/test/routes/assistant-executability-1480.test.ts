@@ -29,6 +29,8 @@ import { InMemoryJobRepository } from '../../src/jobs/job';
 import { buildCustomer } from '../factories/customer.factory';
 import { buildInvoice } from '../factories/invoice.factory';
 import { buildJob } from '../factories/job.factory';
+import { buildEstimate } from '../factories/estimate.factory';
+import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { InMemoryLocationRepository } from '../../src/locations/location';
 import { InMemoryCatalogItemRepository, createCatalogItem } from '../../src/catalog/catalog-item';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -221,6 +223,64 @@ describe('#1480 item 2 — send_invoice by email to a customer with no email on 
     await expect(
       approve(proposalRepo, TENANT, persisted.id, USER, 'owner', undefined, 'ui', { referenceChecks: checks }),
     ).resolves.toMatchObject({ status: 'approved' });
+  });
+});
+
+describe('#1480 item 3 — an invoice from an accepted estimate bills that estimate\'s job and customer', () => {
+  const CUSTOMER = '77777777-7777-4777-8777-777777771480';
+  const JOB = '88888888-8888-4888-8888-888888881480';
+  const ESTIMATE = '99999999-9999-4999-8999-999999991480';
+
+  it('the drafted invoice keeps the jobId and customerId read off the estimate — it can execute', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const estimateRepo = new InMemoryEstimateRepository();
+    await jobRepo.create(buildJob({ id: JOB, tenantId: TENANT, customerId: CUSTOMER }));
+    await estimateRepo.create(
+      buildEstimate({ id: ESTIMATE, tenantId: TENANT, jobId: JOB, estimateNumber: 'EST-0057', status: 'accepted' }),
+    );
+
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = { userId: USER, sessionId: 'sess', tenantId: TENANT, role: 'owner' };
+      next();
+    });
+    app.use(
+      '/api/assistant',
+      createAssistantRouter({
+        gateway: gatewayByTask({
+          classify_intent: classifierReply('create_invoice', { jobReference: 'EST-0057' }),
+          draft_invoice: JSON.stringify({
+            lineItems: [{ description: 'Service', quantity: 1, unitPrice: 18000 }],
+            internalNotes: 'Invoice generated based on accepted estimate EST-0057.',
+            confidence_score: 0.95,
+          }),
+        }),
+        proposalRepo,
+        jobRepo,
+        estimateRepo,
+        entityResolver: {
+          resolve: vi.fn(async (input: { kind: string }) =>
+            input.kind === 'estimate'
+              ? { kind: 'resolved', candidate: { id: ESTIMATE, kind: 'estimate', label: 'EST-0057', score: 1 } }
+              : { kind: 'not_found' },
+          ),
+        } as unknown as EntityResolver,
+        tenantTimezoneResolver: async () => 'America/Phoenix',
+      }),
+    );
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'Create an invoice from the accepted estimate EST-0057.' }] });
+
+    expect(res.status).toBe(200);
+    const [persisted] = await proposalRepo.findByTenant(TENANT);
+    expect(persisted.proposalType).toBe('draft_invoice');
+    expect(persisted.payload.estimateId).toBe(ESTIMATE);
+    expect(persisted.payload.jobId).toBe(JOB);
+    expect(persisted.payload.customerId).toBe(CUSTOMER);
   });
 });
 
