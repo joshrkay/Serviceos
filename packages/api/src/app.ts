@@ -140,6 +140,7 @@ import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory
 import {
   invoiceReferenceCheck,
   serviceLocationReferenceCheck,
+  sendRecipientReferenceCheck,
   technicianReferenceCheck,
 } from './proposals/approval-reference-checks';
 import { createTechnicianLocationRouter } from './routes/technician-location';
@@ -1034,6 +1035,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     serviceLocationReferenceCheck(locationRepo),
     // #1463 — a technician assignee must be an active technician of this tenant.
     technicianReferenceCheck(userRepo),
+    // #1480 — a send_invoice with no recipient must have one on file.
+    sendRecipientReferenceCheck({ invoiceRepo, jobRepo, customerRepo }),
   ];
 
   const webhookSettingsRepo = settingsRepo;

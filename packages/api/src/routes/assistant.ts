@@ -3844,7 +3844,7 @@ async function generateAssistantReply(
               (clarification
                 ? `${uiProposal.title}.\n\n${clarification}`
                 : executionGaps.length > 0
-                  ? `${uiProposal.title}. ${askForExecutabilityGaps(executionGaps)}`
+                  ? `${uiProposal.title}. ${askForExecutabilityGaps(executionGaps, proposal.payload)}`
                   : `${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`) +
               (createAndSend ? CREATE_AND_SEND_NEXT_STEP : ''),
             reasoning: classification.reasoning,

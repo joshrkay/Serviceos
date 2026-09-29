@@ -18,6 +18,8 @@
  */
 import type { Proposal, ProposalType } from './proposal';
 import type { InvoiceRepository } from '../invoices/invoice';
+import type { JobRepository } from '../jobs/job';
+import type { CustomerRepository } from '../customers/customer';
 import type { LocationRepository } from '../locations/location';
 import type { UserRepository } from '../users/user';
 import { findActiveTenantMember } from '../users/tenant-member';
@@ -107,14 +109,50 @@ export function technicianReferenceCheck(
 }
 
 /**
+ * #1480 — `send_invoice` names no recipient of its own for the customer's
+ * address to fall back to, and the customer has none on file for that
+ * channel: the send service can only refuse ("Cannot send email — no email
+ * provided and customer has no email on file"), after the approval tap. The
+ * gap is `recipient`, a payload field the card's Edit fills, so it lifts.
+ * Walks invoice → job → customer, the same hop the send service makes.
+ */
+export function sendRecipientReferenceCheck(deps: {
+  invoiceRepo: Pick<InvoiceRepository, 'findById'>;
+  jobRepo: Pick<JobRepository, 'findById'>;
+  customerRepo: Pick<CustomerRepository, 'findById'>;
+}): ApprovalReferenceCheck {
+  return async (tenantId, proposal) => {
+    if (proposal.proposalType !== 'send_invoice') return [];
+    const { payload } = proposal;
+    const channel = payload.channel ?? payload.sendChannel;
+    if (channel !== 'email' && channel !== 'sms') return [];
+    if (typeof payload.recipient === 'string' && payload.recipient.trim().length > 0) return [];
+    const invoiceId = payload.invoiceId;
+    // No invoice id yet is a different gate (invoiceId), never this one.
+    if (typeof invoiceId !== 'string' || invoiceId.length === 0 || isChainRefToken(invoiceId)) return [];
+    const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
+    if (!invoice) return [];
+    const job = await deps.jobRepo.findById(tenantId, invoice.jobId);
+    if (!job) return [];
+    const customer = await deps.customerRepo.findById(tenantId, job.customerId);
+    if (!customer) return [];
+    const onFile = channel === 'email' ? customer.email : customer.primaryPhone;
+    return typeof onFile === 'string' && onFile.trim().length > 0 ? [] : ['recipient'];
+  };
+}
+
+/**
  * The operator-facing refusal for a set of dangling references. A missing
  * service location is not "a record that does not exist" — it is a record the
  * operator has to add — so it gets its own sentence.
  */
 export function describeDanglingReferences(fields: readonly string[]): string {
-  const ids = fields.filter((f) => f !== 'locationId');
+  const ids = fields.filter((f) => f !== 'locationId' && f !== 'recipient');
   const parts: string[] = [];
   if (ids.length > 0) parts.push(`${ids.join(', ')} does not name an existing record`);
+  if (fields.includes('recipient')) {
+    parts.push('the customer has nothing on file to send it to — add a recipient before approving');
+  }
   if (fields.includes('locationId')) {
     parts.push('the customer has no service location — add one before approving');
   }
@@ -156,12 +194,22 @@ export function holdIfNotExecutable(proposal: Proposal, gaps: readonly string[])
  * The assistant's ask for the missing piece(s) — what the operator has to
  * supply before the card can go ahead.
  */
-export function askForExecutabilityGaps(gaps: readonly string[]): string {
+export function askForExecutabilityGaps(
+  gaps: readonly string[],
+  payload: Record<string, unknown> = {},
+): string {
   const asks: string[] = [];
   if (gaps.includes('locationId')) {
     asks.push("the customer has no service location yet — what's the service address?");
   }
-  const unknown = gaps.filter((g) => g !== 'locationId');
+  if (gaps.includes('recipient')) {
+    asks.push(
+      (payload.channel ?? payload.sendChannel) === 'sms'
+        ? 'the customer has no phone number on file — what number should it go to?'
+        : 'the customer has no email on file — what email address should it go to?',
+    );
+  }
+  const unknown = gaps.filter((g) => g !== 'locationId' && g !== 'recipient');
   if (unknown.length > 0) asks.push(`${unknown.join(', ')} does not name an existing record`);
   return `This can't go ahead yet: ${asks.join('; ')}`;
 }
