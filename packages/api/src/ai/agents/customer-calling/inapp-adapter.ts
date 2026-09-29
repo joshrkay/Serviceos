@@ -23,11 +23,16 @@ import type { ProposalRepository } from '../../../proposals/proposal';
 import { createProposal as buildProposal, missingFieldsFor } from '../../../proposals/proposal';
 import type { ProposalType } from '../../../proposals/proposal';
 import type { ProposalSurface } from '../../../proposals/surface';
+import {
+  askForExecutabilityGaps,
+  holdForExecutability,
+  type ApprovalReferenceCheck,
+} from '../../../proposals/approval-reference-checks';
 // THE shared voice → proposal payload contract, also used by the real Twilio
 // path (ai/voice-turn/create-voice-turn-processor.ts). Exactly one copy of the
 // promotion / alias / line-item translation exists, and it lives next to the
 // per-type contracts it has to satisfy.
-import { buildVoiceProposalPayload } from '../../../proposals/voice-payload';
+import { buildVoiceProposalPayload, lacksExecutionAnchor } from '../../../proposals/voice-payload';
 // A48 fix — the dedicated spoken-instruction → typed-payload mapping
 // update_brand_voice needs (see extractBrandVoiceProposalFields's doc
 // comment for why buildVoiceProposalPayload's generic promotion can't do
@@ -79,7 +84,8 @@ import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 import {
-  pickFollowUpNotFoundIsTerminal,
+  namedJobNotFoundIsTerminal,
+  acceptsNetNewCustomer,
   requiresExistingEntity,
   resolveSchedulingEntities,
 } from './entity-resolution';
@@ -307,6 +313,13 @@ export interface InAppAdapterDeps {
    * rather than silently keeping an ungrounded guess.
    */
   catalogRepo?: CatalogItemRepository;
+  /**
+   * #1485 — the approval-time reference checks (app.ts), run before a drafted
+   * card persists (`holdForExecutability`) so the close asks for what is
+   * missing — a service location, a recipient — instead of "taken care of".
+   * Absent → no checks (tests and harnesses that do not wire them).
+   */
+  approvalReferenceChecks?: readonly ApprovalReferenceCheck[];
   /**
    * QA-2026-07-26 — tenant-scoped customer repository, consulted at
    * `startSession` when the caller supplies a `callerPhone`: exactly one
@@ -988,6 +1001,15 @@ export class InAppVoiceAdapter {
     Promise<string | undefined>
   >();
 
+  /**
+   * #1485 — the executability ask for the proposal this session last
+   * persisted with gaps, read (once) by the proposal_queued close.
+   */
+  private readonly executabilityAsks = new WeakMap<
+    VoiceSession,
+    { proposalId: string; ask: string }
+  >();
+
   private resolveSessionTimezone(
     tenantId: string,
     session: VoiceSession | undefined,
@@ -1059,8 +1081,6 @@ export class InAppVoiceAdapter {
     tenantId: string,
     intent: string,
     resolution: SchedulingEntityResolution,
-    /** #1416 — this resolution re-ran after a pick/confirm (pinnedRefs). */
-    afterPick = false,
   ): Promise<CallingAgentEvent> {
     if (resolution.status === 'ambiguous' && resolution.ambiguous) {
       const refKey = refKeyForEntityKind(resolution.ambiguous.entityKind);
@@ -1104,11 +1124,21 @@ export class InAppVoiceAdapter {
     // surface they become the spoken "I couldn't find a matching customer
     // for Patel" instead of a page to on-call (transitions.ts
     // `escalateEntityNotFound`).
-    // #1416 — after a pick, a job the operator NAMED on an invoice/estimate
-    // is also terminal (pickFollowUpNotFoundIsTerminal): never a placeholder.
-    const notFoundIsTerminal = afterPick
-      ? pickFollowUpNotFoundIsTerminal(intent, resolution.notFound?.entityKind)
-      : requiresExistingEntity(intent);
+    // #1416 / #1485 — a job the operator NAMED on an invoice/estimate is also
+    // terminal (namedJobNotFoundIsTerminal), on the first turn as after a
+    // pick: never a placeholder.
+    // #1476 — and on EVERY turn, a creation intent whose unresolved
+    // reference was its only anchor: with no customerId and no jobId in hand
+    // the draft cannot execute (lacksExecutionAnchor — the same predicate the
+    // payload gate reads), so reading it back and minting it would promise
+    // work that fails after the approval tap. Say what was not found instead
+    // — except where a net-new customer is the designed path (a booking,
+    // book-04), which keeps its gated draft.
+    const notFoundIsTerminal =
+      requiresExistingEntity(intent) ||
+      namedJobNotFoundIsTerminal(intent, resolution.notFound?.entityKind) ||
+      (lacksExecutionAnchor(intentToProposalType(intent), resolution.refs) &&
+        !acceptsNetNewCustomer(intent));
     if (resolution.status === 'not_found' && notFoundIsTerminal) {
       return {
         type: 'entity_not_found',
@@ -1955,7 +1985,6 @@ export class InAppVoiceAdapter {
             session,
             pinned,
           ),
-          true,
         );
       } else {
         fsmEvent = { type: 'entity_confirm_affirmed' };
@@ -1996,7 +2025,6 @@ export class InAppVoiceAdapter {
                   session,
                   pickedRefs,
                 ),
-                true,
               )
             : { type: 'entity_resolved', refs: pickedRefs };
         } else if (pending.attemptCount >= MAX_DISAMBIGUATION_ATTEMPTS) {
@@ -2294,10 +2322,18 @@ export class InAppVoiceAdapter {
         .findById(session.tenantId, lastProposalId)
         .catch(() => null);
       const incomplete = queued ? missingFieldsFor(queued).length > 0 : false;
+      // #1485 — a card the executability check found gaps on asks for them.
+      const gapAsk = this.executabilityAsks.get(session);
+      this.executabilityAsks.delete(session);
+      const executabilityAsk = gapAsk?.proposalId === lastProposalId ? gapAsk.ask : undefined;
       const effects3 = session.machine.dispatch({
         type: 'proposal_queued',
         proposalId: lastProposalId,
-        ...(incomplete ? { utterance: INAPP_INCOMPLETE_DRAFT_COPY } : {}),
+        ...(executabilityAsk
+          ? { utterance: `I've drafted that. ${executabilityAsk}` }
+          : incomplete
+            ? { utterance: INAPP_INCOMPLETE_DRAFT_COPY }
+            : {}),
       });
       allSideEffects.push(...effects3);
       await this.executeSideEffects(session, effects3);
@@ -3207,7 +3243,21 @@ export class InAppVoiceAdapter {
         createdBy: this.proposalActorId(session),
         ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
       });
-      let stored = await this.deps.proposalRepo.create(proposal);
+      // #1485 — the ONE executability check a tap runs, run before persisting
+      // (the chat route's mechanism): an auto-approved card that cannot
+      // execute is held, and the close asks for the missing piece.
+      const held = await holdForExecutability(
+        session.tenantId,
+        proposal,
+        this.deps.approvalReferenceChecks,
+      );
+      let stored = await this.deps.proposalRepo.create(held.proposal);
+      if (held.gaps.length > 0) {
+        this.executabilityAsks.set(session, {
+          proposalId: stored.id,
+          ask: askForExecutabilityGaps(held.gaps, held.proposal.payload),
+        });
+      }
       // QA-2026-06-05: parity with the AI-task pipeline's guardrail promote
       // step (ai/guardrails/low-confidence.ts) which the calling-agent path
       // does not run. Proposals that initialProposalStatus left in 'draft'

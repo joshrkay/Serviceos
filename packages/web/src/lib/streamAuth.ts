@@ -59,6 +59,17 @@ export function isAuthRejectedStatus(status: number): boolean {
   return AUTH_REJECTED_STATUSES.has(status);
 }
 
+/** A 403 whose body says the caller's membership was deactivated. */
+async function isAccessRevokedResponse(response: Response): Promise<boolean> {
+  if (response.status !== 403) return false;
+  try {
+    const body = (await response.clone().json()) as { code?: unknown };
+    return body.code === 'ACCESS_REVOKED';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Fetches `input` with a Bearer token attached, retrying once with a
  * forcibly-refreshed token on a 401/403, and routing through
@@ -80,6 +91,10 @@ export async function fetchWithAuthRetry(
   headers.set('Authorization', `Bearer ${token}`);
   const response = await fetch(input, { ...init, headers });
   if (!isAuthRejectedStatus(response.status)) return response;
+  // #1490 — the token is fine; the member was deactivated. Signing out would
+  // strand them on /login with no explanation; the route guard sends them to
+  // the "Your access was removed" screen instead.
+  if (await isAccessRevokedResponse(response)) return response;
 
   const fresh = await getToken({ skipCache: true });
   if (fresh) {

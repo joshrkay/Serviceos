@@ -46,8 +46,8 @@ export function OnboardingShell() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const apiFetch = useApiClient();
-  const { userId } = useAuth();
-  const { data, isLoading, error, refetch } = useOnboardingStatus(3000);
+  const { userId, signOut } = useAuth();
+  const { data, isLoading, error, accessRevoked, refetch } = useOnboardingStatus(3000);
   // #875 — "Re-run setup assistant" deep-links here with the shared rerun
   // param (utils/onboarding-rerun.ts — the same definition the Settings and
   // Templates entry points link with). Seeding the step override at mount
@@ -241,6 +241,26 @@ export function OnboardingShell() {
             <Zap size={18} className="text-white" />
           </span>
           <Spinner size="md" />
+        </div>
+      </div>
+    );
+  }
+
+  // #1481 — a deactivated teammate gets told why, not "check your connection".
+  if (accessRevoked) {
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center px-6">
+        <div className="text-center max-w-sm" role="alert">
+          <h1 className="text-lg font-medium text-slate-900">Your access was removed</h1>
+          <p className="mt-2 text-sm text-slate-500">
+            An owner of this business deactivated your account. If you think this is a mistake,
+            ask them to reinstate you.
+          </p>
+          <div className="mt-5 flex justify-center">
+            <Button variant="primary" onClick={() => void signOut({ redirectUrl: '/login' })}>
+              Sign out
+            </Button>
+          </div>
         </div>
       </div>
     );

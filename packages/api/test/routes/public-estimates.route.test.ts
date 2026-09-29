@@ -228,6 +228,27 @@ describe('POST /public/estimates/:token/approve', () => {
     expect(res.status).toBe(409);
   });
 
+  // #1473 item 2 — the public page must tell 409 reasons apart, so each
+  // conflict carries a machine-readable reason alongside the copy.
+  it('409 for a job that already has another accepted estimate says so (job_already_accepted)', async () => {
+    await seedEstimate(h, { status: 'accepted', estimateNumber: 'EST-2041' });
+    const est = await seedEstimate(h);
+    const res = await request(h.app)
+      .post(`/public/estimates/${est.viewToken}/approve`)
+      .send({ acceptedByName: 'Sarah Johnson', expectedVersion: est.version });
+    expect(res.status).toBe(409);
+    expect(res.body.details).toEqual({ reason: 'job_already_accepted' });
+  });
+
+  it('409 for a stale version says the estimate was revised (estimate_revised)', async () => {
+    const est = await seedEstimate(h, { version: 2 });
+    const res = await request(h.app)
+      .post(`/public/estimates/${est.viewToken}/approve`)
+      .send({ acceptedByName: 'Sarah Johnson', expectedVersion: 1 });
+    expect(res.status).toBe(409);
+    expect(res.body.details).toEqual({ reason: 'estimate_revised' });
+  });
+
   it('rejects oversized signature payload', async () => {
     const est = await seedEstimate(h);
     const huge = 'x'.repeat(200_001);

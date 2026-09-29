@@ -179,6 +179,16 @@ export function DispatchBoard() {
     if (!dragSource || dragOverTarget?.kind !== 'lane') return null;
     const appt = allAppointments.find((a) => a.id === dragSource.appointmentId);
     if (!appt) return null;
+    // A cross-lane drop is a reassign, which keeps the appointment's window
+    // (#1477) — check feasibility at the time that will actually apply.
+    if (dragSource.sourceTechnicianId !== dragOverTarget.technicianId) {
+      return {
+        appointmentId: dragSource.appointmentId,
+        proposedTechnicianId: dragOverTarget.technicianId,
+        proposedScheduledStart: appt.scheduledStart,
+        proposedScheduledEnd: appt.scheduledEnd,
+      };
+    }
     const lane = laneByTechId(dragOverTarget.technicianId);
     const renderOrder = laneRenderOrder(lane?.appointments ?? [], filters.status);
     const { withoutDragged, insertIndex } = resolveInsert(
@@ -355,7 +365,16 @@ export function DispatchBoard() {
           : 'Reassign to selected technician';
       }
 
-      if (target.kind === 'lane' && target.technicianId && target.insertIndex !== undefined) {
+      // Only a same-lane reschedule moves the appointment in time. The
+      // reassign_appointment contract carries the technician only (no time
+      // fields; the executor keeps the appointment's scheduled window), so a
+      // cross-lane drop must not compute or show a new time (#1477).
+      if (
+        proposalType === 'reschedule_appointment' &&
+        target.kind === 'lane' &&
+        target.technicianId &&
+        target.insertIndex !== undefined
+      ) {
         const lane = laneByTechId(target.technicianId);
         const renderOrder = laneRenderOrder(lane?.appointments ?? [], filters.status);
         const { withoutDragged, insertIndex } = resolveInsert(
@@ -556,8 +575,6 @@ export function DispatchBoard() {
         appointmentId: source.appointmentId,
         ...(source.sourceTechnicianId ? { fromTechnicianId: source.sourceTechnicianId } : {}),
         toTechnicianId: targetTechnicianId,
-        scheduledStart: proposedStart,
-        scheduledEnd: proposedEnd,
         reason: 'Reassigned via dispatch board drag-and-drop',
       };
       summary = 'Reassign appointment to a different technician';
@@ -680,7 +697,9 @@ export function DispatchBoard() {
   const isQueueDropTarget = dragOverTarget?.kind === 'unassigned';
 
   const confirmTimeRange: TimeRangeDisplay | undefined =
-    pendingDrop?.appointment && pendingDrop.proposedStart
+    pendingDrop?.appointment &&
+    pendingDrop.proposalType === 'reschedule_appointment' &&
+    pendingDrop.proposedStart
       ? {
           fromStart: pendingDrop.appointment.scheduledStart,
           fromEnd: pendingDrop.appointment.scheduledEnd,

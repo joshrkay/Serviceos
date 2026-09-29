@@ -65,6 +65,20 @@ for (const [name, dockerfile] of [
   );
 }
 
+// #1481 — the Railway edge renders the API's public origin into connect-src
+// at boot (presigned dev-storage PUTs target the API host). The rendering
+// itself is covered by packages/web/src/csp-api-origin.test.ts.
+assert.match(
+  railwayDockerfile,
+  /COPY packages\/web\/render-security-headers\.sh \/render-security-headers\.sh/,
+  'Railway Dockerfile must ship the CSP API-origin renderer',
+);
+assert.match(
+  read('packages/web/start.sh'),
+  /\/render-security-headers\.sh \/etc\/nginx\/security-headers\.conf/,
+  'Railway start.sh must render the API origin into the CSP before nginx starts',
+);
+
 const cspValue = snippet.match(/add_header Content-Security-Policy "([^"]+)"/)?.[1];
 assert.ok(cspValue, 'CSP header must be present');
 const directives = new Map(

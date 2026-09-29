@@ -104,4 +104,19 @@ describe('P0-032 ErrorBoundary', () => {
     // Default fallback should NOT be present
     expect(screen.queryByText('Something went wrong')).toBeNull();
   });
+
+  // #1481 — Shell's boundary also sees a lazy page whose chunk can't load
+  // offline; show the offline state, not the generic crash + raw TypeError.
+  it('shows the offline state when a page chunk fails to load while offline', () => {
+    const onLine = vi.spyOn(window.navigator, 'onLine', 'get').mockReturnValue(false);
+    render(
+      <ErrorBoundary>
+        <Boom message="Failed to fetch dynamically imported module: https://app.example/assets/JobsPage-abc123.js" />
+      </ErrorBoundary>
+    );
+    expect(screen.getByText(/you're offline/i)).toBeInTheDocument();
+    expect(screen.queryByText('Something went wrong')).not.toBeInTheDocument();
+    expect(screen.queryByText(/dynamically imported module/i)).not.toBeInTheDocument();
+    onLine.mockRestore();
+  });
 });

@@ -174,7 +174,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
           <button
             onClick={onClose}
             aria-label="Close"
-            className="flex size-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
+            className="flex size-11 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors"
           >
             <X size={16} />
           </button>
@@ -193,7 +193,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
                   value={fields.businessName}
                   onChange={(e) => setFields((f) => ({ ...f, businessName: e.target.value }))}
                   placeholder="Ortega HVAC & Services"
-                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                  className="mt-1.5 w-full min-h-11 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
                   required
                 />
               </label>
@@ -209,7 +209,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
                   value={fields.businessPhone}
                   onChange={(e) => setFields((f) => ({ ...f, businessPhone: e.target.value }))}
                   placeholder="+1 (555) 123-4567"
-                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                  className="mt-1.5 w-full min-h-11 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
                 />
               </label>
 
@@ -228,7 +228,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
                   value={fields.ownerPhone}
                   onChange={(e) => setFields((f) => ({ ...f, ownerPhone: e.target.value }))}
                   placeholder="(512) 555-1234"
-                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                  className="mt-1.5 w-full min-h-11 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
                 />
               </label>
 
@@ -240,7 +240,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
                   value={fields.businessEmail}
                   onChange={(e) => setFields((f) => ({ ...f, businessEmail: e.target.value }))}
                   placeholder="hello@ortega-hvac.com"
-                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                  className="mt-1.5 w-full min-h-11 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
                 />
               </label>
 
@@ -267,7 +267,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
                   id="bp-timezone"
                   value={fields.timezone}
                   onChange={(e) => setFields((f) => ({ ...f, timezone: e.target.value }))}
-                  className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors bg-white"
+                  className="mt-1.5 w-full min-h-11 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors bg-white"
                 >
                   <option value="">Select a timezone…</option>
                   {TIMEZONE_OPTIONS.map((tz) => (
@@ -291,7 +291,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
           <button
             type="button"
             onClick={onClose}
-            className="rounded-xl px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+            className="min-h-11 min-w-11 rounded-xl px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
           >
             Cancel
           </button>
@@ -299,7 +299,7 @@ export function BusinessProfileSheet({ onClose, onSaved }: BusinessProfileSheetP
             type="button"
             onClick={save}
             disabled={saving || loading}
-            className="rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
+            className="min-h-11 min-w-11 rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-50 transition-colors"
           >
             {saving ? 'Saving…' : 'Save'}
           </button>

@@ -284,3 +284,26 @@ describe('scheduling endpoints require appointment permissions, not jobs:update 
     expect(res.status).toBe(404);
   });
 });
+
+describe('GET /api/jobs/:id — assigned technician summary (#1479)', () => {
+  it("embeds the assigned technician's name so the Technician card can show it", async () => {
+    const named: User = { ...tech(TECH_1), firstName: 'Pat', lastName: 'Rivera' };
+    const { app } = build([named, tech(TECH_2)]);
+    const created = await request(app)
+      .post('/api/jobs')
+      .send({ ...baseJob, scheduledStart: START_ISO, technicianId: TECH_1, durationMin: 60 });
+    expect(created.status).toBe(201);
+
+    const res = await request(app).get(`/api/jobs/${created.body.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.technician).toEqual({ id: TECH_1, firstName: 'Pat', lastName: 'Rivera' });
+  });
+
+  it('omits technician for an unassigned job', async () => {
+    const { app } = build();
+    const created = await request(app).post('/api/jobs').send(baseJob);
+    const res = await request(app).get(`/api/jobs/${created.body.id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.technician).toBeUndefined();
+  });
+});

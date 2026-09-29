@@ -1271,7 +1271,7 @@ export function SettingsPage() {
           </div>
           <div className="px-4 py-3 border-t border-slate-100">
             <p className="text-xs text-slate-400">
-              New leads from this form appear in your <button onClick={() => navigate('/leads')} className="text-blue-600 hover:underline">Lead Pipeline</button> automatically.
+              New leads from this form appear in your <button onClick={() => navigate('/leads')} className="inline-flex min-h-11 min-w-11 items-center align-middle text-blue-600 hover:underline">Lead Pipeline</button> automatically.
             </p>
           </div>
         </div>
@@ -1310,7 +1310,7 @@ export function SettingsPage() {
           </div>
           <div className="px-4 py-3 border-t border-slate-100">
             <p className="text-xs text-slate-400">
-              Bookings arrive as a held appointment plus an approval in your <button onClick={() => navigate('/assistant')} className="text-blue-600 hover:underline">approval queue</button> — nothing is confirmed without you.
+              Bookings arrive as a held appointment plus an approval in your <button onClick={() => navigate('/assistant')} className="inline-flex min-h-11 min-w-11 items-center align-middle text-blue-600 hover:underline">approval queue</button> — nothing is confirmed without you.
             </p>
           </div>
         </div>

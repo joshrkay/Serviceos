@@ -17,6 +17,7 @@ import { render as rtlRender, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router';
 import { TechnicianDayView } from './TechnicianDayView';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 function render(ui: React.ReactElement) {
   return rtlRender(<MemoryRouter>{ui}</MemoryRouter>);
@@ -121,5 +122,28 @@ describe('TechnicianDayView — glove/daylight class contract (5.1)', () => {
     expect(root.className).toContain('max-w-lg');
     expect(root.className).toContain('mx-auto');
     expect(root.className).not.toMatch(/\bw-\[\d{4,}px\]/);
+  });
+
+  // #1481 — "Open in maps" and each row's address link measured 18px tall
+  // at 320/375px; they are how a technician starts navigation.
+  it('the Open in maps link and every address link meet the ≥44px tap target', async () => {
+    const soon = Date.now() + 60 * 60 * 1000;
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          appointments: [
+            {
+              ...mockAppointments[0],
+              scheduledStart: new Date(soon).toISOString(),
+              scheduledEnd: new Date(soon + 60 * 60 * 1000).toISOString(),
+            },
+          ],
+        }),
+    } as never);
+    render(<TechnicianDayView technicianId="tech-1" />);
+    expectTapTarget(await screen.findByTestId('technician-day-next-map-link'), 'Open in maps');
+    const address = screen.getByRole('link', { name: '123 Main St' });
+    expectTapTarget(address, 'address link');
   });
 });

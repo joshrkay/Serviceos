@@ -24,6 +24,7 @@ describe('sendReply', () => {
   it.each([
     [403, /opted out/i],
     [422, /No phone or email/i],
+    [429, /maximum number of texts/i],
     [503, /not set up/i],
     [500, /try again/i],
   ])('maps a %i failure to friendly copy', async (status, re) => {

@@ -423,16 +423,27 @@ export function requiresExistingEntity(intent: string): boolean {
 }
 
 /**
- * #1416 — the not-found rule for the references still outstanding AFTER a
- * disambiguation pick. Everything `requiresExistingEntity` covers, plus the
- * one creation-intent case where the caller named an EXISTING record: the
- * job in "invoice / estimate the QA Matrix job". A creation intent normally
- * proceeds without a match (a new job is auto-opened at execution), but a
- * job the caller explicitly named that does not exist must be said honestly
- * — never silently replaced by a placeholder job.
+ * #1476 — creation intents where an UNKNOWN name is a net-new customer by
+ * design: a booking for someone not yet in the CRM drafts a card gated on
+ * `customerId` for the operator to complete (register case book-04,
+ * #net-new-entity; the D01 gate in proposals/voice-payload.ts). Every other
+ * creation intent whose only anchor failed to resolve cannot produce an
+ * executable draft, so the live turn asks instead of reading it back.
  */
-export function pickFollowUpNotFoundIsTerminal(intent: string, entityKind?: string): boolean {
-  if (requiresExistingEntity(intent)) return true;
+export function acceptsNetNewCustomer(intent: string): boolean {
+  return SCHEDULING_CREATE_INTENTS.has(intent);
+}
+
+/**
+ * #1416 / #1485 — the one creation-intent case where the caller named an
+ * EXISTING record: the job in "invoice / estimate the QA Matrix job". A
+ * creation intent normally proceeds without a match (a new job is auto-opened
+ * at execution), but a job the caller explicitly named that does not exist
+ * must be said honestly — never silently replaced by a placeholder job. #1416
+ * applied this only after a disambiguation pick; #1485 applies it on every
+ * turn, including the first (a customer that resolves + a job that does not).
+ */
+export function namedJobNotFoundIsTerminal(intent: string, entityKind?: string): boolean {
   return entityKind === 'job' && (intent === 'create_invoice' || intent === 'draft_estimate');
 }
 
@@ -821,13 +832,48 @@ async function resolvePlannedLookups(
 ): Promise<SchedulingEntityResolution | undefined> {
   if (!resolver) return undefined;
   for (const lookup of lookups) {
-    const result = await resolver.resolve({
+    // #1476 P2 — a JOB reference is a question about the customer already in
+    // hand (resolved earlier in this plan, pinned by a pick, or explicit):
+    // "the QA Matrix job" for the QA Matrix customer the operator just chose
+    // means THEIR jobs. Tenant-wide, the same words matched more jobs than a
+    // picker may offer and came back not_found; anchored, several matches are
+    // the ordinary which-one question. (Customer-first plan order is what puts
+    // the customer in `refs` before the job lookup runs.)
+    const customerId =
+      lookup.customerId ?? (lookup.kind === 'job' ? refs.customerId : undefined);
+    let result = await resolver.resolve({
       tenantId,
       reference: lookup.reference,
       kind: lookup.kind,
       ...(lookup.jobId ? { jobId: lookup.jobId } : {}),
-      ...(lookup.customerId ? { customerId: lookup.customerId } : {}),
+      ...(customerId ? { customerId } : {}),
     });
+    // #1492 P2 — a job reference that names no job may name the CUSTOMER
+    // ("draft an estimate for the QA Matrix job" with no customerName
+    // extracted): the create_invoice customer-then-job path. The customer
+    // decides it — a which-customer question when several match, otherwise
+    // that customer's jobs ranked by the scoped lookup (one resolves, several
+    // are a which-job question). A reference naming no customer either keeps
+    // the job's honest not_found (#1416).
+    if (lookup.kind === 'job' && !customerId && result.kind === 'not_found') {
+      const asCustomer = await resolver.resolve({
+        tenantId,
+        reference: lookup.reference,
+        kind: 'customer',
+      });
+      if (asCustomer.kind === 'ambiguous') {
+        return foldResolution(asCustomer, 'customer', lookup.reference, refs, 'customerId');
+      }
+      if (asCustomer.kind === 'resolved') {
+        refs.customerId = asCustomer.candidate.id;
+        result = await resolver.resolve({
+          tenantId,
+          reference: lookup.reference,
+          kind: 'job',
+          customerId: asCustomer.candidate.id,
+        });
+      }
+    }
     const terminal = foldResolution(
       result,
       lookup.kind,

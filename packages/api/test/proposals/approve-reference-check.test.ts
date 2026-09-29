@@ -20,6 +20,7 @@ import { buildInvoice } from '../factories/invoice.factory';
 import {
   invoiceReferenceCheck,
   serviceLocationReferenceCheck,
+  executionAnchorReferenceCheck,
 } from '../../src/proposals/approval-reference-checks';
 import { InMemoryLocationRepository, createLocation } from '../../src/locations/location';
 import { buildChainRefToken } from '../../src/proposals/chain';
@@ -182,3 +183,41 @@ describe('approveProposal — service-location reference check (#1271)', () => {
     await expect(attempt).resolves.toMatchObject({ status: 'approved' });
   });
 });
+
+describe('#1480 — an estimate/invoice draft with no customer and no job is never approvable', () => {
+  function invoiceDraft(payload: Record<string, unknown>): CreateProposalInput {
+    return {
+      tenantId,
+      proposalType: 'draft_invoice',
+      payload: {
+        customerReference: 'the accepted estimate',
+        lineItems: [{ description: 'Service', quantity: 1, unitPriceCents: 18000 }],
+        ...payload,
+      },
+      summary: 'Invoice from the accepted estimate',
+      createdBy: actorId,
+    };
+  }
+
+  async function approveDraft(input: CreateProposalInput) {
+    const repo = new InMemoryProposalRepository();
+    const draft = createProposal(input);
+    await repo.create(draft);
+    return approveProposal(repo, tenantId, draft.id, actorId, 'owner', undefined, 'ui', {
+      referenceChecks: [executionAnchorReferenceCheck()],
+    });
+  }
+
+  it('refuses a draft_invoice that carries only an estimateId, gated on customerId', async () => {
+    await expect(
+      approveDraft(invoiceDraft({ estimateId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' })),
+    ).rejects.toMatchObject({ details: { missingFields: ['customerId'] } });
+  });
+
+  it('approves the same draft once it names a job', async () => {
+    await expect(approveDraft(invoiceDraft({ jobId: JOB_ID }))).resolves.toMatchObject({
+      status: 'approved',
+    });
+  });
+});
+

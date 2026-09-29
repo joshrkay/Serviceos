@@ -105,7 +105,7 @@ describe('voiceInput', () => {
     });
 
     const ids = await voiceInput(h, 'tok', 's-1', 'Draft an estimate for the QA Matrix job', '05', {
-      pickCandidateId: 'cust-main',
+      pickCandidateIds: ['cust-main'],
     });
 
     expect(ids).toEqual(['p-9']);
@@ -113,6 +113,76 @@ describe('voiceInput', () => {
       'Draft an estimate for the QA Matrix job',
       'qa-matrix-A-customer',
       "Yes, that's correct.",
+    ]);
+  });
+
+  // #1492 (VOX-07) — customer-then-job disambiguation asks twice: which
+  // customer, then which of that customer's jobs.
+  const jobPickerTurn = {
+    state: 'entity_resolution',
+    proposalIds: [],
+    sideEffects: [
+      {
+        type: 'tts_play',
+        payload: {
+          template: 'disambiguate',
+          candidates: [
+            { id: 'job-other', name: 'Maintenance visit', score: 1 },
+            { id: 'job-main', name: 'QA Matrix job for run-1', score: 1 },
+          ],
+        },
+      },
+    ],
+  };
+
+  it('answers successive resolution rounds (which customer, then which job) and reaches the proposal', async () => {
+    const { h, calls } = fakeHarness((c) => {
+      const text = (c.body as { text?: string }).text;
+      if (text === 'qa-matrix-A-customer') return { status: 200, body: jobPickerTurn };
+      if (text === 'QA Matrix job for run-1') return { status: 200, body: { state: 'intent_confirm', proposalIds: [] } };
+      if (text === "Yes, that's correct.") return { status: 200, body: { state: 'closing', proposalIds: ['p-7'] } };
+      return { status: 200, body: ambiguousTurn };
+    });
+
+    const ids = await voiceInput(h, 'tok', 's-1', 'Create an invoice for the QA Matrix job', '07', {
+      pickCandidateIds: ['cust-main', 'job-main'],
+    });
+
+    expect(ids).toEqual(['p-7']);
+    expect(calls.map((c) => (c.body as { text: string }).text)).toEqual([
+      'Create an invoice for the QA Matrix job',
+      'qa-matrix-A-customer',
+      'QA Matrix job for run-1',
+      "Yes, that's correct.",
+    ]);
+  });
+
+  it('stops after three resolution rounds when the product keeps asking', async () => {
+    const { h, calls } = fakeHarness(() => ({ status: 200, body: ambiguousTurn }));
+
+    const ids = await voiceInput(h, 'tok', 's-1', 'Create an invoice for the QA Matrix job', '07', {
+      pickCandidateIds: ['cust-main'],
+    });
+
+    expect(ids).toEqual([]);
+    expect(calls).toHaveLength(4); // the utterance + three answers
+  });
+
+  it('never answers a question whose candidates hold none of the records the row means', async () => {
+    const { h, calls } = fakeHarness((c) =>
+      (c.body as { text?: string }).text === 'qa-matrix-A-customer'
+        ? { status: 200, body: jobPickerTurn }
+        : { status: 200, body: ambiguousTurn },
+    );
+
+    const ids = await voiceInput(h, 'tok', 's-1', 'Create an invoice for the QA Matrix job', '07', {
+      pickCandidateIds: ['cust-main', 'job-not-offered'],
+    });
+
+    expect(ids).toEqual([]);
+    expect(calls.map((c) => (c.body as { text: string }).text)).toEqual([
+      'Create an invoice for the QA Matrix job',
+      'qa-matrix-A-customer',
     ]);
   });
 });

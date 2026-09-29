@@ -184,7 +184,7 @@ export const MATRIX: MatrixRow[] = [
     module: 'SCH',
     feature: 'Running-late delay notice (virtual status)',
     passCriteria:
-      'PUT /api/appointments/:id with status=running_late + delayMinutes returns queued=true and does NOT change the stored status (it enqueues a customer delay notice rather than transitioning)',
+      'With the technician booked on two same-day appointments, PUT /api/appointments/:id (the earlier one) with status=running_late + delayMinutes returns queued=true and does NOT change the stored status (it enqueues a delay notice for the next customer rather than transitioning)',
     expected: 'pass',
   },
 

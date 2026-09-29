@@ -7281,6 +7281,61 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_sms_recipient_sends ON sms_recipient_sends
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // #1478 / #1472 — databases that once ran the withdrawn migration
+  // '129_double_booking_exclusion' still carry its BEFORE INSERT OR UPDATE
+  // trigger trg_no_double_booking (confirmed on the dev DB). Its function
+  // skipped only 'cancelled_by_customer' / 'cancelled_by_business' — statuses
+  // that no longer exist — so a CANCELED visit kept blocking its technician's
+  // slot (rebooking it failed). Migration 131's no_double_booking EXCLUDE
+  // constraint is the authoritative guard and already ignores
+  // canceled / no_show via appointment_assignments.appointment_status.
+  //
+  // Non-destructive repair: where (and only where) the legacy trigger exists,
+  // replace its function body with the same semantics as the EXCLUDE
+  // constraint. Nothing is dropped; on a database without the legacy trigger
+  // this is a no-op. Idempotent, so safe under the ledger-less runner.
+  '301_legacy_double_booking_trigger_statuses': `
+    DO $mig301$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        WHERE t.tgname = 'trg_no_double_booking'
+          AND c.relname = 'appointment_assignments'
+          AND NOT t.tgisinternal
+      ) THEN
+        EXECUTE $fn$
+          CREATE OR REPLACE FUNCTION check_no_double_booking()
+          RETURNS TRIGGER LANGUAGE plpgsql AS $body$
+          BEGIN
+            IF NEW.appointment_status IN ('canceled', 'no_show') THEN
+              RETURN NEW;
+            END IF;
+            IF NEW.scheduled_start IS NULL OR NEW.scheduled_end IS NULL THEN
+              RETURN NEW;
+            END IF;
+            IF EXISTS (
+              SELECT 1 FROM appointment_assignments aa
+              WHERE aa.tenant_id = NEW.tenant_id
+                AND aa.technician_id = NEW.technician_id
+                AND aa.id <> NEW.id
+                AND aa.appointment_status NOT IN ('canceled', 'no_show')
+                AND tstzrange(aa.scheduled_start, aa.scheduled_end)
+                    && tstzrange(NEW.scheduled_start, NEW.scheduled_end)
+            ) THEN
+              RAISE EXCEPTION 'DOUBLE_BOOKING: technician % already has an active assignment overlapping [%, %]',
+                NEW.technician_id, NEW.scheduled_start, NEW.scheduled_end
+                USING ERRCODE = 'exclusion_violation';
+            END IF;
+            RETURN NEW;
+          END;
+          $body$;
+        $fn$;
+      END IF;
+    END
+    $mig301$;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

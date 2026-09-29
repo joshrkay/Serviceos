@@ -359,6 +359,7 @@ export class CreateJobExecutionHandler implements ExecutionHandler {
               ? payload.priority
               : undefined,
           createdBy: context.executedBy,
+          actorRole: context.executedByRole,
         },
         this.jobRepo,
         this.auditRepo,
@@ -511,6 +512,7 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
               locationId,
               summary: jobTitle || proposal.summary,
               createdBy: context.executedBy,
+              actorRole: context.executedByRole,
             },
             this.jobRepo,
             this.auditRepo,
@@ -1016,6 +1018,7 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
                 ? payload.summary.trim()
                 : proposal.summary || lineItems[0].description,
             createdBy: context.executedBy,
+            actorRole: context.executedByRole,
           },
           this.jobRepo,
           this.auditRepo,

@@ -8,6 +8,9 @@ function replyErrorMessage(status: number): string {
       return 'This customer has opted out of texts (replied STOP).';
     case 422:
       return 'No phone or email on file for this customer.';
+    case 429:
+      // #1479 — per-recipient SMS volume cap.
+      return 'This customer has already received the maximum number of texts for now. Try again later, or reach them by email or phone.';
     case 503:
       return 'Messaging is not set up for this account yet.';
     default:

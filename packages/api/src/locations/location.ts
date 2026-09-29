@@ -116,6 +116,31 @@ function isValidServiceTypes(value: unknown): value is string[] {
   );
 }
 
+/**
+ * #1473 — the customers directory filters on the chip labels 'HVAC' /
+ * 'Plumbing' / 'Painting', but writers disagreed on case ('plumbing' from a
+ * direct API call). Known trades are stored in their canonical chip casing;
+ * any other value is kept as typed (trimmed). Duplicates are dropped
+ * case-insensitively, first occurrence wins.
+ */
+const CANONICAL_SERVICE_TYPES = ['HVAC', 'Plumbing', 'Painting'] as const;
+const CANONICAL_BY_LOWER = new Map<string, string>(
+  CANONICAL_SERVICE_TYPES.map((t) => [t.toLowerCase(), t]),
+);
+
+export function normalizeServiceTypes(types: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of types) {
+    const trimmed = raw.trim();
+    const key = trimmed.toLowerCase();
+    if (!trimmed || seen.has(key)) continue;
+    seen.add(key);
+    out.push(CANONICAL_BY_LOWER.get(key) ?? trimmed);
+  }
+  return out;
+}
+
 export function validateLocationInput(input: CreateLocationInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
@@ -195,7 +220,7 @@ export async function createLocation(
     accessNotes: input.accessNotes,
     isPrimary: input.isPrimary ?? false,
     addressType: input.addressType ?? 'service',
-    serviceTypes: input.serviceTypes ? [...new Set(input.serviceTypes)] : [],
+    serviceTypes: input.serviceTypes ? normalizeServiceTypes(input.serviceTypes) : [],
     isArchived: false,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -255,7 +280,11 @@ export async function updateLocation(
   const validationErrors = validateLocationUpdateInput(existing, input);
   if (validationErrors.length > 0) throw new Error(`Validation failed: ${validationErrors.join(', ')}`);
 
-  const updated = await repository.update(tenantId, id, { ...input, updatedAt: new Date() });
+  const updated = await repository.update(tenantId, id, {
+    ...input,
+    ...(input.serviceTypes !== undefined ? { serviceTypes: normalizeServiceTypes(input.serviceTypes) } : {}),
+    updatedAt: new Date(),
+  });
 
   if (auditRepo && actorId && updated) {
     const event = createAuditEvent({
