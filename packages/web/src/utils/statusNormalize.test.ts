@@ -57,7 +57,7 @@ describe('normalizeInvoiceStatus', () => {
     expect(normalizeInvoiceStatus('open')).toBe('Unpaid');
     expect(normalizeInvoiceStatus('partially_paid')).toBe('Unpaid');
     expect(normalizeInvoiceStatus('paid')).toBe('Paid');
-    expect(normalizeInvoiceStatus('void')).toBe('Canceled');
+    expect(normalizeInvoiceStatus('void')).toBe('Void');
     expect(normalizeInvoiceStatus('canceled')).toBe('Canceled');
   });
 

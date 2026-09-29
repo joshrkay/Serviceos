@@ -29,7 +29,7 @@ import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { AttachmentSection } from '../attachments/AttachmentSection';
 
-type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Canceled';
+type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Void' | 'Canceled';
 
 interface InvCompat {
   id: string;
@@ -1047,6 +1047,9 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   // status (deriveInvoiceUiStatus folds 'open'/'partially_paid' → 'Unpaid'
   // and may surface 'Overdue'), all of which map back to a payable invoice.
   const canMarkPaid = status === 'Unpaid' || status === 'Overdue';
+  // #1473 — a void/canceled invoice is closed: nothing is owed and there is
+  // no payment link to (re)send (the API refuses the resend with 409).
+  const isClosed = status === 'Void' || status === 'Canceled';
 
   // #1400 — "Download receipt" had no handler. Prints the API's totals and
   // each recorded payment; the business header comes from tenant settings.
@@ -1269,6 +1272,17 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                   paid invoice the headline is the remaining balance
                   (amountDueCents) and we surface the collected amount on a
                   separate "Paid" line. */}
+              {isClosed ? (
+              <div className="rounded-xl px-4 py-4 bg-secondary text-foreground">
+                <p className="text-sm text-muted-foreground mb-1">
+                  {status === 'Void' ? 'Voided — nothing is owed' : 'Canceled — nothing is owed'}
+                </p>
+                <p className="text-3xl text-muted-foreground line-through mb-1">{centsToDisplay(totalCents)}</p>
+                {amountPaidCents > 0 && (
+                  <p className="text-xs text-muted-foreground">Paid {centsToDisplay(amountPaidCents)} before it was voided</p>
+                )}
+              </div>
+              ) : (
               <div className={`rounded-xl px-4 py-4 ${status === 'Paid' ? 'bg-success' : status === 'Overdue' ? 'bg-destructive' : 'bg-primary'} text-primary-foreground`}>
                 <p className="text-sm text-primary-foreground/60 mb-1">
                   {status === 'Paid' ? 'Amount paid' : 'Amount due'}
@@ -1288,12 +1302,13 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                   <p className="text-xs text-success">{paid ? 'Just now' : ''}</p>
                 )}
               </div>
+              )}
 
               <PaymentHistory payments={payments} tz={tz} />
 
               {/* Action buttons */}
               <div className="flex flex-col gap-2">
-                {status !== 'Paid' && (
+                {status !== 'Paid' && !isClosed && (
                   <button
                     onClick={() => setSendOpen(true)}
                     className={`flex items-center justify-center gap-2 rounded-xl py-3 text-sm transition-colors text-primary-foreground ${
