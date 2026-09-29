@@ -1,5 +1,6 @@
 import React from 'react';
 import { reportError } from '../../lib/errorReporter';
+import { chunkLoadFailureCopy } from './chunk-load-failure';
 
 /**
  * ErrorBoundary — top-level React error boundary for ServiceOS.
@@ -55,6 +56,9 @@ export class ErrorBoundary extends React.Component<
       const errName = this.state.error?.name ?? 'Error';
       const errMessage =
         this.state.error?.message ?? 'An unexpected error occurred.';
+      // #1481 — a lazy page chunk that failed to load (offline / stale
+      // deploy) is not a crash; say what happened instead.
+      const loadFailure = chunkLoadFailureCopy(this.state.error);
 
       return (
         <div
@@ -64,24 +68,27 @@ export class ErrorBoundary extends React.Component<
         >
           <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
             <h1 className="text-lg font-semibold text-slate-900">
-              Something went wrong
+              {loadFailure ? loadFailure.title : 'Something went wrong'}
             </h1>
             <p className="mt-2 text-sm text-slate-600">
-              The application encountered an unexpected error and could not
-              continue. You can try reloading the page.
+              {loadFailure
+                ? loadFailure.detail
+                : 'The application encountered an unexpected error and could not continue. You can try reloading the page.'}
             </p>
-            <div className="mt-3 rounded-md bg-slate-50 p-3 text-xs text-slate-500">
-              <span className="font-medium text-slate-700">{errName}</span>
-              {': '}
-              <span>{errMessage}</span>
-            </div>
+            {!loadFailure && (
+              <div className="mt-3 rounded-md bg-slate-50 p-3 text-xs text-slate-500">
+                <span className="font-medium text-slate-700">{errName}</span>
+                {': '}
+                <span>{errMessage}</span>
+              </div>
+            )}
             <div className="mt-5 flex justify-end">
               <button
                 type="button"
                 onClick={this.handleReload}
                 className="rounded-md bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700"
               >
-                Reload page
+                {loadFailure ? 'Try again' : 'Reload page'}
               </button>
             </div>
           </div>
