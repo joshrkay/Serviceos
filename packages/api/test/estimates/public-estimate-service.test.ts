@@ -164,6 +164,18 @@ describe('PublicEstimateService.getByToken', () => {
     expect(view.isActionable).toBe(true);
   });
 
+  it('#1402 §13 — carries the tenant business address to the approval page', async () => {
+    const settings = await h.settings.findByTenant(TENANT);
+    await h.settings.update(TENANT, { ...settings!, businessAddress: '1200 W Main St\nMesa, AZ 85201' });
+    const j = (await h.job.findByTenant(TENANT))[0];
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+
+    const view = await h.service.getByToken(est.viewToken!);
+
+    expect(view.businessAddress).toBe('1200 W Main St\nMesa, AZ 85201');
+  });
+
   it('defaults estimateLabel to "Estimate" when no terminology is configured', async () => {
     const j = (await h.job.findByTenant(TENANT))[0];
     const est = makeEstimate(j.id);

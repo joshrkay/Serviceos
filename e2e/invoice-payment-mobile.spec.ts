@@ -173,4 +173,41 @@ test.describe('invoice payment page — mobile layout / B7.5 descriptive unit', 
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
     });
   });
+
+  // #1402 §13 — a long tenant business address in the header must wrap
+  // inside a 320px phone, never widen the page.
+  test.describe('business address at 320px', () => {
+    test.use({ viewport: { width: 320, height: 690 } });
+
+    test('a long business address wraps without horizontal overflow', async ({ page }) => {
+      await page.route('**/public/invoices/**', async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              ...invoiceView,
+              businessAddress: '1200 West Southern Avenue Industrial Park Building C Suite 400-B\nMesa, AZ 85201',
+            }),
+          });
+          return;
+        }
+        await route.fulfill({ status: 204, body: '' });
+      });
+      await page.route('**/api/public-payments/**', async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ clientSecret: 'pi_e2e_stub_secret_abc' }),
+        });
+      });
+      await page.goto('/pay/e2e-test-token');
+      const address = page.getByTestId('business-address');
+      await expect(address).toBeVisible();
+      const box = await address.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.x + box!.width).toBeLessThanOrEqual(320);
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+    });
+  });
 });

@@ -110,6 +110,28 @@ describe('InvoicesPage detail money (#1400)', () => {
     expect(html).toMatch(/<span>Balance due<\/span>\s*<span>\$0\.00<\/span>/);
   });
 
+  it('#1402 §13 — the receipt prints the tenant business address under the business name', async () => {
+    const inv = apiInvoice({ invoiceNumber: 'INV-0032', status: 'paid', amountPaidCents: 9342, amountDueCents: 0 });
+    apiRoutes['/api/payments?invoiceId='] = [
+      { id: 'p2', invoiceId: inv.id, amountCents: 9342, method: 'cash', status: 'completed', receivedAt: '2026-09-26T15:00:00.000Z', refundedAmountCents: 0 },
+    ];
+    apiRoutes['/api/settings'] = {
+      businessName: 'Acme HVAC',
+      businessAddress: '1200 W Main St\nMesa, AZ 85201',
+    };
+    const written: string[] = [];
+    vi.spyOn(window, 'open').mockReturnValue({
+      document: { write: (html: string) => written.push(html), close: () => {} },
+    } as unknown as Window);
+    renderDetail(inv);
+    await screen.findByRole('region', { name: 'Payment history' });
+
+    fireEvent.click(screen.getByRole('button', { name: /Download receipt/ }));
+
+    await waitFor(() => expect(written.join('')).toContain('INV-0032'));
+    expect(written.join('')).toContain('1200 W Main St<br>Mesa, AZ 85201');
+  });
+
   it('renders the due date as a tenant-local date, never the raw ISO instant', () => {
     const { container } = renderDetail(apiInvoice({ dueDate: '2026-10-27T02:23:19.595Z' }));
     expect(container.textContent).not.toContain('T02:23:19');
