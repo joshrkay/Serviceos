@@ -79,7 +79,9 @@ export function extractLaunchSlots(
   const phone = firstNonEmpty(entities.phone, entities.updatedPhone);
   if (phone) slots.phone = phone;
 
-  const address = firstNonEmpty(entities.serviceAddress, entities.updatedAddress);
+  // #1468 — `address` is the prompt's create_customer field for the caller's
+  // own street address; it was parsed by the classifier but never projected.
+  const address = firstNonEmpty(entities.serviceAddress, entities.address, entities.updatedAddress);
   if (address) slots.address = address;
 
   const serviceType = firstNonEmpty(input.serviceType);
@@ -98,6 +100,10 @@ export function extractLaunchSlots(
     entities.lineItemDescriptions && entities.lineItemDescriptions.length > 0
       ? entities.lineItemDescriptions.join('; ')
       : undefined,
+    // #1468 — the classifier prompt asks create_appointment / create_job /
+    // log_warranty_claim for `jobTitle` (the short name of the work), never
+    // noteBody, so on a booking call this is where the problem arrives.
+    entities.jobTitle,
   );
   if (problem) slots.problem_description = problem;
 
