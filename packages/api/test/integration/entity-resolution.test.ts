@@ -15,6 +15,7 @@ import { Pool } from 'pg';
 import { DateTime } from 'luxon';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb, TestTenant } from './shared';
 import { PgEntityResolver } from '../../src/ai/resolution/pg-entity-resolver';
+import { resolveSchedulingEntities } from '../../src/ai/agents/customer-calling/entity-resolution';
 import { TAU_ENT, TAU_ENT_CONFIRM_LOW } from '../../src/ai/resolution/entity-resolver';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
@@ -1783,6 +1784,64 @@ describe('Postgres integration — entity resolution (P8)', () => {
           });
 
           expect(result.kind).toBe('not_found');
+        });
+      });
+
+      // #1492 P2 (QA VOX-05) — "Draft an estimate for the QA Matrix job…"
+      // extracted only jobReference "QA Matrix", no customerName. Tenant-wide,
+      // the customer-name half scores all seven of the customer's jobs 1.000
+      // and overflows into not_found. The voice resolution falls back to the
+      // reference as a CUSTOMER, then that customer's jobs.
+      describe('a job reference naming a customer, with no customer extracted (#1492)', () => {
+        async function liveShapedCustomer(displayName: string, summaries: string[]) {
+          const seed = await seedRealisticTenant({ displayName, jobSummary: summaries[0] });
+          const jobRepo = new PgJobRepository(pool);
+          const locationId = crypto.randomUUID();
+          await new PgLocationRepository(pool).create({
+            id: locationId, tenantId: seed.tenantId, customerId: seed.customerId, street1: '14 Matrix Way',
+            city: 'Austin', state: 'TX', postalCode: '78701', country: 'USA', isPrimary: false,
+            addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+          });
+          const ids = [seed.jobId];
+          for (const summary of summaries.slice(1)) {
+            const id = crypto.randomUUID();
+            await jobRepo.create({
+              id, tenantId: seed.tenantId, customerId: seed.customerId, locationId,
+              jobNumber: `JOB-${id.slice(0, 8)}`, summary, status: 'new',
+              priority: 'normal', createdBy: seed.userId, createdAt: new Date(), updatedAt: new Date(),
+            });
+            ids.push(id);
+          }
+          return { seed, ids };
+        }
+
+        it('draft_estimate "QA Matrix" → the customer, then a which-job question over their jobs', async () => {
+          const { seed, ids } = await liveShapedCustomer('qa-matrix-A-customer', [
+            'Maintenance visit', 'Furnace tune-up', 'Maintenance visit',
+            'Attic insulation', 'Drain cleaning', 'Water heater flush', 'Maintenance visit',
+          ]);
+
+          const outcome = await resolveSchedulingEntities(resolver, seed.tenantId, 'draft_estimate', {
+            jobReference: 'QA Matrix',
+          });
+
+          expect(outcome.status).toBe('ambiguous');
+          expect(outcome.ambiguous?.entityKind).toBe('job');
+          expect(outcome.ambiguous?.candidates).toHaveLength(5);
+          for (const c of outcome.ambiguous?.candidates ?? []) expect(ids).toContain(c.id);
+          expect(outcome.refs.customerId).toBe(seed.customerId);
+        });
+
+        it('a reference naming neither a job nor a customer stays not_found (#1416)', async () => {
+          const { seed } = await liveShapedCustomer('qa-matrix-A-customer', ['Maintenance visit']);
+
+          const outcome = await resolveSchedulingEntities(resolver, seed.tenantId, 'draft_estimate', {
+            jobReference: 'Zebulon Warehouse',
+          });
+
+          expect(outcome.status).toBe('not_found');
+          expect(outcome.notFound).toEqual({ entityKind: 'job', reference: 'Zebulon Warehouse' });
+          expect(outcome.refs.customerId).toBeUndefined();
         });
       });
 
