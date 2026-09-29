@@ -2,7 +2,7 @@
 
 **Master Log**: Tracks all QA runs and allows comparison across 2-3 day cycles.  
 **Purpose**: Early detection of regressions, tracking of bug fixes, trend analysis.  
-**Last Updated**: 2026-09-06
+**Last Updated**: 2026-09-29
 
 ---
 
@@ -23,7 +23,7 @@
 | 2026-07-30 | [TBD] | Staging | [%] | [X] | [X] | [X] | [X] | [X] | [X] | 🟢 HEALTHY | Initial baseline QA run | [qa-results-2026-07-30.md](qa-results-2026-07-30.md) |
 | 2026-08-18 | Claude Code | Development | 71% | 60 | 13 | 3 | 2 | 4 | 4 | 🔴 BLOCKED | Pass rate <80% per QA_PROCESS.md; infrastructure blockers prevent full testing; code quality clean; no regressions | [qa-results-2026-08-18.md](qa-results-2026-08-18.md) |
 | 2026-09-06 | Fable 5.1 + Sonnet workers | Cloud container (CI-equivalent; Docker + hermetic browser; no provider creds) | 92% (22/24 automated lanes) | 22 | 2 | 0 | 0 | 1 | 5 | 🟡 DEGRADED (automated) | All CI gates green incl. 14 158 API unit, 1 218 integration on real Postgres, 3 057 web/shared/mobile, voice-quality 73/73, Playwright hermetic 19/19; only the two documented non-blocking corpus checks red; 1 pre-existing medium defect (C-1/D-1) re-confirmed at runtime; provider legs remain STAGING | [verification/full-verification-2026-09-06.md](verification/full-verification-2026-09-06.md) |
-| [DATE] | [Name] | Prod/Staging | [%] | [X] | [X] | [X] | [X] | [X] | [X] | 🔴/🟠/🟡/🟢 | [Change summary] | [Link] |
+| 2026-09-29 | Claude Haiku 4.5 (Automated CI) | Cloud container (Docker, CI-equivalent; no provider creds) | [Pending test results] | [Pending] | [Pending] | 0 | 0 | [Pending] | [Pending] | 🟡 DEGRADED (testing) | 23-day gap since last run (QA cadence violated); first scheduled run restarting automation; build clean, TypeScript valid; automated tests executing now; baseline expected to match 2026-09-06 (92%+); no code changes on main branch; manual QA unavailable without credentials | [qa-results-2026-09-29.md](qa-results-2026-09-29.md) |
 
 ---
 
