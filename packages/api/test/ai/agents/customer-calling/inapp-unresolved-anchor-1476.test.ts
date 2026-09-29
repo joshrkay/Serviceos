@@ -17,6 +17,7 @@ import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/vo
 import { InMemoryProposalRepository } from '../../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../../../src/oncall/rotation';
+import { approveProposal } from '../../../../src/proposals/actions';
 import type { LLMGateway, LLMResponse } from '../../../../src/ai/gateway/gateway';
 import type {
   EntityResolver,
@@ -99,5 +100,26 @@ describe('InAppVoiceAdapter — unresolved anchor on a draft (#1476)', () => {
     const turn2 = await adapter.handleInput(sessionId, "Yes, that's correct.");
     expect(turn2.ttsText ?? '').not.toMatch(/taken care of/i);
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  it('an estimate that names nobody is drafted gated — approval refuses it and the close is not "taken care of"', async () => {
+    const adapter = makeAdapter(
+      JSON.stringify({
+        intentType: 'draft_estimate',
+        confidence: 0.9,
+        extractedEntities: { amount: 15000, lineItemDescriptions: ['diagnostic labor'] },
+      }),
+      resolverByKind({}),
+    );
+    const { sessionId } = await adapter.startSession(TENANT, OPERATOR);
+    await adapter.handleInput(sessionId, 'Draft an estimate with one diagnostic labor line for $150.');
+    const close = await adapter.handleInput(sessionId, 'yes');
+
+    expect(close.ttsText ?? '').not.toMatch(/taken care of/i);
+    const [proposal] = await proposalRepo.findByTenant(TENANT);
+    expect(proposal?.proposalType).toBe('draft_estimate');
+    await expect(
+      approveProposal(proposalRepo, TENANT, proposal!.id, OPERATOR, 'owner'),
+    ).rejects.toMatchObject({ details: { missingFields: ['customerId'] } });
   });
 });

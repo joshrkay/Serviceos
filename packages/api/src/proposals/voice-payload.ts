@@ -284,6 +284,15 @@ function namedContractGap(
     // reach `CreateAppointmentExecutionHandler` and fail there instead
     // ("Payload must include a valid jobId" — live evidence, sweep row D01).
     case 'create_appointment':
+    // #1476 — the same anchor gap for the two document drafts. Their schemas'
+    // "customerId or customerReference" refine reports `path: []`, so a draft
+    // naming nobody (or a name that resolved to nobody) persisted UNGATED on
+    // the in-app leg, was approvable, and failed in the executor ("Estimate
+    // draft has neither a customerId nor a jobId" — QA VOX-05c). `customerId`
+    // is the gate estimate-task / invoice-task already use on the memo/chat
+    // leg, and it is liftable (GATED_REFERENCE_SOURCES).
+    case 'draft_estimate':
+    case 'draft_invoice':
       return lacksExecutionAnchor(proposalType, flat) ? ['customerId'] : [];
     // `updateJobPayloadSchema`'s "at least one field to change" refine, after
     // the deterministic phrase parse above has had its turn. `status` is the
