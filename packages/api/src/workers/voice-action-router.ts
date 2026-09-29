@@ -14,6 +14,11 @@ import {
 } from '../proposals/autonomous-lane';
 import { createOneTapUndoToken } from '../proposals/one-tap-undo';
 import { createAuditEvent } from '../audit/audit';
+import {
+  askForExecutabilityGaps,
+  holdForExecutability,
+  type ApprovalReferenceCheck,
+} from '../proposals/approval-reference-checks';
 import { renderProposalSms, renderChainSms } from '../proposals/sms/render';
 import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
@@ -465,6 +470,13 @@ export interface VoiceActionRouterDeps {
   userRepo?: Pick<UserRepository, 'findByTenant'>;
   assignmentRepo?: Pick<AssignmentRepository, 'findByTechnician'>;
   enRouteCoordinator?: EnRouteEnqueuer;
+  /**
+   * #1485 — the approval-time reference checks (app.ts), run on every routed
+   * proposal before it persists (`holdForExecutability`): a card that cannot
+   * execute is never auto-approved, and the owner's SMS asks for the gap.
+   * Absent → no checks (tests that do not wire them).
+   */
+  approvalReferenceChecks?: readonly ApprovalReferenceCheck[];
 }
 
 // THE intent → proposal-type map now lives in `proposals/voice-intent-map.ts`
@@ -1140,6 +1152,8 @@ type SegmentOutcome =
       classification: IntentClassification;
       /** Tenant-wide presence at routing time (P12-004 unsupervised routing). */
       supervisorPresent: boolean;
+      /** #1485 — what the executability check found missing (empty when none). */
+      executabilityGaps: string[];
     }
   // The classifier could not route this segment — a voice_clarification
   // was emitted in its place (single path) or should be (chain path; see
@@ -1881,14 +1895,21 @@ async function processSegment(
   // U9 — the untrusted-source guard runs LAST so a voicemail-sourced
   // proposal can never leave here 'approved', including through the
   // autonomous-lane exception holdIfUnsupervised deliberately preserves.
+  //
+  // #1485 — then the ONE executability check a tap runs (the chat route's
+  // mechanism): a card that cannot execute is held, never auto-approved into
+  // an execution failure.
+  const held = await holdForExecutability(
+    tenantId,
+    holdIfUntrustedSource(holdIfUnsupervised(annotated, supervisorPresent), params.sourceChannel),
+    deps.approvalReferenceChecks,
+  );
   return {
     kind: 'proposal',
-    proposal: holdIfUntrustedSource(
-      holdIfUnsupervised(annotated, supervisorPresent),
-      params.sourceChannel,
-    ),
+    proposal: held.proposal,
     classification,
     supervisorPresent,
+    executabilityGaps: held.gaps,
   };
 }
 

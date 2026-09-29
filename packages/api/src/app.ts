@@ -2739,6 +2739,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
+    // #1485 — the same approval-time checks, run before a routed proposal
+    // persists, so an auto-approve can't skip what a tap refuses.
+    approvalReferenceChecks,
     // B8 — create_customer draft-time duplicate detection parity: the SAME
     // customerRepo the telephony FSM (twilio-adapter.ts) already uses to
     // build its duplicateLoader, so the worker's create_customer proposals
