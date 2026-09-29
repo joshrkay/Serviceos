@@ -36,6 +36,7 @@ const STATUS_TONE: Record<string, StatusTone> = {
   Unpaid: 'warning',
   Paid: 'success',
   Overdue: 'destructive',
+  Void: 'neutral',
   'Estimate sent': 'info',
   'Estimate approved': 'success',
   Urgent: 'destructive',
