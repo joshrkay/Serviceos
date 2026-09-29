@@ -833,12 +833,21 @@ async function resolvePlannedLookups(
 ): Promise<SchedulingEntityResolution | undefined> {
   if (!resolver) return undefined;
   for (const lookup of lookups) {
+    // #1476 P2 — a JOB reference is a question about the customer already in
+    // hand (resolved earlier in this plan, pinned by a pick, or explicit):
+    // "the QA Matrix job" for the QA Matrix customer the operator just chose
+    // means THEIR jobs. Tenant-wide, the same words matched more jobs than a
+    // picker may offer and came back not_found; anchored, several matches are
+    // the ordinary which-one question. (Customer-first plan order is what puts
+    // the customer in `refs` before the job lookup runs.)
+    const customerId =
+      lookup.customerId ?? (lookup.kind === 'job' ? refs.customerId : undefined);
     const result = await resolver.resolve({
       tenantId,
       reference: lookup.reference,
       kind: lookup.kind,
       ...(lookup.jobId ? { jobId: lookup.jobId } : {}),
-      ...(lookup.customerId ? { customerId: lookup.customerId } : {}),
+      ...(customerId ? { customerId } : {}),
     });
     const terminal = foldResolution(
       result,
