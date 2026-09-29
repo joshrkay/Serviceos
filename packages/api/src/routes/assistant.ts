@@ -3082,6 +3082,7 @@ async function generateAssistantReply(
             tenantId,
             userId,
             intent: classification.intentType,
+            message: lastUserText,
             ...(classification.extractedEntities
               ? { extractedEntities: classification.extractedEntities as Record<string, unknown> }
               : {}),

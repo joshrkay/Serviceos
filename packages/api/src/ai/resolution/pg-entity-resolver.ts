@@ -571,7 +571,9 @@ export class PgEntityResolver implements EntityResolver {
       case 'customer':
         return this.resolveCustomer(tenantId, reference);
       case 'job':
-        return this.resolveJob(tenantId, reference, undefined, customerId);
+        return customerId
+          ? this.resolveJobForCustomer(tenantId, reference, customerId)
+          : this.resolveJob(tenantId, reference);
       case 'invoice':
         // A verified customer anchor IS the scope when the operator named the
         // person and no paperwork ("nudge Khan", "remind Johnson"): the
@@ -720,14 +722,6 @@ export class PgEntityResolver implements EntityResolver {
     tenantId: string,
     reference: string,
     customerNeedleOverride?: string,
-    /**
-     * #1476 P2 — the customer the operator already picked. Scopes the lookup
-     * to THAT customer's jobs: "the QA Matrix job" after choosing the QA
-     * Matrix customer must not compete with every other QA Matrix job in the
-     * tenant (live: seven matches overflowed the picker into not_found while
-     * the chosen customer had four).
-     */
-    customerId?: string,
   ): Promise<EntityResolverResult> {
     // '' when the reference is pure filler ("that job"): strict_word_similarity
     // of an empty needle is 0, so such a reference keeps exactly today's
@@ -759,12 +753,9 @@ export class PgEntityResolver implements EntityResolver {
               AND c.is_archived = false
             WHERE j.tenant_id = $1
               AND ${SCORE_EXPR} > $3
-              ${customerId ? 'AND j.customer_id = $5' : ''}
             ORDER BY score DESC
             LIMIT ${MAX_JOB_CANDIDATES + 1}`,
-          customerId
-            ? [tenantId, reference, SIMILARITY_PREFILTER, needle, customerId]
-            : [tenantId, reference, SIMILARITY_PREFILTER, needle],
+          [tenantId, reference, SIMILARITY_PREFILTER, needle],
         )
         .then((r) => r.rows),
     );
@@ -790,6 +781,85 @@ export class PgEntityResolver implements EntityResolver {
     if (confident.length > MAX_JOB_CANDIDATES) return { kind: 'not_found', reference };
 
     return this.toResult(candidates.slice(0, MAX_JOB_CANDIDATES), reference);
+  }
+
+  /**
+   * #1476 P2 / #1490 P2 — a job reference with the customer ALREADY picked.
+   * Scoped to that customer's jobs, the customer's own name no longer tells
+   * any of them apart (it scored every one 1.000, so a customer with more
+   * than five jobs overflowed into not_found — live VOX-05/VOX-07). So the
+   * customer's name words are dropped from the reference and the jobs are
+   * ranked by what is left — the JOB words — against summary and job number.
+   *
+   * A reference naming only the customer is never not_found while they have
+   * jobs: one job is that job, several are a picker of their most recent (a
+   * narrowing question, not a dead end). Job words that pick one resolve it
+   * (or confirm it, in the mid band); job words naming none of their jobs are
+   * not_found, said honestly (#1416).
+   */
+  private async resolveJobForCustomer(
+    tenantId: string,
+    reference: string,
+    customerId: string,
+  ): Promise<EntityResolverResult> {
+    const { rows, jobWords } = await withTenantConnection(this.pool, tenantId, async (client) => {
+      const customer = await client.query<{ display_name: string | null; company_name: string | null }>(
+        `SELECT display_name, company_name FROM customers WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, customerId],
+      );
+      const nameWords = new Set(
+        `${customer.rows[0]?.display_name ?? ''} ${customer.rows[0]?.company_name ?? ''}`
+          .toLowerCase()
+          .split(/[^a-z0-9']+/)
+          .filter(Boolean),
+      );
+      const jobWords = (extractNameLikeToken(reference) ?? '')
+        .split(/\s+/)
+        .filter((w) => w.length > 0 && !nameWords.has(w))
+        .join(' ');
+      const result = await client.query<{
+        id: string;
+        summary: string;
+        job_number: string | null;
+        status: string | null;
+        score: number;
+        total: number;
+      }>(
+        `SELECT j.id, j.summary, j.job_number, j.status,
+                CASE WHEN $3 = '' THEN 0 ELSE GREATEST(
+                  strict_word_similarity($3, j.summary),
+                  strict_word_similarity($3, COALESCE(j.job_number, '')),
+                  similarity(COALESCE(j.job_number, ''), $4)
+                ) END AS score,
+                count(*) OVER ()::int AS total
+           FROM jobs j
+          WHERE j.tenant_id = $1
+            AND j.customer_id = $2
+          ORDER BY score DESC, j.created_at DESC
+          LIMIT ${MAX_JOB_CANDIDATES + 1}`,
+        [tenantId, customerId, jobWords, reference],
+      );
+      return { rows: result.rows, jobWords };
+    });
+
+    if (rows.length === 0) return { kind: 'not_found', reference };
+    const candidates: EntityCandidate[] = rows.map((row) => ({
+      id: row.id,
+      kind: 'job' as EntityKind,
+      label: row.summary,
+      hint: [row.job_number, row.status].filter(Boolean).join(' · ') || undefined,
+      score: Number(row.score),
+    }));
+    // Job words that name none of their jobs are a job that does not exist
+    // (#1416): say so, never answer with a stand-in — not even their only one.
+    if (jobWords !== '') {
+      const ranked = this.toResult(candidates, reference);
+      if (ranked.kind !== 'ambiguous') return ranked;
+      return { kind: 'ambiguous', candidates: ranked.candidates.slice(0, MAX_JOB_CANDIDATES) };
+    }
+    // The reference named only the customer: their one job, or a picker.
+    if (Number(rows[0].total) === 1) return { kind: 'resolved', candidate: candidates[0] };
+    return { kind: 'ambiguous', candidates: candidates.slice(0, MAX_JOB_CANDIDATES) };
   }
 
   private async resolveInvoice(

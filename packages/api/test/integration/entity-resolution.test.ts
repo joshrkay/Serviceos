@@ -1707,6 +1707,85 @@ describe('Postgres integration — entity resolution (P8)', () => {
         }
       });
 
+      // #1490 P2 (QA VOX-05 / VOX-07) — scoped to the chosen customer, the
+      // customer-name half scored EVERY one of their jobs 1.000, so a customer
+      // with more than five jobs overflowed into not_found: "I couldn't find a
+      // matching job for QA Matrix job" about a customer with fifteen.
+      describe('customer anchor with more jobs than a picker holds (#1490)', () => {
+        async function customerWithJobs(summaries: string[]) {
+          const seed = await seedRealisticTenant({ displayName: 'QA Matrix', jobSummary: summaries[0] });
+          const jobRepo = new PgJobRepository(pool);
+          const locationId = crypto.randomUUID();
+          await new PgLocationRepository(pool).create({
+            id: locationId, tenantId: seed.tenantId, customerId: seed.customerId, street1: '14 Matrix Way',
+            city: 'Austin', state: 'TX', postalCode: '78701', country: 'USA', isPrimary: false,
+            addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+          });
+          const ids = [seed.jobId];
+          for (const summary of summaries.slice(1)) {
+            const id = crypto.randomUUID();
+            await jobRepo.create({
+              id, tenantId: seed.tenantId, customerId: seed.customerId, locationId,
+              jobNumber: `JOB-${id.slice(0, 8)}`, summary, status: 'new',
+              priority: 'normal', createdBy: seed.userId, createdAt: new Date(), updatedAt: new Date(),
+            });
+            ids.push(id);
+          }
+          return { seed, ids };
+        }
+
+        const SEVEN = [
+          'Maintenance visit', 'Draft invoice for QA Matrix', 'Maintenance visit',
+          'Draft invoice for QA Matrix', 'Attic insulation', 'Drain cleaning', 'Maintenance visit',
+        ];
+
+        it('a reference naming only the customer asks which of their jobs — never not_found', async () => {
+          const { seed, ids } = await customerWithJobs(SEVEN);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'QA Matrix job',
+            kind: 'job',
+            customerId: seed.customerId,
+          });
+
+          expect(result.kind).toBe('ambiguous');
+          if (result.kind === 'ambiguous') {
+            expect(result.candidates).toHaveLength(5);
+            for (const c of result.candidates) expect(ids).toContain(c.id);
+          }
+        });
+
+        it('the job words pick that customer\'s one matching job out of the seven', async () => {
+          const { seed, ids } = await customerWithJobs(SEVEN);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the QA Matrix insulation job',
+            kind: 'job',
+            customerId: seed.customerId,
+          });
+
+          expect(result.kind).toBe('resolved');
+          if (result.kind === 'resolved') expect(result.candidate.id).toBe(ids[4]); // 'Attic insulation'
+        });
+
+        // #1416 stays true: job words that name NO job of theirs are said
+        // honestly, never answered with some other job (even their only one).
+        it('job words naming none of their jobs are not_found — not a stand-in job', async () => {
+          const { seed } = await customerWithJobs(['Water heater replacement']);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the QA Matrix sprinkler job',
+            kind: 'job',
+            customerId: seed.customerId,
+          });
+
+          expect(result.kind).toBe('not_found');
+        });
+      });
+
       it('never resolves a job by customer name across tenants', async () => {
         const seed = await seedRealisticTenant({
           displayName: 'Jamie Garcia',

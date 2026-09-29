@@ -14,6 +14,10 @@ import { CustomerRepository } from '../../customers/customer';
 import { EstimateRepository } from '../../estimates/estimate';
 import { InvoiceScheduleRepository } from '../../invoices/invoice-schedule';
 import { wholeInvoiceBlockedByPlan } from '../../invoices/milestone-billing-guard';
+import {
+  estimateAlreadyInvoicedReason,
+  findInvoiceHoldingEstimate,
+} from '../../invoices/estimate-invoice-link';
 
 /**
  * P5-005 — Deterministic execution for draft_invoice proposals.
@@ -172,6 +176,18 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
         { tenantId: context.tenantId, jobId, jobStatus: existingJob?.status, estimateId: draftEstimateId },
       );
       if (refusal) return { success: false, error: refusal };
+    }
+
+    // #1490 — an estimate bills through ONE invoice (uq_invoices_estimate).
+    // Refuse a second one by name instead of letting the insert collide.
+    if (draftEstimateId && this.estimateRepo) {
+      const held = await findInvoiceHoldingEstimate(context.tenantId, draftEstimateId, {
+        estimateRepo: this.estimateRepo,
+        invoiceRepo: this.invoiceRepo,
+      });
+      if (held) {
+        return { success: false, error: estimateAlreadyInvoicedReason(held.estimate, held.invoice) };
+      }
     }
 
     try {
