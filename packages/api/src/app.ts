@@ -5839,6 +5839,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // be booked — without this repo the drafting handler cannot see the gap
       // and the proposal auto-approves into a guaranteed execution failure.
       locationRepo,
+      // #1480 — the same approval-time checks, run before a drafted card
+      // persists, so "approved automatically" can't skip what a tap refuses.
+      approvalReferenceChecks,
       // #1045 — back-to-back travel warning on held slots.
       feasibilityDeps,
       // #1173 — the files repo + object storage an Assistant chat photo was

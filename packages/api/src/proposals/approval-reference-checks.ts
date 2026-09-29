@@ -120,3 +120,49 @@ export function describeDanglingReferences(fields: readonly string[]): string {
   }
   return `Cannot approve proposal: ${parts.join('; ')}`;
 }
+
+/**
+ * #1480 — the ONE executability check. Every configured reference check, run
+ * against a proposal as it stands. `approveProposal` runs it on a human tap;
+ * a drafting surface runs it BEFORE persisting a proposal its status decision
+ * auto-approved (`holdIfNotExecutable`), so "approved automatically" can never
+ * skip what a tap would have refused (QA §17: an auto-approved estimate for a
+ * customer with no service location failed at execution).
+ */
+export async function executabilityGaps(
+  tenantId: string,
+  proposal: Proposal,
+  checks: readonly ApprovalReferenceCheck[] | undefined,
+): Promise<string[]> {
+  if (!checks || checks.length === 0) return [];
+  return (await Promise.all(checks.map((check) => check(tenantId, proposal)))).flat();
+}
+
+/**
+ * Pure. An auto-approved proposal with executability gaps is held for review
+ * instead — the same demotion shape as `holdIfUnsupervised`. The gaps are NOT
+ * written into `missingFields`: several (a service location, an email on
+ * file) are fixed on another record, not by editing this payload, and a
+ * `missingFields` gate nothing on the card can lift is the #909 dead end.
+ * `approveProposal` re-runs the checks, so the tap stays refused until the
+ * missing piece exists.
+ */
+export function holdIfNotExecutable(proposal: Proposal, gaps: readonly string[]): Proposal {
+  if (gaps.length === 0 || proposal.status !== 'approved') return proposal;
+  return { ...proposal, status: 'ready_for_review', approvedAt: undefined };
+}
+
+/**
+ * The assistant's ask for the missing piece(s) — what the operator has to
+ * supply before the card can go ahead.
+ */
+export function askForExecutabilityGaps(gaps: readonly string[]): string {
+  const asks: string[] = [];
+  if (gaps.includes('locationId')) {
+    asks.push("the customer has no service location yet — what's the service address?");
+  }
+  const unknown = gaps.filter((g) => g !== 'locationId');
+  if (unknown.length > 0) asks.push(`${unknown.join(', ')} does not name an existing record`);
+  return `This can't go ahead yet: ${asks.join('; ')}`;
+}
+
