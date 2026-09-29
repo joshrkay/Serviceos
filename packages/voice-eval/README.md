@@ -25,6 +25,10 @@ Critical slots: `name, address, service_type, time_window, problem_description`.
   `AI_PROVIDER_BASE_URL` / `AI_*_MODEL` (Railway prod/dev: api.openai.com,
   `gpt-4o-mini` for classify). Provider selection and per-model pricing are
   shared with the real-LLM path smoke (`ai/voice-quality/path-smoke/provider.ts`).
+  It is built via `createHarnessLLMGateway` (`ai/gateway/harness-gateway.ts`),
+  which swaps the production per-tenant token bucket (a fairness cap between
+  real tenants) for a no-op harness quota — a sequential sample on one
+  pseudo-tenant would otherwise drain it; the cost caps bound spend.
   `ANTHROPIC_API_KEY` (Layer-2 harness, Haiku) is an explicit local fallback
   only and is logged as NOT the production provider. With `--gate`,
   enforces the goal thresholds (intent ≥ 92%, slot micro-F1 ≥ 0.88); without it,
