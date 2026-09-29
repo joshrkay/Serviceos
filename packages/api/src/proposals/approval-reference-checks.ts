@@ -23,6 +23,7 @@ import type { CustomerRepository } from '../customers/customer';
 import type { LocationRepository } from '../locations/location';
 import type { EstimateRepository } from '../estimates/estimate';
 import { findInvoiceHoldingEstimate } from '../invoices/estimate-invoice-link';
+import { resolveInvoiceReference } from './execution/issue-invoice-handler';
 import type { UserRepository } from '../users/user';
 import { findActiveTenantMember } from '../users/tenant-member';
 import { isChainRefToken } from './chain';
@@ -39,20 +40,61 @@ export interface ApprovalOptions {
  * real invoice and performs no resolution of its own. Extend deliberately —
  * a type listed here refuses approval when the id names nothing.
  */
-const INVOICE_ID_PROPOSAL_TYPES: ReadonlySet<ProposalType> = new Set<ProposalType>(['send_invoice']);
+const INVOICE_ID_PROPOSAL_TYPES: ReadonlySet<ProposalType> = new Set<ProposalType>([
+  'send_invoice',
+  // #1490 — the reminder handler reads the invoice by id and fails
+  // "not found" after the tap exactly as send_invoice did.
+  'send_payment_reminder',
+]);
+
+/**
+ * #1490 — `issue_invoice` resolves its reference by id OR invoice number
+ * (IssueInvoiceExecutionHandler), so its check resolves the same way:
+ * `{invoiceId: "EST-0057"}` (an estimate's number) approved, then failed
+ * "Invoice EST-0057 not found".
+ */
+const INVOICE_REFERENCE_PROPOSAL_TYPES: ReadonlySet<ProposalType> = new Set<ProposalType>(['issue_invoice']);
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function invoiceReferenceCheck(
-  invoiceRepo: Pick<InvoiceRepository, 'findById'>,
+  invoiceRepo: Pick<InvoiceRepository, 'findById' | 'findByTenant'>,
 ): ApprovalReferenceCheck {
   return async (tenantId, proposal) => {
-    if (!INVOICE_ID_PROPOSAL_TYPES.has(proposal.proposalType)) return [];
+    const byId = INVOICE_ID_PROPOSAL_TYPES.has(proposal.proposalType);
+    if (!byId && !INVOICE_REFERENCE_PROPOSAL_TYPES.has(proposal.proposalType)) return [];
     const id = proposal.payload.invoiceId;
     if (typeof id !== 'string' || id.length === 0) return [];
     // A chained tail carries `$ref:chain[n].invoiceId` until
     // resolveChainReferences fills it at execution time — not an id yet.
     if (isChainRefToken(id)) return [];
-    const invoice = await invoiceRepo.findById(tenantId, id);
-    return invoice ? [] : ['invoiceId'];
+    if (byId) {
+      // Not a uuid names no invoice row (and must not reach a uuid column).
+      if (!UUID_RE.test(id)) return ['invoiceId'];
+      return (await invoiceRepo.findById(tenantId, id)) ? [] : ['invoiceId'];
+    }
+    return (await resolveInvoiceReference(tenantId, id, invoiceRepo)) ? [] : ['invoiceId'];
+  };
+}
+
+/**
+ * #1490 — estimate-sending proposals whose handler reads `payload.estimateId`
+ * by id and fails after the tap when it names nothing.
+ */
+const ESTIMATE_ID_PROPOSAL_TYPES: ReadonlySet<ProposalType> = new Set<ProposalType>([
+  'send_estimate',
+  'send_estimate_nudge',
+]);
+
+export function estimateReferenceCheck(
+  estimateRepo: Pick<EstimateRepository, 'findById'>,
+): ApprovalReferenceCheck {
+  return async (tenantId, proposal) => {
+    if (!ESTIMATE_ID_PROPOSAL_TYPES.has(proposal.proposalType)) return [];
+    const id = proposal.payload.estimateId;
+    if (typeof id !== 'string' || id.length === 0 || isChainRefToken(id)) return [];
+    if (!UUID_RE.test(id)) return ['estimateId'];
+    return (await estimateRepo.findById(tenantId, id)) ? [] : ['estimateId'];
   };
 }
 

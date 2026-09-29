@@ -144,6 +144,7 @@ import {
   executionAnchorReferenceCheck,
   technicianReferenceCheck,
   estimateInvoicedReferenceCheck,
+  estimateReferenceCheck,
 } from './proposals/approval-reference-checks';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
@@ -1043,6 +1044,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     executionAnchorReferenceCheck(),
     // #1490 — a second invoice from an estimate that is already invoiced.
     estimateInvoicedReferenceCheck({ estimateRepo, invoiceRepo }),
+    // #1490 — send_estimate / send_estimate_nudge must name a real estimate.
+    estimateReferenceCheck(estimateRepo),
   ];
 
   const webhookSettingsRepo = settingsRepo;
