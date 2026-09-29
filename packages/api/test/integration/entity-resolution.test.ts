@@ -1843,6 +1843,76 @@ describe('Postgres integration — entity resolution (P8)', () => {
           expect(outcome.notFound).toEqual({ entityKind: 'job', reference: 'Zebulon Warehouse' });
           expect(outcome.refs.customerId).toBeUndefined();
         });
+
+        // #1494 (dev re-verify 2026-09-29, VOX-05/VOX-07) — the reference's
+        // words are the customer's name, so every one of their jobs ties on
+        // the job-word score. The picker then offered the five NEWEST of
+        // fifteen, never the oldest job, "QA Matrix job for qa-matrix-A",
+        // which is the one the reference actually names.
+        describe('the customer\'s jobs rank by the full reference before recency (#1494)', () => {
+          const UNRELATED = [
+            'Maintenance visit', 'Furnace tune-up', 'Draft invoice for QA Matrix', 'Attic insulation',
+            'Drain cleaning', 'Water heater flush', 'Maintenance visit', 'Duct cleaning',
+            'Thermostat install', 'Draft invoice for QA Matrix', 'Gutter repair', 'Maintenance visit',
+            'Sump pump check', 'Filter replacement',
+          ];
+
+          async function fifteenJobCustomer() {
+            const seed = await seedRealisticTenant({
+              displayName: 'qa-matrix-A-customer',
+              jobSummary: 'QA Matrix job for qa-matrix-A',
+            });
+            const jobRepo = new PgJobRepository(pool);
+            const locationId = crypto.randomUUID();
+            await new PgLocationRepository(pool).create({
+              id: locationId, tenantId: seed.tenantId, customerId: seed.customerId, street1: '14 Matrix Way',
+              city: 'Austin', state: 'TX', postalCode: '78701', country: 'USA', isPrimary: false,
+              addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+            });
+            // Every unrelated job is strictly newer than the matching one.
+            for (const [i, summary] of UNRELATED.entries()) {
+              const id = crypto.randomUUID();
+              const createdAt = new Date(Date.now() + (i + 1) * 60_000);
+              await jobRepo.create({
+                id, tenantId: seed.tenantId, customerId: seed.customerId, locationId,
+                jobNumber: `JOB-${id.slice(0, 8)}`, summary, status: 'new',
+                priority: 'normal', createdBy: seed.userId, createdAt, updatedAt: createdAt,
+              });
+            }
+            return seed;
+          }
+
+          it('"the QA Matrix job" with the customer picked resolves the job it names, the oldest of fifteen', async () => {
+            const seed = await fifteenJobCustomer();
+
+            const result = await resolver.resolve({
+              tenantId: seed.tenantId,
+              reference: 'the QA Matrix job',
+              kind: 'job',
+              customerId: seed.customerId,
+            });
+
+            expect(result.kind).toBe('resolved');
+            if (result.kind === 'resolved') expect(result.candidate.id).toBe(seed.jobId);
+          });
+
+          // The bare "QA Matrix" also fits "Draft invoice for QA Matrix" too
+          // closely for a direct pick, so it is a which-job question — led by
+          // the job the words name, not the five newest.
+          it('draft_estimate "QA Matrix" with no customer extracted offers that same job first (live VOX-05)', async () => {
+            const seed = await fifteenJobCustomer();
+
+            const outcome = await resolveSchedulingEntities(resolver, seed.tenantId, 'draft_estimate', {
+              jobReference: 'QA Matrix',
+            });
+
+            expect(outcome.status).toBe('ambiguous');
+            expect(outcome.refs.customerId).toBe(seed.customerId);
+            expect(outcome.ambiguous?.entityKind).toBe('job');
+            expect(outcome.ambiguous?.candidates).toHaveLength(5);
+            expect(outcome.ambiguous?.candidates[0]?.id).toBe(seed.jobId);
+          });
+        });
       });
 
       it('never resolves a job by customer name across tenants', async () => {

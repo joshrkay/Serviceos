@@ -31,6 +31,7 @@ import {
   TAU_ENT,
   TAU_ENT_CONFIRM_LOW,
 } from './entity-resolver';
+import { MARGIN } from './catalog-resolver';
 
 /** Minimum similarity score to even consider a candidate (pre-filter). */
 const SIMILARITY_PREFILTER = 0.3;
@@ -41,6 +42,16 @@ const SIMILARITY_PREFILTER = 0.3;
  * detect overflow.
  */
 const MAX_JOB_CANDIDATES = 5;
+
+/**
+ * #1494 — how far the best of a customer's jobs must lead the next one on
+ * the FULL reference (summary / job number) before a reference naming only
+ * the customer resolves it without a picker. The catalog resolver's
+ * MARGIN, so one "clearly best" rule answers both. The lead is measured
+ * only once the leader clears `SIMILARITY_PREFILTER`: trigram noise below
+ * it never resolves anything, however far ahead.
+ */
+const JOB_REFERENCE_MARGIN = MARGIN;
 
 /**
  * Most estimates a one-tap picker may honestly offer. Same ceiling and same
@@ -796,6 +807,14 @@ export class PgEntityResolver implements EntityResolver {
    * narrowing question, not a dead end). Job words that pick one resolve it
    * (or confirm it, in the mid band); job words naming none of their jobs are
    * not_found, said honestly (#1416).
+   *
+   * #1494 — ties on the job words (always, for a reference naming only the
+   * customer) are broken by the similarity of the FULL reference to the job's
+   * summary / number, and only then by recency: "the QA Matrix job" for
+   * customer qa-matrix-A-customer names their job "QA Matrix job for
+   * qa-matrix-A" even when it is the oldest of fifteen. A reference naming
+   * only the customer whose best job leads the rest by
+   * `JOB_REFERENCE_MARGIN` resolves it; otherwise that job leads the picker.
    */
   private async resolveJobForCustomer(
     tenantId: string,
@@ -823,6 +842,7 @@ export class PgEntityResolver implements EntityResolver {
         job_number: string | null;
         status: string | null;
         score: number;
+        reference_score: number;
         total: number;
       }>(
         `SELECT j.id, j.summary, j.job_number, j.status,
@@ -831,11 +851,15 @@ export class PgEntityResolver implements EntityResolver {
                   strict_word_similarity($3, COALESCE(j.job_number, '')),
                   similarity(COALESCE(j.job_number, ''), $4)
                 ) END AS score,
+                GREATEST(
+                  similarity(j.summary, $4),
+                  similarity(COALESCE(j.job_number, ''), $4)
+                ) AS reference_score,
                 count(*) OVER ()::int AS total
            FROM jobs j
           WHERE j.tenant_id = $1
             AND j.customer_id = $2
-          ORDER BY score DESC, j.created_at DESC
+          ORDER BY score DESC, reference_score DESC, j.created_at DESC
           LIMIT ${MAX_JOB_CANDIDATES + 1}`,
         [tenantId, customerId, jobWords, reference],
       );
@@ -859,6 +883,11 @@ export class PgEntityResolver implements EntityResolver {
     }
     // The reference named only the customer: their one job, or a picker.
     if (Number(rows[0].total) === 1) return { kind: 'resolved', candidate: candidates[0] };
+    const best = Number(rows[0].reference_score);
+    const next = Number(rows[1].reference_score);
+    if (best > SIMILARITY_PREFILTER && best - next >= JOB_REFERENCE_MARGIN) {
+      return { kind: 'resolved', candidate: candidates[0] };
+    }
     return { kind: 'ambiguous', candidates: candidates.slice(0, MAX_JOB_CANDIDATES) };
   }
 
