@@ -629,7 +629,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
             href={buildMapsHref(nextAppointment.locationAddress)}
             target="_blank"
             rel="noreferrer"
-            className="text-primary underline"
+            className="inline-flex min-h-11 min-w-11 items-center align-middle text-primary underline"
             data-testid="technician-day-next-map-link"
           >
             Open in maps
@@ -774,7 +774,7 @@ export function TechnicianDayView({ technicianId }: TechnicianDayViewProps) {
                       href={buildMapsHref(appt.locationAddress)}
                       target="_blank"
                       rel="noreferrer"
-                      className="break-words text-primary underline"
+                      className="inline-flex min-h-11 min-w-11 items-center break-words text-primary underline"
                     >
                       {appt.locationAddress}
                     </a>

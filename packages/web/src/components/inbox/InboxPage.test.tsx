@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { InboxPage } from './InboxPage';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 const apiFetch = vi.fn();
 vi.mock('../../lib/apiClient', () => ({
@@ -211,6 +212,21 @@ describe('InboxPage', () => {
       '/api/proposals/exp-1/re-propose',
       expect.objectContaining({ method: 'POST' }),
     );
+  });
+
+  it('#1481 — the expired card\'s Re-propose button is a ≥44px tap target', async () => {
+    apiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [],
+        summary: { totalCount: 0, criticalCount: 0, highCount: 0, normalCount: 0, lowCount: 0, truncated: false },
+        expired: [
+          { id: 'exp-1', proposalType: 'create_appointment', summary: 'Tuesday 2pm with Jordan', status: 'expired', createdAt: new Date().toISOString() },
+        ],
+      }),
+    );
+    render(<InboxPage />);
+    await waitFor(() => screen.getByTestId('expired-section'));
+    expectTapTarget(screen.getByRole('button', { name: /re-propose/i }), 'Re-propose');
   });
 
   it('journey QA bug 10 — surfaces execution-failed proposals with their executionError', async () => {
