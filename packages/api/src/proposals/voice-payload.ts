@@ -229,6 +229,30 @@ function hasAnyJobEditField(flat: Record<string, unknown>): boolean {
 const MANUAL_REMINDER_STEP_KEY = 'manual';
 
 /**
+ * #1476 — proposal types whose executor needs an ANCHOR record: a `jobId`
+ * (or `linkedJobId`) to work under, or a `customerId` it can open a job for.
+ * With neither, the executor can only fail after the operator's approval tap:
+ * CreateAppointmentExecutionHandler ("Payload must include a valid jobId"),
+ * DraftEstimateExecutionHandler ("Estimate draft has neither a customerId nor
+ * a jobId"), CreateInvoiceExecutionHandler (same shape). One predicate, read
+ * by the payload gate below AND by the live-turn resolution loop (in-app
+ * `toResolutionEvent`), so "is this draft executable?" has one answer.
+ */
+const EXECUTION_ANCHOR_PROPOSAL_TYPES: ReadonlySet<ProposalType> = new Set<ProposalType>([
+  'create_appointment',
+  'draft_estimate',
+  'draft_invoice',
+]);
+
+export function lacksExecutionAnchor(
+  proposalType: ProposalType,
+  flat: Record<string, unknown>,
+): boolean {
+  if (!EXECUTION_ANCHOR_PROPOSAL_TYPES.has(proposalType)) return false;
+  return !flat.jobId && !flat.linkedJobId && !flat.customerId;
+}
+
+/**
  * Whole-object contract refines this builder can detect BEFORE Zod runs, and
  * the single flat payload key each one is gated on.
  *
@@ -260,7 +284,7 @@ function namedContractGap(
     // reach `CreateAppointmentExecutionHandler` and fail there instead
     // ("Payload must include a valid jobId" — live evidence, sweep row D01).
     case 'create_appointment':
-      return !flat.jobId && !flat.linkedJobId && !flat.customerId ? ['customerId'] : [];
+      return lacksExecutionAnchor(proposalType, flat) ? ['customerId'] : [];
     // `updateJobPayloadSchema`'s "at least one field to change" refine, after
     // the deterministic phrase parse above has had its turn. `status` is the
     // named gate because it is the field the overwhelming majority of spoken

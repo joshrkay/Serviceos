@@ -423,6 +423,18 @@ export function requiresExistingEntity(intent: string): boolean {
 }
 
 /**
+ * #1476 — creation intents where an UNKNOWN name is a net-new customer by
+ * design: a booking for someone not yet in the CRM drafts a card gated on
+ * `customerId` for the operator to complete (register case book-04,
+ * #net-new-entity; the D01 gate in proposals/voice-payload.ts). Every other
+ * creation intent whose only anchor failed to resolve cannot produce an
+ * executable draft, so the live turn asks instead of reading it back.
+ */
+export function acceptsNetNewCustomer(intent: string): boolean {
+  return SCHEDULING_CREATE_INTENTS.has(intent);
+}
+
+/**
  * #1416 — the not-found rule for the references still outstanding AFTER a
  * disambiguation pick. Everything `requiresExistingEntity` covers, plus the
  * one creation-intent case where the caller named an EXISTING record: the
