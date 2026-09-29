@@ -32,9 +32,10 @@ async function voiceProposal(
   // have no other way to reach a resolved customerId. Same mechanism SCH-02
   // (scheduling.spec.ts) and SMS-01 (sms.spec.ts) already rely on.
   callerPhone?: string,
-  // QA-2026-09-26 — the record this row means, so a "which one?" turn is
-  // answered by name instead of failing the row (see voiceInput).
-  pickCandidateId?: string,
+  // QA-2026-09-26 — the records this row means, so each "which one?" turn is
+  // answered by name instead of failing the row (see voiceInput). #1492 —
+  // customer-then-job disambiguation asks for the customer, then the job.
+  pickCandidateIds?: string[],
 ): Promise<{ sessionId: string; proposalId: string } | null> {
   const { token } = h.tenantA;
   const sessionId = await startVoiceSession(h, token, label, callerPhone);
@@ -42,7 +43,7 @@ async function voiceProposal(
     h.evidence.fail('Voice session could not be started.');
     return null;
   }
-  const proposalIds = await voiceInput(h, token, sessionId, utterance, label, { pickCandidateId });
+  const proposalIds = await voiceInput(h, token, sessionId, utterance, label, { pickCandidateIds });
   if (proposalIds.length === 0) {
     h.evidence.fail('Voice utterance produced no proposal (Real-LLM-only).');
     return null;
@@ -71,8 +72,9 @@ matrixTest('VOX-05', 'Voice-triggered estimate draft creation', async (h) => {
     undefined,
     // "the QA Matrix job" matches the fixture customer AND the VOX-13
     // ambiguous pair (qa-matrix-A-*) at score 1.0, so the product asks
-    // which one (D-029). Answer it with the fixture customer.
-    h.tenantA.customerId,
+    // which one (D-029). Answer it with the fixture customer, then (#1492)
+    // the fixture job among that customer's jobs.
+    [h.tenantA.customerId, jobId],
   );
   if (!flow) return;
 
@@ -168,8 +170,9 @@ matrixTest('VOX-07', 'Voice-triggered invoice creation from sold work', async (h
     // and SMS-01 already make.
     matrixCustomerPhone(),
     // The classifier still extracts customerName "QA Matrix", which matches
-    // the fixture customer and the VOX-13 ambiguous pair — see VOX-05.
-    h.tenantA.customerId,
+    // the fixture customer and the VOX-13 ambiguous pair — see VOX-05. Then
+    // (#1492) which of that customer's jobs: the fixture job.
+    [h.tenantA.customerId, jobId],
   );
   if (!flow) return;
 
