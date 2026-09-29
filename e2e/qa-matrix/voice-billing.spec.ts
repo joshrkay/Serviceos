@@ -1,5 +1,6 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
 import { startVoiceSession, voiceInput, approveAndAwaitExecution, type ProposalOutcome } from './helpers/voice-flow';
+import { matrixCustomerPhone } from './fixtures/tokens';
 // QA-2026-07-26 — VOX-11 asserts against the SHIPPED inbox response type, not a
 // hand-written structural cast. GET /api/proposals/inbox returns
 // `data: PrioritizedProposal[]`, i.e. the proposal is NESTED at `.proposal`.
@@ -159,13 +160,13 @@ matrixTest('VOX-07', 'Voice-triggered invoice creation from sold work', async (h
     h,
     `Create an invoice for the QA Matrix job for the completed furnace repair, $350 total.`,
     '07',
-    // Seeded primary customer's phone (fixtures/seed.ts: '555-0100').
+    // Seeded primary customer's phone (fixtures/seed.ts; per run, see matrixCustomerPhone()).
     // "the QA Matrix job" is a job-summary reference, not the customer's
     // display name ("qa-matrix-A-customer"), so name-based customer
     // resolution can never hit — caller-ID resolution is what supplies the
     // customerId CreateInvoiceExecutionHandler needs. Same argument SCH-02
     // and SMS-01 already make.
-    '555-0100',
+    matrixCustomerPhone(),
     // The classifier still extracts customerName "QA Matrix", which matches
     // the fixture customer and the VOX-13 ambiguous pair — see VOX-05.
     h.tenantA.customerId,

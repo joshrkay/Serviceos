@@ -268,6 +268,26 @@ describe('P6-025 — DispatchBoard drag-and-drop wires schedule proposals', () =
     expect(body.idempotencyKey).toBeTruthy();
   });
 
+  it('#1477 — reassign shows no time change and proposes none (reassign_appointment moves the technician only)', async () => {
+    render(<DispatchBoard />);
+    const lanes = screen.getAllByTestId('technician-lane');
+    const sourceLane = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-1')!;
+    const targetLane = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-2')!;
+    const card = sourceLane.querySelector('[data-appointment-id="assigned-1"]') as HTMLElement;
+
+    fireDragSequence(card, targetLane, 'assigned-1');
+
+    expect(screen.getByTestId('confirm-proposal-title')).toHaveTextContent(/reassign/i);
+    expect(screen.getByTestId('confirm-proposal-dialog')).not.toHaveTextContent(/Time:/);
+    fireEvent.click(screen.getByTestId('confirm-proposal-confirm'));
+
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+    const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+    expect(body.proposalType).toBe('reassign_appointment');
+    expect(body.payload).not.toHaveProperty('scheduledStart');
+    expect(body.payload).not.toHaveProperty('scheduledEnd');
+  });
+
   it('same lane — drag to a genuinely different slot creates a reschedule_appointment proposal', async () => {
     // A real same-lane move needs 2+ cards: tech-1 gets a second appointment
     // and we drag the first card past the second (trailing gap, index 2).
@@ -805,7 +825,11 @@ describe('U8 — dispatch board is tenant-tz aware', () => {
     expect(calls.some((c) => c[1] === 'America/New_York')).toBe(true);
   });
 
-  it('empty-lane drop for a NY tenant anchors at 08:00 local = 13:00Z (winter/EST)', async () => {
+  it('cross-lane drop for a NY tenant proposes no time change — a reassign keeps its window (#1477)', async () => {
+    // Previously this drop proposed 08:00 local (the empty lane's day start),
+    // but reassign_appointment carries no time and the executor never moved
+    // the appointment, so the dialog promised a time change that never
+    // happened. The 08:00-local anchor still applies to same-lane reschedules.
     render(<DispatchBoard />);
     const sourceLane = screen
       .getAllByTestId('technician-lane')
@@ -817,14 +841,12 @@ describe('U8 — dispatch board is tenant-tz aware', () => {
 
     fireDragSequence(card, targetLane, 'assigned-1');
     expect(screen.getByTestId('confirm-proposal-title')).toHaveTextContent(/reassign/i);
+    expect(screen.getByTestId('confirm-proposal-dialog')).not.toHaveTextContent(/Time:/);
     fireEvent.click(screen.getByTestId('confirm-proposal-confirm'));
 
     await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
     const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
     expect(body.proposalType).toBe('reassign_appointment');
-    // 08:00 America/New_York on 2026-01-15 (EST, UTC-5) = 13:00Z, NOT the old
-    // `${boardDate}T08:00:00.000Z` (which stamped tenant hours as UTC).
-    expect(body.payload.scheduledStart).toBe('2026-01-15T13:00:00.000Z');
-    expect(body.payload.scheduledEnd).toBe('2026-01-15T15:00:00.000Z');
+    expect(body.payload).not.toHaveProperty('scheduledStart');
   });
 });

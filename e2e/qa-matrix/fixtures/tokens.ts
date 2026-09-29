@@ -95,3 +95,14 @@ export function redactTenant(t: TenantFixture): Record<string, string> {
     jobId: `${t.jobId.slice(0, 8)}…`,
   };
 }
+
+/**
+ * #1479 — the seeded primary customer's number for THIS run. The seeder
+ * (fixtures/seed.ts) points the customer at E2E_MATRIX_CUSTOMER_PHONE, which
+ * scripts/qa-matrix-run.sh sets per run so repeated runs never exhaust the
+ * #1464 per-recipient SMS cap on one number. Defaults to the historical
+ * '555-0100' for a hand-seeded tenant.
+ */
+export function matrixCustomerPhone(): string {
+  return process.env.E2E_MATRIX_CUSTOMER_PHONE || '555-0100';
+}

@@ -212,6 +212,7 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
                 ? payload.internalNotes.trim()
                 : proposal.summary || lineItems[0].description,
             createdBy: context.executedBy,
+            actorRole: context.executedByRole,
           },
           this.jobRepo,
           this.auditRepo,
