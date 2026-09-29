@@ -141,6 +141,7 @@ import {
   invoiceReferenceCheck,
   serviceLocationReferenceCheck,
   sendRecipientReferenceCheck,
+  executionAnchorReferenceCheck,
   technicianReferenceCheck,
 } from './proposals/approval-reference-checks';
 import { createTechnicianLocationRouter } from './routes/technician-location';
@@ -1037,6 +1038,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     technicianReferenceCheck(userRepo),
     // #1480 — a send_invoice with no recipient must have one on file.
     sendRecipientReferenceCheck({ invoiceRepo, jobRepo, customerRepo }),
+    // #1476 / #1480 — an estimate/invoice/booking with no job and no customer.
+    executionAnchorReferenceCheck(),
   ];
 
   const webhookSettingsRepo = settingsRepo;

@@ -24,6 +24,7 @@ import type { LocationRepository } from '../locations/location';
 import type { UserRepository } from '../users/user';
 import { findActiveTenantMember } from '../users/tenant-member';
 import { isChainRefToken } from './chain';
+import { lacksExecutionAnchor } from './voice-payload';
 
 export type ApprovalReferenceCheck = (tenantId: string, proposal: Proposal) => Promise<string[]>;
 
@@ -109,6 +110,20 @@ export function technicianReferenceCheck(
 }
 
 /**
+ * #1476 / #1480 — a draft_estimate / draft_invoice / create_appointment with
+ * neither a job nor a customer the executor can open one for. Same predicate
+ * (`lacksExecutionAnchor`) the voice payload gate uses at drafting time, so a
+ * proposal from ANY surface that lost its anchor — e.g. an invoice drafted
+ * from an estimate whose job id was dropped — is refused here instead of
+ * failing "neither a customerId nor a jobId" after the tap. The gate is
+ * `customerId`, which the card's customer picker fills.
+ */
+export function executionAnchorReferenceCheck(): ApprovalReferenceCheck {
+  return async (_tenantId, proposal) =>
+    lacksExecutionAnchor(proposal.proposalType, proposal.payload) ? ['customerId'] : [];
+}
+
+/**
  * #1480 — `send_invoice` names no recipient of its own for the customer's
  * address to fall back to, and the customer has none on file for that
  * channel: the send service can only refuse ("Cannot send email — no email
@@ -141,15 +156,21 @@ export function sendRecipientReferenceCheck(deps: {
   };
 }
 
+/** Gaps that are a missing piece to supply, not an id naming nothing. */
+const SENTENCE_GAPS: ReadonlySet<string> = new Set(['locationId', 'recipient', 'customerId']);
+
 /**
  * The operator-facing refusal for a set of dangling references. A missing
  * service location is not "a record that does not exist" — it is a record the
  * operator has to add — so it gets its own sentence.
  */
 export function describeDanglingReferences(fields: readonly string[]): string {
-  const ids = fields.filter((f) => f !== 'locationId' && f !== 'recipient');
+  const ids = fields.filter((f) => !SENTENCE_GAPS.has(f));
   const parts: string[] = [];
   if (ids.length > 0) parts.push(`${ids.join(', ')} does not name an existing record`);
+  if (fields.includes('customerId')) {
+    parts.push('it is not linked to a customer or a job yet — pick the customer before approving');
+  }
   if (fields.includes('recipient')) {
     parts.push('the customer has nothing on file to send it to — add a recipient before approving');
   }
@@ -209,7 +230,10 @@ export function askForExecutabilityGaps(
         : 'the customer has no email on file — what email address should it go to?',
     );
   }
-  const unknown = gaps.filter((g) => g !== 'locationId' && g !== 'recipient');
+  if (gaps.includes('customerId')) {
+    asks.push("it isn't linked to a customer or a job yet — which customer is it for?");
+  }
+  const unknown = gaps.filter((g) => !SENTENCE_GAPS.has(g));
   if (unknown.length > 0) asks.push(`${unknown.join(', ')} does not name an existing record`);
   return `This can't go ahead yet: ${asks.join('; ')}`;
 }
