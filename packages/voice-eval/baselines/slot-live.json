@@ -2,10 +2,19 @@
   "schemaVersion": 1,
   "eval": "slot",
   "mode": "live",
-  "status": "placeholder",
-  "recordedAt": null,
-  "goldenSet": null,
-  "metrics": {},
+  "status": "recorded",
+  "recordedAt": "2026-09-29T01:00:01.415Z",
+  "goldenSet": {
+    "rows": 100,
+    "fingerprint": "4079a48fd8d20ac6"
+  },
+  "metrics": {
+    "microF1": 0.5867768595041322,
+    "f1.name": 0.7804878048780487,
+    "f1.address": 0.525,
+    "f1.time_window": 0.8142857142857143,
+    "f1.problem_description": 0
+  },
   "tolerance": 0.05,
   "recordCommand": "AI_PROVIDER_API_KEY=... AI_PROVIDER_BASE_URL=https://api.openai.com/v1 AI_DEFAULT_MODEL=gpt-4o-mini AI_LIGHTWEIGHT_MODEL=gpt-4o-mini AI_STANDARD_MODEL=gpt-4o-mini AI_COMPLEX_MODEL=gpt-4o AI_CLASSIFY_INTENT_DEADLINE_MS=12000 VOICE_EVAL_COST_CAP_CENTS=80 npx tsx packages/voice-eval/run-slot-eval.ts --live --max-utterances 100 --record-baseline packages/voice-eval/baselines/slot-live.json"
 }
