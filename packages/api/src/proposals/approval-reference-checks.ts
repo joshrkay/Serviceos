@@ -281,9 +281,25 @@ export async function executabilityGaps(
  * `approveProposal` re-runs the checks, so the tap stays refused until the
  * missing piece exists.
  */
-export function holdIfNotExecutable(proposal: Proposal, gaps: readonly string[]): Proposal {
+function holdIfNotExecutable(proposal: Proposal, gaps: readonly string[]): Proposal {
   if (gaps.length === 0 || proposal.status !== 'approved') return proposal;
   return { ...proposal, status: 'ready_for_review', approvedAt: undefined };
+}
+
+/**
+ * #1485 — what EVERY drafting surface (chat route, voice-action-router, the
+ * in-app and phone voice turns) runs before it persists a proposal its status
+ * decision may have auto-approved: the one executability check, and the hold
+ * when it finds gaps. The surface then asks for the gaps
+ * (`askForExecutabilityGaps`) instead of announcing the card as done.
+ */
+export async function holdForExecutability(
+  tenantId: string,
+  proposal: Proposal,
+  checks: readonly ApprovalReferenceCheck[] | undefined,
+): Promise<{ proposal: Proposal; gaps: string[] }> {
+  const gaps = await executabilityGaps(tenantId, proposal, checks);
+  return { proposal: holdIfNotExecutable(proposal, gaps), gaps };
 }
 
 /**

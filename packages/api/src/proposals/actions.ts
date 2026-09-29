@@ -328,7 +328,7 @@ export async function approveProposal(
   // so the review card's edit path takes over instead of an execution
   // failure after the human's tap (see approval-reference-checks.ts).
   // #1480 — the SAME executabilityGaps a drafting surface runs before it
-  // lets a status decision auto-approve (holdIfNotExecutable).
+  // lets a status decision auto-approve (holdForExecutability).
   const dangling = await executabilityGaps(tenantId, proposal, options?.referenceChecks);
   if (dangling.length > 0) {
     throw new ValidationError(

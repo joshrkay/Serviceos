@@ -27,8 +27,7 @@ import { validateProposalPayload } from '../proposals/contracts';
 import { clearSatisfiedMissingFields } from '../proposals/missing-fields';
 import {
   askForExecutabilityGaps,
-  executabilityGaps,
-  holdIfNotExecutable,
+  holdForExecutability,
   type ApprovalReferenceCheck,
 } from '../proposals/approval-reference-checks';
 // Aliased — the card field this feeds is also called `undoExpiresAt`.
@@ -3538,10 +3537,7 @@ async function generateAssistantReply(
           // #1480 — the same executability check a tap runs.
           Object.assign(
             proposal,
-            holdIfNotExecutable(
-              proposal,
-              await executabilityGaps(tenantId, proposal, deps.approvalReferenceChecks),
-            ),
+            (await holdForExecutability(tenantId, proposal, deps.approvalReferenceChecks)).proposal,
           );
           await deps.proposalRepo.create(proposal);
           if (proposal.status === 'draft') {
@@ -3778,12 +3774,12 @@ async function generateAssistantReply(
         // #1480 — the ONE executability check a human tap runs
         // (approveProposal), run here too, so a card that cannot execute is
         // never "approved automatically" and the reply asks for what is missing.
-        const executionGaps = await executabilityGaps(
+        const { proposal: executable, gaps: executionGaps } = await holdForExecutability(
           tenantId,
           proposal,
           deps.approvalReferenceChecks,
         );
-        Object.assign(proposal, holdIfNotExecutable(proposal, executionGaps));
+        Object.assign(proposal, executable);
         // ONE REQUEST, ONE CARD — the correction half. The operator said "no,
         // make it Thursday": they have ONE booking in mind, so the thread ends
         // up with ONE card, rewritten in place. The row keeps its id (anything

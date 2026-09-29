@@ -65,6 +65,13 @@ export interface RenderProposalSmsOptions {
    * the owner knows it's the updated version awaiting re-approval.
    */
   reapproval?: boolean;
+  /**
+   * #1485 — why this proposal cannot be approved yet (the executability ask,
+   * e.g. "This can't go ahead yet: … what's the service address?"). Renders
+   * the never-approvable form — no Reply Y, no link — with the ask before the
+   * review instructions; the summary gives way first.
+   */
+  blockedBy?: string;
 }
 
 const formatCents = formatUsdCentsFixed;
@@ -226,6 +233,13 @@ export function renderProposalSms(
   const { overallConfidence, fieldConfidence, firstMarkerReason } = extractMeta(input.payload);
   const summary = input.summary.trim();
   const prefix = options.reapproval ? 'Updated: ' : '';
+
+  // ── #1485 — not executable yet: never-approvable form + the ask ──
+  if (options.blockedBy) {
+    const tail = `${options.blockedBy} ${REVIEW_IN_APP_INSTRUCTIONS}`;
+    const summaryBudget = Math.max(PROPOSAL_SMS_MAX_CHARS - prefix.length - 1 - tail.length, 20);
+    return `${prefix}${truncate(summary, summaryBudget)} ${tail}`;
+  }
 
   // ── LOW / VERY_LOW: never-approvable form — no Reply Y, no one-tap link ──
   if (isBlocking(overallConfidence)) {
