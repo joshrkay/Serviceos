@@ -136,7 +136,7 @@ async function runLive(gate: boolean): Promise<number> {
   let spentCents = 0;
   const gateway = await buildLiveGateway(selection, (n) => { spentCents += n; });
 
-  const { pairs, fastPathHits, llmCalls } = await runLiveIntentEval(sample, gateway, {
+  const { pairs, misses, fastPathHits, llmCalls } = await runLiveIntentEval(sample, gateway, {
     tenantId: SYNTHETIC_TENANT_ID,
   }, () => assertActualCostWithinCap(spentCents, capCents));
 
@@ -148,6 +148,14 @@ async function runLive(gate: boolean): Promise<number> {
   console.log(`   actual spend:       ${spentCents.toFixed(1)}c`);
   console.log('   worst confusions (gold ⇒ pred):');
   for (const c of report.topConfusions.slice(0, 8)) console.log(`     - ${c.gold} ⇒ ${c.pred}: ${c.count}`);
+  // #1469 — every miss, row by row, so a failed gate can be triaged (gold
+  // error / scorer bug / model confusion) from the report alone. The golden
+  // set is synthetic and PII-free (CORPUS_MANIFEST.md), so utterances are safe to print.
+  console.log(`   misses (gold ⇒ pred): ${misses.length}`);
+  for (const m of misses) {
+    const why = m.unknownReason ? `  [${m.unknownReason}${m.modelIntent ? `: ${m.modelIntent}` : ''}]` : '';
+    console.log(`     - ${m.gold} ⇒ ${m.pred}  ${JSON.stringify(m.utterance)}${why}`);
+  }
 
   const baselineExit = baselineStep('live', sample, report);
   const g = evaluateGate(report.accuracy, LIVE_INTENT_TARGET, gate);
