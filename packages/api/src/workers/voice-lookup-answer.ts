@@ -271,6 +271,12 @@ export interface ExecuteLookupInput {
   dateTimeDescription?: string;
   /** Tenant IANA timezone for date rendering. */
   timezone?: string;
+  /**
+   * #1490 — `lookup_catalog`: the item a price question names ("how much is
+   * a drain snake?"). The skill quotes a price only for a search matching one
+   * item; absent, it lists the catalog.
+   */
+  catalogSearch?: string;
   now: Date;
 }
 
@@ -1022,7 +1028,7 @@ export async function executeLookupAnswer(
       case 'lookup_catalog': {
         if (!deps.catalogRepo) return { kind: 'unsupported' };
         const r = await lookupCatalog(
-          { tenantId, sessionId },
+          { tenantId, sessionId, ...(input.catalogSearch ? { search: input.catalogSearch } : {}) },
           { catalogRepo: deps.catalogRepo, ...events },
         );
         if (r.status === 'error') return { kind: 'failed', error: r.data.error };

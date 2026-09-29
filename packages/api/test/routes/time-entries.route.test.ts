@@ -16,6 +16,7 @@ import {
   type TimeEntry,
 } from '../../src/time-tracking/time-entry';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryUserRepository } from '../../src/users/user';
 import type { Role } from '../../src/auth/rbac';
 
 const TENANT = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
@@ -56,7 +57,7 @@ function buildApp(repo: InMemoryTimeEntryRepository, opts: { userId?: string; ro
     };
     next();
   });
-  app.use('/api/time-entries', createTimeEntriesRouter(repo, new InMemoryAuditRepository()));
+  app.use('/api/time-entries', createTimeEntriesRouter(repo, new InMemoryAuditRepository(), new InMemoryUserRepository()));
   return app;
 }
 

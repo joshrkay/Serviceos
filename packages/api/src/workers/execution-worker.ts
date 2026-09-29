@@ -27,6 +27,8 @@ import { UNDO_WINDOW_MS } from '../proposals/lifecycle';
 import { Logger } from '../logging/logger';
 import { instrument } from '../monitoring/instrumentation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { executeAudited } from '../commands/command-runner';
+import { isDeterministicExecutionError } from '../proposals/execution/execution-error-class';
 
 export interface ExecutionWorkerDeps {
   proposalRepo: ProposalRepository;
@@ -195,6 +197,42 @@ async function runExecutionSweepInner(deps: ExecutionWorkerDeps): Promise<{
         //     that is merely waiting for its chain sibling.
         //   - a handler that terminalized itself already recorded its own,
         //     better-worded reason; the precondition misses and leaves it.
+        // #1490 — a DETERMINISTIC failure (a constraint violation, bad data,
+        // an aborted transaction, no handler) fails the same way on every
+        // retry: stale recovery would only re-claim it, cycle after cycle,
+        // with 'executing' as its visible state. Settle it now.
+        if (isDeterministicExecutionError(err)) {
+          await executeAudited({
+            client: null,
+            tenantId: proposal.tenantId,
+            auditRepo: deps.auditRepo,
+            stateChange: () =>
+              deps.proposalRepo.updateStatusIf(
+                proposal.tenantId,
+                proposal.id,
+                ['executing'],
+                'execution_failed',
+                { executionError: cause },
+              ),
+            // No audit row when the precondition missed (another path already
+            // moved the row on) — nothing transitioned here.
+            audit: (settled) => settled ? ({
+              tenantId: proposal.tenantId,
+              actorId: 'system:execution-worker',
+              actorRole: 'system',
+              eventType: 'proposal.execution_failed',
+              entityType: 'proposal',
+              entityId: proposal.id,
+              metadata: {
+                proposalType: proposal.proposalType,
+                status: 'execution_failed',
+                executionError: cause,
+                deterministic: true,
+              },
+            }) : [],
+          });
+          continue;
+        }
         await deps.proposalRepo.updateStatusIf(
           proposal.tenantId,
           proposal.id,

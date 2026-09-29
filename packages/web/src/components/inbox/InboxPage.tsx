@@ -1282,7 +1282,7 @@ export function InboxPage() {
                     <button
                       type="button"
                       onClick={() => repropose(card.id)}
-                      className="rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary shrink-0"
+                      className="min-h-11 min-w-11 rounded-lg border border-border bg-card text-foreground text-sm px-3 py-1.5 hover:bg-secondary shrink-0"
                     >
                       Re-propose
                     </button>

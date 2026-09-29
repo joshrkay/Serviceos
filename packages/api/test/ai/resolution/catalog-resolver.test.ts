@@ -179,6 +179,18 @@ describe('resolveLineItemToCatalog — ambiguity & tie-breakers', () => {
     expect(r.match?.name).toBe('Air Filter'); // alphabetical
   });
 
+  // #1490 item 5 (QA 2026-09-29) — "qa29 Diagnostic Visit" was priced from
+  // the older "qa28 Diagnostic Visit …": the one-edit near-duplicate fell
+  // inside MARGIN at the same price, and the tie went to the alphabetically
+  // first name instead of the one the operator actually named.
+  it('the exactly-named item wins over a same-priced near-duplicate inside the margin', () => {
+    const older = item('qa28 Diagnostic Visit 310305', 8_900);
+    const named = item('qa29 Diagnostic Visit 462122', 8_900);
+    const r = resolveLineItemToCatalog('qa29 Diagnostic Visit', [older, named]);
+    expect(r.tier).toBe('exact');
+    expect(r.match?.id).toBe(named.id);
+  });
+
   it('single weak match (floor ≤ score < TAU_HIGH) → ambiguous with one candidate, never silent', () => {
     // 2 of 3 query tokens hit, full name coverage → 2/3 ≈ 0.667: in band.
     const drainService = item('Drain Cleaning', 15_000);

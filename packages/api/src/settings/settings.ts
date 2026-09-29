@@ -232,6 +232,12 @@ export interface TenantSettings {
   // undefined; null only appears transiently in update inputs.
   businessPhone?: string | null;
   businessEmail?: string | null;
+  /**
+   * #1402 §13 — the business's mailing address, printed under the business
+   * name on estimates and invoices (public pages + print/PDF). Free-form,
+   * newline-separated, ≤ 300 chars (migration 299).
+   */
+  businessAddress?: string | null;
   // P8-016 — owner's personal cell (E.164), used by vulnerability-aware
   // emergency triage to patch a customer through to the owner. Never the
   // same as businessPhone (which the AI answers on).
@@ -657,6 +663,8 @@ export interface UpdateSettingsInput {
   // routes through PgSettings.update's `value ?? null` to a SQL NULL.
   businessPhone?: string | null;
   businessEmail?: string | null;
+  /** #1402 §13 — null clears. */
+  businessAddress?: string | null;
   ownerPhone?: string | null;
   timezone?: string | null;
   estimatePrefix?: string;

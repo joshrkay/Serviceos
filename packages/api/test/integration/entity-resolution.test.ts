@@ -15,6 +15,7 @@ import { Pool } from 'pg';
 import { DateTime } from 'luxon';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb, TestTenant } from './shared';
 import { PgEntityResolver } from '../../src/ai/resolution/pg-entity-resolver';
+import { resolveSchedulingEntities } from '../../src/ai/agents/customer-calling/entity-resolution';
 import { TAU_ENT, TAU_ENT_CONFIRM_LOW } from '../../src/ai/resolution/entity-resolver';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
@@ -1655,6 +1656,265 @@ describe('Postgres integration — entity resolution (P8)', () => {
         expect(result.kind).toBe('not_found');
       });
 
+      // #1476 P2 (QA VOX-07) — with the customer already picked, "the QA
+      // Matrix job" means THAT customer's jobs. Tenant-wide the same words
+      // also match the other QA Matrix customers' jobs (live: overflow →
+      // "I couldn't find a matching job"); the customer anchor scopes it.
+      it('a customer anchor scopes a job reference to that customer\'s own jobs', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'QA Matrix North',
+          jobSummary: 'QA Matrix job for north',
+        });
+        const locationRepo = new PgLocationRepository(pool);
+        const jobRepo = new PgJobRepository(pool);
+        const locationId = crypto.randomUUID();
+        await locationRepo.create({
+          id: locationId, tenantId: seed.tenantId, customerId: seed.customerId, street1: '11 Real St',
+          city: 'Austin', state: 'TX', postalCode: '78701', country: 'USA', isPrimary: false,
+          addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+        });
+        const northJobs = [seed.jobId];
+        for (const summary of ['Draft invoice for QA Matrix', 'QA Matrix maintenance', 'QA Matrix furnace']) {
+          const id = crypto.randomUUID();
+          await jobRepo.create({
+            id, tenantId: seed.tenantId, customerId: seed.customerId, locationId,
+            jobNumber: `JOB-${id.slice(0, 8)}`, summary, status: 'new',
+            priority: 'normal', createdBy: seed.userId, createdAt: new Date(), updatedAt: new Date(),
+          });
+          northJobs.push(id);
+        }
+        for (const summary of ['QA Matrix job south', 'QA Matrix repair south', 'QA Matrix install south']) {
+          await addRealisticJob(seed, { displayName: 'QA Matrix South', jobSummary: summary });
+        }
+
+        const tenantWide = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'QA Matrix job',
+          kind: 'job',
+        });
+        const tenantWideIds =
+          tenantWide.kind === 'ambiguous' ? tenantWide.candidates.map((c) => c.id).sort() : [];
+        expect(tenantWideIds).not.toEqual([...northJobs].sort());
+
+        const scoped = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'QA Matrix job',
+          kind: 'job',
+          customerId: seed.customerId,
+        });
+        expect(scoped.kind).toBe('ambiguous');
+        if (scoped.kind === 'ambiguous') {
+          expect(scoped.candidates.map((c) => c.id).sort()).toEqual([...northJobs].sort());
+        }
+      });
+
+      // #1490 P2 (QA VOX-05 / VOX-07) — scoped to the chosen customer, the
+      // customer-name half scored EVERY one of their jobs 1.000, so a customer
+      // with more than five jobs overflowed into not_found: "I couldn't find a
+      // matching job for QA Matrix job" about a customer with fifteen.
+      describe('customer anchor with more jobs than a picker holds (#1490)', () => {
+        async function customerWithJobs(summaries: string[]) {
+          const seed = await seedRealisticTenant({ displayName: 'QA Matrix', jobSummary: summaries[0] });
+          const jobRepo = new PgJobRepository(pool);
+          const locationId = crypto.randomUUID();
+          await new PgLocationRepository(pool).create({
+            id: locationId, tenantId: seed.tenantId, customerId: seed.customerId, street1: '14 Matrix Way',
+            city: 'Austin', state: 'TX', postalCode: '78701', country: 'USA', isPrimary: false,
+            addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+          });
+          const ids = [seed.jobId];
+          for (const summary of summaries.slice(1)) {
+            const id = crypto.randomUUID();
+            await jobRepo.create({
+              id, tenantId: seed.tenantId, customerId: seed.customerId, locationId,
+              jobNumber: `JOB-${id.slice(0, 8)}`, summary, status: 'new',
+              priority: 'normal', createdBy: seed.userId, createdAt: new Date(), updatedAt: new Date(),
+            });
+            ids.push(id);
+          }
+          return { seed, ids };
+        }
+
+        const SEVEN = [
+          'Maintenance visit', 'Draft invoice for QA Matrix', 'Maintenance visit',
+          'Draft invoice for QA Matrix', 'Attic insulation', 'Drain cleaning', 'Maintenance visit',
+        ];
+
+        it('a reference naming only the customer asks which of their jobs — never not_found', async () => {
+          const { seed, ids } = await customerWithJobs(SEVEN);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'QA Matrix job',
+            kind: 'job',
+            customerId: seed.customerId,
+          });
+
+          expect(result.kind).toBe('ambiguous');
+          if (result.kind === 'ambiguous') {
+            expect(result.candidates).toHaveLength(5);
+            for (const c of result.candidates) expect(ids).toContain(c.id);
+          }
+        });
+
+        it('the job words pick that customer\'s one matching job out of the seven', async () => {
+          const { seed, ids } = await customerWithJobs(SEVEN);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the QA Matrix insulation job',
+            kind: 'job',
+            customerId: seed.customerId,
+          });
+
+          expect(result.kind).toBe('resolved');
+          if (result.kind === 'resolved') expect(result.candidate.id).toBe(ids[4]); // 'Attic insulation'
+        });
+
+        // #1416 stays true: job words that name NO job of theirs are said
+        // honestly, never answered with some other job (even their only one).
+        it('job words naming none of their jobs are not_found — not a stand-in job', async () => {
+          const { seed } = await customerWithJobs(['Water heater replacement']);
+
+          const result = await resolver.resolve({
+            tenantId: seed.tenantId,
+            reference: 'the QA Matrix sprinkler job',
+            kind: 'job',
+            customerId: seed.customerId,
+          });
+
+          expect(result.kind).toBe('not_found');
+        });
+      });
+
+      // #1492 P2 (QA VOX-05) — "Draft an estimate for the QA Matrix job…"
+      // extracted only jobReference "QA Matrix", no customerName. Tenant-wide,
+      // the customer-name half scores all seven of the customer's jobs 1.000
+      // and overflows into not_found. The voice resolution falls back to the
+      // reference as a CUSTOMER, then that customer's jobs.
+      describe('a job reference naming a customer, with no customer extracted (#1492)', () => {
+        async function liveShapedCustomer(displayName: string, summaries: string[]) {
+          const seed = await seedRealisticTenant({ displayName, jobSummary: summaries[0] });
+          const jobRepo = new PgJobRepository(pool);
+          const locationId = crypto.randomUUID();
+          await new PgLocationRepository(pool).create({
+            id: locationId, tenantId: seed.tenantId, customerId: seed.customerId, street1: '14 Matrix Way',
+            city: 'Austin', state: 'TX', postalCode: '78701', country: 'USA', isPrimary: false,
+            addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+          });
+          const ids = [seed.jobId];
+          for (const summary of summaries.slice(1)) {
+            const id = crypto.randomUUID();
+            await jobRepo.create({
+              id, tenantId: seed.tenantId, customerId: seed.customerId, locationId,
+              jobNumber: `JOB-${id.slice(0, 8)}`, summary, status: 'new',
+              priority: 'normal', createdBy: seed.userId, createdAt: new Date(), updatedAt: new Date(),
+            });
+            ids.push(id);
+          }
+          return { seed, ids };
+        }
+
+        it('draft_estimate "QA Matrix" → the customer, then a which-job question over their jobs', async () => {
+          const { seed, ids } = await liveShapedCustomer('qa-matrix-A-customer', [
+            'Maintenance visit', 'Furnace tune-up', 'Maintenance visit',
+            'Attic insulation', 'Drain cleaning', 'Water heater flush', 'Maintenance visit',
+          ]);
+
+          const outcome = await resolveSchedulingEntities(resolver, seed.tenantId, 'draft_estimate', {
+            jobReference: 'QA Matrix',
+          });
+
+          expect(outcome.status).toBe('ambiguous');
+          expect(outcome.ambiguous?.entityKind).toBe('job');
+          expect(outcome.ambiguous?.candidates).toHaveLength(5);
+          for (const c of outcome.ambiguous?.candidates ?? []) expect(ids).toContain(c.id);
+          expect(outcome.refs.customerId).toBe(seed.customerId);
+        });
+
+        it('a reference naming neither a job nor a customer stays not_found (#1416)', async () => {
+          const { seed } = await liveShapedCustomer('qa-matrix-A-customer', ['Maintenance visit']);
+
+          const outcome = await resolveSchedulingEntities(resolver, seed.tenantId, 'draft_estimate', {
+            jobReference: 'Zebulon Warehouse',
+          });
+
+          expect(outcome.status).toBe('not_found');
+          expect(outcome.notFound).toEqual({ entityKind: 'job', reference: 'Zebulon Warehouse' });
+          expect(outcome.refs.customerId).toBeUndefined();
+        });
+
+        // #1494 (dev re-verify 2026-09-29, VOX-05/VOX-07) — the reference's
+        // words are the customer's name, so every one of their jobs ties on
+        // the job-word score. The picker then offered the five NEWEST of
+        // fifteen, never the oldest job, "QA Matrix job for qa-matrix-A",
+        // which is the one the reference actually names.
+        describe('the customer\'s jobs rank by the full reference before recency (#1494)', () => {
+          const UNRELATED = [
+            'Maintenance visit', 'Furnace tune-up', 'Draft invoice for QA Matrix', 'Attic insulation',
+            'Drain cleaning', 'Water heater flush', 'Maintenance visit', 'Duct cleaning',
+            'Thermostat install', 'Draft invoice for QA Matrix', 'Gutter repair', 'Maintenance visit',
+            'Sump pump check', 'Filter replacement',
+          ];
+
+          async function fifteenJobCustomer() {
+            const seed = await seedRealisticTenant({
+              displayName: 'qa-matrix-A-customer',
+              jobSummary: 'QA Matrix job for qa-matrix-A',
+            });
+            const jobRepo = new PgJobRepository(pool);
+            const locationId = crypto.randomUUID();
+            await new PgLocationRepository(pool).create({
+              id: locationId, tenantId: seed.tenantId, customerId: seed.customerId, street1: '14 Matrix Way',
+              city: 'Austin', state: 'TX', postalCode: '78701', country: 'USA', isPrimary: false,
+              addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+            });
+            // Every unrelated job is strictly newer than the matching one.
+            for (const [i, summary] of UNRELATED.entries()) {
+              const id = crypto.randomUUID();
+              const createdAt = new Date(Date.now() + (i + 1) * 60_000);
+              await jobRepo.create({
+                id, tenantId: seed.tenantId, customerId: seed.customerId, locationId,
+                jobNumber: `JOB-${id.slice(0, 8)}`, summary, status: 'new',
+                priority: 'normal', createdBy: seed.userId, createdAt, updatedAt: createdAt,
+              });
+            }
+            return seed;
+          }
+
+          it('"the QA Matrix job" with the customer picked resolves the job it names, the oldest of fifteen', async () => {
+            const seed = await fifteenJobCustomer();
+
+            const result = await resolver.resolve({
+              tenantId: seed.tenantId,
+              reference: 'the QA Matrix job',
+              kind: 'job',
+              customerId: seed.customerId,
+            });
+
+            expect(result.kind).toBe('resolved');
+            if (result.kind === 'resolved') expect(result.candidate.id).toBe(seed.jobId);
+          });
+
+          // The bare "QA Matrix" also fits "Draft invoice for QA Matrix" too
+          // closely for a direct pick, so it is a which-job question — led by
+          // the job the words name, not the five newest.
+          it('draft_estimate "QA Matrix" with no customer extracted offers that same job first (live VOX-05)', async () => {
+            const seed = await fifteenJobCustomer();
+
+            const outcome = await resolveSchedulingEntities(resolver, seed.tenantId, 'draft_estimate', {
+              jobReference: 'QA Matrix',
+            });
+
+            expect(outcome.status).toBe('ambiguous');
+            expect(outcome.refs.customerId).toBe(seed.customerId);
+            expect(outcome.ambiguous?.entityKind).toBe('job');
+            expect(outcome.ambiguous?.candidates).toHaveLength(5);
+            expect(outcome.ambiguous?.candidates[0]?.id).toBe(seed.jobId);
+          });
+        });
+      });
+
       it('never resolves a job by customer name across tenants', async () => {
         const seed = await seedRealisticTenant({
           displayName: 'Jamie Garcia',
@@ -2169,7 +2429,13 @@ describe('Postgres integration — entity resolution (P8)', () => {
 
       it('"my Tuesday 2pm furnace appointment" resolves the visit at that time', async () => {
         const seed = await seedRealisticTenant({ displayName: PRIYA, jobSummary: 'furnace tune-up', timezone: ZONE });
-        const twoPm = DateTime.fromJSDate(nextLocalWeekdayNoon(2)).setZone(ZONE).set({ hour: 14 }).toJSDate();
+        // "Tuesday 2pm" said ON a Tuesday before 2pm means today (the resolver
+        // anchors on tenant-local now), so the target is the next Tuesday 14:00
+        // still ahead — counting today. nextLocalWeekdayNoon skips today, which
+        // made this case fail whenever CI ran on a Chicago Tuesday morning.
+        let twoPmLocal = DateTime.now().setZone(ZONE).set({ hour: 14, minute: 0, second: 0, millisecond: 0 });
+        while (twoPmLocal.weekday !== 2 || twoPmLocal <= DateTime.now()) twoPmLocal = twoPmLocal.plus({ days: 1 });
+        const twoPm = twoPmLocal.toJSDate();
         const target = await seedAppointmentAt(seed, seed.jobId, twoPm);
         await seedAppointmentAt(seed, seed.jobId, nextLocalWeekdayNoon(4));
 

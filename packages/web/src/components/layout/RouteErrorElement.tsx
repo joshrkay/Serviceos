@@ -1,6 +1,7 @@
 import React from 'react';
 import { useRouteError, isRouteErrorResponse, useNavigate } from 'react-router';
 import { reportSafeError } from '../../lib/errorReporter';
+import { chunkLoadFailureCopy } from './chunk-load-failure';
 
 /**
  * Router-level error element.
@@ -54,6 +55,14 @@ export function RouteErrorElement(): React.ReactElement {
     errMessage = String(error);
   }
 
+  // #1481 — a route chunk that failed to load (offline / stale deploy) gets
+  // its own copy; the raw TypeError is noise to the user.
+  const loadFailure = chunkLoadFailureCopy(error);
+  if (loadFailure) {
+    title = loadFailure.title;
+    detail = loadFailure.detail;
+  }
+
   // ARCH-31 / OBS-43 — report through the shared PostHog-backed error
   // reporter (see ErrorBoundary for the render-error counterpart). Router
   // loader/action errors and non-Error throws never reach
@@ -96,7 +105,7 @@ export function RouteErrorElement(): React.ReactElement {
       <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
         <h1 className="text-lg font-semibold text-slate-900">{title}</h1>
         <p className="mt-2 text-sm text-slate-600">{detail}</p>
-        {(errName || errMessage) && (
+        {!loadFailure && (errName || errMessage) && (
           <div className="mt-3 rounded-md bg-slate-50 p-3 text-xs text-slate-500">
             <span className="font-medium text-slate-700">{errName}</span>
             {errMessage ? (

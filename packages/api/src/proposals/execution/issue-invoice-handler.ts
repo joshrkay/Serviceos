@@ -49,10 +49,10 @@ export class InvoiceNotDraftError extends AppError {
  * number (e.g. "INV-0042" or bare "0042"). Voice commands typically
  * produce the latter; the assistant platform produces the former.
  */
-async function resolveInvoice(
+export async function resolveInvoiceReference(
   tenantId: string,
   ref: string,
-  repo: InvoiceRepository,
+  repo: Pick<InvoiceRepository, 'findById' | 'findByTenant'>,
 ): Promise<Invoice | null> {
   if (UUID_RE.test(ref)) {
     return repo.findById(tenantId, ref);
@@ -133,7 +133,7 @@ export class IssueInvoiceExecutionHandler implements ExecutionHandler {
       return { success: true, resultEntityId: uuidv4() };
     }
 
-    const invoice = await resolveInvoice(
+    const invoice = await resolveInvoiceReference(
       context.tenantId,
       invoiceId,
       this.invoiceRepo,

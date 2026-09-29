@@ -60,6 +60,10 @@ import type { AggregatedResult, PerRunResult } from './voting/majority-vote';
 import type { LLMGateway } from '../gateway/gateway';
 import { wrapWithCostTracking } from '../gateway/real-layer-two-factory';
 import { AgentEventBus } from './event-bus';
+import { projectPathSmokeCents } from './path-smoke/provider';
+import { WHISPER_CENTS_PER_MINUTE } from './audio/whisper-real-provider';
+import { TTS_CENTS_PER_1K_CHARS } from './audio/tts-fixture-cache';
+import { SYSTEM_PROMPT } from '../orchestration/intent-classifier';
 
 /**
  * ~$3.50 per script across 3 runs (i.e. the script's worst-case ceiling).
@@ -69,6 +73,59 @@ export const PER_RUN_COST_CAP_CENTS_DEFAULT = 350;
 
 /** ~$10/suite — the whole-run fail-fast threshold from spec §6.2. */
 export const SUITE_COST_CAP_CENTS_DEFAULT = 1000;
+
+const RUNS_PER_SCRIPT = 3;
+/** Classifier prompt estimate, derived from the real prompt (as agent-path-smoke does). */
+const EST_AGENT_PROMPT_TOKENS = Math.ceil((SYSTEM_PROMPT.length / 4) * 1.15);
+const EST_AGENT_OUTPUT_TOKENS = 250;
+/** Agent LLM calls per caller turn (classify + reply/confirm), conservatively. */
+const AGENT_CALLS_PER_TURN = 2;
+/** LLM judges per run: disposition, reprompt/recovery, perceived completion. */
+const JUDGE_CALLS_PER_RUN = 3;
+const EST_JUDGE_INPUT_TOKENS = 6_000;
+const EST_JUDGE_OUTPUT_TOKENS = 400;
+
+export interface ProjectLayer2SuiteInput {
+  scripts: readonly VoiceQualityScript[];
+  /** Model the Layer 2 gateway will be served by. */
+  model: string;
+}
+
+/**
+ * #1331 — conservative (no prompt cache, no TTS cache) projection, in cents,
+ * of what the suite cost tracker will book for one Layer 2 suite run. Used to
+ * size VOICE_QUALITY_COST_CAP_CENTS for the model the workflows select (the
+ * caps were sized for Haiku). Per run: two agent calls per caller turn plus an
+ * end-of-call summary, three LLM judges, one Whisper transcription per agent
+ * utterance (greeting + one per turn; each books ≥ 1¢) and one TTS synthesis
+ * per caller turn (each books ≥ 1¢). Null when the model is unpriced.
+ */
+export function projectLayer2SuiteCents(input: ProjectLayer2SuiteInput): number | null {
+  let cents = 0;
+  for (const script of input.scripts) {
+    const callers = script.turns.map((t) => t.caller);
+    const agent = projectPathSmokeCents({
+      model: input.model,
+      utterances: [...callers.flatMap((c) => Array(AGENT_CALLS_PER_TURN).fill(c)), ''],
+      systemPromptTokens: EST_AGENT_PROMPT_TOKENS,
+      outputTokensPerCall: EST_AGENT_OUTPUT_TOKENS,
+    });
+    const judges = projectPathSmokeCents({
+      model: input.model,
+      utterances: Array(JUDGE_CALLS_PER_RUN).fill(''),
+      systemPromptTokens: EST_JUDGE_INPUT_TOKENS,
+      outputTokensPerCall: EST_JUDGE_OUTPUT_TOKENS,
+    });
+    if (agent === null || judges === null) return null;
+    const whisper = (callers.length + 1) * Math.ceil(WHISPER_CENTS_PER_MINUTE);
+    const tts = callers.reduce(
+      (sum, c) => sum + Math.max(1, Math.ceil((c.length / 1000) * TTS_CENTS_PER_1K_CHARS)),
+      0,
+    );
+    cents += RUNS_PER_SCRIPT * (agent + judges + whisper + tts);
+  }
+  return cents;
+}
 
 /**
  * Thrown when a cost cap (per-script or per-suite) is breached. The

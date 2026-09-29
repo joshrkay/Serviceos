@@ -833,3 +833,20 @@ describe('renderChainSms — RV-221 chain summaries', () => {
     expect(() => renderChainSms([], { approveUrl: URL })).toThrow();
   });
 });
+
+describe('#1485 — a proposal that cannot execute yet renders the ask, never an approve prompt', () => {
+  const ASK =
+    "This can't go ahead yet: the customer has no service location yet — what's the service address?";
+
+  it('keeps the ask and "reply N to reject" within the SMS cap, dropping Reply Y and the link, however long the summary', () => {
+    const body = renderProposalSms(
+      { proposalType: 'draft_estimate', summary: 'Estimate '.repeat(80), payload: {} },
+      { approveUrl: URL, blockedBy: ASK },
+    );
+    expect(body.length).toBeLessThanOrEqual(PROPOSAL_SMS_MAX_CHARS);
+    expect(body).toContain(ASK);
+    expect(body).toContain('reply N to reject');
+    expect(body).not.toMatch(/Reply Y/);
+    expect(body).not.toContain(URL);
+  });
+});

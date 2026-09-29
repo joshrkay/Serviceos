@@ -11,6 +11,14 @@ import {
 } from './customer';
 import { normalizeEmail, normalizePhone } from './dedup';
 import { ValidationError } from '../shared/errors';
+import { CUSTOMER_LIST_SORT, type CustomerSortField } from '@ai-service-os/shared';
+import { sqlOrderBy } from '../shared/list-sort';
+
+/** #1402 — allowlisted sort field → SQL. Never built from request text. */
+const CUSTOMER_SORT_COLUMNS: Record<CustomerSortField, string> = {
+  name: 'lower(display_name)',
+  created: 'created_at',
+};
 
 function mapRow(row: Record<string, unknown>): Customer {
   return {
@@ -197,12 +205,15 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
     }
 
     // #1401 — service-type chip filter: a live location tagged with the type.
+    // #1473 — case-insensitive: rows written before write-normalisation kept
+    // the caller's casing ('plumbing' vs the 'Plumbing' chip).
     if (options?.serviceType) {
       conditions.push(
         `EXISTS (SELECT 1 FROM service_locations sl
                  WHERE sl.tenant_id = $1 AND sl.customer_id = customers.id
                    AND sl.is_archived = false
-                   AND sl.service_types @> ARRAY[$${paramIndex}]::text[])`
+                   AND EXISTS (SELECT 1 FROM unnest(sl.service_types) AS st(v)
+                               WHERE lower(st.v) = lower($${paramIndex})))`
       );
       params.push(options.serviceType);
       paramIndex++;
@@ -223,10 +234,14 @@ export class PgCustomerRepository extends PgBaseRepository implements CustomerRe
     options?: CustomerListOptions
   ): Promise<Customer[]> {
     const { where, params } = this.buildListWhere(tenantId, options);
-    // P1-018: default sort = display_name ASC for customers per spec.
-    const sortDirection = options?.sort === 'desc' ? 'DESC' : 'ASC';
+    // P1-018: default sort = display_name ASC; #1402 shared sortBy allowlist.
+    const sortBy = options?.sortBy ?? CUSTOMER_LIST_SORT.defaultField;
+    const orderBy = sqlOrderBy(
+      { field: sortBy, direction: options?.sort ?? CUSTOMER_LIST_SORT.fields[sortBy] },
+      CUSTOMER_SORT_COLUMNS,
+    );
     const usePagination = options?.limit !== undefined || options?.offset !== undefined;
-    let sql = `SELECT * FROM customers ${where} ORDER BY display_name ${sortDirection}`;
+    let sql = `SELECT * FROM customers ${where} ${orderBy}`;
     let queryParams = params;
     if (usePagination) {
       const limit = Math.min(options?.limit ?? DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT);

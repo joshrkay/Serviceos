@@ -5,10 +5,13 @@ import {
   Plus, Send, ArrowLeft, DollarSign, CheckCircle, CheckCircle2,
   Clock, AlertCircle, FileText, CreditCard, ChevronRight, X,
   Phone, Mail, Copy, Check, Pencil, Trash2, MessageSquare,
-  ExternalLink, Lock, Building2, Smartphone, Briefcase,
+  ExternalLink, Lock, Building2, Smartphone, Briefcase, Search,
 } from 'lucide-react';
 import type { InvoiceResponse, LineItem as InvoiceLineItem, CatalogUnitValue } from '@ai-service-os/shared';
+import { centsToInputValue, parseMoneyToCents } from '@ai-service-os/shared';
 import { useListQuery } from '../../hooks/useListQuery';
+import { INVOICE_LIST_SORT, type InvoiceSortField, type ListSort } from '@ai-service-os/shared';
+import { ListSortSelect, listSortParams, type ListSortOption } from '../shared/ListSortSelect';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { useMutation } from '../../hooks/useMutation';
 import { deriveInvoiceUiStatus, centsToDisplay } from '../../utils/statusNormalize';
@@ -26,7 +29,7 @@ import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { AttachmentSection } from '../attachments/AttachmentSection';
 
-type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Canceled';
+type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Void' | 'Canceled';
 
 interface InvCompat {
   id: string;
@@ -648,9 +651,14 @@ function MarkPaidSheet({
   amountDueCents: number;
   inv: InvCompat;
   onClose: () => void;
-  onPaid: () => void | Promise<void>;
+  /** Called after the API accepted the payment, with the amount recorded. */
+  onPaid: (amountCents: number) => void | Promise<void>;
 }) {
   const [method, setMethod] = useState<'card' | 'ach' | 'cash' | 'check'>('cash');
+  // #1402 §5 — the operator can record LESS than the balance (a deposit, a
+  // partial cash payment). Defaults to the full balance; parsed to integer
+  // cents with string math (parseMoneyToCents), never `Number(x) * 100`.
+  const [amountText, setAmountText] = useState(() => centsToInputValue(amountDueCents));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -662,9 +670,13 @@ function MarkPaidSheet({
   ] as const;
 
   async function handleSave() {
-    const amountCents = amountDueCents;
-    if (amountCents <= 0) {
+    if (amountDueCents <= 0) {
       setError('Nothing due on this invoice.');
+      return;
+    }
+    const amountCents = parseMoneyToCents(amountText);
+    if (amountCents === null || amountCents <= 0) {
+      setError('Enter the amount received, e.g. 40.00');
       return;
     }
     setSaving(true);
@@ -685,7 +697,7 @@ function MarkPaidSheet({
           typeof body?.message === 'string' ? body.message : `Payment failed (HTTP ${res.status})`,
         );
       }
-      await onPaid();
+      await onPaid(amountCents);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to record payment');
@@ -711,6 +723,20 @@ function MarkPaidSheet({
             </div>
             <p className="text-lg text-success">{centsToDisplay(amountDueCents)}</p>
           </div>
+
+          <label className="block">
+            <span className="text-xs text-muted-foreground">Amount received</span>
+            <input
+              aria-label="Amount received"
+              inputMode="decimal"
+              value={amountText}
+              onChange={(e) => setAmountText(e.target.value)}
+              className="mt-1.5 w-full min-h-11 rounded-lg border border-border px-3 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary"
+            />
+            <span className="mt-1 block text-xs text-muted-foreground">
+              Less than {centsToDisplay(amountDueCents)} records a partial payment.
+            </span>
+          </label>
 
           <div>
             <p className="text-xs text-muted-foreground mb-2">Payment method received</p>
@@ -749,6 +775,99 @@ function MarkPaidSheet({
             {saving ? 'Saving…' : <><CheckCircle2 size={15} /> Confirm payment received</>}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Void (#1402 §5) ──────────────────────────────────────────────────────
+/**
+ * Offers "Void invoice" only where the API's invoice state machine allows it
+ * (INVOICE_STATUS_TRANSITIONS: open / partially_paid → void). Voiding goes
+ * through POST /api/invoices/:id/transition, which audits the change and
+ * kills any hosted payment link.
+ */
+const VOIDABLE_API_STATUSES = new Set(['open', 'partially_paid']);
+
+function VoidInvoiceAction({ invoiceId, invoiceNumber, apiStatus, onVoided }: {
+  invoiceId: string;
+  invoiceNumber: string;
+  apiStatus: string;
+  onVoided: () => void | Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [voiding, setVoiding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (apiStatus === 'paid') {
+    // paid → void is refused by the state machine; money goes back through
+    // a refund (the assistant's record_refund proposal), not a void.
+    return (
+      <p className="text-xs text-muted-foreground px-1">
+        Paid invoices can’t be voided. To give money back, record a refund — e.g. ask the
+        assistant “Refund $50 on {invoiceNumber}”.
+      </p>
+    );
+  }
+  if (!VOIDABLE_API_STATUSES.has(apiStatus)) return null;
+
+  async function confirmVoid() {
+    setVoiding(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/invoices/${invoiceId}/transition`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'void' }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(typeof body?.message === 'string' ? body.message : `Void failed (HTTP ${res.status})`);
+      }
+      setConfirming(false);
+      await onVoided();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to void invoice');
+    } finally {
+      setVoiding(false);
+    }
+  }
+
+  if (!confirming) {
+    return (
+      <button
+        type="button"
+        onClick={() => setConfirming(true)}
+        className="flex items-center justify-center gap-2 min-h-11 rounded-xl border border-border bg-card text-destructive py-3 text-sm hover:bg-secondary transition-colors"
+      >
+        Void invoice
+      </button>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 flex flex-col gap-2">
+      <p className="text-sm text-foreground">
+        Void {invoiceNumber}? The customer can no longer pay it and this can’t be undone.
+      </p>
+      {error && <p className="text-xs text-destructive">{error}</p>}
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={() => void confirmVoid()}
+          disabled={voiding}
+          className="flex-1 min-h-11 rounded-lg bg-destructive text-primary-foreground text-sm disabled:opacity-50"
+        >
+          {voiding ? 'Voiding…' : `Yes, void ${invoiceNumber}`}
+        </button>
+        <button
+          type="button"
+          onClick={() => setConfirming(false)}
+          disabled={voiding}
+          className="flex-1 min-h-11 rounded-lg border border-border text-sm text-foreground"
+        >
+          Keep it
+        </button>
       </div>
     </div>
   );
@@ -928,28 +1047,42 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   // status (deriveInvoiceUiStatus folds 'open'/'partially_paid' → 'Unpaid'
   // and may surface 'Overdue'), all of which map back to a payable invoice.
   const canMarkPaid = status === 'Unpaid' || status === 'Overdue';
+  // #1473 — a void/canceled invoice is closed: nothing is owed and there is
+  // no payment link to (re)send (the API refuses the resend with 409).
+  const isClosed = status === 'Void' || status === 'Canceled';
 
   // #1400 — "Download receipt" had no handler. Prints the API's totals and
   // each recorded payment; the business header comes from tenant settings.
-  async function downloadReceipt() {
+  // #1402 §5 — the same document labelled "Invoice" (with its due date) is
+  // the invoice PDF, available in every status.
+  async function printDocument(kind: 'receipt' | 'invoice') {
     if (!inv) return;
     let businessName = 'Your business';
     let businessContact: string | undefined;
+    let businessAddress: string | undefined;
     try {
       const res = await apiFetch('/api/settings');
       if (res.ok) {
-        const data = (await res.json()) as { businessName?: string | null; businessPhone?: string | null };
+        const data = (await res.json()) as {
+          businessName?: string | null;
+          businessPhone?: string | null;
+          businessAddress?: string | null;
+        };
         businessName = data.businessName?.trim() || businessName;
         businessContact = data.businessPhone?.trim() || undefined;
+        businessAddress = data.businessAddress?.trim() || undefined;
       }
     } catch {
       /* non-fatal — the receipt prints with a generic header */
     }
     const ok = printInvoiceReceipt({
+      kind,
+      dueDate: inv.dueDate ?? undefined,
       invoiceNumber: inv.invoiceNumber,
       customerName: invCompat.customer,
       businessName,
       businessContact,
+      businessAddress,
       lineItems: inv.lineItems.map((li) => ({ description: li.description, quantity: li.quantity, totalCents: li.totalCents })),
       totals: inv.totals,
       amountPaidCents,
@@ -958,7 +1091,7 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
       formatDate: (iso) => formatDateInTenantTz(iso, tz, { withYear: true }),
       methodLabel: (m) => PAYMENT_METHOD_LABEL[m] ?? m,
     });
-    if (!ok) toast.error('Allow pop-ups to download the receipt');
+    if (!ok) toast.error(`Allow pop-ups to download the ${kind}`);
   }
 
   return (
@@ -1139,6 +1272,17 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                   paid invoice the headline is the remaining balance
                   (amountDueCents) and we surface the collected amount on a
                   separate "Paid" line. */}
+              {isClosed ? (
+              <div className="rounded-xl px-4 py-4 bg-secondary text-foreground">
+                <p className="text-sm text-muted-foreground mb-1">
+                  {status === 'Void' ? 'Voided — nothing is owed' : 'Canceled — nothing is owed'}
+                </p>
+                <p className="text-3xl text-muted-foreground line-through mb-1">{centsToDisplay(totalCents)}</p>
+                {amountPaidCents > 0 && (
+                  <p className="text-xs text-muted-foreground">Paid {centsToDisplay(amountPaidCents)} before it was voided</p>
+                )}
+              </div>
+              ) : (
               <div className={`rounded-xl px-4 py-4 ${status === 'Paid' ? 'bg-success' : status === 'Overdue' ? 'bg-destructive' : 'bg-primary'} text-primary-foreground`}>
                 <p className="text-sm text-primary-foreground/60 mb-1">
                   {status === 'Paid' ? 'Amount paid' : 'Amount due'}
@@ -1158,12 +1302,13 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                   <p className="text-xs text-success">{paid ? 'Just now' : ''}</p>
                 )}
               </div>
+              )}
 
               <PaymentHistory payments={payments} tz={tz} />
 
               {/* Action buttons */}
               <div className="flex flex-col gap-2">
-                {status !== 'Paid' && (
+                {status !== 'Paid' && !isClosed && (
                   <button
                     onClick={() => setSendOpen(true)}
                     className={`flex items-center justify-center gap-2 rounded-xl py-3 text-sm transition-colors text-primary-foreground ${
@@ -1185,12 +1330,24 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
                 )}
                 {status === 'Paid' && (
                   <button
-                    onClick={() => void downloadReceipt()}
+                    onClick={() => void printDocument('receipt')}
                     className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card text-foreground py-3 text-sm hover:bg-secondary transition-colors"
                   >
                     <FileText size={14} /> Download receipt
                   </button>
                 )}
+                <button
+                  onClick={() => void printDocument('invoice')}
+                  className="flex items-center justify-center gap-2 min-h-11 rounded-xl border border-border bg-card text-foreground py-3 text-sm hover:bg-secondary transition-colors"
+                >
+                  <FileText size={14} /> Download PDF
+                </button>
+                <VoidInvoiceAction
+                  invoiceId={inv.id}
+                  invoiceNumber={inv.invoiceNumber}
+                  apiStatus={apiStatus}
+                  onVoided={async () => { await refetch(); }}
+                />
               </div>
             </div>
           </div>
@@ -1216,8 +1373,10 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
           amountDueCents={amountDueCents}
           inv={invCompat}
           onClose={() => setMarkOpen(false)}
-          onPaid={async () => {
-            setPaid(true);
+          onPaid={async (amountCents) => {
+            // #1402 — only a payment that clears the balance is "paid"; a
+            // partial one leaves the page on whatever the refetch returns.
+            if (amountCents >= amountDueCents) setPaid(true);
             await refetch();
             loadPayments();
           }}
@@ -1233,6 +1392,20 @@ const API_STATUS_FOR_TAB: Record<string, string> = {
   Unpaid:  'open',
   Overdue: 'open',
   Paid:    'paid',
+};
+
+// #1402 — server-side sort options (shared list-sort control).
+const SORT_OPTIONS: ReadonlyArray<ListSortOption<InvoiceSortField>> = [
+  { field: 'created',  direction: 'desc', label: 'Newest first' },
+  { field: 'created',  direction: 'asc',  label: 'Oldest first' },
+  { field: 'due',      direction: 'asc',  label: 'Due soonest' },
+  { field: 'total',    direction: 'desc', label: 'Highest total' },
+  { field: 'total',    direction: 'asc',  label: 'Lowest total' },
+  { field: 'customer', direction: 'asc',  label: 'Customer A–Z' },
+];
+const DEFAULT_SORT: ListSort<InvoiceSortField> = {
+  field: INVOICE_LIST_SORT.defaultField,
+  direction: INVOICE_LIST_SORT.fields[INVOICE_LIST_SORT.defaultField],
 };
 
 const TABS: { label: string; value: InvoiceStatus | 'All' }[] = [
@@ -1254,6 +1427,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
   const navigate = useNavigate();
   const tz = useTenantTimezone();
   const [tab,      setTab]      = useState<InvoiceStatus | 'All'>('All');
+  const [sort,     setSort]     = useState<ListSort<InvoiceSortField>>(DEFAULT_SORT);
   const [selected, setSelected] = useState<string | null>(defaultSelectedId ?? null);
 
   // Keep `selected` in sync with the route param so deep-links and in-place
@@ -1263,7 +1437,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
     setSelected(defaultSelectedId ?? null);
   }, [defaultSelectedId]);
 
-  const { data, total, isLoading, error, setFilters, refetch } = useListQuery<InvoiceResponse>(
+  const { data, total, isLoading, error, setFilters, setSearch, refetch } = useListQuery<InvoiceResponse>(
     '/api/invoices',
     {
       // P5-018 — live refresh while the list is visible. Pause while a detail
@@ -1289,6 +1463,12 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
     }
     previousStatusesRef.current = next;
   }, [data]);
+
+  // Tab status + sort compose into one server-side filter set (#1402).
+  const listFilters = (t: InvoiceStatus | 'All', s: ListSort<InvoiceSortField>) => {
+    const apiStatus = t !== 'All' ? API_STATUS_FOR_TAB[t] : undefined;
+    return { ...(apiStatus ? { status: apiStatus } : {}), ...listSortParams(INVOICE_LIST_SORT, s) };
+  };
 
   if (selected) {
     return <InvoiceDetail invoiceId={selected} onBack={() => {
@@ -1351,6 +1531,30 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
           </div>
         </div>
 
+        {/* Search + sort (#1402) — both server-side; search matches the
+            invoice number and the customer's name. */}
+        <div className="flex flex-col gap-2 mb-3">
+          <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3">
+            <Search size={15} className="text-muted-foreground shrink-0" />
+            <input
+              type="search"
+              aria-label="Search invoices"
+              placeholder="Search number or customer…"
+              onChange={e => setSearch(e.target.value)}
+              className="flex-1 min-w-0 min-h-11 text-sm text-foreground placeholder:text-muted-foreground outline-none bg-transparent"
+            />
+          </div>
+          <ListSortSelect
+            label="Sort invoices"
+            options={SORT_OPTIONS}
+            value={sort}
+            onChange={next => {
+              setSort(next);
+              setFilters(listFilters(tab, next));
+            }}
+          />
+        </div>
+
         {/* Tabs */}
         <div className="flex gap-1 mb-4 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
           {TABS.map(t => (
@@ -1358,12 +1562,7 @@ export function InvoicesPage({ defaultSelectedId }: { defaultSelectedId?: string
               key={t.value}
               onClick={() => {
                 setTab(t.value);
-                if (t.value !== 'All') {
-                  const apiStatus = API_STATUS_FOR_TAB[t.value];
-                  if (apiStatus) setFilters({ status: apiStatus });
-                } else {
-                  setFilters({});
-                }
+                setFilters(listFilters(t.value, sort));
               }}
               className={`shrink-0 flex min-h-11 min-w-11 items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 tab === t.value ? 'bg-primary text-primary-foreground' : 'bg-card border border-border text-foreground hover:bg-secondary'

@@ -38,6 +38,7 @@ vi.mock('sonner', () => ({
 }));
 
 import { SettingsPage } from './SettingsPage';
+import { expectTapTarget } from '../../test-utils/tap-target';
 
 function jsonResponse(body: unknown, init: { ok?: boolean; status?: number } = {}): Response {
   const ok = init.ok ?? true;
@@ -219,5 +220,12 @@ describe('SettingsPage live-action rows (#877)', () => {
     expect(sw.className).toContain('min-w-11');
     const row = screen.getByText('Rivet subscription').closest('button')!;
     expect(row.className).toContain('min-h-11');
+  });
+
+  // #1481 — the intake / booking cards' in-sentence links measured 24px tall
+  // at 320px; they are the only way to those pages from the cards.
+  it.each(['Lead Pipeline', 'approval queue'])('the "%s" link is a ≥44px tap target', async (name) => {
+    renderPage();
+    expectTapTarget(await screen.findByRole('button', { name }), name);
   });
 });

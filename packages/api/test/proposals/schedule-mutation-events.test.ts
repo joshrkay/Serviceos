@@ -1,10 +1,21 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { RescheduleAppointmentExecutionHandler } from '../../src/proposals/execution/reschedule-handler';
 import { CancelAppointmentExecutionHandler } from '../../src/proposals/execution/cancellation-handler';
 import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { createAppointment } from '../../src/appointments/appointment';
 import { createProposal } from '../../src/proposals/proposal';
+
+// The fixtures below are literal 2026 instants. #1402 refuses to book or move a visit to a start in the past, so pin
+// the wall clock before every fixture slot — these tests describe behaviour at
+// a fixed clock, not at whatever day CI happens to run.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const tenantA = '00000000-0000-4000-8000-00000000000a';
 

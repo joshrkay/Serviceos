@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { RescheduleAppointmentExecutionHandler } from '../../../src/proposals/execution/reschedule-handler';
 import { Proposal } from '../../../src/proposals/proposal';
 import type { TransactionalCommsService } from '../../../src/notifications/transactional-comms-service';
@@ -8,6 +8,17 @@ import { StubSkillMatcher } from '../../../src/scheduling/skill-matcher';
 import { HaversineFallbackProvider } from '../../../src/scheduling/travel-time/haversine-fallback';
 import { InMemoryAssignmentRepository } from '../../../src/appointments/assignment';
 import { getDispatchBoardEventBus } from '../../../src/dispatch/board-event-bus';
+
+// The fixtures below are literal 2026 instants. #1402 refuses to book or move
+// a visit to a start in the past, so pin "now" before every fixture date —
+// the tests describe behaviour at a fixed clock, not at wall-clock time.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('P6-013 — Execution for reschedule proposals', () => {
   let handler: RescheduleAppointmentExecutionHandler;
@@ -498,5 +509,46 @@ describe('P6-013 — Execution for reschedule proposals', () => {
       context,
     );
     expect(result.success).toBe(true);
+  });
+});
+
+describe('#1402 — a reschedule proposal cannot move a visit into the past', () => {
+  const tenantId = '550e8400-e29b-41d4-a716-446655440000';
+  const HOUR = 60 * 60 * 1000;
+
+  it('fails and leaves the appointment where it was when the new start has already passed', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const handler = new RescheduleAppointmentExecutionHandler(appointmentRepo);
+    const originalStart = new Date(Date.now() + 48 * HOUR);
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: originalStart,
+      scheduledEnd: new Date(originalStart.getTime() + 2 * HOUR),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+
+    const result = await handler.execute(
+      {
+        id: 'prop-1402',
+        tenantId,
+        proposalType: 'reschedule_appointment',
+        status: 'approved',
+        payload: {
+          appointmentId: appt.id,
+          newScheduledStart: new Date(Date.now() - 24 * HOUR).toISOString(),
+          newScheduledEnd: new Date(Date.now() - 22 * HOUR).toISOString(),
+        },
+        summary: 'Reschedule appointment',
+        createdBy: 'user-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      { tenantId, executedBy: 'user-1' },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/in the past/i);
+    const after = await appointmentRepo.findById(tenantId, appt.id);
+    expect(after!.scheduledStart.toISOString()).toBe(originalStart.toISOString());
   });
 });

@@ -145,7 +145,7 @@ export function DncListSheet({ open, onOpenChange }: Props) {
           <button
             type="button"
             onClick={() => onOpenChange(false)}
-            className="text-slate-400 hover:text-slate-600 text-sm"
+            className="min-h-11 min-w-11 text-slate-400 hover:text-slate-600 text-sm"
           >
             Close
           </button>
@@ -158,13 +158,13 @@ export function DncListSheet({ open, onOpenChange }: Props) {
             value={newPhone}
             onChange={(e) => setNewPhone(e.target.value)}
             disabled={saving}
-            className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+            className="flex-1 min-h-11 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10"
             data-testid="dnc-phone-input"
           />
           <button
             type="submit"
             disabled={saving || !newPhone.trim()}
-            className="rounded-lg bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-50"
+            className="min-h-11 min-w-11 rounded-lg bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-50"
             data-testid="dnc-add-button"
           >
             {saving ? 'Adding…' : 'Add'}
@@ -199,7 +199,7 @@ export function DncListSheet({ open, onOpenChange }: Props) {
                     onClick={() => handleRemove(entry.phone)}
                     disabled={removing === entry.phone}
                     aria-label={`Remove ${entry.phone}`}
-                    className="text-slate-400 hover:text-red-600 disabled:opacity-50"
+                    className="flex size-11 shrink-0 items-center justify-center text-slate-400 hover:text-red-600 disabled:opacity-50"
                     data-testid={`dnc-remove-${entry.phone}`}
                   >
                     {removing === entry.phone ? <span className="text-xs">…</span> : <Trash2 size={16} />}

@@ -458,6 +458,14 @@ describe('InvoicesPage', () => {
     renderStatusDetail('void');
     expect(screen.queryByRole('button', { name: /mark as paid/i })).not.toBeInTheDocument();
   });
+
+  it('#1473.1: a void invoice reads "Void", shows no amount due and offers no payment link', () => {
+    renderStatusDetail('void');
+    expect(screen.getAllByText('Void').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Canceled')).not.toBeInTheDocument();
+    expect(screen.queryByText(/amount due/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /payment link|send reminder/i })).not.toBeInTheDocument();
+  });
 });
 
 describe('P5-018 InvoicesPage — payment confirmation reflection', () => {

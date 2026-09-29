@@ -201,6 +201,24 @@ describe('voice-eval live plumbing — intent run loop (mocked gateway)', () => 
     expect(res.fastPathHits).toBe(0);
   });
 
+  // #1469 — five of the live run's known misses were "X ⇒ unknown". Whether
+  // the model picked X below the 0.6 confidence floor or picked unknown
+  // outright are different fixes, so a miss to unknown carries the reason
+  // and the intent the model leaned toward.
+  it('records why a miss landed on unknown and which intent the model leaned toward', async () => {
+    const gw = mockGateway('{"intentType":"lookup_jobs","confidence":0.4}');
+    const res = await runLiveIntentEval([{ utterance: 'Pull up the Henderson work order.', intent: 'lookup_jobs' }], gw);
+    expect(res.misses).toEqual([
+      {
+        utterance: 'Pull up the Henderson work order.',
+        gold: 'lookup_jobs',
+        pred: 'unknown',
+        unknownReason: 'low_confidence',
+        modelIntent: 'lookup_jobs',
+      },
+    ]);
+  });
+
   it('counts a fast-path hit (empty transcript short-circuits before the LLM)', async () => {
     const gw = mockGateway('{"intentType":"create_invoice","confidence":0.9}');
     const rows = [
@@ -254,5 +272,41 @@ describe('voice-eval live plumbing — slot run loop (mocked gateway)', () => {
       problem_description: 'AC stopped cooling',
     });
     expect(res.llmCalls).toBe(1);
+  });
+
+  // #1468 — the live run scored problem_description tp=0 fp=0 fn=100. The
+  // classifier prompt's create_appointment block asks for `jobTitle` ("a short
+  // name for the new work being scheduled") — never noteBody — so the problem
+  // summary arrives as jobTitle on a booking call.
+  it('#1468: a create_appointment booking carries the problem as jobTitle → problem_description', async () => {
+    const gw = mockGateway(
+      JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.92,
+        extractedEntities: {
+          customerName: 'Sarah Johnson',
+          jobTitle: 'AC unit not cooling',
+          dateTimeDescription: 'tomorrow between 8 and 10 AM',
+        },
+      }),
+    );
+    const res = await runLiveSlotEval([{ transcript: 'my ac stopped cooling', gold: {} }], gw);
+    expect(res.examples[0].pred.problem_description).toBe('AC unit not cooling');
+  });
+
+  // #1468 — the prompt's only caller-address field is `address` (create_customer:
+  // "NEW customer's street address, verbatim"); serviceAddress belongs to
+  // add_service_location. A new caller giving their address lands there.
+  it('#1468: the caller address arrives as `address` (create_customer schema) → address slot', async () => {
+    const gw = mockGateway(
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.9,
+        extractedEntities: { displayName: 'Sarah Johnson', address: '456 Oak Avenue, Springfield' },
+      }),
+    );
+    const res = await runLiveSlotEval([{ transcript: 'new customer here', gold: {} }], gw);
+    expect(res.examples[0].pred.address).toBe('456 Oak Avenue, Springfield');
+    expect(res.examples[0].pred.name).toBe('Sarah Johnson');
   });
 });

@@ -37,6 +37,8 @@ interface PublicInvoiceView {
   status: string;
   customerName: string;
   businessName: string;
+  /** #1402 §13 — tenant mailing address, newline-separated. */
+  businessAddress?: string;
   businessPhone?: string;
   businessEmail?: string;
   lineItems: LineItem[];
@@ -529,8 +531,16 @@ export function InvoicePaymentPage() {
             <div className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
               <span className="text-white" style={{ fontSize: 13 }}>S</span>
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-sm text-slate-800">{inv.businessName}</p>
+              {inv.businessAddress && (
+                <p
+                  data-testid="business-address"
+                  className="text-xs text-slate-400 whitespace-pre-line break-words"
+                >
+                  {inv.businessAddress}
+                </p>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-3">
