@@ -842,13 +842,39 @@ async function resolvePlannedLookups(
     // the customer in `refs` before the job lookup runs.)
     const customerId =
       lookup.customerId ?? (lookup.kind === 'job' ? refs.customerId : undefined);
-    const result = await resolver.resolve({
+    let result = await resolver.resolve({
       tenantId,
       reference: lookup.reference,
       kind: lookup.kind,
       ...(lookup.jobId ? { jobId: lookup.jobId } : {}),
       ...(customerId ? { customerId } : {}),
     });
+    // #1492 P2 — a job reference that names no job may name the CUSTOMER
+    // ("draft an estimate for the QA Matrix job" with no customerName
+    // extracted): the create_invoice customer-then-job path. The customer
+    // decides it — a which-customer question when several match, otherwise
+    // that customer's jobs ranked by the scoped lookup (one resolves, several
+    // are a which-job question). A reference naming no customer either keeps
+    // the job's honest not_found (#1416).
+    if (lookup.kind === 'job' && !customerId && result.kind === 'not_found') {
+      const asCustomer = await resolver.resolve({
+        tenantId,
+        reference: lookup.reference,
+        kind: 'customer',
+      });
+      if (asCustomer.kind === 'ambiguous') {
+        return foldResolution(asCustomer, 'customer', lookup.reference, refs, 'customerId');
+      }
+      if (asCustomer.kind === 'resolved') {
+        refs.customerId = asCustomer.candidate.id;
+        result = await resolver.resolve({
+          tenantId,
+          reference: lookup.reference,
+          kind: 'job',
+          customerId: asCustomer.candidate.id,
+        });
+      }
+    }
     const terminal = foldResolution(
       result,
       lookup.kind,
