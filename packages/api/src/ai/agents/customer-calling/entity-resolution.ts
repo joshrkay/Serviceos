@@ -423,6 +423,18 @@ export function requiresExistingEntity(intent: string): boolean {
 }
 
 /**
+ * #1476 — creation intents where an UNKNOWN name is a net-new customer by
+ * design: a booking for someone not yet in the CRM drafts a card gated on
+ * `customerId` for the operator to complete (register case book-04,
+ * #net-new-entity; the D01 gate in proposals/voice-payload.ts). Every other
+ * creation intent whose only anchor failed to resolve cannot produce an
+ * executable draft, so the live turn asks instead of reading it back.
+ */
+export function acceptsNetNewCustomer(intent: string): boolean {
+  return SCHEDULING_CREATE_INTENTS.has(intent);
+}
+
+/**
  * #1416 — the not-found rule for the references still outstanding AFTER a
  * disambiguation pick. Everything `requiresExistingEntity` covers, plus the
  * one creation-intent case where the caller named an EXISTING record: the
@@ -821,12 +833,21 @@ async function resolvePlannedLookups(
 ): Promise<SchedulingEntityResolution | undefined> {
   if (!resolver) return undefined;
   for (const lookup of lookups) {
+    // #1476 P2 — a JOB reference is a question about the customer already in
+    // hand (resolved earlier in this plan, pinned by a pick, or explicit):
+    // "the QA Matrix job" for the QA Matrix customer the operator just chose
+    // means THEIR jobs. Tenant-wide, the same words matched more jobs than a
+    // picker may offer and came back not_found; anchored, several matches are
+    // the ordinary which-one question. (Customer-first plan order is what puts
+    // the customer in `refs` before the job lookup runs.)
+    const customerId =
+      lookup.customerId ?? (lookup.kind === 'job' ? refs.customerId : undefined);
     const result = await resolver.resolve({
       tenantId,
       reference: lookup.reference,
       kind: lookup.kind,
       ...(lookup.jobId ? { jobId: lookup.jobId } : {}),
-      ...(lookup.customerId ? { customerId: lookup.customerId } : {}),
+      ...(customerId ? { customerId } : {}),
     });
     const terminal = foldResolution(
       result,

@@ -564,6 +564,15 @@ export function createJobRouter(
           }));
         }
 
+        // #1479 — embed the assigned technician's name (the contract's
+        // optional `technician` enrichment) so the job detail's Technician
+        // card can render it, the same way the customer summary is embedded.
+        const userRepo = scheduleSyncDeps?.userRepo;
+        const technician =
+          result.assignedTechnicianId && userRepo
+            ? await userRepo.findById(req.auth!.tenantId, result.assignedTechnicianId)
+            : null;
+
         const response = {
           ...result,
           customer: customer ? {
@@ -577,6 +586,9 @@ export function createJobRouter(
             locations,
           } : undefined,
           location: locations.find(l => l.id === result.locationId),
+          technician: technician
+            ? { id: technician.id, firstName: technician.firstName, lastName: technician.lastName }
+            : undefined,
         };
 
         res.json(response);

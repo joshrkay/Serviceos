@@ -140,6 +140,8 @@ import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory
 import {
   invoiceReferenceCheck,
   serviceLocationReferenceCheck,
+  sendRecipientReferenceCheck,
+  executionAnchorReferenceCheck,
   technicianReferenceCheck,
 } from './proposals/approval-reference-checks';
 import { createTechnicianLocationRouter } from './routes/technician-location';
@@ -1034,6 +1036,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     serviceLocationReferenceCheck(locationRepo),
     // #1463 — a technician assignee must be an active technician of this tenant.
     technicianReferenceCheck(userRepo),
+    // #1480 — a send_invoice with no recipient must have one on file.
+    sendRecipientReferenceCheck({ invoiceRepo, jobRepo, customerRepo }),
+    // #1476 / #1480 — an estimate/invoice/booking with no job and no customer.
+    executionAnchorReferenceCheck(),
   ];
 
   const webhookSettingsRepo = settingsRepo;
@@ -5839,6 +5845,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // be booked — without this repo the drafting handler cannot see the gap
       // and the proposal auto-approves into a guaranteed execution failure.
       locationRepo,
+      // #1480 — the same approval-time checks, run before a drafted card
+      // persists, so "approved automatically" can't skip what a tap refuses.
+      approvalReferenceChecks,
       // #1045 — back-to-back travel warning on held slots.
       feasibilityDeps,
       // #1173 — the files repo + object storage an Assistant chat photo was

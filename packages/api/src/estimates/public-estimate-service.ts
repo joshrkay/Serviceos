@@ -309,6 +309,7 @@ export class PublicEstimateService {
     if (siblings.some((s) => s.id !== estimate.id && s.status === 'accepted')) {
       throw new ConflictError(
         'Another estimate on this job has already been accepted. Please contact us — this estimate may no longer be current.',
+        { reason: 'job_already_accepted' },
       );
     }
     // Stale-revision guard. Once an estimate has been revised, a caller MUST
@@ -320,6 +321,7 @@ export class PublicEstimateService {
     if (hasBeenRevised && input.expectedVersion === undefined) {
       throw new ConflictError(
         'This estimate was updated. Please reload to review the latest version before accepting.',
+        { reason: 'estimate_revised' },
       );
     }
     if (
@@ -328,6 +330,7 @@ export class PublicEstimateService {
     ) {
       throw new ConflictError(
         'This estimate was updated after you opened it. Please review the latest version before accepting.',
+        { reason: 'estimate_revised' },
       );
     }
     const trimmed = input.acceptedByName.trim();
@@ -417,6 +420,7 @@ export class PublicEstimateService {
       if ((err as { code?: string } | undefined)?.code === '23505') {
         throw new ConflictError(
           'Another estimate on this job has already been accepted. Please contact us — this estimate may no longer be current.',
+          { reason: 'job_already_accepted' },
         );
       }
       throw err;

@@ -1,5 +1,6 @@
 import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test';
 import { startVoiceSession, voiceInput, approveAndAwaitExecution, ensureTenantTimezone } from './helpers/voice-flow';
+import { matrixCustomerPhone } from './fixtures/tokens';
 
 /**
  * SCH-01 — create + reschedule an appointment via the REST API (deterministic).
@@ -86,7 +87,7 @@ matrixTest('SCH-02', 'Schedule appointment by voice', async (h) => {
   // on and never resolves (GENERIC_CUSTOMER_REFS skips name-based lookup).
   // Spoken times resolve only in the tenant's own zone — see ensureTenantTimezone.
   await ensureTenantTimezone(h, token, '02');
-  const sessionId = await startVoiceSession(h, token, '02', '555-0100');
+  const sessionId = await startVoiceSession(h, token, '02', matrixCustomerPhone());
   if (!sessionId) return void h.evidence.fail('Voice session could not be started.');
 
   const proposalIds = await voiceInput(
@@ -132,7 +133,7 @@ matrixTest('SCH-03', 'Cancel appointment by voice', async (h) => {
   //     session — the seed appointment is created over REST, outside the
   //     voice call, so nothing in the transcript ever introduced a job. The
   //     row was asserting a coreference the caller never established.
-  //  2. It passed no callerPhone, unlike SCH-02 (:76, '555-0100'), so the
+  //  2. It passed no callerPhone, unlike SCH-02 (the seeded customer's number), so the
   //     adapter never resolved a caller identity up front.
   //
   // Tenant A accumulates upcoming appointments across the matrix (SCH-01,
@@ -176,7 +177,7 @@ matrixTest('SCH-03', 'Cancel appointment by voice', async (h) => {
     );
   }
 
-  const sessionId = await startVoiceSession(h, token, '03', '555-0100');
+  const sessionId = await startVoiceSession(h, token, '03', matrixCustomerPhone());
   if (!sessionId) return void h.evidence.fail('Voice session could not be started.');
 
   const proposalIds = await voiceInput(

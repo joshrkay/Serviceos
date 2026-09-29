@@ -42,6 +42,17 @@ npx tsx --no-warnings scripts/qa-smoke-tools.ts
 section "Step 3/5 — seed Tenant A + Tenant B"
 # The seeder requires E2E_DB_URL_READWRITE; doctor already verified it.
 # Seeder is idempotent on owner_id, so re-runs are safe.
+#
+# #1479 — a fresh recipient number per run. The matrix texts its seeded
+# customer on every run, and the #1464 per-recipient SMS cap (product
+# behaviour, never relaxed for QA) refuses a number after its window's
+# maximum. The seeder re-points the SAME customer at this number and the
+# specs read it back via matrixCustomerPhone(). Set QA_MATRIX_CUSTOMER_PHONE
+# to pin one. (Deliberately ignores a stale E2E_MATRIX_CUSTOMER_PHONE loaded
+# from .env.qa.local — that is the previous seed's number, not this run's.)
+E2E_MATRIX_CUSTOMER_PHONE="${QA_MATRIX_CUSTOMER_PHONE:-555-1$(printf '%03d' $((RANDOM % 1000)))}"
+export E2E_MATRIX_CUSTOMER_PHONE
+echo "Matrix customer number for this run: ${E2E_MATRIX_CUSTOMER_PHONE}"
 npx tsx e2e/qa-matrix/fixtures/seed.ts
 
 section "Step 4/6 — run the QA matrix"
