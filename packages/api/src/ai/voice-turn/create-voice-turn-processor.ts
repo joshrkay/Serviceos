@@ -236,9 +236,14 @@ import type { EntityResolver } from '../resolution/entity-resolver';
 import { withCustomerAddressHints } from '../resolution/customer-address-hint';
 import type { LocationRepository } from '../../locations/location';
 import {
+  askForExecutabilityGaps,
+  holdForExecutability,
+} from '../../proposals/approval-reference-checks';
+import {
   MAX_DISAMBIGUATION_ATTEMPTS,
   refKeyForEntityKind,
-  pickFollowUpNotFoundIsTerminal,
+  namedJobNotFoundIsTerminal,
+  requiresExistingEntity,
   resolveDisambiguationFollowUp,
   resolveSchedulingEntities,
   type PendingEntityAmbiguity,
@@ -1641,11 +1646,13 @@ export function createVoiceTurnProcessor(
     // that matches nothing is said honestly (the in-app adapter's
     // `toResolutionEvent` rule, plus a named job on an invoice/estimate)
     // instead of reading back a request that would draft against a
-    // placeholder job.
+    // placeholder job. #1485 — on the FIRST turn too: a resolved customer
+    // plus a named job that matches nothing is never read back into a draft
+    // whose executor would open a new job.
     if (
-      pinnedRefs &&
       resolution.status === 'not_found' &&
-      pickFollowUpNotFoundIsTerminal(intent, resolution.notFound?.entityKind)
+      ((pinnedRefs && requiresExistingEntity(intent)) ||
+        namedJobNotFoundIsTerminal(intent, resolution.notFound?.entityKind))
     ) {
       return {
         type: 'entity_not_found',
@@ -2470,8 +2477,22 @@ export function createVoiceTurnProcessor(
             }
           : {}),
       });
-      const stored = await deps.proposalRepo.create(proposal);
+      // #1485 — the ONE executability check a tap runs, run before
+      // persisting (the chat route's mechanism): an auto-approved card that
+      // cannot execute — e.g. a lane booking — is held, and the close asks
+      // for the missing piece instead of announcing it as done.
+      const held = await holdForExecutability(tenantId, proposal, deps.approvalReferenceChecks);
+      const stored = await deps.proposalRepo.create(held.proposal);
       session.proposalIds.push(stored.id);
+      // The owner / an operator is asked for the gap itself. An S1 caller
+      // cannot supply another record's gap (and is never told what the
+      // tenant has on file), so they hear the honest incomplete-request line.
+      const executabilityUtterance =
+        surfaceAllowed && held.gaps.length > 0
+          ? surface === 'S1'
+            ? CALLER_INCOMPLETE_REQUEST_COPY
+            : `I've drafted that. ${askForExecutabilityGaps(held.gaps, held.proposal.payload)}`
+          : undefined;
       // #1272 — a draft persisted with unfilled missingFields (approve refuses
       // it), or one degraded to a clarification because the details were
       // incomplete, is NOT "taken care of". Without a more specific honest
@@ -2486,7 +2507,9 @@ export function createVoiceTurnProcessor(
         // non-estimate proposals (and for a contract-degraded clarification,
         // which quoted nothing) → the FSM speaks the fixed confirmation.
         // U3 — booking paths override with honest confirmed/pending copy.
-        ...(estimateQuote && !degradedFromContract
+        ...(executabilityUtterance
+          ? { utterance: executabilityUtterance }
+          : estimateQuote && !degradedFromContract
           ? { utterance: estimateQuote.utterance }
           : bookingUtterance
             ? { utterance: bookingUtterance }
@@ -2496,7 +2519,7 @@ export function createVoiceTurnProcessor(
         // WS18 — a grounded ESTIMATE (only) becomes a live, refinable/closeable
         // pendingQuote on the FSM. Scoped to draft_estimate: an invoice quote is
         // for completed work, not a sale to close on the call.
-        ...(estimateQuote && intent === 'draft_estimate' && !degradedFromContract
+        ...(estimateQuote && intent === 'draft_estimate' && !degradedFromContract && !executabilityUtterance
           ? {
               groundedLines: estimateQuote.readbackLines,
               groundedClean: estimateQuote.groundedClean,

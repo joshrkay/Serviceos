@@ -82,7 +82,7 @@ export function JobPhotoUploader({
         value={category}
         onChange={(e) => setCategory(e.target.value as JobPhotoCategory)}
         disabled={busy}
-        className="border rounded px-2 py-1 mb-2"
+        className="min-h-11 min-w-11 border rounded px-2 py-1 mb-2"
       >
         {JOB_PHOTO_CATEGORIES.map((c) => (
           <option key={c} value={c}>
@@ -102,12 +102,24 @@ export function JobPhotoUploader({
         onChange={(e) => setNotes(e.target.value)}
         disabled={busy}
         placeholder="Optional"
-        className="border rounded px-2 py-1 mb-2 w-full"
+        className="min-h-11 border rounded px-2 py-1 mb-2 w-full"
       />
 
+      {/* #1481 — the bare file input rendered ~24px tall; it is visually
+          hidden and reached through this full-width ≥44px label instead. */}
+      <label
+        htmlFor="job-photo-file"
+        className={`flex min-h-11 w-full items-center justify-center rounded border bg-background px-3 text-sm font-medium ${
+          busy ? 'opacity-50' : 'cursor-pointer hover:bg-secondary'
+        }`}
+      >
+        Take or choose a photo
+      </label>
       <input
         ref={inputRef}
+        id="job-photo-file"
         data-testid="job-photo-file-input"
+        className="sr-only"
         type="file"
         accept="image/*"
         capture="environment"

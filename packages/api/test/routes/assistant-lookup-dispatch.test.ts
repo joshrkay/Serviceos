@@ -543,6 +543,60 @@ describe('POST /api/assistant/chat — U7 parity: lookup_leads / lookup_catalog'
     expect(res.body.message.content).not.toContain('Drain cleaning');
   });
 
+  // #1490 item 4 — "How much is <item>?" listed the whole catalog: the chat
+  // path never handed the item to lookup-catalog, which quotes a price only
+  // for a search matching one item.
+  it('catalog: "How much is a water heater flush?" quotes that item\'s price, not the whole list', async () => {
+    const gateway = scriptedGateway([CATALOG_CLASSIFICATION]);
+    const app = buildApp(gateway, {
+      lookups: catalogLookups(await seededCatalogRepo(), async () => 'owner'),
+    });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'How much is a water heater flush?' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).toBe('assistant.lookup.lookup_catalog');
+    expect(res.body.message.content).toContain('Water heater flush');
+    expect(res.body.message.content).toContain('$149');
+    expect(res.body.message.content).not.toContain('Drain cleaning');
+  });
+
+  it('catalog: a browse ("What\'s in our catalog?") still lists the price book', async () => {
+    const gateway = scriptedGateway([CATALOG_CLASSIFICATION]);
+    const app = buildApp(gateway, {
+      lookups: catalogLookups(await seededCatalogRepo(), async () => 'owner'),
+    });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: "What's in our catalog?" }] });
+
+    expect(res.body.message.content).toBe('You have 2 catalog items: Drain cleaning, Water heater flush.');
+  });
+
+  it('catalog: the classifier\'s catalogItemReference is the search when it gives one', async () => {
+    const gateway = scriptedGateway([
+      JSON.stringify({
+        intentType: 'lookup_catalog',
+        confidence: 0.93,
+        extractedEntities: { catalogItemReference: 'drain cleaning' },
+      }),
+    ]);
+    const app = buildApp(gateway, {
+      lookups: catalogLookups(await seededCatalogRepo(), async () => 'owner'),
+    });
+
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: 'What do we charge to clear a drain?' }] });
+
+    expect(res.body.message.content).toContain('Drain cleaning');
+    expect(res.body.message.content).toContain('$225');
+    expect(res.body.message.content).not.toContain('Water heater flush');
+  });
+
   it('catalog: empty catalog answers honestly', async () => {
     const gateway = scriptedGateway([CATALOG_CLASSIFICATION]);
     const app = buildApp(gateway, {

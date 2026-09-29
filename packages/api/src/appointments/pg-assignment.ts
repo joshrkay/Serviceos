@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import { ConflictError } from '../shared/errors';
+import { isDoubleBookingViolation } from './double-booking-db-error';
 import { AppointmentAssignment, AssignmentRepository } from './assignment';
 
 function mapRow(row: Record<string, unknown>): AppointmentAssignment {
@@ -24,7 +25,8 @@ function mapRow(row: Record<string, unknown>): AppointmentAssignment {
  * application's ConflictError (which the route layer maps to HTTP 409).
  *
  *  - `no_double_booking` — exclusion_violation (SQLSTATE 23P01) from the
- *    EXCLUDE constraint on (tenant_id, technician_id, scheduled range).
+ *    EXCLUDE constraint on (tenant_id, technician_id, scheduled range), or
+ *    from the legacy trg_no_double_booking trigger (isDoubleBookingViolation).
  *  - `uq_assignment_primary_per_appointment` — unique_violation (23505)
  *    from the partial unique index that allows at most one primary
  *    assignment per appointment.
@@ -39,13 +41,13 @@ function mapRow(row: Record<string, unknown>): AppointmentAssignment {
  * Everything else is rethrown unchanged.
  */
 function mapAssignmentDbError(err: unknown): Error {
+  if (isDoubleBookingViolation(err)) {
+    return new ConflictError(
+      'Technician is already booked at this time (overlaps an existing assignment).',
+    );
+  }
   if (err && typeof err === 'object') {
-    const e = err as { code?: string; constraint?: string; message?: string };
-    if (e.code === '23P01' && e.constraint === 'no_double_booking') {
-      return new ConflictError(
-        'Technician is already booked at this time (overlaps an existing assignment).',
-      );
-    }
+    const e = err as { code?: string; constraint?: string };
     if (e.code === '23505' && e.constraint === 'uq_assignment_primary_per_appointment') {
       return new ConflictError('Another primary technician is already assigned to this appointment.');
     }

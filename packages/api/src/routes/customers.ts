@@ -190,13 +190,45 @@ export function createCustomerRouter(
       // return `{ data, total }` so the frontend can drive UI pagination.
       // Without those query params we keep the legacy bare-array shape so
       // existing list consumers don't need changes.
+      // #1481 — `page`/`pageSize` (1-based) is accepted as an alias for
+      // limit/offset; it used to be silently ignored, returning every row.
+      const pageRaw = req.query.page as string | undefined;
+      const pageSizeRaw = req.query.pageSize as string | undefined;
+      const usesPageAlias =
+        (pageRaw !== undefined || pageSizeRaw !== undefined) &&
+        req.query.limit === undefined &&
+        req.query.offset === undefined;
       const wantsPaginated =
         req.query.paginated === 'true' ||
         req.query.limit !== undefined ||
-        req.query.offset !== undefined;
+        req.query.offset !== undefined ||
+        usesPageAlias;
 
-      const limitRaw = req.query.limit as string | undefined;
-      const offsetRaw = req.query.offset as string | undefined;
+      let pageLimit: string | undefined;
+      let pageOffset: string | undefined;
+      if (usesPageAlias) {
+        const page = pageRaw !== undefined ? Number(pageRaw) : 1;
+        const size = pageSizeRaw !== undefined ? Number(pageSizeRaw) : DEFAULT_LIST_LIMIT;
+        if (!Number.isInteger(page) || page < 1) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'page must be a positive integer',
+          });
+          return;
+        }
+        if (!Number.isInteger(size) || size < 1 || size > MAX_LIST_LIMIT) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: `pageSize must be between 1 and ${MAX_LIST_LIMIT}`,
+          });
+          return;
+        }
+        pageLimit = String(size);
+        pageOffset = String((page - 1) * size);
+      }
+
+      const limitRaw = (req.query.limit as string | undefined) ?? pageLimit;
+      const offsetRaw = (req.query.offset as string | undefined) ?? pageOffset;
       const limit = limitRaw !== undefined ? parseInt(limitRaw, 10) : DEFAULT_LIST_LIMIT;
       const offset = offsetRaw !== undefined ? parseInt(offsetRaw, 10) : 0;
       if (limitRaw !== undefined && (Number.isNaN(limit) || limit < 1 || limit > MAX_LIST_LIMIT)) {

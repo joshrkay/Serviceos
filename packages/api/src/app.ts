@@ -140,7 +140,11 @@ import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory
 import {
   invoiceReferenceCheck,
   serviceLocationReferenceCheck,
+  sendRecipientReferenceCheck,
+  executionAnchorReferenceCheck,
   technicianReferenceCheck,
+  estimateInvoicedReferenceCheck,
+  estimateReferenceCheck,
 } from './proposals/approval-reference-checks';
 import { createTechnicianLocationRouter } from './routes/technician-location';
 import { createCatalogItemsRouter } from './routes/catalog-items';
@@ -1034,6 +1038,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     serviceLocationReferenceCheck(locationRepo),
     // #1463 — a technician assignee must be an active technician of this tenant.
     technicianReferenceCheck(userRepo),
+    // #1480 — a send_invoice with no recipient must have one on file.
+    sendRecipientReferenceCheck({ invoiceRepo, jobRepo, customerRepo }),
+    // #1476 / #1480 — an estimate/invoice/booking with no job and no customer.
+    executionAnchorReferenceCheck(),
+    // #1490 — a second invoice from an estimate that is already invoiced.
+    estimateInvoicedReferenceCheck({ estimateRepo, invoiceRepo }),
+    // #1490 — send_estimate / send_estimate_nudge must name a real estimate.
+    estimateReferenceCheck(estimateRepo),
   ];
 
   const webhookSettingsRepo = settingsRepo;
@@ -2727,6 +2739,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const voiceActionRouterWorker = createVoiceActionRouterWorker({
     gateway: llmGateway,
     proposalRepo,
+    // #1485 — the same approval-time checks, run before a routed proposal
+    // persists, so an auto-approve can't skip what a tap refuses.
+    approvalReferenceChecks,
     // B8 — create_customer draft-time duplicate detection parity: the SAME
     // customerRepo the telephony FSM (twilio-adapter.ts) already uses to
     // build its duplicateLoader, so the worker's create_customer proposals
@@ -5839,6 +5854,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // be booked — without this repo the drafting handler cannot see the gap
       // and the proposal auto-approves into a guaranteed execution failure.
       locationRepo,
+      // #1480 — the same approval-time checks, run before a drafted card
+      // persists, so "approved automatically" can't skip what a tap refuses.
+      approvalReferenceChecks,
       // #1045 — back-to-back travel warning on held slots.
       feasibilityDeps,
       // #1173 — the files repo + object storage an Assistant chat photo was
@@ -7061,6 +7079,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // written back as, or on what a "104 Cedar" answer is matched against.
     // Replaces the adapter's own `service_locations` query.
     locationRepo,
+    // #1485 — the same approval-time checks, run before a drafted card
+    // persists, so the close asks for what is missing.
+    approvalReferenceChecks,
     // U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
     // read once per session, so the in-app live path books "Thursday at 2pm"
     // in the tenant's zone exactly like the recorded-memo path.

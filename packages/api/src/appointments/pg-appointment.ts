@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import { ConflictError } from '../shared/errors';
+import { isDoubleBookingViolation } from './double-booking-db-error';
 import {
   Appointment,
   AppointmentListOptions,
@@ -59,17 +60,15 @@ function mapRow(row: Record<string, unknown>): Appointment {
  * booked elsewhere fires the migration-131 sync trigger
  * (`trg_appointments_sync_to_assignments`), whose UPDATE of the
  * denormalized assignment rows violates the `no_double_booking`
- * EXCLUDE constraint — SQLSTATE 23P01. Without this mapping the route
+ * EXCLUDE constraint (or the legacy trg_no_double_booking trigger, #1472)
+ * — SQLSTATE 23P01. Without this mapping the route
  * layer would surface a 500 instead of a 409.
  */
 function mapAppointmentDbError(err: unknown): Error {
-  if (err && typeof err === 'object') {
-    const e = err as { code?: string; constraint?: string };
-    if (e.code === '23P01' && e.constraint === 'no_double_booking') {
-      return new ConflictError(
-        'Schedule conflict: the assigned technician is already booked during this time.',
-      );
-    }
+  if (isDoubleBookingViolation(err)) {
+    return new ConflictError(
+      'Schedule conflict: the assigned technician is already booked during this time.',
+    );
   }
   return err instanceof Error ? err : new Error(String(err));
 }
