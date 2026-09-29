@@ -67,7 +67,7 @@ import {
   type PathSmokeProviderSelection,
 } from '../voice-quality/path-smoke/provider';
 import { ANTHROPIC_OPENAI_COMPAT_BASE_URL, DEFAULT_LAYER_TWO_MODEL } from './layer-two-models';
-import { createLLMGateway } from './factory';
+import { createHarnessLLMGateway } from './harness-gateway';
 import { DEFAULT_RETRY } from './retry';
 import { loadConfig } from '../../shared/config';
 
@@ -209,7 +209,9 @@ export interface Layer2GatewayDeps {
 /**
  * #1331 — the Layer 2 gateway. With a production selection it is the gateway
  * production runs — `createLLMGateway(loadConfig(env))` (OpenAI-compatible
- * provider, tier routing, resilience stack) — with the Layer 2 retry count
+ * provider, tier routing, resilience stack), built via createHarnessLLMGateway
+ * so the per-tenant token bucket is swapped for the harness quota — with the
+ * Layer 2 retry count
  * pinned and the per-call spend fed to the suite cost tracker. The Anthropic
  * selection keeps the old harness gateway, with a loud warning.
  */
@@ -229,7 +231,9 @@ export function createLayer2Gateway(deps: Layer2GatewayDeps): LLMGateway {
       maxRetries,
     });
   }
-  const production = createLLMGateway(loadConfig(deps.env), {
+  // Harness quota, not the per-tenant fairness bucket: 40 scripts x many turns
+  // on one pseudo-tenant would drain it. The suite cost cap bounds spend.
+  const production = createHarnessLLMGateway(loadConfig(deps.env), {
     resilience: { retryPolicy: { ...DEFAULT_RETRY, maxAttempts: 1 + maxRetries } },
   });
   return wrapWithCostTracking(new JudgeDeadlineGateway(production, requestTimeoutMs), {

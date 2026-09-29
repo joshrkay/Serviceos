@@ -183,6 +183,89 @@ export function createUsersRouter(
   );
 
   /**
+   * #1402 §13 — deactivate a teammate (owner-only; `users:remove` is held by
+   * owners alone). The member keeps their row, assignments and history but
+   * can no longer act in this tenant: `resolveAuthorization` refuses a
+   * non-'active' membership on every request, and the seat they held is freed
+   * (PgSeatUsageReader counts active members only).
+   */
+  router.post(
+    '/:id/deactivate',
+    requireAuth,
+    requireTenant,
+    requirePermission('users:remove'),
+    notFoundOnMalformedId('User not found'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const tenantId = req.auth!.tenantId;
+        // Self-deactivation would lock the caller out mid-session with no way
+        // back; offboarding yourself is DELETE /api/users/me instead.
+        const target = await userRepo.findById(tenantId, req.params.id);
+        if (target && target.clerkUserId && target.clerkUserId === req.auth!.userId) {
+          res.status(409).json({
+            error: 'CANNOT_DEACTIVATE_SELF',
+            message: 'You cannot deactivate your own account.',
+          });
+          return;
+        }
+        if (!target) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'User not found' });
+          return;
+        }
+        const updated = await userRepo.deactivateMember(tenantId, target.id);
+        if (!updated) {
+          // Null is ambiguous: the row was already deactivated (idempotent
+          // double-tap) or the atomic last-owner guard fired. Re-read to tell.
+          const current = await userRepo.findById(tenantId, target.id);
+          if (current && (current.status ?? 'active') !== 'active') {
+            res.json(current);
+            return;
+          }
+          if (current) {
+            res.status(409).json({
+              error: 'LAST_OWNER',
+              message: 'This is the only active owner. Make someone else an owner first.',
+            });
+            return;
+          }
+          res.status(404).json({ error: 'NOT_FOUND', message: 'User not found' });
+          return;
+        }
+        if (auditRepo) {
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: req.auth!.role,
+              eventType: 'user.deactivated',
+              entityType: 'user',
+              entityId: updated.id,
+              metadata: { role: updated.role },
+            }),
+          );
+        }
+        // A deactivated member's phone must stop receiving tenant pushes.
+        // Best-effort + savepoint-isolated: never undo a completed
+        // deactivation over a token purge.
+        if (deps.deviceTokenRepo && updated.clerkUserId) {
+          const clerkId = updated.clerkUserId;
+          try {
+            await withRequestSavepoint(() =>
+              deps.deviceTokenRepo!.removeAllForUser(tenantId, clerkId),
+            );
+          } catch {
+            // a stale token is also displaced on the device's next register()
+          }
+        }
+        res.json(updated);
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
    * Read the current user's escalation number (`:id` = `me` or a userId).
    * Self-or-owner gated like the PUT below; powers the technician phone sheet.
    */

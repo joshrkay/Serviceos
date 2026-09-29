@@ -5,6 +5,8 @@ import { createCustomerSchema, updateCustomerAccountTypeSchema } from '../shared
 import { asyncRoute } from '../middleware/async-route';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
 import { ValidationError } from '../shared/errors';
+import { parseListSortQuery } from '../shared/list-sort';
+import { CUSTOMER_LIST_SORT } from '@ai-service-os/shared';
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   createCustomer,
@@ -181,7 +183,8 @@ export function createCustomerRouter(
         typeof req.query.serviceType === 'string' && req.query.serviceType.trim() !== ''
           ? req.query.serviceType.trim()
           : undefined;
-      const sort: 'asc' | 'desc' = req.query.sort === 'desc' ? 'desc' : 'asc';
+      // #1402 — shared list sort: `?sortBy=<allowlisted field>&sort=asc|desc`.
+      const { field: sortBy, direction: sort } = parseListSortQuery(CUSTOMER_LIST_SORT, req.query);
 
       // P1-018: when `paginated=true` (or limit/offset are present) we
       // return `{ data, total }` so the frontend can drive UI pagination.
@@ -220,6 +223,7 @@ export function createCustomerRouter(
           serviceType,
           limit,
           offset,
+          sortBy,
           sort,
         });
         res.json(result);
@@ -232,6 +236,7 @@ export function createCustomerRouter(
         search,
         tag,
         serviceType,
+        sortBy,
         sort,
       });
       res.json(result);

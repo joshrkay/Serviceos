@@ -33,6 +33,8 @@ export interface EstimatePrintData {
   customerName: string;
   businessName: string;
   businessContact?: string;
+  /** #1402 §13 — tenant mailing address; newlines become separate printed lines. */
+  businessAddress?: string;
   description?: string;
   validUntil?: string;
   lineItems: EstimatePrintLineItem[];
@@ -126,6 +128,7 @@ export function printEstimateDocument(data: EstimatePrintData): boolean {
   <div class="head">
     <div>
       <div class="biz">${escapeHtml(data.businessName)}</div>
+      ${data.businessAddress?.trim() ? `<div class="muted address">${data.businessAddress.trim().split('\n').map((line) => escapeHtml(line.trim())).join('<br>')}</div>` : ''}
       ${data.businessContact ? `<div class="muted">${escapeHtml(data.businessContact)}</div>` : ''}
     </div>
     <div class="doc-meta">

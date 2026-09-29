@@ -189,6 +189,28 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
       paramIndex++;
     }
 
+    // #1402 §8 — scheduled-date window through the job's live appointments
+    // (tenant-scoped subquery alongside RLS; served by
+    // idx_appointments_schedule / idx_appointments_job).
+    if (options?.scheduledFrom || options?.scheduledTo) {
+      const bounds: string[] = [];
+      if (options.scheduledFrom) {
+        bounds.push(`a.scheduled_start >= $${paramIndex}`);
+        params.push(options.scheduledFrom);
+        paramIndex++;
+      }
+      if (options.scheduledTo) {
+        bounds.push(`a.scheduled_start < $${paramIndex}`);
+        params.push(options.scheduledTo);
+        paramIndex++;
+      }
+      conditions.push(
+        `EXISTS (SELECT 1 FROM appointments a
+                  WHERE a.tenant_id = jobs.tenant_id AND a.job_id = jobs.id
+                    AND a.status <> 'canceled' AND ${bounds.join(' AND ')})`
+      );
+    }
+
     if (options?.search) {
       const searchParam = `%${options.search}%`;
       // #1406 D4 — the jobs list promises "customer, address, job #": match

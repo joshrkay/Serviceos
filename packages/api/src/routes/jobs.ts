@@ -10,6 +10,7 @@ import {
   unscheduleJobSchema,
 } from '../shared/contracts';
 import { toErrorResponse, ValidationError } from '../shared/errors';
+import { uuidSchema } from '../shared/validation';
 import { syncJobSchedule, JobAppointmentSyncDeps } from '../jobs/job-appointment-sync';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
 import { runAfterCommit } from '../middleware/tenant-context';
@@ -51,6 +52,14 @@ const logger = createLogger({
   service: 'jobs-route',
   environment: process.env.NODE_ENV || 'development',
 });
+
+/** Optional ISO-date query param → Date; malformed → 400 VALIDATION_ERROR. */
+function parseIsoQuery(raw: unknown, name: string): Date | undefined {
+  if (raw === undefined || raw === '') return undefined;
+  const d = typeof raw === 'string' ? new Date(raw) : new Date(NaN);
+  if (Number.isNaN(d.getTime())) throw new ValidationError(`${name} must be a valid ISO date`);
+  return d;
+}
 
 export function createJobRouter(
   jobRepo: JobRepository,
@@ -477,11 +486,24 @@ export function createJobRouter(
           return;
         }
 
+        // #1402 §8 — scheduled-date window (ISO instants; from inclusive,
+        // to exclusive). The web converts tenant-local days to these bounds.
+        const scheduledFrom = parseIsoQuery(req.query.scheduledFrom, 'scheduledFrom');
+        const scheduledTo = parseIsoQuery(req.query.scheduledTo, 'scheduledTo');
+        const technicianId = typeof req.query.technicianId === 'string' && req.query.technicianId !== ''
+          ? req.query.technicianId
+          : undefined;
+        if (technicianId !== undefined && !uuidSchema.safeParse(technicianId).success) {
+          throw new ValidationError('technicianId must be a user id');
+        }
+
         const baseOptions = {
           status: req.query.status as any,
           customerId: req.query.customerId as string,
-          technicianId: req.query.technicianId as string,
+          technicianId,
           search: req.query.search as string,
+          scheduledFrom,
+          scheduledTo,
           sort,
         };
 

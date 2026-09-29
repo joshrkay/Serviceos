@@ -194,7 +194,9 @@ export async function describeLiveProvider(selection: LiveProviderSelection): Pr
  * Build the classifier's gateway for the selected provider, recording each
  * call's actual spend via `addCents`. The production selection goes through
  * `createLLMGateway(loadConfig(env))` — the exact factory app.ts uses
- * (resilience stack, tier routing, provider/model mismatch check) — wrapped in
+ * (resilience stack, tier routing, provider/model mismatch check), via
+ * createHarnessLLMGateway so the per-tenant token bucket is replaced by a
+ * harness quota (the cost caps bound spend) — wrapped in
  * the path-smoke spend tracker (per-model pricing of the served model id).
  * The Anthropic fallback uses the Layer-2 harness gateway. Loaded lazily so
  * offline runs never import the `openai`-bearing factories.
@@ -205,10 +207,12 @@ export async function buildLiveGateway(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<LLMGateway> {
   if (selection.kind === 'production') {
-    const { createLLMGateway } = await import('../api/src/ai/gateway/factory');
+    // Harness quota (not the per-tenant fairness bucket): a sequential sample
+    // on one pseudo-tenant would otherwise drain the classifier budget.
+    const { createHarnessLLMGateway } = await import('../api/src/ai/gateway/harness-gateway');
     const { loadConfig } = await import('../api/src/shared/config');
     const { withPathSmokeSpendTracking } = await import('../api/src/ai/voice-quality/path-smoke/provider');
-    return withPathSmokeSpendTracking(createLLMGateway(loadConfig(env)), {
+    return withPathSmokeSpendTracking(createHarnessLLMGateway(loadConfig(env)), {
       fallbackModel: selection.model,
       addCents,
     });
