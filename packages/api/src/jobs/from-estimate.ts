@@ -34,6 +34,7 @@ import {
   syncJobAssignment,
 } from '../appointments/assignment';
 import { UserRepository, User } from '../users/user';
+import { isActiveMember, requireActiveTechnician } from '../users/tenant-member';
 import { InvoiceRepository } from '../invoices/invoice';
 import { RefreshJobMoneyStateDeps } from './job-money-state';
 import {
@@ -137,19 +138,12 @@ async function chooseTechnicianAndSlot(
     unavailableBlockRepo: deps.unavailableBlockRepo,
   };
 
-  async function requireTechnician(id: string): Promise<User> {
-    const user = await deps.userRepo.findById(tenantId, id);
-    if (!user || user.role !== 'technician') {
-      throw new ValidationError('technicianId must reference a user with the technician role');
-    }
-    return user;
-  }
-
-  // Candidate set: an explicit technician, otherwise every technician. (Skill
-  // narrowing is a no-op until a real SkillMatcher exists.)
+  // Candidate set: an explicit technician, otherwise every ACTIVE technician
+  // (#1463 — a suspended member is never auto-picked). (Skill narrowing is a
+  // no-op until a real SkillMatcher exists.)
   const candidates: User[] = input.technicianId
-    ? [await requireTechnician(input.technicianId)]
-    : await deps.userRepo.findByTenant(tenantId, { role: 'technician' });
+    ? [await requireActiveTechnician(deps.userRepo, tenantId, input.technicianId)]
+    : (await deps.userRepo.findByTenant(tenantId, { role: 'technician' })).filter(isActiveMember);
   if (candidates.length === 0) {
     throw new ConflictError('No technicians available to schedule this job');
   }

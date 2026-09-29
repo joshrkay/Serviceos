@@ -2,11 +2,13 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant } from '../middleware/auth';
-import { toErrorResponse } from '../shared/errors';
+import { toErrorResponse, ValidationError } from '../shared/errors';
 import { tzMidnight } from '../shared/timezone';
 import { AuditRepository } from '../audit/audit';
 import { NegativeDurationError, TimeEntryRepository } from '../time-tracking/time-entry';
 import { TimeEntryService } from '../time-tracking/time-entry-service';
+import { resolveCanonicalUser, type UserRepository } from '../users/user';
+import { isActiveMember } from '../users/tenant-member';
 
 /**
  * P12-002 — Time-tracking HTTP routes.
@@ -50,10 +52,28 @@ function canActOnBehalf(req: AuthenticatedRequest, targetUserId: string): boolea
 
 export function createTimeEntriesRouter(
   repo: TimeEntryRepository,
-  auditRepo: AuditRepository
+  auditRepo: AuditRepository,
+  // #1463 — an office clock-in on behalf of someone must name an active
+  // member of the caller's tenant.
+  userRepo: Pick<UserRepository, 'findByTenant'>
 ): Router {
   const router = Router();
   const service = new TimeEntryService(repo, auditRepo);
+
+  /**
+   * The subject may be a Clerk id (what technician devices send) or a
+   * `users.id`. Self needs no lookup; anyone else must be an ACTIVE member of
+   * this tenant — one message whatever the cause, so no existence oracle.
+   */
+  async function requireClockableSubject(req: AuthenticatedRequest, targetUserId: string): Promise<void> {
+    if (targetUserId === req.auth!.userId || targetUserId === req.auth!.canonicalUserId) return;
+    const user = await resolveCanonicalUser(userRepo, req.auth!.tenantId, targetUserId);
+    if (!user || !isActiveMember(user)) {
+      throw new ValidationError('userId must reference an active member of this tenant', {
+        field: 'userId',
+      });
+    }
+  }
 
   router.post(
     '/clock-in',
@@ -70,6 +90,7 @@ export function createTimeEntriesRouter(
           });
           return;
         }
+        await requireClockableSubject(req, targetUserId);
         const entry = await service.clockIn(req.auth!.tenantId, targetUserId, {
           jobId: parsed.jobId,
           entryType: parsed.entryType,
