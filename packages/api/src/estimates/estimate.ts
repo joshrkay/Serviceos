@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
-import { estimateListStage } from '@ai-service-os/shared';
+import { estimateListStage, ESTIMATE_LIST_SORT, type EstimateSortField } from '@ai-service-os/shared';
+import { compareByListSort } from '../shared/list-sort';
 import {
   LineItem,
   DocumentTotals,
@@ -191,7 +192,9 @@ export interface EstimateListOptions {
   limit?: number;
   /** Pagination offset. Default 0. */
   offset?: number;
-  /** Sort direction applied to the canonical sort column (created_at). */
+  /** #1402 — allowlisted sort field (ESTIMATE_LIST_SORT); default created. */
+  sortBy?: EstimateSortField;
+  /** Sort direction; defaults to the field's natural direction. */
   sort?: 'asc' | 'desc';
   /** Only estimates whose `sentAt` is strictly before this. Used by the
    *  estimate-reminder worker to find aging sent estimates. */
@@ -887,6 +890,13 @@ export async function cloneEstimate(
   return created;
 }
 
+const ESTIMATE_SORT_ACCESSORS: Record<EstimateSortField, (e: Estimate) => Date | number | undefined> = {
+  created: (e) => e.createdAt,
+  total: (e) => e.totals.totalCents,
+  // The in-memory repo has no job→customer join; rows keep their id order.
+  customer: () => undefined,
+};
+
 export class InMemoryEstimateRepository implements EstimateRepository {
   private estimates: Map<string, Estimate> = new Map();
 
@@ -954,9 +964,14 @@ export class InMemoryEstimateRepository implements EstimateRepository {
           (e.customerMessage && e.customerMessage.toLowerCase().includes(q))
       );
     }
-    // Default sort: createdAt DESC. P1-018 lets callers flip to ASC.
-    const sortDir = options?.sort === 'asc' ? 1 : -1;
-    results.sort((a, b) => sortDir * (a.createdAt.getTime() - b.createdAt.getTime()));
+    // #1402 — shared list sort (default createdAt DESC; P1-018 `sort` flips).
+    const sortBy = options?.sortBy ?? ESTIMATE_LIST_SORT.defaultField;
+    results.sort(
+      compareByListSort<Estimate, EstimateSortField>(
+        { field: sortBy, direction: options?.sort ?? ESTIMATE_LIST_SORT.fields[sortBy] },
+        ESTIMATE_SORT_ACCESSORS,
+      ),
+    );
     if (options?.offset !== undefined || options?.limit !== undefined) {
       const offset = options?.offset ?? 0;
       const limit = options?.limit !== undefined

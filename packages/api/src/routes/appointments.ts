@@ -38,6 +38,7 @@ import { UserRepository } from '../users/user';
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { ensurePrimaryTechnician } from '../jobs/job-appointment-sync';
+import { requireActiveTechnician } from '../users/tenant-member';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
 import { runAfterCommit } from '../middleware/tenant-context';
 import type { SettingsRepository } from '../settings/settings';
@@ -274,10 +275,7 @@ export function createAppointmentRouter(
           // row is written so a 400/409 never leaves an orphan behind. The EXCLUDE
           // constraint (migration 131) stays the race-safe backstop, and the
           // request transaction rolls the insert back if it fires.
-          const tech = await assignmentDeps.userRepo.findById(req.auth!.tenantId, technicianId);
-          if (!tech || tech.role !== 'technician') {
-            throw new ValidationError('technicianId must reference a user with the technician role');
-          }
+          await requireActiveTechnician(assignmentDeps.userRepo, req.auth!.tenantId, technicianId);
           await assertNoDoubleBooking(
             req.auth!.tenantId,
             technicianId,

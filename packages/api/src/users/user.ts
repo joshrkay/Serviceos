@@ -128,6 +128,16 @@ export interface UserRepository {
    * deleted. Returns the restored row or null if nothing matched.
    */
   restoreAccount(tenantId: string, id: string, mobileNumber: string | null): Promise<User | null>;
+  /**
+   * #1402 §13 — an owner deactivates (never deletes) a teammate: flips
+   * `status` to 'suspended' so `resolveAuthorization` refuses every request
+   * from them, while the row — and every assignment, note and audit entry
+   * that references it — is kept. Only an 'active', non-deleted row moves.
+   * Atomic last-owner guard (same shape as `softDeleteSelf`): an owner is
+   * only deactivated while ANOTHER active, non-deleted owner exists. Returns
+   * the updated row, or null when nothing matched or the guard fired.
+   */
+  deactivateMember(tenantId: string, id: string): Promise<User | null>;
   /** Test/dev helper. Production user creation goes through the Clerk webhook. */
   create?(user: Omit<User, 'createdAt' | 'updatedAt'>): Promise<User>;
 }
@@ -297,6 +307,26 @@ export class InMemoryUserRepository implements UserRepository {
       deletedAt: new Date(),
       updatedAt: new Date(),
     };
+    this.users.set(id, next);
+    return { ...next };
+  }
+
+  async deactivateMember(tenantId: string, id: string): Promise<User | null> {
+    const u = this.users.get(id);
+    if (!u || u.tenantId !== tenantId || u.deletedAt) return null;
+    if ((u.status ?? 'active') !== 'active') return null;
+    if (u.role === 'owner') {
+      const anotherActiveOwner = Array.from(this.users.values()).some(
+        (other) =>
+          other.tenantId === tenantId &&
+          other.id !== id &&
+          other.role === 'owner' &&
+          !other.deletedAt &&
+          (other.status ?? 'active') === 'active',
+      );
+      if (!anotherActiveOwner) return null;
+    }
+    const next: User = { ...u, status: 'suspended', updatedAt: new Date() };
     this.users.set(id, next);
     return { ...next };
   }

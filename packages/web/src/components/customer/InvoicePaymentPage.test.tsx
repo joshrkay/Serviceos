@@ -407,3 +407,27 @@ describe('InvoicePaymentPage — deposit credit row', () => {
     expect(paidRowText).toContain('-$100.00');
   });
 });
+
+describe('InvoicePaymentPage — #1402 §13 business address', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('shows the business address under the business name in the header', async () => {
+    mockFetch({ invoice: { ...baseInvoice, businessAddress: '1200 W Main St\nMesa, AZ 85201' } });
+    renderPage();
+
+    const address = await screen.findByTestId('business-address');
+    expect(address).toHaveTextContent('1200 W Main St');
+    expect(address).toHaveTextContent('Mesa, AZ 85201');
+    expect(address.closest('div')?.textContent).toContain('HVAC Pro');
+  });
+
+  it('renders no address line when the tenant has none', async () => {
+    mockFetch({});
+    renderPage();
+
+    await screen.findAllByText('HVAC Pro');
+    expect(screen.queryByTestId('business-address')).toBeNull();
+  });
+});

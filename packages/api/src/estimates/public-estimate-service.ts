@@ -52,6 +52,8 @@ export interface PublicEstimateView {
   businessName: string;
   businessPhone?: string;
   businessEmail?: string;
+  /** #1402 §13 — tenant mailing address, newline-separated; printed under the name. */
+  businessAddress?: string;
   /**
    * Tenant's customer-facing document word (e.g. 'Quote', 'Bid'), resolved
    * from terminologyPreferences.estimateTerm. Defaults to 'Estimate'. The
@@ -701,6 +703,7 @@ export class PublicEstimateService {
       // that surfaces a null value.
       businessPhone: settings?.businessPhone ?? undefined,
       businessEmail: settings?.businessEmail ?? undefined,
+      businessAddress: settings?.businessAddress ?? undefined,
       // Story 7.4 — flow the tenant's document word into the customer-facing
       // page. `settings` is already loaded above (businessName), so this adds
       // no extra query. Falls back to the canonical 'Estimate'.

@@ -48,6 +48,7 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     businessName: row.business_name as string,
     businessPhone: (row.business_phone as string) ?? undefined,
     businessEmail: (row.business_email as string) ?? undefined,
+    businessAddress: (row.business_address as string | null) ?? undefined,
     ownerPhone: (row.owner_phone as string) ?? undefined,
     // NULL ⇒ undefined ("never chosen"), never a substituted default. See
     // migration 263 and TenantSettings.timezone.
@@ -398,6 +399,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         businessName: 'business_name',
         businessPhone: 'business_phone',
         businessEmail: 'business_email',
+        businessAddress: 'business_address',
         ownerPhone: 'owner_phone',
         timezone: 'timezone',
         estimatePrefix: 'estimate_prefix',

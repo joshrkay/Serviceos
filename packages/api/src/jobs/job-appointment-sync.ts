@@ -41,6 +41,7 @@ import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { SettingsRepository } from '../settings/settings';
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
+import { requireActiveTechnician } from '../users/tenant-member';
 import { UserRepository } from '../users/user';
 import { Job, JobRepository, getJob } from './job';
 import { JobTimelineRepository, isPostCompletionStatus, transitionJobStatus } from './job-lifecycle';
@@ -224,10 +225,8 @@ export async function ensurePrimaryTechnician(
   if (currentPrimary && currentPrimary.technicianId === technicianId) return;
 
   // Tenant-scoped role check: the assignee must be a technician.
-  const user = await deps.userRepo.findById(tenantId, technicianId);
-  if (!user || user.role !== 'technician') {
-    throw new ValidationError('technicianId must reference a user with the technician role');
-  }
+  // #1463 — an ACTIVE member of this tenant, not merely a row in it.
+  const user = await requireActiveTechnician(deps.userRepo, tenantId, technicianId);
 
   if (currentPrimary) {
     await unassignTechnician(tenantId, currentPrimary.id, deps.assignmentRepo, {

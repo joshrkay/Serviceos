@@ -40,6 +40,8 @@ interface PublicEstimateView {
   businessName: string;
   businessPhone?: string;
   businessEmail?: string;
+  /** #1402 §13 — tenant mailing address, newline-separated. */
+  businessAddress?: string;
   /** Tenant's document word (Quote/Bid/Estimate). Defaults to 'Estimate'. */
   estimateLabel?: string;
   lineItems: Array<{
@@ -783,6 +785,7 @@ export function EstimateApprovalPage() {
   const businessName    = apiView.businessName;
   const estimateLabel   = apiView.estimateLabel?.trim() || 'Estimate';
   const businessPhone   = apiView.businessPhone ?? '';
+  const businessAddress = apiView.businessAddress?.trim() ?? '';
   const customerName    = apiView.customerName;
   const customerAddress = apiView.customerAddress ?? '';
   const description     = apiView.customerMessage ?? '';
@@ -901,8 +904,16 @@ export function EstimateApprovalPage() {
               <div className="flex size-8 items-center justify-center rounded-xl bg-slate-900">
                 <span className="text-white" style={{ fontSize: 13 }}>{businessName.charAt(0).toUpperCase()}</span>
               </div>
-              <div>
+              <div className="min-w-0">
                 <p className="text-sm text-slate-800">{businessName}</p>
+                {businessAddress && (
+                  <p
+                    data-testid="business-address"
+                    className="text-xs text-slate-400 whitespace-pre-line break-words"
+                  >
+                    {businessAddress}
+                  </p>
+                )}
                 {businessPhone && <p className="text-xs text-slate-400">{businessPhone}</p>}
               </div>
             </div>
@@ -1151,6 +1162,7 @@ export function EstimateApprovalPage() {
               customerName,
               businessName,
               businessContact: businessPhone,
+              businessAddress,
               description,
               validUntil: validUntilText,
               lineItems: lineItems.map((i) => ({ description: i.description, qty: i.qty, unit: i.unit, rate: i.rate, imageUrl: i.imageUrl })),

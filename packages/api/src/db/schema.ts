@@ -7246,6 +7246,41 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS ai_verification_skipped_at TIMESTAMPTZ;
   `,
+  // #1402 §13 — the business's mailing address, printed under the business
+  // name on estimates and invoices (public pages + print/PDF). Free-form,
+  // newline-separated; the API trims and caps it at 300 chars and the CHECK
+  // backs that up for writes that bypass the route. Additive + nullable, so
+  // existing rows are unaffected. tenant_settings already FORCEs RLS.
+  '299_tenant_settings_business_address': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS business_address TEXT;
+    DO $$ BEGIN
+      ALTER TABLE tenant_settings
+        ADD CONSTRAINT tenant_settings_business_address_len
+        CHECK (business_address IS NULL OR char_length(business_address) <= 300) NOT VALID;
+    EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+  `,
+  // #1402 §18 — per-recipient outbound SMS volume ledger. One row per
+  // customer text actually handed to the carrier; GatedMessageDelivery counts
+  // a number's rows in the rolling window before each send and suppresses
+  // (audited) once the cap is reached. phone is the normalized number (the
+  // same normalizePhone() the DNC list uses). Rows older than a week are
+  // pruned on the next reserve for that number.
+  '300_sms_recipient_sends': `
+    CREATE TABLE IF NOT EXISTS sms_recipient_sends (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      phone TEXT NOT NULL,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_sms_recipient_sends_window
+      ON sms_recipient_sends (tenant_id, phone, sent_at);
+    ALTER TABLE sms_recipient_sends ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE sms_recipient_sends FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_sms_recipient_sends ON sms_recipient_sends;
+    CREATE POLICY tenant_isolation_sms_recipient_sends ON sms_recipient_sends
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

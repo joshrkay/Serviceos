@@ -36,6 +36,25 @@ describe('P11-007 ReassignDialog', () => {
     expect(vi.mocked(apiFetch).mock.calls[0][0]).toBe('/api/users?role=technician');
   });
 
+  // #1463 — a deactivated (suspended) member is not an assignable technician.
+  it('does not offer a suspended technician', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [
+          { id: 'u-1', name: 'Tech Active', status: 'active' },
+          { id: 'u-2', name: 'Tech Suspended', status: 'suspended' },
+        ],
+      }),
+    } as unknown as Response);
+
+    render(<ReassignDialog appointmentId="a-1" />);
+
+    await waitFor(() => expect(screen.getByText('Tech Active')).toBeInTheDocument());
+    expect(screen.queryByText('Tech Suspended')).not.toBeInTheDocument();
+  });
+
   it('writes through the appointment assignment endpoint on save (#1279), never the job field', async () => {
     vi.mocked(apiFetch)
       .mockResolvedValueOnce({
