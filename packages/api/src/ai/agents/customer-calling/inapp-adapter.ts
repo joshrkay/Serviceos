@@ -27,7 +27,7 @@ import type { ProposalSurface } from '../../../proposals/surface';
 // path (ai/voice-turn/create-voice-turn-processor.ts). Exactly one copy of the
 // promotion / alias / line-item translation exists, and it lives next to the
 // per-type contracts it has to satisfy.
-import { buildVoiceProposalPayload } from '../../../proposals/voice-payload';
+import { buildVoiceProposalPayload, lacksExecutionAnchor } from '../../../proposals/voice-payload';
 // A48 fix — the dedicated spoken-instruction → typed-payload mapping
 // update_brand_voice needs (see extractBrandVoiceProposalFields's doc
 // comment for why buildVoiceProposalPayload's generic promotion can't do
@@ -80,6 +80,7 @@ import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 import {
   pickFollowUpNotFoundIsTerminal,
+  acceptsNetNewCustomer,
   requiresExistingEntity,
   resolveSchedulingEntities,
 } from './entity-resolution';
@@ -1106,9 +1107,19 @@ export class InAppVoiceAdapter {
     // `escalateEntityNotFound`).
     // #1416 — after a pick, a job the operator NAMED on an invoice/estimate
     // is also terminal (pickFollowUpNotFoundIsTerminal): never a placeholder.
-    const notFoundIsTerminal = afterPick
-      ? pickFollowUpNotFoundIsTerminal(intent, resolution.notFound?.entityKind)
-      : requiresExistingEntity(intent);
+    // #1476 — and on EVERY turn, a creation intent whose unresolved
+    // reference was its only anchor: with no customerId and no jobId in hand
+    // the draft cannot execute (lacksExecutionAnchor — the same predicate the
+    // payload gate reads), so reading it back and minting it would promise
+    // work that fails after the approval tap. Say what was not found instead
+    // — except where a net-new customer is the designed path (a booking,
+    // book-04), which keeps its gated draft.
+    const notFoundIsTerminal =
+      (afterPick
+        ? pickFollowUpNotFoundIsTerminal(intent, resolution.notFound?.entityKind)
+        : requiresExistingEntity(intent)) ||
+      (lacksExecutionAnchor(intentToProposalType(intent), resolution.refs) &&
+        !acceptsNetNewCustomer(intent));
     if (resolution.status === 'not_found' && notFoundIsTerminal) {
       return {
         type: 'entity_not_found',

@@ -1655,6 +1655,58 @@ describe('Postgres integration — entity resolution (P8)', () => {
         expect(result.kind).toBe('not_found');
       });
 
+      // #1476 P2 (QA VOX-07) — with the customer already picked, "the QA
+      // Matrix job" means THAT customer's jobs. Tenant-wide the same words
+      // also match the other QA Matrix customers' jobs (live: overflow →
+      // "I couldn't find a matching job"); the customer anchor scopes it.
+      it('a customer anchor scopes a job reference to that customer\'s own jobs', async () => {
+        const seed = await seedRealisticTenant({
+          displayName: 'QA Matrix North',
+          jobSummary: 'QA Matrix job for north',
+        });
+        const locationRepo = new PgLocationRepository(pool);
+        const jobRepo = new PgJobRepository(pool);
+        const locationId = crypto.randomUUID();
+        await locationRepo.create({
+          id: locationId, tenantId: seed.tenantId, customerId: seed.customerId, street1: '11 Real St',
+          city: 'Austin', state: 'TX', postalCode: '78701', country: 'USA', isPrimary: false,
+          addressType: 'service', isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+        });
+        const northJobs = [seed.jobId];
+        for (const summary of ['Draft invoice for QA Matrix', 'QA Matrix maintenance', 'QA Matrix furnace']) {
+          const id = crypto.randomUUID();
+          await jobRepo.create({
+            id, tenantId: seed.tenantId, customerId: seed.customerId, locationId,
+            jobNumber: `JOB-${id.slice(0, 8)}`, summary, status: 'new',
+            priority: 'normal', createdBy: seed.userId, createdAt: new Date(), updatedAt: new Date(),
+          });
+          northJobs.push(id);
+        }
+        for (const summary of ['QA Matrix job south', 'QA Matrix repair south', 'QA Matrix install south']) {
+          await addRealisticJob(seed, { displayName: 'QA Matrix South', jobSummary: summary });
+        }
+
+        const tenantWide = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'QA Matrix job',
+          kind: 'job',
+        });
+        const tenantWideIds =
+          tenantWide.kind === 'ambiguous' ? tenantWide.candidates.map((c) => c.id).sort() : [];
+        expect(tenantWideIds).not.toEqual([...northJobs].sort());
+
+        const scoped = await resolver.resolve({
+          tenantId: seed.tenantId,
+          reference: 'QA Matrix job',
+          kind: 'job',
+          customerId: seed.customerId,
+        });
+        expect(scoped.kind).toBe('ambiguous');
+        if (scoped.kind === 'ambiguous') {
+          expect(scoped.candidates.map((c) => c.id).sort()).toEqual([...northJobs].sort());
+        }
+      });
+
       it('never resolves a job by customer name across tenants', async () => {
         const seed = await seedRealisticTenant({
           displayName: 'Jamie Garcia',

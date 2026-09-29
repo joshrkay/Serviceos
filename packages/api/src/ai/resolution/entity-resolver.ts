@@ -140,6 +140,10 @@ export interface EntityResolver {
      * an explicit document number (INV-0042 / EST-0042) always resolves
      * through the named path instead — the anchor never overrides a number
      * the operator actually said.
+     *
+     * #1476 P2 — for `job` the anchor scopes a NAMED reference to that
+     * customer's own jobs (one resolves, several are the which-one question).
+     * An empty job reference is still `skipped`.
      */
     customerId?: string;
   }): Promise<EntityResolverResult>;

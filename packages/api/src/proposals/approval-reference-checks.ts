@@ -18,10 +18,13 @@
  */
 import type { Proposal, ProposalType } from './proposal';
 import type { InvoiceRepository } from '../invoices/invoice';
+import type { JobRepository } from '../jobs/job';
+import type { CustomerRepository } from '../customers/customer';
 import type { LocationRepository } from '../locations/location';
 import type { UserRepository } from '../users/user';
 import { findActiveTenantMember } from '../users/tenant-member';
 import { isChainRefToken } from './chain';
+import { lacksExecutionAnchor } from './voice-payload';
 
 export type ApprovalReferenceCheck = (tenantId: string, proposal: Proposal) => Promise<string[]>;
 
@@ -107,16 +110,131 @@ export function technicianReferenceCheck(
 }
 
 /**
+ * #1476 / #1480 — a draft_estimate / draft_invoice / create_appointment with
+ * neither a job nor a customer the executor can open one for. Same predicate
+ * (`lacksExecutionAnchor`) the voice payload gate uses at drafting time, so a
+ * proposal from ANY surface that lost its anchor — e.g. an invoice drafted
+ * from an estimate whose job id was dropped — is refused here instead of
+ * failing "neither a customerId nor a jobId" after the tap. The gate is
+ * `customerId`, which the card's customer picker fills.
+ */
+export function executionAnchorReferenceCheck(): ApprovalReferenceCheck {
+  return async (_tenantId, proposal) =>
+    lacksExecutionAnchor(proposal.proposalType, proposal.payload) ? ['customerId'] : [];
+}
+
+/**
+ * #1480 — `send_invoice` names no recipient of its own for the customer's
+ * address to fall back to, and the customer has none on file for that
+ * channel: the send service can only refuse ("Cannot send email — no email
+ * provided and customer has no email on file"), after the approval tap. The
+ * gap is `recipient`, a payload field the card's Edit fills, so it lifts.
+ * Walks invoice → job → customer, the same hop the send service makes.
+ */
+export function sendRecipientReferenceCheck(deps: {
+  invoiceRepo: Pick<InvoiceRepository, 'findById'>;
+  jobRepo: Pick<JobRepository, 'findById'>;
+  customerRepo: Pick<CustomerRepository, 'findById'>;
+}): ApprovalReferenceCheck {
+  return async (tenantId, proposal) => {
+    if (proposal.proposalType !== 'send_invoice') return [];
+    const { payload } = proposal;
+    const channel = payload.channel ?? payload.sendChannel;
+    if (channel !== 'email' && channel !== 'sms') return [];
+    if (typeof payload.recipient === 'string' && payload.recipient.trim().length > 0) return [];
+    const invoiceId = payload.invoiceId;
+    // No invoice id yet is a different gate (invoiceId), never this one.
+    if (typeof invoiceId !== 'string' || invoiceId.length === 0 || isChainRefToken(invoiceId)) return [];
+    const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
+    if (!invoice) return [];
+    const job = await deps.jobRepo.findById(tenantId, invoice.jobId);
+    if (!job) return [];
+    const customer = await deps.customerRepo.findById(tenantId, job.customerId);
+    if (!customer) return [];
+    const onFile = channel === 'email' ? customer.email : customer.primaryPhone;
+    return typeof onFile === 'string' && onFile.trim().length > 0 ? [] : ['recipient'];
+  };
+}
+
+/** Gaps that are a missing piece to supply, not an id naming nothing. */
+const SENTENCE_GAPS: ReadonlySet<string> = new Set(['locationId', 'recipient', 'customerId']);
+
+/**
  * The operator-facing refusal for a set of dangling references. A missing
  * service location is not "a record that does not exist" — it is a record the
  * operator has to add — so it gets its own sentence.
  */
 export function describeDanglingReferences(fields: readonly string[]): string {
-  const ids = fields.filter((f) => f !== 'locationId');
+  const ids = fields.filter((f) => !SENTENCE_GAPS.has(f));
   const parts: string[] = [];
   if (ids.length > 0) parts.push(`${ids.join(', ')} does not name an existing record`);
+  if (fields.includes('customerId')) {
+    parts.push('it is not linked to a customer or a job yet — pick the customer before approving');
+  }
+  if (fields.includes('recipient')) {
+    parts.push('the customer has nothing on file to send it to — add a recipient before approving');
+  }
   if (fields.includes('locationId')) {
     parts.push('the customer has no service location — add one before approving');
   }
   return `Cannot approve proposal: ${parts.join('; ')}`;
 }
+
+/**
+ * #1480 — the ONE executability check. Every configured reference check, run
+ * against a proposal as it stands. `approveProposal` runs it on a human tap;
+ * a drafting surface runs it BEFORE persisting a proposal its status decision
+ * auto-approved (`holdIfNotExecutable`), so "approved automatically" can never
+ * skip what a tap would have refused (QA §17: an auto-approved estimate for a
+ * customer with no service location failed at execution).
+ */
+export async function executabilityGaps(
+  tenantId: string,
+  proposal: Proposal,
+  checks: readonly ApprovalReferenceCheck[] | undefined,
+): Promise<string[]> {
+  if (!checks || checks.length === 0) return [];
+  return (await Promise.all(checks.map((check) => check(tenantId, proposal)))).flat();
+}
+
+/**
+ * Pure. An auto-approved proposal with executability gaps is held for review
+ * instead — the same demotion shape as `holdIfUnsupervised`. The gaps are NOT
+ * written into `missingFields`: several (a service location, an email on
+ * file) are fixed on another record, not by editing this payload, and a
+ * `missingFields` gate nothing on the card can lift is the #909 dead end.
+ * `approveProposal` re-runs the checks, so the tap stays refused until the
+ * missing piece exists.
+ */
+export function holdIfNotExecutable(proposal: Proposal, gaps: readonly string[]): Proposal {
+  if (gaps.length === 0 || proposal.status !== 'approved') return proposal;
+  return { ...proposal, status: 'ready_for_review', approvedAt: undefined };
+}
+
+/**
+ * The assistant's ask for the missing piece(s) — what the operator has to
+ * supply before the card can go ahead.
+ */
+export function askForExecutabilityGaps(
+  gaps: readonly string[],
+  payload: Record<string, unknown> = {},
+): string {
+  const asks: string[] = [];
+  if (gaps.includes('locationId')) {
+    asks.push("the customer has no service location yet — what's the service address?");
+  }
+  if (gaps.includes('recipient')) {
+    asks.push(
+      (payload.channel ?? payload.sendChannel) === 'sms'
+        ? 'the customer has no phone number on file — what number should it go to?'
+        : 'the customer has no email on file — what email address should it go to?',
+    );
+  }
+  if (gaps.includes('customerId')) {
+    asks.push("it isn't linked to a customer or a job yet — which customer is it for?");
+  }
+  const unknown = gaps.filter((g) => !SENTENCE_GAPS.has(g));
+  if (unknown.length > 0) asks.push(`${unknown.join(', ')} does not name an existing record`);
+  return `This can't go ahead yet: ${asks.join('; ')}`;
+}
+
