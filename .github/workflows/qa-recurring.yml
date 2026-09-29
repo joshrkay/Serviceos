@@ -1,14 +1,14 @@
-name: QA Recurring Daily
+name: QA Recurring Every 2 Days
 
 on:
   schedule:
-    - cron: '0 4 * * *'
+    - cron: '57 4 */2 * *'
   workflow_dispatch:
 
 jobs:
   qa-run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
