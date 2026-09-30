@@ -105,7 +105,7 @@ describe('lookupMyDay skill', () => {
     expect(res.status).toBe('found');
     if (res.status !== 'found') throw new Error('unreachable');
     expect(res.data.appointments.map((a) => a.appointmentId)).toEqual(['appt-early', 'appt-late']);
-    expect(res.summary).toContain('2 appointments left today');
+    expect(res.summary).toContain('You have 2 appointments today:');
     expect(res.summary).toContain('AC tune-up');
     expect(res.summary).toContain('Drain cleaning');
   });
@@ -213,7 +213,7 @@ describe('lookupMyDay skill', () => {
     // today", which is false at 5pm after a full day). "Nothing left
     // today" is honest: it speaks to what's still AHEAD, matching I5's
     // forward-looking filter above.
-    expect(res.summary).toContain('You have nothing left today');
+    expect(res.summary).toBe("Nothing left today — today's one appointment is behind you.");
     expect(res.summary).not.toMatch(/clear/i);
   });
 
@@ -277,7 +277,7 @@ describe('lookupMyDay skill', () => {
     expect(res.data.appointments.map((a) => a.jobSummary)).toEqual(['Old maintenance visit']);
   });
 
-  it('returns status "none" with a "nothing left today" summary and records the event when nothing is on', async () => {
+  it('returns status "none" with a "nothing on the schedule today" summary and records the event when nothing is on', async () => {
     const deps = await fixtures();
     const lookupEvents = eventsSpy();
 
@@ -287,7 +287,7 @@ describe('lookupMyDay skill', () => {
     );
 
     expect(res.status).toBe('none');
-    expect(res.summary).toContain('You have nothing left today');
+    expect(res.summary).toBe('You have nothing on the schedule today.');
     expect(lookupEvents.record).toHaveBeenCalledWith(
       expect.objectContaining({ tenantId: TENANT, intent: 'lookup_my_day', resultStatus: 'none', resultCount: 0 }),
     );
