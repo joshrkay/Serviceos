@@ -147,10 +147,22 @@ test.describe('9.7 — the Saturday summary email, captured', () => {
           .join('\n'),
       );
 
+      // The send is audited — and that audit row IS the idempotency ledger:
+      // one `weekly_feedback_email.sent` per tenant-week, none for C.
+      const weekKey = new Date(startOfWeekUTC(saturday).getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const sentRows = async (tenantId: string) =>
+        (await auditRepo.findByEntity(tenantId, 'weekly_feedback_email', weekKey)).filter(
+          (e) => e.eventType === 'weekly_feedback_email.sent',
+        );
+      expect(await sentRows(ownerA.tenantId)).toHaveLength(1);
+      expect(await sentRows(ownerB.tenantId)).toHaveLength(1);
+      expect(await sentRows(ownerC.tenantId)).toEqual([]);
+
       // The send ledger is idempotent: a second Saturday tick sends nothing.
       const before = delivery.sentEmails.length;
       await runWeeklyFeedbackSweep(deps);
       expect(delivery.sentEmails.length, 'a re-run sends no second email').toBe(before);
+      expect(await sentRows(ownerA.tenantId)).toHaveLength(1);
     } finally {
       await pool.end().catch(() => undefined);
     }
