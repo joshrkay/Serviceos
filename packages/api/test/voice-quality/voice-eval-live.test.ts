@@ -27,6 +27,7 @@ import {
   runLiveIntentEval,
   runLiveSlotEval,
   sampleDeterministic,
+  withRateLimitRetry,
 } from '../../../voice-eval/live-support';
 
 /** Mock gateway returning a fixed classifier JSON with token usage (an LLM call). */
@@ -372,5 +373,55 @@ describe('voice-eval live plumbing — slot run loop (mocked gateway)', () => {
     const res = await runLiveSlotEval([{ transcript: 'my pipe burst', gold: {} }], gw);
     expect(res.examples[0].pred.problem_description).toBe('pipe burst under the kitchen sink, water everywhere');
     expect(res.examples[0].pred.address).toBe('12 Pine Lane');
+  });
+});
+
+// A 200-row sequential live run on gpt-4o-mini sends ~15k prompt tokens per
+// call, so the run itself crosses a 200k tokens-per-minute org limit within
+// the first minute. The production gateway surfaces the throttle as a typed
+// LLM_RATE_LIMITED (with the provider's retry hint) once its own retries are
+// spent, which aborted the whole eval with no report (2026-09-30 local runs).
+// The eval gateway waits out the hint and retries the SAME row; a throttle is
+// not a classification result, so it must never score as one.
+describe('voice-eval live plumbing — rate-limit retry', () => {
+  function rateLimited(retryAfterMs: number): Error {
+    return Object.assign(new Error('AI provider rate limit reached'), {
+      code: 'LLM_RATE_LIMITED',
+      statusCode: 429,
+      details: { rateLimited: true, retryAfterMs },
+    });
+  }
+
+  it('waits out the provider hint and retries until the call succeeds', async () => {
+    let calls = 0;
+    const inner = {
+      complete: async () => {
+        calls += 1;
+        if (calls <= 2) throw rateLimited(1500);
+        return { content: 'ok', model: 'mock', provider: 'mock', latencyMs: 1 };
+      },
+    } as unknown as LLMGateway;
+    const waits: number[] = [];
+    const gw = withRateLimitRetry(inner, { sleep: async (ms) => { waits.push(ms); } });
+    const res = await gw.complete({ messages: [] } as never);
+    expect(res.content).toBe('ok');
+    expect(calls).toBe(3);
+    expect(waits).toEqual([1500, 1500]);
+  });
+
+  it('rethrows other errors at once, and a throttle that outlasts the retry budget', async () => {
+    const boom = { complete: async () => { throw new Error('boom'); } } as unknown as LLMGateway;
+    await expect(
+      withRateLimitRetry(boom, { sleep: async () => {} }).complete({ messages: [] } as never),
+    ).rejects.toThrow('boom');
+
+    let calls = 0;
+    const always = {
+      complete: async () => { calls += 1; throw rateLimited(10); },
+    } as unknown as LLMGateway;
+    await expect(
+      withRateLimitRetry(always, { sleep: async () => {}, maxRetries: 3 }).complete({ messages: [] } as never),
+    ).rejects.toThrow('rate limit');
+    expect(calls).toBe(4);
   });
 });
