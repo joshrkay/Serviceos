@@ -2934,3 +2934,49 @@ describe('intent-classifier — ai_run_id surfacing', () => {
     expect(call.tenantId).toBe('tenant-real');
   });
 });
+
+describe('#1018 row 5.3 — spoken time logging classifies deterministically (no model)', () => {
+  // The in-app technician/operator surface ('inapp' channel → 'operator').
+  const inapp = { tenantId: 't1', classifierProfile: 'operator' as const };
+
+  it('"log two hours on the Garcia job" routes to log_time_entry with 120 minutes on the Garcia job, NO LLM call', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent('log two hours on the Garcia job', inapp, gateway);
+    expect(result.intentType).toBe('log_time_entry');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(result.extractedEntities).toMatchObject({
+      timeEntryType: 'job',
+      durationMinutes: 120,
+      jobReference: 'Garcia',
+    });
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('does NOT short-circuit on a phone profile that does not offer log_time_entry (caller, field_tech)', async () => {
+    // PROFILE_INTENTS.caller / .field_tech do not accept log_time_entry — a
+    // deterministic matcher must never mint an off-surface intent; it falls
+    // through to the LLM path, whose post-parse guard owns off-surface.
+    for (const classifierProfile of ['caller', 'field_tech'] as const) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(
+        'log two hours on the Garcia job',
+        { tenantId: 't1', classifierProfile },
+        gateway,
+      );
+      expect(result.intentType).not.toBe('log_time_entry');
+      expect(gateway.complete).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('negative control: a richer or slot-less time utterance stays LLM-routed', async () => {
+    for (const transcript of [
+      'log two hours on the Garcia job and add a note about the filter',
+      'log two hours',
+      'how many hours did I log on the Garcia job',
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      await classifyIntent(transcript, inapp, gateway);
+      expect(gateway.complete, `"${transcript}" must stay LLM-routed`).toHaveBeenCalledTimes(1);
+    }
+  });
+});

@@ -194,6 +194,30 @@ function accountPriorityLabel(row: InboxProposalRow): string | null {
   return parts.join(' · ');
 }
 
+/**
+ * #1015 row 3.12 — the drive-time check the API stamps on a booking card
+ * (`slotFeasibility` on a non-held draft; api ai/scheduling/place-hold.ts
+ * `HoldFeasibility`). One owner-readable line per travel warning, flagged
+ * unverified when the estimate is the great-circle fallback.
+ */
+function feasibilityWarningLines(row: InboxProposalRow): string[] {
+  const stamp = row.proposal.sourceContext?.slotFeasibility ?? row.proposal.sourceContext?.holdFeasibility;
+  if (!stamp || typeof stamp !== 'object') return [];
+  if ((stamp as { checked?: unknown }).checked === false) return ['Drive time not checked for this slot'];
+  const warnings = (stamp as { warnings?: unknown }).warnings;
+  if (!Array.isArray(warnings)) return [];
+  return warnings.map((w) => {
+    const meta = (w && typeof w === 'object' ? (w as { metadata?: Record<string, unknown> }).metadata : undefined) ?? {};
+    const travel = typeof meta.travelSeconds === 'number' ? Math.round(meta.travelSeconds / 60) : null;
+    const gap = typeof meta.gapSeconds === 'number' ? Math.round(meta.gapSeconds / 60) : null;
+    const base =
+      travel !== null && gap !== null
+        ? `Tight schedule: ~${travel} min drive, only ${gap} min between jobs`
+        : String((w as { message?: unknown })?.message ?? 'Drive time may not fit this slot');
+    return meta.source === 'haversine' ? `${base} (straight-line estimate, unverified)` : base;
+  });
+}
+
 const CONFIDENCE_CONFIG: Record<
   ConfidenceLevel,
   { label: string; bar: string; track: string; width: string; labelColor: string }
@@ -1098,6 +1122,11 @@ export function InboxPage() {
                       <p className="text-xs text-warning mt-0.5">{holdExpiryLine(row, tz)}</p>
                     )}
                     {row.reason && <p className="text-xs text-muted-foreground mt-0.5">{row.reason}</p>}
+                    {feasibilityWarningLines(row).map((line, i) => (
+                      <p key={i} data-testid="proposal-feasibility-warning" className="text-xs text-warning mt-0.5">
+                        {line}
+                      </p>
+                    ))}
                     {/* Review J8 — the drafting handler's own reasoning. On a
                         gated proposal it is the only thing that says what the
                         draft REFUSED to do ("Heard a price of $290,000.00 …
