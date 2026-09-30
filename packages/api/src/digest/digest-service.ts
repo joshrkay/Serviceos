@@ -170,6 +170,13 @@ export interface DigestLearnedItem {
   lessonType: string;
   /** Human-readable line straight from correction_lessons.summary. */
   summary: string;
+  /**
+   * #1013 row 9.9 — the executed proposal that recorded this lesson. The
+   * digest's Undo acts on it (`POST /api/proposals/:id/undo { scope:
+   * 'lessons' }`). Optional: digests stored before this field carry none,
+   * and the client hides Undo for them.
+   */
+  sourceProposalId?: string;
 }
 
 /**
@@ -990,6 +997,7 @@ export async function computeDigestPayload(
           lessonId: l.id,
           lessonType: l.lessonType,
           summary: l.summary,
+          sourceProposalId: l.sourceProposalId,
         }))
       : undefined;
 

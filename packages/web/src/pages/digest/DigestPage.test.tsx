@@ -215,6 +215,66 @@ describe('DigestPage', () => {
       expect(screen.queryByText('Supervisor checks')).not.toBeInTheDocument();
     });
 
+    describe('#1013 row 9.9 — undo a lesson from "What I learned today"', () => {
+      const undoable = {
+        ...basePayload,
+        learnedToday: [
+          {
+            lessonId: 'l-1',
+            lessonType: 'labor_rate_changed',
+            summary: 'labor rate is $135 going forward',
+            sourceProposalId: 'p-src',
+          },
+        ],
+      };
+
+      it('Undo reverses the lesson through the proposal\'s lessons-scoped undo and marks it undone', async () => {
+        mockFetch.mockImplementation(async (url: string) =>
+          String(url).startsWith('/api/digests/')
+            ? digestResponse(undoable)
+            : jsonResponse({ id: 'p-src', status: 'executed' }),
+        );
+        renderAt('/digest/2026-06-10');
+        const undo = await screen.findByRole('button', { name: 'Undo: labor rate is $135 going forward' });
+        undo.click();
+
+        await screen.findByText('Undone');
+        const undoCall = mockFetch.mock.calls.find(([url]) => String(url) === '/api/proposals/p-src/undo');
+        expect(undoCall).toBeDefined();
+        const init = undoCall![1] as RequestInit;
+        expect(init.method).toBe('POST');
+        expect(JSON.parse(String(init.body))).toEqual({ scope: 'lessons' });
+        expect(screen.queryByRole('button', { name: /^Undo:/ })).not.toBeInTheDocument();
+      });
+
+      it('a digest stored before the field existed (no sourceProposalId) offers no Undo', async () => {
+        mockFetch.mockResolvedValue(digestResponse(enriched));
+        renderAt('/digest/2026-06-10');
+        await screen.findByText('labor rate is $145 going forward');
+        expect(screen.queryByRole('button', { name: /^Undo:/ })).not.toBeInTheDocument();
+      });
+
+      it('a refused undo keeps the lesson, says so, and leaves Undo available', async () => {
+        mockFetch.mockImplementation(async (url: string) =>
+          String(url).startsWith('/api/digests/')
+            ? digestResponse(undoable)
+            : jsonResponse({ error: 'FORBIDDEN' }, 403),
+        );
+        renderAt('/digest/2026-06-10');
+        (await screen.findByRole('button', { name: 'Undo: labor rate is $135 going forward' })).click();
+        expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't undo this lesson");
+        expect(screen.queryByText('Undone')).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Undo: labor rate is $135 going forward' })).toBeEnabled();
+      });
+
+      it('the Undo control meets the 44px tap target (min-h-11)', async () => {
+        mockFetch.mockResolvedValue(digestResponse(undoable));
+        renderAt('/digest/2026-06-10');
+        const undo = await screen.findByRole('button', { name: 'Undo: labor rate is $135 going forward' });
+        expect(undo.className).toContain('min-h-11');
+      });
+    });
+
     it('the unsure list rows meet the 44px glove target (min-h-11)', async () => {
       mockFetch.mockResolvedValue(digestResponse(enriched));
       renderAt('/digest/2026-06-10');
