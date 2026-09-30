@@ -311,15 +311,19 @@ describe('Postgres integration — service agreements', () => {
       expect(toggled!.priorityBooking).toBe(true);
     });
 
-    // #6 phase 4 — migration 176 auto_collect_dues column.
-    it('round-trips auto_collect_dues and defaults to false', async () => {
+    // #6 phase 4 — migration 176 auto_collect_dues column. #1510 (owner
+    // decision 2026-09-30) — a NEW agreement that doesn't say otherwise
+    // auto-collects its dues; only an explicit false opts out.
+    it('a new agreement that does not set auto_collect_dues persists auto-collecting (#1510)', async () => {
       const plain = await repo.create(makeAgreement(t.tenantId, cust, t.userId));
-      expect((await repo.findById(t.tenantId, plain.id))!.autoCollectDues).toBe(false);
+      expect((await repo.findById(t.tenantId, plain.id))!.autoCollectDues).toBe(true);
+    });
 
-      const collecting = await repo.create(
-        makeAgreement(t.tenantId, cust, t.userId, { autoCollectDues: true }),
+    it('round-trips an explicit auto_collect_dues=false', async () => {
+      const optedOut = await repo.create(
+        makeAgreement(t.tenantId, cust, t.userId, { autoCollectDues: false }),
       );
-      expect((await repo.findById(t.tenantId, collecting.id))!.autoCollectDues).toBe(true);
+      expect((await repo.findById(t.tenantId, optedOut.id))!.autoCollectDues).toBe(false);
     });
   });
 });
