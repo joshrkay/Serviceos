@@ -6626,6 +6626,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           jobRepo,
           qboConfig,
           logger: accountingSyncLogger,
+          // #1013 row 9.11 — each invoice sync outcome is audited.
+          auditRepo,
           ...(pool ? { planForTenant: (tenantId: string) => readTenantPlanId(pool, tenantId) } : {}),
         });
       }).catch((err) => {
@@ -7103,6 +7105,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    // #1509 — the SAME alias-first resolver chat, memo and phone use (see
+    // `sharedEntityResolver` above). Without it the adapter self-built a bare
+    // PgEntityResolver from `pool` and an approved tenant alias ("Bobby")
+    // resolved on every surface except in-app voice.
+    ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
     // U3 — service locations for the customer disambiguation hint. The SAME
     // repo the assistant-chat router is wired with (~5484 above), so the two
     // in-app surfaces cannot drift on what an ambiguous "Smith" is spoken/

@@ -433,7 +433,8 @@ describe('CreateServiceAgreementExecutionHandler', () => {
       renewalCount: 0,
       memberDiscountBps: 0,
       priorityBooking: false,
-      autoCollectDues: false,
+      // #1510 — owner decision 2026-09-30: new agreements auto-collect dues.
+      autoCollectDues: true,
     });
     expect(stored!.endsOn).toBeUndefined();
     expect(stored!.renewalTermMonths).toBeUndefined();
