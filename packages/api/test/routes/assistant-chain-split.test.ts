@@ -153,6 +153,67 @@ describe('#1480 item 4 — "X, and <verb> …" drafts every step as linked propo
   });
 });
 
+describe('#1480 item 4 — a visit mentioned as context is not a booking step', () => {
+  const ESTIMATE_LINES = JSON.stringify({
+    lineItems: [
+      { description: 'Blower motor', quantity: 1, unitPrice: 42500 },
+      { description: 'Diagnostic visit', quantity: 1, unitPrice: 8900 },
+    ],
+    confidence_score: 0.9,
+  });
+
+  // "add a diagnostic visit" is a LINE on the estimate being drafted, not a
+  // new appointment. Split on it, and the fragment classified on its own
+  // reads like a booking.
+  it('"draft an estimate … and add a diagnostic visit" is ONE estimate, with no appointment step', async () => {
+    const turn = 'Draft an estimate for the Patel job for a blower motor and add a diagnostic visit.';
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp({
+      proposalRepo,
+      gateway: scriptedGateway(
+        {
+          [turn]: { intentType: 'draft_estimate', entities: { customerName: 'Patel' } },
+          'Draft an estimate for the Patel job for a blower motor': {
+            intentType: 'draft_estimate',
+            entities: { customerName: 'Patel' },
+          },
+          // What the fragment alone classifies as.
+          'add a diagnostic visit': { intentType: 'create_appointment', entities: { jobTitle: 'diagnostic visit' } },
+        },
+        { 'You are an estimate generation assistant': ESTIMATE_LINES },
+      ),
+    });
+
+    const res = await chat(app, turn);
+    expect(res.status).toBe(200);
+    expect((await proposalRepo.findByTenant(TEST_TENANT)).map((p) => p.proposalType)).toEqual(['draft_estimate']);
+    expect(res.body.message.content).not.toMatch(/linked steps|didn't draft/i);
+  });
+
+  // A note ABOUT a visit is a note: it may be its own step, never a booking.
+  it('"… and add a note about the visit" never becomes an appointment', async () => {
+    const turn = 'Create an estimate for the Patel job and add a note about the visit.';
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp({
+      proposalRepo,
+      gateway: scriptedGateway(
+        {
+          [turn]: { intentType: 'draft_estimate', entities: { customerName: 'Patel' } },
+          'Create an estimate for the Patel job': { intentType: 'draft_estimate', entities: { customerName: 'Patel' } },
+          'add a note about the visit': { intentType: 'add_note', entities: { noteText: 'about the visit' } },
+        },
+        { 'You are an estimate generation assistant': ESTIMATE_LINES },
+      ),
+    });
+
+    const res = await chat(app, turn);
+    expect(res.status).toBe(200);
+    expect((await proposalRepo.findByTenant(TEST_TENANT)).map((p) => p.proposalType)).not.toContain(
+      'create_appointment',
+    );
+  });
+});
+
 describe('#1480 item 4 — AST-04 "create an invoice for job X and send it"', () => {
   const JOB_ID = 'c73844bd-4928-4d1f-b8c5-f669ceb10018';
   const CUSTOMER_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';

@@ -1432,7 +1432,10 @@ const STEP_NOUN_FAMILIES: ReadonlyArray<[RegExp, StepFamily]> = [
   [/\b(?:invoice|bill)\b/i, 'invoice'],
   [/\b(?:estimate|quote)\b/i, 'estimate'],
   [/\b(?:customer|client)\b/i, 'customer'],
-  [/\b(?:appointment|visit|booking)\b/i, 'appointment'],
+  // Not "visit": after a generic create verb ("add a diagnostic visit") a
+  // visit is a LINE on the document being drafted, not a booking (#1480).
+  // A visit that IS a booking comes with its own verb (book / schedule).
+  [/\b(?:appointment|booking)\b/i, 'appointment'],
   [/\bnote\b/i, 'note'],
   [/\breminder\b/i, 'reminder'],
 ];
