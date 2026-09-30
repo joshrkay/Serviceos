@@ -618,8 +618,23 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           example. Paid for by dropping the skill-routing notes from the
  *           lookup_invoices / lookup_availability blocks (caller first turn
  *           shrinks net). No intent or slot changes.
+ *   1.21.0 — #1469 + #1468 (live voice eval, 2026-09-30). Prompt text +
+ *           one new entity slot, no intent changes. (a) Operator-voiced
+ *           lookups: lookup_jobs (a named job / work order, filtered job
+ *           lists), lookup_account_summary (a named customer's history) and
+ *           lookup_leads (lists filtered by source / follow-up status, not
+ *           only a count) — the live model sent these to `unknown`. The
+ *           caller profile keeps its caller-voiced lookup_jobs /
+ *           lookup_account_summary blocks via INTENT_BLOCK_VARIANTS (budget).
+ *           (b) A distinction rule: a QUESTION about a booking =
+ *           lookup_appointments, a STATEMENT of attendance =
+ *           confirm_appointment. (c) New `problemDescription` entity (the
+ *           problem as described) on create_appointment / create_job /
+ *           emergency_dispatch, and `serviceAddress` now also asked on
+ *           create_appointment / emergency_dispatch — both projected by
+ *           extractLaunchSlots (voice/launch-slots.ts).
  */
-export const INTENT_TAXONOMY_VERSION = '1.20.0';
+export const INTENT_TAXONOMY_VERSION = '1.21.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -796,6 +811,11 @@ export interface ExtractedEntities {
   paymentReference?: string;
   // create_job intent: title of the new job.
   jobTitle?: string;
+  // #1468 — create_appointment / create_job / emergency_dispatch: the
+  // caller's problem or symptoms in their own words ("water heater leaking
+  // from the bottom"). Distinct from jobTitle (a short NAME for the work):
+  // the launch-slot `problem_description` is sourced from here first.
+  problemDescription?: string;
   // update_customer intent. These hold the NEW values the caller wants
   // written to an EXISTING customer record (resolved via customerName or
   // the identified caller). Kept distinct from create_customer's
@@ -2559,6 +2579,7 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.paymentReference === 'string') extracted.paymentReference = ee.paymentReference;
     // create_job fields
     if (typeof ee.jobTitle === 'string') extracted.jobTitle = ee.jobTitle;
+    if (typeof ee.problemDescription === 'string') extracted.problemDescription = ee.problemDescription;
     // update_customer fields
     if (typeof ee.updatedName === 'string') extracted.updatedName = ee.updatedName;
     if (typeof ee.updatedEmail === 'string') extracted.updatedEmail = ee.updatedEmail;

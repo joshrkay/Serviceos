@@ -309,4 +309,42 @@ describe('voice-eval live plumbing — slot run loop (mocked gateway)', () => {
     expect(res.examples[0].pred.address).toBe('456 Oak Avenue, Springfield');
     expect(res.examples[0].pred.name).toBe('Sarah Johnson');
   });
+
+  // #1468 (taxonomy 1.21.0) — create_appointment / emergency_dispatch now ask
+  // for `problemDescription` (the symptoms as described) and `serviceAddress`
+  // (where the work is). The described problem is the problem_description
+  // slot; jobTitle (a short NAME for the work) is only the fallback.
+  it('#1468: problemDescription wins over jobTitle; serviceAddress fills address on a booking', async () => {
+    const gw = mockGateway(
+      JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.92,
+        extractedEntities: {
+          customerName: 'Sarah Johnson',
+          jobTitle: 'AC repair',
+          problemDescription: 'outdoor unit running but no cold air inside',
+          serviceAddress: '456 Oak Avenue, Springfield',
+        },
+      }),
+    );
+    const res = await runLiveSlotEval([{ transcript: 'my ac stopped cooling', gold: {} }], gw);
+    expect(res.examples[0].pred.problem_description).toBe('outdoor unit running but no cold air inside');
+    expect(res.examples[0].pred.address).toBe('456 Oak Avenue, Springfield');
+  });
+
+  it('#1468: an emergency_dispatch call projects its problem and address', async () => {
+    const gw = mockGateway(
+      JSON.stringify({
+        intentType: 'emergency_dispatch',
+        confidence: 0.95,
+        extractedEntities: {
+          problemDescription: 'pipe burst under the kitchen sink, water everywhere',
+          serviceAddress: '12 Pine Lane',
+        },
+      }),
+    );
+    const res = await runLiveSlotEval([{ transcript: 'my pipe burst', gold: {} }], gw);
+    expect(res.examples[0].pred.problem_description).toBe('pipe burst under the kitchen sink, water everywhere');
+    expect(res.examples[0].pred.address).toBe('12 Pine Lane');
+  });
 });

@@ -110,7 +110,9 @@ describe('buildClassifierSystemPrompt — per-profile assembly', () => {
     expect(buildClassifierSystemPrompt('operator')).toContain('Distinctions that matter:');
   });
 
-  it('caller entity dictionary is trimmed to the 13 fields its intents extract (#896)', () => {
+  // #1468 added problemDescription + serviceAddress (create_appointment's
+  // problem and service address) → 15.
+  it('caller entity dictionary is trimmed to the 15 fields its intents extract (#896, #1468)', () => {
     expect(dictionaryKeys(buildClassifierSystemPrompt('caller'))).toEqual([
       'customerName',
       'jobReference',
@@ -125,6 +127,8 @@ describe('buildClassifierSystemPrompt — per-profile assembly', () => {
       'newDateTimeDescription',
       'noteBody',
       'jobTitle',
+      'problemDescription',
+      'serviceAddress',
     ]);
     // Trimmed dictionary must still read as the JSON example: the last
     // surviving line carries no trailing comma before the closing brace.

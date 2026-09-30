@@ -96,6 +96,9 @@ export function extractLaunchSlots(
 
   const problem = firstNonEmpty(
     input.problemDescription,
+    // #1468 (taxonomy 1.21.0) — the prompt's own field for the problem as
+    // described, on create_appointment / create_job / emergency_dispatch.
+    entities.problemDescription,
     entities.noteBody,
     entities.lineItemDescriptions && entities.lineItemDescriptions.length > 0
       ? entities.lineItemDescriptions.join('; ')
