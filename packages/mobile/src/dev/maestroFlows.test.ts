@@ -66,7 +66,9 @@ describe('Maestro device flows — static contract', () => {
     // saw no "Skip for now", then the gate redirected to onboarding and 5.4 A
     // could not find the "Assistant" tab. A fresh dev-auth tenant never has
     // setup complete, so onboarding is certain — wait for it, skip, then wait
-    // for the tab bar.
+    // for the tab bar. (Run 36770097508 then showed the skip itself went
+    // nowhere — "/" was served by both (onboarding)/index and (tabs)/index;
+    // fixed in the route table, pinned by src/navigation/routeTable.test.ts.)
     const { commands } = loadFlow('subflows/signed-in.yaml');
     const waits = commands
       .map((c, i) => ({ i, v: typeof c === 'object' ? (c.extendedWaitUntil as { visible?: string })?.visible : undefined }))

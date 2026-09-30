@@ -6,7 +6,7 @@
 # resolves. Do NOT accept the tab bar as "signed in" before that: the gate
 # fails open while the status loads, so tabs flash first and the redirect lands
 # after (Maestro run 36767934585). Wait for onboarding, skip it ("Skip for now"
-# is honoured for the session — app/(onboarding)/index.tsx), then wait for the
+# is honoured for the session — app/(onboarding)/onboarding.tsx), then wait for the
 # tab bar. The Clerk sign-in screen ("Check your email") must never appear.
 appId: com.serviceos.app
 ---
