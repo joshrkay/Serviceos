@@ -3,7 +3,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
 import { InMemoryAgreementRunRepository } from '../../src/agreements/agreement-run';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
-import { DuesCollectionResult } from '../../src/agreements/dues-collector';
+import { DuesCollectionResult, StripeDuesCollector } from '../../src/agreements/dues-collector';
+import { InMemoryCustomerPaymentMethodRepository } from '../../src/payments/customer-payment-method';
 import {
   createAgreement,
   updateAgreement,
@@ -560,7 +561,6 @@ describe('membership member pricing: createAgreement / updateAgreement', () => {
     );
     expect(plain.memberDiscountBps).toBe(0);
     expect(plain.priorityBooking).toBe(false);
-    expect(plain.autoCollectDues).toBe(false);
 
     const member = await createAgreement(
       {
@@ -599,6 +599,82 @@ describe('membership member pricing: createAgreement / updateAgreement', () => {
     );
     const updated = await updateAgreement(t, a.id, { memberDiscountBps: 2000 }, repo);
     expect(updated?.memberDiscountBps).toBe(2000);
+  });
+});
+
+describe('#1510 — new agreements default to auto-collecting dues', () => {
+  // Owner decision 2026-09-30 (docs/audit/blocked-on-josh.md §8.12):
+  // auto-collect is the intended default for membership dues.
+  const base = {
+    name: 'Gold membership',
+    recurrenceRule: 'FREQ=MONTHLY',
+    priceCents: 4900,
+    startsOn: '2026-10-01',
+    createdBy: 'u',
+  };
+
+  it('a new agreement that does not mention auto-collect collects dues automatically', async () => {
+    const created = await createAgreement(
+      { ...base, tenantId: tenantId(), customerId: uuidv4() },
+      new InMemoryAgreementRepository(),
+    );
+    expect(created.autoCollectDues).toBe(true);
+  });
+
+  it('an agreement created with auto-collect explicitly off stays off', async () => {
+    const created = await createAgreement(
+      { ...base, tenantId: tenantId(), customerId: uuidv4(), autoCollectDues: false },
+      new InMemoryAgreementRepository(),
+    );
+    expect(created.autoCollectDues).toBe(false);
+  });
+
+  it('a new member with no card on file still gets the dues invoice raised', async () => {
+    const repo = new InMemoryAgreementRepository();
+    const runRepo = new InMemoryAgreementRunRepository();
+    const { jobsService, invoicesService } = makeMocks();
+    const auditRepo = new InMemoryAuditRepository();
+    const t = tenantId();
+    // The REAL collector over an empty card store — the no-card path.
+    const duesCollector = new StripeDuesCollector({
+      customerPaymentMethodRepo: new InMemoryCustomerPaymentMethodRepository(),
+      stripeConfig: { apiKey: 'sk_test_unused' },
+      invoiceOps: {
+        ensureIssuedAmountDue: vi.fn(),
+        recordPayment: vi.fn(),
+      },
+    });
+    const created = await createAgreement(
+      {
+        ...base,
+        tenantId: t,
+        customerId: uuidv4(),
+        recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=1',
+        startsOn: '2026-10-01',
+      },
+      repo,
+    );
+
+    const result = await runDueAgreements(t, {
+      agreementRepo: repo,
+      runRepo,
+      jobsService,
+      invoicesService,
+      auditRepo,
+      duesCollector,
+      now: new Date(Date.UTC(2026, 9, 1)),
+    });
+
+    // The cycle's dues invoice is raised…
+    expect(result.generatedRunIds).toHaveLength(1);
+    expect(invoicesService.calls).toBe(1);
+    const run = await runRepo.findById(t, result.generatedRunIds[0]);
+    expect(run?.generatedInvoiceId).toEqual(expect.any(String));
+    // …and the default auto-collect reached the collector, which found no
+    // card: a setup gap, audited as skipped (not a payment failure).
+    const events = await auditRepo.findByEntity(t, 'service_agreement', created.id);
+    expect(events.map((e) => e.eventType)).toContain('service_agreement.auto_collect_skipped');
+    expect(events.map((e) => e.eventType)).not.toContain('service_agreement.auto_collect_failed');
   });
 });
 

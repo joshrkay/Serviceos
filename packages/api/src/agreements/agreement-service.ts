@@ -216,7 +216,10 @@ export async function createAgreement(
     renewalCount: 0,
     memberDiscountBps: input.memberDiscountBps ?? 0,
     priorityBooking: input.priorityBooking ?? false,
-    autoCollectDues: input.autoCollectDues ?? false,
+    // #1510 — owner decision 2026-09-30: auto-collect is the default for new
+    // agreements; only an explicit `false` opts out. A member with no card on
+    // file still gets the dues invoice (runDueAgreements → no_card).
+    autoCollectDues: input.autoCollectDues ?? true,
     createdBy: input.createdBy,
     createdAt: now,
     updatedAt: now,

@@ -112,3 +112,27 @@ describe('malformed :id never reaches Postgres as a raw uuid comparison (#882)',
     expect(res.body.error).toBe('NOT_FOUND');
   });
 });
+
+describe('#1510 — POST /api/agreements defaults to auto-collecting dues', () => {
+  const body = {
+    customerId: '22222222-2222-4222-8222-222222222222',
+    name: 'Gold membership',
+    recurrenceRule: 'FREQ=MONTHLY',
+    priceCents: 4900,
+    startsOn: '2026-10-01',
+  };
+
+  it('a new agreement posted without autoCollectDues is created auto-collecting', async () => {
+    const res = await request(buildPgLikeApp()).post('/api/agreements').send(body);
+    expect(res.status).toBe(201);
+    expect(res.body.autoCollectDues).toBe(true);
+  });
+
+  it('a new agreement posted with autoCollectDues:false is created without it', async () => {
+    const res = await request(buildPgLikeApp())
+      .post('/api/agreements')
+      .send({ ...body, autoCollectDues: false });
+    expect(res.status).toBe(201);
+    expect(res.body.autoCollectDues).toBe(false);
+  });
+});
