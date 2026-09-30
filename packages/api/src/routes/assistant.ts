@@ -53,6 +53,7 @@ import {
   CLASSIFIER_CONFIDENCE_THRESHOLD,
   type IntentClassification,
 } from '../ai/orchestration/intent-classifier';
+import { isOffTopicRequest, OFF_TOPIC_DECLINE } from '../ai/orchestration/off-topic-guard';
 // Lookup wiring (2026-07): `lookup_*` intents previously matched nothing in
 // either dispatch map below and fell through to the generic LLM — which has
 // no DB access and answered from nothing (production: ZERO `ai_runs` rows
@@ -4567,6 +4568,25 @@ async function generateAssistantReply(
         stack: err instanceof Error ? err.stack : undefined,
       });
     }
+  }
+
+  // ── Off-topic scope guard ────────────────────────────────────────
+  // A turn the classifier could not place (`unknown`) that is plainly not
+  // business — a poem, a joke, trivia — is declined here, before the generic
+  // model is paid to answer it. Only after a healthy classify: a classifier
+  // FAILURE is our problem, not an off-topic ask. Biased to answering: see
+  // ai/orchestration/off-topic-guard.ts.
+  if (!guardIntentError && guardIntent === 'unknown' && isOffTopicRequest(lastUserText)) {
+    return {
+      taskType: 'assistant.off_topic',
+      model: 'policy-guard',
+      usage: classifierUsage,
+      message: {
+        role: 'assistant' as const,
+        content: OFF_TOPIC_DECLINE,
+        reasoning: 'Non-business request — declined without calling the generic model.',
+      },
+    };
   }
 
   // ── Fallback path: generic LLM text reply ────────────────────────
