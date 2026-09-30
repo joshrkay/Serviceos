@@ -332,6 +332,32 @@ describe('voice-eval live plumbing — slot run loop (mocked gateway)', () => {
     expect(res.examples[0].pred.address).toBe('456 Oak Avenue, Springfield');
   });
 
+  // #1468 live diagnostic (2026-09-30): on reschedule_appointment (24/100) and
+  // lookup_jobs (15/100) calls the problem slot was empty — the model names
+  // the existing work in appointmentReference / jobReference, which is what
+  // the call is about. That reference is the last-resort problem_description,
+  // so the agent does not re-ask a rescheduling caller to describe a problem.
+  it.each([
+    ['reschedule_appointment', { appointmentReference: 'furnace tune-up', newDateTimeDescription: 'Saturday morning' }, 'furnace tune-up'],
+    ['lookup_jobs', { customerName: 'Carlos Mendez', jobReference: 'shower valve job' }, 'shower valve job'],
+  ])('#1468: %s falls back to the referenced work for problem_description', async (intentType, entities, expected) => {
+    const gw = mockGateway(JSON.stringify({ intentType, confidence: 0.9, extractedEntities: entities }));
+    const res = await runLiveSlotEval([{ transcript: 'about my existing job', gold: {} }], gw);
+    expect(res.examples[0].pred.problem_description).toBe(expected);
+  });
+
+  it('#1468: a described problem still wins over the referenced work', async () => {
+    const gw = mockGateway(
+      JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.9,
+        extractedEntities: { jobReference: 'the Oak Street job', problemDescription: 'breaker keeps tripping' },
+      }),
+    );
+    const res = await runLiveSlotEval([{ transcript: 'breaker keeps tripping', gold: {} }], gw);
+    expect(res.examples[0].pred.problem_description).toBe('breaker keeps tripping');
+  });
+
   it('#1468: an emergency_dispatch call projects its problem and address', async () => {
     const gw = mockGateway(
       JSON.stringify({

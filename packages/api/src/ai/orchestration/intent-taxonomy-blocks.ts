@@ -1005,7 +1005,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
  * advertised on the surface.
  */
 export const ENTITY_FIELDS: ReadonlyArray<{ key: string; intents: readonly IntentType[] | '*'; line: string }> = [
-  { key: 'customerName', intents: '*', line: `    "customerName": "<string, optional — existing-customer reference on invoice/estimate/appointment>"` },
+  { key: 'customerName', intents: '*', line: `    "customerName": "<string, optional — existing-customer reference on invoice/estimate/appointment; also the name a caller gives for themself>"` },
   { key: 'jobReference', intents: '*', line: `    "jobReference": "<string, optional>"` },
   { key: 'amount', intents: '*', line: `    "amount": <integer cents, optional>` },
   { key: 'dateTimeDescription', intents: '*', line: `    "dateTimeDescription": "<verbatim date/time phrase from transcript, optional>"` },

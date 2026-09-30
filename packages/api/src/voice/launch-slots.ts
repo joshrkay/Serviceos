@@ -107,6 +107,12 @@ export function extractLaunchSlots(
     // log_warranty_claim for `jobTitle` (the short name of the work), never
     // noteBody, so on a booking call this is where the problem arrives.
     entities.jobTitle,
+    // #1468 — last resort: on a call about EXISTING work (reschedule,
+    // job-status lookup) the model names that work as a reference; it is
+    // what the call is about, so a rescheduling caller is not re-asked to
+    // describe a problem.
+    entities.appointmentReference,
+    entities.jobReference,
   );
   if (problem) slots.problem_description = problem;
 

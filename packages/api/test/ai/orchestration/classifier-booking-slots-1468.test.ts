@@ -99,4 +99,17 @@ describe('#1468 — booking calls return the problem and the service address', (
     expect(b).toContain('problemDescription');
     expect(b).toContain('serviceAddress');
   });
+
+  // Live slot diagnostic (2026-09-30, taxonomy 1.21.0 draft): the caller's
+  // name was empty on every reschedule_appointment (24/100) and
+  // emergency_dispatch (24/100) call — customerName read as an
+  // "existing-customer reference on invoice/estimate/appointment" only.
+  it.each([
+    ['operator', undefined],
+    ['caller', 'caller' as const],
+  ])('%s: customerName also carries the name a caller gives for themself', async (_n, profile) => {
+    const line = entityLine(await systemPromptSent(profile), 'customerName');
+    expect(line).toMatch(/caller/i);
+    expect(line).toMatch(/own name|for themself|their name/i);
+  });
 });
