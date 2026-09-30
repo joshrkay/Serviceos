@@ -862,7 +862,8 @@ export class SendEstimateTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {
-      channel: ee.sendChannel ?? 'email',
+      // #1524 — no channel named is 'auto', same as send_invoice.
+      channel: ee.sendChannel ?? 'auto',
     };
     const missing: string[] = [];
     let extraSourceContext: Record<string, unknown> | undefined;

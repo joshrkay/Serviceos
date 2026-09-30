@@ -1049,6 +1049,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // boot) so a text the gate would suppress is refused with its reason.
     sendRecipientReferenceCheck({
       invoiceRepo,
+      // #1524 — send_estimate walks estimate → job → customer the same way.
+      estimateRepo,
       jobRepo,
       customerRepo,
       smsPreflight: {

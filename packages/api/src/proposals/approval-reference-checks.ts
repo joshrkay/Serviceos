@@ -203,9 +203,20 @@ export function executionAnchorReferenceCheck(): ApprovalReferenceCheck {
  * provided and customer has no email on file"), after the approval tap. The
  * gap is `recipient`, a payload field the card's Edit fills, so it lifts.
  * Walks invoice → job → customer, the same hop the send service makes.
+ *
+ * #1524 — `send_estimate` gets the same check (estimate → job → customer):
+ * it goes through the same SendService recipient resolution, so it failed
+ * the same way after the tap.
  */
+const SEND_DOCUMENT_ID_FIELD: Partial<Record<ProposalType, 'invoiceId' | 'estimateId'>> = {
+  send_invoice: 'invoiceId',
+  send_estimate: 'estimateId',
+};
+
 export function sendRecipientReferenceCheck(deps: {
   invoiceRepo: Pick<InvoiceRepository, 'findById'>;
+  /** #1524 — for send_estimate; without it an estimate send is not checked. */
+  estimateRepo?: Pick<EstimateRepository, 'findById'>;
   jobRepo: Pick<JobRepository, 'findById'>;
   customerRepo: Pick<CustomerRepository, 'findById'>;
   /**
@@ -217,17 +228,21 @@ export function sendRecipientReferenceCheck(deps: {
   smsPreflight?: Pick<GatedMessageDelivery, 'preflightCustomerSms'>;
 }): ApprovalReferenceCheck {
   return async (tenantId, proposal) => {
-    if (proposal.proposalType !== 'send_invoice') return [];
+    const document = SEND_DOCUMENT_ID_FIELD[proposal.proposalType];
+    if (!document) return [];
     const { payload } = proposal;
     const channel = payload.channel ?? payload.sendChannel;
     if (channel !== 'email' && channel !== 'sms' && channel !== 'auto') return [];
     if (typeof payload.recipient === 'string' && payload.recipient.trim().length > 0) return [];
-    const invoiceId = payload.invoiceId;
-    // No invoice id yet is a different gate (invoiceId), never this one.
-    if (typeof invoiceId !== 'string' || invoiceId.length === 0 || isChainRefToken(invoiceId)) return [];
-    const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
-    if (!invoice) return [];
-    const job = await deps.jobRepo.findById(tenantId, invoice.jobId);
+    const documentId = payload[document];
+    // No document id yet is a different gate (invoiceId / estimateId), never this one.
+    if (typeof documentId !== 'string' || documentId.length === 0 || isChainRefToken(documentId)) return [];
+    const sent =
+      document === 'invoiceId'
+        ? await deps.invoiceRepo.findById(tenantId, documentId)
+        : await deps.estimateRepo?.findById(tenantId, documentId);
+    if (!sent) return [];
+    const job = await deps.jobRepo.findById(tenantId, sent.jobId);
     if (!job) return [];
     const customer = await deps.customerRepo.findById(tenantId, job.customerId);
     if (!customer) return [];
