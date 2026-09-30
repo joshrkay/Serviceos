@@ -17,8 +17,22 @@ import { approveProposal } from '../../src/proposals/actions';
 import {
   invoiceReferenceCheck,
   invoiceSendableReferenceCheck,
+  estimateInvoicedReferenceCheck,
 } from '../../src/proposals/approval-reference-checks';
 import { buildInvoice } from '../factories/invoice.factory';
+import { buildEstimate } from '../factories/estimate.factory';
+import { buildLineItem } from '../factories/line-item.factory';
+import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
+import { InMemoryCustomerRepository, createCustomer } from '../../src/customers/customer';
+import { InMemoryLocationRepository, createLocation } from '../../src/locations/location';
+import { createJob } from '../../src/jobs/job';
+import { InMemorySettingsRepository, type TenantSettings } from '../../src/settings/settings';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { calculateDocumentTotals } from '../../src/shared/billing-engine';
+import { ProposalExecutor } from '../../src/proposals/execution/executor';
+import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
+import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
+import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import {
@@ -291,4 +305,142 @@ describe('#1480 item 4 — AST-07 customer → estimate → create-and-send invo
     expect(res.body.message.content).toMatch(/4 linked steps/i);
     expect(res.body.message.content).not.toMatch(/didn't draft/i);
   });
+
+  // Money correctness: the invoice step's own clause ("create the invoice")
+  // names no work, so whatever the drafting model wrote for it is a guess.
+  // Once the estimate step has run, the invoice bills THAT estimate — its
+  // lines, discount and tax — exactly as convert-to-invoice would.
+  it('executing the chained invoice bills the estimate the chain produced: its lines, discount and tax, not the drafted guess', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const estimateRepo = new InMemoryEstimateRepository();
+    const customerRepo = new InMemoryCustomerRepository();
+    const locationRepo = new InMemoryLocationRepository();
+    const gateway = scriptedGateway(
+      {
+        [turn]: { intentType: 'create_customer', entities: { displayName: 'Jane Smith', phone: '555-0101' } },
+        'New customer Jane Smith, phone 555-0101': {
+          intentType: 'create_customer',
+          entities: { displayName: 'Jane Smith', phone: '555-0101' },
+        },
+        'draft an estimate for her for a water heater install at $1200': {
+          intentType: 'draft_estimate',
+          entities: { customerName: 'her', lineItemDescriptions: ['water heater install'] },
+        },
+        'create the invoice.': { intentType: 'create_invoice', entities: {} },
+      },
+      {
+        'You are an estimate generation assistant': LINES,
+        // The model's guess for a clause that names no work.
+        'You are an invoice generation assistant': JSON.stringify({
+          lineItems: [{ description: 'Service call', quantity: 1, unitPrice: 8900 }],
+          confidence_score: 0.9,
+        }),
+      },
+    );
+    const app = buildApp({ proposalRepo, gateway, invoiceRepo, jobRepo });
+    expect((await chat(app, turn)).status).toBe(200);
+    const [customerStep, estimateStep, invoiceStep] = byChainIndex(await proposalRepo.findByTenant(TEST_TENANT));
+
+    // Steps 1 and 2 ran: the customer, the job the estimate opened, and the
+    // estimate as it was saved — two lines, a $50 discount, 8.6% tax.
+    const customer = await createCustomer(
+      { tenantId: TEST_TENANT, firstName: 'Jane', lastName: 'Smith', createdBy: TEST_USER },
+      customerRepo,
+    );
+    const location = await createLocation(
+      { tenantId: TEST_TENANT, customerId: customer.id, street1: '1 Main St', city: 'Mesa', state: 'AZ', postalCode: '85201', isPrimary: true },
+      locationRepo,
+    );
+    const job = await createJob(
+      { tenantId: TEST_TENANT, customerId: customer.id, locationId: location.id, summary: 'Water heater install', createdBy: TEST_USER },
+      jobRepo,
+    );
+    const estimateLines = [
+      buildLineItem({ description: 'Water heater (50 gal)', quantity: 1, unitPriceCents: 95_000, totalCents: 95_000, sortOrder: 0 }),
+      buildLineItem({ description: 'Install labor', quantity: 1, unitPriceCents: 25_000, totalCents: 25_000, sortOrder: 1 }),
+    ];
+    const estimate = await estimateRepo.create(
+      buildEstimate({
+        tenantId: TEST_TENANT,
+        jobId: job.id,
+        lineItems: estimateLines,
+        totals: calculateDocumentTotals(estimateLines, 5_000, 860),
+      }),
+    );
+    await proposalRepo.updateStatus(TEST_TENANT, customerStep.id, 'executed', { resultEntityId: customer.id });
+    await proposalRepo.updateStatus(TEST_TENANT, estimateStep.id, 'executed', { resultEntityId: estimate.id });
+
+    // Step 3: the operator approves the invoice; it executes past its undo window.
+    await approveProposal(proposalRepo, TEST_TENANT, invoiceStep.id, TEST_USER, 'owner');
+    const approved = await proposalRepo.updateStatus(TEST_TENANT, invoiceStep.id, 'approved', {
+      approvedAt: new Date(Date.now() - 60_000),
+    });
+    const executor = new ProposalExecutor(
+      createExecutionHandlerRegistry({ invoiceRepo, estimateRepo, jobRepo, customerRepo, locationRepo, settingsRepo: seededSettings() }),
+      proposalRepo,
+      new IdempotencyGuard(new InMemoryProposalExecutionRepository(), proposalRepo),
+      new InMemoryAuditRepository(),
+    );
+    const { result } = await executor.execute(approved!, { tenantId: TEST_TENANT, executedBy: TEST_USER });
+
+    expect(result.success).toBe(true);
+    const invoice = await invoiceRepo.findById(TEST_TENANT, result.resultEntityId!);
+    expect(invoice?.estimateId).toBe(estimate.id);
+    expect(invoice?.jobId).toBe(job.id);
+    expect(invoice?.lineItems.map((li) => [li.description, li.quantity, li.unitPriceCents])).toEqual([
+      ['Water heater (50 gal)', 1, 95_000],
+      ['Install labor', 1, 25_000],
+    ]);
+    // $1,200.00 − $50.00 = $1,150.00; 8.6% tax on that is $98.90.
+    expect(invoice?.totals.discountCents).toBe(5_000);
+    expect(invoice?.totals.taxRateBps).toBe(860);
+    expect(invoice?.totals.totalCents).toBe(124_890);
+  });
+
+  // #1490/#1491 — one invoice per estimate. A chained invoice names its
+  // estimate through a chain token, which the reference check skips; once the
+  // estimate step has run, the tap must see the real estimate and refuse a
+  // second invoice for it.
+  it('an estimate that is already invoiced keeps the chained invoice from approving', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const estimateRepo = new InMemoryEstimateRepository();
+    const { app } = ast07App(proposalRepo);
+    expect((await chat(app, turn)).status).toBe(200);
+    const [customerStep, estimateStep, invoiceStep] = byChainIndex(await proposalRepo.findByTenant(TEST_TENANT));
+    const JOB = 'abababab-abab-4bab-8bab-abababababab';
+    const estimate = await estimateRepo.create(buildEstimate({ tenantId: TEST_TENANT, jobId: JOB }));
+    await invoiceRepo.create(buildInvoice({ tenantId: TEST_TENANT, jobId: JOB, estimateId: estimate.id }));
+    await proposalRepo.updateStatus(TEST_TENANT, customerStep.id, 'executed', {
+      resultEntityId: 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd',
+    });
+    await proposalRepo.updateStatus(TEST_TENANT, estimateStep.id, 'executed', { resultEntityId: estimate.id });
+
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, invoiceStep.id, TEST_USER, 'owner', undefined, undefined, {
+        referenceChecks: [estimateInvoicedReferenceCheck({ estimateRepo, invoiceRepo })],
+      }),
+    ).rejects.toThrow(/already invoiced/i);
+  });
 });
+
+function seededSettings(): InMemorySettingsRepository {
+  const repo = new InMemorySettingsRepository();
+  const seeded: TenantSettings = {
+    id: 'settings-1',
+    tenantId: TEST_TENANT,
+    businessName: 'Test Co',
+    timezone: 'UTC',
+    estimatePrefix: 'EST-',
+    invoicePrefix: 'INV-',
+    nextEstimateNumber: 1,
+    nextInvoiceNumber: 1,
+    defaultPaymentTermDays: 30,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  void repo.create(seeded);
+  return repo;
+}
