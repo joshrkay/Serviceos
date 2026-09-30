@@ -17,6 +17,7 @@ import {
   validateVoiceIngest,
   VoiceRepository,
   TranscribeAudioFn,
+  UnsupportedAudioFormatError,
 } from '../voice/voice-service';
 import { Queue } from '../queues/queue';
 import {
@@ -271,6 +272,30 @@ export function createVoiceRouter(
         }
       }
 
+      // #1497 — one failure response for both body shapes. An audio format
+      // the transcriber cannot decode is the client's problem (4xx, plain
+      // copy); anything else is ours. The raw provider/exception text is
+      // logged and audited, never sent to the client.
+      async function respondTranscriptionFailure(err: unknown, bodyShape: 'multipart' | 'raw') {
+        const errMsg = err instanceof Error ? err.message : 'Unknown error';
+        logger?.error(`voice.transcribe: failed (${bodyShape})`, {
+          tenantId, error: errMsg,
+          errorCategory: categorizeError(errMsg),
+        });
+        await emitAudit('voice.transcription.failed', { error: errMsg });
+        if (err instanceof UnsupportedAudioFormatError) {
+          res.status(415).json({
+            error: 'UNSUPPORTED_AUDIO_FORMAT',
+            message: "Sorry, we can't transcribe this audio format. Try recording again, or upload an m4a, mp3, wav or webm file.",
+          });
+          return;
+        }
+        res.status(500).json({
+          error: 'TRANSCRIPTION_FAILED',
+          message: "Sorry, we couldn't transcribe that recording. Please try again.",
+        });
+      }
+
       // Helper: validate and transcribe a buffer
       async function validateAndTranscribe(audioBuffer: Buffer, audioContentType: string) {
         // MIME type validation
@@ -335,16 +360,7 @@ export function createVoiceRouter(
 
           await validateAndTranscribe(audioPart.data, audioPart.contentType || 'audio/webm');
         } catch (err) {
-          const errMsg = err instanceof Error ? err.message : 'Unknown error';
-          logger?.error('voice.transcribe: failed (multipart)', {
-            tenantId, error: errMsg,
-            errorCategory: categorizeError(errMsg),
-          });
-          await emitAudit('voice.transcription.failed', { error: errMsg });
-          res.status(500).json({
-            error: 'TRANSCRIPTION_FAILED',
-            message: err instanceof Error ? err.message : 'Transcription failed',
-          });
+          await respondTranscriptionFailure(err, 'multipart');
         }
         return;
       }
@@ -359,16 +375,7 @@ export function createVoiceRouter(
           }
           await validateAndTranscribe(rawBody, contentType);
         } catch (err) {
-          const errMsg = err instanceof Error ? err.message : 'Unknown error';
-          logger?.error('voice.transcribe: failed (raw)', {
-            tenantId, error: errMsg,
-            errorCategory: categorizeError(errMsg),
-          });
-          await emitAudit('voice.transcription.failed', { error: errMsg });
-          res.status(500).json({
-            error: 'TRANSCRIPTION_FAILED',
-            message: err instanceof Error ? err.message : 'Transcription failed',
-          });
+          await respondTranscriptionFailure(err, 'raw');
         }
         return;
       }
