@@ -48,6 +48,12 @@
 import type { PinLockAlertRetryScheduler } from '../tasks/voice-approval-pin-lock-alert';
 import type { VoiceApprovalPinLockAlertRepository } from '../../settings/voice-approval-pin-lock-alert';
 import type { Pool } from 'pg';
+import {
+  InMemoryTransactionRunner,
+  PgTenantTransactionRunner,
+  type TenantTransactionRunner,
+} from '../../db/tenant-transaction';
+import { tenantContextStore } from '../../middleware/tenant-context';
 import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
 import {
@@ -3038,6 +3044,20 @@ export function createVoiceTurnProcessor(
    * created this session and best-effort releases any tentative appointment
    * hold on a known job. A life-safety call must never leave a booking behind.
    */
+  // #1514 — the unit of work an E1 booking revocation commits in. Inside an
+  // ambient tenant transaction (a request that already owns one) the repos
+  // already share that client, so opening a second connection would only
+  // risk waiting on our own row lock — run in place instead.
+  const ownRevocationTx: TenantTransactionRunner = deps.pool
+    ? new PgTenantTransactionRunner(deps.pool)
+    : new InMemoryTransactionRunner();
+  const revocationTx: Pick<TenantTransactionRunner, 'run'> = {
+    run: (tenantId, fn) =>
+      tenantContextStore.getStore()?.tenantId === tenantId
+        ? new InMemoryTransactionRunner().run(tenantId, fn)
+        : ownRevocationTx.run(tenantId, fn),
+  };
+
   async function handleRevokePendingBookings(
     session: VoiceSession,
     fx: SideEffect,
@@ -3060,22 +3080,32 @@ export function createVoiceTurnProcessor(
           // approved → executing → executed between the read above and the
           // write. `updateStatusIf` folds the precondition into the UPDATE, so
           // a lost race returns null rather than rejecting an executed booking.
-          const revoked = await deps.proposalRepo.updateStatusIf(
-            tenantId,
-            id,
-            REVOCABLE_FROM_STATUSES,
-            'rejected',
-            {
-              rejectionReason: 'life_safety_emergency',
-              rejectionDetails: `Booking revoked — E1 life-safety signal (${reason}) during the call; a hazard call is never booked.`,
-            },
-          );
-          if (revoked) {
-            // Repo rule: all mutations emit an audit event. Cancelling a
-            // customer's booking is exactly what an operator reconstructing an
-            // E1 call will need to see.
-            if (deps.auditRepo) {
-              try {
+          //
+          // #1514 — the status flip and its audit row are ONE unit of work.
+          // They used to be two separate commits, so a reader (an operator,
+          // or main's T1) could see the booking `rejected` before the
+          // `e1_booking_revoked` row existed — and a failed audit insert left
+          // a revoked booking with no trail at all. Both repos reuse the
+          // runner's client (tenantContextStore), so they commit together or
+          // not at all.
+          const proposalRepo = deps.proposalRepo;
+          let revoked: Proposal | null;
+          try {
+            revoked = await revocationTx.run(tenantId, async () => {
+              const flipped = await proposalRepo.updateStatusIf(
+                tenantId,
+                id,
+                REVOCABLE_FROM_STATUSES,
+                'rejected',
+                {
+                  rejectionReason: 'life_safety_emergency',
+                  rejectionDetails: `Booking revoked — E1 life-safety signal (${reason}) during the call; a hazard call is never booked.`,
+                },
+              );
+              // Repo rule: all mutations emit an audit event. Cancelling a
+              // customer's booking is exactly what an operator reconstructing
+              // an E1 call will need to see.
+              if (flipped && deps.auditRepo) {
                 await deps.auditRepo.create(
                   createAuditEvent({
                     tenantId,
@@ -3083,25 +3113,32 @@ export function createVoiceTurnProcessor(
                     actorRole: 'system',
                     eventType: 'agent.calling.e1_booking_revoked',
                     entityType: 'proposal',
-                    entityId: revoked.id,
+                    entityId: flipped.id,
                     correlationId: session.id,
                     metadata: {
-                      proposalId: revoked.id,
-                      proposalType: revoked.proposalType,
+                      proposalId: flipped.id,
+                      proposalType: flipped.proposalType,
                       fromStatus: p.status,
                       reason,
                     },
                   }),
                 );
-              } catch (err) {
-                logger.warn('e1_booking_revoked audit persist failed', {
-                  error: err instanceof Error ? err.message : String(err),
-                  sessionId: session.id,
-                  proposalId: revoked.id,
-                });
               }
-            }
-          } else {
+              return flipped;
+            });
+          } catch (err) {
+            // The unit of work rolled back, so the booking is still LIVE on a
+            // life-safety call — never silent: compensate like a lost race.
+            logger.error('revoke_pending_bookings: revocation rolled back', {
+              error: err instanceof Error ? err.message : String(err),
+              sessionId: session.id,
+              proposalId: id,
+            });
+            const current = await deps.proposalRepo.findById(tenantId, id);
+            await recordRevokeBlocked(session, tenantId, current ?? p);
+            continue;
+          }
+          if (!revoked) {
             // Lost the race. Re-read so the audit/task carry the real status.
             const current = await deps.proposalRepo.findById(tenantId, id);
             await recordRevokeBlocked(session, tenantId, current ?? p);
