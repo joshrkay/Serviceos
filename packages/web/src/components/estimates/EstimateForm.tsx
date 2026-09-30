@@ -12,6 +12,7 @@ import {
   totalCents,
 } from '../forms/LineItemEditor';
 import { useListQuery } from '../../hooks/useListQuery';
+import { IDEMPOTENCY_HEADER, useIdempotencyKey } from '../../lib/idempotencyKey';
 import { Button, Field, Input, Select, Textarea } from '../../components/ui';
 
 export interface EstimateFormProps {
@@ -265,6 +266,9 @@ export function EstimateForm({
     }
   }
 
+  // #1489 — one Idempotency-Key per create submission, reused on retry.
+  const submissionKey = useIdempotencyKey();
+
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -329,6 +333,7 @@ export function EstimateForm({
       try {
         const res = await apiFetch('/api/estimates', {
           method: 'POST',
+          headers: { [IDEMPOTENCY_HEADER]: submissionKey.keyFor(body) },
           body: JSON.stringify(body),
         });
         if (!res.ok) {
@@ -336,6 +341,7 @@ export function EstimateForm({
           throw new Error((json as { message?: string })?.message ?? `HTTP ${res.status}`);
         }
         const created = await res.json() as { id: string };
+        submissionKey.settle();
         toast.success('Estimate created');
         onCreated?.(created.id);
       } catch (err) {
@@ -346,7 +352,7 @@ export function EstimateForm({
         setSubmitting(false);
       }
     },
-    [form, onCreated]
+    [form, onCreated, submissionKey]
   );
 
   const total = totalCents(form.items);

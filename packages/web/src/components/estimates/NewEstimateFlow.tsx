@@ -11,6 +11,7 @@ import {
 import { apiFetch } from '../../utils/api-fetch';
 import { useListQuery } from '../../hooks/useListQuery';
 import { useEstimateTerm } from '../../hooks/useEstimateTerm';
+import { IDEMPOTENCY_HEADER, useIdempotencyKey } from '../../lib/idempotencyKey';
 import { ErrorState } from '../ErrorState';
 
 type ServiceType = 'HVAC' | 'Plumbing' | 'Painting';
@@ -1187,6 +1188,9 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
   const [jobsLoaded,  setJobsLoaded]  = useState(false);
   const [jobId,       setJobId]       = useState<string | null>(null);
   const [creatingJob, setCreatingJob] = useState(false);
+  // #1489 — one Idempotency-Key per create submission, reused on retry.
+  const jobSubmissionKey = useIdempotencyKey();
+  const estimateSubmissionKey = useIdempotencyKey();
   // Invalidate the cached created-estimate id whenever the inputs that fed it
   // change. Otherwise, after a create succeeds but /send fails, a user who goes
   // back and edits the job, valid-until, or line items would re-send the stale
@@ -1230,19 +1234,22 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
     setCreatingJob(true);
     setSubmitError(null);
     try {
+      const jobBody = {
+        customerId,
+        locationId: locId,
+        summary: aiResult?.description || 'New job',
+      };
       const res = await apiFetch('/api/jobs', {
         method: 'POST',
-        body: JSON.stringify({
-          customerId,
-          locationId: locId,
-          summary: aiResult?.description || 'New job',
-        }),
+        headers: { [IDEMPOTENCY_HEADER]: jobSubmissionKey.keyFor(jobBody) },
+        body: JSON.stringify(jobBody),
       });
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
         throw new Error((json as { message?: string })?.message ?? `HTTP ${res.status}`);
       }
       const created = await res.json() as ApiJob;
+      jobSubmissionKey.settle();
       setJobs(prev => [created, ...prev]);
       setJobId(created.id);
       return created.id;
@@ -1342,19 +1349,22 @@ export function NewEstimateFlow({ onClose, onCreated, preSelectedCustomerId }: {
       if (!Number.isNaN(d.getTime())) validUntilIso = d.toISOString();
     }
     try {
+      const estimateBody = {
+        jobId: useJobId,
+        lineItems: buildLineItemsPayload(),
+        validUntil: validUntilIso,
+      };
       const res = await apiFetch('/api/estimates', {
         method: 'POST',
-        body: JSON.stringify({
-          jobId: useJobId,
-          lineItems: buildLineItemsPayload(),
-          validUntil: validUntilIso,
-        }),
+        headers: { [IDEMPOTENCY_HEADER]: estimateSubmissionKey.keyFor(estimateBody) },
+        body: JSON.stringify(estimateBody),
       });
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
         throw new Error((json as { message?: string })?.message ?? `HTTP ${res.status}`);
       }
       const created = await res.json() as { id: string };
+      estimateSubmissionKey.settle();
       createdEstimateIdRef.current = created.id;
       return created.id;
     } catch (err) {

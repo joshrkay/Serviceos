@@ -459,8 +459,8 @@ export function NewJobFlow({
   const [addressConflictNote, setAddressConflictNote] = useState('');
   const { data: apiCustomers } = useListQuery<ApiCustomer>('/api/customers');
   const tenantTz = useTenantTimezone();
-  const { mutate: createJobMutation } = useMutation<CreateJobRequest, CreateJobResponse>('POST', '/api/jobs');
-  const { mutate: createCustomerMutation } = useMutation<Record<string, unknown>, CreateCustomerResponse>('POST', '/api/customers');
+  const { mutate: createJobMutation } = useMutation<CreateJobRequest, CreateJobResponse>('POST', '/api/jobs', { idempotent: true });
+  const { mutate: createCustomerMutation } = useMutation<Record<string, unknown>, CreateCustomerResponse>('POST', '/api/customers', { idempotent: true });
   const { mutate: createLocationMutation } = useMutation<Record<string, unknown>, CreateLocationResponse>('POST', '/api/locations');
 
   useEffect(() => {

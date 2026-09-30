@@ -80,7 +80,7 @@ interface AddCustomerSheetProps {
 
 function AddCustomerSheet({ onClose, onNewEstimate, onNewJob, existingCustomers, onCreate }: AddCustomerSheetProps) {
   const navigate = useNavigate();
-  const { mutate: createCustomer } = useMutation<Record<string, unknown>, Customer>('POST', '/api/customers');
+  const { mutate: createCustomer } = useMutation<Record<string, unknown>, Customer>('POST', '/api/customers', { idempotent: true });
   const { mutate: createLocation } = useMutation<Record<string, unknown>, { id: string }>('POST', '/api/locations');
 
   const [step, setStep] = useState<SheetStep>('contact');

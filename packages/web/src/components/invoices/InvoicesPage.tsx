@@ -28,6 +28,7 @@ import { printInvoiceReceipt } from '../../lib/invoiceReceipt';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateInTenantTz, formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
 import { AttachmentSection } from '../attachments/AttachmentSection';
+import { IDEMPOTENCY_HEADER, useIdempotencyKey } from '../../lib/idempotencyKey';
 
 type InvoiceStatus = 'Draft' | 'Sent' | 'Unpaid' | 'Paid' | 'Overdue' | 'Void' | 'Canceled';
 
@@ -661,6 +662,8 @@ function MarkPaidSheet({
   const [amountText, setAmountText] = useState(() => centsToInputValue(amountDueCents));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // #1489 — a retried "Mark as paid" must never record the payment twice.
+  const submissionKey = useIdempotencyKey();
 
   const METHODS = [
     { key: 'card',  label: 'Credit / Debit card', icon: CreditCard },
@@ -682,14 +685,14 @@ function MarkPaidSheet({
     setSaving(true);
     setError(null);
     try {
+      const payment = { invoiceId, amountCents, method: UI_METHOD_TO_API[method] };
       const res = await apiFetch('/api/payments', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          invoiceId,
-          amountCents,
-          method: UI_METHOD_TO_API[method],
-        }),
+        headers: {
+          'Content-Type': 'application/json',
+          [IDEMPOTENCY_HEADER]: submissionKey.keyFor(payment),
+        },
+        body: JSON.stringify(payment),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -697,6 +700,7 @@ function MarkPaidSheet({
           typeof body?.message === 'string' ? body.message : `Payment failed (HTTP ${res.status})`,
         );
       }
+      submissionKey.settle();
       await onPaid(amountCents);
       onClose();
     } catch (err) {
