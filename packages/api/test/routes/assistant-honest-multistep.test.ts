@@ -9,6 +9,10 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import request from 'supertest';
 import { createAssistantRouter, type AssistantRouterDeps } from '../../src/routes/assistant';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { approveProposal } from '../../src/proposals/actions';
+import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
+import { InMemoryJobRepository } from '../../src/jobs/job';
+import { buildJob } from '../factories/job.factory';
 import type { AuthenticatedRequest } from '../../src/middleware/auth';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import {
@@ -181,5 +185,68 @@ describe('#1499 slice 1 — a multi-step reply names every step it did not draft
     const res = await chat(app, turn);
     expect(res.status).toBe(200);
     expect(res.body.message.content).not.toMatch(/didn't draft/i);
+  });
+});
+
+describe('#1499 slice 2 — "create an invoice for job X and send it" drafts the invoice from the job', () => {
+  const JOB_ID = 'c73844bd-4928-4d1f-b8c5-f669ceb10018';
+  const CUSTOMER_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const INVOICE_DRAFT = JSON.stringify({
+    lineItems: [{ description: 'Blower motor replacement', quantity: 1, unitPrice: 42500 }],
+    confidence_score: 0.9,
+  });
+
+  // C22: the classifier read the turn as issue_invoice, and the JOB number
+  // rode through to invoiceId. The card was "Issue invoice JOB-0081" and no
+  // invoice existed.
+  it('issue_invoice with a job number as invoiceId becomes a draft_invoice on that job, and the reply says the send comes next', async () => {
+    const turn = 'Create an invoice for job JOB-0081 and send it.';
+    const proposalRepo = new InMemoryProposalRepository();
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create(buildJob({ id: JOB_ID, tenantId: TEST_TENANT, customerId: CUSTOMER_ID, jobNumber: 'JOB-0081' }));
+    const app = buildApp({
+      proposalRepo,
+      jobRepo,
+      invoiceRepo: new InMemoryInvoiceRepository(),
+      gateway: scriptedGateway(
+        { [turn]: { intentType: 'issue_invoice', entities: { jobReference: 'JOB-0081' } } },
+        { 'You are an invoice generation assistant': INVOICE_DRAFT },
+      ),
+    });
+
+    const res = await chat(app, turn);
+    expect(res.status).toBe(200);
+    const persisted = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted.map((p) => p.proposalType)).toEqual(['draft_invoice']);
+    const payload = persisted[0].payload as Record<string, unknown>;
+    expect(payload.jobId).toBe(JOB_ID);
+    expect(payload.customerId).toBe(CUSTOMER_ID);
+    expect(payload.invoiceId).toBeUndefined();
+    expect(res.body.message.proposal.proposalType).toBe('draft_invoice');
+    expect(res.body.message.content).toMatch(/send/i);
+  });
+
+  // Without create wording it really is "send the existing one" — but a job
+  // number is provably not an invoice id, one tap from being submitted as one.
+  it('a plain issue never carries the job number as its invoiceId, and cannot be approved as-is', async () => {
+    const turn = 'Issue the invoice for job JOB-0081.';
+    const proposalRepo = new InMemoryProposalRepository();
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create(buildJob({ id: JOB_ID, tenantId: TEST_TENANT, customerId: CUSTOMER_ID, jobNumber: 'JOB-0081' }));
+    const app = buildApp({
+      proposalRepo,
+      jobRepo,
+      invoiceRepo: new InMemoryInvoiceRepository(),
+      // The taxonomy tells the classifier to put an issue_invoice reference in
+      // jobReference — the live C22 card carried it through as invoiceId.
+      gateway: scriptedGateway({ [turn]: { intentType: 'issue_invoice', entities: { jobReference: 'JOB-0081' } } }),
+    });
+
+    const res = await chat(app, turn);
+    expect(res.status).toBe(200);
+    const [persisted] = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted.proposalType).toBe('issue_invoice');
+    expect((persisted.payload as Record<string, unknown>).invoiceId).not.toBe('JOB-0081');
+    await expect(approveProposal(proposalRepo, TEST_TENANT, persisted.id, TEST_USER, 'owner')).rejects.toThrow();
   });
 });

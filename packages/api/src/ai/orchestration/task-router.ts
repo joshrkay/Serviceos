@@ -74,7 +74,16 @@ const INVOICE_NUMBER_RE = /^(?:[A-Za-z][A-Za-z0-9]*-)?\d+$/;
 // "<alpha><alnum>*-<digits>" invoice number for ANY tenant prefix
 // ("INV-0042", "ACME-0042"). Free-text names ("the Henderson invoice",
 // "Henderson") are NOT resolvable and must fall to the gated rung.
+//
+// #1499 (C22) — except the prefixes that name ANOTHER document: "JOB-0081" is
+// a job number (hard-coded JOB- numbering, pg-job.ts) and "EST-0079" an
+// estimate number. Handed through, "issue invoice JOB-0081" became an
+// approvable-looking card whose invoiceId was a job; they fall to the gated
+// rung like any other non-invoice reference.
+const OTHER_DOCUMENT_NUMBER_RE = /^(?:JOB|EST)-\d+$/i;
+
 export function looksLikeResolvedInvoiceRef(value: string): boolean {
+  if (OTHER_DOCUMENT_NUMBER_RE.test(value)) return false;
   return UUID_RE.test(value) || INVOICE_NUMBER_RE.test(value);
 }
 

@@ -1429,25 +1429,74 @@ const IN_FLIGHT_INVOICE_STATUSES: ReadonlySet<string> = new Set(['draft', 'open'
  * words ask for a new invoice and that is what gets drafted.
  */
 async function isCreateAndSendWithNoInvoice(
-  invoiceRepo: InvoiceRepository | undefined,
+  deps: Pick<AssistantRouterDeps, 'invoiceRepo' | 'jobRepo'>,
   tenantId: string,
   intentType: string,
   text: string,
-): Promise<boolean> {
-  if (intentType !== 'send_invoice' || !CREATE_INVOICE_WORDING_RE.test(text)) return false;
+): Promise<CreateAndSendReroute | undefined> {
+  // #1499 (C22) — "Create an invoice for job JOB-0081 and send it" came back
+  // `issue_invoice` rather than `send_invoice`: same dead end, same reroute.
+  if (!CREATE_AND_SEND_INTENTS.has(intentType) || !CREATE_INVOICE_WORDING_RE.test(text)) return undefined;
+  const { invoiceRepo } = deps;
   const ids = [...new Set((text.match(LITERAL_UUID_RE) ?? []).map((id) => id.toLowerCase()))];
-  if (!invoiceRepo) return true;
+  const job = await findJobByLiteralNumber(deps.jobRepo, tenantId, text);
+  if (!invoiceRepo) return { job };
   try {
     for (const id of ids) {
-      if (await invoiceRepo.findById(tenantId, id)) return false;
+      if (await invoiceRepo.findById(tenantId, id)) return undefined;
+    }
+    for (const id of [...ids, ...(job.jobId ? [job.jobId] : [])]) {
       const onJob = await invoiceRepo.findByJob(tenantId, id);
-      if (onJob.some((inv) => IN_FLIGHT_INVOICE_STATUSES.has(inv.status))) return false;
+      if (onJob.some((inv) => IN_FLIGHT_INVOICE_STATUSES.has(inv.status))) return undefined;
     }
   } catch {
     // Failure-soft toward the draft: a draft never sends anything.
-    return true;
+    return { job };
   }
-  return true;
+  return { job };
+}
+
+/** The intents a "create (an invoice) … and send it" ask comes back as. */
+const CREATE_AND_SEND_INTENTS: ReadonlySet<string> = new Set(['send_invoice', 'issue_invoice']);
+
+/** "JOB-0081" — a job's human number, as the operator reads it off the job. */
+const LITERAL_JOB_NUMBER_RE = /\bJOB-\d+\b/gi;
+
+/**
+ * A create-and-send ask re-routed to drafting the invoice (#1393/#1499). `job`
+ * is the job a literal job NUMBER in the text names ({} when none, or not
+ * exactly one): the draft bills that job, and its id must never ride the
+ * invoice-id slot.
+ */
+interface CreateAndSendReroute {
+  job: Record<string, string>;
+}
+
+/**
+ * #1499 — the job a literal "JOB-0081" names, via the job repository's own
+ * search (which matches job_number), kept only on an EXACT number match.
+ * Exactly one job, or nothing — same rule as `resolveLiteralJobReference`.
+ * Failure-soft. Narrow on purpose: only the create-and-send reroute uses it;
+ * general doc-number resolution belongs to the lookup/resolution layer.
+ */
+async function findJobByLiteralNumber(
+  jobRepo: JobRepository | undefined,
+  tenantId: string,
+  text: string,
+): Promise<Record<string, string>> {
+  if (!jobRepo) return {};
+  const numbers = [...new Set((text.match(LITERAL_JOB_NUMBER_RE) ?? []).map((n) => n.toUpperCase()))];
+  if (numbers.length !== 1) return {};
+  try {
+    const hits = (await jobRepo.findByTenant(tenantId, { search: numbers[0], limit: 5 })).filter(
+      (job) => job.jobNumber?.toUpperCase() === numbers[0],
+    );
+    if (hits.length !== 1) return {};
+    const [job] = hits;
+    return { jobId: job.id, ...(job.customerId ? { customerId: job.customerId } : {}) };
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -3136,7 +3185,7 @@ async function generateAssistantReply(
           : classified;
       // #1393 — "create and send" with no invoice to send drafts the invoice.
       const createAndSend = await isCreateAndSendWithNoInvoice(
-        deps.invoiceRepo,
+        deps,
         tenantId,
         photoRouted.intentType,
         lastUserText,
@@ -3741,7 +3790,9 @@ async function generateAssistantReply(
           extractedEntities,
           lastUserText,
         );
-        const verifiedIds = preDraft.ids;
+        // #1499 — a create-and-send reroute that named its job by NUMBER
+        // bills that job; a name the resolver verified still wins.
+        const verifiedIds = { ...(createAndSend?.job ?? {}), ...preDraft.ids };
         // I3 — resolved once (memoized).
         const singleIntentTenantThresholdOverride = await getTenantThresholdOverride();
         const { proposal } = await handler.handle({
