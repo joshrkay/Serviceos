@@ -166,19 +166,21 @@ export interface InAppAdapterDeps {
    * Postgres pool — when present, end-of-call summaries are persisted to
    * call_summaries. Optional so dev mode (no DB) still works.
    *
-   * Also used to self-construct the entity resolver (see `entityResolver`)
-   * when one isn't injected, so production wiring needs no change.
+   * Also used to self-construct a bare `PgEntityResolver` (no tenant
+   * aliases) when no `entityResolver` is injected.
    */
   pool?: Pool;
   /**
    * P0 voice-safety — shared, tenant-scoped entity resolver (production:
-   * `PgEntityResolver`, pg_trgm, τ_ent=0.80). Free-text
+   * app.ts's `sharedEntityResolver`, `AliasFirstEntityResolver →
+   * PgEntityResolver`, pg_trgm, τ_ent=0.80 — #1509). Free-text
    * customer/job/appointment references on the scheduling path resolve
    * through this so ambiguity becomes a one-tap voice_clarification instead
    * of a silent "newest match" guess (CLAUDE.md invariant).
    *
-   * Optional and self-constructed from `pool` when omitted (see
-   * `getEntityResolver`), so app.ts needs no wiring change; tests inject a
+   * app.ts MUST inject the shared resolver: the `pool` fallback (see
+   * `getEntityResolver`) skips approved tenant aliases, so an alias that
+   * resolves in chat/memo/phone would miss here (#1509). Tests inject a
    * mock resolver directly (no DB required). When neither a resolver nor a
    * pool is present, resolution is skipped and references pass through
    * unresolved (proposal surfaces for operator review) — never guessed.

@@ -34,6 +34,7 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { createLogger } from '../../src/logging/logger';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
@@ -441,6 +442,79 @@ describe('QuickBooks accounting sync — integration', () => {
     );
   });
 
+  describe('#1013 row 9.11 — every QuickBooks sync outcome is audited', () => {
+    it('a successful push writes ONE accounting.invoice.synced row for the invoice; a re-sweep adds none', async () => {
+      const auditRepo = new PgAuditRepository(pool);
+      const integrationId = await seedActiveIntegration(tenantA.tenantId);
+      const { jobId } = await seedCustomerJobLocation(tenantA, 'Audra');
+      const invoiceId = await seedPaidInvoice(tenantA, jobId, 'INV-AUD-001');
+      const deps = {
+        integrationRepo,
+        syncLogRepo,
+        invoiceRepo,
+        customerRepo,
+        jobRepo,
+        qboConfig: QBO_CONFIG,
+        logger,
+        auditRepo,
+      };
+
+      await runAccountingSyncSweep({ ...deps, fetchFn: makeQboFetch().fetchFn });
+      const rows = await auditRepo.findByEntity(tenantA.tenantId, 'invoice', invoiceId);
+      const synced = rows.filter((r) => r.eventType === 'accounting.invoice.synced');
+      expect(synced).toHaveLength(1);
+      expect(synced[0].actorRole).toBe('system');
+      // The audit row names the SAME QuickBooks id the dedupe ledger holds
+      // (the shared DB carries other tenants' integrations, so the mock's
+      // counter is not a stable literal here).
+      const ledger = (await syncLogRepo.listRecent(tenantA.tenantId, integrationId, 50)).find(
+        (l) => l.entityType === 'invoice' && l.entityId === invoiceId && l.status === 'success',
+      );
+      expect(ledger?.externalId).toMatch(/^qb_sr_\d+$/);
+      expect(synced[0].metadata).toMatchObject({
+        provider: 'quickbooks',
+        integrationId,
+        externalId: ledger!.externalId,
+        invoiceNumber: 'INV-AUD-001',
+        totalCents: 12500,
+      });
+
+      // Already synced → zero QuickBooks calls and zero new audit rows.
+      await runAccountingSyncSweep({ ...deps, fetchFn: makeQboFetch().fetchFn });
+      const after = await auditRepo.findByEntity(tenantA.tenantId, 'invoice', invoiceId);
+      expect(after.filter((r) => r.eventType.startsWith('accounting.invoice.'))).toHaveLength(1);
+    });
+
+    it('a QuickBooks refusal writes ONE accounting.invoice.sync_failed row carrying the reason (the invoice is retried next sweep)', async () => {
+      const auditRepo = new PgAuditRepository(pool);
+      const integrationId = await seedActiveIntegration(tenantA.tenantId);
+      const { jobId } = await seedCustomerJobLocation(tenantA, 'Faye');
+      const invoiceId = await seedPaidInvoice(tenantA, jobId, 'INV-AUD-FAIL');
+      const { fetchFn } = makeQboFetch({
+        forceError: { onPath: 'salesreceipt', status: 422, message: 'invalid line amount' },
+      });
+
+      await runAccountingSyncSweep({
+        integrationRepo,
+        syncLogRepo,
+        invoiceRepo,
+        customerRepo,
+        jobRepo,
+        qboConfig: QBO_CONFIG,
+        fetchFn,
+        logger,
+        auditRepo,
+      });
+
+      const rows = await auditRepo.findByEntity(tenantA.tenantId, 'invoice', invoiceId);
+      expect(rows.filter((r) => r.eventType === 'accounting.invoice.synced')).toHaveLength(0);
+      const failed = rows.filter((r) => r.eventType === 'accounting.invoice.sync_failed');
+      expect(failed).toHaveLength(1);
+      expect(failed[0].metadata).toMatchObject({ provider: 'quickbooks', integrationId });
+      expect(String(failed[0].metadata.reason)).toContain('invalid line amount');
+    });
+  });
+
   it('tenant isolation: sync_log rows written under tenant A are invisible to tenant B (RLS)', async () => {
     const tenantB = await createTestTenant(pool);
     const integrationA = await seedActiveIntegration(tenantA.tenantId);
@@ -482,5 +556,37 @@ describe('QuickBooks accounting sync — integration', () => {
     expect(entityIdsUnderA).not.toContain(invoiceB);
     expect(entityIdsUnderB).toContain(invoiceB);
     expect(entityIdsUnderB).not.toContain(invoiceA);
+  });
+
+  it('#1013 row 9.11 T1: each tenant\'s sync audit row is written under its own tenant and unreadable by the neighbour', async () => {
+    const auditRepo = new PgAuditRepository(pool);
+    const tenantB = await createTestTenant(pool);
+    await seedActiveIntegration(tenantA.tenantId);
+    await seedActiveIntegration(tenantB.tenantId);
+    const { jobId: jobA } = await seedCustomerJobLocation(tenantA, 'AudA');
+    const { jobId: jobB } = await seedCustomerJobLocation(tenantB, 'AudB');
+    const invoiceA = await seedPaidInvoice(tenantA, jobA, 'INV-AUD-T1-A');
+    const invoiceB = await seedPaidInvoice(tenantB, jobB, 'INV-AUD-T1-B');
+
+    await runAccountingSyncSweep({
+      integrationRepo,
+      syncLogRepo,
+      invoiceRepo,
+      customerRepo,
+      jobRepo,
+      qboConfig: QBO_CONFIG,
+      fetchFn: makeQboFetch().fetchFn,
+      logger,
+      auditRepo,
+    });
+
+    const syncedFor = async (tenantId: string, invoiceId: string) =>
+      (await auditRepo.findByEntity(tenantId, 'invoice', invoiceId)).filter(
+        (r) => r.eventType === 'accounting.invoice.synced',
+      );
+    expect(await syncedFor(tenantA.tenantId, invoiceA)).toHaveLength(1);
+    expect(await syncedFor(tenantB.tenantId, invoiceB)).toHaveLength(1);
+    expect(await syncedFor(tenantB.tenantId, invoiceA)).toHaveLength(0);
+    expect(await syncedFor(tenantA.tenantId, invoiceB)).toHaveLength(0);
   });
 });
