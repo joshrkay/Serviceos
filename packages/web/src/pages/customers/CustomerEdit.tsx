@@ -3,6 +3,7 @@ import { Check } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { Field, Input, Select, Textarea, Button } from '../../components/ui';
 import { formatApiErrorMessage } from '../../utils/api-errors';
+import { IDEMPOTENCY_HEADER, useIdempotencyKey } from '../../lib/idempotencyKey';
 
 const CHANNELS = ['email', 'sms', 'phone', 'mail'] as const;
 
@@ -123,6 +124,9 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
     };
   }, [customerId]);
 
+  // #1489 — one Idempotency-Key per create submission, reused on retry.
+  const submissionKey = useIdempotencyKey();
+
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -183,6 +187,7 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
             })
           : await apiFetch('/api/customers', {
               method: 'POST',
+              headers: { [IDEMPOTENCY_HEADER]: submissionKey.keyFor(body) },
               body: JSON.stringify(body),
             });
         if (!res.ok) {
@@ -190,6 +195,7 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
           throw new Error(formatApiErrorMessage(json, `HTTP ${res.status}`));
         }
         const saved = await res.json();
+        submissionKey.settle();
         onSaved?.(customerId ?? saved.id);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to save customer');
@@ -197,7 +203,7 @@ export function CustomerEdit({ customerId, onSaved, onCancel }: CustomerEditProp
         setSubmitting(false);
       }
     },
-    [form, customerId, onSaved]
+    [form, customerId, onSaved, submissionKey]
   );
 
   if (loading) {

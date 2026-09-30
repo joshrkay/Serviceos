@@ -254,6 +254,47 @@ describe('useMutation — basic behavior', () => {
   });
 });
 
+describe('useMutation — Idempotency-Key (#1489)', () => {
+  const keyOf = (call: Parameters<typeof fetch>): string | undefined =>
+    ((call[1] as RequestInit).headers as Record<string, string>)['Idempotency-Key'];
+
+  it('an idempotent create retried with the same body reuses its key; the next create gets a new one', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValue({ ok: true, status: 201, json: async () => ({ id: 'c1' }) } as Response);
+
+    const { result } = renderHook(() => useMutation('POST', '/api/customers', { idempotent: true }));
+    await act(async () => {
+      await expect(result.current.mutate({ firstName: 'Grace' })).rejects.toThrow('Failed to fetch');
+    });
+    await act(async () => {
+      await result.current.mutate({ firstName: 'Grace' });
+    });
+    await act(async () => {
+      await result.current.mutate({ firstName: 'Grace' });
+    });
+
+    const keys = fetchSpy.mock.calls.map(keyOf);
+    expect(keys[0]).toMatch(/\S{8,}/);
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).toMatch(/\S{8,}/);
+    expect(keys[2]).not.toBe(keys[0]);
+  });
+
+  it('sends no key unless the mutation opts in', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: '1' }),
+    } as Response);
+    const { result } = renderHook(() => useMutation('POST', '/api/items'));
+    await act(async () => {
+      await result.current.mutate({ name: 'Test' });
+    });
+    expect(keyOf(fetchSpy.mock.calls[0]!)).toBeUndefined();
+  });
+});
+
 describe('P0-030 useMutation — Authorization Bearer header', () => {
   it('happy path: includes Bearer token from Clerk getToken on every request', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({

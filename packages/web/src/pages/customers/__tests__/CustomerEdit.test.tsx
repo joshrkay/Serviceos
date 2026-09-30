@@ -289,6 +289,35 @@ describe('CustomerEdit — create mode (no customerId)', () => {
     expect(body.lastName).toBe('Hopper');
   });
 
+  // #1489 — a create retried after a lost response must not duplicate the
+  // customer: every attempt of one submission carries the same key.
+  it('sends one stable Idempotency-Key across a retried create', async () => {
+    vi.mocked(apiFetch)
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({ id: 'c-new', firstName: 'Grace', lastName: 'Hopper' }),
+      } as unknown as Response);
+
+    const onSaved = vi.fn();
+    render(<CustomerEdit onSaved={onSaved} />);
+    fireEvent.change(screen.getByLabelText('firstName'), { target: { value: 'Grace' } });
+    fireEvent.change(screen.getByLabelText('lastName'), { target: { value: 'Hopper' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Failed to fetch');
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith('c-new'));
+
+    const keys = vi.mocked(apiFetch).mock.calls.map(
+      ([, opts]) => (opts?.headers as Record<string, string> | undefined)?.['Idempotency-Key'],
+    );
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toMatch(/\S{8,}/);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
   it('omits blank optional fields from the create request', async () => {
     vi.mocked(apiFetch).mockResolvedValueOnce({
       ok: true,
