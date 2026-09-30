@@ -1,0 +1,15 @@
+# Shared subflow: wait for the dev-auth-signed-in app shell (no Clerk sign-in
+# screen), and step past the setup-complete gate. A fresh DEV_AUTH_BYPASS
+# tenant has not finished onboarding, so AuthGate routes it to /onboarding;
+# "Skip for now" is honoured for the session (app/(onboarding)/index.tsx).
+appId: com.serviceos.app
+---
+- extendedWaitUntil:
+    visible: "(Skip for now|Today|Home)"
+    timeout: 120000
+- assertNotVisible: "Check your email"
+- runFlow:
+    when:
+      visible: "Skip for now"
+    commands:
+      - tapOn: "Skip for now"
