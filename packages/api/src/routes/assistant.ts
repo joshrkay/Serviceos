@@ -1605,6 +1605,52 @@ function liftChainRefGates(proposal: Proposal, refs: readonly ChainRef[]): void 
   proposal.sourceContext = { ...(proposal.sourceContext ?? {}), missingFields: remaining };
 }
 
+/**
+ * #1513 — the customer id a drafted chain card carries that the ROUTE verified
+ * (resolver / repo lookup, stamped on `sourceContext.verifiedIds`) — never a
+ * model-authored one.
+ */
+function verifiedCustomerOf(proposal: Proposal): string | undefined {
+  const verified = (proposal.sourceContext as Record<string, unknown> | undefined)?.verifiedIds as
+    | Record<string, unknown>
+    | undefined;
+  const id = proposal.payload.customerId;
+  return isUuidString(id) && verified?.customerId === id ? (id as string) : undefined;
+}
+
+/**
+ * #1513 — a chain leg that names no customer of its own ("…then create the
+ * invoice") is for the customer the chain is already about. With no
+ * create_customer edge to take it from, it inherits the verified customer of
+ * the step it is linked to (its estimate), else of the nearest earlier step —
+ * and the customerId gate that its missing reference raised is lifted. The id
+ * is a verified tenant record from this same turn, so it is stamped verified.
+ */
+function inheritChainCustomer(
+  proposal: Proposal,
+  refs: readonly ChainRef[],
+  chainVerifiedCustomers: ReadonlyArray<string | undefined>,
+  ownCustomerReference: unknown,
+): void {
+  // A leg that names someone ELSE is never re-pointed at the chain's customer.
+  if (typeof ownCustomerReference === 'string' && !CUSTOMER_PRONOUN_RE.test(ownCustomerReference.trim())) return;
+  const path = chatChainPayloadPath(proposal.proposalType, 'customerId');
+  if (path !== 'customerId' || isUuidString(proposal.payload.customerId)) return;
+  if (refs.some((ref) => ref.payloadPath === 'customerId')) return;
+  const linked = refs.map((ref) => chainVerifiedCustomers[ref.parentChainIndex]).find(Boolean);
+  const customerId = linked ?? [...chainVerifiedCustomers].reverse().find(Boolean);
+  if (!customerId) return;
+  proposal.payload.customerId = customerId;
+  delete proposal.payload.customerReference;
+  stampVerifiedIds(proposal as { sourceContext?: Record<string, unknown> }, { customerId });
+  proposal.sourceContext = {
+    ...(proposal.sourceContext ?? {}),
+    missingFields: missingFieldsFor(proposal).filter((field) => field !== 'customerId'),
+  };
+}
+
+const CUSTOMER_PRONOUN_RE = /^(?:her|him|them|they|she|he|the\s+customer|same\s+customer)$/i;
+
 const isUuidString = (value: unknown): boolean =>
   typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 
@@ -3807,6 +3853,8 @@ async function generateAssistantReply(
         // #1480 item 4 — the proposal type each drafted card is, by chain
         // index: what a later step's `$ref:chain[n]` edge points at.
         const chainTypes: string[] = [];
+        // #1513 — each drafted card's route-VERIFIED customer id, by chain index.
+        const chainVerifiedCustomers: Array<string | undefined> = [];
         for (const step of chainSteps) {
           const segment = step.text;
           // "…and send it": the invoice it sends is the one this turn drafts.
@@ -3842,6 +3890,20 @@ async function generateAssistantReply(
             ? undefined
             : await isCreateAndSendWithNoInvoice(deps, tenantId, segClass.intentType, segment);
           if (segCreateAndSend) segClass = { ...segClass, intentType: 'create_invoice' };
+          // #1513 — a chain leg whose own words are "create the invoice" (a
+          // create verb governing the invoice noun, CREATE_INVOICE_WORDING_RE)
+          // but that the classifier could not place on its own — bare, it
+          // names no work (live AST-07: `unknown`, and the leg vanished). The
+          // planner already knows what the leg asks for; its customer and
+          // estimate come from the chain edges below.
+          if (
+            !step.sendInvoiceTail &&
+            segClass.intentType !== 'create_customer' &&
+            !CHAT_INTENT_TO_REGISTRY_KEY[segClass.intentType] &&
+            CREATE_INVOICE_WORDING_RE.test(segment)
+          ) {
+            segClass = { ...segClass, intentType: 'create_invoice' };
+          }
           // create_customer is the one documented exception to
           // CHAT_INTENT_TO_REGISTRY_KEY (see that constant's doc comment) —
           // the chain path has no conversational "ask for a name" fallback,
@@ -3974,6 +4036,7 @@ async function generateAssistantReply(
           // raised is lifted — the edge is what fills it.
           const chainRefs = chatChainRefs(proposal, chainTypes, tailParentIndex);
           liftChainRefGates(proposal, chainRefs);
+          inheritChainCustomer(proposal, chainRefs, chainVerifiedCustomers, segClass.extractedEntities?.customerName);
           applyChainMetadata(proposal, {
             chainId,
             chainIndex: chainCards.length,
@@ -4061,6 +4124,7 @@ async function generateAssistantReply(
           if (typeof segEntities.displayName === 'string') carried.customerName = segEntities.displayName;
           chainCards.push(proposalToUI(proposal, segment));
           chainTypes.push(proposal.proposalType);
+          chainVerifiedCustomers.push(verifiedCustomerOf(proposal));
         }
         if (chainCards.length === 1) {
           // Only one segment produced a proposal — return it directly so the
