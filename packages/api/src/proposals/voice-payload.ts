@@ -439,6 +439,12 @@ export async function buildVoiceProposalPayload(
     const title = nonEmptyString(entities.jobTitle) ?? nonEmptyString(entities.jobReference);
     if (title) flat.title = title;
   }
+  // log_time_entry (#1018 5.3): classifier emits `timeEntryType`;
+  // `logTimeEntryPayloadSchema` requires `entryType`. Same mapping and 'job'
+  // default as `LogTimeEntryTaskHandler` (ai/tasks/voice-extended-tasks.ts).
+  if (proposalType === 'log_time_entry' && flat.entryType === undefined) {
+    flat.entryType = nonEmptyString(entities.timeEntryType) ?? 'job';
+  }
   // update_customer: the classifier (and the deterministic owner-command
   // matchers in ai/orchestration/intent-classifier.ts, which emit
   // `updatedPhone`/`updatedAddress` for the two stereotyped phrasings) names

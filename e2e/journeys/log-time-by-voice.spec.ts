@@ -12,6 +12,13 @@
  * jobId, EXACTLY ONE audit event, tenant-scoped, AND counted by the
  * job-profit query (`getJobProfit`, packages/api/src/jobs/job-profit.ts).
  *
+ * UPDATE (#1018, 2026-09-30): `matchLogTimePhrase` now classifies this
+ * utterance with no model — but only on profiles that offer
+ * `log_time_entry`. A technician's call is the `field_tech` profile, which
+ * does not (nor does the S1 proposal allowlist), so the stop below still
+ * holds on the phone. The in-app surface reaches the full criterion:
+ * e2e/journeys/log-time-by-voice-inapp-5-3.spec.ts.
+ *
  * ─── HONEST STOP POINT (found while writing this spec; do not fake it) ────
  *
  * Every `SpeechResult` reaching `/api/telephony/gather` is classified by

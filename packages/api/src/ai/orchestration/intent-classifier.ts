@@ -2122,6 +2122,50 @@ export function matchAppointmentChangeOpening(
 }
 
 /**
+ * #1018 row 5.3 — deterministic short-circuit for the stereotyped spoken
+ * time log: "log two hours on the Garcia job". Same technique #1119 used for
+ * the confirm/move/cancel turns: without a live model (the hermetic no-key
+ * gateway) this utterance classified `unknown`, so a technician could never
+ * log hours by talking.
+ *
+ * ANCHORED and narrow: a spelled or numeric duration in hours/minutes and a
+ * "the <X> job" reference, nothing else. Anything richer ("log two hours on
+ * the Garcia job and add a note") falls through to the LLM with its
+ * extraction intact. The duration lands in whole minutes (the unit
+ * `time_entries.duration_minutes` stores) and the job reference goes through
+ * the SAME entity resolver (`JOB_REF_INTENTS`) the LLM-classified path uses.
+ *
+ * Safe for a WRITE intent for the usual reasons: D-004 — the result is a
+ * capture proposal a human confirms, and `LogTimeEntryTaskHandler` gates on a
+ * resolved `jobId`. The caller gates the match on the classifier profile.
+ */
+const SPOKEN_DURATION_NUMBERS: Readonly<Record<string, number>> = {
+  a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
+  eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20,
+  thirty: 30, forty: 40, 'forty-five': 45, fifty: 50,
+};
+const LOG_TIME_PATTERN = new RegExp(
+  String.raw`^\s*(?:please\s+)?(?:log|put\s+(?:me\s+)?down(?:\s+for)?)\s+` +
+    String.raw`(\d{1,3}|${Object.keys(SPOKEN_DURATION_NUMBERS).join('|')})\s+(hours?|minutes?)\s+` +
+    String.raw`(?:on|for|to)\s+the\s+(.{1,80}?)\s+job\s*[.!]?\s*$`,
+  'i',
+);
+
+export function matchLogTimePhrase(
+  transcript: string,
+): { durationMinutes: number; jobReference: string } | null {
+  if (!transcript) return null;
+  const match = LOG_TIME_PATTERN.exec(transcript);
+  if (!match) return null;
+  const rawCount = match[1].toLowerCase();
+  const count = /^\d+$/.test(rawCount) ? Number(rawCount) : SPOKEN_DURATION_NUMBERS[rawCount];
+  const jobReference = match[3].trim();
+  if (!count || !jobReference) return null;
+  const durationMinutes = /^hour/i.test(match[2]) ? count * 60 : count;
+  return { durationMinutes, jobReference };
+}
+
+/**
  * A06 (2026-08-30 live sweep, sweep-10) — deterministic short-circuit for the
  * canonical dictated `issue_invoice` phrasing: "Issue invoice INV-0010" /
  * "Issue the invoice INV-0010". Anchored, doc-number-shaped capture, same
@@ -2933,6 +2977,25 @@ async function classifyIntentRaw(
       intentType: appointmentChange,
       confidence: 0.95,
       reasoning: `matched deterministic ${appointmentChange} opening phrasing`,
+    };
+  }
+
+  // #1018 row 5.3 — the anchored spoken time log. Profile-gated like the
+  // move/cancel opening above; see matchLogTimePhrase's doc comment.
+  const logTimeMatch = matchLogTimePhrase(transcript);
+  if (
+    logTimeMatch &&
+    isIntentAcceptedOnProfile(context.classifierProfile ?? 'operator', 'log_time_entry')
+  ) {
+    return {
+      intentType: 'log_time_entry',
+      confidence: 0.95,
+      reasoning: 'matched deterministic log_time_entry phrasing',
+      extractedEntities: {
+        timeEntryType: 'job',
+        durationMinutes: logTimeMatch.durationMinutes,
+        jobReference: logTimeMatch.jobReference,
+      },
     };
   }
 
