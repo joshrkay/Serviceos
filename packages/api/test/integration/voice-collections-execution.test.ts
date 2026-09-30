@@ -220,7 +220,9 @@ describe(provesExecution('send_invoice') + 'Integration — U1 voice collections
     expect(provider.lastDispatch).toMatchObject({
       tenantId: tenant.tenantId,
       invoiceId,
-      channel: 'email',
+      // #1524 — "Send the Smith invoice" names no channel: 'auto' (SendService
+      // sends to the customer's email, else texts their phone).
+      channel: 'auto',
     });
 
     // Executed effect #2 — the executor's terminal audit row is in Postgres.

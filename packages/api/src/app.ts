@@ -1044,7 +1044,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // #1463 — a technician assignee must be an active technician of this tenant.
     technicianReferenceCheck(userRepo),
     // #1480 — a send_invoice with no recipient must have one on file.
-    sendRecipientReferenceCheck({ invoiceRepo, jobRepo, customerRepo }),
+    // #1524 — with no channel named it falls back to a text, asked of the
+    // one SMS gate (`messageDelivery`, built below; read per approval, after
+    // boot) so a text the gate would suppress is refused with its reason.
+    sendRecipientReferenceCheck({
+      invoiceRepo,
+      // #1524 — send_estimate walks estimate → job → customer the same way.
+      estimateRepo,
+      jobRepo,
+      customerRepo,
+      smsPreflight: {
+        preflightCustomerSms: async (args) => (messageDelivery ? messageDelivery.preflightCustomerSms(args) : null),
+      },
+    }),
     // #1476 / #1480 — an estimate/invoice/booking with no job and no customer.
     executionAnchorReferenceCheck(),
     // #1490 — a second invoice from an estimate that is already invoiced.
@@ -1485,7 +1497,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // provider branches (per-tenant, global, and in-memory dev).
   // WS12 — the gate also consults the consent ledger so a revocation arriving
   // on ANY channel (voice, portal, manual, STOP) suppresses customer SMS.
-  const messageDelivery: MessageDeliveryProvider | null = rawMessageDelivery
+  const messageDelivery: GatedMessageDelivery | null = rawMessageDelivery
     ? new GatedMessageDelivery({
         base: rawMessageDelivery,
         dnc: dncRepo,

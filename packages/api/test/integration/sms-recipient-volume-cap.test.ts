@@ -63,6 +63,20 @@ describe('Postgres integration — per-recipient SMS volume cap (#1402 §18)', (
     expect(base.sentSms).toHaveLength(2);
   });
 
+  it('#1524 — the approval-time preflight reads the real count and reserves nothing', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const { gate, base } = gateWith(2);
+    const ask = () => gate.preflightCustomerSms({ tenantId, to: '+15551230000', smsConsent: true });
+
+    await gate.sendSms(msg(tenantId));
+    expect(await ask()).toBeNull();
+    expect(await ask()).toBeNull();
+    await gate.sendSms(msg(tenantId));
+    expect(await ask()).toBe('recipient_volume_cap');
+
+    expect(base.sentSms).toHaveLength(2);
+  });
+
   it('concurrent sends can never overshoot the last slot', async () => {
     const { tenantId } = await createTestTenant(pool);
     const { gate, base } = gateWith(1);
