@@ -1,4 +1,5 @@
 import { Logger } from '../../logging/logger';
+import { createAuditEventBestEffort, type AuditRepository } from '../../audit/audit';
 import type { CallPlanId } from '../../billing/call-usage-pricing';
 import { planIncludesQuickBooks } from '../../billing/plan-features';
 import { Customer, CustomerRepository } from '../../customers/customer';
@@ -40,7 +41,19 @@ export interface AccountingSyncServiceDeps {
    * beyond this many. Default 200; overridable for tests.
    */
   invoicePageSize?: number;
+  /**
+   * #1013 row 9.11 — `audit_events` for each invoice sync OUTCOME
+   * (`accounting.invoice.synced` / `accounting.invoice.sync_failed`). The
+   * `accounting_sync_log` row is the dedupe ledger; the audit row is the
+   * owner-visible record that a paid invoice left ServiceOS for QuickBooks.
+   * Best-effort: the push has already happened in QuickBooks by the time it
+   * is written, so a ledger failure is logged, never rethrown.
+   */
+  auditRepo?: AuditRepository;
 }
+
+/** Actor recorded on accounting-sync audit rows — no human is in the loop. */
+export const ACCOUNTING_SYNC_ACTOR = 'system:accounting-sync';
 
 export interface TenantSyncResult {
   tenantId: string;
@@ -198,6 +211,7 @@ export class AccountingSyncService {
           status: 'success',
           payloadHash,
         });
+        await this.auditInvoiceSynced(integration, invoice, created.id);
         return { pushed: true, skipped: false, tokens };
       } catch (err) {
         tokens = await this.refreshIfNeeded(integration, tokens, err);
@@ -222,6 +236,7 @@ export class AccountingSyncService {
           status: 'success',
           payloadHash,
         });
+        await this.auditInvoiceSynced(integration, invoice, created.id);
         return { pushed: true, skipped: false, tokens };
       }
     } catch (err) {
@@ -308,6 +323,29 @@ export class AccountingSyncService {
     }
   }
 
+  private async auditInvoiceSynced(
+    integration: AccountingIntegration,
+    invoice: Invoice,
+    externalId: string,
+  ): Promise<void> {
+    if (!this.deps.auditRepo) return;
+    await createAuditEventBestEffort(this.deps.auditRepo, {
+      tenantId: integration.tenantId,
+      actorId: ACCOUNTING_SYNC_ACTOR,
+      actorRole: 'system',
+      eventType: 'accounting.invoice.synced',
+      entityType: 'invoice',
+      entityId: invoice.id,
+      metadata: {
+        provider: integration.provider,
+        integrationId: integration.id,
+        externalId,
+        invoiceNumber: invoice.invoiceNumber,
+        totalCents: invoice.totals.totalCents,
+      },
+    });
+  }
+
   private async logFailure(
     integration: AccountingIntegration,
     entityType: 'invoice' | 'customer',
@@ -325,6 +363,21 @@ export class AccountingSyncService {
       payloadHash,
       errorMessage,
     });
+    if (this.deps.auditRepo) {
+      await createAuditEventBestEffort(this.deps.auditRepo, {
+        tenantId: integration.tenantId,
+        actorId: ACCOUNTING_SYNC_ACTOR,
+        actorRole: 'system',
+        eventType: `accounting.${entityType}.sync_failed`,
+        entityType,
+        entityId,
+        metadata: {
+          provider: integration.provider,
+          integrationId: integration.id,
+          reason: errorMessage,
+        },
+      });
+    }
     this.deps.logger.warn('Accounting sync push failed', {
       tenantId: integration.tenantId,
       entityType,

@@ -482,8 +482,16 @@ describe('computeDigestPayload', () => {
       revertedAt: null,
     };
     const withLessons = await computeDigestPayload(TENANT, DATE, makeDeps({ appliedLessons: [lesson] }));
+    // #1013 row 9.9 — each learned item names the proposal whose execution
+    // recorded it: that is the handle the owner's Undo acts on
+    // (POST /api/proposals/:id/undo { scope: 'lessons' }).
     expect(withLessons.learnedToday).toEqual([
-      { lessonId: 'les-1', lessonType: 'labor_rate_changed', summary: 'labor rate is $145 going forward' },
+      {
+        lessonId: 'les-1',
+        lessonType: 'labor_rate_changed',
+        summary: 'labor rate is $145 going forward',
+        sourceProposalId: 'p-src',
+      },
     ]);
 
     const none = await computeDigestPayload(TENANT, DATE, makeDeps({ appliedLessons: [] }));

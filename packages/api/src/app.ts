@@ -6626,6 +6626,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           jobRepo,
           qboConfig,
           logger: accountingSyncLogger,
+          // #1013 row 9.11 — each invoice sync outcome is audited.
+          auditRepo,
           ...(pool ? { planForTenant: (tenantId: string) => readTenantPlanId(pool, tenantId) } : {}),
         });
       }).catch((err) => {

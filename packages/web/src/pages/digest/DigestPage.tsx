@@ -68,6 +68,11 @@ interface DigestLearnedItem {
   lessonId: string;
   lessonType: string;
   summary: string;
+  /**
+   * #1013 row 9.9 — the executed proposal that recorded the lesson; Undo acts
+   * on it. Absent on digests stored before the field existed → no Undo.
+   */
+  sourceProposalId?: string;
 }
 
 // WS6 — supervisor-review reflection. WS22 amendment: `fixed` is grounded in
@@ -306,6 +311,69 @@ export function DigestPage() {
   );
 }
 
+/**
+ * #1013 row 9.9 — one "What I learned today" line, with the owner's Undo.
+ *
+ * Undo reverses the lesson (and the config it cascaded, e.g. the tenant labor
+ * rate) through `POST /api/proposals/:id/undo { scope: 'lessons' }` — the
+ * explicit lessons scope (#1139). The executed proposal itself and whatever it
+ * created stay; only what the product LEARNED from the edit is taken back.
+ * The digest is a stored snapshot, so the row flips to "Undone" locally
+ * rather than disappearing on a refetch.
+ */
+function LearnedLessonRow({ lesson }: { lesson: DigestLearnedItem }) {
+  const apiFetch = useApiClient();
+  const [state, setState] = useState<'idle' | 'undoing' | 'undone' | 'failed'>('idle');
+
+  async function undo(): Promise<void> {
+    if (!lesson.sourceProposalId) return;
+    setState('undoing');
+    try {
+      const res = await apiFetch(`/api/proposals/${encodeURIComponent(lesson.sourceProposalId)}/undo`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ scope: 'lessons' }),
+      });
+      setState(res.ok ? 'undone' : 'failed');
+    } catch {
+      setState('failed');
+    }
+  }
+
+  return (
+    <li className="flex min-h-11 items-center justify-between gap-3 py-2">
+      <div className="flex min-w-0 flex-col gap-1">
+        <span className="inline-flex w-fit items-center rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-xs font-medium capitalize text-blue-700">
+          {approvalLabel(lesson.lessonType)}
+        </span>
+        <p className="break-words text-sm text-slate-700">{lesson.summary}</p>
+        {state === 'failed' && (
+          <p role="alert" className="text-xs text-red-700">
+            Couldn&apos;t undo this lesson. Try again.
+          </p>
+        )}
+      </div>
+      {state === 'undone' ? (
+        <span className="inline-flex shrink-0 items-center rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
+          Undone
+        </span>
+      ) : (
+        lesson.sourceProposalId && (
+          <button
+            type="button"
+            onClick={() => void undo()}
+            disabled={state === 'undoing'}
+            aria-label={`Undo: ${lesson.summary}`}
+            className="min-h-11 shrink-0 rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+          >
+            {state === 'undoing' ? 'Undoing…' : 'Undo'}
+          </button>
+        )
+      )}
+    </li>
+  );
+}
+
 function DigestBody({
   digest,
   timezone,
@@ -455,12 +523,7 @@ function DigestBody({
         <SectionCard title="What I learned today">
           <ul className="divide-y divide-slate-100">
             {p.learnedToday.map((l) => (
-              <li key={l.lessonId} className="flex min-h-11 flex-col justify-center gap-1 py-2">
-                <span className="inline-flex w-fit items-center rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-xs font-medium capitalize text-blue-700">
-                  {approvalLabel(l.lessonType)}
-                </span>
-                <p className="break-words text-sm text-slate-700">{l.summary}</p>
-              </li>
+              <LearnedLessonRow key={l.lessonId} lesson={l} />
             ))}
           </ul>
         </SectionCard>
