@@ -27,8 +27,12 @@ const WHISPER_RAW_FORMAT_ERROR =
   '{"error":{"message":"Invalid file format. Supported formats: [\'flac\', \'m4a\', \'mp3\', \'mp4\', \'mpeg\', \'mpga\', \'oga\', \'ogg\', \'wav\', \'webm\']","type":"invalid_request_error"}}';
 
 /** Which uploaded-file extensions Whisper can decode a given container as. */
+// The live provider (re-verify 2026-09-30) rejects an iOS Safari `audio/mp4`
+// memo (M4A-branded, audio-only) uploaded as `audio.mp4` with the format error
+// below, and decodes the identical bytes named `audio.m4a` — so the stub only
+// accepts `m4a` for an audio/mp4 upload, matching the real provider.
 const DECODABLE_EXTENSIONS: Record<string, string[]> = {
-  'audio/mp4': ['mp4', 'm4a'],
+  'audio/mp4': ['m4a'],
   'audio/x-m4a': ['m4a', 'mp4'],
   'audio/m4a': ['m4a', 'mp4'],
   'audio/wav': ['wav'],
