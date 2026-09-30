@@ -114,7 +114,7 @@ function estimate(number: string, status: EstimateStatus, totalCents = 10_000): 
     createdBy: OPERATOR,
     createdAt: NOW,
     updatedAt: NOW,
-  } as Estimate;
+  } as unknown as Estimate;
 }
 
 function job(number: string, summary: string, status: Job['status'], extra: Partial<Job> = {}): Job {
