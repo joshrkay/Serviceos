@@ -15,9 +15,11 @@ import { EstimateRepository } from '../../estimates/estimate';
 import { InvoiceScheduleRepository } from '../../invoices/invoice-schedule';
 import { wholeInvoiceBlockedByPlan } from '../../invoices/milestone-billing-guard';
 import {
+  copyEstimateOntoInvoicePayload,
   estimateAlreadyInvoicedReason,
   findInvoiceHoldingEstimate,
 } from '../../invoices/estimate-invoice-link';
+import { chainMetaFor } from '../chain';
 
 /**
  * P5-005 — Deterministic execution for draft_invoice proposals.
@@ -66,6 +68,29 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
     private readonly estimateRepo?: EstimateRepository,
   ) {}
 
+  /**
+   * #1480 item 4 (AST-07) — "…then draft an estimate, then create the
+   * invoice": the invoice step's estimateId arrives through a chain edge
+   * from the estimate step, and its own clause named no work, so the lines
+   * it was drafted with are the model's guess. Bill the estimate the chain
+   * produced instead — its selected lines, discount and tax, the same
+   * selection convert-to-invoice bills (`copyEstimateOntoInvoicePayload`).
+   * Only for a chain-supplied estimateId: an invoice drafted from a known
+   * estimate already carries its lines, and an operator's edits stand.
+   */
+  private async billChainedEstimate(proposal: Proposal, tenantId: string): Promise<Record<string, unknown>> {
+    const chainedEstimate = chainMetaFor(proposal)?.chainRefs.some(
+      (ref) => ref.entityKind === 'estimateId' && ref.payloadPath === 'estimateId',
+    );
+    const estimateId = proposal.payload.estimateId;
+    if (!chainedEstimate || !this.estimateRepo || typeof estimateId !== 'string') return proposal.payload;
+    const estimate = await this.estimateRepo.findById(tenantId, estimateId);
+    if (!estimate) return proposal.payload;
+    const billed = { ...proposal.payload };
+    copyEstimateOntoInvoicePayload(billed, estimate);
+    return billed;
+  }
+
   // Degrades to a synthetic-id passthrough (saves nothing) without both
   // the invoice repo and the settings repo — see execute().
   isFullyWired(): boolean {
@@ -73,7 +98,7 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
   }
 
   async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
-    const { payload } = proposal;
+    const payload = await this.billChainedEstimate(proposal, context.tenantId);
 
     // QA-2026-07-26 (VOX-07) — accept customerId OR jobId, exactly like
     // DraftEstimateExecutionHandler (handlers.ts). This handler previously
@@ -165,6 +190,19 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
 
     // #1203 — plan then draft_invoice: never a second, whole-estimate invoice.
     const draftEstimateId = typeof payload.estimateId === 'string' ? payload.estimateId : undefined;
+    // #1480 item 4 (AST-07) — an invoice drafted FROM an estimate with no job
+    // of its own (a chat chain's "…then create the invoice", linked to the
+    // estimate step) bills the estimate's job, the one the estimate opened —
+    // never a second, empty job for the same work. Only when that job is the
+    // payload customer's: a mismatch keeps the auto-open path below.
+    if (!jobId && draftEstimateId && this.estimateRepo && this.jobRepo) {
+      const estimate = await this.estimateRepo.findById(context.tenantId, draftEstimateId);
+      const estimateJob = estimate ? await this.jobRepo.findById(context.tenantId, estimate.jobId) : null;
+      if (estimateJob && (!customerId || estimateJob.customerId === customerId)) {
+        jobId = estimateJob.id;
+        existingJob = estimateJob;
+      }
+    }
     if (draftEstimateId && jobId && this.scheduleRepo) {
       const refusal = await wholeInvoiceBlockedByPlan(
         {

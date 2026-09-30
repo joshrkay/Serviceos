@@ -18,7 +18,8 @@ import {
   intersectAppliedStandingInstructions,
 } from '../standing-instructions-context';
 import { contractErrorsFrom, contractGapFields } from './task-input';
-import { calculateLineItemTotal, resolveSelectedLineItems } from '../../shared/billing-engine';
+import { calculateLineItemTotal } from '../../shared/billing-engine';
+import { copyEstimateOntoInvoicePayload } from '../../invoices/estimate-invoice-link';
 import type { Estimate, EstimateRepository } from '../../estimates/estimate';
 import type { JobRepository } from '../../jobs/job';
 import { formatUsdCentsFixed } from '@ai-service-os/shared';
@@ -77,26 +78,6 @@ const MAX_ESTIMATE_CHOICES = 5;
 
 /** #1405 — what the operator said, carried on the gated draft. */
 const ACCEPTED_ESTIMATE_REFERENCE = 'the accepted estimate';
-
-/**
- * #1276F / #1405 — bill THIS estimate: its customer-selected lines, its
- * discount and its tax rate replace whatever the draft carried, verbatim —
- * the same selection REST convert-to-invoice bills. Used when the handler
- * drafts from a known estimate and when the operator picks one of several.
- */
-export function copyEstimateOntoInvoicePayload(
-  payload: Record<string, unknown>,
-  estimate: Estimate,
-): void {
-  payload.lineItems = resolveSelectedLineItems(estimate.lineItems, estimate.acceptedSelection).map(
-    (li) => ({ ...li }),
-  );
-  payload.estimateId = estimate.id;
-  if (!payload.jobId) payload.jobId = estimate.jobId;
-  payload.discountCents = estimate.totals.discountCents;
-  payload.taxRateBps = estimate.totals.taxRateBps;
-  delete payload.estimateReference;
-}
 
 /**
  * #1405 — the operator picked which accepted estimate a gated draft_invoice

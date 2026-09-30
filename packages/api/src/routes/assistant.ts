@@ -22,7 +22,7 @@ import { Proposal, ProposalRepository, ProposalType, missingFieldsFor } from '..
 // below previously wrote sourceContext.chainId only, never the TOP-LEVEL
 // Proposal.chainId column this helper sets — the column findByChain and
 // the web Inbox's groupIntoFeed both key on.
-import { applyChainMetadata } from '../proposals/chain';
+import { applyChainMetadata, payloadPathFor, type ChainEntityKind, type ChainRef } from '../proposals/chain';
 import { validateProposalPayload } from '../proposals/contracts';
 import { clearSatisfiedMissingFields } from '../proposals/missing-fields';
 import {
@@ -51,7 +51,9 @@ import {
   isVoiceApprovalIntent,
   isVoiceEditIntent,
   CLASSIFIER_CONFIDENCE_THRESHOLD,
+  type IntentClassification,
 } from '../ai/orchestration/intent-classifier';
+import { isOffTopicRequest, OFF_TOPIC_DECLINE } from '../ai/orchestration/off-topic-guard';
 // Lookup wiring (2026-07): `lookup_*` intents previously matched nothing in
 // either dispatch map below and fell through to the generic LLM — which has
 // no DB access and answered from nothing (production: ZERO `ai_runs` rows
@@ -1398,8 +1400,8 @@ const CREATE_INVOICE_WORDING_RE =
  * #1499 — the honest tail of a multi-step reply: every step the operator
  * asked for that did NOT become a card, named in their own words, with an
  * offer to do it. Empty when nothing was dropped. Each step is offered as
- * its own message because that is the path that drafts it today (splitting
- * compound asks properly is #1480 item 4).
+ * its own message: a step the chain split (#1480 item 4, planChainSteps)
+ * could not draft is one the split has no handler for.
  */
 function undraftedStepsNote(steps: readonly string[]): string {
   if (steps.length === 0) return '';
@@ -1430,7 +1432,10 @@ const STEP_NOUN_FAMILIES: ReadonlyArray<[RegExp, StepFamily]> = [
   [/\b(?:invoice|bill)\b/i, 'invoice'],
   [/\b(?:estimate|quote)\b/i, 'estimate'],
   [/\b(?:customer|client)\b/i, 'customer'],
-  [/\b(?:appointment|visit|booking)\b/i, 'appointment'],
+  // Not "visit": after a generic create verb ("add a diagnostic visit") a
+  // visit is a LINE on the document being drafted, not a booking (#1480).
+  // A visit that IS a booking comes with its own verb (book / schedule).
+  [/\b(?:appointment|booking)\b/i, 'appointment'],
   [/\bnote\b/i, 'note'],
   [/\breminder\b/i, 'reminder'],
 ];
@@ -1462,12 +1467,13 @@ function proposalTypeFamilies(proposalType: string): StepFamily[] {
 }
 
 /**
- * #1499 — the steps of a compound, NON-chain request ("add Priya, and book
- * her Thursday at 9am") that the single drafted card does not cover. This is
- * a reporter, not a splitter: nothing is drafted from what it finds (that is
- * #1480 item 4); it exists so the reply can say what it did not do. Splits
- * only on "and <action verb>", so "a blower motor and a diagnostic visit"
- * stays one step.
+ * #1499 — the steps of a compound request ("add Priya, and book her
+ * Thursday at 9am") that the single drafted card does not cover. Since #1480
+ * item 4 the chain path splits and drafts these asks first (planChainSteps);
+ * this reporter only runs when that split drafted NOTHING (every step failed
+ * to classify) and the whole turn fell through to one card — it keeps that
+ * reply honest about the steps it still did not do. Splits only on "and
+ * <action verb>", so "a blower motor and a diagnostic visit" stays one step.
  */
 function undraftedCompoundSteps(
   text: string,
@@ -1482,6 +1488,128 @@ function undraftedCompoundSteps(
     return !!family && !covered.has(family) && !(opts.skipFamilies ?? []).includes(family);
   });
 }
+
+/**
+ * #1480 item 4 — one step of a multi-step chat ask. `text` is what is
+ * classified and drafted from; a `sendInvoiceTail` step is not classified at
+ * all — it is "send it" after an invoice step of the SAME turn, drafted as a
+ * `send_invoice` linked to that invoice (a pronoun alone classifies as
+ * nothing, and the invoice it names does not exist yet).
+ */
+interface ChainStepPlan {
+  text: string;
+  sendInvoiceTail?: { channel: 'email' | 'sms' };
+}
+
+/** "create and send (the invoice …)" — the send verb rides the create verb. */
+const CREATE_AND_SEND_VERB_RE = /\b(create|draft|make|write\s+up|generate)\s+(?:and|&)\s+(send|text|email)\s+/i;
+
+/** "… create" with nothing after it: the split landed inside "create and send". */
+const BARE_CREATE_VERB_END_RE = /(?:^|\s)(?:create|draft|make|write\s+up|generate)$/i;
+
+/** A send clause whose object is the thing the previous step drafts. */
+const SEND_IT_CLAUSE_RE = /^(send|text|email)\s+(?:it|that|this|them|her|him|the\s+invoice)\b/i;
+
+function sendChannelFor(verb: string, clause: string): 'email' | 'sms' {
+  return /^text$/i.test(verb) || /\b(?:by|via|over)\s+(?:text|sms)\b/i.test(clause) ? 'sms' : 'email';
+}
+
+/**
+ * #1480 item 4 — the steps of a chat turn, in order. Splits on "then" (the
+ * AST-07 chain) and, within each part, on "and <action verb>" (C23, AST-04)
+ * — the same anchor `undraftedCompoundSteps` reports on, but only where the
+ * trailing clause names a record family of its own; anything else stays part
+ * of the clause before it ("a blower motor and a diagnostic visit" is one
+ * step). "Create and send the invoice" is two steps: the invoice, then its
+ * send.
+ */
+function planChainSteps(text: string): ChainStepPlan[] {
+  const steps: ChainStepPlan[] = [];
+  const parts = text.split(/(?:,\s*)?\bthen\b\s+/i).map((seg) => seg.trim()).filter(Boolean);
+  for (const part of parts) {
+    const clauses: string[] = [];
+    for (const raw of part.split(STEP_CLAUSE_SPLIT_RE).map((c) => c.trim()).filter(Boolean)) {
+      // A clause ending in a bare create verb is the first half of "create
+      // and send …" — one clause, handled below.
+      const joinsPrevious =
+        clauses.length > 0 && (!stepClauseFamily(raw) || BARE_CREATE_VERB_END_RE.test(clauses[clauses.length - 1]));
+      if (joinsPrevious) clauses[clauses.length - 1] += ` and ${raw}`;
+      else clauses.push(raw);
+    }
+    for (const clause of clauses) {
+      const previous = steps[steps.length - 1];
+      const sendIt = SEND_IT_CLAUSE_RE.exec(clause);
+      if (sendIt && previous && !previous.sendInvoiceTail && stepClauseFamily(previous.text) === 'invoice') {
+        steps.push({ text: clause, sendInvoiceTail: { channel: sendChannelFor(sendIt[1], clause) } });
+        continue;
+      }
+      const createAndSend = CREATE_AND_SEND_VERB_RE.exec(clause);
+      if (createAndSend && CREATE_INVOICE_WORDING_RE.test(clause)) {
+        steps.push({ text: clause.replace(CREATE_AND_SEND_VERB_RE, `${createAndSend[1]} `) });
+        steps.push({ text: clause, sendInvoiceTail: { channel: sendChannelFor(createAndSend[2], clause) } });
+        continue;
+      }
+      steps.push({ text: clause });
+    }
+  }
+  return steps;
+}
+
+/** The chain allows the three-step AST-07 ask plus the send its invoice splits into, and one more. */
+const MAX_CHAT_CHAIN_STEPS = 5;
+
+/** The id an earlier chain step's execution produces, by its proposal type. */
+const CHAIN_PRODUCED_KIND: ReadonlyArray<[string, ChainEntityKind]> = [
+  ['create_customer', 'customerId'],
+  // AST-07 — "…then create the invoice" after an estimate bills THAT estimate.
+  ['draft_estimate', 'estimateId'],
+];
+
+/**
+ * Where a proposal type takes an earlier step's id. `payloadPathFor` is the
+ * shared (voice) map; `create_appointment` also consumes a customerId on this
+ * surface — its executor opens a job for that customer (SCH-02), so "add
+ * Priya and book her" needs no intermediate create_job step.
+ */
+function chatChainPayloadPath(proposalType: string, kind: ChainEntityKind): string | undefined {
+  if (proposalType === 'create_appointment' && kind === 'customerId') return 'customerId';
+  return payloadPathFor(proposalType as ProposalType, kind);
+}
+
+/**
+ * #1480 item 4 — the dependency edges of one chat chain step: the invoice a
+ * send tail sends, and the customer an earlier step of the same turn creates
+ * (only when the step has no real id for it — a resolved existing customer
+ * is never overwritten).
+ */
+function chatChainRefs(proposal: Proposal, chainTypes: readonly string[], tailParentIndex: number): ChainRef[] {
+  const refs: ChainRef[] = [];
+  if (tailParentIndex >= 0) {
+    refs.push({ payloadPath: 'invoiceId', parentChainIndex: tailParentIndex, entityKind: 'invoiceId' });
+    return refs;
+  }
+  for (const [producer, kind] of CHAIN_PRODUCED_KIND) {
+    const parentChainIndex = chainTypes.lastIndexOf(producer);
+    const path = chatChainPayloadPath(proposal.proposalType, kind);
+    if (parentChainIndex < 0 || !path || isUuidString(proposal.payload[path])) continue;
+    refs.push({ payloadPath: path, parentChainIndex, entityKind: kind });
+  }
+  return refs;
+}
+
+/** A chain edge fills its field at execution — it is no longer a gap the operator must close. */
+function liftChainRefGates(proposal: Proposal, refs: readonly ChainRef[]): void {
+  if (refs.length === 0) return;
+  const filled = new Set(refs.map((ref) => ref.payloadPath));
+  const remaining = missingFieldsFor(proposal).filter((field) => !filled.has(field));
+  proposal.sourceContext = { ...(proposal.sourceContext ?? {}), missingFields: remaining };
+}
+
+const isUuidString = (value: unknown): boolean =>
+  typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
+/** #1480 item 4 — what a linked send step waits on (approveProposal's linked-step gate + invoiceSendableReferenceCheck). */
+const LINKED_SEND_UNLOCK_NOTE = ' The send unlocks once the invoice is approved and issued.';
 
 /** Appended to the drafted card's reply: sending is the operator's next step. */
 const CREATE_AND_SEND_NEXT_STEP =
@@ -3659,8 +3787,10 @@ async function generateAssistantReply(
       // money/comms steps land ready_for_review — the HITL contract is
       // never bypassed (the original matrix expectation of a fully-executed
       // invoice without approval contradicts 'money never auto-approves').
-      const chainSegments = lastUserText.split(/(?:,\s*)?\bthen\b\s+/i).map((seg) => seg.trim()).filter(Boolean);
-      if (chainSegments.length >= 2 && chainSegments.length <= 4) {
+      // #1480 item 4 — "X, and <verb> …" and "create and send …" split too,
+      // not only "… then …" (planChainSteps).
+      const chainSteps = planChainSteps(lastUserText);
+      if (chainSteps.length >= 2 && chainSteps.length <= MAX_CHAT_CHAIN_STEPS) {
         // PR-0a (#967, #962) — a real uuid, matching the id shape
         // applyChainMetadata/findByChain expect elsewhere (voice/memo
         // chains already mint theirs via uuidv4 in voice-action-router.ts).
@@ -3674,17 +3804,44 @@ async function generateAssistantReply(
         const carried: Record<string, unknown> = {};
         // #913 — top-level classify plus every segment classify that landed.
         let chainUsage = classifierUsage;
-        for (const segment of chainSegments) {
-          let segClass;
-          try {
-            // Same context object as the top-level classification above so
-            // the two can't drift on which intents are even emittable.
-            segClass = await classifyIntent(segment, classifyContext, deps.gateway);
-          } catch {
-            undraftedSegments.push(segment);
-            continue;
+        // #1480 item 4 — the proposal type each drafted card is, by chain
+        // index: what a later step's `$ref:chain[n]` edge points at.
+        const chainTypes: string[] = [];
+        for (const step of chainSteps) {
+          const segment = step.text;
+          // "…and send it": the invoice it sends is the one this turn drafts.
+          const tailParentIndex = step.sendInvoiceTail ? chainTypes.lastIndexOf('draft_invoice') : -1;
+          let segClass: Pick<IntentClassification, 'intentType' | 'extractedEntities' | 'tokenUsage'>;
+          if (step.sendInvoiceTail) {
+            if (tailParentIndex < 0) {
+              // The invoice half became a send of an invoice that already
+              // exists (#1393: an in-flight invoice keeps the send path) —
+              // that card IS the send. Anything else is a step not drafted.
+              if (!chainTypes.includes('send_invoice')) undraftedSegments.push(segment);
+              continue;
+            }
+            segClass = {
+              intentType: 'send_invoice',
+              extractedEntities: { sendChannel: step.sendInvoiceTail.channel },
+            };
+          } else {
+            try {
+              // Same context object as the top-level classification above so
+              // the two can't drift on which intents are even emittable.
+              segClass = await classifyIntent(segment, classifyContext, deps.gateway);
+            } catch {
+              undraftedSegments.push(segment);
+              continue;
+            }
           }
           chainUsage = sumUsage(chainUsage, usageOf(segClass.tokenUsage));
+          // #1393 per step — "create an invoice for job X" classified as a
+          // send/issue of an invoice that does not exist drafts the invoice,
+          // exactly as the single-request path does.
+          const segCreateAndSend = step.sendInvoiceTail
+            ? undefined
+            : await isCreateAndSendWithNoInvoice(deps, tenantId, segClass.intentType, segment);
+          if (segCreateAndSend) segClass = { ...segClass, intentType: 'create_invoice' };
           // create_customer is the one documented exception to
           // CHAT_INTENT_TO_REGISTRY_KEY (see that constant's doc comment) —
           // the chain path has no conversational "ask for a name" fallback,
@@ -3699,7 +3856,12 @@ async function generateAssistantReply(
             continue;
           }
           const factory = () => sharedHandlers.get(registryKey)!;
-          const segEntities: Record<string, unknown> = { ...carried, ...(segClass.extractedEntities ?? {}) };
+          // A send tail names no customer of its own: the carried name would
+          // only send it hunting for some OTHER invoice of theirs.
+          const segEntities: Record<string, unknown> = {
+            ...(step.sendInvoiceTail ? {} : carried),
+            ...(segClass.extractedEntities ?? {}),
+          };
           if (segClass.intentType === 'create_customer' && segEntities.displayName && !segEntities.name) {
             segEntities.name = segEntities.displayName;
           }
@@ -3723,16 +3885,17 @@ async function generateAssistantReply(
           // literal job UUID in THIS segment names that job and its customer
           // (#1276B). Keyed on the segment's own text, not the whole turn: a
           // UUID in the other half of "X, then Y" is not this step's job.
-          const segVerifiedIds = (
-            await resolvePreDraftIds(
+          const segVerifiedIds = {
+            ...(segCreateAndSend?.job ?? {}),
+            ...(await resolvePreDraftIds(
               deps,
               tenantId,
               segClass.intentType,
               registryKey,
               segEntities,
               segment,
-            )
-          ).ids;
+            )).ids,
+          };
           // I3 — resolved once (memoized) and reused across every segment.
           const segTenantThresholdOverride = await getTenantThresholdOverride();
           const { proposal } = await factory().handle({
@@ -3803,19 +3966,20 @@ async function generateAssistantReply(
           // groupIntoFeed (which both key on Proposal.chainId, not
           // sourceContext) actually find chat-produced chains.
           //
-          // chainRefs stays empty here: the chat path threads dependent
-          // entities forward via the `carried` object below (customerName
-          // only, resolved before drafting), not applyChainMetadata's
-          // `$ref:chain[n]` token machinery — so `chainRefs.length > 0`
-          // never fires and this can't force a proposal back to 'draft'
-          // out from under the dependency-gate status handling that
-          // follows.
+          // #1480 item 4 — a step that needs a record an EARLIER step of this
+          // turn creates (the new customer, the invoice being drafted) gets a
+          // `$ref:chain[n]` edge instead of an unresolvable reference: the
+          // id is filled from that step's result when it executes
+          // (resolveChainReferences), and the gate the unresolved reference
+          // raised is lifted — the edge is what fills it.
+          const chainRefs = chatChainRefs(proposal, chainTypes, tailParentIndex);
+          liftChainRefGates(proposal, chainRefs);
           applyChainMetadata(proposal, {
             chainId,
             chainIndex: chainCards.length,
-            chainLength: chainSegments.length,
-            dependsOnChainIndices: [],
-            chainRefs: [],
+            chainLength: chainSteps.length,
+            dependsOnChainIndices: [...new Set(chainRefs.map((ref) => ref.parentChainIndex))],
+            chainRefs,
           });
           // Back-compat: chainStep (1-based) predates chainIndex
           // (0-based, applyChainMetadata's convention) — keep both so any
@@ -3896,6 +4060,7 @@ async function generateAssistantReply(
           if (typeof segEntities.name === 'string') carried.customerName = segEntities.name;
           if (typeof segEntities.displayName === 'string') carried.customerName = segEntities.displayName;
           chainCards.push(proposalToUI(proposal, segment));
+          chainTypes.push(proposal.proposalType);
         }
         if (chainCards.length === 1) {
           // Only one segment produced a proposal — return it directly so the
@@ -3924,6 +4089,7 @@ async function generateAssistantReply(
                 `Created ${chainCards.length} linked steps: ` +
                 chainCards.map((c, i) => `${i + 1}) ${c.title}`).join('; ') +
                 '. Capture steps run after approval windows; money steps wait for your approval.' +
+                (chainTypes.includes('send_invoice') ? LINKED_SEND_UNLOCK_NOTE : '') +
                 undraftedStepsNote(undraftedSegments),
               proposal: chainCards[0],
             },
@@ -4416,6 +4582,25 @@ async function generateAssistantReply(
         stack: err instanceof Error ? err.stack : undefined,
       });
     }
+  }
+
+  // ── Off-topic scope guard ────────────────────────────────────────
+  // A turn the classifier could not place (`unknown`) that is plainly not
+  // business — a poem, a joke, trivia — is declined here, before the generic
+  // model is paid to answer it. Only after a healthy classify: a classifier
+  // FAILURE is our problem, not an off-topic ask. Biased to answering: see
+  // ai/orchestration/off-topic-guard.ts.
+  if (!guardIntentError && guardIntent === 'unknown' && isOffTopicRequest(lastUserText)) {
+    return {
+      taskType: 'assistant.off_topic',
+      model: 'policy-guard',
+      usage: classifierUsage,
+      message: {
+        role: 'assistant' as const,
+        content: OFF_TOPIC_DECLINE,
+        reasoning: 'Non-business request — declined without calling the generic model.',
+      },
+    };
   }
 
   // ── Fallback path: generic LLM text reply ────────────────────────
