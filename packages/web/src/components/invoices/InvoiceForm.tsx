@@ -9,6 +9,7 @@ import {
   totalCents,
 } from '../forms/LineItemEditor';
 import { useListQuery } from '../../hooks/useListQuery';
+import { IDEMPOTENCY_HEADER, useIdempotencyKey } from '../../lib/idempotencyKey';
 import { Field, Input, Select, Textarea, Button } from '../ui';
 
 export interface InvoiceFormProps {
@@ -143,6 +144,9 @@ export function InvoiceForm({ onCreated, onCancel, initialJobId }: InvoiceFormPr
     ? (selectedJob.customer.displayName || [selectedJob.customer.firstName, selectedJob.customer.lastName].filter(Boolean).join(' '))
     : '';
 
+  // #1489 — one Idempotency-Key per create submission, reused on retry.
+  const submissionKey = useIdempotencyKey();
+
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -197,6 +201,7 @@ export function InvoiceForm({ onCreated, onCancel, initialJobId }: InvoiceFormPr
       try {
         const res = await apiFetch('/api/invoices', {
           method: 'POST',
+          headers: { [IDEMPOTENCY_HEADER]: submissionKey.keyFor(body) },
           body: JSON.stringify(body),
         });
         if (!res.ok) {
@@ -204,6 +209,7 @@ export function InvoiceForm({ onCreated, onCancel, initialJobId }: InvoiceFormPr
           throw new Error((json as { message?: string })?.message ?? `HTTP ${res.status}`);
         }
         const created = await res.json() as { id: string };
+        submissionKey.settle();
         onCreated?.(created.id);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to create invoice');
@@ -211,7 +217,7 @@ export function InvoiceForm({ onCreated, onCancel, initialJobId }: InvoiceFormPr
         setSubmitting(false);
       }
     },
-    [form, onCreated]
+    [form, onCreated, submissionKey]
   );
 
   const total = totalCents(form.items);
