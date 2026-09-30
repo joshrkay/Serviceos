@@ -47,8 +47,16 @@ import type { TaskContext } from '../../packages/api/src/ai/tasks/task-handlers'
  *
  * The owner opens the real `/inbox`: the card says the drive does not fit
  * and that the estimate is unverified; approving books the appointment.
- * T1: tenant B's identical 10am booking (no Carlos conflict) shows no
- * warning, and A's card never appears on B's inbox.
+ * T2 (non-interference, in the same run): tenant B drafts the identical
+ * 10am booking for its own customer at the same San Francisco address while
+ * tenant A's Carlos is booked in Oakland until 09:55 — exactly the neighbour
+ * appointment that makes A's slot infeasible. B's answer is its own: its
+ * stamp reads back `{ checked: true, warnings: [] }` and its card shows no
+ * warning; A's stamp carries exactly one warning, for A's own Carlos; A's
+ * card never appears on B's inbox. Proven red against a planted fault: the
+ * feasibility read path (appointments in the window, their assignments, the
+ * technician's calendar, the job and location lookups) without its tenant
+ * predicates hands A's Oakland job to B's check, and B's card warns.
  */
 
 const API_URL = process.env.E2E_NOAUTHBYPASS_API_URL ?? 'http://localhost:3002';
@@ -173,7 +181,7 @@ test.describe('3.12 — the owner sees the drive-time warning on the booking car
     await pool?.end();
   });
 
-  test('a 10am booking 5 minutes after Carlos leaves Oakland carries an unverified drive-time warning on the real Inbox; approving books it; tenant B sees no warning (T1)', async ({ page, browser, baseURL }) => {
+  test('a 10am booking 5 minutes after Carlos leaves Oakland carries an unverified drive-time warning on the real Inbox; approving books it; tenant B\'s identical slot in the same run is unaffected by A\'s Oakland job (T2)', async ({ page, browser, baseURL }) => {
     test.setTimeout(180_000);
     const pageErrors: string[] = [];
     page.on('pageerror', (err) => pageErrors.push(err.message));
@@ -187,6 +195,21 @@ test.describe('3.12 — the owner sees the drive-time warning on the booking car
       [proposalA],
     );
     console.log(`[3.12] tenant A slotFeasibility: ${JSON.stringify(stamped[0]?.source_context?.slotFeasibility)}`);
+    // T2 — each tenant's stamp is computed from its own calendar only.
+    const stampA = stamped[0]?.source_context?.slotFeasibility as
+      | { checked: boolean; warnings: Array<{ metadata?: { technicianId?: string } }> }
+      | undefined;
+    expect(stampA?.checked).toBe(true);
+    expect(stampA?.warnings.map((w) => w.metadata?.technicianId)).toEqual([shopA.carlos.techId]);
+    const { rows: stampedB } = await pool.query<{ source_context: Record<string, unknown> }>(
+      `SELECT source_context FROM proposals WHERE id = $1`,
+      [proposalB],
+    );
+    console.log(`[3.12] tenant B slotFeasibility: ${JSON.stringify(stampedB[0]?.source_context?.slotFeasibility)}`);
+    expect(stampedB[0]?.source_context?.slotFeasibility, 'A\'s Oakland job must not change B\'s answer').toEqual({
+      checked: true,
+      warnings: [],
+    });
 
     // ── Owner A's real Inbox. ──────────────────────────────────────────────
     await signInBrowser(page, baseURL!, shopA.owner.sub, shopA.owner.token);
@@ -218,13 +241,14 @@ test.describe('3.12 — the owner sees the drive-time warning on the booking car
       )
       .toBe(1);
 
-    // ── T1: tenant B's clean 10am draft carries no warning; A's is not there.
+    // ── T2: tenant B's 10am draft carries no warning; A's card is not there.
     const pageB = await (await browser.newContext()).newPage();
     await signInBrowser(pageB, baseURL!, shopB.owner.sub, shopB.owner.token);
     await pageB.goto('/inbox');
     const cardB = pageB.getByTestId('inbox-row');
     await expect(cardB).toHaveCount(1, { timeout: 20_000 });
     await expect(cardB.getByTestId('proposal-feasibility-warning')).toHaveCount(0);
+    await pageB.screenshot({ path: 'docs/audit/lane-reports/t2-legs-rung5/3.12-neighbour-inbox-no-warning.png', fullPage: true });
     const { rows: bStatus } = await pool.query<{ status: string }>(`SELECT status FROM proposals WHERE id = $1`, [proposalB]);
     expect(bStatus[0].status).toBe('ready_for_review');
 

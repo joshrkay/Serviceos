@@ -1,4 +1,4 @@
-import { test, expect, APIRequestContext } from '@playwright/test';
+import { test, expect, APIRequestContext, type Page } from '@playwright/test';
 import { createHmac, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -36,6 +36,18 @@ import { PgCustomerRepository } from '../../packages/api/src/customers/pg-custom
  * throwing "empty draft". The row's acceptance only asks that A draft
  * return, not that it be a good one — the CONTENT of the draft is out of
  * scope (a real model turn would be #1119; this row doesn't need one).
+ *
+ * GUARDED-SEND half (the DNC refusal), second test below: owner A's customer
+ * is on A's DNC list. In the real inbox A asks for a suggestion and presses
+ * Send; the real reply route refuses it (403 dnc_blocked), the composer
+ * shows why, and NO dispatch row is written — only the
+ * `conversation.reply.suppressed` audit row. T2: the neighbour has its own
+ * customer on the SAME phone number, not on the neighbour's DNC list; in
+ * the same run the neighbour's suggested reply sends (one dispatch row,
+ * the outbound message on its thread) — A's opt-out does not change the
+ * neighbour's answer. Proven red against a planted fault: the DNC lookup
+ * (`PgDncRepository.isOnDnc`) without its tenant predicate blocks the
+ * neighbour's send too.
  *
  * T2 (#1013): a neighbour tenant's own unanswered thread is seeded in the
  * same run. A's inbox lists only A's thread, A's suggest-reply cannot reach
@@ -114,6 +126,73 @@ async function bootstrapOwner(request: APIRequestContext, label: string): Promis
   return { tenantId, sub, jwt, authHeaders };
 }
 
+async function seedInboundThread(
+  tenantOwner: BootstrappedOwner,
+  firstName: string,
+  lastName: string,
+  phone: string,
+  text: string,
+): Promise<string> {
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  try {
+    const customerRepo = new PgCustomerRepository(pool);
+    const conversationRepo = new PgConversationRepository(pool);
+    const now = new Date();
+    const customer = await customerRepo.create({
+      id: randomUUID(),
+      tenantId: tenantOwner.tenantId,
+      firstName,
+      lastName,
+      displayName: `${firstName} ${lastName}`,
+      primaryPhone: phone,
+      preferredChannel: 'sms',
+      smsConsent: true,
+      isArchived: false,
+      createdBy: tenantOwner.sub,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const thread = await conversationRepo.createConversation({
+      tenantId: tenantOwner.tenantId,
+      title: customer.displayName,
+      entityType: 'customer',
+      entityId: customer.id,
+      createdBy: tenantOwner.sub,
+    });
+    await conversationRepo.addMessage({
+      tenantId: tenantOwner.tenantId,
+      conversationId: thread.id,
+      messageType: 'text',
+      content: text,
+      senderId: customer.id,
+      senderRole: 'customer',
+      source: 'sms',
+      // `fromE164` is what the real inbound-SMS path records; a reply goes
+      // back to the number that actually wrote (reply-service `lastInbound`).
+      metadata: { direction: 'inbound', channel: 'sms', fromE164: phone },
+    });
+    return thread.id;
+  } finally {
+    await pool.end().catch(() => undefined);
+  }
+}
+
+async function signInOwner(page: Page, owner: BootstrappedOwner, baseURL: string): Promise<void> {
+  await installClerkStub(page, { signedIn: true, sub: owner.sub, token: owner.jwt });
+  await page.addInitScript(
+    ({ welcomeKey, whatsNewKey }) => {
+      try {
+        localStorage.setItem(welcomeKey, '1');
+        localStorage.setItem(whatsNewKey, '2026-06-21-onboarding');
+      } catch {
+        /* private mode */
+      }
+    },
+    { welcomeKey: WELCOME_SEEN_KEY, whatsNewKey: WHATS_NEW_SEEN_KEY },
+  );
+  await blockExternalHosts(page, baseURL);
+}
+
 test.describe('9.12 reachability — AI-suggestion leg of the unified inbox', () => {
   const canRun =
     !process.env.E2E_BASE_URL &&
@@ -147,70 +226,8 @@ test.describe('9.12 reachability — AI-suggestion leg of the unified inbox', ()
     const neighbourConversationId = await seedInboundThread(neighbour, 'Nora', 'Neighbour', '+15555552098',
       'Neighbour-only question about my water heater');
 
-    async function seedInboundThread(
-      tenantOwner: BootstrappedOwner,
-      firstName: string,
-      lastName: string,
-      phone: string,
-      text: string,
-    ): Promise<string> {
-    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-    let conversationId: string;
-    try {
-      const customerRepo = new PgCustomerRepository(pool);
-      const conversationRepo = new PgConversationRepository(pool);
-      const now = new Date();
-      const customer = await customerRepo.create({
-        id: randomUUID(),
-        tenantId: tenantOwner.tenantId,
-        firstName,
-        lastName,
-        displayName: `${firstName} ${lastName}`,
-        primaryPhone: phone,
-        preferredChannel: 'sms',
-        smsConsent: true,
-        isArchived: false,
-        createdBy: tenantOwner.sub,
-        createdAt: now,
-        updatedAt: now,
-      });
-      const thread = await conversationRepo.createConversation({
-        tenantId: tenantOwner.tenantId,
-        title: customer.displayName,
-        entityType: 'customer',
-        entityId: customer.id,
-        createdBy: tenantOwner.sub,
-      });
-      await conversationRepo.addMessage({
-        tenantId: tenantOwner.tenantId,
-        conversationId: thread.id,
-        messageType: 'text',
-        content: text,
-        senderId: customer.id,
-        senderRole: 'customer',
-        source: 'sms',
-        metadata: { direction: 'inbound', channel: 'sms' },
-      });
-      conversationId = thread.id;
-    } finally {
-      await pool.end().catch(() => undefined);
-    }
-    return conversationId;
-    }
 
-    await installClerkStub(page, { signedIn: true, sub: owner.sub, token: owner.jwt });
-    await page.addInitScript(
-      ({ welcomeKey, whatsNewKey }) => {
-        try {
-          localStorage.setItem(welcomeKey, '1');
-          localStorage.setItem(whatsNewKey, '2026-06-21-onboarding');
-        } catch {
-          /* private mode */
-        }
-      },
-      { welcomeKey: WELCOME_SEEN_KEY, whatsNewKey: WHATS_NEW_SEEN_KEY },
-    );
-    await blockExternalHosts(page, baseURL!);
+    await signInOwner(page, owner, baseURL!);
 
     await page.goto('/comms-inbox');
     await expect(page.getByTestId('comms-thread-row').first()).toBeVisible({ timeout: 15_000 });
@@ -276,5 +293,104 @@ test.describe('9.12 reachability — AI-suggestion leg of the unified inbox', ()
     }
 
     expect(pageErrors, 'no uncaught page errors across the 9.12 suggest-reply flow').toEqual([]);
+  });
+
+  test('guarded send: a suggested reply to a DNC-listed customer is refused in the real inbox with zero dispatch rows; the neighbour\'s send to the same number in the same run goes out (T2)', async ({
+    page,
+    browser,
+    request,
+    baseURL,
+  }) => {
+    test.setTimeout(90_000);
+    const pageErrors: string[] = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+    const SHARED_PHONE = '+15555552097';
+
+    const owner = await bootstrapOwner(request, 'dnc-owner');
+    const neighbour = await bootstrapOwner(request, 'dnc-neighbour');
+    const conversationId = await seedInboundThread(owner, 'Dana', 'Donotcall', SHARED_PHONE,
+      'Please stop texting me.');
+    const neighbourConversationId = await seedInboundThread(neighbour, 'Nico', 'Neighbour', SHARED_PHONE,
+      'Can you confirm Thursday?');
+
+    // Owner A's DNC entry, through the real DNC route (Settings › DNC list).
+    const dncRes = await request.post(`${API_URL}/api/dnc`, {
+      headers: { 'content-type': 'application/json', ...owner.authHeaders },
+      data: JSON.stringify({ phone: SHARED_PHONE, source: 'manual' }),
+    });
+    expect(dncRes.status(), `POST /api/dnc -> ${await dncRes.text()}`).toBe(201);
+
+    async function suggestAndSend(p: Page, id: string): Promise<number> {
+      await p.goto('/comms-inbox');
+      await expect(p.getByTestId('comms-thread-row')).toHaveCount(1, { timeout: 15_000 });
+      await p.getByTestId('comms-thread-row').first().click();
+      await expect(p.getByTestId('message-suggest-button')).toBeVisible({ timeout: 15_000 });
+      const suggested = p.waitForResponse(
+        (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/conversations/${id}/suggest-reply`,
+      );
+      await p.getByTestId('message-suggest-button').click();
+      expect((await suggested).status()).toBe(200);
+      await expect(p.getByTestId('message-input-field')).not.toHaveValue('');
+      const sent = p.waitForResponse(
+        (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/conversations/${id}/reply`,
+      );
+      await p.getByTestId('message-send-button').click();
+      return (await sent).status();
+    }
+
+    const dispatchesFor = async (tenantId: string): Promise<number> => {
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+      try {
+        const { rows } = await pool.query<{ n: string }>(
+          'SELECT count(*)::text AS n FROM message_dispatches WHERE tenant_id = $1',
+          [tenantId],
+        );
+        return Number(rows[0].n);
+      } finally {
+        await pool.end().catch(() => undefined);
+      }
+    };
+
+    // ── A: the suggested reply is refused by the DNC gate. ────────────────
+    await signInOwner(page, owner, baseURL!);
+    expect(await suggestAndSend(page, conversationId), 'the DNC-listed send is refused').toBe(403);
+    await expect(page.getByTestId('comms-send-error')).toContainText(/opted out/i, { timeout: 10_000 });
+    // The draft is restored to the composer, not lost (#1406 D10).
+    await expect(page.getByTestId('message-input-field')).not.toHaveValue('');
+    await page.screenshot({ path: join(SCREENSHOT_DIR, '9-12-03-dnc-refused.png') });
+    expect(await dispatchesFor(owner.tenantId), 'a DNC refusal writes NO dispatch row').toBe(0);
+    const aMessages = (await (
+      await request.get(`${API_URL}/api/conversations/${conversationId}/messages`, { headers: owner.authHeaders })
+    ).json()) as Array<{ senderRole: string }>;
+    expect(aMessages.filter((m) => m.senderRole === 'owner'), 'nothing outbound on A\'s thread').toHaveLength(0);
+    const auditPool = new Pool({ connectionString: process.env.DATABASE_URL });
+    try {
+      const { rows } = await auditPool.query<{ event_type: string }>(
+        `SELECT event_type FROM audit_events WHERE tenant_id = $1 AND event_type LIKE 'conversation.reply.%'`,
+        [owner.tenantId],
+      );
+      expect(rows.map((r) => r.event_type)).toEqual(['conversation.reply.suppressed']);
+    } finally {
+      await auditPool.end().catch(() => undefined);
+    }
+
+    // ── T2: the neighbour's customer on the SAME number is not on the
+    //    neighbour's list — its suggested reply goes out. ─────────────────
+    const nbPage = await (await browser.newContext()).newPage();
+    nbPage.on('pageerror', (err) => pageErrors.push(err.message));
+    await signInOwner(nbPage, neighbour, baseURL!);
+    expect(await suggestAndSend(nbPage, neighbourConversationId), 'A\'s opt-out must not block the neighbour').toBe(201);
+    await nbPage.screenshot({ path: join(SCREENSHOT_DIR, '9-12-04-neighbour-sent.png') });
+    expect(await dispatchesFor(neighbour.tenantId)).toBe(1);
+    const nbMessages = (await (
+      await request.get(`${API_URL}/api/conversations/${neighbourConversationId}/messages`, {
+        headers: neighbour.authHeaders,
+      })
+    ).json()) as Array<{ senderRole: string }>;
+    expect(nbMessages.filter((m) => m.senderRole === 'owner')).toHaveLength(1);
+    // …and A is still refused, with still no dispatch row.
+    expect(await dispatchesFor(owner.tenantId)).toBe(0);
+
+    expect(pageErrors, 'no uncaught page errors across the guarded-send flow').toEqual([]);
   });
 });
