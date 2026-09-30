@@ -3811,7 +3811,10 @@ async function generateAssistantReply(
           let segClass: Pick<IntentClassification, 'intentType' | 'extractedEntities' | 'tokenUsage'>;
           if (step.sendInvoiceTail) {
             if (tailParentIndex < 0) {
-              undraftedSegments.push(segment);
+              // The invoice half became a send of an invoice that already
+              // exists (#1393: an in-flight invoice keeps the send path) —
+              // that card IS the send. Anything else is a step not drafted.
+              if (!chainTypes.includes('send_invoice')) undraftedSegments.push(segment);
               continue;
             }
             segClass = {
@@ -3829,6 +3832,13 @@ async function generateAssistantReply(
             }
           }
           chainUsage = sumUsage(chainUsage, usageOf(segClass.tokenUsage));
+          // #1393 per step — "create an invoice for job X" classified as a
+          // send/issue of an invoice that does not exist drafts the invoice,
+          // exactly as the single-request path does.
+          const segCreateAndSend = step.sendInvoiceTail
+            ? undefined
+            : await isCreateAndSendWithNoInvoice(deps, tenantId, segClass.intentType, segment);
+          if (segCreateAndSend) segClass = { ...segClass, intentType: 'create_invoice' };
           // create_customer is the one documented exception to
           // CHAT_INTENT_TO_REGISTRY_KEY (see that constant's doc comment) —
           // the chain path has no conversational "ask for a name" fallback,
@@ -3872,16 +3882,17 @@ async function generateAssistantReply(
           // literal job UUID in THIS segment names that job and its customer
           // (#1276B). Keyed on the segment's own text, not the whole turn: a
           // UUID in the other half of "X, then Y" is not this step's job.
-          const segVerifiedIds = (
-            await resolvePreDraftIds(
+          const segVerifiedIds = {
+            ...(segCreateAndSend?.job ?? {}),
+            ...(await resolvePreDraftIds(
               deps,
               tenantId,
               segClass.intentType,
               registryKey,
               segEntities,
               segment,
-            )
-          ).ids;
+            )).ids,
+          };
           // I3 — resolved once (memoized) and reused across every segment.
           const segTenantThresholdOverride = await getTenantThresholdOverride();
           const { proposal } = await factory().handle({

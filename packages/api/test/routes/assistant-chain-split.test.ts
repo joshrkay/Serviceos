@@ -19,7 +19,7 @@ import {
   invoiceSendableReferenceCheck,
 } from '../../src/proposals/approval-reference-checks';
 import { buildInvoice } from '../factories/invoice.factory';
-import type { AuthenticatedRequest } from '../../src/middleware/auth';
+import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import {
   setSupervisorPresenceLoader,

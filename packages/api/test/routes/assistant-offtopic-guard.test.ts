@@ -15,7 +15,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import request from 'supertest';
 import { createAssistantRouter, type AssistantRouterDeps } from '../../src/routes/assistant';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
-import type { AuthenticatedRequest } from '../../src/middleware/auth';
+import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import {
   setSupervisorPresenceLoader,
