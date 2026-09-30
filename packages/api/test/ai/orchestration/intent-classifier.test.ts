@@ -2423,8 +2423,12 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
   // #1427 bumped it to 1.20.0: draft_estimate now names a customer asking
   // what new work would cost, with a customer-voiced example — prompt text
   // only, no intent or slot changes.
-  it('taxonomy version reflects the latest coordinated bump (1.20.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.20.0');
+  // #1469/#1468 bumped it to 1.21.0: operator-voiced lookup_jobs /
+  // lookup_account_summary / lookup_leads phrasings, a confirm vs lookup
+  // appointment rule, and a problemDescription entity (+ serviceAddress on
+  // create_appointment / emergency_dispatch) for the launch slots.
+  it('taxonomy version reflects the latest coordinated bump (1.21.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.21.0');
   });
 
   // Task 11 (2026-08-07 tradesperson plan) — log_mileage is a new intent

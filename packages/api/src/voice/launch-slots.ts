@@ -96,6 +96,9 @@ export function extractLaunchSlots(
 
   const problem = firstNonEmpty(
     input.problemDescription,
+    // #1468 (taxonomy 1.21.0) — the prompt's own field for the problem as
+    // described, on create_appointment / create_job / emergency_dispatch.
+    entities.problemDescription,
     entities.noteBody,
     entities.lineItemDescriptions && entities.lineItemDescriptions.length > 0
       ? entities.lineItemDescriptions.join('; ')
@@ -104,6 +107,12 @@ export function extractLaunchSlots(
     // log_warranty_claim for `jobTitle` (the short name of the work), never
     // noteBody, so on a booking call this is where the problem arrives.
     entities.jobTitle,
+    // #1468 — last resort: on a call about EXISTING work (reschedule,
+    // job-status lookup) the model names that work as a reference; it is
+    // what the call is about, so a rescheduling caller is not re-asked to
+    // describe a problem.
+    entities.appointmentReference,
+    entities.jobReference,
   );
   if (problem) slots.problem_description = problem;
 

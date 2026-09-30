@@ -233,6 +233,13 @@ describe('classifier prompt budget — per-profile first turn', () => {
       // example, ≈+39 tok) was paid for by dropping the skill-routing notes
       // from lookup_invoices / lookup_availability (≈−53 tok): caller base
       // prompt 11,822 → 11,765 chars, plan+account caller ≈ 7,623.
+      // #1469/#1468 (taxonomy 1.21.0): the operator-voiced lookup_jobs /
+      // lookup_account_summary text stays OFF the caller (caller variants in
+      // INTENT_BLOCK_VARIANTS); the caller does gain problemDescription /
+      // serviceAddress on create_appointment and a customerName ask on
+      // reschedule_appointment, paid for by reflowing the create_appointment
+      // ask one line shorter and a short caller serviceAddress line. A first
+      // draft measured 7,747 (over the line); the shipped text is under it.
       expect(tokens).toBeLessThan(PER_TURN_CLASSIFY_INPUT_TOKEN_BUDGET * PER_TURN_FIRST_TURN_MARGIN);
     },
   );
