@@ -1,0 +1,39 @@
+# PRD 3.3 (#1015) — "told when the offered times are just defaults", on a
+# signed-in mobile screen. The dev-auth tenant has no configured timezone or
+# business hours, so GET /api/dispatch/availability labels them `default` and
+# the manual-booking slot step (app/appointments/new.tsx → SlotPicker) must
+# render the notice. The customer + job are seeded through the same API by
+# scripts/maestro-device-run.sh and passed in as env.
+appId: com.serviceos.app
+name: PRD 3.3 — defaults notice on the booking slot step
+tags:
+  - prd-3.3
+env:
+  MAESTRO_CUSTOMER_NAME: Maestro Defaults
+  MAESTRO_JOB_SUMMARY: Maestro defaults visit
+---
+# App state is reset by the harness (reset_app), not clearState — see
+# scripts/maestro-device-run.sh.
+- launchApp:
+    clearState: false
+    permissions:
+      all: allow
+- runFlow: subflows/signed-in.yaml
+- openLink: serviceos://appointments/new
+- extendedWaitUntil:
+    visible: "Pick a customer"
+    timeout: 30000
+- tapOn: ${MAESTRO_CUSTOMER_NAME}
+- tapOn: "Next: job"
+- extendedWaitUntil:
+    visible: ${MAESTRO_JOB_SUMMARY}
+    timeout: 30000
+- tapOn: ${MAESTRO_JOB_SUMMARY}
+- tapOn: "Next: time"
+- extendedWaitUntil:
+    visible: "These times use default settings"
+    timeout: 30000
+- assertVisible: "Timezone not configured.*"
+- assertVisible: "Business hours not configured.*"
+- assertVisible: "Travel buffer not configured.*"
+- takeScreenshot: prd-3.3-defaults-notice
