@@ -93,7 +93,7 @@ describe('InAppVoiceAdapter — closing copy is conditional on an approvable dra
     expect(closing.ttsText).toMatch(/details/i);
   });
 
-  it('a complete, approvable draft keeps the existing closing line', async () => {
+  it('#1497: a complete draft left for review says it is drafted and awaiting approval — never "taken care of"', async () => {
     const adapter = buildAdapter([
       classifierJson('create_customer', { displayName: 'Jane Smith', phone: '+15125550100' }),
       classifierJson('confirm'),
@@ -106,6 +106,13 @@ describe('InAppVoiceAdapter — closing copy is conditional on an approvable dra
     const proposals = await proposalRepo.findByTenant(TENANT);
     expect(proposals).toHaveLength(1);
     expect(missingFieldsFor(proposals[0]!)).toEqual([]);
-    expect(closing.ttsText).toBe(GENERIC_CLOSING_LINE);
+    // Precondition: the card is waiting on the operator, not executed.
+    expect(['draft', 'ready_for_review']).toContain(proposals[0]!.status);
+
+    expect(closing.ttsText).not.toBe(GENERIC_CLOSING_LINE);
+    expect(closing.ttsText).not.toMatch(/taken care of/i);
+    expect(closing.ttsText).not.toMatch(/confirmation/i);
+    expect(closing.ttsText).toMatch(/drafted/i);
+    expect(closing.ttsText).toMatch(/approv/i);
   });
 });

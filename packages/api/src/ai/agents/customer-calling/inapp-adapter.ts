@@ -122,6 +122,7 @@ import {
   LANGUAGE_UNSUPPORTED_LINE,
   VOICE_APPROVAL_REFUSAL,
   INAPP_INCOMPLETE_DRAFT_COPY,
+  OPERATOR_DRAFTED_FOR_REVIEW_COPY,
 } from './tts-copy';
 import type { SessionLanguage } from './tts-copy';
 import type { Language } from '../../i18n/i18n';
@@ -2323,6 +2324,10 @@ export class InAppVoiceAdapter {
         .findById(session.tenantId, lastProposalId)
         .catch(() => null);
       const incomplete = queued ? missingFieldsFor(queued).length > 0 : false;
+      // #1497 — the speaker is the operator who owns the card. Unless the
+      // proposal has actually executed, it is waiting on THEIR approval: say
+      // so, instead of the caller-facing "taken care of … confirmation".
+      const executed = queued?.status === 'executed';
       // #1485 — a card the executability check found gaps on asks for them.
       const gapAsk = this.executabilityAsks.get(session);
       this.executabilityAsks.delete(session);
@@ -2334,7 +2339,9 @@ export class InAppVoiceAdapter {
           ? { utterance: `I've drafted that. ${executabilityAsk}` }
           : incomplete
             ? { utterance: INAPP_INCOMPLETE_DRAFT_COPY }
-            : {}),
+            : executed
+              ? {}
+              : { utterance: OPERATOR_DRAFTED_FOR_REVIEW_COPY }),
       });
       allSideEffects.push(...effects3);
       await this.executeSideEffects(session, effects3);

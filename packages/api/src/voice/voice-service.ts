@@ -247,17 +247,56 @@ export interface TranscribeAudioFn {
 }
 
 /**
+ * #1497 — the upload filename extension for each audio container Whisper
+ * decodes. Whisper picks its decoder from the uploaded file NAME, so an iOS
+ * Safari `audio/mp4` memo named `audio.webm` (the old catch-all) was refused.
+ * Keyed by the base MIME type (parameters such as `;codecs=` stripped).
+ */
+const WHISPER_EXTENSION_BY_MIME: Readonly<Record<string, string>> = {
+  'audio/webm': 'webm',
+  'video/webm': 'webm',
+  'audio/ogg': 'ogg',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/wave': 'wav',
+  'audio/vnd.wave': 'wav',
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/mp4': 'mp4',
+  'video/mp4': 'mp4',
+  'audio/x-m4a': 'm4a',
+  'audio/m4a': 'm4a',
+  'audio/flac': 'flac',
+  'audio/x-flac': 'flac',
+};
+
+/**
+ * #1497 — thrown by a transcriber for an audio container it cannot decode.
+ * The route maps it to a 4xx with plain copy (never a 500 carrying provider
+ * text).
+ */
+export class UnsupportedAudioFormatError extends Error {
+  /** `providerDetail` is the raw provider text — for logs only. */
+  constructor(readonly contentType: string, providerDetail?: string) {
+    super(`Unsupported audio format: ${contentType}${providerDetail ? ` (${providerDetail})` : ''}`);
+    this.name = 'UnsupportedAudioFormatError';
+  }
+}
+
+function whisperExtensionFor(contentType: string): string | undefined {
+  const base = contentType.split(';')[0]!.trim().toLowerCase();
+  return WHISPER_EXTENSION_BY_MIME[base];
+}
+
+/**
  * Create a transcribeAudio function backed by OpenAI Whisper API.
  * Falls back to a dev-mode stub when no API key is provided.
  */
 export function createTranscribeAudioFn(apiKey?: string): TranscribeAudioFn {
   if (apiKey) {
     return async (audioBuffer: Buffer, contentType: string, options?: TranscribeAudioOptions) => {
-      const ext = contentType.includes('webm') ? 'webm'
-        : contentType.includes('wav') ? 'wav'
-        : contentType.includes('ogg') ? 'ogg'
-        : contentType.includes('mpeg') ? 'mp3'
-        : 'webm';
+      const ext = whisperExtensionFor(contentType);
+      if (!ext) throw new UnsupportedAudioFormatError(contentType);
       const fd = new FormData();
       // Uint8Array.from(...) always allocates a fresh, plain `ArrayBuffer`
       // backing store, so the result type-checks as `BlobPart` regardless of
@@ -282,6 +321,12 @@ export function createTranscribeAudioFn(apiKey?: string): TranscribeAudioFn {
       });
       if (!res.ok) {
         const errBody = await res.text();
+        // #1497 — Whisper answers 400 "Invalid file format" for audio it
+        // cannot decode (a mislabelled or corrupt upload). That is the
+        // client's format problem, not a server fault.
+        if (res.status === 400 && /invalid file format/i.test(errBody)) {
+          throw new UnsupportedAudioFormatError(contentType, `Whisper API error ${res.status}: ${errBody}`);
+        }
         throw new Error(`Whisper API error ${res.status}: ${errBody}`);
       }
       const data = (await res.json()) as { text?: string };
