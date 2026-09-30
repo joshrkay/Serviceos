@@ -2451,6 +2451,19 @@ export function editFieldsForMissing(
 }
 
 /**
+ * #1499 — a card title cut at a fixed width ended mid-word ("… and a
+ * diagno"). Cut at the last word boundary inside `max` and say so with an
+ * ellipsis; a text that fits is returned untouched.
+ */
+function shortenOnWord(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const boundary = cut.lastIndexOf(' ');
+  const head = (boundary > 0 ? cut.slice(0, boundary) : cut).replace(/[\s,;:—–-]+$/, '');
+  return `${head}…`;
+}
+
+/**
  * QA-2026-06-05 (AST-02/03/04): map any persisted proposal to the UI card
  * shape — estimates/invoices were previously unpersisted LLM JSON.
  *
@@ -2537,7 +2550,7 @@ export function proposalToUI(
   const signals = proposalSignals(proposal.payload, proposal.sourceContext);
   return {
     id: proposal.id,
-    title: `${cardType}: ${proposal.summary.slice(0, 80)}${total}`,
+    title: `${cardType}: ${shortenOnWord(proposal.summary, 80)}${total}`,
     summary: proposal.summary.slice(0, 160),
     // Review K4 — the persisted explanation WINS, the source echo is the
     // fallback. Shared with `customerProposalToUI` (see `cardExplanation`),
@@ -2590,6 +2603,27 @@ export function proposalToUI(
  * review, and telling the operator otherwise actively contradicts what the
  * backend just did.
  */
+/**
+ * #1499 (C35) — a line still waiting on its catalog pick blocks Approve
+ * (approve → 400), so "Review and approve to proceed" was a promise the card
+ * could not keep. Name the line(s) to pick instead. Undefined when no line
+ * pick is pending.
+ */
+function pendingLinePickLine(proposal: Pick<Proposal, 'payload' | 'sourceContext'>): string | undefined {
+  const lineItems = Array.isArray(proposal.payload.lineItems) ? (proposal.payload.lineItems as unknown[]) : [];
+  const names = missingFieldsFor(proposal as Proposal)
+    .map((field) => field.match(/^lineItems\[(\d+)\]\.catalogItemId$/)?.[1])
+    .filter((index): index is string => index !== undefined)
+    .map((index) => {
+      const line = lineItems[Number(index)] as { description?: unknown } | undefined;
+      return typeof line?.description === 'string' && line.description.trim()
+        ? `"${line.description.trim()}"`
+        : `line ${Number(index) + 1}`;
+    });
+  if (names.length === 0) return undefined;
+  return `Pick the catalog item for ${names.join(' and ')} on the card, then approve.`;
+}
+
 function proposalReplySuffix(status: AssistantProposal['status']): string {
   return status === 'Approved'
     ? 'Approved automatically — it will proceed shortly.'
@@ -4052,7 +4086,7 @@ async function generateAssistantReply(
                 ? `${uiProposal.title}.\n\n${clarification}`
                 : executionGaps.length > 0
                   ? `${uiProposal.title}. ${askForExecutabilityGaps(executionGaps, proposal.payload)}`
-                  : `${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`) +
+                  : `${uiProposal.title}. ${pendingLinePickLine(proposal) ?? proposalReplySuffix(uiProposal.status)}`) +
               (createAndSend ? CREATE_AND_SEND_NEXT_STEP : '') +
               // #1499 — a compound ask names the steps this one card skipped.
               // The create-and-send tail above already says the send is next.
@@ -4141,6 +4175,11 @@ async function generateAssistantReply(
         // (editProposal clears the gate on fill) and the executor reads.
         const needsLastName = isBareFirstName(customerPayload.name);
         if (needsLastName) gateOnLastName(proposal);
+        // #1499 — every other chat proposal carries its thread; this one did
+        // not, so the conversation could not find its own customer card.
+        if (conversationId) {
+          proposal.sourceContext = { ...(proposal.sourceContext ?? {}), conversationId };
+        }
         await deps.proposalRepo.create(proposal);
         // QA-2026-06-05: parity with the guardrail promote step (see
         // inapp-adapter.handleCreateProposal). create-customer-task builds

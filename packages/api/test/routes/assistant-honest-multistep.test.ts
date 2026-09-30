@@ -13,6 +13,7 @@ import { approveProposal } from '../../src/proposals/actions';
 import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import { buildJob } from '../factories/job.factory';
+import type { CatalogItem, CatalogItemRepository } from '../../src/catalog/catalog-item';
 import type { AuthenticatedRequest } from '../../src/middleware/auth';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { EntityKind, EntityResolver, EntityResolverResult } from '../../src/ai/resolution/entity-resolver';
@@ -356,6 +357,108 @@ describe('#1499 slice 3 — a clarification asks for the field that is actually 
     expect(content).not.toMatch(/date and time/i);
     expect(content).toMatch(/couldn't find a matching appointment for Morgan Tatebrook/i);
     expect(await proposalRepo.findByTenant(TEST_TENANT)).toEqual([]);
+  });
+});
+
+function catalogItem(id: string, name: string, unitPriceCents: number): CatalogItem {
+  return {
+    id,
+    tenantId: TEST_TENANT,
+    name,
+    description: name,
+    category: 'labor',
+    unit: 'each',
+    unitPriceCents,
+    productServiceType: 'service',
+    archivedAt: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  } as unknown as CatalogItem;
+}
+
+describe('#1499 slice 4 — card copy and card fields', () => {
+  const CUSTOMER = '88888888-8888-4888-8888-888888888888';
+  const LOCATED_ESTIMATE_TURN =
+    'Draft an estimate for Intake QA49125: blower motor replacement $425 and a diagnostic visit $89.';
+
+  function estimateApp(proposalRepo: InMemoryProposalRepository) {
+    return buildApp({
+      proposalRepo,
+      catalogRepo: {
+        listByTenant: vi.fn(async () => [
+          catalogItem('cat-blower', 'Blower Motor Replacement', 42500),
+          catalogItem('cat-diag-a', 'Diagnostic Visit', 8900),
+          catalogItem('cat-diag-b', 'Diagnostic Visit', 12900),
+        ]),
+      } as unknown as CatalogItemRepository,
+      entityResolver: scriptedResolver((kind) =>
+        kind === 'customer'
+          ? { kind: 'resolved', candidate: { id: CUSTOMER, kind: 'customer', label: 'Intake QA49125', score: 1 } }
+          : undefined,
+      ),
+      gateway: scriptedGateway(
+        {
+          [LOCATED_ESTIMATE_TURN]: {
+            intentType: 'draft_estimate',
+            entities: {
+              customerName: 'Intake QA49125',
+              lineItemDescriptions: ['blower motor replacement', 'diagnostic visit'],
+            },
+          },
+        },
+        {
+          'You are an estimate generation assistant': JSON.stringify({
+            lineItems: [
+              { description: 'Blower motor replacement', quantity: 1, unitPrice: 42500 },
+              { description: 'Diagnostic visit', quantity: 1, unitPrice: 8900 },
+            ],
+            confidence_score: 0.9,
+          }),
+        },
+      ),
+    });
+  }
+
+  // C35: a line still needed a catalog pick, approve returned 400, and the
+  // reply said "Review and approve to proceed".
+  it('a card with a line item still to pick does not say "Review and approve"; it says what to pick', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const res = await chat(estimateApp(proposalRepo), LOCATED_ESTIMATE_TURN);
+    expect(res.status).toBe(200);
+    expect(res.body.message.proposal.missingFields).toContain('lineItems[1].catalogItemId');
+    const content: string = res.body.message.content;
+    expect(content).not.toMatch(/review and approve/i);
+    expect(content).toMatch(/pick/i);
+    expect(content).toContain('Diagnostic visit');
+  });
+
+  // C35's title: "… $425 and a diagno" — cut mid-word at 80 characters.
+  it('a long title is shortened on a word boundary, with an ellipsis', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const res = await chat(estimateApp(proposalRepo), LOCATED_ESTIMATE_TURN);
+    expect(res.status).toBe(200);
+    expect(res.body.message.proposal.title).toBe(
+      'Estimate: Draft an estimate for Intake QA49125: blower motor replacement $425 and a…',
+    );
+  });
+
+  // Battery 2: every chat proposal carried its conversationId except
+  // create_customer's, so the thread could not find its own customer card.
+  it('a chat create_customer proposal carries the conversationId', async () => {
+    const turn = 'Add customer Priya Nandakumar, phone 555-201-4411.';
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp({
+      proposalRepo,
+      gateway: scriptedGateway({
+        [turn]: { intentType: 'create_customer', entities: { displayName: 'Priya Nandakumar', phone: '555-201-4411' } },
+      }),
+    });
+
+    const res = await chat(app, turn);
+    expect(res.status).toBe(200);
+    const [persisted] = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(persisted.proposalType).toBe('create_customer');
+    expect(persisted.sourceContext?.conversationId).toBe(CONVERSATION_ID);
   });
 });
 
