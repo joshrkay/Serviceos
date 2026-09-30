@@ -7336,6 +7336,36 @@ export const MIGRATIONS = {
     END
     $mig301$;
   `,
+
+  // #1489 — HTTP Idempotency-Key store for the create routes (customers,
+  // jobs, appointments, estimates, invoices, payments). One row per
+  // (tenant, user, key): the claim is inserted inside the request
+  // transaction, so a concurrent duplicate's INSERT waits on it and then
+  // replays the committed response. request_fingerprint = sha256 of
+  // method + path + canonical body (a different body under the same key is
+  // rejected 422). response_* stay NULL while the first request is in
+  // flight. Rows live 24h; the hold-reaper tick prunes them per tenant.
+  '302_idempotency_keys': `
+    CREATE TABLE IF NOT EXISTS idempotency_keys (
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      user_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      request_fingerprint TEXT NOT NULL,
+      response_status INTEGER,
+      response_content_type TEXT,
+      response_body TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ,
+      PRIMARY KEY (tenant_id, user_id, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_idempotency_keys_created
+      ON idempotency_keys (tenant_id, created_at);
+    ALTER TABLE idempotency_keys ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE idempotency_keys FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_idempotency_keys ON idempotency_keys;
+    CREATE POLICY tenant_isolation_idempotency_keys ON idempotency_keys
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
