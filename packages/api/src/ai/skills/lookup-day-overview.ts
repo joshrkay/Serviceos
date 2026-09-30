@@ -6,9 +6,7 @@
  * and the FSM stays in intent_capture). Composes, in spoken order:
  *
  *   1. urgent / high-priority open jobs FIRST (the "heads up" line),
- *   2. today's appointments in start order, with technician names
- *      resolved via job.assignedTechnicianId → users (decorative —
- *      a missing userRepo or name never fails the overview),
+ *   2. the day's schedule,
  *   3. pending-approvals count (draft + ready_for_review, counted
  *      through the same `buildInboxPayload` the operator inbox uses so
  *      the spoken number always matches the screen),
@@ -19,19 +17,16 @@
  * `localDateString` — reports/money-dashboard + digest-service), so
  * "today" here is exactly the digest's tenant-local calendar day.
  *
- * The appointment list is the WHOLE day, unfiltered by time — an
- * already-past 8am visit is still spoken alongside a not-yet-started 2pm
- * one (only `canceled`/`no_show` are dropped). That's the right answer
- * for an owner's morning overview of "what happened/is happening/will
- * happen today." `ai/skills/lookup-my-day.ts` (Task 10, 2026-08-07
- * tradesperson plan, quality-review I5) makes the OPPOSITE, equally
- * deliberate choice for the SAME
- * `AppointmentRepository.findByDateRange` data: a technician asking
- * "what's my next job?" needs only what's still ahead, so that skill
- * additionally drops `completed` status and anything already past
- * `scheduledEnd`.
+ * #1498 — the schedule sentence (2) is NOT computed here. It is
+ * `ai/skills/lookup-my-day.ts#lookupMyDay` for the whole tenant — the ONE
+ * schedule lookup — so "what does my day look like?" and "what's on my
+ * schedule today?" can never report two different days again (the QA sweep
+ * heard "7 appointments today" and "nothing left today" side by side). That
+ * module defines which visits count and which are "left". Asked about
+ * another day ("…tomorrow?"), the overview is just that day's schedule:
+ * urgent jobs, approvals and overnight activity are about NOW, not Friday.
  */
-import type { Appointment, AppointmentRepository } from '../../appointments/appointment';
+import type { AppointmentRepository } from '../../appointments/appointment';
 import type { Job, JobRepository } from '../../jobs/job';
 import type { UserRepository } from '../../users/user';
 import type { ProposalRepository } from '../../proposals/proposal';
@@ -39,7 +34,8 @@ import { buildInboxPayload, listSince } from '../../proposals/inbox';
 import { resolveDayWindow } from '../../reports/money-dashboard';
 import { localDateString } from '../../digest/digest-service';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
-import { plural, formatTime, technicianDisplayName } from './spoken-format';
+import { plural } from './spoken-format';
+import { lookupMyDay, type MyDayAppointment } from './lookup-my-day';
 
 export interface LookupDayOverviewInput {
   tenantId: string;
@@ -50,6 +46,8 @@ export interface LookupDayOverviewInput {
   now?: Date;
   /** Voice session this lookup runs inside. Used for the audit row. */
   sessionId?: string;
+  /** #1498 — tenant-local `YYYY-MM-DD` asked about; absent → today. */
+  day?: string;
 }
 
 export interface LookupDayOverviewDeps {
@@ -62,14 +60,7 @@ export interface LookupDayOverviewDeps {
   lookupEvents?: LookupEventService;
 }
 
-export interface DayOverviewAppointment {
-  appointmentId: string;
-  jobId: string;
-  jobSummary?: string;
-  scheduledStart: Date;
-  scheduledEnd: Date;
-  technicianName?: string;
-}
+export type DayOverviewAppointment = MyDayAppointment;
 
 export interface DayOverviewUrgentJob {
   jobId: string;
@@ -94,7 +85,6 @@ export type LookupDayOverviewResult =
 /** Tenant-local default mirrors resolveDayWindow's. */
 const DEFAULT_TIMEZONE = 'America/New_York';
 /** Spoken caps — a 40-appointment day must not become a 3-minute monologue. */
-const MAX_SPOKEN_APPOINTMENTS = 5;
 const MAX_SPOKEN_URGENT_JOBS = 3;
 /** Inbox cap — only the summary counts are used here. */
 const INBOX_COUNT_CAP = 100;
@@ -130,62 +120,62 @@ export async function lookupDayOverview(
     }
   };
 
+  const failed = async (error: string): Promise<LookupDayOverviewResult> => {
+    const message = "I'm having trouble pulling up your day right now.";
+    await recordEvent('error', 0, message);
+    return { status: 'error', summary: message, data: { error } };
+  };
+
   try {
-    const today = resolveDayWindow(localDateString(now, timezone), timezone);
+    const todayDate = localDateString(now, timezone);
+    // The ONE schedule lookup, for the whole business (#1498).
+    const schedule = await lookupMyDay(
+      {
+        tenantId: input.tenantId,
+        wholeTenant: true,
+        timezone,
+        now,
+        ...(input.day ? { day: input.day } : {}),
+      },
+      {
+        appointmentRepo: deps.appointmentRepo,
+        jobRepo: deps.jobRepo,
+        ...(deps.userRepo ? { userRepo: deps.userRepo } : {}),
+      },
+    );
+    if (schedule.status === 'error') return failed(schedule.data.error);
+    const appointments = schedule.data.dayAppointments;
+    const noOverview = {
+      urgentJobs: [],
+      pendingApprovalsCount: 0,
+      overnight: { createdCount: 0, executedCount: 0, failedCount: 0 },
+    };
+
+    // Another day: only its schedule — urgency, approvals and overnight are NOW.
+    if (schedule.data.day !== todayDate) {
+      const status = appointments.length > 0 ? 'found' : 'none';
+      await recordEvent(status, appointments.length, schedule.summary);
+      return { status, summary: schedule.summary, data: { appointments, ...noOverview } };
+    }
+
+    const today = resolveDayWindow(todayDate, timezone);
     // Yesterday 6pm tenant-local = today's local midnight minus 6 hours.
     const overnightSince = new Date(
       today.start.getTime() - OVERNIGHT_LOOKBACK_FROM_MIDNIGHT_MS,
     );
 
-    const [rawAppointments, allJobs, draftProposals, readyProposals, overnight] =
-      await Promise.all([
-        deps.appointmentRepo.findByDateRange(input.tenantId, today.start, today.end),
-        // 200: covers a busy week of jobs on a typical SMB tenant without
-        // loading the entire job history. Urgent/high-priority jobs are
-        // filtered client-side below, so a priority-filtered DB query
-        // (findByPriority) would be cleaner but the repo interface
-        // doesn't expose one yet — this bounded scan is acceptable until
-        // a priority index + filtered query is added.
-        deps.jobRepo.findByTenant(input.tenantId, { limit: 200 }),
-        deps.proposalRepo.findByStatus(input.tenantId, 'draft'),
-        deps.proposalRepo.findByStatus(input.tenantId, 'ready_for_review'),
-        listSince(deps.proposalRepo, input.tenantId, overnightSince),
-      ]);
-
-    const liveAppointments = rawAppointments
-      .filter(
-        (a: Appointment) =>
-          a.status !== 'canceled' && a.status !== 'no_show' && a.status !== 'completed',
-      )
-      .sort((a, b) => a.scheduledStart.getTime() - b.scheduledStart.getTime());
-
-    const jobById = new Map(allJobs.map((j) => [j.id, j] as const));
-
-    // Technician names — one tenant-scoped user fetch, decorative on failure.
-    let userNameById = new Map<string, string>();
-    if (deps.userRepo) {
-      try {
-        const users = await deps.userRepo.findByTenant(input.tenantId);
-        userNameById = new Map(users.map((u) => [u.id, technicianDisplayName(u)]));
-      } catch {
-        // Names are decorative — never fail the overview over them.
-      }
-    }
-
-    const appointments: DayOverviewAppointment[] = liveAppointments.map((a) => {
-      const job = jobById.get(a.jobId);
-      const technicianName = job?.assignedTechnicianId
-        ? userNameById.get(job.assignedTechnicianId)
-        : undefined;
-      return {
-        appointmentId: a.id,
-        jobId: a.jobId,
-        ...(job ? { jobSummary: job.summary } : {}),
-        scheduledStart: a.scheduledStart,
-        scheduledEnd: a.scheduledEnd,
-        ...(technicianName ? { technicianName } : {}),
-      };
-    });
+    const [allJobs, draftProposals, readyProposals, overnight] = await Promise.all([
+      // 200: covers a busy week of jobs on a typical SMB tenant without
+      // loading the entire job history. Urgent/high-priority jobs are
+      // filtered client-side below, so a priority-filtered DB query
+      // (findByPriority) would be cleaner but the repo interface
+      // doesn't expose one yet — this bounded scan is acceptable until
+      // a priority index + filtered query is added.
+      deps.jobRepo.findByTenant(input.tenantId, { limit: 200 }),
+      deps.proposalRepo.findByStatus(input.tenantId, 'draft'),
+      deps.proposalRepo.findByStatus(input.tenantId, 'ready_for_review'),
+      listSince(deps.proposalRepo, input.tenantId, overnightSince),
+    ]);
 
     const urgentJobs: DayOverviewUrgentJob[] = allJobs
       .filter(
@@ -225,21 +215,7 @@ export async function lookupDayOverview(
       );
     }
 
-    if (appointments.length === 0) {
-      sentences.push('You have no appointments on the calendar today.');
-    } else {
-      const spoken = appointments.slice(0, MAX_SPOKEN_APPOINTMENTS).map((a) => {
-        const time = formatTime(a.scheduledStart, timezone);
-        const what = a.jobSummary ? ` — ${a.jobSummary}` : '';
-        const who = a.technicianName ? ` with ${a.technicianName}` : '';
-        return `${time}${what}${who}`;
-      });
-      const rest = appointments.length - spoken.length;
-      sentences.push(
-        `You have ${appointments.length} ${plural(appointments.length, 'appointment')} today: ` +
-          `${spoken.join('; ')}${rest > 0 ? `; and ${rest} more` : ''}.`,
-      );
-    }
+    sentences.push(schedule.summary);
 
     if (pendingApprovalsCount > 0) {
       sentences.push(
@@ -293,12 +269,6 @@ export async function lookupDayOverview(
       },
     };
   } catch (err) {
-    const message = "I'm having trouble pulling up your day right now.";
-    await recordEvent('error', 0, message);
-    return {
-      status: 'error',
-      summary: message,
-      data: { error: err instanceof Error ? err.message : String(err) },
-    };
+    return failed(err instanceof Error ? err.message : String(err));
   }
 }

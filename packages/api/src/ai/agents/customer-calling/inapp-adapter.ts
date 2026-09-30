@@ -2167,6 +2167,7 @@ export class InAppVoiceAdapter {
               userId: session.actorUserId,
               intent: classification.intentType as IntentType,
               entities: classification.extractedEntities as Record<string, unknown> | undefined,
+              transcript: text,
             });
           }
         }

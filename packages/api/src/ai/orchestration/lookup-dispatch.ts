@@ -69,6 +69,12 @@ import {
 } from '../../workers/voice-lookup-answer';
 import { TECHNICIAN_REF_INTENTS } from '../agents/customer-calling/entity-resolution';
 import { ambiguousReferenceLine, resolveLookupReference } from './lookup-reference';
+import { customerDisplayName, speakForOperator } from './operator-point-of-view';
+import {
+  answerDocumentLookup,
+  answerTenantWideLookup,
+  type TenantWideAnswer,
+} from './tenant-wide-lookups';
 
 /**
  * Everything the assistant route needs to answer a lookup, as ONE optional
@@ -137,14 +143,11 @@ export interface AssistantLookupReply {
    * The customer this answer is ABOUT, when a free-text reference resolved to
    * one. Present only on an answered reply.
    *
-   * Chat ignores it — the operator can see the name they typed. A SPOKEN
-   * surface cannot: the skills' summaries are written in the second person
-   * for a caller who IS the customer ("You have one open invoice"), and an
-   * operator asking "what does Khan owe us?" must hear "Khan Household has
-   * one open invoice" instead — both because the second person is addressed
-   * to the wrong party and because naming the record is the operator's only
-   * confirmation that the right one was read. See
-   * `ai/voice-turn/inapp-lookup-surface.ts#speakForOperator`.
+   * Part of the chat response envelope (API clients and the QA harness read
+   * it). `message.content` already names the customer — the dispatch
+   * re-points the skill's second-person summary at them
+   * (`operator-point-of-view.ts#speakForOperator`), so neither surface has
+   * to.
    */
   resolvedCustomer?: { id: string; label?: string };
 }
@@ -200,6 +203,16 @@ function noCustomerReferenceReply(intent: IntentType): AssistantLookupReply {
   };
 }
 
+function tenantWideReply(intent: IntentType, answer: TenantWideAnswer): AssistantLookupReply {
+  return {
+    taskType: lookupTaskType(intent),
+    model: LOOKUP_MODEL,
+    usage: { input: 0, output: 0, total: 0 },
+    outcome: answer.outcome,
+    message: { role: 'assistant', content: answer.content, reasoning: answer.reasoning },
+  };
+}
+
 function ambiguousReply(
   intent: IntentType,
   reference: string,
@@ -226,6 +239,21 @@ export interface DispatchAssistantLookupInput {
   extractedEntities?: Record<string, unknown>;
   /** The operator's own words this turn — read only where an entity is missing. */
   message?: string;
+}
+
+/** Lookups that read the schedule for one day. */
+const SCHEDULE_INTENTS: ReadonlySet<IntentType> = new Set<IntentType>([
+  'lookup_my_day',
+  'lookup_day_overview',
+  'lookup_appointments',
+]);
+
+const DAY_WORD_RE =
+  /\b(?:today|tonight|tomorrow|(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/i;
+
+/** The day word in a schedule question ("…for tomorrow?" → "tomorrow"). */
+function scheduleDayWord(message: string | undefined): string | undefined {
+  return message?.match(DAY_WORD_RE)?.[0];
 }
 
 /**
@@ -307,13 +335,46 @@ export async function dispatchAssistantLookup(
       TECHNICIAN_REF_INTENTS.has(intent) && typeof entities.targetTechnicianName === 'string'
         ? entities.targetTechnicianName
         : undefined;
+    // The day a schedule question names. The classifier's own phrase wins;
+    // otherwise the day word in the operator's sentence ("…tomorrow?") —
+    // a schedule question must never silently answer for a different day.
     const dateTimeDescription =
-      typeof entities.dateTimeDescription === 'string' ? entities.dateTimeDescription : undefined;
+      typeof entities.dateTimeDescription === 'string'
+        ? entities.dateTimeDescription
+        : SCHEDULE_INTENTS.has(intent)
+          ? scheduleDayWord(input.message)
+          : undefined;
     const catalogSearch =
       intent === 'lookup_catalog' ? catalogSearchTerm(entities, input.message) : undefined;
 
-    // Customer-scoped ask with nothing to resolve → chat-specific clarification.
-    if (CUSTOMER_SCOPED_LOOKUP_INTENTS.has(intent) && !customerReference) {
+    // A literal document number answers directly (#1498): "status of
+    // JOB-0081" is about that record, never "which customer?".
+    const documentAnswer = await answerDocumentLookup(
+      {
+        tenantId,
+        actorId: userId,
+        intent,
+        entities,
+        ...(input.message ? { message: input.message } : {}),
+      },
+      deps,
+    );
+    if (documentAnswer) return tenantWideReply(intent, documentAnswer);
+
+    // Customer-scoped ask with no customer named: the operator means the
+    // whole business where the question has a tenant-wide reading (#1498);
+    // only a question that genuinely needs a customer asks which one.
+    // "What appointments do we have tomorrow?" names no customer: it is a
+    // question about the schedule, answered by the ONE schedule lookup.
+    const executedIntent: IntentType =
+      intent === 'lookup_appointments' && !customerReference ? 'lookup_my_day' : intent;
+
+    if (executedIntent === intent && CUSTOMER_SCOPED_LOOKUP_INTENTS.has(intent) && !customerReference) {
+      const tenantWide = await answerTenantWideLookup(
+        { tenantId, actorId: userId, intent, ...(input.message ? { message: input.message } : {}) },
+        deps,
+      );
+      if (tenantWide) return tenantWideReply(intent, tenantWide);
       return noCustomerReferenceReply(intent);
     }
 
@@ -379,7 +440,7 @@ export async function dispatchAssistantLookup(
         // Per-turn UUID: lookup_events.session_id is a UUID column, and the
         // route's correlation id (`assistant-<userId>-<uuid>`) is not one.
         sessionId: uuidv4(),
-        intent,
+        intent: executedIntent,
         actorId: userId,
         ...(customerId ? { customerId } : {}),
         ...(jobId ? { jobId } : {}),
@@ -406,16 +467,29 @@ export async function dispatchAssistantLookup(
     // 'found' | 'none' | 'refused' all carry an accurate, data-derived
     // summary. A zero-row lookup returns the skill's real empty answer
     // ("You have no appointments scheduled") — never a fluent invention.
+    const outcome: AssistantLookupOutcome =
+      execution.answer.result === 'refused'
+        ? 'refused'
+        : unresolvedReference
+          ? 'not_found'
+          : 'answered';
+    // The operator asked ABOUT a customer: an answer about one names them
+    // (#1498 — chat said "Your account is paid in full").
+    const content =
+      outcome === 'answered' && customerId
+        ? speakForOperator(
+            execution.answer.summary,
+            await customerDisplayName(deps.shared.customerRepo, tenantId, {
+              id: customerId,
+              ...(customerLabel ? { label: customerLabel } : {}),
+            }),
+          )
+        : execution.answer.summary;
     return {
       taskType: lookupTaskType(intent),
       model: LOOKUP_MODEL,
       usage: { input: 0, output: 0, total: 0 },
-      outcome:
-        execution.answer.result === 'refused'
-          ? 'refused'
-          : unresolvedReference
-            ? 'not_found'
-            : 'answered',
+      outcome,
       // Only on a real answer: a refusal is about the ASKER's permissions and
       // must not be re-pointed at the customer.
       ...(customerId && execution.answer.result !== 'refused'
@@ -423,7 +497,7 @@ export async function dispatchAssistantLookup(
         : {}),
       message: {
         role: 'assistant',
-        content: execution.answer.summary,
+        content,
         reasoning:
           execution.answer.result === 'refused'
             ? `Permission-gated lookup refused — your role lacks ${

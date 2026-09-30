@@ -166,12 +166,13 @@ import type { Mode } from '../proposals/auto-approve';
 // drift. `routes -> workers` imports are an existing pattern in this
 // codebase (see routes/admin-tenants.ts, routes/onboarding.ts).
 import { holdIfUnsupervised } from '../workers/voice-action-router';
-import type { InvoiceRepository } from '../invoices/invoice';
+import type { Invoice, InvoiceRepository } from '../invoices/invoice';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { EstimateRepository } from '../estimates/estimate';
 import { redraftInvoiceOnEstimatePick } from '../ai/tasks/invoice-task';
 import type { AppointmentRepository } from '../appointments/appointment';
-import type { JobRepository } from '../jobs/job';
+import type { Job, JobRepository } from '../jobs/job';
+import { findDocumentByNumber, findDocumentNumbers } from '../ai/resolution/document-number';
 import type { DunningEventRepository } from '../invoices/dunning-config';
 import type { CustomerRepository } from '../customers/customer';
 import type { LocationRepository } from '../locations/location';
@@ -1284,7 +1285,8 @@ const LITERAL_JOB_DRAFT_TYPES: ReadonlySet<string> = new Set(['draft_estimate', 
  * customer the operator had in fact identified. A UUID that is a job THIS
  * tenant owns is a repo lookup, so its id and customerId are verified by
  * construction. Exactly one such job, or nothing: two job ids in one request
- * is not a pick. Failure-soft, like the resolver pass it joins.
+ * is not a pick. Failure-soft, like the resolver pass it joins. #1498 — the
+ * job's own number ("JOB-0081") is read the same way, by exact match.
  */
 async function resolveLiteralJobReference(
   jobRepo: JobRepository | undefined,
@@ -1293,18 +1295,95 @@ async function resolveLiteralJobReference(
 ): Promise<Record<string, string>> {
   if (!jobRepo) return {};
   const ids = [...new Set((text.match(LITERAL_UUID_RE) ?? []).map((id) => id.toLowerCase()))];
-  const jobs = [];
-  for (const id of ids) {
-    try {
+  // #1498 — the job's own number ("JOB-0081") names it just as exactly.
+  const numbers = findDocumentNumbers(text).filter((doc) => doc.kind === 'job');
+  const jobs = new Map<string, Job>();
+  try {
+    for (const id of ids) {
       const job = await jobRepo.findById(tenantId, id);
-      if (job) jobs.push(job);
-    } catch {
-      return {};
+      if (job) jobs.set(job.id, job);
     }
+    for (const doc of numbers) {
+      const found = await findDocumentByNumber({ jobRepo }, tenantId, doc);
+      if (found?.kind === 'job') jobs.set(found.record.id, found.record);
+    }
+  } catch {
+    return {};
   }
-  if (jobs.length !== 1) return {};
-  const [job] = jobs;
+  if (jobs.size !== 1) return {};
+  const [job] = [...jobs.values()];
   return { jobId: job.id, ...(job.customerId ? { customerId: job.customerId } : {}) };
+}
+
+/**
+ * The drafts whose `invoiceId` gate a literal INV- number in the operator's
+ * words may lift. Deliberately just the reminder — a comms action that never
+ * auto-approves. The money-moving invoice drafts (update / send / issue /
+ * record_payment …) keep their pinned rule that a repo match never lifts the
+ * gate on this surface (assistant.route.test.ts, "money-path handler
+ * wiring"); for those the number is read only to check the invoice's state
+ * (`invoiceActionBlocker`).
+ */
+const LITERAL_INVOICE_ID_TYPES: ReadonlySet<string> = new Set(['send_payment_reminder']);
+
+/**
+ * #1498 — "Send a payment reminder for invoice INV-0060" names the invoice by
+ * its own number. The classifier does not reliably file that number anywhere
+ * the resolver reads, so the operator's words are read for it, by exact
+ * match: exactly one INV- number that is an invoice of THIS tenant, or
+ * nothing. Failure-soft, like `resolveLiteralJobReference`.
+ */
+async function resolveLiteralInvoiceNumber(
+  invoiceRepo: InvoiceRepository | undefined,
+  tenantId: string,
+  text: string,
+): Promise<string | undefined> {
+  if (!invoiceRepo) return undefined;
+  const numbers = findDocumentNumbers(text).filter((doc) => doc.kind === 'invoice');
+  if (numbers.length !== 1) return undefined;
+  try {
+    const found = await findDocumentByNumber({ invoiceRepo }, tenantId, numbers[0]);
+    return found?.kind === 'invoice' ? found.record.id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * #1498 — why the named invoice's state rules an action out, in the
+ * operator's words, or undefined when it doesn't (or the invoice can't be
+ * read — the draft then proceeds and execution keeps its own guards).
+ *   - a payment reminder on a settled invoice would dun a customer who owes
+ *     nothing;
+ *   - a payment recorded against a DRAFT would book money on an invoice the
+ *     customer has never been sent (execution only accepts open /
+ *     partially-paid invoices, so the card could never succeed anyway).
+ */
+async function invoiceActionBlocker(
+  invoiceRepo: InvoiceRepository | undefined,
+  tenantId: string,
+  registryKey: string | undefined,
+  invoiceId: string | undefined,
+): Promise<string | undefined> {
+  if (!invoiceRepo || !invoiceId) return undefined;
+  if (registryKey !== 'send_payment_reminder' && registryKey !== 'record_payment') return undefined;
+  let invoice: Invoice | null;
+  try {
+    invoice = await invoiceRepo.findById(tenantId, invoiceId);
+  } catch {
+    return undefined;
+  }
+  if (!invoice) return undefined;
+  if (registryKey === 'send_payment_reminder' && invoice.status === 'paid') {
+    return `${invoice.invoiceNumber} is already paid in full, so there's nothing to remind the customer about.`;
+  }
+  if (registryKey === 'record_payment' && invoice.status === 'draft') {
+    return (
+      `${invoice.invoiceNumber} is still a draft — it hasn't been issued, so there's no payment to record yet. ` +
+      'Issue it first, then record the payment.'
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -1460,9 +1539,6 @@ async function isCreateAndSendWithNoInvoice(
 /** The intents a "create (an invoice) … and send it" ask comes back as. */
 const CREATE_AND_SEND_INTENTS: ReadonlySet<string> = new Set(['send_invoice', 'issue_invoice']);
 
-/** "JOB-0081" — a job's human number, as the operator reads it off the job. */
-const LITERAL_JOB_NUMBER_RE = /\bJOB-\d+\b/gi;
-
 /**
  * A create-and-send ask re-routed to drafting the invoice (#1393/#1499). `job`
  * is the job a literal job NUMBER in the text names ({} when none, or not
@@ -1474,11 +1550,10 @@ interface CreateAndSendReroute {
 }
 
 /**
- * #1499 — the job a literal "JOB-0081" names, via the job repository's own
- * search (which matches job_number), kept only on an EXACT number match.
- * Exactly one job, or nothing — same rule as `resolveLiteralJobReference`.
- * Failure-soft. Narrow on purpose: only the create-and-send reroute uses it;
- * general doc-number resolution belongs to the lookup/resolution layer.
+ * #1499 — the job a literal "JOB-0081" names, kept only on an EXACT number
+ * match (`findDocumentByNumber`, #1498 — the one document-number reader).
+ * Exactly one job number in the words, or nothing — same rule as
+ * `resolveLiteralJobReference`. Failure-soft.
  */
 async function findJobByLiteralNumber(
   jobRepo: JobRepository | undefined,
@@ -1486,14 +1561,12 @@ async function findJobByLiteralNumber(
   text: string,
 ): Promise<Record<string, string>> {
   if (!jobRepo) return {};
-  const numbers = [...new Set((text.match(LITERAL_JOB_NUMBER_RE) ?? []).map((n) => n.toUpperCase()))];
+  const numbers = findDocumentNumbers(text).filter((doc) => doc.kind === 'job');
   if (numbers.length !== 1) return {};
   try {
-    const hits = (await jobRepo.findByTenant(tenantId, { search: numbers[0], limit: 5 })).filter(
-      (job) => job.jobNumber?.toUpperCase() === numbers[0],
-    );
-    if (hits.length !== 1) return {};
-    const [job] = hits;
+    const found = await findDocumentByNumber({ jobRepo }, tenantId, numbers[0]);
+    if (found?.kind !== 'job') return {};
+    const job = found.record;
     return { jobId: job.id, ...(job.customerId ? { customerId: job.customerId } : {}) };
   } catch {
     return {};
@@ -1507,7 +1580,7 @@ async function findJobByLiteralNumber(
  * rather than drafting a job for one customer onto another's estimate.
  */
 async function resolvePreDraftIds(
-  deps: Pick<AssistantRouterDeps, 'entityResolver' | 'jobRepo'>,
+  deps: Pick<AssistantRouterDeps, 'entityResolver' | 'jobRepo' | 'invoiceRepo'>,
   tenantId: string,
   intent: string,
   registryKey: string | undefined,
@@ -1515,6 +1588,15 @@ async function resolvePreDraftIds(
   operatorText: string,
 ): Promise<PreDraftResolution> {
   const byName = await resolveVerifiedIdsForDraft(deps.entityResolver, tenantId, intent, entities);
+  if (registryKey && LITERAL_INVOICE_ID_TYPES.has(registryKey) && !byName.ids.invoiceId) {
+    const invoiceId = await resolveLiteralInvoiceNumber(deps.invoiceRepo, tenantId, operatorText);
+    if (invoiceId) {
+      return {
+        ids: { ...byName.ids, invoiceId },
+        ambiguousRefKeys: byName.ambiguousRefKeys.filter((key) => key !== 'invoiceId'),
+      };
+    }
+  }
   if (!registryKey || !LITERAL_JOB_DRAFT_TYPES.has(registryKey)) return byName;
   const byJobId = await resolveLiteralJobReference(deps.jobRepo, tenantId, operatorText);
   if (Object.keys(byJobId).length === 0) return byName;
@@ -2653,11 +2735,41 @@ const EN_ROUTE_PHRASE_RE = new RegExp(
   'i',
 );
 
+/** "overdue" / "past due" / "late" — the question is about the due date, not payment. */
+const OVERDUE_WORD_RE = /\b(?:overdue|past[\s-]+due|late)\b/i;
+
+/**
+ * #1498 — "Which invoices are overdue?" listed all 23 unpaid invoices when 4
+ * were past due. Overdue means UNPAID (open / partially paid) AND past its
+ * due date; an invoice with no due date is not overdue. Not limited to the
+ * last month: the oldest overdue invoice is the one the owner most needs to
+ * hear about. Most overdue first.
+ */
+function overdueInvoicesAnswer(all: Invoice[], now: Date): string {
+  const overdue = all
+    .filter(
+      (i) =>
+        (i.status === 'open' || i.status === 'partially_paid') &&
+        i.dueDate !== undefined &&
+        new Date(i.dueDate).getTime() < now.getTime(),
+    )
+    .sort((a, b) => new Date(a.dueDate!).getTime() - new Date(b.dueDate!).getTime());
+  if (overdue.length === 0) return 'No overdue invoices — nothing unpaid is past its due date.';
+  const lines = overdue
+    .slice(0, 10)
+    .map((i) => `${i.invoiceNumber} — $${(i.amountDueCents / 100).toFixed(2)} due (${i.status})`)
+    .join('; ');
+  const totalDue = overdue.reduce((sum, i) => sum + i.amountDueCents, 0);
+  return `${overdue.length} overdue invoice${overdue.length === 1 ? '' : 's'}, $${(totalDue / 100).toFixed(2)} past due: ${lines}${overdue.length > 10 ? '; …' : ''}`;
+}
+
 async function answerUnpaidInvoicesQuery(
   invoiceRepo: InvoiceRepository,
-  tenantId: string
+  tenantId: string,
+  question: string,
 ): Promise<string> {
   const all = await invoiceRepo.findByTenant(tenantId);
+  if (OVERDUE_WORD_RE.test(question)) return overdueInvoicesAnswer(all, new Date());
   const cutoff = Date.now() - 31 * 86_400_000;
   const unpaid = all.filter(
     (i) => ['open', 'partially_paid'].includes(i.status) && new Date(i.createdAt).getTime() >= cutoff
@@ -3130,7 +3242,7 @@ async function generateAssistantReply(
       // data, never propose. Runs before classification so phrasing variance
       // in the classifier can't turn a question into a mutation proposal.
       if (deps.invoiceRepo && UNPAID_QUERY_RE.test(lastUserText)) {
-        const content = await answerUnpaidInvoicesQuery(deps.invoiceRepo, tenantId);
+        const content = await answerUnpaidInvoicesQuery(deps.invoiceRepo, tenantId, lastUserText);
         return {
           taskType: 'assistant.query.unpaid_invoices',
           model: 'data-lookup',
@@ -3878,6 +3990,28 @@ async function generateAssistantReply(
         // #1499 — a create-and-send reroute that named its job by NUMBER
         // bills that job; a name the resolver verified still wins.
         const verifiedIds = { ...(createAndSend?.job ?? {}), ...preDraft.ids };
+        // #1498 — an action the named invoice's state already rules out is
+        // refused here, with the reason, rather than drafted into a card that
+        // could only fail (or, worse, be approved).
+        const invoiceBlocker = await invoiceActionBlocker(
+          deps.invoiceRepo,
+          tenantId,
+          registryKey,
+          verifiedIds.invoiceId ??
+            (await resolveLiteralInvoiceNumber(deps.invoiceRepo, tenantId, lastUserText)),
+        );
+        if (invoiceBlocker) {
+          return {
+            taskType: `assistant.${registryKey}`,
+            model: 'policy-guard',
+            usage: classifierUsage,
+            message: {
+              role: 'assistant' as const,
+              content: invoiceBlocker,
+              reasoning: "Refused before drafting — the invoice's current state rules this action out.",
+            },
+          };
+        }
         // I3 — resolved once (memoized).
         const singleIntentTenantThresholdOverride = await getTenantThresholdOverride();
         const { proposal } = await handler.handle({
