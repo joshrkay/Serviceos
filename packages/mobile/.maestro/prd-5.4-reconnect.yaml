@@ -1,0 +1,16 @@
+# PRD 5.4 (#1018) phase C — the reconnect edge. Turning airplane mode off must
+# trip useOfflineSync's reconnect flush: the banner goes away once the queue
+# drains. The harness then asserts the journal is empty, the local audio is
+# deleted, and exactly one voice_recordings row carries the key it recorded in
+# phase A (read from the real Postgres the API writes to).
+appId: com.serviceos.app
+name: PRD 5.4 C — reconnect flushes the journal
+tags:
+  - prd-5.4
+---
+- setAirplaneMode: disabled
+- extendedWaitUntil:
+    notVisible: ".*action waiting.*"
+    timeout: 90000
+- assertNotVisible: "You're offline.*"
+- takeScreenshot: prd-5.4-c-flushed
