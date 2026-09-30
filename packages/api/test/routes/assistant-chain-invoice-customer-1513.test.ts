@@ -15,6 +15,18 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import request from 'supertest';
 import { createAssistantRouter, type AssistantRouterDeps } from '../../src/routes/assistant';
 import { InMemoryProposalRepository, missingFieldsFor, type Proposal } from '../../src/proposals/proposal';
+import { approveProposal } from '../../src/proposals/actions';
+import { ProposalExecutor } from '../../src/proposals/execution/executor';
+import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
+import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
+import { InMemoryProposalExecutionRepository } from '../../src/proposals/proposal-execution';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryCustomerRepository } from '../../src/customers/customer';
+import { InMemoryLocationRepository } from '../../src/locations/location';
+import { InMemoryJobRepository } from '../../src/jobs/job';
+import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
+import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
+import { InMemorySettingsRepository, type TenantSettings } from '../../src/settings/settings';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { EntityKind, EntityResolver, EntityResolverResult } from '../../src/ai/resolution/entity-resolver';
@@ -223,4 +235,104 @@ function scriptedResolver(
       script(kind, reference) ?? { kind: 'not_found' as const, reference },
     ),
   } as unknown as EntityResolver;
+}
+
+describe('#1513 — approving the AST-07 chain in order executes every leg through to the invoice', () => {
+  it('customer → estimate → invoice all execute, and the invoice bills the estimate the chain produced', async () => {
+    const turn =
+      'New customer Riley Chainqa, phone 602-555-1990, 456 Oak St, Phoenix AZ 85002, then draft an estimate for her for a water heater install at $1200, then create and send the invoice.';
+    const proposalRepo = new InMemoryProposalRepository();
+    const customerRepo = new InMemoryCustomerRepository();
+    const locationRepo = new InMemoryLocationRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const estimateRepo = new InMemoryEstimateRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const customerEntities = { displayName: 'Riley Chainqa', phone: '602-555-1990', address: '456 Oak St, Phoenix AZ 85002' };
+    const app = buildApp({
+      proposalRepo,
+      jobRepo,
+      invoiceRepo,
+      gateway: scriptedGateway(
+        {
+          [turn]: { intentType: 'create_customer', entities: customerEntities },
+          'New customer Riley Chainqa, phone 602-555-1990, 456 Oak St, Phoenix AZ 85002': {
+            intentType: 'create_customer',
+            entities: customerEntities,
+          },
+          'draft an estimate for her for a water heater install at $1200': {
+            intentType: 'draft_estimate',
+            entities: { customerName: 'her', lineItemDescriptions: ['water heater install'] },
+          },
+          'create the invoice.': { intentType: 'unknown' },
+        },
+        {
+          'You are an estimate generation assistant': LINES,
+          // The invoice leg's own drafted guess — never what gets billed.
+          'You are an invoice generation assistant': JSON.stringify({
+            lineItems: [{ description: 'Service call', quantity: 1, unitPrice: 8900 }],
+            confidence_score: 0.9,
+          }),
+        },
+      ),
+    });
+    expect((await chat(app, turn)).status).toBe(200);
+    const [customerStep, estimateStep, invoiceStep] = byChainIndex(await proposalRepo.findByTenant(TEST_TENANT));
+
+    const executor = new ProposalExecutor(
+      createExecutionHandlerRegistry({
+        customerRepo,
+        locationRepo,
+        jobRepo,
+        estimateRepo,
+        invoiceRepo,
+        settingsRepo: seededSettings(),
+        auditRepo: new InMemoryAuditRepository(),
+      }),
+      proposalRepo,
+      new IdempotencyGuard(new InMemoryProposalExecutionRepository(), proposalRepo),
+      new InMemoryAuditRepository(),
+    );
+    const ctx = { tenantId: TEST_TENANT, executedBy: TEST_USER };
+    /** The operator's tap, then the sweep once the undo window has passed. */
+    async function approveAndRun(step: Proposal) {
+      await approveProposal(proposalRepo, TEST_TENANT, step.id, TEST_USER, 'owner');
+      const approved = await proposalRepo.updateStatus(TEST_TENANT, step.id, 'approved', {
+        approvedAt: new Date(Date.now() - 60_000),
+      });
+      const { result } = await executor.execute(approved!, ctx);
+      expect(result.success, `${step.proposalType}: ${result.error}`).toBe(true);
+      return result.resultEntityId!;
+    }
+
+    const customerId = await approveAndRun(customerStep);
+    const estimateId = await approveAndRun(estimateStep);
+    const invoiceId = await approveAndRun(invoiceStep);
+
+    const estimate = await estimateRepo.findById(TEST_TENANT, estimateId);
+    const invoice = await invoiceRepo.findById(TEST_TENANT, invoiceId);
+    expect((await jobRepo.findById(TEST_TENANT, estimate!.jobId))?.customerId).toBe(customerId);
+    expect(invoice?.jobId).toBe(estimate!.jobId);
+    expect(invoice?.estimateId).toBe(estimateId);
+    expect(invoice?.lineItems.map((li) => [li.description, li.unitPriceCents])).toEqual([['Water heater install', 120_000]]);
+    expect(invoice?.totals.totalCents).toBe(estimate!.totals.totalCents);
+  });
+});
+
+function seededSettings(): InMemorySettingsRepository {
+  const repo = new InMemorySettingsRepository();
+  const seeded: TenantSettings = {
+    id: 'settings-1',
+    tenantId: TEST_TENANT,
+    businessName: 'Test Co',
+    timezone: 'UTC',
+    estimatePrefix: 'EST-',
+    invoicePrefix: 'INV-',
+    nextEstimateNumber: 1,
+    nextInvoiceNumber: 1,
+    defaultPaymentTermDays: 30,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  void repo.create(seeded);
+  return repo;
 }
