@@ -118,6 +118,8 @@ jobs:
         working-directory: packages/mobile
         env:
           CI: '1'
+          # Don't let `expo start` rewrite the self-contained tsconfig.json.
+          EXPO_NO_TYPESCRIPT_SETUP: '1'
 
       - name: Install Maestro
         run: |
@@ -157,4 +159,6 @@ jobs:
             ${{ runner.temp }}/api.log
             ${{ runner.temp }}/metro.log
             ~/.maestro/tests/
+          # Maestro's debug output nests under dot-directories (.maestro/…).
+          include-hidden-files: true
           retention-days: 14

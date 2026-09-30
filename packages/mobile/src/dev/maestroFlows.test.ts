@@ -59,6 +59,30 @@ describe('Maestro device flows — static contract', () => {
     }
   });
 
+  it('signed-in subflow waits out the setup gate: skip onboarding, then land on the tab bar', () => {
+    // Run 36767934585: the old subflow accepted "(Skip for now|Today|Home)" —
+    // the tab bar is visible for a moment BEFORE /api/onboarding/status
+    // resolves (the gate fails open while loading), so the conditional skip
+    // saw no "Skip for now", then the gate redirected to onboarding and 5.4 A
+    // could not find the "Assistant" tab. A fresh dev-auth tenant never has
+    // setup complete, so onboarding is certain — wait for it, skip, then wait
+    // for the tab bar. (Run 36770097508 then showed the skip itself went
+    // nowhere — "/" was served by both (onboarding)/index and (tabs)/index;
+    // fixed in the route table, pinned by src/navigation/routeTable.test.ts.)
+    const { commands } = loadFlow('subflows/signed-in.yaml');
+    const waits = commands
+      .map((c, i) => ({ i, v: typeof c === 'object' ? (c.extendedWaitUntil as { visible?: string })?.visible : undefined }))
+      .filter((w) => w.v !== undefined);
+    const skipWait = waits.find((w) => w.v === 'Skip for now');
+    const skipTap = commands.findIndex((c) => typeof c === 'object' && c.tapOn === 'Skip for now');
+    const tabsWait = waits.find((w) => w.v === 'Assistant');
+    expect(skipWait).toBeDefined();
+    expect(skipTap).toBeGreaterThan(skipWait!.i);
+    expect(tabsWait?.i).toBeGreaterThan(skipTap);
+    // No alternation that a pre-gate tab bar can satisfy.
+    expect(waits.some((w) => /\|/.test(w.v as string))).toBe(false);
+  });
+
   it('3.3: reaches the manual-booking slot step signed in and asserts the defaults notice', () => {
     const { commands } = loadFlow('prd-3.3-defaults-notice.yaml');
     const keys = commands.map((c) => (typeof c === 'string' ? c : Object.keys(c)[0]));
@@ -87,7 +111,15 @@ describe('Maestro device flows — static contract', () => {
 
     // A: offline BEFORE the hold-to-record capture, then the queued state.
     const offlineAt = at(capture, (c) => c.setAirplaneMode === 'enabled');
-    const recordAt = at(capture, (c) => c.longPressOn === 'Hold to record');
+    // Hold-to-record needs a hold long enough for MediaRecorder to reach
+    // RECORDING on an emulator. Run 36772438631: `longPressOn` (~3 s) released
+    // while the recorder was still only PREPARED ("stop called in an invalid
+    // state: 8") → "No audio captured". Hold with a slow in-place swipe instead.
+    const recordAt = at(capture, (c) => {
+      const s = c.swipe as { duration?: number; start?: string; end?: string } | undefined;
+      return !!s && (s.duration ?? 0) >= 8000 && s.start !== undefined && s.end !== undefined;
+    });
+    expect(capture.some((c) => typeof c === 'object' && 'longPressOn' in c)).toBe(false);
     const queuedAt = at(capture, (c) => (c.extendedWaitUntil as { visible?: string })?.visible === 'Saved offline');
     expect(offlineAt).toBeGreaterThan(-1);
     expect(recordAt).toBeGreaterThan(offlineAt);
@@ -157,5 +189,37 @@ describe('scripts/maestro-device-run.sh — the CI device harness', () => {
     expect(src).toContain('run-as com.serviceos.app ls files/offline-audio/');
     // "one row" is read from the real Postgres the API wrote to.
     expect(src).toMatch(/FROM voice_recordings WHERE idempotency_key/);
+  });
+
+  it('fails fast on a broken Metro bundle and leaves debug evidence for any failure', () => {
+    const src = readFileSync(SCRIPT, 'utf8');
+    // Run 36765536371: every flow burned 2 minutes on a red box because Metro
+    // returned a 500 for the Android bundle. Fetch that bundle ONCE, before any
+    // flow, and fail with Metro's own error body.
+    const bundleCheck = src.indexOf('\ncheck_bundle\n');
+    const firstFlow = src.indexOf('\nrun_flow ');
+    expect(bundleCheck).toBeGreaterThan(-1);
+    expect(bundleCheck).toBeLessThan(firstFlow);
+    expect(src).toContain('localhost:8081/.expo/.virtual-metro-entry.bundle?platform=android');
+    // Maestro's per-command screenshots + view hierarchy, per flow.
+    expect(src).toMatch(/maestro test [^\n]*--debug-output "\$OUT\/debug\//);
+    // A logcat tail is written whenever the script exits non-zero.
+    expect(src).toMatch(/trap [^\n]*EXIT/);
+    expect(src).toContain('adb logcat -d');
+  });
+
+  it('collects every takeScreenshot PNG into the uploaded output dir after each flow', () => {
+    // Run 36767934585: 3.3 passed and took its screenshot, but the PNG was not
+    // in the uploaded evidence — Maestro writes takeScreenshot files relative
+    // to the flow, not to the harness's output dir.
+    const src = readFileSync(SCRIPT, 'utf8');
+    const runFlow = src.slice(src.indexOf('run_flow() {'), src.indexOf('\n}\n', src.indexOf('run_flow() {')));
+    expect(runFlow).toContain('collect_screenshots');
+    const start = src.indexOf('collect_screenshots() {');
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, src.indexOf('\n}\n', start));
+    expect(body).toContain('"$FLOWS"');
+    expect(body).toContain('takeScreenshot/*.png');
+    expect(body).toContain('"$OUT/screenshots/"');
   });
 });
