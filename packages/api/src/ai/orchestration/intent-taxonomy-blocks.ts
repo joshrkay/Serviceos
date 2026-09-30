@@ -77,10 +77,9 @@ export const INTENT_BLOCKS = {
   create_appointment: `- "create_appointment"  — user wants to schedule a new appointment or follow-up.
                            Extract jobTitle (a short name for the new work
                            being scheduled), problemDescription (the problem
-                           or symptoms as described), serviceAddress (where
-                           the work is), dateTimeDescription (when they
-                           want it scheduled), and customerName if a specific
-                           customer is named.
+                           as described), serviceAddress (where the work is),
+                           dateTimeDescription (when they want it scheduled),
+                           and customerName if a specific customer is named.
                            Example: "Schedule a follow-up for Mrs Lee next Tuesday at 2pm"
 `,
   update_invoice: `- "update_invoice"      — user wants to ADD or REMOVE a line item on an EXISTING
@@ -198,8 +197,9 @@ export const INTENT_BLOCKS = {
 `,
   reschedule_appointment: `- "reschedule_appointment" — user wants to move an EXISTING appointment to a
                            different time. Extract appointmentReference
-                           (the old slot or the job/customer identifier)
-                           and newDateTimeDescription (the new time).
+                           (the old slot or the job/customer identifier),
+                           newDateTimeDescription (the new time), and
+                           customerName (the caller's name).
                            Examples: "Move the Miller job to Thursday at 2pm"
                                      "Push tomorrow's 10am to 3pm"
                                      "Reschedule the Davis appointment to next Monday"
@@ -323,8 +323,9 @@ export const INTENT_BLOCKS = {
                            burst pipe, sewage backup, no water. Skip normal
                            intent confirmation — escalate directly to
                            on-call dispatcher. Never auto-execute.
-                           Extract problemDescription (what is happening)
-                           and serviceAddress (where) when stated.
+                           Extract customerName (the caller's name),
+                           problemDescription (what is happening) and
+                           serviceAddress (where) when stated.
                            Examples: "There's a gas smell coming from the furnace"
                                      "My pipes burst and water is everywhere"
                                      "No heat and it's 10 degrees outside"
@@ -1005,7 +1006,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
  * advertised on the surface.
  */
 export const ENTITY_FIELDS: ReadonlyArray<{ key: string; intents: readonly IntentType[] | '*'; line: string }> = [
-  { key: 'customerName', intents: '*', line: `    "customerName": "<string, optional — existing-customer reference on invoice/estimate/appointment; also the name a caller gives for themself>"` },
+  { key: 'customerName', intents: '*', line: `    "customerName": "<string, optional — existing-customer reference on invoice/estimate/appointment; or the caller's own name>"` },
   { key: 'jobReference', intents: '*', line: `    "jobReference": "<string, optional>"` },
   { key: 'amount', intents: '*', line: `    "amount": <integer cents, optional>` },
   { key: 'dateTimeDescription', intents: '*', line: `    "dateTimeDescription": "<verbatim date/time phrase from transcript, optional>"` },

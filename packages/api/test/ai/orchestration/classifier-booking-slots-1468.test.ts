@@ -112,4 +112,16 @@ describe('#1468 — booking calls return the problem and the service address', (
     expect(line).toMatch(/caller/i);
     expect(line).toMatch(/own name|for themself|their name/i);
   });
+
+  // Live slot run after (d) (2026-09-30): name recall only 48% → 50% — the
+  // dictionary line alone did not move gpt-4o-mini. The blocks for the two
+  // intents that dropped the name must ask for it themselves.
+  it.each([
+    ['operator', 'reschedule_appointment', undefined],
+    ['caller', 'reschedule_appointment', 'caller' as const],
+    ['operator', 'emergency_dispatch', undefined],
+  ])('%s: the %s block asks for the caller\'s name in customerName', async (_n, intent, profile) => {
+    const b = block(await systemPromptSent(profile), intent);
+    expect(b).toMatch(/customerName \(the caller's name/);
+  });
 });

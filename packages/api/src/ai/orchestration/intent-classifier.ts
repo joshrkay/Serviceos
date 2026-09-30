@@ -633,8 +633,9 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           emergency_dispatch, and `serviceAddress` now also asked on
  *           create_appointment / emergency_dispatch — both projected by
  *           extractLaunchSlots (voice/launch-slots.ts). (d) The customerName
- *           field also carries the name a caller gives for themself (the
- *           live model left it empty on reschedule / emergency calls).
+ *           field also carries the caller's own name, and the
+ *           reschedule_appointment / emergency_dispatch blocks ask for it
+ *           (the live model left it empty on those calls).
  */
 export const INTENT_TAXONOMY_VERSION = '1.21.0';
 
