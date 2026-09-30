@@ -90,10 +90,20 @@ LOCATION_ID="$(api_post /api/locations "{\"customerId\":\"$CUSTOMER_ID\",\"stree
 [ -n "$LOCATION_ID" ] || fail "location seed returned no id"
 api_post /api/jobs "{\"customerId\":\"$CUSTOMER_ID\",\"locationId\":\"$LOCATION_ID\",\"summary\":\"$JOB_SUMMARY\",\"priority\":\"normal\"}" >/dev/null
 
+# takeScreenshot writes its PNG relative to the flow file, not to $OUT, so
+# sweep them into the uploaded output dir after every flow (pass or fail).
+collect_screenshots() {
+  mkdir -p "$OUT/screenshots"
+  find "$FLOWS" "$OUT" -maxdepth 2 -name '*.png' -not -path "$OUT/screenshots/*" -not -path "$OUT/debug/*" \
+    -exec mv -f {} "$OUT/screenshots/" \; 2>/dev/null || true
+}
+
 run_flow() {
-  local flow="$1"; shift
+  local flow="$1" rc=0; shift
   log "maestro test $flow"
-  (cd "$OUT" && maestro test --format junit --output "$OUT/${flow%.yaml}.xml" --debug-output "$OUT/debug/${flow%.yaml}" "$FLOWS/$flow" "$@")
+  (cd "$OUT" && maestro test --format junit --output "$OUT/${flow%.yaml}.xml" --debug-output "$OUT/debug/${flow%.yaml}" "$FLOWS/$flow" "$@") || rc=$?
+  collect_screenshots
+  return "$rc"
 }
 
 # --- fresh app state -----------------------------------------------------

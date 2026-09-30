@@ -159,4 +159,6 @@ jobs:
             ${{ runner.temp }}/api.log
             ${{ runner.temp }}/metro.log
             ~/.maestro/tests/
+          # Maestro's debug output nests under dot-directories (.maestro/…).
+          include-hidden-files: true
           retention-days: 14

@@ -59,6 +59,28 @@ describe('Maestro device flows — static contract', () => {
     }
   });
 
+  it('signed-in subflow waits out the setup gate: skip onboarding, then land on the tab bar', () => {
+    // Run 36767934585: the old subflow accepted "(Skip for now|Today|Home)" —
+    // the tab bar is visible for a moment BEFORE /api/onboarding/status
+    // resolves (the gate fails open while loading), so the conditional skip
+    // saw no "Skip for now", then the gate redirected to onboarding and 5.4 A
+    // could not find the "Assistant" tab. A fresh dev-auth tenant never has
+    // setup complete, so onboarding is certain — wait for it, skip, then wait
+    // for the tab bar.
+    const { commands } = loadFlow('subflows/signed-in.yaml');
+    const waits = commands
+      .map((c, i) => ({ i, v: typeof c === 'object' ? (c.extendedWaitUntil as { visible?: string })?.visible : undefined }))
+      .filter((w) => w.v !== undefined);
+    const skipWait = waits.find((w) => w.v === 'Skip for now');
+    const skipTap = commands.findIndex((c) => typeof c === 'object' && c.tapOn === 'Skip for now');
+    const tabsWait = waits.find((w) => w.v === 'Assistant');
+    expect(skipWait).toBeDefined();
+    expect(skipTap).toBeGreaterThan(skipWait!.i);
+    expect(tabsWait?.i).toBeGreaterThan(skipTap);
+    // No alternation that a pre-gate tab bar can satisfy.
+    expect(waits.some((w) => /\|/.test(w.v as string))).toBe(false);
+  });
+
   it('3.3: reaches the manual-booking slot step signed in and asserts the defaults notice', () => {
     const { commands } = loadFlow('prd-3.3-defaults-notice.yaml');
     const keys = commands.map((c) => (typeof c === 'string' ? c : Object.keys(c)[0]));
@@ -174,5 +196,15 @@ describe('scripts/maestro-device-run.sh — the CI device harness', () => {
     // A logcat tail is written whenever the script exits non-zero.
     expect(src).toMatch(/trap [^\n]*EXIT/);
     expect(src).toContain('adb logcat -d');
+  });
+
+  it('collects every takeScreenshot PNG into the uploaded output dir after each flow', () => {
+    // Run 36767934585: 3.3 passed and took its screenshot, but the PNG was not
+    // in the uploaded evidence — Maestro writes takeScreenshot files relative
+    // to the flow, not to the harness's output dir.
+    const src = readFileSync(SCRIPT, 'utf8');
+    const runFlow = src.slice(src.indexOf('run_flow() {'), src.indexOf('\n}\n', src.indexOf('run_flow() {')));
+    expect(runFlow).toContain('collect_screenshots');
+    expect(src).toMatch(/collect_screenshots\(\) \{[^}]*"\$FLOWS"[^}]*\.png[^}]*"\$OUT\/screenshots/);
   });
 });
