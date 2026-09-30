@@ -211,6 +211,18 @@ export const INAPP_INCOMPLETE_DRAFT_COPY =
   "I've drafted that, but it still needs a few details before it can be approved — open the card to fill them in. Is there anything else I can help you with?";
 
 /**
+ * #1497 — closing line for an OPERATOR (in-app, or the owner on the phone
+ * line) whose confirmed request was persisted as a card still waiting on
+ * their approval (`draft` / `ready_for_review`). The FSM's default "Great,
+ * I've got that taken care of. You'll receive a confirmation shortly." is
+ * customer-caller copy: to the operator it claims work that has not run and
+ * promises a confirmation nobody sends. Only a proposal that has actually
+ * executed may be announced as done.
+ */
+export const OPERATOR_DRAFTED_FOR_REVIEW_COPY =
+  "I've drafted that — it's in your approvals waiting for you to review. Is there anything else I can help you with?";
+
+/**
  * #1272 — phone (S1/owner line) twin of {@link INAPP_INCOMPLETE_DRAFT_COPY}.
  * The caller cannot fill the card, so the honest next step is a person
  * following up — never a promised confirmation.
@@ -295,6 +307,9 @@ export const SENTENCE_CATALOG_ES: Record<string, string> = {
   // English mid-flow just because the operator asked to approve by voice.
   [VOICE_APPROVAL_REFUSAL]:
     'Toque la tarjeta para aprobar — aquí todavía no acepto aprobaciones por voz.',
+  // #1497 — operator close for a card awaiting their approval.
+  [OPERATOR_DRAFTED_FOR_REVIEW_COPY]:
+    'Lo dejé como borrador — está en sus aprobaciones esperando su revisión. ¿Hay algo más en lo que pueda ayudarle?',
   // #1272 — honest closing lines for a draft that still has missingFields.
   [INAPP_INCOMPLETE_DRAFT_COPY]:
     'Lo dejé como borrador, pero le faltan algunos datos antes de poder aprobarlo — abra la tarjeta para completarlos. ¿Hay algo más en lo que pueda ayudarle?',
