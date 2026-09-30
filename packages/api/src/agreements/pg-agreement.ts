@@ -92,7 +92,8 @@ export class PgAgreementRepository extends PgBaseRepository implements Agreement
           agreement.renewalCount ?? 0,
           agreement.memberDiscountBps ?? 0,
           agreement.priorityBooking ?? false,
-          agreement.autoCollectDues ?? false,
+          // #1510 — new agreements auto-collect unless explicitly false.
+          agreement.autoCollectDues ?? true,
         ],
       );
       return mapRow(result.rows[0]);

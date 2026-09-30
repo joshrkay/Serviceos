@@ -34,6 +34,12 @@ import type { CatalogItem } from '../../packages/api/src/catalog/catalog-item';
  * separately-reported product gap). This spec picks up exactly where that
  * gap stops: ONCE a meta-proposal exists, is it reachable and approvable by
  * an owner on the real Inbox? Yes — proven here.
+ *
+ * T2 (#1013): a neighbour tenant holds a SAME-named catalog item corrected
+ * three times to a DIFFERENT price, so it mints its own meta-proposal in the
+ * same run. Owner A's inbox shows only A's ($89, never the neighbour's $95),
+ * A's approval leaves the neighbour's item price, proposal status and audit
+ * trail untouched, and A cannot read the neighbour's proposal (404).
  */
 
 const API_URL = process.env.E2E_API_URL ?? 'http://localhost:3000';
@@ -129,7 +135,20 @@ test.describe('9.10 reachability — three-strike meta-proposal, approved by the
     page.on('pageerror', (err) => pageErrors.push(err.message));
 
     const owner = await bootstrapOwner(request, 'owner');
+    // T2 — a neighbour tenant with the SAME-named catalog item, corrected
+    // three times to a DIFFERENT price, so it mints its OWN meta-proposal.
+    // Its data must not change owner A's inbox, approval or catalog.
+    const neighbour = await bootstrapOwner(request, 'neighbour');
 
+    const seeded = await seedThreeStrikes(owner, 8900);
+    const neighbourSeeded = await seedThreeStrikes(neighbour, 9500);
+    const catalogItemId = seeded.catalogItemId;
+    const proposalId = seeded.proposalId;
+
+    async function seedThreeStrikes(
+      tenantOwner: BootstrappedOwner,
+      afterCents: number,
+    ): Promise<{ catalogItemId: string; proposalId: string }> {
     const pool = new Pool({ connectionString: process.env.DATABASE_URL });
     const catalogItemId = randomUUID();
     let proposalId: string;
@@ -142,7 +161,7 @@ test.describe('9.10 reachability — three-strike meta-proposal, approved by the
       const nowIso = new Date().toISOString();
       const item: CatalogItem = {
         id: catalogItemId,
-        tenantId: owner.tenantId,
+        tenantId: tenantOwner.tenantId,
         name: 'Smoke Detector',
         description: '',
         category: 'Materials',
@@ -158,12 +177,12 @@ test.describe('9.10 reachability — three-strike meta-proposal, approved by the
       async function seedLesson(createdAt: Date) {
         const lesson = buildCorrectionLesson({
           id: randomUUID(),
-          tenantId: owner.tenantId,
+          tenantId: tenantOwner.tenantId,
           lessonType: 'part_price_changed',
           sourceProposalId: randomUUID(),
-          ownerId: owner.sub,
+          ownerId: tenantOwner.sub,
           summary: 'price change',
-          payload: { kind: 'part_price_changed', catalogItemId, beforeCents: 10000, afterCents: 8900 },
+          payload: { kind: 'part_price_changed', catalogItemId, beforeCents: 10000, afterCents },
           localDate: '2026-06-14',
         });
         await lessonRepo.create({ ...lesson, createdAt });
@@ -175,7 +194,7 @@ test.describe('9.10 reachability — three-strike meta-proposal, approved by the
       const third = await seedLesson(new Date('2026-06-14T03:00:00Z'));
 
       const emitted = await detectCorrectionRepetition(
-        { tenantId: owner.tenantId, recordedLessons: [third] },
+        { tenantId: tenantOwner.tenantId, recordedLessons: [third] },
         { lessonRepo, proposalRepo, catalogRepo, auditRepo },
       );
       expect(emitted).toHaveLength(1);
@@ -184,6 +203,8 @@ test.describe('9.10 reachability — three-strike meta-proposal, approved by the
       proposalId = emitted[0].id;
     } finally {
       await pool.end().catch(() => undefined);
+    }
+    return { catalogItemId, proposalId };
     }
 
     // ── The owner reaches it on the REAL Inbox and approves it there. ──────
@@ -214,6 +235,9 @@ test.describe('9.10 reachability — three-strike meta-proposal, approved by the
     await expect(page.getByText(/corrected smoke detector to \$89 3 times/i)).toBeVisible({
       timeout: 15_000,
     });
+    // T2 — the neighbour's own three strikes ($95) never surface on A's inbox.
+    await expect(page.getByText(/corrected smoke detector to \$95/i)).toHaveCount(0);
+    await expect(page.getByTestId('inbox-row')).toHaveCount(1);
     await page.screenshot({ path: join(SCREENSHOT_DIR, '9-10-01-meta-proposal-on-inbox.png') });
 
     const approvePromise = page.waitForResponse(
@@ -251,9 +275,31 @@ test.describe('9.10 reachability — three-strike meta-proposal, approved by the
       expect(catAudits.map((a) => a.eventType)).toContain('catalog_item.updated');
       const propAudits = await auditRepo2.findByEntity(owner.tenantId, 'proposal', proposalId);
       expect(propAudits.map((a) => a.eventType)).toContain('proposal.executed');
+
+      // T2 — A's approval changed nothing of the neighbour's: its same-named
+      // item keeps its price, its own meta-proposal still awaits ITS owner,
+      // and no catalog/proposal audit row was written under it.
+      const neighbourItem = await catalogRepo2.findById(neighbour.tenantId, neighbourSeeded.catalogItemId);
+      expect(neighbourItem?.unitPriceCents).toBe(10000);
+      expect(await catalogRepo2.findById(neighbour.tenantId, catalogItemId)).toBeNull();
+      expect(
+        (await auditRepo2.findByEntity(neighbour.tenantId, 'catalog_item', neighbourSeeded.catalogItemId)).map(
+          (a) => a.eventType,
+        ),
+      ).not.toContain('catalog_item.updated');
     } finally {
       await pool2.end().catch(() => undefined);
     }
+    const neighbourProposal = await request.get(`${API_URL}/api/proposals/${neighbourSeeded.proposalId}`, {
+      headers: neighbour.authHeaders,
+    });
+    expect(neighbourProposal.ok()).toBeTruthy();
+    expect(((await neighbourProposal.json()) as { status?: string }).status).toBe('ready_for_review');
+    // …and owner A cannot even read it.
+    const crossRead = await request.get(`${API_URL}/api/proposals/${neighbourSeeded.proposalId}`, {
+      headers: owner.authHeaders,
+    });
+    expect(crossRead.status()).toBe(404);
 
     expect(pageErrors, 'no uncaught page errors across the 9.10 flow').toEqual([]);
   });
