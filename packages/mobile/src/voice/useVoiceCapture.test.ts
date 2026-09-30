@@ -83,6 +83,33 @@ describe('useVoiceCapture', () => {
     expect(result.current.outcome).toEqual({ kind: 'proposal' });
   });
 
+  it('Android: a bare file path from the recorder is read and uploaded as a file:// URI', async () => {
+    // expo-audio 0.3.5 on Android reports `recorder.uri` as a plain path (its
+    // Kotlin `uri` property returns `filePath`; upstream wraps it in
+    // Uri.fromFile from 0.4.x). expo-file-system needs a URI, so the size
+    // check read nothing and every clip was "No audio captured" (Maestro run
+    // 36777031223 — the recorder had encoded 395 audio frames).
+    h.recorder.uri = '/data/user/0/com.serviceos.app/cache/Audio/recording-1.m4a';
+    const { result } = renderHook(() => useVoiceCapture());
+
+    await act(async () => {
+      await result.current.startRecording();
+      await result.current.stopAndTranscribe();
+    });
+
+    expect(h.getInfo).toHaveBeenCalledWith(
+      'file:///data/user/0/com.serviceos.app/cache/Audio/recording-1.m4a',
+    );
+    expect(h.upload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fileUri: 'file:///data/user/0/com.serviceos.app/cache/Audio/recording-1.m4a',
+      }),
+      expect.anything(),
+      undefined,
+    );
+    expect(result.current.phase).toBe('transcript');
+  });
+
   it('passes a job-scoped capture through to the upload pipeline', async () => {
     const jobId = '3b6cbf1a-bd8a-45f7-8b84-ce6b43a231d1';
     const { result } = renderHook(() => useVoiceCapture(jobId));
