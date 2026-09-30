@@ -1314,6 +1314,95 @@ async function resolveLiteralJobReference(
 const CREATE_INVOICE_WORDING_RE =
   /\b(?:create|draft|make|write\s+up|generate)\s+(?:(?:and|&)\s+(?:send|text|email)\s+)?(?:(?:a|an|the)\s+)?(?:new\s+)?invoice\b/i;
 
+/**
+ * #1499 — the honest tail of a multi-step reply: every step the operator
+ * asked for that did NOT become a card, named in their own words, with an
+ * offer to do it. Empty when nothing was dropped. Each step is offered as
+ * its own message because that is the path that drafts it today (splitting
+ * compound asks properly is #1480 item 4).
+ */
+function undraftedStepsNote(steps: readonly string[]): string {
+  if (steps.length === 0) return '';
+  const named = steps.map((step) => `"${step.replace(/[.!?\s]+$/, '')}"`).join(' and ');
+  const offer = steps.length === 1 ? 'Want me to? Send it' : 'Want me to? Send each';
+  return `\n\nI didn't draft ${named} yet. ${offer} as its own message and I'll draft it.`;
+}
+
+/**
+ * #1499 — the kind of record a requested step acts on. A step clause's family
+ * comes from its leading verb (and, for the generic create verbs, the noun it
+ * governs); a drafted card's family comes from its proposal type. A clause
+ * whose family no drafted card covers is a step the reply must name.
+ */
+type StepFamily = 'customer' | 'appointment' | 'invoice' | 'estimate' | 'send' | 'note' | 'reminder';
+
+const STEP_VERB_FAMILIES: ReadonlyArray<[RegExp, StepFamily]> = [
+  [/^(?:book|schedule|reschedule|cancel)\b/i, 'appointment'],
+  [/^(?:send|text|email)\b/i, 'send'],
+  [/^(?:invoice|bill)\b/i, 'invoice'],
+  [/^(?:quote)\b/i, 'estimate'],
+  [/^remind\b/i, 'reminder'],
+];
+
+const STEP_CREATE_VERB_RE = /^(?:create|draft|make|add|write\s+up|generate|put\s+in|set\s+up)\b/i;
+
+const STEP_NOUN_FAMILIES: ReadonlyArray<[RegExp, StepFamily]> = [
+  [/\b(?:invoice|bill)\b/i, 'invoice'],
+  [/\b(?:estimate|quote)\b/i, 'estimate'],
+  [/\b(?:customer|client)\b/i, 'customer'],
+  [/\b(?:appointment|visit|booking)\b/i, 'appointment'],
+  [/\bnote\b/i, 'note'],
+  [/\breminder\b/i, 'reminder'],
+];
+
+/** Every verb a trailing step clause may open with (the split anchor). */
+const STEP_CLAUSE_SPLIT_RE =
+  /(?:,\s*|\s+)(?:and|&)\s+(?:also\s+)?(?=(?:book|schedule|reschedule|cancel|send|text|email|invoice|bill|quote|remind|create|draft|make|add|write\s+up|generate|put\s+in|set\s+up)\b)/i;
+
+function stepClauseFamily(clause: string): StepFamily | undefined {
+  const text = clause.trim();
+  for (const [re, family] of STEP_VERB_FAMILIES) if (re.test(text)) return family;
+  if (!STEP_CREATE_VERB_RE.test(text)) return undefined;
+  // The noun the create verb governs, within its first few words.
+  const head = text.split(/\s+/).slice(0, 5).join(' ');
+  for (const [re, family] of STEP_NOUN_FAMILIES) if (re.test(head)) return family;
+  return undefined;
+}
+
+function proposalTypeFamilies(proposalType: string): StepFamily[] {
+  const families: StepFamily[] = [];
+  if (proposalType.startsWith('send_')) families.push('send');
+  if (proposalType.includes('reminder')) families.push('reminder');
+  if (proposalType.includes('invoice')) families.push('invoice');
+  if (proposalType.includes('estimate')) families.push('estimate');
+  if (proposalType.includes('customer')) families.push('customer');
+  if (proposalType.includes('appointment')) families.push('appointment');
+  if (proposalType.includes('note')) families.push('note');
+  return families;
+}
+
+/**
+ * #1499 — the steps of a compound, NON-chain request ("add Priya, and book
+ * her Thursday at 9am") that the single drafted card does not cover. This is
+ * a reporter, not a splitter: nothing is drafted from what it finds (that is
+ * #1480 item 4); it exists so the reply can say what it did not do. Splits
+ * only on "and <action verb>", so "a blower motor and a diagnostic visit"
+ * stays one step.
+ */
+function undraftedCompoundSteps(
+  text: string,
+  draftedProposalTypes: readonly string[],
+  opts: { skipFamilies?: readonly StepFamily[] } = {},
+): string[] {
+  const clauses = text.split(STEP_CLAUSE_SPLIT_RE).map((c) => c.trim()).filter(Boolean);
+  if (clauses.length < 2) return [];
+  const covered = new Set(draftedProposalTypes.flatMap(proposalTypeFamilies));
+  return clauses.filter((clause) => {
+    const family = stepClauseFamily(clause);
+    return !!family && !covered.has(family) && !(opts.skipFamilies ?? []).includes(family);
+  });
+}
+
 /** Appended to the drafted card's reply: sending is the operator's next step. */
 const CREATE_AND_SEND_NEXT_STEP =
   "\n\nThere's no invoice on that yet, so I drafted one. Once you approve it, issue it and I can send it.";
@@ -3333,6 +3422,9 @@ async function generateAssistantReply(
         // format, so switching it is safe.
         const chainId = uuidv4();
         const chainCards: AssistantProposal[] = [];
+        // #1499 — every step the operator asked for that produced no card.
+        // The reply names each one; a silent drop reads as "done".
+        const undraftedSegments: string[] = [];
         const carried: Record<string, unknown> = {};
         // #913 — top-level classify plus every segment classify that landed.
         let chainUsage = classifierUsage;
@@ -3343,6 +3435,7 @@ async function generateAssistantReply(
             // the two can't drift on which intents are even emittable.
             segClass = await classifyIntent(segment, classifyContext, deps.gateway);
           } catch {
+            undraftedSegments.push(segment);
             continue;
           }
           chainUsage = sumUsage(chainUsage, usageOf(segClass.tokenUsage));
@@ -3355,7 +3448,10 @@ async function generateAssistantReply(
             segClass.intentType === 'create_customer'
               ? 'create_customer'
               : CHAT_INTENT_TO_REGISTRY_KEY[segClass.intentType];
-          if (!registryKey) continue;
+          if (!registryKey) {
+            undraftedSegments.push(segment);
+            continue;
+          }
           const factory = () => sharedHandlers.get(registryKey)!;
           const segEntities: Record<string, unknown> = { ...carried, ...(segClass.extractedEntities ?? {}) };
           if (segClass.intentType === 'create_customer' && segEntities.displayName && !segEntities.name) {
@@ -3445,7 +3541,10 @@ async function generateAssistantReply(
               ? { images: chatImages }
               : {}),
           });
-          if (!proposal) continue;
+          if (!proposal) {
+            undraftedSegments.push(segment);
+            continue;
+          }
           stampVerifiedIds(proposal, segVerifiedIds);
           applyVerifiedIdsToPayload(proposal, segVerifiedIds);
           dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
@@ -3561,7 +3660,9 @@ async function generateAssistantReply(
             usage: chainUsage,
             message: {
               role: 'assistant' as const,
-              content: `${chainCards[0].title}. ${proposalReplySuffix(chainCards[0].status)}`,
+              content:
+                `${chainCards[0].title}. ${proposalReplySuffix(chainCards[0].status)}` +
+                undraftedStepsNote(undraftedSegments),
               proposal: chainCards[0],
             },
           };
@@ -3576,7 +3677,8 @@ async function generateAssistantReply(
               content:
                 `Created ${chainCards.length} linked steps: ` +
                 chainCards.map((c, i) => `${i + 1}) ${c.title}`).join('; ') +
-                '. Capture steps run after approval windows; money steps wait for your approval.',
+                '. Capture steps run after approval windows; money steps wait for your approval.' +
+                undraftedStepsNote(undraftedSegments),
               proposal: chainCards[0],
             },
           };
@@ -3843,7 +3945,14 @@ async function generateAssistantReply(
                 : executionGaps.length > 0
                   ? `${uiProposal.title}. ${askForExecutabilityGaps(executionGaps, proposal.payload)}`
                   : `${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`) +
-              (createAndSend ? CREATE_AND_SEND_NEXT_STEP : ''),
+              (createAndSend ? CREATE_AND_SEND_NEXT_STEP : '') +
+              // #1499 — a compound ask names the steps this one card skipped.
+              // The create-and-send tail above already says the send is next.
+              undraftedStepsNote(
+                undraftedCompoundSteps(lastUserText, [proposal.proposalType], {
+                  skipFamilies: createAndSend ? ['send'] : [],
+                }),
+              ),
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },
@@ -3951,9 +4060,11 @@ async function generateAssistantReply(
           usage: classifierUsage,
           message: {
             role: 'assistant' as const,
-            content: needsLastName
-              ? `${uiProposal.title}. What's ${String(customerPayload.name).trim()}'s last name? Add it on the card before approving — I won't guess it.`
-              : uiProposal.title + '. Review and approve to add them to your CRM.',
+            content:
+              (needsLastName
+                ? `${uiProposal.title}. What's ${String(customerPayload.name).trim()}'s last name? Add it on the card before approving — I won't guess it.`
+                : uiProposal.title + '. Review and approve to add them to your CRM.') +
+              undraftedStepsNote(undraftedCompoundSteps(lastUserText, [proposal.proposalType])),
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },
