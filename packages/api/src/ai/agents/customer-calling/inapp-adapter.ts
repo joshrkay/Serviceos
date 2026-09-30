@@ -141,6 +141,11 @@ import type { IntentType } from '../../orchestration/intent-classifier';
 // surface adapter (identity + speech + telemetry). Never a switch in here.
 import { answerInAppLookup } from '../../voice-turn/inapp-lookup-surface';
 import { answerInAppEnRoute } from '../../voice-turn/inapp-en-route-surface';
+import {
+  answerCallbackNumberQuestion,
+  answerPendingDetailQuestion,
+  detectConfirmTurnQuestion,
+} from '../../voice-turn/confirm-turn-question';
 import type { InAppEnRouteDeps } from '../../voice-turn/inapp-en-route-surface';
 import type { AssistantLookupDeps } from '../../orchestration/lookup-dispatch';
 import type { VoicePersona, VoicePersonaResolver } from '../../../settings/voice-persona-resolver';
@@ -1325,6 +1330,114 @@ export class InAppVoiceAdapter {
     return { type: 'intent_details_supplied', entities: newSlots };
   }
 
+  /**
+   * #1476 — the spoken answer to a question asked at the `intent_confirm`
+   * readback, followed by the readback itself so the confirmation is
+   * re-asked in the same breath. The in-app surface is an authenticated
+   * tenant user, so the number on file for the request's customer may be
+   * read back.
+   */
+  private async answerConfirmTurnQuestion(
+    session: VoiceSession,
+    kind: NonNullable<ReturnType<typeof detectConfirmTurnQuestion>>,
+    text: string,
+  ): Promise<{ text: string; capExceeded: boolean }> {
+    const context = session.machine.currentContext;
+    const entities = (context.extractedEntities ?? {}) as Record<string, unknown>;
+    let answer: string;
+    let capExceeded = false;
+    if (kind === 'callback_number') {
+      const customerId =
+        (typeof entities.customerId === 'string' ? entities.customerId : undefined) ??
+        session.customerId;
+      let onFile: string | undefined;
+      if (customerId && this.deps.customerRepo) {
+        const customer = await this.deps.customerRepo
+          .findById(session.tenantId, customerId)
+          .catch(() => null);
+        onFile = customer?.primaryPhone ?? customer?.secondaryPhone;
+      }
+      answer = answerCallbackNumberQuestion({
+        untrustedCaller: false,
+        givenThisCall: typeof entities.phone === 'string' ? entities.phone : undefined,
+        onFile,
+      });
+    } else {
+      let looked: string | undefined;
+      const detail = answerPendingDetailQuestion(kind, entities);
+      if (detail === undefined) {
+        const lookup = await this.answerConfirmTurnQuestionByLookup(session, text);
+        looked = lookup.text;
+        capExceeded = lookup.capExceeded;
+      }
+      answer = detail ?? looked ?? "I don't have that detail on this one yet.";
+    }
+    const readback = renderTtsText(
+      'intent_confirm',
+      { template: 'confirm_intent', intent: context.currentIntent },
+      session.language ?? 'en',
+    );
+    return { text: `${answer} ${readback}`, capExceeded };
+  }
+
+  /**
+   * #1476 — a confirm-step question the pending request cannot answer itself
+   * goes through the EXISTING read-only lookup path: the unchanged classifier
+   * names the lookup, the shared dispatch answers it (RBAC and all). Anything
+   * that is not a confident lookup — or a classifier failure — is undefined:
+   * the question is not an instruction, so it never becomes one here.
+   */
+  private async answerConfirmTurnQuestionByLookup(
+    session: VoiceSession,
+    text: string,
+  ): Promise<{ text?: string; capExceeded: boolean }> {
+    const context = session.machine.currentContext;
+    let classification: Awaited<ReturnType<typeof classifyIntent>>;
+    try {
+      classification = await this.classifyIntentWithRetry(text, {
+        tenantId: session.tenantId,
+        sessionId: session.id,
+        ...(session.callSid ? { callSid: session.callSid } : {}),
+        ...(context.ownerSession ? { ownerSession: true } : {}),
+        ...(context.extendedIntents ? { extendedIntents: true } : {}),
+        ...(context.customerProtectionIntents ? { customerProtectionIntents: true } : {}),
+      });
+    } catch {
+      return { capExceeded: false };
+    }
+    if (classification.tokenUsage) {
+      const { input, output } = classification.tokenUsage;
+      const cents = estimateCostCents(input, output);
+      const capEvents = session.costTracker.recordUsage({
+        inputTokens: input,
+        outputTokens: output,
+        costCents: cents,
+      });
+      session.events.emit(
+        'voice-event',
+        costIncurredEvent(cents, session.costTracker.totals.costCents),
+      );
+      if (capEvents.some((e) => e.type === 'cost_cap_exceeded')) {
+        return { capExceeded: true };
+      }
+    }
+    if (
+      classification.confidence < TAU_INT ||
+      !isLookupIntent(classification.intentType as IntentType)
+    ) {
+      return { capExceeded: false };
+    }
+    const answered = await answerInAppLookup(this.deps.lookups, {
+      session,
+      tenantId: session.tenantId,
+      userId: session.actorUserId,
+      intent: classification.intentType as IntentType,
+      entities: classification.extractedEntities as Record<string, unknown> | undefined,
+      transcript: text,
+    });
+    return { text: answered, capExceeded: false };
+  }
+
   private async classifyIntentWithRetry(
     text: string,
     context: Parameters<typeof classifyIntent>[1],
@@ -1959,7 +2072,34 @@ export class InAppVoiceAdapter {
       !isNegation(text) &&
       SLOT_FILL_INTENTS.has(session.machine.currentContext.currentIntent ?? '');
 
-    if (stateBeforeTurn === 'intent_confirm' && !confirmSlotFillTurn) {
+    /**
+     * #1476 — a QUESTION at the readback ("can you confirm the number you
+     * have for me to call back?") is neither a yes nor a no. Answer it, keep
+     * the pending request, and re-ask — never the correction that used to
+     * wipe it. Detection is English-only (confirm-turn-question.ts).
+     */
+    const confirmQuestion =
+      stateBeforeTurn === 'intent_confirm' &&
+      !isAffirmation(text) &&
+      !isNegation(text)
+        ? detectConfirmTurnQuestion(text)
+        : null;
+    /** Non-undefined means this turn answered a confirm-step question: no FSM dispatch. */
+    let confirmQuestionAnswer: string | undefined;
+
+    if (confirmQuestion) {
+      const answered = await this.answerConfirmTurnQuestion(session, confirmQuestion, text);
+      if (answered.capExceeded) {
+        // The lookup classify crossed the session cap: escalation supersedes
+        // the answer, exactly as on a classifier turn (branch C below).
+        fsmEvent = { type: 'cost_cap_exceeded' };
+        session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
+      } else {
+        confirmQuestionAnswer = answered.text;
+        // Never dispatched (see effects1) — the FSM stays in intent_confirm.
+        fsmEvent = { type: 'intent_details_supplied', entities: {} };
+      }
+    } else if (stateBeforeTurn === 'intent_confirm' && !confirmSlotFillTurn) {
       fsmEvent = isAffirmation(text)
         ? { type: 'confirmed' }
         : { type: 'correction', newTranscript: text };
@@ -2238,9 +2378,26 @@ export class InAppVoiceAdapter {
     // Adapter acts and read-only lookups both answer WITHOUT touching the
     // FSM: the session stays in intent_capture/closing, ready for the next
     // request, and no proposal can be minted for this turn.
-    const effects1: SideEffect[] = lookupText
-      ? [{ type: 'tts_play', payload: { text: lookupText } }]
-      : (adapterActEffects ?? session.machine.dispatch(fsmEvent));
+    const effects1: SideEffect[] =
+      confirmQuestionAnswer !== undefined
+        ? [
+            {
+              type: 'audit_log',
+              payload: {
+                eventType: 'agent.calling.intent_confirm.question_answered',
+                sessionId: session.id,
+                tenantId: session.tenantId,
+                state: stateBeforeTurn,
+                questionKind: confirmQuestion,
+                intentType: session.machine.currentContext.currentIntent,
+                ts: Date.now(),
+              },
+            },
+            { type: 'tts_play', payload: { text: confirmQuestionAnswer } },
+          ]
+        : lookupText
+          ? [{ type: 'tts_play', payload: { text: lookupText } }]
+          : (adapterActEffects ?? session.machine.dispatch(fsmEvent));
     allSideEffects.push(...effects1);
     const aggregate1 = await this.executeSideEffects(session, effects1);
     let lastProposalId = aggregate1.lastProposalId;
@@ -2273,7 +2430,9 @@ export class InAppVoiceAdapter {
     // read off the FSM context (the transition merged them) rather than off
     // the event, which carries only this turn's delta.
     const resolutionInput: { intent: string; entities: Record<string, unknown> } | undefined =
-      fsmEvent.type === 'intent_classified'
+      confirmQuestionAnswer !== undefined
+        ? undefined
+        : fsmEvent.type === 'intent_classified'
         ? { intent: fsmEvent.intentType, entities: fsmEvent.entities }
         : fsmEvent.type === 'intent_details_supplied' &&
             session.machine.currentContext.currentIntent
@@ -2426,7 +2585,7 @@ export class InAppVoiceAdapter {
     const refusedThisTurn = auditEventTypes.includes('agent.calling.voice_approval_denied');
     const trace = deriveTurnTrace({
       finalState: session.machine.currentState,
-      eventType: fsmEvent.type,
+      eventType: confirmQuestionAnswer !== undefined ? 'confirm_question_answered' : fsmEvent.type,
       ...(classifiedIntent !== undefined ? { intent: classifiedIntent } : {}),
       ...(classifiedConfidence !== undefined ? { confidence: classifiedConfidence } : {}),
       ...(turnResolution !== undefined ? { resolution: turnResolution } : {}),
@@ -2434,7 +2593,7 @@ export class InAppVoiceAdapter {
       ...(mintedProposalType ? { proposalType: mintedProposalType } : {}),
       // A read-only lookup answered this turn — the FSM never moved and no
       // proposal can exist, so the stage is `answered`, not `intent_detected`.
-      ...(lookupText !== undefined ? { answered: true } : {}),
+      ...(lookupText !== undefined || confirmQuestionAnswer !== undefined ? { answered: true } : {}),
       ...(classifierFailureClass ? { classifierFailureClass } : {}),
       ...(refusedThisTurn ? { refused: true } : {}),
       sideEffectTypes: allSideEffects.map((effect) => effect.type),
@@ -2445,7 +2604,7 @@ export class InAppVoiceAdapter {
     session.events.emit('voice-event', {
       type: 'transition',
       state: session.machine.currentState,
-      event: fsmEvent.type,
+      event: confirmQuestionAnswer !== undefined ? 'confirm_question_answered' : fsmEvent.type,
       sideEffects: allSideEffects,
       trace,
     });
