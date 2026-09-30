@@ -1228,3 +1228,37 @@ handler or proof tag that changed without regenerating, cannot merge. Deletion w
 catalog is the one place product reads "what can I say, and is it proven", and `packages/web`'s
 voice-example pin depends on its machine-readable block. The stale "Persistence proof" column and
 its warning are gone — the generated column is derived from part 2's tags.
+
+## D-035 — Create routes accept an Idempotency-Key; the claim rides the request transaction
+
+**Date:** 2026-09-30
+**Status:** Accepted (owner approved building option (a) of #1489 on 2026-09-30)
+**Resolves:** #1489
+
+**Context.** Two concurrent identical `POST /api/customers` created two customers; the UI's
+double-click guard cannot help a client whose request timed out and was retried. The issue offered
+(a) an `Idempotency-Key` key store with replay, or (b) per-entity dedupe rules.
+
+**Decision.**
+
+1. **(a), on every create route** — customers, jobs, appointments, estimates, invoices and record
+   payment (`POST /api/payments`) — via one middleware mounted in `createApp` after the request
+   transaction and before the routers (`packages/api/src/idempotency/`). The header is optional;
+   requests without it are unchanged.
+2. **Scope and semantics.** A key is scoped to (tenant, user). Same key + same body (method, path
+   and key-order-insensitive JSON) replays the stored status and body with `Idempotent-Replayed:
+   true`; a different body is `422 IDEMPOTENCY_KEY_REUSED`; a malformed key (not 1–255 printable
+   ASCII) is `400 INVALID_IDEMPOTENCY_KEY`. Only a success (< 400) is stored — a failed attempt
+   leaves the key free, so a retry runs again.
+3. **The claim is a row in the request transaction** (`idempotency_keys`, migration 302, FORCE RLS),
+   not the proposal executor's session advisory lock: holding a session lock across an HTTP handler
+   would pin a direct connection per in-flight create. Because the claim commits or rolls back
+   atomically with the record it guards, a concurrent duplicate's INSERT waits on it and then
+   replays; past a bounded wait (10s `lock_timeout`, scoped to the claim statement) it is
+   `409 IDEMPOTENCY_IN_PROGRESS`. In-memory mode (no `DATABASE_URL`) answers an in-flight
+   duplicate 409 immediately.
+4. **TTL 24h.** A claim treats an expired row as free; the hold-reaper tick (no new interval) prunes
+   expired rows per tenant at most once an hour.
+5. **Web.** Create forms send one key per submission (`packages/web/src/lib/idempotencyKey.ts`,
+   `useMutation({ idempotent: true })`): stable across retries of the same body, fresh after a
+   success or an edit to the body — so a user who corrects the form is never answered 422.

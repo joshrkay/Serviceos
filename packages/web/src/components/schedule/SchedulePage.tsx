@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
+import { IDEMPOTENCY_HEADER, useIdempotencyKey } from '../../lib/idempotencyKey';
 import { delayOutcomeMessage, type RunningLateOutcome } from '../../lib/delayOutcome';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
@@ -196,6 +197,8 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
   const [startTime, setStartTime] = useState('10:00');
   const [endTime,   setEndTime]   = useState('12:00');
   const [saving, setSaving]     = useState(false);
+  // #1489 — one Idempotency-Key per create submission, reused on retry.
+  const submissionKey = useIdempotencyKey();
   const [error,  setError]      = useState<string | null>(null);
   // #1402 — non-blocking warnings from a successful create (e.g. outside
   // business hours). The form stays open on them until the operator taps Done.
@@ -221,20 +224,23 @@ function NewAppointmentForm({ selectedDate, onCreated, onClose, technicians }: {
       // request. The API writes appointment_assignments (the canonical
       // relation the dispatch board and double-booking guard read), refuses
       // an overlapping booking with 409, and derives the job's technician.
+      const apptBody = {
+        jobId,
+        scheduledStart: start.toISOString(),
+        scheduledEnd: end.toISOString(),
+        timezone: tz,
+        ...(techId ? { technicianId: techId } : {}),
+      };
       const apptRes = await apiFetch('/api/appointments', {
         method: 'POST',
-        body: JSON.stringify({
-          jobId,
-          scheduledStart: start.toISOString(),
-          scheduledEnd: end.toISOString(),
-          timezone: tz,
-          ...(techId ? { technicianId: techId } : {}),
-        }),
+        headers: { [IDEMPOTENCY_HEADER]: submissionKey.keyFor(apptBody) },
+        body: JSON.stringify(apptBody),
       });
       const j = await apptRes.json().catch(() => ({}));
       if (!apptRes.ok) {
         throw new Error(j?.message ?? `HTTP ${apptRes.status}`);
       }
+      submissionKey.settle();
 
       onCreated();
       const warnings = appointmentWarnings(j);
