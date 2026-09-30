@@ -27,7 +27,9 @@ themselves are kept as written (history); this table is the current state.
 | Intuit consent click | #1000 | Answered 2026-09-26 (Josh clicks through on a sandbox company) — **not yet done**. The fan-out half this entry also named is **done** (lane Z: accounting-sync entry in `sweep-tenant-fanout.test.ts`) | 9.11 3 → **4− (T1·T4)**; 5 waits on the click |
 | Google Business Profile | #1000 | Answered 2026-09-26 (Josh connects one tenant) — not yet done | 9.4 sweep 4 (T4) / approval half 5 |
 | Railway census | #999 / #1000 | Resolved (rung 5 is the map's ceiling) | — |
-| §8.12 memberships minimum | #1058 (closed) | Lane T built all three of (a)/(b)/(c) on every path; **Josh's "intended minimum" answer is still not recorded** — if it is "auto-collect is the path", the port reverts | 8.12 3 → **4 (T1·T4)** |
+| §8.12 memberships minimum | #1058 (closed) | Lane T built all three of (a)/(b)/(c) on every path. ~~Josh's "intended minimum" answer is still not recorded~~ **Answered 2026-09-30:** auto-collect is the intended default, and the no-card path raises the dues invoice. So the port **stays** (it is not reverted). Open follow-up: `autoCollectDues` still defaults to `false` (see the §8.12 entry below) | 8.12 3 → **4 (T1·T4)** |
+| #1238 item 5 (PIN-attempt clock skew) | #1238 (closed) | **Answered 2026-09-30:** keep the current rule. A PIN attempt stamped more than 60s in the future is still rejected, and a decision test already pins this. No change | I3 (unchanged) |
+| #1215 item 4 (T&M plan vs a later-accepted estimate) | #1215 (closed) | **Answered 2026-09-30:** keep the current behaviour, which is the #1203 design. Convert returns a readable 409, and auto-invoice stands aside. No change | no story row |
 | Stripe test key (dues, off-session, Terminal) | #1000 | Open — no key issued | 8.5b/c 3; 5.5 live-charge half |
 | Spanish E1 (#1056) | #1056 (closed) | **Fixed** — "fuga de gas" reaches E1 at the real handler (`e1-life-safety-handler.test.ts`, 31/31) | 2.5 4 (T1), Spanish clause met |
 | §8.5 card-on-file audit | — | Open (money-class emission not landed) | 8.5 card-on-file 4− |
@@ -40,10 +42,14 @@ themselves are kept as written (history); this table is the current state.
 | 5.5 simulated reader | #1018 | Open — needs the Stripe test key above | 5.5 live-charge half |
 | #1102 refuse vs skip | #1102 (closed) | Fixed by PR #1107 (refuse); #1109 closed too | 5.5 4 (T1) both halves |
 
-**Count still parked on Josh:** 8 *(was 9; the O-2/voice-gate conflict below is resolved in code — lane RG, 2026-09-27)* —
+**Count still parked on Josh:** 7 *(was 8; the 8.12 minimum was answered 2026-09-30. Was 9 before that; the O-2/voice-gate conflict below was resolved in code — lane RG, 2026-09-27)* —
 the Intuit click, the GBP connect, the Stripe test key (covers 8.5b/c and
-5.5), the 8.12 minimum, 1.6's Twilio subaccount, 1.10's flag, the §E questions
+5.5), 1.6's Twilio subaccount, 1.10's flag, the §E questions
 E2–E5/E7, and the O-9 PRD amendment (answered; the text change is not made).
+
+**Also answered 2026-09-30, outside the rung map:** the three open questions on voice map #833
+(entity resolution per surface, the undo window under voice approval, and the S1 posture). The
+answer is the as-built behaviour, recorded in `docs/decisions.md` D-036.
 
 ### NEW 2026-09-26 — the O-2 answer and the shipped voice gate disagree (from lane Z's re-grade of #1015)
 - **What:** O-2's answer says E1 may launch publicly *with the placeholder hard-flagged* until a trade
@@ -108,6 +114,18 @@ O-1 is resolved: Basic is $50/month and Enterprise is $150/month; both include 3
 - **Josh's call:** does "recurring revenue is actually recurring" require (a) issuing the dues invoice, (b) a due date so the cadence chases it, (c) numbering off the tenant sequence — all three, or a different minimum? The correction above sharpens this into a concrete choice: the configured path already does (a) and (b), so is the answer *"auto-collect IS the intended path, and the default should flip / onboarding must drive owners to it"*, or *"the default path must stand on its own and issue dues regardless"*? The severity turns on how many real memberships sit on the default path or have no saved card — which only you can see.
 - **Until decided:** row 8.12 stays at 3 STORY NOT MET; #1058 holds the analysis with file:line.
 - **2026-09-26 (lane T, #1058):** built the issue's own stated desired behaviour — all three of (a) issue, (b) due date on tenant terms, (c) tenant-sequence numbering — on EVERY path (`agreements/agreement-invoices-port.ts`). If Josh's answer is instead *"auto-collect is the intended path"*, revert that port to draft-only; the tests in `membership-renewal-sweep.test.ts` say exactly what to flip.
+- **Answered 2026-09-30 (Josh):** **auto-collect is the intended default, and the no-card path
+  raises the dues invoice.** The revert condition above does not apply, because the answer keeps
+  issuance on the no-card path. So lane T's port stays as built: every cycle issues a
+  tenant-sequence invoice with a due date on tenant terms (`agreements/agreement-invoices-port.ts`),
+  and a `no_card` collection still leaves that issued, dunnable invoice
+  (`agreements/agreement-service.ts`, `service_agreement.auto_collect_skipped`).
+  **Engineering follow-up this answer implies (not done here):** the as-built default is still
+  opt-in. `autoCollectDues` defaults to `false` in `createAgreement`
+  (`packages/api/src/agreements/agreement-service.ts:219`) and in the row mapper
+  (`agreements/pg-agreement.ts:48`, `:95`). Making auto-collect the default means flipping that for
+  new memberships (a code change with its own tests). It does not mean touching existing rows
+  without an owner's consent.
 
 ### Stripe test-mode key for `StripeDuesCollector` (from #1023) — Credentials
 - **What:** **narrowed on review (PR #1053).** The orchestration is now proven at real Postgres by injecting `stripeFetch` — the HTTPS boundary only, as the deposit-checkout path already does — leaving the real collector, invoice ops, `issueInvoice`, `recordPayment` and repositories in the path; success, 402 decline (with decline metadata surviving to the audit row) and no-card are all covered. The earlier claim that "any injected collector is *mocked is not proven*" conflated injecting a fake `DuesCollector` (which would be) with injecting the HTTP boundary (which is not). What a test-mode credential would still add is narrower: that Stripe's API accepts our PaymentIntent request shape and that real decline codes come back in the shape we parse. Same credential unblocks §8.5's off-session-charge half (see the #1022 entry above).
