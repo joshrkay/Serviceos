@@ -28,6 +28,12 @@ export interface RecipientSmsVolumeLedger {
     limits: { maxPerWindow: number; windowHours: number },
   ): Promise<RecipientVolumeReservation>;
   release(tenantId: string, reservationId: string): Promise<void>;
+  /**
+   * #1524 — read-only count of the sends recorded to this number in the
+   * rolling window. Reserves nothing: it answers "would the next text be
+   * capped?" before a human approves one.
+   */
+  sentInWindow(tenantId: string, normalizedPhone: string, windowHours: number): Promise<number>;
 }
 
 /** In-process ledger for tests and no-DB dev. `now` is injectable for window tests. */
@@ -56,6 +62,12 @@ export class InMemoryRecipientSmsVolumeLedger implements RecipientSmsVolumeLedge
 
   async release(tenantId: string, reservationId: string): Promise<void> {
     this.rows = this.rows.filter((r) => !(r.tenantId === tenantId && r.id === reservationId));
+  }
+
+  async sentInWindow(tenantId: string, normalizedPhone: string, windowHours: number): Promise<number> {
+    const since = this.now().getTime() - windowHours * 3_600_000;
+    return this.rows.filter((r) => r.tenantId === tenantId && r.phone === normalizedPhone && r.sentAt > since)
+      .length;
   }
 }
 
@@ -98,6 +110,18 @@ export class PgRecipientSmsVolumeLedger extends PgBaseRepository implements Reci
         [tenantId, normalizedPhone],
       );
       return { allowed: true, sentInWindow, reservationId: inserted.rows[0].id };
+    });
+  }
+
+  async sentInWindow(tenantId: string, normalizedPhone: string, windowHours: number): Promise<number> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const counted = await client.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n FROM sms_recipient_sends
+          WHERE tenant_id = $1 AND phone = $2
+            AND sent_at > NOW() - ($3::int * INTERVAL '1 hour')`,
+        [tenantId, normalizedPhone, windowHours],
+      );
+      return Number(counted.rows[0]?.n ?? 0);
     });
   }
 

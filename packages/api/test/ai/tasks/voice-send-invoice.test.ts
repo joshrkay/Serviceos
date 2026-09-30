@@ -77,11 +77,13 @@ describe('SendInvoiceTaskHandler', () => {
     expect(res.proposal.payload.channel).toBe('sms');
   });
 
-  it('defaults channel to email when not extracted', async () => {
+  // #1524 — no channel named is 'auto' (the customer's email, else a text),
+  // not an invented 'email' a phone-only customer cannot receive.
+  it("defaults channel to 'auto' when not extracted", async () => {
     const res = await new SendInvoiceTaskHandler().handle(
       ctx({ existingEntities: { customerName: 'Henderson' } }),
     );
-    expect(res.proposal.payload.channel).toBe('email');
+    expect(res.proposal.payload.channel).toBe('auto');
   });
 });
 
@@ -189,7 +191,8 @@ describe('SendInvoiceTaskHandler — U1 resolver-verified invoiceId', () => {
     expect(provider.lastDispatch).toMatchObject({
       tenantId: 't-1',
       invoiceId: RESOLVED_ID,
-      channel: 'email',
+      // #1524 — no channel was named; SendService picks from the file.
+      channel: 'auto',
     });
   });
 
