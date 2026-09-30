@@ -111,7 +111,15 @@ describe('Maestro device flows — static contract', () => {
 
     // A: offline BEFORE the hold-to-record capture, then the queued state.
     const offlineAt = at(capture, (c) => c.setAirplaneMode === 'enabled');
-    const recordAt = at(capture, (c) => c.longPressOn === 'Hold to record');
+    // Hold-to-record needs a hold long enough for MediaRecorder to reach
+    // RECORDING on an emulator. Run 36772438631: `longPressOn` (~3 s) released
+    // while the recorder was still only PREPARED ("stop called in an invalid
+    // state: 8") → "No audio captured". Hold with a slow in-place swipe instead.
+    const recordAt = at(capture, (c) => {
+      const s = c.swipe as { duration?: number; start?: string; end?: string } | undefined;
+      return !!s && (s.duration ?? 0) >= 8000 && s.start !== undefined && s.end !== undefined;
+    });
+    expect(capture.some((c) => typeof c === 'object' && 'longPressOn' in c)).toBe(false);
     const queuedAt = at(capture, (c) => (c.extendedWaitUntil as { visible?: string })?.visible === 'Saved offline');
     expect(offlineAt).toBeGreaterThan(-1);
     expect(recordAt).toBeGreaterThan(offlineAt);
@@ -207,6 +215,11 @@ describe('scripts/maestro-device-run.sh — the CI device harness', () => {
     const src = readFileSync(SCRIPT, 'utf8');
     const runFlow = src.slice(src.indexOf('run_flow() {'), src.indexOf('\n}\n', src.indexOf('run_flow() {')));
     expect(runFlow).toContain('collect_screenshots');
-    expect(src).toMatch(/collect_screenshots\(\) \{[^}]*"\$FLOWS"[^}]*\.png[^}]*"\$OUT\/screenshots/);
+    const start = src.indexOf('collect_screenshots() {');
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, src.indexOf('\n}\n', start));
+    expect(body).toContain('"$FLOWS"');
+    expect(body).toContain('takeScreenshot/*.png');
+    expect(body).toContain('"$OUT/screenshots/"');
   });
 });

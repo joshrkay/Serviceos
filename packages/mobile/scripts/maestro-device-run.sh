@@ -90,12 +90,13 @@ LOCATION_ID="$(api_post /api/locations "{\"customerId\":\"$CUSTOMER_ID\",\"stree
 [ -n "$LOCATION_ID" ] || fail "location seed returned no id"
 api_post /api/jobs "{\"customerId\":\"$CUSTOMER_ID\",\"locationId\":\"$LOCATION_ID\",\"summary\":\"$JOB_SUMMARY\",\"priority\":\"normal\"}" >/dev/null
 
-# takeScreenshot writes its PNG relative to the flow file, not to $OUT, so
-# sweep them into the uploaded output dir after every flow (pass or fail).
+# takeScreenshot PNGs land under the flow dir or, with --debug-output, under
+# debug/<flow>/.maestro/tests/<run>/<flow name>/takeScreenshot/. Copy them all
+# into one flat, uploaded dir after every flow (pass or fail).
 collect_screenshots() {
   mkdir -p "$OUT/screenshots"
-  find "$FLOWS" "$OUT" -maxdepth 2 -name '*.png' -not -path "$OUT/screenshots/*" -not -path "$OUT/debug/*" \
-    -exec mv -f {} "$OUT/screenshots/" \; 2>/dev/null || true
+  find "$FLOWS" -maxdepth 2 -name '*.png' -exec mv -f {} "$OUT/screenshots/" \; 2>/dev/null || true
+  find "$OUT/debug" -path '*/takeScreenshot/*.png' -exec cp -f {} "$OUT/screenshots/" \; 2>/dev/null || true
 }
 
 run_flow() {
