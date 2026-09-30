@@ -392,15 +392,29 @@ export async function approveProposal(
 }
 
 /**
- * #1480 item 4 — the proposal as the approval checks should see it. A
- * non-capture (money / comms) chain step whose parent has not executed is
- * refused outright: approving it would promise a send of a record that does
- * not exist, and a rejected parent would fail it after the tap (D-029).
+ * #1480 item 4 — the proposal as the approval checks should see it.
+ *
+ * A non-capture (money / comms) chain step is refused while the step it
+ * depends on has not even been APPROVED — a lone tap on step 2 would promise
+ * an action on a record nobody has agreed to create, and a rejected parent
+ * would fail it after the tap (D-029). Once the parent is approved (or
+ * executing) the tap is allowed: the executor orders the two
+ * (resolveChainReferences holds the child until the parent has run). That is
+ * the D-019 owner one-tap close — approveChainSet approves the draft_estimate
+ * head, then the owner approves the linked send_estimate
+ * (autonomous-close-execution.ts). The one exception is a send_invoice whose
+ * parent is a draft_invoice: that invoice is born a DRAFT, and a draft cannot
+ * be sent until it is issued (its own approval, D-023), so approving the
+ * draft does not make the send executable.
+ *
  * Capture steps keep the chain contract (`approveChainSet` approves them with
- * their head; the executor waits for the parent). With every parent executed,
- * the chain tokens are swapped for the real ids so the reference checks run
- * against the record the step will act on.
+ * their head). With every parent executed, the chain tokens are swapped for
+ * the real ids so the reference checks run against the record the step will
+ * act on.
  */
+/** The parent is agreed to: the executor will run it before this step. */
+const PARENT_AGREED_STATUSES: ReadonlySet<Proposal['status']> = new Set(['approved', 'executing']);
+
 async function linkedStepGate(
   proposalRepo: ProposalRepository,
   tenantId: string,
@@ -417,6 +431,15 @@ async function linkedStepGate(
     resolution.parentId === '(missing)' ? null : await proposalRepo.findById(tenantId, resolution.parentId);
   const parentMeta = parent ? chainMetaFor(parent) : undefined;
   const step = parentMeta ? `step ${parentMeta.chainIndex + 1}` : 'the earlier linked step';
+  if (resolution.reason === 'parent_pending' && parent && PARENT_AGREED_STATUSES.has(parent.status)) {
+    if (proposal.proposalType === 'send_invoice' && parent.proposalType === 'draft_invoice') {
+      throw new ValidationError(
+        `Cannot approve proposal: the invoice linked ${step} creates will be a draft — once it exists, issue it, then approve the send`,
+        { missingFields: ['linkedStep'], parentProposalId: parent.id },
+      );
+    }
+    return proposal;
+  }
   throw new ValidationError(
     resolution.reason === 'parent_pending'
       ? `Cannot approve proposal: it acts on what linked ${step} creates, which does not exist yet — approve ${step} first; this one unlocks once it has run`
