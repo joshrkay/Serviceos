@@ -15,6 +15,7 @@ import { InMemoryJobRepository } from '../../src/jobs/job';
 import { buildJob } from '../factories/job.factory';
 import type { AuthenticatedRequest } from '../../src/middleware/auth';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import type { EntityKind, EntityResolver, EntityResolverResult } from '../../src/ai/resolution/entity-resolver';
 import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
@@ -250,3 +251,111 @@ describe('#1499 slice 2 — "create an invoice for job X and send it" drafts the
     await expect(approveProposal(proposalRepo, TEST_TENANT, persisted.id, TEST_USER, 'owner')).rejects.toThrow();
   });
 });
+
+/** A resolver scripted per (kind, reference); anything unscripted is not_found. */
+function scriptedResolver(
+  script: (kind: EntityKind, reference: string) => EntityResolverResult | undefined,
+): EntityResolver {
+  return {
+    resolve: vi.fn(async ({ kind, reference }: { kind: EntityKind; reference: string }) =>
+      script(kind, reference) ?? { kind: 'not_found' as const, reference },
+    ),
+  } as unknown as EntityResolver;
+}
+
+describe('#1499 slice 3 — a clarification asks for the field that is actually missing', () => {
+  // C18: the job was named, the technician was not ("the technician"), and
+  // the reply asked for "the date and time".
+  it('reassign with no technician named asks which team member, not for a date and time', async () => {
+    const turn = 'Reassign job JOB-0082 to the technician.';
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp({
+      proposalRepo,
+      entityResolver: scriptedResolver((kind) =>
+        kind === 'appointment'
+          ? {
+              kind: 'low_confidence',
+              candidate: { id: '44444444-4444-4444-8444-444444444444', kind: 'appointment', label: 'JOB-0082', score: 0.7 },
+            }
+          : undefined,
+      ),
+      gateway: scriptedGateway({
+        [turn]: {
+          intentType: 'reassign_appointment',
+          entities: { appointmentReference: 'JOB-0082', targetTechnicianName: 'the technician' },
+        },
+      }),
+    });
+
+    const res = await chat(app, turn);
+    expect(res.status).toBe(200);
+    const content: string = res.body.message.content;
+    expect(content).not.toMatch(/date and time/i);
+    expect(content).toMatch(/which team member|team member's name/i);
+  });
+
+  // C25: two customers named Dana. The reply asked for "the date and time";
+  // the gap is which Dana.
+  it('"Dana\'s appointment" with two Danas on file asks which Dana', async () => {
+    const turn = "Reschedule Dana's appointment to next Monday.";
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp({
+      proposalRepo,
+      entityResolver: scriptedResolver((kind, reference) =>
+        kind === 'customer' && /^dana$/i.test(reference.trim())
+          ? {
+              kind: 'ambiguous',
+              candidates: [
+                { id: '55555555-5555-4555-8555-555555555555', kind: 'customer', label: 'Dana Reyes', score: 0.9 },
+                { id: '66666666-6666-4666-8666-666666666666', kind: 'customer', label: 'Dana Whitfield', score: 0.9 },
+              ],
+            }
+          : undefined,
+      ),
+      gateway: scriptedGateway({
+        [turn]: {
+          intentType: 'reschedule_appointment',
+          entities: { appointmentReference: "Dana's appointment", newDateTimeDescription: 'next Monday' },
+        },
+      }),
+    });
+
+    const res = await chat(app, turn);
+    expect(res.status).toBe(200);
+    const content: string = res.body.message.content;
+    expect(content).not.toMatch(/date and time/i);
+    expect(content).toContain('Dana Reyes');
+    expect(content).toContain('Dana Whitfield');
+  });
+
+  // C17: Morgan is a customer with no appointment. The reply asked for "the
+  // date and time" (which the operator had given); the truth is there is no
+  // appointment of Morgan's to move.
+  it('reschedule for a customer who has no appointment says so, instead of asking for a date and time', async () => {
+    const turn = "Reschedule Morgan Tatebrook's appointment to Friday at 2pm.";
+    const MORGAN = '77777777-7777-4777-8777-777777777777';
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp({
+      proposalRepo,
+      entityResolver: scriptedResolver((kind, reference) =>
+        kind === 'customer' && reference === 'Morgan Tatebrook'
+          ? { kind: 'resolved', candidate: { id: MORGAN, kind: 'customer', label: 'Morgan Tatebrook', score: 1 } }
+          : undefined,
+      ),
+      gateway: scriptedGateway({
+        [turn]: {
+          intentType: 'reschedule_appointment',
+          entities: { appointmentReference: 'Morgan Tatebrook', newDateTimeDescription: 'Friday at 2pm' },
+        },
+      }),
+    });
+
+    const res = await chat(app, turn);
+    expect(res.status).toBe(200);
+    const content: string = res.body.message.content;
+    expect(content).not.toMatch(/date and time/i);
+    expect(content).toMatch(/couldn't find a matching appointment for Morgan Tatebrook/i);
+    expect(await proposalRepo.findByTenant(TEST_TENANT)).toEqual([]);
+  });
+});
+

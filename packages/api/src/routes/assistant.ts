@@ -127,6 +127,7 @@ import {
   isDisambiguationAnswer,
   isGatedReferenceField,
   PENDING_AMBIGUITY_KEY,
+  MAX_LISTED_CANDIDATES,
 } from '../ai/resolution/gated-reference-resolution';
 import {
   resolveDisambiguationFollowUp,
@@ -1570,6 +1571,42 @@ async function resolveVerifiedIdsForDraft(
 }
 
 /**
+ * #1499 (C25) — "Reschedule Dana's appointment to next Monday" with two Danas
+ * on file. The classifier extracts only `appointmentReference: "Dana's
+ * appointment"`, the appointment stays unresolved, and the generic ask
+ * ("which appointment …") never says what actually blocks it: WHICH Dana.
+ * When the unresolved appointment reference is a possessive naming a person
+ * who matches more than one customer, the question names them. A plain text
+ * question — no pending-answer anchor is stamped, exactly like the generic
+ * can't-match line it replaces — so it can never arm the ordinal matcher.
+ * Failure-soft: any resolver trouble keeps the generic line.
+ */
+async function askWhichCustomerForPossessive(
+  resolver: EntityResolver | undefined,
+  tenantId: string,
+  proposal: Proposal,
+  entities: Record<string, unknown>,
+): Promise<string | undefined> {
+  if (!resolver || !missingFieldsFor(proposal).includes('appointmentId')) return undefined;
+  const reference =
+    trimmedString(entities.appointmentReference) ?? trimmedString(proposal.payload.appointmentReference);
+  const owner = reference?.match(/^(.+?)['’]s\s+(?:appointment|visit|booking)\b/i)?.[1]?.trim();
+  if (!owner) return undefined;
+  try {
+    const result = await resolver.resolve({ tenantId, reference: owner, kind: 'customer' });
+    if (result.kind !== 'ambiguous') return undefined;
+    const names = [...new Set(result.candidates.slice(0, MAX_LISTED_CANDIDATES).map((c) => c.label))];
+    if (names.length < 2) return undefined;
+    return (
+      `I have more than one ${owner} — ${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}. ` +
+      "Which one? Reply with their full name and I'll pick up the appointment."
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Gate a freshly drafted proposal on the references the PRE-draft resolver
  * found ambiguous, so the post-draft loop asks about them.
  *
@@ -1853,7 +1890,21 @@ export async function appointmentProvablyAbsent(
       trimmedString(extractedEntities.customerName) ??
       trimmedString(proposal.payload.customerName) ??
       trimmedString(proposal.payload.customerReference);
-    if (!customerName) return false;
+    if (!customerName) {
+      // #1499 (C17) — "Reschedule Morgan Tatebrook's appointment" extracts
+      // the person as the APPOINTMENT reference only. When that reference
+      // names exactly one customer, their (absent) bookings are the proof.
+      // Only a confident customer match counts here: a reference that is not
+      // a name ("tomorrow's 3pm") matching no customer proves nothing.
+      const reference =
+        trimmedString(extractedEntities.appointmentReference) ??
+        trimmedString(proposal.payload.appointmentReference);
+      const asName = reference?.replace(/['’]s\s+(?:appointment|visit|booking)\b.*$/i, '').trim();
+      // A proper name, not a time or a pointer ("the 2pm", "that one").
+      if (!asName || !/^\p{Lu}[\p{L}'’.-]*(?:\s+\p{Lu}[\p{L}'’.-]*)*$/u.test(asName)) return false;
+      const named = await resolver.resolve({ tenantId, reference: asName, kind: 'customer' });
+      return named.kind === 'resolved' ? await anchoredAbsent(named.candidate.id) : false;
+    }
     const customer = await resolver.resolve({ tenantId, reference: customerName, kind: 'customer' });
     if (customer.kind === 'not_found') return true;
     if (customer.kind === 'resolved') return await anchoredAbsent(customer.candidate.id);
@@ -3855,7 +3906,7 @@ async function generateAssistantReply(
         // ids are DB-verified by construction, so they are never subject to
         // the scrub.
         const {
-          question: clarification,
+          question: resolvedClarification,
           notFound,
           askedField,
         } = await resolveGatedReferencesForChat(
@@ -3870,6 +3921,12 @@ async function generateAssistantReply(
           true,
         );
         revertUnaskedAmbiguityGate(proposal, ambiguityGate, askedField);
+        // #1499 — the can't-match line, sharpened to "which Dana?" when that
+        // is what actually blocks the appointment. Never over a real question.
+        const whichCustomer = askedField
+          ? undefined
+          : await askWhichCustomerForPossessive(deps.entityResolver, tenantId, proposal, extractedEntities);
+        const clarification = whichCustomer ?? resolvedClarification;
         // AN APPOINTMENT THAT DOES NOT EXIST IS A MISS, NOT A FORM.
         //
         // "Cancel the Patel appointment", with no Patel on the books, drafted
