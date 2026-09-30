@@ -172,14 +172,17 @@ describe('POST /api/assistant/chat — send_invoice for a job UUID (AST-04)', ()
     const res = await chat(app, PHRASE);
     expect(res.status).toBe(200);
 
+    // #1480 item 4 — the "send" half is no longer only a line in the reply:
+    // it is a linked send_invoice step for the invoice being drafted.
     const persisted = await proposalRepo.findByTenant(TEST_TENANT);
-    expect(persisted.map((p) => p.proposalType)).toEqual(['draft_invoice']);
-    const payload = persisted[0].payload as Record<string, unknown>;
+    const invoiceDraft = persisted.find((p) => p.proposalType === 'draft_invoice');
+    expect(persisted.map((p) => p.proposalType).sort()).toEqual(['draft_invoice', 'send_invoice']);
+    const payload = invoiceDraft!.payload as Record<string, unknown>;
     expect(payload.jobId).toBe(JOB_ID);
     expect(payload.customerId).toBe(CUSTOMER_ID);
     expect(payload.invoiceId).toBeUndefined();
-    expect(missingFieldsFor(persisted[0])).not.toContain('invoiceId');
-    // The card is the draft, and the reply says sending comes after approval.
+    expect(missingFieldsFor(invoiceDraft!)).not.toContain('invoiceId');
+    // The head card is the draft, and the reply says what unlocks the send.
     expect(res.body.message.proposal.proposalType).toBe('draft_invoice');
     expect(res.body.message.content).toMatch(/send/i);
   });
