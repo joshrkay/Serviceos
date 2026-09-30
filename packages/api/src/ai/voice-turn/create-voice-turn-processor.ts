@@ -955,6 +955,19 @@ export interface VoiceTurnProcessor {
     session: VoiceSession,
     usage: { input: number; output: number } | undefined,
   ): boolean;
+  /**
+   * #1476 — the side effects for a QUESTION asked at the `intent_confirm`
+   * readback (answer + readback re-asked; FSM not dispatched). Shared by
+   * `speechTurn` and the Gather adapter so both phone transports apply the
+   * identical S1 callback-number rules. `kind` comes from
+   * `detectConfirmTurnQuestion`.
+   */
+  answerConfirmTurnQuestion(
+    session: VoiceSession,
+    kind: ConfirmTurnQuestionKind,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<SideEffect[]>;
   /** Replace a placeholder `intent_confirm` tts_play with a concrete readback. */
   expandIntentConfirmTemplate(
     sideEffects: SideEffect[],
@@ -5287,6 +5300,7 @@ export function createVoiceTurnProcessor(
     expandDisambiguationTemplate,
     executeSideEffects,
     recordCost,
+    answerConfirmTurnQuestion,
     expandIntentConfirmTemplate,
     resolveVerticalPromptSection,
     resolvePlanPromptSection,
