@@ -36,6 +36,12 @@ import { PgCustomerRepository } from '../../packages/api/src/customers/pg-custom
  * throwing "empty draft". The row's acceptance only asks that A draft
  * return, not that it be a good one — the CONTENT of the draft is out of
  * scope (a real model turn would be #1119; this row doesn't need one).
+ *
+ * T2 (#1013): a neighbour tenant's own unanswered thread is seeded in the
+ * same run. A's inbox lists only A's thread, A's suggest-reply cannot reach
+ * the neighbour's conversation (404), the neighbour's thread is exactly as
+ * seeded afterwards, and no `message_dispatches` row exists under either
+ * tenant.
  */
 
 const API_URL = process.env.E2E_API_URL ?? 'http://localhost:3000';
@@ -131,7 +137,23 @@ test.describe('9.12 reachability — AI-suggestion leg of the unified inbox', ()
     page.on('pageerror', (err) => pageErrors.push(err.message));
 
     const owner = await bootstrapOwner(request, 'owner');
+    // T2 — a neighbour tenant with its OWN unanswered inbound thread in the
+    // same run. It must not appear in owner A's inbox, must not be reachable
+    // through A's suggest-reply, and A's suggestion must not touch it.
+    const neighbour = await bootstrapOwner(request, 'neighbour');
 
+    const conversationId = await seedInboundThread(owner, 'Sam', 'Suggest', '+15555552099',
+      'Can you come back and take another look at the leak?');
+    const neighbourConversationId = await seedInboundThread(neighbour, 'Nora', 'Neighbour', '+15555552098',
+      'Neighbour-only question about my water heater');
+
+    async function seedInboundThread(
+      tenantOwner: BootstrappedOwner,
+      firstName: string,
+      lastName: string,
+      phone: string,
+      text: string,
+    ): Promise<string> {
     const pool = new Pool({ connectionString: process.env.DATABASE_URL });
     let conversationId: string;
     try {
@@ -140,30 +162,30 @@ test.describe('9.12 reachability — AI-suggestion leg of the unified inbox', ()
       const now = new Date();
       const customer = await customerRepo.create({
         id: randomUUID(),
-        tenantId: owner.tenantId,
-        firstName: 'Sam',
-        lastName: 'Suggest',
-        displayName: 'Sam Suggest',
-        primaryPhone: '+15555552099',
+        tenantId: tenantOwner.tenantId,
+        firstName,
+        lastName,
+        displayName: `${firstName} ${lastName}`,
+        primaryPhone: phone,
         preferredChannel: 'sms',
         smsConsent: true,
         isArchived: false,
-        createdBy: owner.sub,
+        createdBy: tenantOwner.sub,
         createdAt: now,
         updatedAt: now,
       });
       const thread = await conversationRepo.createConversation({
-        tenantId: owner.tenantId,
+        tenantId: tenantOwner.tenantId,
         title: customer.displayName,
         entityType: 'customer',
         entityId: customer.id,
-        createdBy: owner.sub,
+        createdBy: tenantOwner.sub,
       });
       await conversationRepo.addMessage({
-        tenantId: owner.tenantId,
+        tenantId: tenantOwner.tenantId,
         conversationId: thread.id,
         messageType: 'text',
-        content: 'Can you come back and take another look at the leak?',
+        content: text,
         senderId: customer.id,
         senderRole: 'customer',
         source: 'sms',
@@ -172,6 +194,8 @@ test.describe('9.12 reachability — AI-suggestion leg of the unified inbox', ()
       conversationId = thread.id;
     } finally {
       await pool.end().catch(() => undefined);
+    }
+    return conversationId;
     }
 
     await installClerkStub(page, { signedIn: true, sub: owner.sub, token: owner.jwt });
@@ -190,6 +214,9 @@ test.describe('9.12 reachability — AI-suggestion leg of the unified inbox', ()
 
     await page.goto('/comms-inbox');
     await expect(page.getByTestId('comms-thread-row').first()).toBeVisible({ timeout: 15_000 });
+    // T2 — only A's own thread is listed; the neighbour's never is.
+    await expect(page.getByTestId('comms-thread-row')).toHaveCount(1);
+    await expect(page.getByText('Nora Neighbour')).toHaveCount(0);
     await page.getByTestId('comms-thread-row').first().click();
     await expect(page.getByTestId('message-suggest-button')).toBeVisible({ timeout: 15_000 });
     await page.screenshot({ path: join(SCREENSHOT_DIR, '9-12-01-thread-open.png') });
@@ -216,6 +243,37 @@ test.describe('9.12 reachability — AI-suggestion leg of the unified inbox', ()
     const messages = (await messagesRes.json()) as Array<{ senderRole: string }>;
     const outbound = messages.filter((m) => m.senderRole === 'owner');
     expect(outbound, 'suggest-reply must never itself create a message/dispatch row').toHaveLength(0);
+
+    // T2 — owner A cannot draft against the neighbour's thread (it does not
+    // exist from A's side), the neighbour's thread is exactly as seeded, and
+    // no dispatch row exists under EITHER tenant.
+    const crossSuggest = await request.post(
+      `${API_URL}/api/conversations/${neighbourConversationId}/suggest-reply`,
+      { headers: { 'content-type': 'application/json', ...owner.authHeaders }, data: '{}' },
+    );
+    expect(crossSuggest.status(), 'A must not reach the neighbour thread').toBe(404);
+    const neighbourMessagesRes = await request.get(
+      `${API_URL}/api/conversations/${neighbourConversationId}/messages`,
+      { headers: neighbour.authHeaders },
+    );
+    expect(neighbourMessagesRes.ok()).toBeTruthy();
+    const neighbourMessages = (await neighbourMessagesRes.json()) as Array<{ senderRole: string; content: string }>;
+    expect(neighbourMessages.map((m) => [m.senderRole, m.content])).toEqual([
+      ['customer', 'Neighbour-only question about my water heater'],
+    ]);
+    const neighbourList = await request.get(`${API_URL}/api/conversations`, { headers: neighbour.authHeaders });
+    expect(neighbourList.ok()).toBeTruthy();
+    expect(JSON.stringify(await neighbourList.json())).not.toContain(conversationId);
+    const dispatchPool = new Pool({ connectionString: process.env.DATABASE_URL });
+    try {
+      const { rows } = await dispatchPool.query<{ n: string }>(
+        'SELECT count(*)::text AS n FROM message_dispatches WHERE tenant_id = ANY($1::uuid[])',
+        [[owner.tenantId, neighbour.tenantId]],
+      );
+      expect(rows[0].n, 'suggest-reply writes zero dispatch rows under either tenant').toBe('0');
+    } finally {
+      await dispatchPool.end().catch(() => undefined);
+    }
 
     expect(pageErrors, 'no uncaught page errors across the 9.12 suggest-reply flow').toEqual([]);
   });

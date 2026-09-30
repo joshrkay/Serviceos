@@ -150,7 +150,10 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
     });
   }
 
-  async function inboundCall(tenantId: string): Promise<Call> {
+  async function inboundCall(
+    tenantId: string,
+    opts: { auditRepo?: PgAuditRepository } = {},
+  ): Promise<Call> {
     const store = new VoiceSessionStore({ startInterval: false });
     const llm = scriptedGateway();
     const adapter = new TwilioGatherAdapter({
@@ -161,7 +164,7 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
       pool,
       userRepo,
       settingsRepo,
-      auditRepo,
+      auditRepo: opts.auditRepo ?? auditRepo,
       proposalRepo,
       customerRepo,
       appointmentRepo,
@@ -356,6 +359,74 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
     expect(underA).toHaveLength(0);
   });
 
+  /**
+   * #1514 — the revocation and its audit row are ONE unit of work. Main's T1
+   * flaked because the status flip committed on its own and the audit insert
+   * followed as a separate statement: a reader that saw `rejected` could
+   * still find no `e1_booking_revoked` row. This test widens that window
+   * deterministically — the audit write for the revocation is held 400ms (a
+   * slow audit insert, as under CI load) — and asserts the invariant a reader
+   * must be able to rely on: once the booking reads as revoked, its audit row
+   * is already there. No polling on the audit read: polling would hide the gap.
+   */
+  it('#1514: a revoked booking is never visible without its revocation audit row, even when the audit write is slow', async () => {
+    class SlowRevocationAudit extends PgAuditRepository {
+      override async create(event: AuditEvent): Promise<AuditEvent> {
+        if (event.eventType === BOOKING_REVOKED_EVENT) {
+          await new Promise((r) => {
+            setTimeout(r, 400);
+          });
+        }
+        return super.create(event);
+      }
+    }
+    const c = await inboundCall(tenantB.tenantId, { auditRepo: new SlowRevocationAudit(pool) });
+    const bookingId = await bookThroughTheCall(c);
+
+    await turn(c, EN_GAS);
+
+    await waitFor(
+      () => proposalRepo.findById(c.tenantId, bookingId),
+      (p) => p?.status === 'rejected',
+      'booking revoked',
+    );
+    const rows = await auditRepo.findByEntity(c.tenantId, 'proposal', bookingId);
+    expect(rows.map((e) => e.eventType)).toContain(BOOKING_REVOKED_EVENT);
+  });
+
+  /**
+   * #1514 — the other half of "one unit of work": when the revocation's audit
+   * row cannot be written, the revocation does not commit either (no revoked
+   * booking without a trail) — and because that leaves the booking LIVE on a
+   * life-safety call, it is never silent: the existing revoke-blocked
+   * compensation (audit row on the session + URGENT follow-up) fires.
+   */
+  it('#1514: when the revocation audit write fails, the booking is not revoked without a trail — the revoke-blocked compensation fires', async () => {
+    class FailingRevocationAudit extends PgAuditRepository {
+      override async create(event: AuditEvent): Promise<AuditEvent> {
+        if (event.eventType === BOOKING_REVOKED_EVENT) {
+          throw new Error('audit store unavailable');
+        }
+        return super.create(event);
+      }
+    }
+    const c = await inboundCall(tenantB.tenantId, { auditRepo: new FailingRevocationAudit(pool) });
+    const bookingId = await bookThroughTheCall(c);
+
+    await turn(c, EN_GAS);
+
+    const sessionRows = await waitFor(
+      () => sessionAudit(c.tenantId, c.session.id),
+      (rows) => rows.some((e) => e.eventType === 'agent.calling.e1_revoke_blocked_terminal'),
+      'revoke-blocked compensation',
+    );
+    expect(
+      sessionRows.find((e) => e.eventType === 'agent.calling.e1_revoke_blocked_terminal')?.metadata,
+    ).toMatchObject({ proposalId: bookingId, status: 'draft' });
+    const booking = await proposalRepo.findById(c.tenantId, bookingId);
+    expect(booking?.status).toBe('draft');
+  });
+
   async function expectEnglishE1(c: Call, twiml: string, phrase: string): Promise<void> {
     const row = emergencyRow(await sessionAudit(c.tenantId, c.session.id));
     expect(row?.metadata, phrase).toMatchObject({ tier: 'E1', reason: 'life_safety_e1', language: 'en' });
@@ -466,8 +537,8 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
         'spanish E1 booking revoked',
       );
       expect(booking?.rejectionReason).toBe('life_safety_emergency');
-      // The revocation's audit leg is written after the status flip, still
-      // detached, so it is polled too.
+      // #1514 — the audit leg commits in the same unit of work as the status
+      // flip, so this poll now resolves on its first read; kept as harmless.
       const revokeRows = await waitFor(
         () => auditRepo.findByEntity(c.tenantId, 'proposal', bookingId),
         (rows) => rows.some((e) => e.eventType === BOOKING_REVOKED_EVENT),

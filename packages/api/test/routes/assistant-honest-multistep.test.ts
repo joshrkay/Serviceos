@@ -112,9 +112,12 @@ afterEach(() => {
 describe('#1499 slice 1 — a multi-step reply names every step it did not draft', () => {
   // AST-07: three "then" steps, two cards, and the reply said "Created 2
   // linked steps" as if that were the whole ask. The invoice step vanished.
+  // #1513 — a bare "create (and send) the invoice" leg is now drafted even
+  // when it classifies as nothing, so the dropped step here is one the chain
+  // genuinely has no handler for.
   it('chain: the dropped third step is named in the reply, with an offer to do it', async () => {
     const turn =
-      'New customer Jane Smith, phone 555-0101, then draft an estimate for her for a water heater install at $1200, then create and send the invoice.';
+      'New customer Jane Smith, phone 555-0101, then draft an estimate for her for a water heater install at $1200, then order the parts from the supplier.';
     const proposalRepo = new InMemoryProposalRepository();
     const app = buildApp({
       proposalRepo,
@@ -129,7 +132,7 @@ describe('#1499 slice 1 — a multi-step reply names every step it did not draft
             intentType: 'draft_estimate',
             entities: { lineItemDescriptions: ['water heater install'] },
           },
-          'create and send the invoice.': { intentType: 'unknown' },
+          'order the parts from the supplier.': { intentType: 'unknown' },
         },
         { 'You are an estimate generation assistant': ESTIMATE_DRAFT },
       ),
@@ -142,7 +145,7 @@ describe('#1499 slice 1 — a multi-step reply names every step it did not draft
       'draft_estimate',
     ]);
     const content: string = res.body.message.content;
-    expect(content).toContain('create and send the invoice');
+    expect(content).toContain('order the parts from the supplier');
     expect(content).toMatch(/didn't draft|haven't drafted/i);
     expect(content).toMatch(/want me to/i);
   });
@@ -218,9 +221,12 @@ describe('#1499 slice 2 — "create an invoice for job X and send it" drafts the
 
     const res = await chat(app, turn);
     expect(res.status).toBe(200);
+    // #1480 item 4 / #1513 — the send half is a linked send_invoice step for
+    // the invoice being drafted (the bare leg is an invoice leg even when it
+    // classifies as nothing on its own).
     const persisted = await proposalRepo.findByTenant(TEST_TENANT);
-    expect(persisted.map((p) => p.proposalType)).toEqual(['draft_invoice']);
-    const payload = persisted[0].payload as Record<string, unknown>;
+    expect(persisted.map((p) => p.proposalType).sort()).toEqual(['draft_invoice', 'send_invoice']);
+    const payload = persisted.find((p) => p.proposalType === 'draft_invoice')!.payload as Record<string, unknown>;
     expect(payload.jobId).toBe(JOB_ID);
     expect(payload.customerId).toBe(CUSTOMER_ID);
     expect(payload.invoiceId).toBeUndefined();

@@ -40,6 +40,15 @@ const NO_AUTH_BYPASS_SPECS = [
   'journeys/on-my-way-tap.spec.ts',
   'journeys/technician-assignment-notification.spec.ts',
   'journeys/dispatch-lateness-badge-4-7.spec.ts',
+  // §8.5 row 5.1 (#1018) — the 320px glove contract on Carlos's own day view.
+  'journeys/technician-field-screens-320-5-1.spec.ts',
+  // §8.5 row 5.2 (#1018) — before/after pairing from Carlos's own job screen.
+  'journeys/job-photo-pairing-5-2.spec.ts',
+  // §8.5 row 5.3 / §8.3 rows 3.7, 3.12 (#1015/#1018) — in-app reachability
+  // with production-shaped auth (each session's internal user DB-resolved).
+  'journeys/log-time-by-voice-inapp-5-3.spec.ts',
+  'journeys/inapp-disambiguation-3-7.spec.ts',
+  'journeys/booking-feasibility-card-3-12.spec.ts',
 ];
 
 // §10 — when Clerk journey tests run, default v2 on for the Vite dev server unless
