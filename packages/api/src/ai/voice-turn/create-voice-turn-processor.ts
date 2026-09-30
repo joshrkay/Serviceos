@@ -117,6 +117,7 @@ import {
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   CALLER_INCOMPLETE_REQUEST_COPY,
+  OPERATOR_DRAFTED_FOR_REVIEW_COPY,
   type SessionLanguage,
 } from '../agents/customer-calling/tts-copy';
 import {
@@ -2500,6 +2501,14 @@ export function createVoiceTurnProcessor(
       // "You'll receive a confirmation shortly".
       const incompleteRequest =
         surfaceAllowed && (degradedFromContract || missingFieldsFor(stored).length > 0);
+      // #1497 — the owner line is an operator surface. The FSM's default
+      // close ("taken care of … You'll receive a confirmation shortly") is
+      // caller copy; to the owner it claims work that has not run. Unless the
+      // card actually executed, say it is drafted and awaiting their approval.
+      // An S1 caller keeps the default: their request IS queued for the
+      // owner, which is what that line reports to them.
+      const operatorAwaitingReview =
+        surfaceAllowed && surface !== 'S1' && stored.status !== 'executed';
       const followUps = session.machine.dispatch({
         type: 'proposal_queued',
         proposalId: stored.id,
@@ -2515,7 +2524,9 @@ export function createVoiceTurnProcessor(
             ? { utterance: bookingUtterance }
             : incompleteRequest
               ? { utterance: CALLER_INCOMPLETE_REQUEST_COPY }
-              : {}),
+              : operatorAwaitingReview
+                ? { utterance: OPERATOR_DRAFTED_FOR_REVIEW_COPY }
+                : {}),
         // WS18 — a grounded ESTIMATE (only) becomes a live, refinable/closeable
         // pendingQuote on the FSM. Scoped to draft_estimate: an invoice quote is
         // for completed work, not a sale to close on the call.

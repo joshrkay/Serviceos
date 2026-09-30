@@ -2824,3 +2824,62 @@ describe('createVoiceTurnProcessor.speechTurn — B2B account context wiring (2.
     expect(serialized).not.toContain('business account');
   });
 });
+
+// ─── #1497 — the owner line is an OPERATOR surface: a card left for review ───
+// is announced as drafted, never "taken care of … confirmation shortly".
+
+describe('createVoiceTurnProcessor — owner-line close for a card awaiting approval (#1497)', () => {
+  const GENERIC_CLOSING_LINE =
+    "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?";
+
+  async function confirmCreateCustomer(ownerSession: boolean) {
+    const gateway = makeGatewayWithSequence([
+      JSON.stringify({
+        intentType: 'create_customer',
+        confidence: 0.95,
+        reasoning: 'add a customer',
+        extractedEntities: { displayName: 'Jane Smith', phone: '+15125550100' },
+      }),
+      JSON.stringify({ answer: 'yes', reasoning: 'said yes' }),
+    ]);
+    const { processor, session, proposalRepo } = makeCtx({
+      gateway,
+      withRepos: true,
+      ...(ownerSession ? { ownerSession: true } : {}),
+    });
+    await processor.speechTurn({
+      session,
+      speechResult: 'add a new customer Jane Smith 512 555 0100',
+      callSid: 'CA-1497',
+      tenantId: 'tenant-abc',
+    });
+    const confirmEffects = await processor.speechTurn({
+      session,
+      speechResult: 'yes',
+      callSid: 'CA-1497',
+      tenantId: 'tenant-abc',
+    });
+    const proposals = await proposalRepo.findByTenant('tenant-abc');
+    const spoken = confirmEffects
+      .filter((fx) => fx.type === 'tts_play')
+      .map((fx) => String(fx.payload.text));
+    return { proposals, closing: spoken[spoken.length - 1] };
+  }
+
+  it('the owner hears the card is drafted and waiting on their approval', async () => {
+    const { proposals, closing } = await confirmCreateCustomer(true);
+    expect(proposals).toHaveLength(1);
+    expect(['draft', 'ready_for_review']).toContain(proposals[0]!.status);
+    expect(closing).toBeDefined();
+    expect(closing).not.toMatch(/taken care of/i);
+    expect(closing).not.toMatch(/confirmation/i);
+    expect(closing).toMatch(/drafted/i);
+    expect(closing).toMatch(/approv/i);
+  });
+
+  it('an S1 caller whose request is queued for the owner keeps the caller close', async () => {
+    const { proposals, closing } = await confirmCreateCustomer(false);
+    expect(proposals).toHaveLength(1);
+    expect(closing).toBe(GENERIC_CLOSING_LINE);
+  });
+});
