@@ -127,6 +127,7 @@ import {
   isDisambiguationAnswer,
   isGatedReferenceField,
   PENDING_AMBIGUITY_KEY,
+  MAX_LISTED_CANDIDATES,
 } from '../ai/resolution/gated-reference-resolution';
 import {
   resolveDisambiguationFollowUp,
@@ -1314,6 +1315,95 @@ async function resolveLiteralJobReference(
 const CREATE_INVOICE_WORDING_RE =
   /\b(?:create|draft|make|write\s+up|generate)\s+(?:(?:and|&)\s+(?:send|text|email)\s+)?(?:(?:a|an|the)\s+)?(?:new\s+)?invoice\b/i;
 
+/**
+ * #1499 — the honest tail of a multi-step reply: every step the operator
+ * asked for that did NOT become a card, named in their own words, with an
+ * offer to do it. Empty when nothing was dropped. Each step is offered as
+ * its own message because that is the path that drafts it today (splitting
+ * compound asks properly is #1480 item 4).
+ */
+function undraftedStepsNote(steps: readonly string[]): string {
+  if (steps.length === 0) return '';
+  const named = steps.map((step) => `"${step.replace(/[.!?\s]+$/, '')}"`).join(' and ');
+  const offer = steps.length === 1 ? 'Want me to? Send it' : 'Want me to? Send each';
+  return `\n\nI didn't draft ${named} yet. ${offer} as its own message and I'll draft it.`;
+}
+
+/**
+ * #1499 — the kind of record a requested step acts on. A step clause's family
+ * comes from its leading verb (and, for the generic create verbs, the noun it
+ * governs); a drafted card's family comes from its proposal type. A clause
+ * whose family no drafted card covers is a step the reply must name.
+ */
+type StepFamily = 'customer' | 'appointment' | 'invoice' | 'estimate' | 'send' | 'note' | 'reminder';
+
+const STEP_VERB_FAMILIES: ReadonlyArray<[RegExp, StepFamily]> = [
+  [/^(?:book|schedule|reschedule|cancel)\b/i, 'appointment'],
+  [/^(?:send|text|email)\b/i, 'send'],
+  [/^(?:invoice|bill)\b/i, 'invoice'],
+  [/^(?:quote)\b/i, 'estimate'],
+  [/^remind\b/i, 'reminder'],
+];
+
+const STEP_CREATE_VERB_RE = /^(?:create|draft|make|add|write\s+up|generate|put\s+in|set\s+up)\b/i;
+
+const STEP_NOUN_FAMILIES: ReadonlyArray<[RegExp, StepFamily]> = [
+  [/\b(?:invoice|bill)\b/i, 'invoice'],
+  [/\b(?:estimate|quote)\b/i, 'estimate'],
+  [/\b(?:customer|client)\b/i, 'customer'],
+  [/\b(?:appointment|visit|booking)\b/i, 'appointment'],
+  [/\bnote\b/i, 'note'],
+  [/\breminder\b/i, 'reminder'],
+];
+
+/** Every verb a trailing step clause may open with (the split anchor). */
+const STEP_CLAUSE_SPLIT_RE =
+  /(?:,\s*|\s+)(?:and|&)\s+(?:also\s+)?(?=(?:book|schedule|reschedule|cancel|send|text|email|invoice|bill|quote|remind|create|draft|make|add|write\s+up|generate|put\s+in|set\s+up)\b)/i;
+
+function stepClauseFamily(clause: string): StepFamily | undefined {
+  const text = clause.trim();
+  for (const [re, family] of STEP_VERB_FAMILIES) if (re.test(text)) return family;
+  if (!STEP_CREATE_VERB_RE.test(text)) return undefined;
+  // The noun the create verb governs, within its first few words.
+  const head = text.split(/\s+/).slice(0, 5).join(' ');
+  for (const [re, family] of STEP_NOUN_FAMILIES) if (re.test(head)) return family;
+  return undefined;
+}
+
+function proposalTypeFamilies(proposalType: string): StepFamily[] {
+  const families: StepFamily[] = [];
+  if (proposalType.startsWith('send_')) families.push('send');
+  if (proposalType.includes('reminder')) families.push('reminder');
+  if (proposalType.includes('invoice')) families.push('invoice');
+  if (proposalType.includes('estimate')) families.push('estimate');
+  if (proposalType.includes('customer')) families.push('customer');
+  if (proposalType.includes('appointment')) families.push('appointment');
+  if (proposalType.includes('note')) families.push('note');
+  return families;
+}
+
+/**
+ * #1499 — the steps of a compound, NON-chain request ("add Priya, and book
+ * her Thursday at 9am") that the single drafted card does not cover. This is
+ * a reporter, not a splitter: nothing is drafted from what it finds (that is
+ * #1480 item 4); it exists so the reply can say what it did not do. Splits
+ * only on "and <action verb>", so "a blower motor and a diagnostic visit"
+ * stays one step.
+ */
+function undraftedCompoundSteps(
+  text: string,
+  draftedProposalTypes: readonly string[],
+  opts: { skipFamilies?: readonly StepFamily[] } = {},
+): string[] {
+  const clauses = text.split(STEP_CLAUSE_SPLIT_RE).map((c) => c.trim()).filter(Boolean);
+  if (clauses.length < 2) return [];
+  const covered = new Set(draftedProposalTypes.flatMap(proposalTypeFamilies));
+  return clauses.filter((clause) => {
+    const family = stepClauseFamily(clause);
+    return !!family && !covered.has(family) && !(opts.skipFamilies ?? []).includes(family);
+  });
+}
+
 /** Appended to the drafted card's reply: sending is the operator's next step. */
 const CREATE_AND_SEND_NEXT_STEP =
   "\n\nThere's no invoice on that yet, so I drafted one. Once you approve it, issue it and I can send it.";
@@ -1340,25 +1430,74 @@ const IN_FLIGHT_INVOICE_STATUSES: ReadonlySet<string> = new Set(['draft', 'open'
  * words ask for a new invoice and that is what gets drafted.
  */
 async function isCreateAndSendWithNoInvoice(
-  invoiceRepo: InvoiceRepository | undefined,
+  deps: Pick<AssistantRouterDeps, 'invoiceRepo' | 'jobRepo'>,
   tenantId: string,
   intentType: string,
   text: string,
-): Promise<boolean> {
-  if (intentType !== 'send_invoice' || !CREATE_INVOICE_WORDING_RE.test(text)) return false;
+): Promise<CreateAndSendReroute | undefined> {
+  // #1499 (C22) — "Create an invoice for job JOB-0081 and send it" came back
+  // `issue_invoice` rather than `send_invoice`: same dead end, same reroute.
+  if (!CREATE_AND_SEND_INTENTS.has(intentType) || !CREATE_INVOICE_WORDING_RE.test(text)) return undefined;
+  const { invoiceRepo } = deps;
   const ids = [...new Set((text.match(LITERAL_UUID_RE) ?? []).map((id) => id.toLowerCase()))];
-  if (!invoiceRepo) return true;
+  const job = await findJobByLiteralNumber(deps.jobRepo, tenantId, text);
+  if (!invoiceRepo) return { job };
   try {
     for (const id of ids) {
-      if (await invoiceRepo.findById(tenantId, id)) return false;
+      if (await invoiceRepo.findById(tenantId, id)) return undefined;
+    }
+    for (const id of [...ids, ...(job.jobId ? [job.jobId] : [])]) {
       const onJob = await invoiceRepo.findByJob(tenantId, id);
-      if (onJob.some((inv) => IN_FLIGHT_INVOICE_STATUSES.has(inv.status))) return false;
+      if (onJob.some((inv) => IN_FLIGHT_INVOICE_STATUSES.has(inv.status))) return undefined;
     }
   } catch {
     // Failure-soft toward the draft: a draft never sends anything.
-    return true;
+    return { job };
   }
-  return true;
+  return { job };
+}
+
+/** The intents a "create (an invoice) … and send it" ask comes back as. */
+const CREATE_AND_SEND_INTENTS: ReadonlySet<string> = new Set(['send_invoice', 'issue_invoice']);
+
+/** "JOB-0081" — a job's human number, as the operator reads it off the job. */
+const LITERAL_JOB_NUMBER_RE = /\bJOB-\d+\b/gi;
+
+/**
+ * A create-and-send ask re-routed to drafting the invoice (#1393/#1499). `job`
+ * is the job a literal job NUMBER in the text names ({} when none, or not
+ * exactly one): the draft bills that job, and its id must never ride the
+ * invoice-id slot.
+ */
+interface CreateAndSendReroute {
+  job: Record<string, string>;
+}
+
+/**
+ * #1499 — the job a literal "JOB-0081" names, via the job repository's own
+ * search (which matches job_number), kept only on an EXACT number match.
+ * Exactly one job, or nothing — same rule as `resolveLiteralJobReference`.
+ * Failure-soft. Narrow on purpose: only the create-and-send reroute uses it;
+ * general doc-number resolution belongs to the lookup/resolution layer.
+ */
+async function findJobByLiteralNumber(
+  jobRepo: JobRepository | undefined,
+  tenantId: string,
+  text: string,
+): Promise<Record<string, string>> {
+  if (!jobRepo) return {};
+  const numbers = [...new Set((text.match(LITERAL_JOB_NUMBER_RE) ?? []).map((n) => n.toUpperCase()))];
+  if (numbers.length !== 1) return {};
+  try {
+    const hits = (await jobRepo.findByTenant(tenantId, { search: numbers[0], limit: 5 })).filter(
+      (job) => job.jobNumber?.toUpperCase() === numbers[0],
+    );
+    if (hits.length !== 1) return {};
+    const [job] = hits;
+    return { jobId: job.id, ...(job.customerId ? { customerId: job.customerId } : {}) };
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -1428,6 +1567,42 @@ async function resolveVerifiedIdsForDraft(
     return { ids: resolved, ambiguousRefKeys: [] };
   } catch {
     return NO_PRE_DRAFT_RESOLUTION;
+  }
+}
+
+/**
+ * #1499 (C25) — "Reschedule Dana's appointment to next Monday" with two Danas
+ * on file. The classifier extracts only `appointmentReference: "Dana's
+ * appointment"`, the appointment stays unresolved, and the generic ask
+ * ("which appointment …") never says what actually blocks it: WHICH Dana.
+ * When the unresolved appointment reference is a possessive naming a person
+ * who matches more than one customer, the question names them. A plain text
+ * question — no pending-answer anchor is stamped, exactly like the generic
+ * can't-match line it replaces — so it can never arm the ordinal matcher.
+ * Failure-soft: any resolver trouble keeps the generic line.
+ */
+async function askWhichCustomerForPossessive(
+  resolver: EntityResolver | undefined,
+  tenantId: string,
+  proposal: Proposal,
+  entities: Record<string, unknown>,
+): Promise<string | undefined> {
+  if (!resolver || !missingFieldsFor(proposal).includes('appointmentId')) return undefined;
+  const reference =
+    trimmedString(entities.appointmentReference) ?? trimmedString(proposal.payload.appointmentReference);
+  const owner = reference?.match(/^(.+?)['’]s\s+(?:appointment|visit|booking)\b/i)?.[1]?.trim();
+  if (!owner) return undefined;
+  try {
+    const result = await resolver.resolve({ tenantId, reference: owner, kind: 'customer' });
+    if (result.kind !== 'ambiguous') return undefined;
+    const names = [...new Set(result.candidates.slice(0, MAX_LISTED_CANDIDATES).map((c) => c.label))];
+    if (names.length < 2) return undefined;
+    return (
+      `I have more than one ${owner} — ${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}. ` +
+      "Which one? Reply with their full name and I'll pick up the appointment."
+    );
+  } catch {
+    return undefined;
   }
 }
 
@@ -1715,7 +1890,21 @@ export async function appointmentProvablyAbsent(
       trimmedString(extractedEntities.customerName) ??
       trimmedString(proposal.payload.customerName) ??
       trimmedString(proposal.payload.customerReference);
-    if (!customerName) return false;
+    if (!customerName) {
+      // #1499 (C17) — "Reschedule Morgan Tatebrook's appointment" extracts
+      // the person as the APPOINTMENT reference only. When that reference
+      // names exactly one customer, their (absent) bookings are the proof.
+      // Only a confident customer match counts here: a reference that is not
+      // a name ("tomorrow's 3pm") matching no customer proves nothing.
+      const reference =
+        trimmedString(extractedEntities.appointmentReference) ??
+        trimmedString(proposal.payload.appointmentReference);
+      const asName = reference?.replace(/['’]s\s+(?:appointment|visit|booking)\b.*$/i, '').trim();
+      // A proper name, not a time or a pointer ("the 2pm", "that one").
+      if (!asName || !/^\p{Lu}[\p{L}'’.-]*(?:\s+\p{Lu}[\p{L}'’.-]*)*$/u.test(asName)) return false;
+      const named = await resolver.resolve({ tenantId, reference: asName, kind: 'customer' });
+      return named.kind === 'resolved' ? await anchoredAbsent(named.candidate.id) : false;
+    }
     const customer = await resolver.resolve({ tenantId, reference: customerName, kind: 'customer' });
     if (customer.kind === 'not_found') return true;
     if (customer.kind === 'resolved') return await anchoredAbsent(customer.candidate.id);
@@ -2262,6 +2451,19 @@ export function editFieldsForMissing(
 }
 
 /**
+ * #1499 — a card title cut at a fixed width ended mid-word ("… and a
+ * diagno"). Cut at the last word boundary inside `max` and say so with an
+ * ellipsis; a text that fits is returned untouched.
+ */
+function shortenOnWord(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const boundary = cut.lastIndexOf(' ');
+  const head = (boundary > 0 ? cut.slice(0, boundary) : cut).replace(/[\s,;:—–-]+$/, '');
+  return `${head}…`;
+}
+
+/**
  * QA-2026-06-05 (AST-02/03/04): map any persisted proposal to the UI card
  * shape — estimates/invoices were previously unpersisted LLM JSON.
  *
@@ -2348,7 +2550,7 @@ export function proposalToUI(
   const signals = proposalSignals(proposal.payload, proposal.sourceContext);
   return {
     id: proposal.id,
-    title: `${cardType}: ${proposal.summary.slice(0, 80)}${total}`,
+    title: `${cardType}: ${shortenOnWord(proposal.summary, 80)}${total}`,
     summary: proposal.summary.slice(0, 160),
     // Review K4 — the persisted explanation WINS, the source echo is the
     // fallback. Shared with `customerProposalToUI` (see `cardExplanation`),
@@ -2401,6 +2603,27 @@ export function proposalToUI(
  * review, and telling the operator otherwise actively contradicts what the
  * backend just did.
  */
+/**
+ * #1499 (C35) — a line still waiting on its catalog pick blocks Approve
+ * (approve → 400), so "Review and approve to proceed" was a promise the card
+ * could not keep. Name the line(s) to pick instead. Undefined when no line
+ * pick is pending.
+ */
+function pendingLinePickLine(proposal: Pick<Proposal, 'payload' | 'sourceContext'>): string | undefined {
+  const lineItems = Array.isArray(proposal.payload.lineItems) ? (proposal.payload.lineItems as unknown[]) : [];
+  const names = missingFieldsFor(proposal as Proposal)
+    .map((field) => field.match(/^lineItems\[(\d+)\]\.catalogItemId$/)?.[1])
+    .filter((index): index is string => index !== undefined)
+    .map((index) => {
+      const line = lineItems[Number(index)] as { description?: unknown } | undefined;
+      return typeof line?.description === 'string' && line.description.trim()
+        ? `"${line.description.trim()}"`
+        : `line ${Number(index) + 1}`;
+    });
+  if (names.length === 0) return undefined;
+  return `Pick the catalog item for ${names.join(' and ')} on the card, then approve.`;
+}
+
 function proposalReplySuffix(status: AssistantProposal['status']): string {
   return status === 'Approved'
     ? 'Approved automatically — it will proceed shortly.'
@@ -3047,7 +3270,7 @@ async function generateAssistantReply(
           : classified;
       // #1393 — "create and send" with no invoice to send drafts the invoice.
       const createAndSend = await isCreateAndSendWithNoInvoice(
-        deps.invoiceRepo,
+        deps,
         tenantId,
         photoRouted.intentType,
         lastUserText,
@@ -3333,6 +3556,9 @@ async function generateAssistantReply(
         // format, so switching it is safe.
         const chainId = uuidv4();
         const chainCards: AssistantProposal[] = [];
+        // #1499 — every step the operator asked for that produced no card.
+        // The reply names each one; a silent drop reads as "done".
+        const undraftedSegments: string[] = [];
         const carried: Record<string, unknown> = {};
         // #913 — top-level classify plus every segment classify that landed.
         let chainUsage = classifierUsage;
@@ -3343,6 +3569,7 @@ async function generateAssistantReply(
             // the two can't drift on which intents are even emittable.
             segClass = await classifyIntent(segment, classifyContext, deps.gateway);
           } catch {
+            undraftedSegments.push(segment);
             continue;
           }
           chainUsage = sumUsage(chainUsage, usageOf(segClass.tokenUsage));
@@ -3355,7 +3582,10 @@ async function generateAssistantReply(
             segClass.intentType === 'create_customer'
               ? 'create_customer'
               : CHAT_INTENT_TO_REGISTRY_KEY[segClass.intentType];
-          if (!registryKey) continue;
+          if (!registryKey) {
+            undraftedSegments.push(segment);
+            continue;
+          }
           const factory = () => sharedHandlers.get(registryKey)!;
           const segEntities: Record<string, unknown> = { ...carried, ...(segClass.extractedEntities ?? {}) };
           if (segClass.intentType === 'create_customer' && segEntities.displayName && !segEntities.name) {
@@ -3445,7 +3675,10 @@ async function generateAssistantReply(
               ? { images: chatImages }
               : {}),
           });
-          if (!proposal) continue;
+          if (!proposal) {
+            undraftedSegments.push(segment);
+            continue;
+          }
           stampVerifiedIds(proposal, segVerifiedIds);
           applyVerifiedIdsToPayload(proposal, segVerifiedIds);
           dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
@@ -3561,7 +3794,9 @@ async function generateAssistantReply(
             usage: chainUsage,
             message: {
               role: 'assistant' as const,
-              content: `${chainCards[0].title}. ${proposalReplySuffix(chainCards[0].status)}`,
+              content:
+                `${chainCards[0].title}. ${proposalReplySuffix(chainCards[0].status)}` +
+                undraftedStepsNote(undraftedSegments),
               proposal: chainCards[0],
             },
           };
@@ -3576,7 +3811,8 @@ async function generateAssistantReply(
               content:
                 `Created ${chainCards.length} linked steps: ` +
                 chainCards.map((c, i) => `${i + 1}) ${c.title}`).join('; ') +
-                '. Capture steps run after approval windows; money steps wait for your approval.',
+                '. Capture steps run after approval windows; money steps wait for your approval.' +
+                undraftedStepsNote(undraftedSegments),
               proposal: chainCards[0],
             },
           };
@@ -3639,7 +3875,9 @@ async function generateAssistantReply(
           extractedEntities,
           lastUserText,
         );
-        const verifiedIds = preDraft.ids;
+        // #1499 — a create-and-send reroute that named its job by NUMBER
+        // bills that job; a name the resolver verified still wins.
+        const verifiedIds = { ...(createAndSend?.job ?? {}), ...preDraft.ids };
         // I3 — resolved once (memoized).
         const singleIntentTenantThresholdOverride = await getTenantThresholdOverride();
         const { proposal } = await handler.handle({
@@ -3702,7 +3940,7 @@ async function generateAssistantReply(
         // ids are DB-verified by construction, so they are never subject to
         // the scrub.
         const {
-          question: clarification,
+          question: resolvedClarification,
           notFound,
           askedField,
         } = await resolveGatedReferencesForChat(
@@ -3717,6 +3955,12 @@ async function generateAssistantReply(
           true,
         );
         revertUnaskedAmbiguityGate(proposal, ambiguityGate, askedField);
+        // #1499 — the can't-match line, sharpened to "which Dana?" when that
+        // is what actually blocks the appointment. Never over a real question.
+        const whichCustomer = askedField
+          ? undefined
+          : await askWhichCustomerForPossessive(deps.entityResolver, tenantId, proposal, extractedEntities);
+        const clarification = whichCustomer ?? resolvedClarification;
         // AN APPOINTMENT THAT DOES NOT EXIST IS A MISS, NOT A FORM.
         //
         // "Cancel the Patel appointment", with no Patel on the books, drafted
@@ -3842,8 +4086,15 @@ async function generateAssistantReply(
                 ? `${uiProposal.title}.\n\n${clarification}`
                 : executionGaps.length > 0
                   ? `${uiProposal.title}. ${askForExecutabilityGaps(executionGaps, proposal.payload)}`
-                  : `${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`) +
-              (createAndSend ? CREATE_AND_SEND_NEXT_STEP : ''),
+                  : `${uiProposal.title}. ${pendingLinePickLine(proposal) ?? proposalReplySuffix(uiProposal.status)}`) +
+              (createAndSend ? CREATE_AND_SEND_NEXT_STEP : '') +
+              // #1499 — a compound ask names the steps this one card skipped.
+              // The create-and-send tail above already says the send is next.
+              undraftedStepsNote(
+                undraftedCompoundSteps(lastUserText, [proposal.proposalType], {
+                  skipFamilies: createAndSend ? ['send'] : [],
+                }),
+              ),
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },
@@ -3924,6 +4175,11 @@ async function generateAssistantReply(
         // (editProposal clears the gate on fill) and the executor reads.
         const needsLastName = isBareFirstName(customerPayload.name);
         if (needsLastName) gateOnLastName(proposal);
+        // #1499 — every other chat proposal carries its thread; this one did
+        // not, so the conversation could not find its own customer card.
+        if (conversationId) {
+          proposal.sourceContext = { ...(proposal.sourceContext ?? {}), conversationId };
+        }
         await deps.proposalRepo.create(proposal);
         // QA-2026-06-05: parity with the guardrail promote step (see
         // inapp-adapter.handleCreateProposal). create-customer-task builds
@@ -3951,9 +4207,11 @@ async function generateAssistantReply(
           usage: classifierUsage,
           message: {
             role: 'assistant' as const,
-            content: needsLastName
-              ? `${uiProposal.title}. What's ${String(customerPayload.name).trim()}'s last name? Add it on the card before approving — I won't guess it.`
-              : uiProposal.title + '. Review and approve to add them to your CRM.',
+            content:
+              (needsLastName
+                ? `${uiProposal.title}. What's ${String(customerPayload.name).trim()}'s last name? Add it on the card before approving — I won't guess it.`
+                : uiProposal.title + '. Review and approve to add them to your CRM.') +
+              undraftedStepsNote(undraftedCompoundSteps(lastUserText, [proposal.proposalType])),
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },

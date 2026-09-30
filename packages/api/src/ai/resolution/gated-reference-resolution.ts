@@ -739,8 +739,11 @@ function whatToSupply(kind: EntityKind): string {
       return 'the job name or number';
     case 'catalogItem':
       return 'the exact catalog item name';
+    // #1499 — "which one", not "when": the operator usually named the NEW
+    // time already ("to Friday at 2pm"); what is missing is the booking
+    // being moved. The customer and its current day are what pick it out.
     case 'appointment':
-      return 'the date and time';
+      return "which appointment you mean (the customer's name and the day it's booked for)";
     case 'technician':
       return "the team member's name";
     case 'lead':
@@ -777,8 +780,12 @@ function whatToSupply(kind: EntityKind): string {
  * plain-language nudge naming what would let a human resolve it themselves
  * is the honest, safe alternative (never guesses; D-004 untouched).
  */
-export function buildUnresolvedPrompt(kind: EntityKind): string {
-  return `I couldn't automatically match that — reply with ${whatToSupply(kind)} and I'll pick it up.`;
+export function buildUnresolvedPrompt(kind: EntityKind, ...moreKinds: EntityKind[]): string {
+  // #1499 — every unresolved field, not only the first: "reassign JOB-0082 to
+  // the technician" gates on the appointment AND the team member, and asking
+  // only about the first left the real gap (which technician) unsaid.
+  const asks = [...new Set([kind, ...moreKinds].map(whatToSupply))];
+  return `I couldn't automatically match that — reply with ${asks.join(' and ')} and I'll pick it up.`;
 }
 
 /**
@@ -813,10 +820,10 @@ export function buildGatedReferenceReply(
 ): string | undefined {
   if (!askClarification) return undefined;
   if (outcome.ambiguity) return buildDisambiguationQuestion(outcome.ambiguity);
-  if (outcome.unresolved.length > 0) {
-    const source = GATED_REFERENCE_SOURCES[outcome.unresolved[0]];
-    if (source) return buildUnresolvedPrompt(source.kind);
-  }
+  const kinds = outcome.unresolved
+    .map((field) => GATED_REFERENCE_SOURCES[field]?.kind)
+    .filter((kind): kind is EntityKind => kind !== undefined);
+  if (kinds.length > 0) return buildUnresolvedPrompt(kinds[0], ...kinds.slice(1));
   return undefined;
 }
 
