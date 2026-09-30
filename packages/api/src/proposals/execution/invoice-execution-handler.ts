@@ -165,6 +165,19 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
 
     // #1203 — plan then draft_invoice: never a second, whole-estimate invoice.
     const draftEstimateId = typeof payload.estimateId === 'string' ? payload.estimateId : undefined;
+    // #1480 item 4 (AST-07) — an invoice drafted FROM an estimate with no job
+    // of its own (a chat chain's "…then create the invoice", linked to the
+    // estimate step) bills the estimate's job, the one the estimate opened —
+    // never a second, empty job for the same work. Only when that job is the
+    // payload customer's: a mismatch keeps the auto-open path below.
+    if (!jobId && draftEstimateId && this.estimateRepo && this.jobRepo) {
+      const estimate = await this.estimateRepo.findById(context.tenantId, draftEstimateId);
+      const estimateJob = estimate ? await this.jobRepo.findById(context.tenantId, estimate.jobId) : null;
+      if (estimateJob && (!customerId || estimateJob.customerId === customerId)) {
+        jobId = estimateJob.id;
+        existingJob = estimateJob;
+      }
+    }
     if (draftEstimateId && jobId && this.scheduleRepo) {
       const refusal = await wholeInvoiceBlockedByPlan(
         {

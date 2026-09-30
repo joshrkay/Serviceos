@@ -9,6 +9,7 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { logProposalEvent } from './audit';
 import { confidenceMetaBlocksAutoApprove } from './auto-approve';
 import { chainMetaFor } from './chain';
+import { resolveChainReferences } from './execution/chain-resolution';
 import { undoCorrectionLesson } from '../learning/corrections/apply-undo';
 import type { CorrectionLessonRepository } from '../learning/corrections/correction-lesson';
 import type { ConfigPorts } from '../learning/corrections/lesson-applicator';
@@ -329,7 +330,12 @@ export async function approveProposal(
   // failure after the human's tap (see approval-reference-checks.ts).
   // #1480 — the SAME executabilityGaps a drafting surface runs before it
   // lets a status decision auto-approve (holdForExecutability).
-  const dangling = await executabilityGaps(tenantId, proposal, options?.referenceChecks);
+  // #1480 item 4 — a linked money/comms step ("…and send it") names its
+  // record through an earlier step of the same chain. Until that step has
+  // run there is nothing to send, so the tap is refused; once it has, the
+  // checks below see the real id instead of the chain token.
+  const linked = await linkedStepGate(proposalRepo, tenantId, proposal);
+  const dangling = await executabilityGaps(tenantId, linked, options?.referenceChecks);
   if (dangling.length > 0) {
     throw new ValidationError(
       describeDanglingReferences(dangling),
@@ -383,6 +389,40 @@ export async function approveProposal(
   }
 
   return updated;
+}
+
+/**
+ * #1480 item 4 — the proposal as the approval checks should see it. A
+ * non-capture (money / comms) chain step whose parent has not executed is
+ * refused outright: approving it would promise a send of a record that does
+ * not exist, and a rejected parent would fail it after the tap (D-029).
+ * Capture steps keep the chain contract (`approveChainSet` approves them with
+ * their head; the executor waits for the parent). With every parent executed,
+ * the chain tokens are swapped for the real ids so the reference checks run
+ * against the record the step will act on.
+ */
+async function linkedStepGate(
+  proposalRepo: ProposalRepository,
+  tenantId: string,
+  proposal: Proposal,
+): Promise<Proposal> {
+  const meta = chainMetaFor(proposal);
+  if (!meta || meta.chainRefs.length === 0) return proposal;
+  const resolution = await resolveChainReferences(proposal, { proposalRepo });
+  if (resolution.status === 'resolved') return { ...proposal, payload: resolution.payload };
+  if (resolution.status === 'noop' || actionClassForProposalType(proposal.proposalType) === 'capture') {
+    return proposal;
+  }
+  const parent =
+    resolution.parentId === '(missing)' ? null : await proposalRepo.findById(tenantId, resolution.parentId);
+  const parentMeta = parent ? chainMetaFor(parent) : undefined;
+  const step = parentMeta ? `step ${parentMeta.chainIndex + 1}` : 'the earlier linked step';
+  throw new ValidationError(
+    resolution.reason === 'parent_pending'
+      ? `Cannot approve proposal: it acts on what linked ${step} creates, which does not exist yet — approve ${step} first; this one unlocks once it has run`
+      : `Cannot approve proposal: linked ${step}, which it depends on, did not run — there is nothing for this one to act on`,
+    { missingFields: ['linkedStep'], parentProposalId: resolution.parentId },
+  );
 }
 
 function isReviewableForChainSet(proposal: Proposal): boolean {

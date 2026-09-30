@@ -139,6 +139,7 @@ import { createProposalsRouter } from './routes/proposals';
 import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
 import {
   invoiceReferenceCheck,
+  invoiceSendableReferenceCheck,
   serviceLocationReferenceCheck,
   sendRecipientReferenceCheck,
   executionAnchorReferenceCheck,
@@ -1046,6 +1047,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     estimateInvoicedReferenceCheck({ estimateRepo, invoiceRepo }),
     // #1490 — send_estimate / send_estimate_nudge must name a real estimate.
     estimateReferenceCheck(estimateRepo),
+    // #1480 item 4 — a send_invoice for a draft (unissued) or dead invoice.
+    invoiceSendableReferenceCheck(invoiceRepo),
   ];
 
   const webhookSettingsRepo = settingsRepo;
