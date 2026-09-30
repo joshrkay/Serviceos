@@ -50,6 +50,7 @@ import { logInboundCallOnCustomerTimeline } from './inbound-call-log';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
 import { confirmIntent } from '../ai/skills/confirm-intent';
+import { detectConfirmTurnQuestion } from '../ai/voice-turn/confirm-turn-question';
 import { intentClassifiedEvent, languageSwitchedEvent } from '../ai/voice-quality/events';
 import {
   detectLanguageSwitchIntent,
@@ -2482,8 +2483,24 @@ export class TwilioGatherAdapter {
         );
     }
 
+    // #1476 — a QUESTION at the readback is neither a yes nor a no; the
+    // confirm_intent skill below would read it as a correction and drop the
+    // pending request. Answer it and re-ask through the processor's shared
+    // helper (same S1 callback-number rules as speechTurn).
+    const confirmQuestion =
+      currentState === 'intent_confirm' ? detectConfirmTurnQuestion(opts.speechResult) : null;
+
     // 2. Branch on FSM state.
-    if (currentState === 'intent_confirm') {
+    if (confirmQuestion) {
+      sideEffectsAll.push(
+        ...(await this.processor.answerConfirmTurnQuestion(
+          session,
+          confirmQuestion,
+          opts.speechResult,
+          opts.tenantId,
+        )),
+      );
+    } else if (currentState === 'intent_confirm') {
       // confirm_intent: caller is responding to a yes/no readback.
       try {
         const ctx = session.machine.currentContext;

@@ -23,10 +23,8 @@
  * NO DB, NO LLM: in-memory repos and a stub EntityResolver throughout.
  */
 import { describe, it, expect, vi } from 'vitest';
-import {
-  answerInAppLookup,
-  speakForOperator,
-} from '../../../src/ai/voice-turn/inapp-lookup-surface';
+import { answerInAppLookup } from '../../../src/ai/voice-turn/inapp-lookup-surface';
+import { speakForOperator } from '../../../src/ai/orchestration/operator-point-of-view';
 import { LOOKUP_UNAVAILABLE_LINE } from '../../../src/workers/voice-lookup-answer';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import type {

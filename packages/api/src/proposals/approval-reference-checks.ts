@@ -27,6 +27,7 @@ import { resolveInvoiceReference } from './execution/issue-invoice-handler';
 import type { UserRepository } from '../users/user';
 import { findActiveTenantMember } from '../users/tenant-member';
 import { isChainRefToken } from './chain';
+import { UNSENDABLE_INVOICE_STATUSES } from '../notifications/send-service';
 import { lacksExecutionAnchor } from './voice-payload';
 
 export type ApprovalReferenceCheck = (tenantId: string, proposal: Proposal) => Promise<string[]>;
@@ -76,6 +77,33 @@ export function invoiceReferenceCheck(
     return (await resolveInvoiceReference(tenantId, id, invoiceRepo)) ? [] : ['invoiceId'];
   };
 }
+
+/**
+ * #1480 item 4 — `send_invoice` for an invoice that exists but cannot be sent:
+ * a draft (never issued — no due date, no working payment link) or a dead one
+ * (void / canceled). The send service refuses both after the tap
+ * (`SendService.sendInvoice`), so approval refuses them first. The gap is a
+ * sentence: the fix is issuing the invoice (its own approval, D-023), not an
+ * edit to this card.
+ */
+export function invoiceSendableReferenceCheck(
+  invoiceRepo: Pick<InvoiceRepository, 'findById'>,
+): ApprovalReferenceCheck {
+  return async (tenantId, proposal) => {
+    if (proposal.proposalType !== 'send_invoice') return [];
+    const id = proposal.payload.invoiceId;
+    if (typeof id !== 'string' || !UUID_RE.test(id)) return [];
+    const invoice = await invoiceRepo.findById(tenantId, id);
+    if (!invoice || !UNSENDABLE_INVOICE_STATUSES.has(invoice.status)) return [];
+    return [invoice.status === 'draft' ? INVOICE_NOT_ISSUED : INVOICE_NOT_SENDABLE];
+  };
+}
+
+const INVOICE_NOT_ISSUED = 'invoiceNotIssued';
+const INVOICE_NOT_SENDABLE = 'invoiceNotSendable';
+const INVOICE_NOT_ISSUED_SENTENCE =
+  "the invoice is still a draft — issue it first (say \"issue it\"), then approve the send";
+const INVOICE_NOT_SENDABLE_SENTENCE = 'the invoice is void or canceled — there is nothing to send';
 
 /**
  * #1490 — estimate-sending proposals whose handler reads `payload.estimateId`
@@ -224,6 +252,8 @@ const ESTIMATE_ALREADY_INVOICED = 'estimateAlreadyInvoiced';
 
 /** Gaps that are a missing piece to supply, not an id naming nothing. */
 const SENTENCE_GAPS: ReadonlySet<string> = new Set([
+  INVOICE_NOT_ISSUED,
+  INVOICE_NOT_SENDABLE,
   'locationId',
   'recipient',
   'customerId',
@@ -252,6 +282,8 @@ export function describeDanglingReferences(fields: readonly string[]): string {
     parts.push('the customer has no service location — add one before approving');
   }
   if (fields.includes(ESTIMATE_ALREADY_INVOICED)) parts.push(ESTIMATE_ALREADY_INVOICED_SENTENCE);
+  if (fields.includes(INVOICE_NOT_ISSUED)) parts.push(INVOICE_NOT_ISSUED_SENTENCE);
+  if (fields.includes(INVOICE_NOT_SENDABLE)) parts.push(INVOICE_NOT_SENDABLE_SENTENCE);
   return `Cannot approve proposal: ${parts.join('; ')}`;
 }
 
@@ -325,6 +357,8 @@ export function askForExecutabilityGaps(
     asks.push("it isn't linked to a customer or a job yet — which customer is it for?");
   }
   if (gaps.includes(ESTIMATE_ALREADY_INVOICED)) asks.push(ESTIMATE_ALREADY_INVOICED_SENTENCE);
+  if (gaps.includes(INVOICE_NOT_ISSUED)) asks.push(INVOICE_NOT_ISSUED_SENTENCE);
+  if (gaps.includes(INVOICE_NOT_SENDABLE)) asks.push(INVOICE_NOT_SENDABLE_SENTENCE);
   const unknown = gaps.filter((g) => !SENTENCE_GAPS.has(g));
   if (unknown.length > 0) asks.push(`${unknown.join(', ')} does not name an existing record`);
   return `This can't go ahead yet: ${asks.join('; ')}`;

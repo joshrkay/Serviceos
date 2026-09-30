@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { toast } from 'sonner';
 import { useApiClient } from '../lib/apiClient';
 import { formatApiErrorMessage } from '../utils/api-errors';
+import { IDEMPOTENCY_HEADER, useIdempotencyKey } from '../lib/idempotencyKey';
 
 /**
  * Built-in success/error toast copy keyed by common entity actions used
@@ -27,6 +28,12 @@ export interface MutationOptions<TBody, TResult> {
   onSuccess?: (data: TResult, variables: TBody) => void;
   /** Optional callback fired after error toast. */
   onError?: (err: unknown, variables: TBody) => void;
+  /**
+   * #1489 — send an `Idempotency-Key` (for create POSTs). Retrying the same
+   * body reuses the key, so a create whose response was lost is replayed by
+   * the API instead of duplicated; a success starts a fresh key.
+   */
+  idempotent?: boolean;
 }
 
 export interface MutationResult<TBody, TResult> {
@@ -96,15 +103,19 @@ export function useMutation<TBody, TResult>(
   const apiFetch = useApiClient();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const submissionKey = useIdempotencyKey();
 
   const mutate = useCallback(async (body: TBody, opts?: { headers?: Record<string, string> }): Promise<TResult> => {
     setIsLoading(true);
     setError(null);
     try {
+      const headers = options.idempotent
+        ? { ...opts?.headers, [IDEMPOTENCY_HEADER]: submissionKey.keyFor(body) }
+        : opts?.headers;
       const response = await apiFetch(path, {
         method,
         body: JSON.stringify(body),
-        ...(opts?.headers ? { headers: opts.headers } : {}),
+        ...(headers ? { headers } : {}),
       });
       if (!response.ok) {
         const err: MutationHttpError = new Error(await extractApiErrorMessage(response));
@@ -126,6 +137,7 @@ export function useMutation<TBody, TResult>(
         }
       }
 
+      submissionKey.settle();
       // Success toast (configurable; suppress with `false`)
       if (options.successMessage !== false && options.successMessage) {
         toast.success(options.successMessage);
@@ -153,7 +165,7 @@ export function useMutation<TBody, TResult>(
     } finally {
       setIsLoading(false);
     }
-  }, [apiFetch, method, path, options]);
+  }, [apiFetch, method, path, options, submissionKey]);
 
   return { mutate, isLoading, error };
 }

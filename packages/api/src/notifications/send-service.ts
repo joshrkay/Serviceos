@@ -98,7 +98,7 @@ export interface SendPortalLinkResult {
  * 'void'/'canceled' are dead invoices with nothing to collect. See the
  * sendInvoice() guard below.
  */
-const UNSENDABLE_INVOICE_STATUSES: ReadonlySet<InvoiceStatus> = new Set([
+export const UNSENDABLE_INVOICE_STATUSES: ReadonlySet<InvoiceStatus> = new Set([
   'draft',
   'void',
   'canceled',

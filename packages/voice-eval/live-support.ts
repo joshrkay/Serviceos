@@ -212,10 +212,12 @@ export async function buildLiveGateway(
     const { createHarnessLLMGateway } = await import('../api/src/ai/gateway/harness-gateway');
     const { loadConfig } = await import('../api/src/shared/config');
     const { withPathSmokeSpendTracking } = await import('../api/src/ai/voice-quality/path-smoke/provider');
-    return withPathSmokeSpendTracking(createHarnessLLMGateway(loadConfig(env)), {
-      fallbackModel: selection.model,
-      addCents,
-    });
+    return withRateLimitRetry(
+      withPathSmokeSpendTracking(createHarnessLLMGateway(loadConfig(env)), {
+        fallbackModel: selection.model,
+        addCents,
+      }),
+    );
   }
   const { createRealLayerTwoGateway } = await import('../api/src/ai/gateway/real-layer-two-factory');
   const { AgentEventBus } = await import('../api/src/ai/voice-quality/event-bus');
@@ -230,6 +232,42 @@ export async function buildLiveGateway(
       },
       totalCents: () => harnessCents,
     },
+  });
+}
+
+/** Default retry budget for {@link withRateLimitRetry}. */
+export const RATE_LIMIT_MAX_RETRIES = 8;
+const RATE_LIMIT_FALLBACK_WAIT_MS = 2_000;
+
+/**
+ * Wrap the live eval gateway so a provider throttle (the gateway's typed
+ * `LLM_RATE_LIMITED`, raised once its own retries are spent) waits out the
+ * provider's retry hint and retries the SAME request, up to `maxRetries`
+ * times. A sequential live run on gpt-4o-mini sends ~15k prompt tokens per
+ * call and crosses a 200k tokens-per-minute org limit on its own; without
+ * this the first throttle aborted the whole run with no report. A throttle is
+ * never a classification result, so it must never be scored as one. Any
+ * other error is rethrown at once.
+ */
+export function withRateLimitRetry(
+  gateway: LLMGateway,
+  opts: { sleep?: (ms: number) => Promise<void>; maxRetries?: number } = {},
+): LLMGateway {
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const maxRetries = opts.maxRetries ?? RATE_LIMIT_MAX_RETRIES;
+  const complete: LLMGateway['complete'] = async (request) => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await gateway.complete(request);
+      } catch (err) {
+        const e = err as { code?: string; details?: { retryAfterMs?: number } };
+        if (e?.code !== 'LLM_RATE_LIMITED' || attempt >= maxRetries) throw err;
+        await sleep(e.details?.retryAfterMs ?? RATE_LIMIT_FALLBACK_WAIT_MS);
+      }
+    }
+  };
+  return new Proxy(gateway, {
+    get: (target, prop, receiver) => (prop === 'complete' ? complete : Reflect.get(target, prop, receiver)),
   });
 }
 

@@ -76,9 +76,10 @@ export const INTENT_BLOCKS = {
 `,
   create_appointment: `- "create_appointment"  — user wants to schedule a new appointment or follow-up.
                            Extract jobTitle (a short name for the new work
-                           being scheduled), dateTimeDescription (when they
-                           want it scheduled), and customerName if a specific
-                           customer is named.
+                           being scheduled), problemDescription (the problem
+                           as described), serviceAddress (where the work is),
+                           dateTimeDescription (when they want it scheduled),
+                           and customerName if a specific customer is named.
                            Example: "Schedule a follow-up for Mrs Lee next Tuesday at 2pm"
 `,
   update_invoice: `- "update_invoice"      — user wants to ADD or REMOVE a line item on an EXISTING
@@ -196,8 +197,9 @@ export const INTENT_BLOCKS = {
 `,
   reschedule_appointment: `- "reschedule_appointment" — user wants to move an EXISTING appointment to a
                            different time. Extract appointmentReference
-                           (the old slot or the job/customer identifier)
-                           and newDateTimeDescription (the new time).
+                           (the old slot or the job/customer identifier),
+                           newDateTimeDescription (the new time), and
+                           customerName (the caller's name).
                            Examples: "Move the Miller job to Thursday at 2pm"
                                      "Push tomorrow's 10am to 3pm"
                                      "Reschedule the Davis appointment to next Monday"
@@ -321,6 +323,9 @@ export const INTENT_BLOCKS = {
                            burst pipe, sewage backup, no water. Skip normal
                            intent confirmation — escalate directly to
                            on-call dispatcher. Never auto-execute.
+                           Extract customerName (the caller's name),
+                           problemDescription (what is happening) and
+                           serviceAddress (where) when stated.
                            Examples: "There's a gas smell coming from the furnace"
                                      "My pipes burst and water is everywhere"
                                      "No heat and it's 10 degrees outside"
@@ -660,12 +665,15 @@ export const INTENT_BLOCKS = {
                                      "Total amount due on my account?"
 `,
   lookup_jobs: `- "lookup_jobs"         — caller is ASKING about their recent or current
-                           jobs. Read-only.
+                           jobs, or an operator pulls up a named job /
+                           work order or a filtered list of jobs. Read-only.
                            Examples: "What jobs do I have open?"
                                      "Tell me about my last service call"
                                      "What's the status of my repair?"
                                      "Did you finish the work order?"
                                      "What jobs are on my account?"
+                                     "Bring up the Garcia bathroom remodel"
+                                     "Which jobs are on hold right now?"
 `,
   lookup_agreements: `- "lookup_agreements"   — caller is ASKING about their service plan /
                            agreement / membership. Read-only.
@@ -688,13 +696,16 @@ export const INTENT_BLOCKS = {
                               "I'd rather speak english"
 `,
   lookup_account_summary: `- "lookup_account_summary" — caller asks an open-ended "what's on my
-                           account" / "give me an update" question.
-                           Read-only.
+                           account" / "give me an update" question, or an
+                           operator asks for a summary/history of a named or
+                           current customer's account. Read-only.
                            Examples: "What's on my account?"
                                      "Give me a quick summary"
                                      "Catch me up on my account"
                                      "Where do I stand?"
                                      "Tell me about my account"
+                                     "What's our history with the Garcia household?"
+                                     "Brief me on this customer before I call back"
 `,
   lookup_customer: `- "lookup_customer"     — caller is ASKING about the contact info or
                            CRM record we have on file for them — name,
@@ -722,10 +733,14 @@ export const INTENT_BLOCKS = {
                                      "What times can you come out?"
 `,
   lookup_leads: `- "lookup_leads"        — owner/dispatcher is ASKING about the lead
-                           pipeline (count of open leads). Read-only.
+                           pipeline — how many leads are open, or a list of
+                           leads filtered by source or follow-up status.
+                           Read-only.
                            Examples: "How many open leads do we have?"
                                      "What's in the lead pipeline?"
                                      "How many leads are still open?"
+                                     "Which leads did the referral program bring us?"
+                                     "Who in the pipeline is overdue for a follow-up?"
 `,
   lookup_revenue: `- "lookup_revenue"      — owner is ASKING about revenue / money brought
                            in this month, or outstanding receivables.
@@ -860,6 +875,32 @@ export const INTENT_BLOCK_VARIANTS = {
                            address VERBATIM in "address".
 `,
   },
+  // #1469 — the operator blocks now also teach OPERATOR phrasings (a named
+  // job / work order, a named customer's history). An inbound caller only
+  // ever asks about their OWN jobs/account, and the caller first turn has
+  // no budget for lore it cannot use (classifier-prompt-budget.test.ts), so
+  // the caller keeps the caller-voiced block verbatim.
+  lookup_jobs: {
+    caller: `- "lookup_jobs"         — caller is ASKING about their recent or current
+                           jobs. Read-only.
+                           Examples: "What jobs do I have open?"
+                                     "Tell me about my last service call"
+                                     "What's the status of my repair?"
+                                     "Did you finish the work order?"
+                                     "What jobs are on my account?"
+`,
+  },
+  lookup_account_summary: {
+    caller: `- "lookup_account_summary" — caller asks an open-ended "what's on my
+                           account" / "give me an update" question.
+                           Read-only.
+                           Examples: "What's on my account?"
+                                     "Give me a quick summary"
+                                     "Catch me up on my account"
+                                     "Where do I stand?"
+                                     "Tell me about my account"
+`,
+  },
 } as const satisfies IntentBlockVariantTable;
 
 /** Table shape for ENTITY_FIELD_VARIANTS — see IntentBlockVariantTable (#902). */
@@ -881,6 +922,10 @@ export const ENTITY_FIELD_VARIANTS = {
   },
   noteBody: {
     caller: `    "noteBody": "<string, optional — the complaint text on complaint>"`,
+  },
+  // #1468 — a caller has no add_service_location; only the booking half.
+  serviceAddress: {
+    caller: `    "serviceAddress": "<string, optional — where the work is on create_appointment>"`,
   },
 } as const satisfies EntityFieldVariantTable;
 
@@ -935,6 +980,11 @@ export const DISTINCTION_RULES: ReadonlyArray<{ intents: readonly IntentType[]; 
   scheduled for them) is lookup_appointments; a caller asking about "MY
   schedule/day/jobs" (plural work to do) is lookup_my_day.
 ` },
+  { intents: ['confirm_appointment', 'lookup_appointments'], text: `- A QUESTION about whether a booking exists or is still happening ("am
+  I on the books for Friday?", "is that visit still happening?")
+  = lookup_appointments. A STATEMENT that the customer will be there
+  ("we're good for Tuesday, lock it in") = confirm_appointment.
+` },
 ];
 
 /** JSON contract head, through the opening of extractedEntities. */
@@ -956,7 +1006,7 @@ Return valid JSON with exactly this shape (no prose, no markdown fences):
  * advertised on the surface.
  */
 export const ENTITY_FIELDS: ReadonlyArray<{ key: string; intents: readonly IntentType[] | '*'; line: string }> = [
-  { key: 'customerName', intents: '*', line: `    "customerName": "<string, optional — existing-customer reference on invoice/estimate/appointment>"` },
+  { key: 'customerName', intents: '*', line: `    "customerName": "<string, optional — existing-customer reference on invoice/estimate/appointment; or the caller's own name>"` },
   { key: 'jobReference', intents: '*', line: `    "jobReference": "<string, optional>"` },
   { key: 'amount', intents: '*', line: `    "amount": <integer cents, optional>` },
   { key: 'dateTimeDescription', intents: '*', line: `    "dateTimeDescription": "<verbatim date/time phrase from transcript, optional>"` },
@@ -976,6 +1026,7 @@ export const ENTITY_FIELDS: ReadonlyArray<{ key: string; intents: readonly Inten
   { key: 'paymentMethod', intents: ['record_payment'], line: `    "paymentMethod": "<cash|check|card|other, optional — on record_payment>"` },
   { key: 'paymentReference', intents: ['record_payment'], line: `    "paymentReference": "<string, optional — check number or memo on record_payment>"` },
   { key: 'jobTitle', intents: ['create_job', 'log_warranty_claim', 'create_appointment', 'schedule_inspection'], line: `    "jobTitle": "<string, optional — title of new job on create_job (prefixed "Warranty — " plus what failed on log_warranty_claim); also the short name of the new work being scheduled on create_appointment (prefixed "Inspection — " plus the type on schedule_inspection)>"` },
+  { key: 'problemDescription', intents: ['create_appointment', 'create_job', 'emergency_dispatch'], line: `    "problemDescription": "<string, optional — the problem/symptoms in the speaker's words on create_appointment/create_job/emergency_dispatch>"` },
   { key: 'updatedName', intents: ['update_customer'], line: `    "updatedName": "<string, optional — new name on update_customer>"` },
   { key: 'updatedEmail', intents: ['update_customer'], line: `    "updatedEmail": "<string, optional — new email on update_customer>"` },
   { key: 'updatedPhone', intents: ['update_customer'], line: `    "updatedPhone": "<string, optional — new phone on update_customer>"` },
@@ -985,7 +1036,7 @@ export const ENTITY_FIELDS: ReadonlyArray<{ key: string; intents: readonly Inten
   { key: 'vendor', intents: ['log_expense', 'add_material'], line: `    "vendor": "<string, optional — who was paid on log_expense, or the supply house on add_material>"` },
   { key: 'leadReference', intents: ['convert_lead', 'mark_lead_lost'], line: `    "leadReference": "<string, optional — the lead being converted/lost on convert_lead/mark_lead_lost>"` },
   { key: 'lostReason', intents: ['mark_lead_lost'], line: `    "lostReason": "<string, optional — why the lead was lost on mark_lead_lost>"` },
-  { key: 'serviceAddress', intents: ['add_service_location'], line: `    "serviceAddress": "<string, optional — full address on add_service_location>"` },
+  { key: 'serviceAddress', intents: ['add_service_location', 'create_appointment', 'emergency_dispatch'], line: `    "serviceAddress": "<string, optional — full address on add_service_location; where the work is on create_appointment/emergency_dispatch>"` },
   { key: 'timeEntryType', intents: ['log_time_entry'], line: `    "timeEntryType": "<job|drive|break|admin, optional — on log_time_entry>"` },
   { key: 'durationMinutes', intents: ['log_time_entry'], line: `    "durationMinutes": <integer MINUTES of completed work time, optional — on log_time_entry; "two hours" is 120>` },
   { key: 'delayMinutes', intents: ['notify_delay'], line: `    "delayMinutes": <integer minutes, optional — on notify_delay>` },

@@ -22,7 +22,7 @@ import { Proposal, ProposalRepository, ProposalType, missingFieldsFor } from '..
 // below previously wrote sourceContext.chainId only, never the TOP-LEVEL
 // Proposal.chainId column this helper sets — the column findByChain and
 // the web Inbox's groupIntoFeed both key on.
-import { applyChainMetadata } from '../proposals/chain';
+import { applyChainMetadata, payloadPathFor, type ChainEntityKind, type ChainRef } from '../proposals/chain';
 import { validateProposalPayload } from '../proposals/contracts';
 import { clearSatisfiedMissingFields } from '../proposals/missing-fields';
 import {
@@ -51,7 +51,9 @@ import {
   isVoiceApprovalIntent,
   isVoiceEditIntent,
   CLASSIFIER_CONFIDENCE_THRESHOLD,
+  type IntentClassification,
 } from '../ai/orchestration/intent-classifier';
+import { isOffTopicRequest, OFF_TOPIC_DECLINE } from '../ai/orchestration/off-topic-guard';
 // Lookup wiring (2026-07): `lookup_*` intents previously matched nothing in
 // either dispatch map below and fell through to the generic LLM — which has
 // no DB access and answered from nothing (production: ZERO `ai_runs` rows
@@ -127,6 +129,7 @@ import {
   isDisambiguationAnswer,
   isGatedReferenceField,
   PENDING_AMBIGUITY_KEY,
+  MAX_LISTED_CANDIDATES,
 } from '../ai/resolution/gated-reference-resolution';
 import {
   resolveDisambiguationFollowUp,
@@ -165,12 +168,13 @@ import type { Mode } from '../proposals/auto-approve';
 // drift. `routes -> workers` imports are an existing pattern in this
 // codebase (see routes/admin-tenants.ts, routes/onboarding.ts).
 import { holdIfUnsupervised } from '../workers/voice-action-router';
-import type { InvoiceRepository } from '../invoices/invoice';
+import type { Invoice, InvoiceRepository } from '../invoices/invoice';
 import type { CatalogItemRepository } from '../catalog/catalog-item';
 import type { EstimateRepository } from '../estimates/estimate';
 import { redraftInvoiceOnEstimatePick } from '../ai/tasks/invoice-task';
 import type { AppointmentRepository } from '../appointments/appointment';
-import type { JobRepository } from '../jobs/job';
+import type { Job, JobRepository } from '../jobs/job';
+import { findDocumentByNumber, findDocumentNumbers } from '../ai/resolution/document-number';
 import type { DunningEventRepository } from '../invoices/dunning-config';
 import type { CustomerRepository } from '../customers/customer';
 import type { LocationRepository } from '../locations/location';
@@ -1283,7 +1287,8 @@ const LITERAL_JOB_DRAFT_TYPES: ReadonlySet<string> = new Set(['draft_estimate', 
  * customer the operator had in fact identified. A UUID that is a job THIS
  * tenant owns is a repo lookup, so its id and customerId are verified by
  * construction. Exactly one such job, or nothing: two job ids in one request
- * is not a pick. Failure-soft, like the resolver pass it joins.
+ * is not a pick. Failure-soft, like the resolver pass it joins. #1498 — the
+ * job's own number ("JOB-0081") is read the same way, by exact match.
  */
 async function resolveLiteralJobReference(
   jobRepo: JobRepository | undefined,
@@ -1292,18 +1297,95 @@ async function resolveLiteralJobReference(
 ): Promise<Record<string, string>> {
   if (!jobRepo) return {};
   const ids = [...new Set((text.match(LITERAL_UUID_RE) ?? []).map((id) => id.toLowerCase()))];
-  const jobs = [];
-  for (const id of ids) {
-    try {
+  // #1498 — the job's own number ("JOB-0081") names it just as exactly.
+  const numbers = findDocumentNumbers(text).filter((doc) => doc.kind === 'job');
+  const jobs = new Map<string, Job>();
+  try {
+    for (const id of ids) {
       const job = await jobRepo.findById(tenantId, id);
-      if (job) jobs.push(job);
-    } catch {
-      return {};
+      if (job) jobs.set(job.id, job);
     }
+    for (const doc of numbers) {
+      const found = await findDocumentByNumber({ jobRepo }, tenantId, doc);
+      if (found?.kind === 'job') jobs.set(found.record.id, found.record);
+    }
+  } catch {
+    return {};
   }
-  if (jobs.length !== 1) return {};
-  const [job] = jobs;
+  if (jobs.size !== 1) return {};
+  const [job] = [...jobs.values()];
   return { jobId: job.id, ...(job.customerId ? { customerId: job.customerId } : {}) };
+}
+
+/**
+ * The drafts whose `invoiceId` gate a literal INV- number in the operator's
+ * words may lift. Deliberately just the reminder — a comms action that never
+ * auto-approves. The money-moving invoice drafts (update / send / issue /
+ * record_payment …) keep their pinned rule that a repo match never lifts the
+ * gate on this surface (assistant.route.test.ts, "money-path handler
+ * wiring"); for those the number is read only to check the invoice's state
+ * (`invoiceActionBlocker`).
+ */
+const LITERAL_INVOICE_ID_TYPES: ReadonlySet<string> = new Set(['send_payment_reminder']);
+
+/**
+ * #1498 — "Send a payment reminder for invoice INV-0060" names the invoice by
+ * its own number. The classifier does not reliably file that number anywhere
+ * the resolver reads, so the operator's words are read for it, by exact
+ * match: exactly one INV- number that is an invoice of THIS tenant, or
+ * nothing. Failure-soft, like `resolveLiteralJobReference`.
+ */
+async function resolveLiteralInvoiceNumber(
+  invoiceRepo: InvoiceRepository | undefined,
+  tenantId: string,
+  text: string,
+): Promise<string | undefined> {
+  if (!invoiceRepo) return undefined;
+  const numbers = findDocumentNumbers(text).filter((doc) => doc.kind === 'invoice');
+  if (numbers.length !== 1) return undefined;
+  try {
+    const found = await findDocumentByNumber({ invoiceRepo }, tenantId, numbers[0]);
+    return found?.kind === 'invoice' ? found.record.id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * #1498 — why the named invoice's state rules an action out, in the
+ * operator's words, or undefined when it doesn't (or the invoice can't be
+ * read — the draft then proceeds and execution keeps its own guards).
+ *   - a payment reminder on a settled invoice would dun a customer who owes
+ *     nothing;
+ *   - a payment recorded against a DRAFT would book money on an invoice the
+ *     customer has never been sent (execution only accepts open /
+ *     partially-paid invoices, so the card could never succeed anyway).
+ */
+async function invoiceActionBlocker(
+  invoiceRepo: InvoiceRepository | undefined,
+  tenantId: string,
+  registryKey: string | undefined,
+  invoiceId: string | undefined,
+): Promise<string | undefined> {
+  if (!invoiceRepo || !invoiceId) return undefined;
+  if (registryKey !== 'send_payment_reminder' && registryKey !== 'record_payment') return undefined;
+  let invoice: Invoice | null;
+  try {
+    invoice = await invoiceRepo.findById(tenantId, invoiceId);
+  } catch {
+    return undefined;
+  }
+  if (!invoice) return undefined;
+  if (registryKey === 'send_payment_reminder' && invoice.status === 'paid') {
+    return `${invoice.invoiceNumber} is already paid in full, so there's nothing to remind the customer about.`;
+  }
+  if (registryKey === 'record_payment' && invoice.status === 'draft') {
+    return (
+      `${invoice.invoiceNumber} is still a draft — it hasn't been issued, so there's no payment to record yet. ` +
+      'Issue it first, then record the payment.'
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -1313,6 +1395,221 @@ async function resolveLiteralJobReference(
  */
 const CREATE_INVOICE_WORDING_RE =
   /\b(?:create|draft|make|write\s+up|generate)\s+(?:(?:and|&)\s+(?:send|text|email)\s+)?(?:(?:a|an|the)\s+)?(?:new\s+)?invoice\b/i;
+
+/**
+ * #1499 — the honest tail of a multi-step reply: every step the operator
+ * asked for that did NOT become a card, named in their own words, with an
+ * offer to do it. Empty when nothing was dropped. Each step is offered as
+ * its own message: a step the chain split (#1480 item 4, planChainSteps)
+ * could not draft is one the split has no handler for.
+ */
+function undraftedStepsNote(steps: readonly string[]): string {
+  if (steps.length === 0) return '';
+  const named = steps.map((step) => `"${step.replace(/[.!?\s]+$/, '')}"`).join(' and ');
+  const offer = steps.length === 1 ? 'Want me to? Send it' : 'Want me to? Send each';
+  return `\n\nI didn't draft ${named} yet. ${offer} as its own message and I'll draft it.`;
+}
+
+/**
+ * #1499 — the kind of record a requested step acts on. A step clause's family
+ * comes from its leading verb (and, for the generic create verbs, the noun it
+ * governs); a drafted card's family comes from its proposal type. A clause
+ * whose family no drafted card covers is a step the reply must name.
+ */
+type StepFamily = 'customer' | 'appointment' | 'invoice' | 'estimate' | 'send' | 'note' | 'reminder';
+
+const STEP_VERB_FAMILIES: ReadonlyArray<[RegExp, StepFamily]> = [
+  [/^(?:book|schedule|reschedule|cancel)\b/i, 'appointment'],
+  [/^(?:send|text|email)\b/i, 'send'],
+  [/^(?:invoice|bill)\b/i, 'invoice'],
+  [/^(?:quote)\b/i, 'estimate'],
+  [/^remind\b/i, 'reminder'],
+];
+
+const STEP_CREATE_VERB_RE = /^(?:create|draft|make|add|write\s+up|generate|put\s+in|set\s+up)\b/i;
+
+const STEP_NOUN_FAMILIES: ReadonlyArray<[RegExp, StepFamily]> = [
+  [/\b(?:invoice|bill)\b/i, 'invoice'],
+  [/\b(?:estimate|quote)\b/i, 'estimate'],
+  [/\b(?:customer|client)\b/i, 'customer'],
+  // Not "visit": after a generic create verb ("add a diagnostic visit") a
+  // visit is a LINE on the document being drafted, not a booking (#1480).
+  // A visit that IS a booking comes with its own verb (book / schedule).
+  [/\b(?:appointment|booking)\b/i, 'appointment'],
+  [/\bnote\b/i, 'note'],
+  [/\breminder\b/i, 'reminder'],
+];
+
+/** Every verb a trailing step clause may open with (the split anchor). */
+const STEP_CLAUSE_SPLIT_RE =
+  /(?:,\s*|\s+)(?:and|&)\s+(?:also\s+)?(?=(?:book|schedule|reschedule|cancel|send|text|email|invoice|bill|quote|remind|create|draft|make|add|write\s+up|generate|put\s+in|set\s+up)\b)/i;
+
+function stepClauseFamily(clause: string): StepFamily | undefined {
+  const text = clause.trim();
+  for (const [re, family] of STEP_VERB_FAMILIES) if (re.test(text)) return family;
+  if (!STEP_CREATE_VERB_RE.test(text)) return undefined;
+  // The noun the create verb governs, within its first few words.
+  const head = text.split(/\s+/).slice(0, 5).join(' ');
+  for (const [re, family] of STEP_NOUN_FAMILIES) if (re.test(head)) return family;
+  return undefined;
+}
+
+function proposalTypeFamilies(proposalType: string): StepFamily[] {
+  const families: StepFamily[] = [];
+  if (proposalType.startsWith('send_')) families.push('send');
+  if (proposalType.includes('reminder')) families.push('reminder');
+  if (proposalType.includes('invoice')) families.push('invoice');
+  if (proposalType.includes('estimate')) families.push('estimate');
+  if (proposalType.includes('customer')) families.push('customer');
+  if (proposalType.includes('appointment')) families.push('appointment');
+  if (proposalType.includes('note')) families.push('note');
+  return families;
+}
+
+/**
+ * #1499 — the steps of a compound request ("add Priya, and book her
+ * Thursday at 9am") that the single drafted card does not cover. Since #1480
+ * item 4 the chain path splits and drafts these asks first (planChainSteps);
+ * this reporter only runs when that split drafted NOTHING (every step failed
+ * to classify) and the whole turn fell through to one card — it keeps that
+ * reply honest about the steps it still did not do. Splits only on "and
+ * <action verb>", so "a blower motor and a diagnostic visit" stays one step.
+ */
+function undraftedCompoundSteps(
+  text: string,
+  draftedProposalTypes: readonly string[],
+  opts: { skipFamilies?: readonly StepFamily[] } = {},
+): string[] {
+  const clauses = text.split(STEP_CLAUSE_SPLIT_RE).map((c) => c.trim()).filter(Boolean);
+  if (clauses.length < 2) return [];
+  const covered = new Set(draftedProposalTypes.flatMap(proposalTypeFamilies));
+  return clauses.filter((clause) => {
+    const family = stepClauseFamily(clause);
+    return !!family && !covered.has(family) && !(opts.skipFamilies ?? []).includes(family);
+  });
+}
+
+/**
+ * #1480 item 4 — one step of a multi-step chat ask. `text` is what is
+ * classified and drafted from; a `sendInvoiceTail` step is not classified at
+ * all — it is "send it" after an invoice step of the SAME turn, drafted as a
+ * `send_invoice` linked to that invoice (a pronoun alone classifies as
+ * nothing, and the invoice it names does not exist yet).
+ */
+interface ChainStepPlan {
+  text: string;
+  sendInvoiceTail?: { channel: 'email' | 'sms' };
+}
+
+/** "create and send (the invoice …)" — the send verb rides the create verb. */
+const CREATE_AND_SEND_VERB_RE = /\b(create|draft|make|write\s+up|generate)\s+(?:and|&)\s+(send|text|email)\s+/i;
+
+/** "… create" with nothing after it: the split landed inside "create and send". */
+const BARE_CREATE_VERB_END_RE = /(?:^|\s)(?:create|draft|make|write\s+up|generate)$/i;
+
+/** A send clause whose object is the thing the previous step drafts. */
+const SEND_IT_CLAUSE_RE = /^(send|text|email)\s+(?:it|that|this|them|her|him|the\s+invoice)\b/i;
+
+function sendChannelFor(verb: string, clause: string): 'email' | 'sms' {
+  return /^text$/i.test(verb) || /\b(?:by|via|over)\s+(?:text|sms)\b/i.test(clause) ? 'sms' : 'email';
+}
+
+/**
+ * #1480 item 4 — the steps of a chat turn, in order. Splits on "then" (the
+ * AST-07 chain) and, within each part, on "and <action verb>" (C23, AST-04)
+ * — the same anchor `undraftedCompoundSteps` reports on, but only where the
+ * trailing clause names a record family of its own; anything else stays part
+ * of the clause before it ("a blower motor and a diagnostic visit" is one
+ * step). "Create and send the invoice" is two steps: the invoice, then its
+ * send.
+ */
+function planChainSteps(text: string): ChainStepPlan[] {
+  const steps: ChainStepPlan[] = [];
+  const parts = text.split(/(?:,\s*)?\bthen\b\s+/i).map((seg) => seg.trim()).filter(Boolean);
+  for (const part of parts) {
+    const clauses: string[] = [];
+    for (const raw of part.split(STEP_CLAUSE_SPLIT_RE).map((c) => c.trim()).filter(Boolean)) {
+      // A clause ending in a bare create verb is the first half of "create
+      // and send …" — one clause, handled below.
+      const joinsPrevious =
+        clauses.length > 0 && (!stepClauseFamily(raw) || BARE_CREATE_VERB_END_RE.test(clauses[clauses.length - 1]));
+      if (joinsPrevious) clauses[clauses.length - 1] += ` and ${raw}`;
+      else clauses.push(raw);
+    }
+    for (const clause of clauses) {
+      const previous = steps[steps.length - 1];
+      const sendIt = SEND_IT_CLAUSE_RE.exec(clause);
+      if (sendIt && previous && !previous.sendInvoiceTail && stepClauseFamily(previous.text) === 'invoice') {
+        steps.push({ text: clause, sendInvoiceTail: { channel: sendChannelFor(sendIt[1], clause) } });
+        continue;
+      }
+      const createAndSend = CREATE_AND_SEND_VERB_RE.exec(clause);
+      if (createAndSend && CREATE_INVOICE_WORDING_RE.test(clause)) {
+        steps.push({ text: clause.replace(CREATE_AND_SEND_VERB_RE, `${createAndSend[1]} `) });
+        steps.push({ text: clause, sendInvoiceTail: { channel: sendChannelFor(createAndSend[2], clause) } });
+        continue;
+      }
+      steps.push({ text: clause });
+    }
+  }
+  return steps;
+}
+
+/** The chain allows the three-step AST-07 ask plus the send its invoice splits into, and one more. */
+const MAX_CHAT_CHAIN_STEPS = 5;
+
+/** The id an earlier chain step's execution produces, by its proposal type. */
+const CHAIN_PRODUCED_KIND: ReadonlyArray<[string, ChainEntityKind]> = [
+  ['create_customer', 'customerId'],
+  // AST-07 — "…then create the invoice" after an estimate bills THAT estimate.
+  ['draft_estimate', 'estimateId'],
+];
+
+/**
+ * Where a proposal type takes an earlier step's id. `payloadPathFor` is the
+ * shared (voice) map; `create_appointment` also consumes a customerId on this
+ * surface — its executor opens a job for that customer (SCH-02), so "add
+ * Priya and book her" needs no intermediate create_job step.
+ */
+function chatChainPayloadPath(proposalType: string, kind: ChainEntityKind): string | undefined {
+  if (proposalType === 'create_appointment' && kind === 'customerId') return 'customerId';
+  return payloadPathFor(proposalType as ProposalType, kind);
+}
+
+/**
+ * #1480 item 4 — the dependency edges of one chat chain step: the invoice a
+ * send tail sends, and the customer an earlier step of the same turn creates
+ * (only when the step has no real id for it — a resolved existing customer
+ * is never overwritten).
+ */
+function chatChainRefs(proposal: Proposal, chainTypes: readonly string[], tailParentIndex: number): ChainRef[] {
+  const refs: ChainRef[] = [];
+  if (tailParentIndex >= 0) {
+    refs.push({ payloadPath: 'invoiceId', parentChainIndex: tailParentIndex, entityKind: 'invoiceId' });
+    return refs;
+  }
+  for (const [producer, kind] of CHAIN_PRODUCED_KIND) {
+    const parentChainIndex = chainTypes.lastIndexOf(producer);
+    const path = chatChainPayloadPath(proposal.proposalType, kind);
+    if (parentChainIndex < 0 || !path || isUuidString(proposal.payload[path])) continue;
+    refs.push({ payloadPath: path, parentChainIndex, entityKind: kind });
+  }
+  return refs;
+}
+
+/** A chain edge fills its field at execution — it is no longer a gap the operator must close. */
+function liftChainRefGates(proposal: Proposal, refs: readonly ChainRef[]): void {
+  if (refs.length === 0) return;
+  const filled = new Set(refs.map((ref) => ref.payloadPath));
+  const remaining = missingFieldsFor(proposal).filter((field) => !filled.has(field));
+  proposal.sourceContext = { ...(proposal.sourceContext ?? {}), missingFields: remaining };
+}
+
+const isUuidString = (value: unknown): boolean =>
+  typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
+/** #1480 item 4 — what a linked send step waits on (approveProposal's linked-step gate + invoiceSendableReferenceCheck). */
+const LINKED_SEND_UNLOCK_NOTE = ' The send unlocks once the invoice is approved and issued.';
 
 /** Appended to the drafted card's reply: sending is the operator's next step. */
 const CREATE_AND_SEND_NEXT_STEP =
@@ -1340,25 +1637,68 @@ const IN_FLIGHT_INVOICE_STATUSES: ReadonlySet<string> = new Set(['draft', 'open'
  * words ask for a new invoice and that is what gets drafted.
  */
 async function isCreateAndSendWithNoInvoice(
-  invoiceRepo: InvoiceRepository | undefined,
+  deps: Pick<AssistantRouterDeps, 'invoiceRepo' | 'jobRepo'>,
   tenantId: string,
   intentType: string,
   text: string,
-): Promise<boolean> {
-  if (intentType !== 'send_invoice' || !CREATE_INVOICE_WORDING_RE.test(text)) return false;
+): Promise<CreateAndSendReroute | undefined> {
+  // #1499 (C22) — "Create an invoice for job JOB-0081 and send it" came back
+  // `issue_invoice` rather than `send_invoice`: same dead end, same reroute.
+  if (!CREATE_AND_SEND_INTENTS.has(intentType) || !CREATE_INVOICE_WORDING_RE.test(text)) return undefined;
+  const { invoiceRepo } = deps;
   const ids = [...new Set((text.match(LITERAL_UUID_RE) ?? []).map((id) => id.toLowerCase()))];
-  if (!invoiceRepo) return true;
+  const job = await findJobByLiteralNumber(deps.jobRepo, tenantId, text);
+  if (!invoiceRepo) return { job };
   try {
     for (const id of ids) {
-      if (await invoiceRepo.findById(tenantId, id)) return false;
+      if (await invoiceRepo.findById(tenantId, id)) return undefined;
+    }
+    for (const id of [...ids, ...(job.jobId ? [job.jobId] : [])]) {
       const onJob = await invoiceRepo.findByJob(tenantId, id);
-      if (onJob.some((inv) => IN_FLIGHT_INVOICE_STATUSES.has(inv.status))) return false;
+      if (onJob.some((inv) => IN_FLIGHT_INVOICE_STATUSES.has(inv.status))) return undefined;
     }
   } catch {
     // Failure-soft toward the draft: a draft never sends anything.
-    return true;
+    return { job };
   }
-  return true;
+  return { job };
+}
+
+/** The intents a "create (an invoice) … and send it" ask comes back as. */
+const CREATE_AND_SEND_INTENTS: ReadonlySet<string> = new Set(['send_invoice', 'issue_invoice']);
+
+/**
+ * A create-and-send ask re-routed to drafting the invoice (#1393/#1499). `job`
+ * is the job a literal job NUMBER in the text names ({} when none, or not
+ * exactly one): the draft bills that job, and its id must never ride the
+ * invoice-id slot.
+ */
+interface CreateAndSendReroute {
+  job: Record<string, string>;
+}
+
+/**
+ * #1499 — the job a literal "JOB-0081" names, kept only on an EXACT number
+ * match (`findDocumentByNumber`, #1498 — the one document-number reader).
+ * Exactly one job number in the words, or nothing — same rule as
+ * `resolveLiteralJobReference`. Failure-soft.
+ */
+async function findJobByLiteralNumber(
+  jobRepo: JobRepository | undefined,
+  tenantId: string,
+  text: string,
+): Promise<Record<string, string>> {
+  if (!jobRepo) return {};
+  const numbers = findDocumentNumbers(text).filter((doc) => doc.kind === 'job');
+  if (numbers.length !== 1) return {};
+  try {
+    const found = await findDocumentByNumber({ jobRepo }, tenantId, numbers[0]);
+    if (found?.kind !== 'job') return {};
+    const job = found.record;
+    return { jobId: job.id, ...(job.customerId ? { customerId: job.customerId } : {}) };
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -1368,7 +1708,7 @@ async function isCreateAndSendWithNoInvoice(
  * rather than drafting a job for one customer onto another's estimate.
  */
 async function resolvePreDraftIds(
-  deps: Pick<AssistantRouterDeps, 'entityResolver' | 'jobRepo'>,
+  deps: Pick<AssistantRouterDeps, 'entityResolver' | 'jobRepo' | 'invoiceRepo'>,
   tenantId: string,
   intent: string,
   registryKey: string | undefined,
@@ -1376,6 +1716,15 @@ async function resolvePreDraftIds(
   operatorText: string,
 ): Promise<PreDraftResolution> {
   const byName = await resolveVerifiedIdsForDraft(deps.entityResolver, tenantId, intent, entities);
+  if (registryKey && LITERAL_INVOICE_ID_TYPES.has(registryKey) && !byName.ids.invoiceId) {
+    const invoiceId = await resolveLiteralInvoiceNumber(deps.invoiceRepo, tenantId, operatorText);
+    if (invoiceId) {
+      return {
+        ids: { ...byName.ids, invoiceId },
+        ambiguousRefKeys: byName.ambiguousRefKeys.filter((key) => key !== 'invoiceId'),
+      };
+    }
+  }
   if (!registryKey || !LITERAL_JOB_DRAFT_TYPES.has(registryKey)) return byName;
   const byJobId = await resolveLiteralJobReference(deps.jobRepo, tenantId, operatorText);
   if (Object.keys(byJobId).length === 0) return byName;
@@ -1428,6 +1777,42 @@ async function resolveVerifiedIdsForDraft(
     return { ids: resolved, ambiguousRefKeys: [] };
   } catch {
     return NO_PRE_DRAFT_RESOLUTION;
+  }
+}
+
+/**
+ * #1499 (C25) — "Reschedule Dana's appointment to next Monday" with two Danas
+ * on file. The classifier extracts only `appointmentReference: "Dana's
+ * appointment"`, the appointment stays unresolved, and the generic ask
+ * ("which appointment …") never says what actually blocks it: WHICH Dana.
+ * When the unresolved appointment reference is a possessive naming a person
+ * who matches more than one customer, the question names them. A plain text
+ * question — no pending-answer anchor is stamped, exactly like the generic
+ * can't-match line it replaces — so it can never arm the ordinal matcher.
+ * Failure-soft: any resolver trouble keeps the generic line.
+ */
+async function askWhichCustomerForPossessive(
+  resolver: EntityResolver | undefined,
+  tenantId: string,
+  proposal: Proposal,
+  entities: Record<string, unknown>,
+): Promise<string | undefined> {
+  if (!resolver || !missingFieldsFor(proposal).includes('appointmentId')) return undefined;
+  const reference =
+    trimmedString(entities.appointmentReference) ?? trimmedString(proposal.payload.appointmentReference);
+  const owner = reference?.match(/^(.+?)['’]s\s+(?:appointment|visit|booking)\b/i)?.[1]?.trim();
+  if (!owner) return undefined;
+  try {
+    const result = await resolver.resolve({ tenantId, reference: owner, kind: 'customer' });
+    if (result.kind !== 'ambiguous') return undefined;
+    const names = [...new Set(result.candidates.slice(0, MAX_LISTED_CANDIDATES).map((c) => c.label))];
+    if (names.length < 2) return undefined;
+    return (
+      `I have more than one ${owner} — ${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}. ` +
+      "Which one? Reply with their full name and I'll pick up the appointment."
+    );
+  } catch {
+    return undefined;
   }
 }
 
@@ -1715,7 +2100,21 @@ export async function appointmentProvablyAbsent(
       trimmedString(extractedEntities.customerName) ??
       trimmedString(proposal.payload.customerName) ??
       trimmedString(proposal.payload.customerReference);
-    if (!customerName) return false;
+    if (!customerName) {
+      // #1499 (C17) — "Reschedule Morgan Tatebrook's appointment" extracts
+      // the person as the APPOINTMENT reference only. When that reference
+      // names exactly one customer, their (absent) bookings are the proof.
+      // Only a confident customer match counts here: a reference that is not
+      // a name ("tomorrow's 3pm") matching no customer proves nothing.
+      const reference =
+        trimmedString(extractedEntities.appointmentReference) ??
+        trimmedString(proposal.payload.appointmentReference);
+      const asName = reference?.replace(/['’]s\s+(?:appointment|visit|booking)\b.*$/i, '').trim();
+      // A proper name, not a time or a pointer ("the 2pm", "that one").
+      if (!asName || !/^\p{Lu}[\p{L}'’.-]*(?:\s+\p{Lu}[\p{L}'’.-]*)*$/u.test(asName)) return false;
+      const named = await resolver.resolve({ tenantId, reference: asName, kind: 'customer' });
+      return named.kind === 'resolved' ? await anchoredAbsent(named.candidate.id) : false;
+    }
     const customer = await resolver.resolve({ tenantId, reference: customerName, kind: 'customer' });
     if (customer.kind === 'not_found') return true;
     if (customer.kind === 'resolved') return await anchoredAbsent(customer.candidate.id);
@@ -2262,6 +2661,19 @@ export function editFieldsForMissing(
 }
 
 /**
+ * #1499 — a card title cut at a fixed width ended mid-word ("… and a
+ * diagno"). Cut at the last word boundary inside `max` and say so with an
+ * ellipsis; a text that fits is returned untouched.
+ */
+function shortenOnWord(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const boundary = cut.lastIndexOf(' ');
+  const head = (boundary > 0 ? cut.slice(0, boundary) : cut).replace(/[\s,;:—–-]+$/, '');
+  return `${head}…`;
+}
+
+/**
  * QA-2026-06-05 (AST-02/03/04): map any persisted proposal to the UI card
  * shape — estimates/invoices were previously unpersisted LLM JSON.
  *
@@ -2348,7 +2760,7 @@ export function proposalToUI(
   const signals = proposalSignals(proposal.payload, proposal.sourceContext);
   return {
     id: proposal.id,
-    title: `${cardType}: ${proposal.summary.slice(0, 80)}${total}`,
+    title: `${cardType}: ${shortenOnWord(proposal.summary, 80)}${total}`,
     summary: proposal.summary.slice(0, 160),
     // Review K4 — the persisted explanation WINS, the source echo is the
     // fallback. Shared with `customerProposalToUI` (see `cardExplanation`),
@@ -2401,6 +2813,27 @@ export function proposalToUI(
  * review, and telling the operator otherwise actively contradicts what the
  * backend just did.
  */
+/**
+ * #1499 (C35) — a line still waiting on its catalog pick blocks Approve
+ * (approve → 400), so "Review and approve to proceed" was a promise the card
+ * could not keep. Name the line(s) to pick instead. Undefined when no line
+ * pick is pending.
+ */
+function pendingLinePickLine(proposal: Pick<Proposal, 'payload' | 'sourceContext'>): string | undefined {
+  const lineItems = Array.isArray(proposal.payload.lineItems) ? (proposal.payload.lineItems as unknown[]) : [];
+  const names = missingFieldsFor(proposal as Proposal)
+    .map((field) => field.match(/^lineItems\[(\d+)\]\.catalogItemId$/)?.[1])
+    .filter((index): index is string => index !== undefined)
+    .map((index) => {
+      const line = lineItems[Number(index)] as { description?: unknown } | undefined;
+      return typeof line?.description === 'string' && line.description.trim()
+        ? `"${line.description.trim()}"`
+        : `line ${Number(index) + 1}`;
+    });
+  if (names.length === 0) return undefined;
+  return `Pick the catalog item for ${names.join(' and ')} on the card, then approve.`;
+}
+
 function proposalReplySuffix(status: AssistantProposal['status']): string {
   return status === 'Approved'
     ? 'Approved automatically — it will proceed shortly.'
@@ -2430,11 +2863,41 @@ const EN_ROUTE_PHRASE_RE = new RegExp(
   'i',
 );
 
+/** "overdue" / "past due" / "late" — the question is about the due date, not payment. */
+const OVERDUE_WORD_RE = /\b(?:overdue|past[\s-]+due|late)\b/i;
+
+/**
+ * #1498 — "Which invoices are overdue?" listed all 23 unpaid invoices when 4
+ * were past due. Overdue means UNPAID (open / partially paid) AND past its
+ * due date; an invoice with no due date is not overdue. Not limited to the
+ * last month: the oldest overdue invoice is the one the owner most needs to
+ * hear about. Most overdue first.
+ */
+function overdueInvoicesAnswer(all: Invoice[], now: Date): string {
+  const overdue = all
+    .filter(
+      (i) =>
+        (i.status === 'open' || i.status === 'partially_paid') &&
+        i.dueDate !== undefined &&
+        new Date(i.dueDate).getTime() < now.getTime(),
+    )
+    .sort((a, b) => new Date(a.dueDate!).getTime() - new Date(b.dueDate!).getTime());
+  if (overdue.length === 0) return 'No overdue invoices — nothing unpaid is past its due date.';
+  const lines = overdue
+    .slice(0, 10)
+    .map((i) => `${i.invoiceNumber} — $${(i.amountDueCents / 100).toFixed(2)} due (${i.status})`)
+    .join('; ');
+  const totalDue = overdue.reduce((sum, i) => sum + i.amountDueCents, 0);
+  return `${overdue.length} overdue invoice${overdue.length === 1 ? '' : 's'}, $${(totalDue / 100).toFixed(2)} past due: ${lines}${overdue.length > 10 ? '; …' : ''}`;
+}
+
 async function answerUnpaidInvoicesQuery(
   invoiceRepo: InvoiceRepository,
-  tenantId: string
+  tenantId: string,
+  question: string,
 ): Promise<string> {
   const all = await invoiceRepo.findByTenant(tenantId);
+  if (OVERDUE_WORD_RE.test(question)) return overdueInvoicesAnswer(all, new Date());
   const cutoff = Date.now() - 31 * 86_400_000;
   const unpaid = all.filter(
     (i) => ['open', 'partially_paid'].includes(i.status) && new Date(i.createdAt).getTime() >= cutoff
@@ -2907,7 +3370,7 @@ async function generateAssistantReply(
       // data, never propose. Runs before classification so phrasing variance
       // in the classifier can't turn a question into a mutation proposal.
       if (deps.invoiceRepo && UNPAID_QUERY_RE.test(lastUserText)) {
-        const content = await answerUnpaidInvoicesQuery(deps.invoiceRepo, tenantId);
+        const content = await answerUnpaidInvoicesQuery(deps.invoiceRepo, tenantId, lastUserText);
         return {
           taskType: 'assistant.query.unpaid_invoices',
           model: 'data-lookup',
@@ -3047,7 +3510,7 @@ async function generateAssistantReply(
           : classified;
       // #1393 — "create and send" with no invoice to send drafts the invoice.
       const createAndSend = await isCreateAndSendWithNoInvoice(
-        deps.invoiceRepo,
+        deps,
         tenantId,
         photoRouted.intentType,
         lastUserText,
@@ -3324,8 +3787,10 @@ async function generateAssistantReply(
       // money/comms steps land ready_for_review — the HITL contract is
       // never bypassed (the original matrix expectation of a fully-executed
       // invoice without approval contradicts 'money never auto-approves').
-      const chainSegments = lastUserText.split(/(?:,\s*)?\bthen\b\s+/i).map((seg) => seg.trim()).filter(Boolean);
-      if (chainSegments.length >= 2 && chainSegments.length <= 4) {
+      // #1480 item 4 — "X, and <verb> …" and "create and send …" split too,
+      // not only "… then …" (planChainSteps).
+      const chainSteps = planChainSteps(lastUserText);
+      if (chainSteps.length >= 2 && chainSteps.length <= MAX_CHAT_CHAIN_STEPS) {
         // PR-0a (#967, #962) — a real uuid, matching the id shape
         // applyChainMetadata/findByChain expect elsewhere (voice/memo
         // chains already mint theirs via uuidv4 in voice-action-router.ts).
@@ -3333,19 +3798,50 @@ async function generateAssistantReply(
         // format, so switching it is safe.
         const chainId = uuidv4();
         const chainCards: AssistantProposal[] = [];
+        // #1499 — every step the operator asked for that produced no card.
+        // The reply names each one; a silent drop reads as "done".
+        const undraftedSegments: string[] = [];
         const carried: Record<string, unknown> = {};
         // #913 — top-level classify plus every segment classify that landed.
         let chainUsage = classifierUsage;
-        for (const segment of chainSegments) {
-          let segClass;
-          try {
-            // Same context object as the top-level classification above so
-            // the two can't drift on which intents are even emittable.
-            segClass = await classifyIntent(segment, classifyContext, deps.gateway);
-          } catch {
-            continue;
+        // #1480 item 4 — the proposal type each drafted card is, by chain
+        // index: what a later step's `$ref:chain[n]` edge points at.
+        const chainTypes: string[] = [];
+        for (const step of chainSteps) {
+          const segment = step.text;
+          // "…and send it": the invoice it sends is the one this turn drafts.
+          const tailParentIndex = step.sendInvoiceTail ? chainTypes.lastIndexOf('draft_invoice') : -1;
+          let segClass: Pick<IntentClassification, 'intentType' | 'extractedEntities' | 'tokenUsage'>;
+          if (step.sendInvoiceTail) {
+            if (tailParentIndex < 0) {
+              // The invoice half became a send of an invoice that already
+              // exists (#1393: an in-flight invoice keeps the send path) —
+              // that card IS the send. Anything else is a step not drafted.
+              if (!chainTypes.includes('send_invoice')) undraftedSegments.push(segment);
+              continue;
+            }
+            segClass = {
+              intentType: 'send_invoice',
+              extractedEntities: { sendChannel: step.sendInvoiceTail.channel },
+            };
+          } else {
+            try {
+              // Same context object as the top-level classification above so
+              // the two can't drift on which intents are even emittable.
+              segClass = await classifyIntent(segment, classifyContext, deps.gateway);
+            } catch {
+              undraftedSegments.push(segment);
+              continue;
+            }
           }
           chainUsage = sumUsage(chainUsage, usageOf(segClass.tokenUsage));
+          // #1393 per step — "create an invoice for job X" classified as a
+          // send/issue of an invoice that does not exist drafts the invoice,
+          // exactly as the single-request path does.
+          const segCreateAndSend = step.sendInvoiceTail
+            ? undefined
+            : await isCreateAndSendWithNoInvoice(deps, tenantId, segClass.intentType, segment);
+          if (segCreateAndSend) segClass = { ...segClass, intentType: 'create_invoice' };
           // create_customer is the one documented exception to
           // CHAT_INTENT_TO_REGISTRY_KEY (see that constant's doc comment) —
           // the chain path has no conversational "ask for a name" fallback,
@@ -3355,9 +3851,17 @@ async function generateAssistantReply(
             segClass.intentType === 'create_customer'
               ? 'create_customer'
               : CHAT_INTENT_TO_REGISTRY_KEY[segClass.intentType];
-          if (!registryKey) continue;
+          if (!registryKey) {
+            undraftedSegments.push(segment);
+            continue;
+          }
           const factory = () => sharedHandlers.get(registryKey)!;
-          const segEntities: Record<string, unknown> = { ...carried, ...(segClass.extractedEntities ?? {}) };
+          // A send tail names no customer of its own: the carried name would
+          // only send it hunting for some OTHER invoice of theirs.
+          const segEntities: Record<string, unknown> = {
+            ...(step.sendInvoiceTail ? {} : carried),
+            ...(segClass.extractedEntities ?? {}),
+          };
           if (segClass.intentType === 'create_customer' && segEntities.displayName && !segEntities.name) {
             segEntities.name = segEntities.displayName;
           }
@@ -3381,16 +3885,17 @@ async function generateAssistantReply(
           // literal job UUID in THIS segment names that job and its customer
           // (#1276B). Keyed on the segment's own text, not the whole turn: a
           // UUID in the other half of "X, then Y" is not this step's job.
-          const segVerifiedIds = (
-            await resolvePreDraftIds(
+          const segVerifiedIds = {
+            ...(segCreateAndSend?.job ?? {}),
+            ...(await resolvePreDraftIds(
               deps,
               tenantId,
               segClass.intentType,
               registryKey,
               segEntities,
               segment,
-            )
-          ).ids;
+            )).ids,
+          };
           // I3 — resolved once (memoized) and reused across every segment.
           const segTenantThresholdOverride = await getTenantThresholdOverride();
           const { proposal } = await factory().handle({
@@ -3445,7 +3950,10 @@ async function generateAssistantReply(
               ? { images: chatImages }
               : {}),
           });
-          if (!proposal) continue;
+          if (!proposal) {
+            undraftedSegments.push(segment);
+            continue;
+          }
           stampVerifiedIds(proposal, segVerifiedIds);
           applyVerifiedIdsToPayload(proposal, segVerifiedIds);
           dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
@@ -3458,19 +3966,20 @@ async function generateAssistantReply(
           // groupIntoFeed (which both key on Proposal.chainId, not
           // sourceContext) actually find chat-produced chains.
           //
-          // chainRefs stays empty here: the chat path threads dependent
-          // entities forward via the `carried` object below (customerName
-          // only, resolved before drafting), not applyChainMetadata's
-          // `$ref:chain[n]` token machinery — so `chainRefs.length > 0`
-          // never fires and this can't force a proposal back to 'draft'
-          // out from under the dependency-gate status handling that
-          // follows.
+          // #1480 item 4 — a step that needs a record an EARLIER step of this
+          // turn creates (the new customer, the invoice being drafted) gets a
+          // `$ref:chain[n]` edge instead of an unresolvable reference: the
+          // id is filled from that step's result when it executes
+          // (resolveChainReferences), and the gate the unresolved reference
+          // raised is lifted — the edge is what fills it.
+          const chainRefs = chatChainRefs(proposal, chainTypes, tailParentIndex);
+          liftChainRefGates(proposal, chainRefs);
           applyChainMetadata(proposal, {
             chainId,
             chainIndex: chainCards.length,
-            chainLength: chainSegments.length,
-            dependsOnChainIndices: [],
-            chainRefs: [],
+            chainLength: chainSteps.length,
+            dependsOnChainIndices: [...new Set(chainRefs.map((ref) => ref.parentChainIndex))],
+            chainRefs,
           });
           // Back-compat: chainStep (1-based) predates chainIndex
           // (0-based, applyChainMetadata's convention) — keep both so any
@@ -3551,6 +4060,7 @@ async function generateAssistantReply(
           if (typeof segEntities.name === 'string') carried.customerName = segEntities.name;
           if (typeof segEntities.displayName === 'string') carried.customerName = segEntities.displayName;
           chainCards.push(proposalToUI(proposal, segment));
+          chainTypes.push(proposal.proposalType);
         }
         if (chainCards.length === 1) {
           // Only one segment produced a proposal — return it directly so the
@@ -3561,7 +4071,9 @@ async function generateAssistantReply(
             usage: chainUsage,
             message: {
               role: 'assistant' as const,
-              content: `${chainCards[0].title}. ${proposalReplySuffix(chainCards[0].status)}`,
+              content:
+                `${chainCards[0].title}. ${proposalReplySuffix(chainCards[0].status)}` +
+                undraftedStepsNote(undraftedSegments),
               proposal: chainCards[0],
             },
           };
@@ -3576,7 +4088,9 @@ async function generateAssistantReply(
               content:
                 `Created ${chainCards.length} linked steps: ` +
                 chainCards.map((c, i) => `${i + 1}) ${c.title}`).join('; ') +
-                '. Capture steps run after approval windows; money steps wait for your approval.',
+                '. Capture steps run after approval windows; money steps wait for your approval.' +
+                (chainTypes.includes('send_invoice') ? LINKED_SEND_UNLOCK_NOTE : '') +
+                undraftedStepsNote(undraftedSegments),
               proposal: chainCards[0],
             },
           };
@@ -3639,7 +4153,31 @@ async function generateAssistantReply(
           extractedEntities,
           lastUserText,
         );
-        const verifiedIds = preDraft.ids;
+        // #1499 — a create-and-send reroute that named its job by NUMBER
+        // bills that job; a name the resolver verified still wins.
+        const verifiedIds = { ...(createAndSend?.job ?? {}), ...preDraft.ids };
+        // #1498 — an action the named invoice's state already rules out is
+        // refused here, with the reason, rather than drafted into a card that
+        // could only fail (or, worse, be approved).
+        const invoiceBlocker = await invoiceActionBlocker(
+          deps.invoiceRepo,
+          tenantId,
+          registryKey,
+          verifiedIds.invoiceId ??
+            (await resolveLiteralInvoiceNumber(deps.invoiceRepo, tenantId, lastUserText)),
+        );
+        if (invoiceBlocker) {
+          return {
+            taskType: `assistant.${registryKey}`,
+            model: 'policy-guard',
+            usage: classifierUsage,
+            message: {
+              role: 'assistant' as const,
+              content: invoiceBlocker,
+              reasoning: "Refused before drafting — the invoice's current state rules this action out.",
+            },
+          };
+        }
         // I3 — resolved once (memoized).
         const singleIntentTenantThresholdOverride = await getTenantThresholdOverride();
         const { proposal } = await handler.handle({
@@ -3702,7 +4240,7 @@ async function generateAssistantReply(
         // ids are DB-verified by construction, so they are never subject to
         // the scrub.
         const {
-          question: clarification,
+          question: resolvedClarification,
           notFound,
           askedField,
         } = await resolveGatedReferencesForChat(
@@ -3717,6 +4255,12 @@ async function generateAssistantReply(
           true,
         );
         revertUnaskedAmbiguityGate(proposal, ambiguityGate, askedField);
+        // #1499 — the can't-match line, sharpened to "which Dana?" when that
+        // is what actually blocks the appointment. Never over a real question.
+        const whichCustomer = askedField
+          ? undefined
+          : await askWhichCustomerForPossessive(deps.entityResolver, tenantId, proposal, extractedEntities);
+        const clarification = whichCustomer ?? resolvedClarification;
         // AN APPOINTMENT THAT DOES NOT EXIST IS A MISS, NOT A FORM.
         //
         // "Cancel the Patel appointment", with no Patel on the books, drafted
@@ -3842,8 +4386,15 @@ async function generateAssistantReply(
                 ? `${uiProposal.title}.\n\n${clarification}`
                 : executionGaps.length > 0
                   ? `${uiProposal.title}. ${askForExecutabilityGaps(executionGaps, proposal.payload)}`
-                  : `${uiProposal.title}. ${proposalReplySuffix(uiProposal.status)}`) +
-              (createAndSend ? CREATE_AND_SEND_NEXT_STEP : ''),
+                  : `${uiProposal.title}. ${pendingLinePickLine(proposal) ?? proposalReplySuffix(uiProposal.status)}`) +
+              (createAndSend ? CREATE_AND_SEND_NEXT_STEP : '') +
+              // #1499 — a compound ask names the steps this one card skipped.
+              // The create-and-send tail above already says the send is next.
+              undraftedStepsNote(
+                undraftedCompoundSteps(lastUserText, [proposal.proposalType], {
+                  skipFamilies: createAndSend ? ['send'] : [],
+                }),
+              ),
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },
@@ -3924,6 +4475,11 @@ async function generateAssistantReply(
         // (editProposal clears the gate on fill) and the executor reads.
         const needsLastName = isBareFirstName(customerPayload.name);
         if (needsLastName) gateOnLastName(proposal);
+        // #1499 — every other chat proposal carries its thread; this one did
+        // not, so the conversation could not find its own customer card.
+        if (conversationId) {
+          proposal.sourceContext = { ...(proposal.sourceContext ?? {}), conversationId };
+        }
         await deps.proposalRepo.create(proposal);
         // QA-2026-06-05: parity with the guardrail promote step (see
         // inapp-adapter.handleCreateProposal). create-customer-task builds
@@ -3951,9 +4507,11 @@ async function generateAssistantReply(
           usage: classifierUsage,
           message: {
             role: 'assistant' as const,
-            content: needsLastName
-              ? `${uiProposal.title}. What's ${String(customerPayload.name).trim()}'s last name? Add it on the card before approving — I won't guess it.`
-              : uiProposal.title + '. Review and approve to add them to your CRM.',
+            content:
+              (needsLastName
+                ? `${uiProposal.title}. What's ${String(customerPayload.name).trim()}'s last name? Add it on the card before approving — I won't guess it.`
+                : uiProposal.title + '. Review and approve to add them to your CRM.') +
+              undraftedStepsNote(undraftedCompoundSteps(lastUserText, [proposal.proposalType])),
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },
@@ -4024,6 +4582,25 @@ async function generateAssistantReply(
         stack: err instanceof Error ? err.stack : undefined,
       });
     }
+  }
+
+  // ── Off-topic scope guard ────────────────────────────────────────
+  // A turn the classifier could not place (`unknown`) that is plainly not
+  // business — a poem, a joke, trivia — is declined here, before the generic
+  // model is paid to answer it. Only after a healthy classify: a classifier
+  // FAILURE is our problem, not an off-topic ask. Biased to answering: see
+  // ai/orchestration/off-topic-guard.ts.
+  if (!guardIntentError && guardIntent === 'unknown' && isOffTopicRequest(lastUserText)) {
+    return {
+      taskType: 'assistant.off_topic',
+      model: 'policy-guard',
+      usage: classifierUsage,
+      message: {
+        role: 'assistant' as const,
+        content: OFF_TOPIC_DECLINE,
+        reasoning: 'Non-business request — declined without calling the generic model.',
+      },
+    };
   }
 
   // ── Fallback path: generic LLM text reply ────────────────────────

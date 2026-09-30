@@ -139,6 +139,7 @@ import { createProposalsRouter } from './routes/proposals';
 import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory';
 import {
   invoiceReferenceCheck,
+  invoiceSendableReferenceCheck,
   serviceLocationReferenceCheck,
   sendRecipientReferenceCheck,
   executionAnchorReferenceCheck,
@@ -450,6 +451,10 @@ import {
 } from './config/ai-routing';
 import { ProposalExecutor } from './proposals/execution/executor';
 import { IdempotencyGuard } from './proposals/execution/idempotency';
+import { mountIdempotentCreateRoutes } from './idempotency/idempotency-middleware';
+import { InMemoryIdempotencyStore, type IdempotencyStore } from './idempotency/idempotency-store';
+import { PgIdempotencyStore } from './idempotency/pg-idempotency-store';
+import { pruneExpiredIdempotencyKeys } from './idempotency/prune-idempotency-keys';
 import { createExecutionHandlerRegistry } from './proposals/execution/handlers';
 import { assertVoiceHandlersWired } from './proposals/execution/wiring-assertions';
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
@@ -1046,6 +1051,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     estimateInvoicedReferenceCheck({ estimateRepo, invoiceRepo }),
     // #1490 — send_estimate / send_estimate_nudge must name a real estimate.
     estimateReferenceCheck(estimateRepo),
+    // #1480 item 4 — a send_invoice for a draft (unissued) or dead invoice.
+    invoiceSendableReferenceCheck(invoiceRepo),
   ];
 
   const webhookSettingsRepo = settingsRepo;
@@ -4893,6 +4900,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     app.use('/api', withTenantTransaction(pool));
   }
 
+  // #1489 — Idempotency-Key on the create routes. Mounted after the request
+  // transaction (the claim row commits or rolls back with the created record)
+  // and before the routers. Header-less requests pass straight through.
+  const idempotencyStore: IdempotencyStore = pool
+    ? new PgIdempotencyStore(pool)
+    : new InMemoryIdempotencyStore();
+  mountIdempotentCreateRoutes(app, idempotencyStore);
+
   // Mount API routes
   app.use(
     '/api/customers',
@@ -6652,7 +6667,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // U6 — held-slot reaper. Every 15 minutes, cancel tentative holds whose
   // hold_expiry_at has passed so the stale rows leave raw appointment reads.
   // Leader-locked + idempotent (only acts on rows still hold_pending_approval).
-  // Also carries the device push-token TTL sweep, which is day-guarded below.
+  // Also carries the device push-token TTL sweep (day-guarded) and the #1489
+  // idempotency-key TTL sweep (hour-guarded), below.
   const holdReaperLogger = createLogger({
     service: 'hold-reaper-worker',
     environment: process.env.NODE_ENV || 'development',
@@ -6662,6 +6678,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // DELETE + RESET contending for the same pool the E1 audit write needs.
   // Once per UTC day is plenty.
   let lastDeviceTokenPruneDay = '';
+  // #1489 — Idempotency-Key TTL (24h) sweep, at most once an hour.
+  let lastIdempotencyPruneHour = '';
   if (shouldRunWorkers) {
     registerInterval(setInterval(() => {
       void runAsLeader(SWEEP_LOCK.holdReaper, async () => {
@@ -6678,6 +6696,18 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         // wasted round trip on the E1 push fan-out. Per-tenant because
         // device_tokens has FORCE ROW LEVEL SECURITY — there is no
         // cross-tenant DELETE to write without breaking the RLS pattern.
+        // Idempotency keys expire after 24h (claims also treat an expired
+        // key as free); this keeps the table small. Per-tenant (FORCE RLS).
+        const thisHour = new Date().toISOString().slice(0, 13);
+        if (thisHour !== lastIdempotencyPruneHour) {
+          lastIdempotencyPruneHour = thisHour;
+          const pruned = await pruneExpiredIdempotencyKeys({
+            store: idempotencyStore,
+            tenantIds,
+            logger: holdReaperLogger,
+          });
+          if (pruned > 0) holdReaperLogger.info('Pruned expired idempotency keys', { pruned });
+        }
         const today = new Date().toISOString().slice(0, 10);
         if (today !== lastDeviceTokenPruneDay) {
           lastDeviceTokenPruneDay = today;
@@ -7073,6 +7103,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    // #1509 — the SAME alias-first resolver chat, memo and phone use (see
+    // `sharedEntityResolver` above). Without it the adapter self-built a bare
+    // PgEntityResolver from `pool` and an approved tenant alias ("Bobby")
+    // resolved on every surface except in-app voice.
+    ...(sharedEntityResolver ? { entityResolver: sharedEntityResolver } : {}),
     // U3 — service locations for the customer disambiguation hint. The SAME
     // repo the assistant-chat router is wired with (~5484 above), so the two
     // in-app surfaces cannot drift on what an ambiguous "Smith" is spoken/

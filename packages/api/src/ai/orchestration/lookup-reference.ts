@@ -18,7 +18,7 @@ export type LookupReferenceResult =
    * SPOKEN surface has to be able to name the record that answered — "Khan
    * Household owes …" tells the operator WHICH record was read, where "You
    * owe …" tells them nothing and is addressed to the wrong person entirely
-   * (see ai/voice-turn/inapp-lookup-surface.ts#speakForOperator). Optional: a
+   * (see ai/orchestration/operator-point-of-view.ts#speakForOperator). Optional: a
    * resolver that returns no label still resolves.
    */
   | { kind: 'resolved'; id: string; label?: string }

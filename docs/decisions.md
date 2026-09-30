@@ -1228,3 +1228,175 @@ handler or proof tag that changed without regenerating, cannot merge. Deletion w
 catalog is the one place product reads "what can I say, and is it proven", and `packages/web`'s
 voice-example pin depends on its machine-readable block. The stale "Persistence proof" column and
 its warning are gone — the generated column is derived from part 2's tags.
+
+## D-035 — Create routes accept an Idempotency-Key; the claim rides the request transaction
+
+**Date:** 2026-09-30
+**Status:** Accepted (owner approved building option (a) of #1489 on 2026-09-30)
+**Resolves:** #1489
+
+**Context.** Two concurrent identical `POST /api/customers` created two customers; the UI's
+double-click guard cannot help a client whose request timed out and was retried. The issue offered
+(a) an `Idempotency-Key` key store with replay, or (b) per-entity dedupe rules.
+
+**Decision.**
+
+1. **(a), on every create route** — customers, jobs, appointments, estimates, invoices and record
+   payment (`POST /api/payments`) — via one middleware mounted in `createApp` after the request
+   transaction and before the routers (`packages/api/src/idempotency/`). The header is optional;
+   requests without it are unchanged.
+2. **Scope and semantics.** A key is scoped to (tenant, user). Same key + same body (method, path
+   and key-order-insensitive JSON) replays the stored status and body with `Idempotent-Replayed:
+   true`; a different body is `422 IDEMPOTENCY_KEY_REUSED`; a malformed key (not 1–255 printable
+   ASCII) is `400 INVALID_IDEMPOTENCY_KEY`. Only a success (< 400) is stored — a failed attempt
+   leaves the key free, so a retry runs again.
+3. **The claim is a row in the request transaction** (`idempotency_keys`, migration 302, FORCE RLS),
+   not the proposal executor's session advisory lock: holding a session lock across an HTTP handler
+   would pin a direct connection per in-flight create. Because the claim commits or rolls back
+   atomically with the record it guards, a concurrent duplicate's INSERT waits on it and then
+   replays; past a bounded wait (10s `lock_timeout`, scoped to the claim statement) it is
+   `409 IDEMPOTENCY_IN_PROGRESS`. In-memory mode (no `DATABASE_URL`) answers an in-flight
+   duplicate 409 immediately.
+4. **TTL 24h.** A claim treats an expired row as free; the hold-reaper tick (no new interval) prunes
+   expired rows per tenant at most once an hour.
+5. **Web.** Create forms send one key per submission (`packages/web/src/lib/idempotencyKey.ts`,
+   `useMutation({ idempotent: true })`): stable across retries of the same body, fresh after a
+   success or an edit to the body — so a user who corrects the form is never answered 422.
+
+## D-036 — Map #833's open questions are answered by the as-built behaviour: one resolver with per-surface asks, a fixed 5 s undo, and an S1 posture keyed to session identity
+
+**Date:** 2026-09-30
+**Status:** Accepted (owner decision 2026-09-30: adopt the current as-built behaviour as the answer)
+**Resolves:** the three open questions on map #833 ("Entity resolution per surface", "The undo
+window under voice approval", "Inbound (S1) posture once owner voice-first lands"). #833's other
+open questions are already answered elsewhere: the static PIN by O-4 (accept for now,
+`docs/audit/blocked-on-josh.md`), the approval transport and its latency by O-6 / #838, and the
+migration shape and agreement-test replacement by D-034.
+
+**Context.** #833 left three questions open. Since then, code has shipped an answer to each, and no
+decision chose it. The owner has now ratified what is built. This entry states that behaviour
+precisely, so a later change is a deliberate change of decision and not drift. Paths are relative
+to `packages/api/src/` unless they name another package. Line numbers are as of `origin/main` @
+`83b20d4e4`.
+
+**Decision (1) — Entity resolution: one resolver core, with surface-specific *asking*.**
+
+1. **One resolver contract, one threshold pair, on every surface.** `EntityResolver`
+   (`ai/resolution/entity-resolver.ts:100`) returns `resolved | ambiguous | low_confidence |
+   not_found | skipped` (`:91`). `TAU_ENT = 0.8` (`:66`) is the resolve threshold.
+   `TAU_ENT_CONFIRM_LOW = 0.6` (`:78`) opens a "probably right, confirm first" band. Production
+   builds **one** instance, `AliasFirstEntityResolver → PgEntityResolver`
+   (`app.ts:2686-2690`). The same object goes to the recorded-memo worker (`app.ts:2807`), the live
+   phone (`app.ts:3772`), which serves both the owner line and S1 callers, and assistant chat and
+   its lookups (`app.ts:5904`, `:5918`).
+2. **What differs per surface is how an ambiguity is *asked*, never whether it is guessed.**
+   - **Recorded memo:** `annotateResolvedEntities` (`workers/voice-action-router.ts:762`) runs
+     `resolveVoiceEntityReferences` (`ai/agents/customer-calling/entity-resolution.ts:1050`). An
+     ambiguity mints a `voice_clarification` proposal with the candidates. An unresolved reference
+     rides on `sourceContext.pendingReference` for the operator to review.
+   - **Live phone (owner line and S1):** the FSM's `entity_resolution` / `entity_confirm` states ask
+     the question aloud. The answer turn goes through the shared matcher, which allows
+     `MAX_DISAMBIGUATION_ATTEMPTS = 2` (`entity-resolution.ts:1142`;
+     `ai/voice-turn/create-voice-turn-processor.ts:1846-1906`). Once those are used up, the call
+     continues with the id **absent**, never a pick.
+   - **In-app voice session** (`InAppVoiceAdapter`, `/api/voice/sessions`): the same FSM loop and
+     attempt cap, plus the U3 address-hint decorator on candidates
+     (`ai/agents/customer-calling/inapp-adapter.ts:967-990`).
+   - **Chat:** before drafting, the chat surface resolves the same way (`routes/assistant.ts:1621`).
+     A drafted proposal still gated on an id goes through `resolveGatedReferences`
+     (`ai/resolution/gated-reference-resolution.ts:338`, via `routes/assistant.ts:2055`). That asks
+     **one** question in the chat, and the next turn answers it. Resolution never approves and
+     never executes (D-004, D-029).
+3. **The caller's identity outranks their words.** When a memo or telephony turn carries a verified
+   caller-ID customer, the spoken `customerName` is dropped before resolution
+   (`entity-resolution.ts:1065-1066`; `workers/voice-action-router.ts:755-760`). A caller naming
+   someone else can never retarget the proposal. On the phone, the identified caller's customer id
+   is stamped as `callerCustomerId` on what is drafted
+   (`create-voice-turn-processor.ts:2294-2297`). In-app deliberately does **not** do this: there
+   `payload.customerId` is the operator (`inapp-adapter.ts:3226-3232`).
+4. **Recorded as-built, not endorsed as a design:** the in-app voice adapter is not handed the
+   shared resolver. `app.ts:7095` passes only `pool`, so it builds a bare `PgEntityResolver`
+   (`inapp-adapter.ts:985-990`) and **skips alias-first resolution**. A tenant alias therefore
+   resolves by memo, phone and chat, but not in an in-app voice session. Wiring it to
+   `sharedEntityResolver` is an ordinary parity fix that needs no decision.
+
+**Decision (2) — Undo under voice approval: the same fixed 5-second server window as every other
+approval, with no spoken undo.**
+
+1. **Duration: 5 s, one constant, not configurable per tenant.** `UNDO_WINDOW_MS = 5000`
+   (`proposals/lifecycle.ts:53`). Web mirrors it in
+   `packages/web/src/hooks/useUndoableApproval.ts:8`. A voice approval goes through
+   `approveChainSet` with channel `'voice'` (`ai/tasks/proposal-approval-task.ts:1250-1262`), and
+   that stamps `approvedAt` (`proposals/actions.ts:342-345`), so the window applies exactly as it
+   does to a tap. The executor refuses to run a proposal while its window is open
+   (`proposals/execution/executor.ts:107-116`). The execution sweep picks it up only after the
+   window closes (`workers/execution-worker.ts:55`), on a 1 s tick (`app.ts:2606-2623`).
+2. **Spoken copy: a statement, not an offer.** A successful voice approval speaks
+   `Approved — "<summary>" will run shortly.` (`proposal-approval-task.ts:1297-1301`, through
+   `formatChainSetApprovalMessage`). No undo intent exists on any voice surface, and no undo is
+   offered aloud. On voice, the safeguards are the readback built from the payload, the strict
+   deterministic affirmative, and the spoken challenge for money or irreversible actions (D-025),
+   not the undo.
+3. **Visual copy (app surfaces that show the approval):** the toast shows `Approved · Ns to undo`
+   with an Undo button (`packages/web/src/components/common/UndoToast.tsx:41-49`). The proposal card
+   reads `Applying shortly; undo now, or reverse it from the record afterwards.` while the window is
+   open, and `Applying shortly — reverse it from the record if it was wrong.` after it closes
+   (`packages/web/src/components/shared/AIProposalCard.tsx:405-407`). The countdown is anchored to
+   the server's `undoExpiresAt` / `undoRemainingMs` (`routes/proposals.ts:358-368`).
+4. **What "undo" means after a customer-visible message has gone out: it doesn't.** Nothing executes
+   inside the window, so an undo within 5 s means nothing was sent. `POST /api/proposals/:id/undo`
+   (`routes/proposals.ts:450`) moves `approved → undone`, which is terminal
+   (`proposals/lifecycle.ts:28-36`). After the window it answers `409 UNDO_WINDOW_CLOSED`: "create
+   a new proposal" (`proposals/actions.ts:569-571`). An executed send is reversed only by a new,
+   compensating proposal. The one exception is the D-015 autonomous-booking lane's one-tap UNDO
+   SMS: a ≤30-minute token that cancels the booking and sends a fixed apology
+   (`routes/one-tap-undo.ts`, `proposals/one-tap-undo.ts:24`). It is **not** extended to owner
+   voice approval. D-025's recorded reservation stands: an approved `comms` send is customer-visible
+   and effectively not undoable.
+
+**Decision (3) — S1 posture: orthogonal to owner voice-first. Trust comes from session identity,
+never from the transcript, and the caller allowlist does not move.**
+
+1. **Who is S1 is decided once, at session establishment.** A session is S1 unless its channel is
+   in `TRUSTED_CHANNELS` (only `'inapp'`) or it is an owner session
+   (`create-voice-turn-processor.ts:473-493`). This fails closed: a new channel starts as S1. An
+   owner session needs **both** of these: the caller-ID is an approver phone (`owner_phone` or an
+   *active* backup supervisor's mobile; `proposals/approver-identity.ts:37-58`), **and** the call
+   has full STIR/SHAKEN A-attestation (`telephony/stir-attestation.ts:23-25`;
+   `telephony/twilio-adapter.ts:1226-1239`). A lookup failure yields a non-owner
+   (`twilio-adapter.ts:999-1020`).
+2. **The caller allowlist is unchanged by owner voice-first.** `S1_ALLOWED_PROPOSAL_TYPES`
+   (`proposals/surface.ts:43-52`) lists `create_customer`, `create_appointment`, `create_booking`,
+   `create_job`, `reschedule_appointment`, `draft_estimate`, `callback`, and `voice_clarification`.
+   The deterministic emergency path's `emergency_dispatch` is exempt only when it carries the
+   server-set `systemDetectedSafety` marker (`surface.ts:66-87`). The list is enforced twice: at
+   creation (`create-voice-turn-processor.ts:2170-2185`, which audits
+   `voice.surface_violation_blocked`) and at execution (`proposals/execution/executor.ts:130-135`,
+   via `resolveSurface`'s fail-safe telephony inference, `surface.ts:147-163`). It stays
+   hand-maintained on purpose (D-034 part 1, item 4): no declaration can widen what an
+   unauthenticated caller reaches.
+3. **The classifier taxonomy follows identity, never content.** `classifierProfileForSession`
+   (`create-voice-turn-processor.ts:580-584`) gives `owner_line` to an owner session, `operator` to
+   `inapp`, `field_tech` to a caller-ID-resolved employee (D-026), and `caller` to everyone else.
+   Voice approval (`approve_proposal` / `reject_proposal`) is routed only when `ownerSession` is set
+   (`ai/agents/customer-calling/types.ts:378-387`). A D-026 phone actor who is not an approver gets
+   role-gated lookups, but that session's proposals are still minted as S1.
+4. **Caller-facing copy stays caller copy.** An S1 caller hears only a callback number they gave on
+   this call, or their own caller-ID masked. Only the owner line may hear the number on file
+   (`create-voice-turn-processor.ts:1289-1291`). An S1 caller keeps the "queued for the owner" close,
+   while the owner line hears "drafted, awaiting your approval" (#1497,
+   `create-voice-turn-processor.ts:2640-2647`).
+
+**Consequences.** #833 has nothing left to decide, and the build order stays on epic #852. Changing
+any of the following is a new decision that supersedes this one: the 5 s constant, adding a spoken
+undo, per-surface resolver thresholds, `TRUSTED_CHANNELS`, the owner-session attestation rule, or
+the S1 allowlist. The in-app alias gap (1.4) is a bug to fix, not a decision to revisit.
+
+**Alternatives rejected.**
+- *Lengthen the window for voice approvals, or speak "say undo to cancel".* Rejected for now. It
+  adds a turn to an exchange that already has no room under Gather's hang timer (D-025, #836), and
+  the owner chose the as-built behaviour. Revisit if voice-approved comms produce real regrets.
+- *A separate resolver per surface.* Rejected. The surfaces differ only in how they ask. Forking the
+  scoring would bring back the drift D-029 and #909 closed.
+- *Widen S1 once the owner is voice-first.* Rejected. The owner's gain comes from `ownerSession`
+  (identity), not from loosening the caller boundary. The two are orthogonal by construction.

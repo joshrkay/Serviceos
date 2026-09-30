@@ -897,6 +897,24 @@ export function normalizeDraftLineItems(raw: unknown[]): {
   return { lineItems, malformed };
 }
 
+/**
+ * #1499 — the name of a job opened to hold a drafted estimate. It used to be
+ * `proposal.summary`, which on chat is the operator's raw sentence ("Draft an
+ * estimate for … $89."), so the job list read like a chat log. The work itself
+ * — the line descriptions — names it. Undefined when no line has a
+ * description (the caller keeps its old fallback).
+ */
+function jobSummaryFromLineItems(lineItems: ReadonlyArray<{ description?: unknown }>): string | undefined {
+  const descriptions = lineItems
+    .map((line) => (typeof line.description === 'string' ? line.description.trim() : ''))
+    .filter((d) => d.length > 0);
+  if (descriptions.length === 0) return undefined;
+  const joined = descriptions.join(', ');
+  if (joined.length <= 120) return joined;
+  const cut = joined.slice(0, 120);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(' '), 1)).replace(/[\s,]+$/, '')}…`;
+}
+
 export class DraftEstimateExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'draft_estimate';
 
@@ -1016,7 +1034,7 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
             summary:
               typeof payload.summary === 'string' && payload.summary.trim().length > 0
                 ? payload.summary.trim()
-                : proposal.summary || lineItems[0].description,
+                : jobSummaryFromLineItems(lineItems) ?? proposal.summary,
             createdBy: context.executedBy,
             actorRole: context.executedByRole,
           },
