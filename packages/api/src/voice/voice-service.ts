@@ -262,7 +262,9 @@ const WHISPER_EXTENSION_BY_MIME: Readonly<Record<string, string>> = {
   'audio/vnd.wave': 'wav',
   'audio/mpeg': 'mp3',
   'audio/mp3': 'mp3',
-  'audio/mp4': 'mp4',
+  // iOS Safari records audio-only MP4 (M4A brand); the provider decodes it
+  // as `.m4a` and rejects the same bytes named `.mp4` (re-verify 2026-09-30).
+  'audio/mp4': 'm4a',
   'video/mp4': 'mp4',
   'audio/x-m4a': 'm4a',
   'audio/m4a': 'm4a',
