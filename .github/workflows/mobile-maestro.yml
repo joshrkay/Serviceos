@@ -118,6 +118,8 @@ jobs:
         working-directory: packages/mobile
         env:
           CI: '1'
+          # Don't let `expo start` rewrite the self-contained tsconfig.json.
+          EXPO_NO_TYPESCRIPT_SETUP: '1'
 
       - name: Install Maestro
         run: |

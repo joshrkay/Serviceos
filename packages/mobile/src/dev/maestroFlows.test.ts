@@ -158,4 +158,21 @@ describe('scripts/maestro-device-run.sh — the CI device harness', () => {
     // "one row" is read from the real Postgres the API wrote to.
     expect(src).toMatch(/FROM voice_recordings WHERE idempotency_key/);
   });
+
+  it('fails fast on a broken Metro bundle and leaves debug evidence for any failure', () => {
+    const src = readFileSync(SCRIPT, 'utf8');
+    // Run 36765536371: every flow burned 2 minutes on a red box because Metro
+    // returned a 500 for the Android bundle. Fetch that bundle ONCE, before any
+    // flow, and fail with Metro's own error body.
+    const bundleCheck = src.indexOf('\ncheck_bundle\n');
+    const firstFlow = src.indexOf('\nrun_flow ');
+    expect(bundleCheck).toBeGreaterThan(-1);
+    expect(bundleCheck).toBeLessThan(firstFlow);
+    expect(src).toContain('localhost:8081/.expo/.virtual-metro-entry.bundle?platform=android');
+    // Maestro's per-command screenshots + view hierarchy, per flow.
+    expect(src).toMatch(/maestro test [^\n]*--debug-output "\$OUT\/debug\//);
+    // A logcat tail is written whenever the script exits non-zero.
+    expect(src).toMatch(/trap [^\n]*EXIT/);
+    expect(src).toContain('adb logcat -d');
+  });
 });
