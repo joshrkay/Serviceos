@@ -29,9 +29,9 @@ import {
  * live prompt — re-pin hash+length here IN THE SAME PR as the cassette
  * re-record and voice-eval sign-off.
  */
-const OPERATOR_PROMPT_LENGTH = 58057; // #1427 re-pin: draft_estimate customer quote requests
+const OPERATOR_PROMPT_LENGTH = 59755; // #1469/#1468 re-pin: operator lookups, confirm-vs-lookup rule, problemDescription
 const OPERATOR_PROMPT_SHA256 =
-  '1c990260fc2a5acb976e78ed86f49aad6f10daa7a80de87f76ff89ac71b7a3c8';
+  'a2b2111dadd6e60ff5852f8e1ec37af576a03c9f3d122141c594b6424ee2091a';
 
 describe('intent-taxonomy-blocks extraction', () => {
   it("buildClassifierSystemPrompt('operator') IS the exported SYSTEM_PROMPT", () => {
@@ -52,12 +52,12 @@ describe('intent-taxonomy-blocks extraction', () => {
     );
   });
 
-  it('moved the whole taxonomy: 68 distinct blocks (+ trailing unknown), 6 rules, 57 fields', () => {
+  it('moved the whole taxonomy: 68 distinct blocks (+ trailing unknown), 7 rules, 58 fields', () => {
     // 69 blocks in the literal; 'unknown' appears twice (full + trailing
     // catch-all), so the keyed table holds 68.
     expect(INTENT_BLOCK_ORDER).toHaveLength(68);
-    expect(DISTINCTION_RULES).toHaveLength(6);
-    expect(ENTITY_FIELDS).toHaveLength(57);
+    expect(DISTINCTION_RULES).toHaveLength(7); // #1469: confirm vs lookup appointments
+    expect(ENTITY_FIELDS).toHaveLength(58); // #1468: problemDescription
   });
 
   it('PROFILE_INTENTS.operator is exactly SUPPORTED_INTENTS (the literal list in classifier-profile.ts cannot drift)', () => {
