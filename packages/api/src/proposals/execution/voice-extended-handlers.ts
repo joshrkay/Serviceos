@@ -242,7 +242,8 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
 export interface InvoiceDispatch {
   tenantId: string;
   invoiceId: string;
-  channel: 'email' | 'sms';
+  /** #1524 — 'auto': no channel was named; the customer's email, else a text. */
+  channel: 'email' | 'sms' | 'auto';
   recipient?: string;
   customMessage?: string;
 }
@@ -383,10 +384,14 @@ export class SendInvoiceExecutionHandler implements ExecutionHandler {
     // passing QA row uses issue_invoice (no channel gate) rather than
     // send_invoice. Resolve from either key; the email/sms validation below
     // is unchanged.
-    const channel = payload.channel ?? payload.sendChannel;
-    if (channel !== 'email' && channel !== 'sms') {
-      return { success: false, error: 'Payload must specify channel as email or sms' };
+    const named = payload.channel ?? payload.sendChannel;
+    if (named !== 'email' && named !== 'sms' && named !== 'auto') {
+      return { success: false, error: 'Payload must specify channel as email, sms or auto' };
     }
+    const recipient = typeof payload.recipient === 'string' ? payload.recipient : undefined;
+    // #1524 — 'auto' with a recipient typed on the card goes where that
+    // recipient can receive it; without one, SendService picks from the file.
+    const channel = named === 'auto' && recipient ? (recipient.includes('@') ? 'email' : 'sms') : named;
 
     if (!this.provider) {
       // Dev wiring without a provider. Returns synthetic id.
@@ -397,7 +402,7 @@ export class SendInvoiceExecutionHandler implements ExecutionHandler {
       tenantId: context.tenantId,
       invoiceId: payload.invoiceId,
       channel,
-      recipient: typeof payload.recipient === 'string' ? payload.recipient : undefined,
+      recipient,
       customMessage: typeof payload.customMessage === 'string' ? payload.customMessage : undefined,
     };
 
