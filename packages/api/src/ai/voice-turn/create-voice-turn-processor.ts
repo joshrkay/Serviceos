@@ -839,6 +839,12 @@ export interface VoiceTurnProcessorDeps {
    * Optional: when absent, all three channels default to enabled.
    */
   settingsRepo?: SettingsRepository;
+  /**
+   * #1331 — clock for spoken-time resolution ("Tuesday at 2pm"), passed to
+   * `resolveSchedulingEntities` as its existing `now` seam. Production leaves
+   * it unset (wall clock); the voice-quality harness pins its corpus world.
+   */
+  now?: () => Date;
   /** F3 — whisper TwiML cache for dispatcher ear-only context. */
   whisperCache?: WhisperCache;
   /** F4 — outbound SMS to dispatcher on escalation. */
@@ -1713,8 +1719,12 @@ export function createVoiceTurnProcessor(
         entities,
         // SCH-03 — sticky job anchor for "the appointment for that job".
         session.machine.currentContext.jobId,
-        timezone || pinnedRefs
-          ? { ...(timezone ? { timezone } : {}), ...(pinnedRefs ? { pinnedRefs } : {}) }
+        timezone || pinnedRefs || deps.now
+          ? {
+              ...(timezone ? { timezone } : {}),
+              ...(pinnedRefs ? { pinnedRefs } : {}),
+              ...(deps.now ? { now: deps.now() } : {}),
+            }
           : undefined,
       );
     } catch (err) {

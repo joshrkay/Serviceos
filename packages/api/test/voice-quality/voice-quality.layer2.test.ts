@@ -80,7 +80,7 @@ import {
 import { createLayer2AudioDriver } from '../../src/ai/voice-quality/audio/layer2-audio-driver';
 import { FillerAudioCache } from '../../src/ai/agents/customer-calling/filler-audio-cache';
 import { FillerEngine } from '../../src/ai/agents/customer-calling/filler-engine';
-import type { WhisperBufferTranscriber } from '../../src/ai/voice-quality/audio/whisper-real-provider';
+import { createOpenAiWhisperBufferTranscriber } from '../../src/ai/voice-quality/audio/openai-whisper-buffer-transcriber';
 import { TtsFixtureCache } from '../../src/ai/voice-quality/audio/tts-fixture-cache';
 import {
   createLayer2Gateway,
@@ -105,6 +105,7 @@ import type { AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
 import { createVoiceTurnProcessor } from '../../src/ai/voice-turn';
 import { buildHarnessPhoneLookups } from '../../src/ai/voice-quality/harness-lookups';
+import { buildLayer2ProcessorWorld } from '../../src/ai/voice-quality/layer2-world';
 import type { SpeechTurnHandler } from '../../src/telephony/media-streams/mediastream-adapter';
 import { normalizePhone } from '../../src/compliance/dnc';
 
@@ -375,6 +376,9 @@ describe('Voice Quality Layer 2 — corpus', () => {
             const processorRef: {
               current: ReturnType<typeof createVoiceTurnProcessor> | null;
             } = { current: null };
+            // #1331 — tenant zone, on-call rotation and the corpus clock,
+            // wired from the fixtures as app.ts wires them from tenant rows.
+            const world = buildLayer2ProcessorWorld(script, factoryCtx.tenantId);
             const processor = createVoiceTurnProcessor({
               store: suiteState.voiceSessionStore!,
               gateway: driverDeps.gateway,
@@ -383,10 +387,16 @@ describe('Voice Quality Layer 2 — corpus', () => {
               customerRepo: factoryCtx.repos.customerRepo,
               appointmentRepo: factoryCtx.repos.appointmentRepo,
               jobRepo: factoryCtx.repos.jobRepo,
+              settingsRepo: world.settingsRepo,
+              onCallRepo: world.onCallRepo,
+              now: world.now,
               // #1395 — media_streams answers lookup_* through the shared
               // dispatch; invoice / estimate / lead reads reach it only via
               // this bundle (the same builder Layer 1 uses).
-              lookups: buildHarnessPhoneLookups(factoryCtx.repos),
+              lookups: buildHarnessPhoneLookups(factoryCtx.repos, {
+                settingsRepo: world.settingsRepo,
+                now: world.now,
+              }),
               businessName: 'Test Tenant',
               systemActorId: 'voice-quality-layer2',
               onSessionTerminated: async (session) => {
@@ -408,6 +418,9 @@ describe('Voice Quality Layer 2 — corpus', () => {
                   conversationId: session.conversationId ?? session.id,
                 });
                 session.machine.dispatch({ type: 'greeted_ok' });
+                // #1331 — the inbound adapter stamps Twilio `From` on the
+                // session; the ask_caller turn resolves an unknown caller by it.
+                if (!opts.callerIdBlocked && opts.callerId) session.callerPhone = opts.callerId;
 
                 const matches =
                   !opts.callerIdBlocked && opts.callerId &&
@@ -572,52 +585,6 @@ function makeCostCappedResult(scriptId: string): RunScriptLayer2Result {
   };
 }
 
-/**
- * Wrap the production `WhisperTranscriptionProvider` (URL-based) with
- * a buffer-in interface that posts directly to OpenAI's audio
- * transcriptions endpoint. Mirrors the production wire format
- * (multipart with `file` + `model` fields). Lives here as a wiring
- * adapter; promoting to a shared module is a follow-up if a second
- * call-site needs the buffer path.
- */
-function makeWhisperBufferTranscriber(apiKey: string): WhisperBufferTranscriber {
-  return {
-    async transcribeBuffer(audio: Buffer) {
-      const fd = new FormData();
-      // Telephony is PCM16 mono 8 kHz; OpenAI accepts a wide format set
-      // with the `.wav` content type as a tolerable hint. Whisper sniffs
-      // bytes regardless.
-      fd.append('file', new Blob([audio], { type: 'audio/wav' }), 'audio.wav');
-      fd.append('model', 'whisper-1');
-      const res = await fetch(
-        'https://api.openai.com/v1/audio/transcriptions',
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${apiKey}` },
-          body: fd,
-          // #1331 — fetch has no default timeout; a stalled Whisper call
-          // would hold the script past vitest's 60 s budget. Transcribing a
-          // few seconds of agent audio normally takes well under this.
-          signal: AbortSignal.timeout(20_000),
-        },
-      );
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        // Surface 429s with a structured shape so WhisperRealProvider's
-        // retry detection (`status === 429`) works.
-        const err = new Error(`whisper transcribe failed: ${res.status} ${body.slice(0, 200)}`);
-        (err as { status?: number }).status = res.status;
-        throw err;
-      }
-      const data = (await res.json()) as { text?: string };
-      return {
-        transcript: data.text ?? '',
-        metadata: { provider: 'openai-whisper-buffer', model: 'whisper-1' },
-      };
-    },
-  };
-}
-
 interface BuiltDriverDeps {
   /** Shared per-script inputs to `createLayer2AudioDriver` (one stack per run). */
   audioDeps: Omit<
@@ -682,7 +649,7 @@ async function buildAudioModeDriverDeps(
       serverUrl: suiteState.serverUrl,
       voiceSessionStore,
       ttsCache,
-      whisperTranscriber: makeWhisperBufferTranscriber(openaiKey),
+      whisperTranscriber: createOpenAiWhisperBufferTranscriber({ apiKey: openaiKey }),
       costTracker: suiteState.suiteCostTracker,
       deliverFinalTranscript: (transcript) => {
         if (!suiteState.deliverFinalTranscript) {
