@@ -126,6 +126,7 @@ import {
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   CALLER_INCOMPLETE_REQUEST_COPY,
   OPERATOR_DRAFTED_FOR_REVIEW_COPY,
+  INAPP_INCOMPLETE_DRAFT_COPY,
   type SessionLanguage,
 } from '../agents/customer-calling/tts-copy';
 import {
@@ -2870,7 +2871,10 @@ export function createVoiceTurnProcessor(
           : bookingUtterance
             ? { utterance: bookingUtterance }
             : incompleteRequest
-              ? { utterance: CALLER_INCOMPLETE_REQUEST_COPY }
+              ? // #1331 — the owner line is an operator surface (#1497): the
+                // incomplete card is theirs to finish, so "someone from our
+                // team will follow up with you" (S1 caller copy) is untrue there.
+                { utterance: surface === 'S1' ? CALLER_INCOMPLETE_REQUEST_COPY : INAPP_INCOMPLETE_DRAFT_COPY }
               : operatorAwaitingReview
                 ? { utterance: OPERATOR_DRAFTED_FOR_REVIEW_COPY }
                 : {}),

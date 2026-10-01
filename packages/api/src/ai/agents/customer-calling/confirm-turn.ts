@@ -10,6 +10,7 @@
  * `inapp-adapter.ts` re-exports the matchers so existing imports still work.
  */
 import type { CallingAgentEvent } from './types';
+import { resolveDateTime } from '../../scheduling/resolve-datetime';
 
 /**
  * Whole-utterance affirmations recognized when the caller answers the
@@ -341,6 +342,12 @@ const SLOT_DETAIL_ENTITY_KEYS: ReadonlySet<string> = new Set([
   'lineItemDescriptions',
 ]);
 
+/** The WHEN slots of `SLOT_DETAIL_ENTITY_KEYS`. */
+const WHEN_ENTITY_KEYS = ['dateTimeDescription', 'newDateTimeDescription', 'scheduleDescription'] as const;
+
+/** Pending requests whose readback speaks a day/time (intent-readback.ts `scheduleEn`). */
+const TIMED_BOOKING_INTENTS: ReadonlySet<string> = new Set(['create_appointment', 'create_booking']);
+
 export interface ConfirmTurnSlotFillInput {
   /** The request being confirmed (`context.currentIntent`). */
   pendingIntent: string | undefined;
@@ -429,6 +436,27 @@ export function confirmTurnSlotFillEvent(input: ConfirmTurnSlotFillInput): Calli
       continue;
     }
     if (SLOT_DETAIL_ENTITY_KEYS.has(key)) newSlots[key] = value;
+  }
+
+  // #1331 — a booking still missing its WHEN, answered with a bare day/time
+  // ("Tuesday at 2pm."), takes that phrase as the time even when the
+  // classifier named no intent and extracted nothing from the fragment (Layer
+  // 2 run 36895893912, two-step-booking): otherwise nothing merges and the
+  // caller hears the same "with no day or time yet" readback again. The phrase
+  // is kept verbatim as `dateTimeDescription`; it is resolved in the tenant
+  // zone downstream like any spoken time. The parse here (in UTC) only decides
+  // whether the words ARE a day/time.
+  const hasWhen = (bag: Record<string, unknown> | undefined): boolean =>
+    WHEN_ENTITY_KEYS.some((k) => usable(bag?.[k]));
+  if (
+    TIMED_BOOKING_INTENTS.has(pendingIntent ?? '') &&
+    !hasWhen(newSlots) &&
+    !hasWhen(input.pendingEntities)
+  ) {
+    const phrase = text.trim().replace(/[.!?]+$/, '').trim();
+    if (phrase.length > 0 && resolveDateTime(phrase, { timezone: 'UTC' }).ok) {
+      newSlots.dateTimeDescription = phrase;
+    }
   }
 
   const sameRequest =

@@ -136,6 +136,34 @@ describe('#1538 — phone: a detail given at the readback', () => {
     expect(proposals).toHaveLength(1);
     expect(proposals[0].proposalType).toBe('create_appointment');
   });
+
+  // #1331 — Layer 2 run 36895893912 (two-step-booking, all 3 runs): the live
+  // classifier named no intent AND extracted no slot from the bare answer
+  // "Tuesday at 2pm.", so nothing merged and the caller heard the same
+  // "…with no day or time yet. Is that right?" again; the yes then drafted a
+  // booking with no time. A booking still missing its WHEN, answered with a
+  // phrase that IS a day/time, takes that phrase as the time.
+  it('takes a bare day/time answer as the booking time even when the classifier extracted nothing', async () => {
+    const NOTHING = JSON.stringify({ intentType: 'unknown', confidence: 0.3, extractedEntities: {} });
+    const { session, proposalRepo, turn } = await makeCall({ 'Tuesday at 2pm': NOTHING });
+    await turn('I want to book a service appointment.');
+
+    const reply = spoken(await turn('Tuesday at 2pm.'));
+    expect(reply).toBe("Just to confirm — you'd like to schedule an appointment, Tuesday at 2pm. Is that right?");
+    expect(session.machine.currentContext.extractedEntities?.dateTimeDescription).toBe('Tuesday at 2pm');
+
+    await turn("Yes, that's right.");
+    expect((await proposalRepo.findByTenant(TENANT)).map((p) => p.proposalType)).toEqual(['create_appointment']);
+  });
+
+  it('an answer that is not a day/time still merges nothing (the readback is re-asked unchanged)', async () => {
+    const NOTHING = JSON.stringify({ intentType: 'unknown', confidence: 0.3, extractedEntities: {} });
+    const { session, turn } = await makeCall({ 'whatever works': NOTHING });
+    await turn('I want to book a service appointment.');
+    const reply = spoken(await turn('Hmm, whatever works for you.'));
+    expect(reply).toMatch(/with no day or time yet/);
+    expect(session.machine.currentContext.extractedEntities?.dateTimeDescription).toBeUndefined();
+  });
 });
 
 describe('#1538 — phone: a real correction at the readback still corrects', () => {

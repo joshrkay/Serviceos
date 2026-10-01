@@ -24,6 +24,10 @@ import type { VoiceQualityScript } from './schema';
 import type { RepoBundle } from './runner';
 import type { EntityResolver } from '../resolution/entity-resolver';
 import { fixtureEntityResolverForBundle } from './fixture-entity-resolver';
+import type { VoiceSession } from '../agents/customer-calling/voice-session-store';
+import type { CustomerRepository } from '../../customers/customer';
+import { normalizePhone } from '../../compliance/dnc';
+import { lookupExecutedEvent } from './events';
 
 /** The pinned "now" of the voice-quality corpus world (Layer 1's booking clock). */
 export const VOICE_QUALITY_CORPUS_EPOCH = '2026-05-01T12:00:00.000Z';
@@ -54,18 +58,83 @@ class FixtureSettingsRepository extends InMemorySettingsRepository {
   }
 }
 
+/**
+ * Skill name on the `lookup_executed` stamp emitted when caller-ID identified
+ * exactly one customer. The floor PII grader treats it as identity-resolving
+ * (graders/floor.ts IDENTITY_RESOLVING_LOOKUPS).
+ */
+export const CALLER_ID_IDENTITY_LOOKUP_SKILL = 'identify_caller_by_caller_id';
+
+/**
+ * #1331 — Layer 2 session establishment, as twilio-adapter establishes an
+ * inbound call: bootstrap the FSM, stamp Twilio `From` on the session, and
+ * identify the caller by caller-ID. Exactly one match → `session.customerId`
+ * + `caller_known` (the identity the phone lookup surface answers a
+ * customer's own-records question for), recorded on the event log as an
+ * identity stamp — the customer-line twin of the owner line's
+ * `verify_owner_identity` stamp. Unknown, blocked or ambiguous → no identity.
+ */
+export async function establishLayer2Caller(
+  session: VoiceSession,
+  opts: { callerId?: string | null; callerIdBlocked?: boolean },
+  customerRepo: Pick<CustomerRepository, 'findByPhoneNormalized'>,
+): Promise<void> {
+  session.machine.dispatch({
+    type: 'session_started',
+    userId: 'voice-quality-layer2',
+    tenantId: session.tenantId,
+    conversationId: session.conversationId ?? session.id,
+  });
+  session.machine.dispatch({ type: 'greeted_ok' });
+  const callerId = !opts.callerIdBlocked && opts.callerId ? opts.callerId : undefined;
+  if (callerId) session.callerPhone = callerId;
+  const matches =
+    callerId && customerRepo.findByPhoneNormalized
+      ? await customerRepo.findByPhoneNormalized(session.tenantId, normalizePhone(callerId))
+      : [];
+  if (matches.length === 1) {
+    session.customerId = matches[0]!.id;
+    session.events.emit('voice-event', lookupExecutedEvent(CALLER_ID_IDENTITY_LOOKUP_SKILL, 0, true));
+    session.machine.dispatch({ type: 'caller_known', customerId: matches[0]!.id });
+  } else {
+    session.machine.dispatch({ type: 'unknown_caller' });
+  }
+}
+
+function fixtureBusinessHours(
+  script: VoiceQualityScript,
+): { timezone?: string; schedule?: unknown; callMomentLocal?: string } | undefined {
+  const tenant = (script.fixtures.tenant ?? {}) as Record<string, unknown>;
+  return tenant.businessHours as
+    | { timezone?: string; schedule?: unknown; callMomentLocal?: string }
+    | undefined;
+}
+
+/** The fixture tenant's IANA zone (business-hours zone first; LA default). */
+export function corpusTimezone(script: VoiceQualityScript): string {
+  const tenant = (script.fixtures.tenant ?? {}) as Record<string, unknown>;
+  return (
+    fixtureBusinessHours(script)?.timezone ??
+    (typeof tenant.timezone === 'string' ? tenant.timezone : 'America/Los_Angeles')
+  );
+}
+
+/**
+ * The moment the script's call happens in the corpus world: its own
+ * business-hours call moment, else {@link VOICE_QUALITY_CORPUS_EPOCH}. The
+ * Layer 2 processor's clock, and the date the judges grade dates against.
+ */
+export function corpusCallMoment(script: VoiceQualityScript): Date {
+  return new Date(fixtureBusinessHours(script)?.callMomentLocal ?? VOICE_QUALITY_CORPUS_EPOCH);
+}
+
 export function buildLayer2ProcessorWorld(
   script: VoiceQualityScript,
   tenantId: string,
   repos?: RepoBundle,
 ): Layer2ProcessorWorld {
-  const tenant = (script.fixtures.tenant ?? {}) as Record<string, unknown>;
-  const businessHours = tenant.businessHours as
-    | { timezone?: string; schedule?: unknown; callMomentLocal?: string }
-    | undefined;
-  const timezone =
-    businessHours?.timezone ??
-    (typeof tenant.timezone === 'string' ? tenant.timezone : 'America/Los_Angeles');
+  const businessHours = fixtureBusinessHours(script);
+  const timezone = corpusTimezone(script);
 
   const settingsRepo = new FixtureSettingsRepository(tenantId, {
     tenantId,
@@ -77,7 +146,7 @@ export function buildLayer2ProcessorWorld(
     new Map([[tenantId, [{ id: 'oncall_vq', userId: 'dispatcher_vq', orderIndex: 0 }]]]),
   );
 
-  const fixed = new Date(businessHours?.callMomentLocal ?? VOICE_QUALITY_CORPUS_EPOCH);
+  const fixed = corpusCallMoment(script);
   const now = (): Date => fixed;
   return {
     settingsRepo,

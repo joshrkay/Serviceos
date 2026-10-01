@@ -105,9 +105,8 @@ import type { AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
 import { createVoiceTurnProcessor } from '../../src/ai/voice-turn';
 import { buildHarnessPhoneLookups } from '../../src/ai/voice-quality/harness-lookups';
-import { buildLayer2ProcessorWorld } from '../../src/ai/voice-quality/layer2-world';
+import { buildLayer2ProcessorWorld, establishLayer2Caller } from '../../src/ai/voice-quality/layer2-world';
 import type { SpeechTurnHandler } from '../../src/telephony/media-streams/mediastream-adapter';
-import { normalizePhone } from '../../src/compliance/dnc';
 
 const REPORT_PATH = path.resolve(
   __dirname,
@@ -415,34 +414,10 @@ describe('Voice Quality Layer 2 — corpus', () => {
               ...driverDeps.audioDeps,
               onSessionCreated: async (session, opts) => {
                 suiteState.speechTurns.set(session.id, processor.speechTurn);
-                session.machine.dispatch({
-                  type: 'session_started',
-                  userId: 'voice-quality-layer2',
-                  tenantId: session.tenantId,
-                  conversationId: session.conversationId ?? session.id,
-                });
-                session.machine.dispatch({ type: 'greeted_ok' });
-                // #1331 — the inbound adapter stamps Twilio `From` on the
-                // session; the ask_caller turn resolves an unknown caller by it.
-                if (!opts.callerIdBlocked && opts.callerId) session.callerPhone = opts.callerId;
-
-                const matches =
-                  !opts.callerIdBlocked && opts.callerId &&
-                  factoryCtx.repos.customerRepo.findByPhoneNormalized
-                    ? await factoryCtx.repos.customerRepo.findByPhoneNormalized(
-                        session.tenantId,
-                        normalizePhone(opts.callerId),
-                      )
-                    : [];
-                if (matches.length === 1) {
-                  session.customerId = matches[0]!.id;
-                  session.machine.dispatch({
-                    type: 'caller_known',
-                    customerId: matches[0]!.id,
-                  });
-                } else {
-                  session.machine.dispatch({ type: 'unknown_caller' });
-                }
+                // #1331 — FSM bootstrap, Twilio `From` on the session, and
+                // caller-ID identification (with its identity stamp), as
+                // twilio-adapter establishes an inbound call.
+                await establishLayer2Caller(session, opts, factoryCtx.repos.customerRepo);
               },
               onSessionEnded: (sessionId) => {
                 suiteState.speechTurns.delete(sessionId);
