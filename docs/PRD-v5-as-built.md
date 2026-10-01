@@ -1328,10 +1328,10 @@ ceiling (#999), so a row at 5 has nothing left on this map:
 | 8.6 | 10 | 4 | 1 | 6 | 3 | 6.1a/6.1b (the SSE assistant session) at 3; 6.8 parked |
 | 8.7 | 12 | 4.5 | 6 | 4 | 2 | 7.2's confidence cap is unit-only at T0. 7.11: O-9 was answered and its criterion was amended 2026-09-30 to name the covered surfaces. It has not been re-graded against the amended text |
 | 8.8 | 13 | 5 | 10 | 3 | 0 | 8.10/8.11 need their T2/T3 reachability legs. 8.12's minimum was answered 2026-09-30 (auto-collect is the default); flipping `autoCollectDues` is the follow-up, and 8.12's cell has not been re-graded here |
-| 8.9 | 12 | 5 | 8 | 4 | 0 | *(2026-09-30, #1013 close lane)* 9.8 is capped at 4 by owner decision (prices stay tied to the catalog — no free-text price edit); 9.11 and 9.4's sweep need a live Intuit / Google connection (#1000); 9.12's guarded-send half has no in-app DNC run |
+| 8.9 | 12 | 5 | 9 | 3 | 0 | *(2026-09-30, #1013 close lane)* 9.8 is capped at 4 by owner decision (prices stay tied to the catalog — no free-text price edit); 9.11 and 9.4's sweep need a live Intuit / Google connection (#1000); 9.12's guarded-send half reached 5 (T2) in the T2 lane (PR #1529) |
 | §5 | 26 | 4 | 0 | 25 | 1 | C5 — the second classifier reaches 2 of 93 origins. O-9 was answered and the commitment amended 2026-09-30 (§8.10 #5). C5 has not been re-graded against it. An invariant's in-repo ceiling is 4 |
 
-**Totals (2026-09-30): 124 rows — 64 at 5, 51 at 4 or 4−, 9 at 3 or below, 0 at 6.**
+**Totals (2026-09-30, after PR #1529): 124 rows — 65 at 5, 50 at 4 or 4−, 9 at 3 or below, 0 at 6.**
 
 *At 2026-09-26 (origin/main @ 284ff29d2) the same census read **47 at 5, 67 at 4 or 4−, 10 at 3 or below, 0 at 6**. The 2026-09-26 table had §8.3 at 10 / 2 / 0 and §8.5 at 0 / 5 / 0 (median 4). The lines below record the passes in between.*
 
@@ -1343,7 +1343,7 @@ ceiling (#999), so a row at 5 has nothing left on this map:
 
 *Re-graded 2026-09-30 (#1024 close-out, origin/main @ b94936af6): 3.3 4 (T3) → **5 (T3)** and 5.4 4 (T1) → **5 (T2)**, from the Maestro device run 36780860209 (PR #1525). Each row's Confirm cell carries its command and its reasoning. Census: **124 rows — 64 at 5, 51 at 4 or 4−, 9 at 3 or below, 0 at 6** (§8.3: 12 / 0 / 0; §8.5: 4 / 1 / 0, median 5).*
 
-*Flagged at the same close-out, not re-graded: five rows print **5 at T1 only**: 3.10, 3.12, 5.1, 5.2 and 5.3 (in-app). §8.0's capping rule says rung 5 requires T2. None of the five cells argues why T2 would not apply. Each needs either a T2 leg (a neighbour's data does not change this tenant's answer) or a stated reason the rule does not bind it. Until then, read those five as "5, capping unresolved". If all five were held at 4, the census would read 59 / 56 / 9.*
+*Flagged at the same close-out, not re-graded: five rows print **5 at T1 only**: 3.10, 3.12, 5.1, 5.2 and 5.3 (in-app). §8.0's capping rule says rung 5 requires T2. None of the five cells argues why T2 would not apply. Each needs either a T2 leg (a neighbour's data does not change this tenant's answer) or a stated reason the rule does not bind it. Until then, read those five as "5, capping unresolved". If all five were held at 4, the census would read 59 / 56 / 9. **Resolved 2026-09-30 (PR #1529, T2 lane):** each of the five gained a neighbour-tenant (T2) leg in its existing spec, proven red by removing the tenant predicate on the path it guards; 3.10, 3.12, 5.1, 5.2 and 5.3 (in-app) now read **5 (T2)** (5.1 also T3), and 9.12's guarded-send (DNC) half reached **5 (T2)**. Census: **124 rows — 65 at 5, 50 at 4 or 4−, 9 at 3 or below, 0 at 6**.*
 Two rows print a rung with no command beside them, both rung 0 by decision
 (4.10 out of scope, 6.8 parked — map #1001): there is nothing to run.
 
