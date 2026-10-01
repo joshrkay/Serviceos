@@ -157,7 +157,6 @@ import {
   confirmTurnSlotFillEvent,
   isAffirmation,
   isNegation,
-  isAffirmation,
   SLOT_FILL_INTENTS,
 } from '../agents/customer-calling/confirm-turn';
 import {
