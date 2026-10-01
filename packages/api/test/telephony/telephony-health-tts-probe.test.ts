@@ -84,6 +84,16 @@ describe('#1536 — /api/telephony/health probes the TTS provider', () => {
     );
   });
 
+  it('a billing refusal (payment_required) is degraded, not down: calls fall back to Gather', async () => {
+    const provider = stubProvider(async () => ({ ok: false, reason: 'payment_required' }));
+
+    const res = await request(appWith(provider)).get('/api/telephony/health');
+
+    expect(res.body.capabilities.tts).toBe(false);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.degraded).toBe(true);
+  });
+
   it('a credential failure does not mask a hard failure: no database → ok:false', async () => {
     const provider = stubProvider(async () => ({ ok: false, reason: 'unauthorized' }));
     const base = configOnlyReport();

@@ -84,6 +84,14 @@ describe('#1536 — /voice consults the cached TTS verdict', () => {
     expect(ttsWarnings[0][1]).toMatchObject({ reason: 'missing_permissions' });
   });
 
+  // ElevenLabs 402 (free plan / library voice) and quota exhaustion refuse every
+  // synthesis until billing changes — as persistent as a bad key, so the
+  // caller must hear Gather rather than a voiceless Stream.
+  it.each(['payment_required', 'quota_exceeded'])('failed / %s (billing) → Gather TwiML', async (reason) => {
+    const res = await voicePost(mount(stubHealth({ status: 'failed', reason })));
+    expect(res.text).toBe(GATHER_TWIML);
+  });
+
   it('failed / unauthorized → Gather TwiML', async () => {
     const res = await voicePost(mount(stubHealth({ status: 'failed', reason: 'unauthorized' })));
     expect(res.text).toBe(GATHER_TWIML);
