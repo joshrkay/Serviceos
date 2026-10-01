@@ -9,7 +9,8 @@
 import { describe, it, expect } from 'vitest';
 import { DateTime } from 'luxon';
 
-import { nextTuesdayAt14, referenceDayIso } from '../../../src/ai/voice-quality/inapp-50/world';
+import { nextTuesdayAt14 } from '../../../src/ai/voice-quality/inapp-50/world';
+import { referenceDayIso } from '../../../src/ai/voice-quality/fixture-entity-resolver';
 
 const ZONE = 'America/Phoenix';
 

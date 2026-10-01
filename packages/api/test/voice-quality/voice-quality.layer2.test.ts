@@ -107,6 +107,20 @@ import { createVoiceTurnProcessor } from '../../src/ai/voice-turn';
 import { buildHarnessPhoneLookups } from '../../src/ai/voice-quality/harness-lookups';
 import type { SpeechTurnHandler } from '../../src/telephony/media-streams/mediastream-adapter';
 import { normalizePhone } from '../../src/compliance/dnc';
+import { fixtureEntityResolverForBundle } from '../../src/ai/voice-quality/fixture-entity-resolver';
+
+/** #1540 §1 — the corpus world's "now" (Layer 1's booking clock). */
+const CORPUS_NOW = new Date('2026-05-01T12:00:00.000Z');
+
+/** The fixture tenant's zone (business-hours zone first), as Layer 1 reads it. */
+function corpusTimezone(script: VoiceQualityScript): string {
+  const tenant = (script.fixtures.tenant ?? {}) as Record<string, unknown>;
+  const businessHours = tenant.businessHours as { timezone?: string } | undefined;
+  return (
+    businessHours?.timezone ??
+    (typeof tenant.timezone === 'string' ? tenant.timezone : 'America/Los_Angeles')
+  );
+}
 
 const REPORT_PATH = path.resolve(
   __dirname,
@@ -389,6 +403,15 @@ describe('Voice Quality Layer 2 — corpus', () => {
               lookups: buildHarnessPhoneLookups(factoryCtx.repos),
               businessName: 'Test Tenant',
               systemActorId: 'voice-quality-layer2',
+              // #1540 §1 — app.ts wires `PgEntityResolver`; the harness wires
+              // the fixture resolver over the SAME repo bundle the runner
+              // seeded, in the corpus world (tenant zone, Friday 2026-05-01),
+              // so "my appointment on Tuesday" resolves instead of gating.
+              entityResolver: fixtureEntityResolverForBundle(factoryCtx.repos, {
+                tenantId: factoryCtx.tenantId,
+                timezone: corpusTimezone(script),
+                now: () => CORPUS_NOW,
+              }),
               onSessionTerminated: async (session) => {
                 await processorRef.current?.runSummary(session);
               },

@@ -13,7 +13,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createVoiceTurnProcessor } from '../../../src/ai/voice-turn';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
-import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { InMemoryProposalRepository, missingFieldsFor } from '../../../src/proposals/proposal';
 import { InMemoryCustomerRepository, createCustomer } from '../../../src/customers/customer';
 import { InMemorySettingsRepository, type TenantSettings } from '../../../src/settings/settings';
 import type { LLMGateway, LLMRequest } from '../../../src/ai/gateway/gateway';
@@ -91,6 +91,6 @@ describe('#1540 §6 — phone owner line: log_expense is drafted with the tenant
     const [proposal] = await proposalRepo.findByTenant(TENANT);
     expect(proposal?.proposalType).toBe('log_expense');
     expect(proposal?.payload.spentAt).toBe('2026-04-30T07:00:00.000Z');
-    expect(proposal?.missingFields ?? []).not.toContain('spentAt');
+    expect(proposal ? missingFieldsFor(proposal) : []).not.toContain('spentAt');
   });
 });
