@@ -1,0 +1,134 @@
+/**
+ * #1536 — GET /api/telephony/health must report whether the configured TTS
+ * provider can actually speak, not just whether a key is set. A key without
+ * the Text to Speech permission reported `tts: true` while every phone reply
+ * failed. Seam: the health route (supertest) with a stub TTS provider probe.
+ */
+import { describe, it, expect } from 'vitest';
+import express from 'express';
+import request from 'supertest';
+import { createTelephonyRouter, type TelephonyHealthReport } from '../../src/routes/telephony';
+import type { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
+import { createTtsHealthCheck } from '../../src/ai/tts/tts-health';
+import type { TtsProbeResult, TtsProvider } from '../../src/ai/tts/tts-provider';
+
+const configOnlyReport = (): TelephonyHealthReport => ({
+  ok: true,
+  capabilities: {
+    mediaStreams: true,
+    tts: true,
+    stt: true,
+    recording: true,
+    messageDelivery: true,
+    database: true,
+    llmGateway: true,
+  },
+  config: { publicBaseUrl: 'https://api.invalid', businessName: 'Test Co' },
+  warnings: [],
+});
+
+function stubProvider(probe: () => Promise<TtsProbeResult>): TtsProvider & { probeCalls: number } {
+  const p = {
+    probeCalls: 0,
+    synthesize: async () => {
+      throw new Error('health must not synthesize through the reply path');
+    },
+    probe: async () => {
+      p.probeCalls += 1;
+      return probe();
+    },
+  };
+  return p;
+}
+
+function appWith(
+  provider: TtsProvider,
+  opts: { ttlMs?: number; responseDeadlineMs?: number; probeTimeoutMs?: number; now?: () => number } = {},
+) {
+  const app = express();
+  app.use(
+    '/api/telephony',
+    createTelephonyRouter({
+      adapter: {} as TwilioGatherAdapter,
+      authTokenGetter: () => 'unused',
+      resolveTenantId: () => undefined,
+      getHealth: configOnlyReport,
+      ttsHealth: createTtsHealthCheck({ provider, ...opts }),
+    }),
+  );
+  return app;
+}
+
+describe('#1536 — /api/telephony/health probes the TTS provider', () => {
+  it('reports tts:false with reason missing_permissions when the key cannot synthesize', async () => {
+    const provider = stubProvider(async () => ({ ok: false, reason: 'missing_permissions' }));
+
+    const res = await request(appWith(provider)).get('/api/telephony/health');
+
+    expect(res.status).toBe(200);
+    expect(res.body.capabilities.tts).toBe(false);
+    expect(res.body.ttsCheck).toMatchObject({ status: 'failed', reason: 'missing_permissions' });
+    expect(res.body.ok).toBe(false);
+    expect(res.body.warnings).toContain(
+      'TTS provider rejected the probe (missing_permissions) — voice replies will fail',
+    );
+  });
+
+  it('caches the verdict: repeated health hits within the TTL probe the provider once, then re-probe after it', async () => {
+    let clock = 1_000_000;
+    const provider = stubProvider(async () => ({ ok: true }));
+    const app = appWith(provider, { ttlMs: 10 * 60_000, now: () => clock });
+
+    const first = await request(app).get('/api/telephony/health');
+    await request(app).get('/api/telephony/health');
+    clock += 9 * 60_000;
+    await request(app).get('/api/telephony/health');
+
+    expect(first.body.capabilities.tts).toBe(true);
+    expect(first.body.ttsCheck).toMatchObject({ status: 'ok' });
+    expect(provider.probeCalls).toBe(1);
+
+    clock += 2 * 60_000; // 11 minutes since the probe — past the 10 min TTL
+    await request(app).get('/api/telephony/health');
+    expect(provider.probeCalls).toBe(2);
+  });
+
+  it('never blocks on a slow provider: answers promptly with ttsCheck unknown while the probe runs', async () => {
+    const provider = stubProvider(() => new Promise<TtsProbeResult>(() => {})); // hangs forever
+    const app = appWith(provider, { responseDeadlineMs: 20, probeTimeoutMs: 60_000 });
+
+    const started = Date.now();
+    const res = await request(app).get('/api/telephony/health');
+
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(res.status).toBe(200);
+    expect(res.body.ttsCheck).toMatchObject({ status: 'unknown' });
+    expect(res.body.capabilities.tts).toBe(true); // no verdict yet — config answer stands
+  });
+
+  it('a probe that never answers is cached as unreachable and reported tts:false on the next hit', async () => {
+    const provider = stubProvider(() => new Promise<TtsProbeResult>(() => {}));
+    const app = appWith(provider, { responseDeadlineMs: 5, probeTimeoutMs: 30 });
+
+    await request(app).get('/api/telephony/health');
+    await new Promise((r) => setTimeout(r, 60));
+    const res = await request(app).get('/api/telephony/health');
+
+    expect(res.body.ttsCheck).toMatchObject({ status: 'failed', reason: 'unreachable' });
+    expect(res.body.capabilities.tts).toBe(false);
+    expect(provider.probeCalls).toBe(1);
+  });
+
+  it('a provider without a probe stays config-only and is marked as such', async () => {
+    const provider: TtsProvider = {
+      synthesize: async () => {
+        throw new Error('unused');
+      },
+    };
+
+    const res = await request(appWith(provider)).get('/api/telephony/health');
+
+    expect(res.body.capabilities.tts).toBe(true);
+    expect(res.body.ttsCheck).toEqual({ status: 'config_only' });
+  });
+});
