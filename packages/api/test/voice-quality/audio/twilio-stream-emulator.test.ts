@@ -361,6 +361,32 @@ describe('VQ2-006 — TwilioStreamEmulator', () => {
     expect(result.numFrames).toBe(3);
   });
 
+  it('#1331 — the real reply marked on the bus BEFORE its first frame lands still counts (no race with WS transit)', async () => {
+    // The adapter records audio_frame_emitted as it sends; the frame reaches
+    // the emulator a transit later. If the silence window is measured from
+    // the filler, the turn closes the instant the mark appears — before the
+    // reply frame arrives (CI flake on #1537: "expected 1 to be 3"). Model
+    // the transit explicitly (40 ms, inside the 100 ms window).
+    emulator = new TwilioStreamEmulator({
+      serverUrl: stub.url,
+      bus,
+      silenceWindowMs: 100,
+      firstAudioTimeoutMs: 1_000,
+      deliverFinalTranscript: () => {
+        bus.record(transcriptReceivedEvent({}));
+        setTimeout(() => stub.sendInboundFrame(inboundFramePayload()), 30); // filler
+        setTimeout(() => bus.record(audioFrameEmittedEvent({ byteCount: 320 })), 400);
+        setTimeout(() => stub.sendInboundFrame(inboundFramePayload()), 440); // real reply, in transit
+      },
+    });
+    await emulator.start('CA_MARK_BEFORE_FRAME');
+    await stub.waitForConnection();
+
+    const result = await emulator.sendCallerUtterance(shortPcmSilence(), 0, 'what do I owe');
+
+    expect(result.numFrames).toBe(2);
+  });
+
   it('VQ2-006 — sendCallerUtterance returns ttfaMs = 0 when no inbound frames (handles silent agent)', async () => {
     await emulator.start('CA_SILENT');
     await stub.waitForConnection();

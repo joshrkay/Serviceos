@@ -84,6 +84,40 @@ describe('ElevenLabsStreamConnection', () => {
     await assertion;
   });
 
+  it('#1536: names the provider error code in the rejection, never the provider message or key', async () => {
+    const conn = new ElevenLabsStreamConnection({ apiKey: 'sk_secret_key', voiceId: 'v', modelId: 'm' });
+    const iter = conn.synthesize({ text: 'hello' })[Symbol.asyncIterator]();
+    const next = iter.next();
+    await Promise.resolve();
+    // Shape ElevenLabs sends when the key lacks the Text to Speech permission.
+    ws.fire('message', {
+      data: JSON.stringify({
+        message: 'The API key you used is missing the permission text_to_speech to execute this operation. key=sk_secret_key',
+        error: 'missing_permissions',
+        code: 1008,
+      }),
+    });
+    const err = await next.then(() => null, (e: unknown) => e as Error & { code?: string });
+    expect(err?.message).toBe('ElevenLabs rejected the speech request (missing_permissions)');
+    expect(err?.code).toBe('missing_permissions');
+    expect(err?.message).not.toContain('sk_secret_key');
+    expect(err?.message).not.toContain('text_to_speech to execute');
+  });
+
+  it('#1536: reads the code from a REST-style detail object and drops a non-token code', async () => {
+    const conn = new ElevenLabsStreamConnection({ apiKey: 'k', voiceId: 'v', modelId: 'm' });
+    const a = conn.synthesize({ text: 'a' })[Symbol.asyncIterator]().next();
+    await Promise.resolve();
+    ws.fire('message', { data: JSON.stringify({ error: { status: 'invalid_api_key', message: 'Invalid API key' } }) });
+    await expect(a).rejects.toThrow('ElevenLabs rejected the speech request (invalid_api_key)');
+
+    ws = new FakeWs();
+    const b = conn.synthesize({ text: 'b' })[Symbol.asyncIterator]().next();
+    await Promise.resolve();
+    ws.fire('message', { data: JSON.stringify({ error: 'Your key sk_abc is bad!' }) });
+    await expect(b).rejects.toThrow(/^ElevenLabs rejected the speech request \(unknown\)$/);
+  });
+
   it('yields PCM chunks for inbound audio frames and ends with isFinal=true', async () => {
     const conn = new ElevenLabsStreamConnection({
       apiKey: 'k',
