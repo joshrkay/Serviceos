@@ -80,7 +80,7 @@ import {
 import { createLayer2AudioDriver } from '../../src/ai/voice-quality/audio/layer2-audio-driver';
 import { FillerAudioCache } from '../../src/ai/agents/customer-calling/filler-audio-cache';
 import { FillerEngine } from '../../src/ai/agents/customer-calling/filler-engine';
-import type { WhisperBufferTranscriber } from '../../src/ai/voice-quality/audio/whisper-real-provider';
+import { createOpenAiWhisperBufferTranscriber } from '../../src/ai/voice-quality/audio/openai-whisper-buffer-transcriber';
 import { TtsFixtureCache } from '../../src/ai/voice-quality/audio/tts-fixture-cache';
 import {
   createLayer2Gateway,
@@ -572,52 +572,6 @@ function makeCostCappedResult(scriptId: string): RunScriptLayer2Result {
   };
 }
 
-/**
- * Wrap the production `WhisperTranscriptionProvider` (URL-based) with
- * a buffer-in interface that posts directly to OpenAI's audio
- * transcriptions endpoint. Mirrors the production wire format
- * (multipart with `file` + `model` fields). Lives here as a wiring
- * adapter; promoting to a shared module is a follow-up if a second
- * call-site needs the buffer path.
- */
-function makeWhisperBufferTranscriber(apiKey: string): WhisperBufferTranscriber {
-  return {
-    async transcribeBuffer(audio: Buffer) {
-      const fd = new FormData();
-      // Telephony is PCM16 mono 8 kHz; OpenAI accepts a wide format set
-      // with the `.wav` content type as a tolerable hint. Whisper sniffs
-      // bytes regardless.
-      fd.append('file', new Blob([audio], { type: 'audio/wav' }), 'audio.wav');
-      fd.append('model', 'whisper-1');
-      const res = await fetch(
-        'https://api.openai.com/v1/audio/transcriptions',
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${apiKey}` },
-          body: fd,
-          // #1331 — fetch has no default timeout; a stalled Whisper call
-          // would hold the script past vitest's 60 s budget. Transcribing a
-          // few seconds of agent audio normally takes well under this.
-          signal: AbortSignal.timeout(20_000),
-        },
-      );
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        // Surface 429s with a structured shape so WhisperRealProvider's
-        // retry detection (`status === 429`) works.
-        const err = new Error(`whisper transcribe failed: ${res.status} ${body.slice(0, 200)}`);
-        (err as { status?: number }).status = res.status;
-        throw err;
-      }
-      const data = (await res.json()) as { text?: string };
-      return {
-        transcript: data.text ?? '',
-        metadata: { provider: 'openai-whisper-buffer', model: 'whisper-1' },
-      };
-    },
-  };
-}
-
 interface BuiltDriverDeps {
   /** Shared per-script inputs to `createLayer2AudioDriver` (one stack per run). */
   audioDeps: Omit<
@@ -682,7 +636,7 @@ async function buildAudioModeDriverDeps(
       serverUrl: suiteState.serverUrl,
       voiceSessionStore,
       ttsCache,
-      whisperTranscriber: makeWhisperBufferTranscriber(openaiKey),
+      whisperTranscriber: createOpenAiWhisperBufferTranscriber({ apiKey: openaiKey }),
       costTracker: suiteState.suiteCostTracker,
       deliverFinalTranscript: (transcript) => {
         if (!suiteState.deliverFinalTranscript) {
