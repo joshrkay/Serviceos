@@ -100,8 +100,10 @@ describe('#1540 §2 — the ask_caller turn carries the caller\'s request forwar
     const customers = await call.customerRepo.findByTenant(TENANT);
     expect(customers).toHaveLength(1);
     expect(call.session.customerId).toBe(customers[0]!.id);
-    // …and the request was classified and taken straight to its flow.
-    expect(call.classifyCalls()).toBe(1);
+    // …and the request was classified and taken straight to its flow
+    // (#1331: this stereotyped opening is now classified deterministically,
+    // without a model call — see the Layer 2 test below).
+    expect(call.session.machine.currentContext.currentIntent).toBe('create_appointment');
     expect(reply).not.toContain('How can I help you today?');
     expect(call.session.machine.currentState).not.toBe('intent_capture');
     expect(reply).toMatch(/^Just to confirm/);
@@ -129,5 +131,24 @@ describe('#1540 §2 — the ask_caller turn carries the caller\'s request forwar
     expect(await call.customerRepo.findByTenant(TENANT)).toHaveLength(1);
     expect(call.session.machine.currentState).toBe('intent_capture');
     expect(reply).toBe('How can I help you today?');
+  });
+});
+
+describe('#1331 Layer 2 (run 36925905917) — find-or-create-lead-unknown-caller', () => {
+  // In 2 of 3 live runs the model returned no usable intent for this
+  // entity-free opening, and the caller — who had just asked for service —
+  // heard "How can I help you today?": the request was dropped, against the
+  // owner decision (identify AND keep the request). The opening is a
+  // stereotyped new-booking ask, so it must not depend on the model.
+  it('"Hi, I\'d like to schedule service for my home." keeps the booking request even when the model returns nothing usable', async () => {
+    const call = await unknownCallerAtAskCaller(
+      JSON.stringify({ intentType: 'unknown', confidence: 0.3, extractedEntities: {} }),
+    );
+
+    const reply = spoken(await call.turn("Hi, I'd like to schedule service for my home."));
+
+    expect(await call.customerRepo.findByTenant(TENANT)).toHaveLength(1);
+    expect(reply).not.toContain('How can I help you today?');
+    expect(reply).toBe("Just to confirm — you'd like to schedule an appointment, with no day or time yet. Is that right?");
   });
 });

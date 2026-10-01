@@ -70,6 +70,25 @@ export function callerNameMatchesAccount(
   return callerNameMatchScore(spokenName, account) >= TAU_ENT;
 }
 
+/**
+ * The caller's held request, re-voiced with the account name they just
+ * confirmed in place of the name they mumbled. After "yes, that's me" the
+ * name is no longer in doubt, and the garbled spelling only costs the
+ * classifier its confidence: Layer 2 run 36925905917 classified "Hi this is
+ * Mmmmaria Roddrrgez calling about my appointment" as unknown in 2 of 3
+ * runs and the caller, who had just said yes, was asked to repeat it.
+ * An utterance with no self-introduction is returned unchanged.
+ */
+export function withConfirmedSelfName(utterance: string, accountName: string): string {
+  const spokenName = spokenSelfName(utterance);
+  if (!spokenName) return utterance;
+  const lead = SELF_NAME_LEAD.exec(utterance);
+  if (!lead) return utterance;
+  const at = utterance.indexOf(spokenName, lead.index + lead[0].length);
+  if (at < 0) return utterance;
+  return utterance.slice(0, at) + accountName + utterance.slice(at + spokenName.length);
+}
+
 /** The one yes/no check. */
 export function callerIdentityCheckLine(accountName: string): string {
   return `Just to make sure I have the right account — is this ${accountName}?`;
