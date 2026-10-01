@@ -125,6 +125,7 @@ import {
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   CALLER_INCOMPLETE_REQUEST_COPY,
+  CALLER_REQUEST_QUEUED_COPY,
   OPERATOR_DRAFTED_FOR_REVIEW_COPY,
   INAPP_INCOMPLETE_DRAFT_COPY,
   type SessionLanguage,
@@ -2903,10 +2904,9 @@ export function createVoiceTurnProcessor(
       // close ("taken care of … You'll receive a confirmation shortly") is
       // caller copy; to the owner it claims work that has not run. Unless the
       // card actually executed, say it is drafted and awaiting their approval.
-      // An S1 caller keeps the default: their request IS queued for the
-      // owner, which is what that line reports to them.
-      const operatorAwaitingReview =
-        surfaceAllowed && surface !== 'S1' && stored.status !== 'executed';
+      // #1331 — the same default claimed completion to an S1 caller too
+      // (their request is only queued): they hear it was passed to the team.
+      const awaitingReview = surfaceAllowed && stored.status !== 'executed';
       const followUps = session.machine.dispatch({
         type: 'proposal_queued',
         proposalId: stored.id,
@@ -2925,8 +2925,11 @@ export function createVoiceTurnProcessor(
                 // incomplete card is theirs to finish, so "someone from our
                 // team will follow up with you" (S1 caller copy) is untrue there.
                 { utterance: surface === 'S1' ? CALLER_INCOMPLETE_REQUEST_COPY : INAPP_INCOMPLETE_DRAFT_COPY }
-              : operatorAwaitingReview
-                ? { utterance: OPERATOR_DRAFTED_FOR_REVIEW_COPY }
+              : awaitingReview
+                ? {
+                    utterance:
+                      surface === 'S1' ? CALLER_REQUEST_QUEUED_COPY : OPERATOR_DRAFTED_FOR_REVIEW_COPY,
+                  }
                 : {}),
         // WS18 — a grounded ESTIMATE (only) becomes a live, refinable/closeable
         // pendingQuote on the FSM. Scoped to draft_estimate: an invoice quote is

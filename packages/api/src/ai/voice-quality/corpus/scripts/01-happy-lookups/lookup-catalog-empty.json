@@ -36,7 +36,7 @@
       "caller": "What services do we have in our catalog?",
       "expected": {
         "intent": "lookup_catalog",
-        "spokenAnswerMatches": "Your service catalog is empty right now.",
+        "spokenAnswerMatches": "Your service catalog is empty right now. You can add services in the app under Settings, then Price book.",
         "escalates": false
       },
       "hangupAfter": false
