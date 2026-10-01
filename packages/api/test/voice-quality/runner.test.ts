@@ -493,3 +493,39 @@ describe('#1331 — Layer 2 owner-line persona', () => {
     expect(layer1.turns).toHaveLength(1);
   });
 });
+
+// #1331 — production contracts validate record ids as UUIDs
+// (`customerId: Invalid uuid`). Corpus fixtures use readable ids
+// ("cust_02_add_material_owner") that Layer 1's mocks tolerate, so on Layer 2
+// every write proposal was gated on a bad customerId and lookup_balance
+// failed outright (run 36829085635 log). The Layer 2 persona maps each
+// readable fixture id to a stable UUID everywhere it appears.
+describe('#1331 — loadLayer2Corpus fixture ids', () => {
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  it('gives every Layer 2 fixture record a UUID id, and keeps references and expected slots pointing at it', () => {
+    const layer2 = loadLayer2Corpus();
+    const create = layer2.find((s) => s.id === 'create-appointment-known-customer')!;
+    const customer = (create.fixtures.customers as Array<{ id: string; tenantId: string }>)[0]!;
+    expect(customer.id).toMatch(UUID);
+    expect(create.turns[0]!.expected.slots?.customerId).toBe(customer.id);
+    // Tenant ids are not record ids and stay as authored.
+    expect(customer.tenantId).toBe('t_02_create_appointment');
+
+    const cancel = layer2.find((s) => s.id === 'cancel-appointment-known-customer')!;
+    const appt = (cancel.fixtures.appointments as Array<{ id: string; jobId: string }>)[0]!;
+    expect(appt.id).toMatch(UUID);
+    expect(appt.jobId).toMatch(UUID);
+    expect(cancel.turns[0]!.expected.slots?.appointmentId).toBe(appt.id);
+
+    // Stable across loads, so the three voting runs and every week agree.
+    expect(
+      loadLayer2Corpus().find((s) => s.id === 'create-appointment-known-customer')!.turns[0]!
+        .expected.slots?.customerId,
+    ).toBe(customer.id);
+
+    // Layer 1 is untouched.
+    const layer1 = loadCorpus().find((s) => s.id === 'create-appointment-known-customer')!;
+    expect((layer1.fixtures.customers as Array<{ id: string }>)[0]!.id).toBe('cust_02_create_appt_jane');
+  });
+});
