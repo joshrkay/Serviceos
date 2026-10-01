@@ -9,7 +9,9 @@
  * Formatting contract: output must read correctly on both TTS engines
  * (Amazon Polly and Google Cloud TTS). In practice that means:
  *   - Dollar amounts as "$120.50" (not "120 dollars 50 cents" — that
- *     confuses Polly's number-interpretation heuristic).
+ *     confuses Polly's number-interpretation heuristic). The OpenAI /
+ *     ElevenLabs providers spell the amount out at synthesis time
+ *     (ai/tts/speakable-text.ts, #1331); this text stays "$N.NN" for cards.
  *   - No markdown, no HTML entities, no trailing punctuation added here
  *     (the caller's sentence owns punctuation).
  */

@@ -289,6 +289,8 @@ export class TwilioStreamEmulator {
     // real Deepgram final. Standalone emulator tests have no adapter, so they
     // retain the synthetic bus event as a timing fallback.
     const transcriptReceivedTs = performance.now();
+    // Wall-clock twin of the above: bus events carry Date.now() stamps.
+    const transcriptDeliveredAtMs = Date.now();
     if (this.deps.deliverFinalTranscript) {
       if (callerTranscript === undefined) {
         throw new Error(
@@ -320,15 +322,36 @@ export class TwilioStreamEmulator {
 
     // Phase 2: once the reply has begun, collect frames until
     // `silenceWindowMs` elapses without a new arrival (end of agent turn).
+    //
+    // #1331 — on the live bridge the first frames may be the production
+    // filler (played ~250 ms after the caller finishes when the answer is not
+    // ready); the real reply follows seconds later. Until the adapter marks
+    // the REAL reply on the bus (`audio_frame_emitted`), a quiet gap is the
+    // agent thinking, not the end of its turn — keep waiting, bounded by the
+    // same first-audio timeout.
+    const awaitingRealReply = (): boolean =>
+      this.deps.deliverFinalTranscript !== undefined &&
+      !this.deps.bus
+        .events()
+        .some((e) => e.type === 'audio_frame_emitted' && e.ts >= transcriptDeliveredAtMs) &&
+      performance.now() - transcriptReceivedTs < firstAudioTimeoutMs;
     const firstReply = firstReplyFrame();
     if (firstReply) {
       let lastFrameTs = this.receivedFrames[this.receivedFrames.length - 1]!.ts;
-      while (performance.now() - lastFrameTs < silenceWindowMs) {
+      let wasAwaiting = awaitingRealReply();
+      while (performance.now() - lastFrameTs < silenceWindowMs || wasAwaiting) {
         await new Promise((r) => setTimeout(r, SILENCE_POLL_MS));
         const newest = this.receivedFrames[this.receivedFrames.length - 1];
         if (newest && newest.ts > lastFrameTs) {
           lastFrameTs = newest.ts;
         }
+        // The adapter marks the real reply on the bus as it SENDS the frame;
+        // the frame lands a WS transit later. Start the silence window at the
+        // mark (not at the old filler frame), or the turn closes in that
+        // transit gap with the reply still in flight.
+        const awaiting = awaitingRealReply();
+        if (wasAwaiting && !awaiting) lastFrameTs = Math.max(lastFrameTs, performance.now());
+        wasAwaiting = awaiting;
       }
     }
 

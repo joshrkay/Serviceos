@@ -21,7 +21,8 @@
  * |---|---|
  * | Floor                           | 100% of scripts must pass unanimously |
  * | Overall disposition+CE pass     | ≥85% (12/14 at v1) |
- * | TTFA P95 across all turns       | ≤800 ms |
+ * | First-audible P95 (#1331)       | ≤800 ms (filler or first reply frame) |
+ * | Answer-audio TTFA P95 (#1331)   | ≤4000 ms (first real reply frame) |
  * | Perceived completion pass rate  | ≥90% |
  * | Cost-capped scripts             | 0 |
  *
@@ -77,8 +78,20 @@ export interface Layer2LaunchGateThresholds {
   floorAllScripts: true;
   /** Disposition + caller-experience aggregate pass rate. Default 85% (12/14 scripts). */
   overallPassRateMin: number;
-  /** TTFA P95 ceiling (ms) across all scripts' median TTFA. Default 800 ms. */
+  /**
+   * Answer-audio (TTFA) P95 ceiling (ms): transcript → first REAL reply frame
+   * (classify + reply + full TTS synthesis). #1331 (owner decision
+   * 2026-10-01): its own budget, 4000 ms — first live measurement (run
+   * 36811698452) had per-script medians p50 2577 / p95 3379 / max 3628 ms.
+   * The 800 ms caller-facing SLO is `firstAudibleP95MaxMs`.
+   */
   ttfaP95MaxMs: number;
+  /**
+   * #1331 — first-audible P95 ceiling (ms): transcript → the first thing the
+   * caller hears (the production 250 ms filler or the first reply frame).
+   * The product's caller-facing SLO. Default 800 ms.
+   */
+  firstAudibleP95MaxMs: number;
   /** Perceived-completion pass rate floor. Default 90%. */
   perceivedCompletionPassRateMin: number;
   /** Maximum allowed cost-capped scripts. Default 0. */
@@ -88,7 +101,8 @@ export interface Layer2LaunchGateThresholds {
 export const DEFAULT_LAYER2_THRESHOLDS: Layer2LaunchGateThresholds = {
   floorAllScripts: true,
   overallPassRateMin: 0.85,
-  ttfaP95MaxMs: 800,
+  ttfaP95MaxMs: 4000,
+  firstAudibleP95MaxMs: 800,
   perceivedCompletionPassRateMin: 0.9,
   costCappedScriptsMax: 0,
 };
@@ -111,6 +125,8 @@ export interface Layer2Report {
   }>;
   callerExperience: {
     ttfaMedians: { p50: number; p95: number };
+    /** #1331 — first-audible (filler or first reply frame) percentiles. */
+    firstAudibleMedians: { p50: number; p95: number };
     lookupMedians: { p50: number; p95: number };
     repromptRatioOverall: number;
     perceivedCompletionRate: number;
@@ -137,6 +153,7 @@ export interface Layer2Report {
       floorAllPass: boolean;
       overallPassRate: number;
       ttfaP95Ms: number;
+      firstAudibleP95Ms: number;
       perceivedCompletionPassRate: number;
       costCappedScripts: number;
     };
@@ -197,6 +214,13 @@ export function buildLayer2Report(
     .map((r) => r.aggregated.callerExperience.lookupMedianMs)
     .filter((n) => n > 0);
   const ttfaMedians = { p50: percentile(allTtfas, 50), p95: percentile(allTtfas, 95) };
+  const allFirstAudible = results
+    .map((r) => r.aggregated.callerExperience.firstAudibleMedianMs)
+    .filter((n) => n > 0);
+  const firstAudibleMedians = {
+    p50: percentile(allFirstAudible, 50),
+    p95: percentile(allFirstAudible, 95),
+  };
   const lookupMedians = { p50: percentile(allLookups, 50), p95: percentile(allLookups, 95) };
 
   const perceivedCompletionPasses = results.filter(
@@ -227,6 +251,7 @@ export function buildLayer2Report(
     floorAllPass,
     overallPassRate,
     ttfaP95Ms: ttfaMedians.p95,
+    firstAudibleP95Ms: firstAudibleMedians.p95,
     perceivedCompletionPassRate: perceivedCompletionRate,
     costCappedScripts: costCapped.length,
   };
@@ -243,10 +268,16 @@ export function buildLayer2Report(
     blockers.push(`floor failure on scripts: ${failingIds}`);
   }
   if (totalScripts > 0 && overallPassRate < thresholds.overallPassRateMin) {
+    // #1331 — the per-script vitest tests assert the floor only, so name the
+    // component counts; "0.0%" beside "12 passed" otherwise reads as bad math.
+    const count = (pick: (a: AggregatedResult) => boolean): string =>
+      `${results.filter((r) => pick(r.aggregated)).length}/${totalScripts}`;
     blockers.push(
       `overall pass rate ${(overallPassRate * 100).toFixed(1)}% below threshold ${(
         thresholds.overallPassRateMin * 100
-      ).toFixed(0)}%`,
+      ).toFixed(0)}% (a script passes only when floor, disposition and perceived completion all pass: ` +
+        `floor ${count((a) => a.floor.passed)}, disposition ${count((a) => a.disposition.passed)}, ` +
+        `perceived completion ${count((a) => a.perceivedCompletion.passed)})`,
     );
   }
   // #1387 — zero TTFA samples means the observations carried no
@@ -260,7 +291,17 @@ export function buildLayer2Report(
   }
   if (totalScripts > 0 && ttfaMedians.p95 > thresholds.ttfaP95MaxMs) {
     blockers.push(
-      `TTFA P95 ${ttfaMedians.p95.toFixed(0)}ms above threshold ${thresholds.ttfaP95MaxMs}ms`,
+      `answer-audio (TTFA) P95 ${ttfaMedians.p95.toFixed(0)}ms above threshold ${thresholds.ttfaP95MaxMs}ms`,
+    );
+  }
+  if (totalScripts > 0 && allFirstAudible.length === 0) {
+    blockers.push(
+      'first-audible not measured on any script (no transcript→filler/first-audio timing in the observations)',
+    );
+  }
+  if (totalScripts > 0 && firstAudibleMedians.p95 > thresholds.firstAudibleP95MaxMs) {
+    blockers.push(
+      `first-audible P95 ${firstAudibleMedians.p95.toFixed(0)}ms above threshold ${thresholds.firstAudibleP95MaxMs}ms`,
     );
   }
   if (totalScripts > 0 && perceivedCompletionRate < thresholds.perceivedCompletionPassRateMin) {
@@ -290,6 +331,7 @@ export function buildLayer2Report(
     })),
     callerExperience: {
       ttfaMedians,
+      firstAudibleMedians,
       lookupMedians,
       repromptRatioOverall,
       perceivedCompletionRate,
@@ -338,7 +380,12 @@ export function formatLayer2ReportMarkdown(report: Layer2Report): string {
       report.overallPassRate * 100
     ).toFixed(1)}%)`,
   );
-  lines.push(`- TTFA median P95: ${report.callerExperience.ttfaMedians.p95.toFixed(0)}ms`);
+  lines.push(
+    `- First-audible median P95: ${report.callerExperience.firstAudibleMedians.p95.toFixed(0)}ms`,
+  );
+  lines.push(
+    `- Answer-audio (TTFA) median P95: ${report.callerExperience.ttfaMedians.p95.toFixed(0)}ms`,
+  );
   lines.push(
     `- Lookup→speak median P95: ${report.callerExperience.lookupMedians.p95.toFixed(0)}ms`,
   );

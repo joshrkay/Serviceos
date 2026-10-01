@@ -17,7 +17,8 @@
       "caller": "Hi, I'd like to schedule service for my home.",
       "expected": {
         "intent": "create_appointment",
-        "escalates": true
+        "escalates": false,
+        "spokenAnswerMatches": "#1540 §2 owner decision (2026-10-01): an unknown caller is identified (found or created by phone) AND their request is kept — no hand-off to a person and no 'How can I help you today?'. The agent reads the booking request back for a yes (e.g. 'Just to confirm — you'd like to schedule an appointment, with no day or time yet. Is that right?')"
       },
       "hangupAfter": false
     }

@@ -90,6 +90,13 @@ export const VoiceQualityScriptSchema = z.object({
       caller: z.string(),
       expected: z.object({
         intent: z.string().optional(),
+        /**
+         * #1540 §5 — other intents that answer the caller's words just as
+         * well ("What do I owe?" → lookup_balance as well as lookup_invoices).
+         * Criterion 9 accepts `intent` or any of these; `intent` stays the
+         * one the Layer 1 mock replays, so cassettes are unaffected.
+         */
+        alsoAcceptedIntents: z.array(z.string()).optional(),
         slots: z.record(z.unknown()).optional(),
         proposalType: z.string().optional(),
         escalates: z.boolean().optional(),

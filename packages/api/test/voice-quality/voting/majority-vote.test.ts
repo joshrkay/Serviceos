@@ -28,6 +28,7 @@ function makeRun(overrides: Partial<PerRunResult> = {}): PerRunResult {
     },
     callerExperience: {
       ttfaMs: 200,
+      firstAudibleMs: 0,
       lookupMs: 1000,
       durationMs: 60_000,
       repromptRatio: 0,
@@ -120,6 +121,35 @@ describe('VQ2-012 — majority-vote aggregator', () => {
     expect(out.flakeIndicator).toBe(true);
   });
 
+  // #1331 — run 36829085635's report said only "poor, poor, poor" for 24
+  // scripts; with no rationale and no agent transcript the failures could not
+  // be diagnosed without another paid run. Each run's judge rationale and the
+  // agent's per-turn transcript now travel into the aggregated verdict.
+  it('#1331 — keeps each run’s judge rationale and agent transcript in run order', () => {
+    const poor = makeRun({
+      perceivedCompletion: {
+        satisfaction: 'poor',
+        abandonmentRisk: 1,
+        rationale: 'Agent never answered the question.',
+        agentTurns: ['<response not captured>'],
+      },
+    });
+    const good = makeRun({
+      perceivedCompletion: {
+        satisfaction: 'good',
+        abandonmentRisk: 0,
+        rationale: 'Read the balance back correctly.',
+        agentTurns: ['You owe $972 on invoice INV-3001.'],
+      },
+    });
+    const out = aggregate([poor, good, good]);
+    expect(out.perceivedCompletion.runResults).toEqual([
+      { satisfaction: 'poor', abandonmentRisk: 1, rationale: 'Agent never answered the question.', agentTurns: ['<response not captured>'] },
+      { satisfaction: 'good', abandonmentRisk: 0, rationale: 'Read the balance back correctly.', agentTurns: ['You owe $972 on invoice INV-3001.'] },
+      { satisfaction: 'good', abandonmentRisk: 0, rationale: 'Read the balance back correctly.', agentTurns: ['You owe $972 on invoice INV-3001.'] },
+    ]);
+  });
+
   it("VQ2-012 — perceived completion all 'poor' → passed=false, flakeIndicator=false", () => {
     const poor = makeRun({
       perceivedCompletion: { satisfaction: 'poor', abandonmentRisk: 1 },
@@ -142,13 +172,13 @@ describe('VQ2-012 — majority-vote aggregator', () => {
 
   it('VQ2-012 — caller-experience medians: median([100,200,300]) === 200, median([100,100,300]) === 100', () => {
     const r1 = makeRun({
-      callerExperience: { ttfaMs: 100, lookupMs: 100, durationMs: 100, repromptRatio: 0, recoveryTurns: 0 },
+      callerExperience: { ttfaMs: 100, firstAudibleMs: 0, lookupMs: 100, durationMs: 100, repromptRatio: 0, recoveryTurns: 0 },
     });
     const r2 = makeRun({
-      callerExperience: { ttfaMs: 200, lookupMs: 100, durationMs: 100, repromptRatio: 0.1, recoveryTurns: 1 },
+      callerExperience: { ttfaMs: 200, firstAudibleMs: 0, lookupMs: 100, durationMs: 100, repromptRatio: 0.1, recoveryTurns: 1 },
     });
     const r3 = makeRun({
-      callerExperience: { ttfaMs: 300, lookupMs: 300, durationMs: 100, repromptRatio: 0.2, recoveryTurns: 3 },
+      callerExperience: { ttfaMs: 300, firstAudibleMs: 0, lookupMs: 300, durationMs: 100, repromptRatio: 0.2, recoveryTurns: 3 },
     });
     const out = aggregate([r1, r2, r3]);
     expect(out.callerExperience.ttfaMedianMs).toBe(200);

@@ -229,7 +229,10 @@ describe('#1118 — speechTurn (media streams) dispatches entity_ambiguous', () 
     expect(session.machine.currentState).toBe('intent_confirm');
     expect(session.machine.currentContext.extractedEntities?.customerId).toBe('bob-old');
     expect(session.machine.currentContext.pendingEntityAmbiguity).toBeUndefined();
-    expect(spoken(followUp).at(-1)).toBe('Just to confirm — create job. Is that right?');
+    // #1539 — the readback names the job and the resolved customer.
+    expect(spoken(followUp).at(-1)).toBe(
+      "Just to confirm — you'd like to open a new job for Bob Smith: faucet repair. Is that right?",
+    );
 
     await turn('yes');
     const proposals = await proposalRepo.findByTenant(TENANT);
@@ -271,7 +274,9 @@ describe('#1118 — speechTurn (media streams) dispatches entity_ambiguous', () 
     const fx = await turn('open a job for Bob Smith, faucet repair');
     expect(session.machine.currentState).toBe('intent_confirm');
     expect(session.machine.currentContext.extractedEntities?.customerId).toBe('bob-only');
-    expect(spoken(fx).at(-1)).toBe('Just to confirm — create job. Is that right?');
+    expect(spoken(fx).at(-1)).toBe(
+      "Just to confirm — you'd like to open a new job for Bob Smith: faucet repair. Is that right?",
+    );
   });
 
   it('with no locationRepo wired the question is still asked (phone-only hints) — degraded, never dropped', async () => {

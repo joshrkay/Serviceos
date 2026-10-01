@@ -25,36 +25,58 @@
  */
 import { median } from './median-of-three';
 
+/**
+ * #1331 — one run's verdict on a criterion family, with the grader's
+ * reason per failed criterion so a red report names WHY without a rerun.
+ */
+export interface RunCriteriaVerdict {
+  passed: boolean;
+  failedCriteria: number[];
+  reasons?: Record<number, string>;
+}
+
 export interface PerRunResult {
-  floor: { passed: boolean; failedCriteria: number[] };
+  floor: RunCriteriaVerdict;
   disposition: {
     passed: boolean;
     failedCriteria: number[];
+    reasons?: Record<number, string>;
     /** Hard-slot key/value pairs extracted from the proposal payload. */
     slotValues: Record<string, unknown>;
   };
   callerExperience: {
     ttfaMs: number;
+    /** #1331 — first-audible (filler or first reply frame) P95 for the run. */
+    firstAudibleMs: number;
     lookupMs: number;
     durationMs: number;
     repromptRatio: number;
     recoveryTurns: number;
   };
-  perceivedCompletion: {
-    satisfaction: 'good' | 'acceptable' | 'poor';
-    abandonmentRisk: 0 | 1 | 2;
-  };
+  perceivedCompletion: RunPerceivedCompletion;
+}
+
+/** One run's perceived-completion verdict. */
+export interface RunPerceivedCompletion {
+  satisfaction: 'good' | 'acceptable' | 'poor';
+  abandonmentRisk: 0 | 1 | 2;
+  /** #1331 — the judge's own rationale, for diagnosis without a re-run. */
+  rationale?: string;
+  /** #1331 — what the agent said each turn, as the judge read it. */
+  agentTurns?: string[];
 }
 
 export interface AggregatedResult {
   floor: {
     /** Unanimous-of-three. */
     passed: boolean;
-    runResults: ReadonlyArray<{ passed: boolean; failedCriteria: number[] }>;
+    runResults: ReadonlyArray<RunCriteriaVerdict>;
   };
   disposition: {
     /** 2-of-3 majority on `.passed`. */
     passed: boolean;
+    /** #1331 — each run's disposition verdict + reasons, in run order. */
+    runResults?: ReadonlyArray<RunCriteriaVerdict>;
     /** True iff every slot key has at most 1 distinct value across runs. */
     slotsAgree: boolean;
     /** Map of slotKey -> distinct-value count across the three runs. */
@@ -62,6 +84,8 @@ export interface AggregatedResult {
   };
   callerExperience: {
     ttfaMedianMs: number;
+    /** #1331 — median-of-three first-audible latency. */
+    firstAudibleMedianMs: number;
     lookupMedianMs: number;
     durationMedianMs: number;
     repromptRatioMedian: number;
@@ -71,9 +95,19 @@ export interface AggregatedResult {
     /** 2-of-3: satisfaction !== 'poor' AND abandonmentRisk !== 2. */
     passed: boolean;
     satisfactions: ReadonlyArray<'good' | 'acceptable' | 'poor'>;
+    /** #1331 — each run's verdict, rationale and agent transcript, in run order. */
+    runResults?: ReadonlyArray<RunPerceivedCompletion>;
   };
   /** True iff the three runs disagree on any binary outcome. */
   flakeIndicator: boolean;
+}
+
+function runVerdict(v: RunCriteriaVerdict): RunCriteriaVerdict {
+  return {
+    passed: v.passed,
+    failedCriteria: v.failedCriteria,
+    ...(v.reasons && Object.keys(v.reasons).length > 0 ? { reasons: v.reasons } : {}),
+  };
 }
 
 /**
@@ -113,6 +147,7 @@ export function aggregate(
 
   // Caller-experience: median-of-three per metric.
   const ttfaMedianMs = median(runs.map((r) => r.callerExperience.ttfaMs));
+  const firstAudibleMedianMs = median(runs.map((r) => r.callerExperience.firstAudibleMs));
   const lookupMedianMs = median(runs.map((r) => r.callerExperience.lookupMs));
   const durationMedianMs = median(runs.map((r) => r.callerExperience.durationMs));
   const repromptRatioMedian = median(
@@ -147,18 +182,17 @@ export function aggregate(
   return {
     floor: {
       passed: floorAllPass,
-      runResults: runs.map((r) => ({
-        passed: r.floor.passed,
-        failedCriteria: r.floor.failedCriteria,
-      })),
+      runResults: runs.map((r) => runVerdict(r.floor)),
     },
     disposition: {
       passed: dispositionMajority,
+      runResults: runs.map((r) => runVerdict(r.disposition)),
       slotsAgree,
       distinctSlotValueCounts,
     },
     callerExperience: {
       ttfaMedianMs,
+      firstAudibleMedianMs,
       lookupMedianMs,
       durationMedianMs,
       repromptRatioMedian,
@@ -167,6 +201,7 @@ export function aggregate(
     perceivedCompletion: {
       passed: pcMajority,
       satisfactions: runs.map((r) => r.perceivedCompletion.satisfaction),
+      runResults: runs.map((r) => ({ ...r.perceivedCompletion })),
     },
     flakeIndicator,
   };

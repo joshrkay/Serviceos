@@ -359,7 +359,7 @@ describe('PR-B create_customer — gated by the (create_customer, surface) cell'
     ).toBeDefined();
   });
 
-  it('cell served by a DIFFERENT module (media_streams: generic FSM path): the declared drift is preserved', async () => {
+  it('cell served by a DIFFERENT module (media_streams): an already-matched caller gets the shared #1540 §3 answer, no draft', async () => {
     const cell = COVERAGE_TABLE.create_customer.media_streams;
     expect(cell.status).toBe('reachable');
     const h = makeTurnHarness({
@@ -368,10 +368,8 @@ describe('PR-B create_customer — gated by the (create_customer, surface) cell'
 
     const fx = await h.turn('new customer, Maria Alvarez');
 
-    // No P18-001 one-turn consume: the FSM advanced into the multi-turn
-    // confirm funnel (entity_resolution → intent_confirm readback).
-    expect(ttsTexts(fx).join(' | ')).not.toContain('in our system already');
-    expect(h.session.machine.currentState).not.toBe('intent_capture');
+    expect(ttsTexts(fx).join(' | ')).toContain('in our system already');
+    expect(h.session.machine.currentState).toBe('intent_capture');
     expect(h.proposalRepo.create).not.toHaveBeenCalled();
   });
 });

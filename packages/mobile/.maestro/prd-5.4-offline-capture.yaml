@@ -20,7 +20,15 @@ tags:
 - extendedWaitUntil:
     visible: "You're offline.*"
     timeout: 30000
-- longPressOn: "Hold to record"
+- assertVisible: "Hold to record"
+# Hold the mic ~10 s with a slow in-place swipe (press-in → release). Maestro's
+# longPressOn (~3 s) released before the emulator's MediaRecorder reached
+# RECORDING (run 36772438631). Coordinates: the "Hold" circle on the CI AVD's
+# 320x640 screen (centre ≈ 160,279).
+- swipe:
+    start: "50%,42%"
+    end: "50%,45%"
+    duration: 10000
 - extendedWaitUntil:
     visible: "Saved offline"
     timeout: 30000

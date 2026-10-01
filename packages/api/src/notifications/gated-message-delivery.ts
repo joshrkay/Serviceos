@@ -282,6 +282,38 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
   }
 
   /**
+   * #1524 — would a customer text to `to` go out right now? The same
+   * decision `sendSms` makes (kill switch, then — in 'block' mode — consent,
+   * standing revocation and DNC, then the per-recipient cap), asked BEFORE a
+   * human approves a send whose only channel is SMS, so the refusal names the
+   * reason instead of the gate suppressing the send after the tap. Read-only:
+   * no audit row, no cap slot reserved. Null = it would go out.
+   */
+  async preflightCustomerSms(args: {
+    tenantId: string;
+    to: string;
+    smsConsent: boolean;
+  }): Promise<SmsSuppressionReason | null> {
+    if (!isOutboundChannelEnabled('sms', this.deps.env)) return 'channel_disabled';
+    if (this.deps.enforcement === 'block') {
+      const reason = await this.evaluate({
+        to: args.to,
+        body: '',
+        tenantId: args.tenantId,
+        recipientClass: 'customer',
+        consent: { smsConsent: args.smsConsent },
+      });
+      if (reason) return reason;
+    }
+    const cap = this.deps.recipientVolumeCap;
+    if (cap && cap.maxPerWindow > 0) {
+      const sent = await cap.ledger.sentInWindow(args.tenantId, normalizePhone(args.to), cap.windowHours);
+      if (sent >= cap.maxPerWindow) return 'recipient_volume_cap';
+    }
+    return null;
+  }
+
+  /**
    * #1402 §18 — the last step of every CUSTOMER send: reserve a slot in the
    * recipient's rolling window, then send. Over the cap → audited
    * `sms.suppressed` (reason `recipient_volume_cap`) + SmsSuppressedError, so

@@ -1,15 +1,20 @@
-# Shared subflow: wait for the dev-auth-signed-in app shell (no Clerk sign-in
-# screen), and step past the setup-complete gate. A fresh DEV_AUTH_BYPASS
-# tenant has not finished onboarding, so AuthGate routes it to /onboarding;
-# "Skip for now" is honoured for the session (app/(onboarding)/index.tsx).
+# Shared subflow: the dev-auth-signed-in app, past the setup-complete gate.
+#
+# A fresh DEV_AUTH_BYPASS tenant (the harness pm-clears the app, and the
+# tenant never completes business identity) always has setup incomplete, so
+# AuthGate always routes to /onboarding once GET /api/onboarding/status
+# resolves. Do NOT accept the tab bar as "signed in" before that: the gate
+# fails open while the status loads, so tabs flash first and the redirect lands
+# after (Maestro run 36767934585). Wait for onboarding, skip it ("Skip for now"
+# is honoured for the session — app/(onboarding)/onboarding.tsx), then wait for the
+# tab bar. The Clerk sign-in screen ("Check your email") must never appear.
 appId: com.serviceos.app
 ---
 - extendedWaitUntil:
-    visible: "(Skip for now|Today|Home)"
+    visible: "Skip for now"
     timeout: 120000
 - assertNotVisible: "Check your email"
-- runFlow:
-    when:
-      visible: "Skip for now"
-    commands:
-      - tapOn: "Skip for now"
+- tapOn: "Skip for now"
+- extendedWaitUntil:
+    visible: "Assistant"
+    timeout: 30000

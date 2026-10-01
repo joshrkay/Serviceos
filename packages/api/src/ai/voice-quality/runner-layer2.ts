@@ -224,6 +224,7 @@ function failEverythingRun(): PerRunResult {
     disposition: { passed: false, failedCriteria: [], slotValues: {} },
     callerExperience: {
       ttfaMs: 0,
+      firstAudibleMs: 0,
       lookupMs: 0,
       durationMs: 0,
       repromptRatio: 0,
@@ -252,6 +253,19 @@ function mergeSlotValues(
         merged[k] = v;
       }
     }
+  }
+  return merged;
+}
+
+/** #1331 — union of two graders' reasons; a criterion both failed keeps both. */
+function mergeReasons(
+  a: Record<number, string> | undefined,
+  b: Record<number, string> | undefined,
+): Record<number, string> {
+  const merged: Record<number, string> = { ...a };
+  for (const [k, v] of Object.entries(b ?? {})) {
+    const id = Number(k);
+    merged[id] = merged[id] ? `${merged[id]}; ${v}` : v;
   }
   return merged;
 }
@@ -329,17 +343,19 @@ async function gradeOneRun(
   });
 
   return {
-    floor: { passed: floor.passed, failedCriteria: floor.failedCriteria },
+    floor: { passed: floor.passed, failedCriteria: floor.failedCriteria, reasons: floor.reasons },
     disposition: {
       // Hard-disposition pass requires BOTH the structured grader's
       // verdict AND the LLM grader's verdict (criterion 12 + soft slot
       // 10). Either failure flips this run to disposition-fail.
       passed: dispStruct.passed && dispLlm.failedCriteria.length === 0,
       failedCriteria: [...dispStruct.failedCriteria, ...dispLlm.failedCriteria],
+      reasons: mergeReasons(dispStruct.reasons, dispLlm.reasons),
       slotValues: mergeSlotValues(dispStruct.perTurnDetail),
     },
     callerExperience: {
       ttfaMs: callerExp.ttfaP95Ms,
+      firstAudibleMs: callerExp.firstAudibleP95Ms,
       lookupMs: callerExp.lookupP95Ms,
       durationMs: callerExp.totalDurationMs,
       repromptRatio: reprompt.repromptRatio,
@@ -348,6 +364,8 @@ async function gradeOneRun(
     perceivedCompletion: {
       satisfaction: perceived.verdict.perceivedSatisfaction,
       abandonmentRisk: perceived.verdict.abandonmentRisk,
+      rationale: perceived.verdict.rationale,
+      ...(perceived.agentTurns ? { agentTurns: perceived.agentTurns } : {}),
     },
   };
 }

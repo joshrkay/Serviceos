@@ -229,6 +229,94 @@ describe('VQ2-013 — Layer 2 voting runner', () => {
     expect(result.perRunResults).toHaveLength(3);
   });
 
+  // #1331 — the weekly report said only `failedCriteria:[3]` and
+  // `disposition.passed:false`; the grader reasons that name WHY were
+  // dropped between the per-run graders and the aggregated verdict, so a
+  // red run could not be diagnosed from its artifact.
+  it('#1331 — the aggregated verdict keeps each run\'s floor and disposition failure reasons', async () => {
+    harness.floorReturn = {
+      passed: false,
+      failedCriteria: [3],
+      reasons: { 3: 'Turn latency 8100ms exceeds hard cap 7000ms' },
+    } as never;
+    harness.dispStructReturn = {
+      passed: false,
+      failedCriteria: [9],
+      reasons: { 9: 'turn 0: expected intent add_material, got unknown' },
+      perTurnDetail: [],
+    } as never;
+    harness.dispLlmReturn = {
+      failedCriteria: [12],
+      reasons: { 12: 'agent never confirmed the material' },
+    } as never;
+
+    const result = await runScriptLayer2(eligibleScript(), makeCtx());
+
+    expect(result.aggregated.floor.runResults[0]).toEqual({
+      passed: false,
+      failedCriteria: [3],
+      reasons: { 3: 'Turn latency 8100ms exceeds hard cap 7000ms' },
+    });
+    expect(result.aggregated.disposition.runResults?.[0]).toEqual({
+      passed: false,
+      failedCriteria: [9, 12],
+      reasons: {
+        9: 'turn 0: expected intent add_material, got unknown',
+        12: 'agent never confirmed the material',
+      },
+    });
+  });
+
+  it('#1331 — a criterion both disposition graders fail (10: hard + soft slots) keeps both reasons', async () => {
+    harness.dispStructReturn = {
+      passed: false,
+      failedCriteria: [10],
+      reasons: { 10: 'hard slot quantity: expected 3, got 2' },
+      perTurnDetail: [],
+    } as never;
+    harness.dispLlmReturn = {
+      failedCriteria: [10],
+      reasons: { 10: 'notes do not mention PEX' },
+    } as never;
+
+    const result = await runScriptLayer2(eligibleScript(), makeCtx());
+
+    expect(result.aggregated.disposition.runResults?.[0]?.reasons).toEqual({
+      10: 'hard slot quantity: expected 3, got 2; notes do not mention PEX',
+    });
+  });
+
+  it('#1331 — the aggregated perceived completion carries each run\'s judge rationale and agent turns', async () => {
+    harness.perceivedReturn = {
+      passed: false,
+      verdict: { perceivedSatisfaction: 'poor', rationale: 'Agent never answered.', abandonmentRisk: 1 },
+      agentTurns: ['<response not captured>'],
+    } as never;
+
+    const result = await runScriptLayer2(eligibleScript(), makeCtx());
+
+    expect(result.aggregated.perceivedCompletion.runResults?.[0]).toEqual({
+      satisfaction: 'poor',
+      abandonmentRisk: 1,
+      rationale: 'Agent never answered.',
+      agentTurns: ['<response not captured>'],
+    });
+  });
+
+  it('#1331 — the aggregated caller experience carries the median first-audible latency', async () => {
+    harness.callerExpReturn = {
+      ttfaP95Ms: 2_900,
+      firstAudibleP95Ms: 270,
+      lookupP95Ms: 500,
+      totalDurationMs: 30_000,
+    } as never;
+
+    const result = await runScriptLayer2(eligibleScript(), makeCtx());
+
+    expect(result.aggregated.callerExperience.firstAudibleMedianMs).toBe(270);
+    expect(result.aggregated.callerExperience.ttfaMedianMs).toBe(2_900);
+  });
+
   it('VQ2-013 — accumulates per-run cost; total = sum of run costs', async () => {
     harness.runScriptCostsCents = [50, 70, 30];
     const script = eligibleScript();

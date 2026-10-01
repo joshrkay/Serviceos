@@ -164,6 +164,12 @@ export type CallingAgentEvent =
   | { type: 'compliance_violation_detected'; rule: string }
   | { type: 'greeted_ok' }
   | { type: 'caller_known'; customerId: string }
+  /**
+   * #1331 — the caller answered "no" to the caller-name identity check ("is
+   * this <name on the account>?"): the caller-ID account is unbound for the
+   * rest of the call and the agent asks who it is speaking with.
+   */
+  | { type: 'caller_identity_rejected' }
   /** Authenticated in-app operator; not a CRM customer identity. */
   | { type: 'operator_session' }
   | { type: 'unknown_caller' }

@@ -12,21 +12,14 @@
  *     transcript. Hard slots (IDs, enums, datetime) are graded by the
  *     structured grader (VQ-021); this only judges free-text fields.
  *
- * v1 spoken-answer extraction is conservative. The voice agent doesn't
- * yet emit a `speech_outbound` event carrying the agent's TTS string
- * (VQ-024 will wire that), so we fall back to:
- *   1. The corresponding proposal's `summary` (what the agent would have
- *      spoken back as confirmation), when a proposal exists for that turn.
- *   2. `script.turns[i].expected.spokenAnswerMatches` only as a SAFETY
- *      net for the prompt context — never as the agent's own output
- *      (that would tautologically pass the judge).
- *
- * In v1 this means we are grading "the proposal contract surface" rather
- * than the actual emitted TTS, which is acceptable: every script that
- * exercises a mutation has a proposal to grade, and pure-lookup scripts
- * (no proposal) skip the judge with a documented rationale until VQ-024
- * lands. The same key path will swap from `proposal.summary` to the
- * captured TTS string with no API change to graders.
+ * Spoken-answer extraction (#1331): the turn's `speech_outbound`
+ * transcript — what the caller heard (Layer 2: Whisper-recovered audio;
+ * Layer 1: the text driver's reply). The proposal `summary` is only the
+ * fallback when no speech was captured for the turn, and
+ * `script.turns[i].expected.spokenAnswerMatches` is only ever the
+ * expectation — never the agent's own output (that would tautologically
+ * pass the judge). Before #1331 this graded `proposal.summary` (an
+ * operator-card title such as "Add material") and skipped every lookup.
  *
  * Concurrency: judge calls run in parallel via a hand-rolled bounded
  * pool (cap 5). Promise.all on a giant array would saturate the LLM
@@ -48,6 +41,7 @@ import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
 import type { Proposal } from '../../../proposals/proposal';
 import { parseJsonResponse } from './parse-json-response';
+import { corpusCallMoment, corpusTimezone } from '../layer2-world';
 
 export interface DispositionLlmInput {
   observation: Observation;
@@ -97,7 +91,17 @@ const JUDGE_SYSTEM = `You are a strict but fair evaluator of a voice agent's res
   "softSlotsReasonable": boolean,
   "rationale": string  // <= 200 chars
 }
-You return false for "answerMeaningMatches" only if the agent gave wrong info, missed key info, or hallucinated. Cosmetic differences (phrasing, ordering) are NOT failures.`;
+You return false for "answerMeaningMatches" only if the agent gave wrong info, missed key info, or hallucinated. Cosmetic differences (phrasing, ordering) are NOT failures.
+
+How this product works (grade against THIS contract, not an imagined one):
+- For a request that changes something (book, cancel, update, refund, message, ...) the agent never carries it out during the call. It first reads the request back ("Just to confirm — ... Is that right?"); that read-back IS the right reply to the request turn, and it should restate what the caller asked. On the caller's yes the change is drafted for human review. A turn may complete a meaning set up by the agent's previous line (shown when present): the details the caller just confirmed in the read-back need not be repeated in the drafted reply.
+- The business owner (calling their own line) hears that it is "in your approvals waiting for you to review" — for the owner that IS "drafted for review; an operator will confirm", because the owner is the operator. A customer hears that the team will confirm.
+- Still wrong: drafting or reading back the wrong thing, saying a draft is incomplete or needs follow-up when the expected answer says it was drafted, claiming the change already happened, or wrong facts.
+
+The agent's line is speech recognition of the audio the caller heard:
+- Short pre-recorded fillers played while the agent works ("One moment", "Let me check on that", "Let me see", "Sure thing", "Absolutely", "Got it", "Okay") are not part of the answer — ignore them wherever they appear.
+- A word transcribed as a sound-alike of the expected word (e.g. a trade term like "PEX" heard as "pecks") is a transcription artifact, not an agent error. A different value — other digits, another date, address, amount or name — is still wrong.
+- Dates are relative to the call date given with the turn.`;
 
 /**
  * Soft-field keys that the LLM judge owns on criterion 10. Hard fields
@@ -127,13 +131,16 @@ export async function gradeDispositionLlm(
     expectedAnswer?: string;
     softSlots: Record<string, unknown>;
     callerTranscript: string;
+    previousAgentLine?: string;
   }> = script.turns.map((turn, i) => {
     const proposal = observation.proposals[i] as Proposal | undefined;
-    const spokenAnswer = extractSpokenAnswer(proposal);
+    const spokenAnswer = extractSpokenAnswer(observation, i, proposal);
     const softSlots = extractSoftSlots(proposal);
+    const previousAgentLine = i > 0 ? spokenLine(observation, i - 1) : undefined;
     return {
       turnIndex: i,
       spokenAnswer,
+      ...(previousAgentLine !== undefined ? { previousAgentLine } : {}),
       ...(turn.expected.spokenAnswerMatches !== undefined
         ? { expectedAnswer: turn.expected.spokenAnswerMatches }
         : {}),
@@ -141,6 +148,8 @@ export async function gradeDispositionLlm(
       callerTranscript: turn.caller,
     };
   });
+
+  const callContext = describeCall(script);
 
   // Run with bounded concurrency.
   const perTurnDetail: DispositionLlmTurnDetail[] = new Array(turnTasks.length);
@@ -161,6 +170,8 @@ export async function gradeDispositionLlm(
             task.expectedAnswer,
             task.softSlots,
             task.callerTranscript,
+            task.previousAgentLine,
+            callContext,
             gateway,
             costTracker,
           );
@@ -199,6 +210,8 @@ async function evaluateTurn(
   expectedAnswer: string | undefined,
   softSlots: Record<string, unknown>,
   callerTranscript: string,
+  previousAgentLine: string | undefined,
+  callContext: string,
   gateway: LLMGateway,
   costTracker?: { addCents: (n: number) => void },
 ): Promise<DispositionLlmTurnDetail> {
@@ -216,14 +229,16 @@ async function evaluateTurn(
     };
   }
 
-  const cacheKey = makeCacheKey(scriptId, turnIndex, spokenAnswer, expectedAnswer, softSlots);
+  const cacheKey = makeCacheKey(scriptId, turnIndex, spokenAnswer, expectedAnswer, softSlots, previousAgentLine);
   let parsed = judgeCache.get(cacheKey);
   if (!parsed) {
     parsed = await callJudge(gateway, {
+      callContext,
       callerTranscript,
       spokenAnswer,
       expectedAnswer,
       softSlots,
+      ...(previousAgentLine !== undefined ? { previousAgentLine } : {}),
     });
     judgeCache.set(cacheKey, parsed);
     costTracker?.addCents(JUDGE_CALL_COST_CENTS);
@@ -240,15 +255,43 @@ async function evaluateTurn(
 }
 
 interface JudgeUserPromptInput {
+  /** #1331 — who is calling + the corpus call date (same for every turn). */
+  callContext: string;
   callerTranscript: string;
+  /** #1331 — the agent line this caller turn answered (e.g. the read-back). */
+  previousAgentLine?: string;
   spokenAnswer: string | null;
   expectedAnswer?: string;
   softSlots: Record<string, unknown>;
 }
 
+/**
+ * #1331 — who is calling and on what date, so a drafted-reply / date answer is
+ * graded against the right persona and the corpus world's calendar (not the
+ * judge's guess at "this year").
+ */
+function describeCall(script: VoiceQualityScript): string {
+  const caller = script.callerIsOwner
+    ? 'Caller: the business owner, calling their own business line.'
+    : 'Caller: a customer of the business.';
+  const date = new Intl.DateTimeFormat('en-US', {
+    timeZone: corpusTimezone(script),
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(corpusCallMoment(script));
+  return `${caller}\nCall date: ${date}`;
+}
+
 function buildUserPrompt(input: JudgeUserPromptInput): string {
+  const context =
+    input.previousAgentLine !== undefined
+      ? `Agent's previous line (what the caller was answering): "${input.previousAgentLine}"\n`
+      : '';
   return `
-Caller said: "${input.callerTranscript}"
+${input.callContext}
+${context}Caller said: "${input.callerTranscript}"
 Agent said: "${input.spokenAnswer ?? '(no spoken response captured)'}"
 Expected response should match: "${input.expectedAnswer ?? '(no explicit expectation; just judge for reasonableness)'}"
 Soft slots in agent's proposal: ${JSON.stringify(input.softSlots)}
@@ -295,13 +338,32 @@ async function callJudge(
 }
 
 /**
- * v1 spoken-answer extraction. We use the proposal's `summary` (the
- * TTS-ready confirmation string the agent would speak back) when a
- * proposal exists for the turn. When there is no proposal — e.g., a
- * pure lookup turn — we return null and the turn is skipped with a
- * documented rationale until VQ-024 captures the actual emitted TTS.
+ * The agent's spoken answer for turn `turnIndex`: the `speech_outbound`
+ * transcript the driver recorded for that turn (Layer 2: Whisper-recovered
+ * from the audio the caller heard; Layer 1: the string the text driver
+ * spoke). #1331 — criterion 12 is "right caller-facing answer", so it grades
+ * what was SAID. The proposal `summary` is an operator-card title ("Add
+ * material"), not a reply; it remains only as the fallback for an
+ * observation with no captured speech for the turn. No speech and no
+ * proposal → null, and the turn is skipped (see evaluateTurn).
  */
-function extractSpokenAnswer(proposal: Proposal | undefined): string | null {
+function spokenLine(observation: Observation, turnIndex: number): string | undefined {
+  let spoken: string | undefined;
+  for (const e of observation.events) {
+    if (e.type === 'speech_outbound' && e.turnIndex === turnIndex && e.transcript.trim().length > 0) {
+      spoken = e.transcript;
+    }
+  }
+  return spoken;
+}
+
+function extractSpokenAnswer(
+  observation: Observation,
+  turnIndex: number,
+  proposal: Proposal | undefined,
+): string | null {
+  const spoken = spokenLine(observation, turnIndex);
+  if (spoken !== undefined) return spoken;
   if (!proposal) return null;
   if (typeof proposal.summary === 'string' && proposal.summary.length > 0) {
     return proposal.summary;
@@ -328,6 +390,7 @@ function makeCacheKey(
   spokenAnswer: string,
   expectedAnswer: string | undefined,
   softSlots: Record<string, unknown>,
+  previousAgentLine: string | undefined,
 ): string {
   // Stable JSON: sort soft-slot keys so equivalent payloads produce the
   // same hash regardless of property iteration order.
@@ -342,5 +405,7 @@ function makeCacheKey(
   hash.update(expectedAnswer ?? '');
   hash.update(' ');
   hash.update(stableSlots);
+  hash.update(' ');
+  hash.update(previousAgentLine ?? '');
   return hash.digest('hex');
 }

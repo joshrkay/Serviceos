@@ -202,7 +202,9 @@ describe('SendEstimateNudgeExecutionHandler', () => {
     expect(sendService.sendEstimate).toHaveBeenCalledWith({
       tenantId: TENANT,
       estimateId: ESTIMATE_ID,
-      channel: 'sms',
+      // #1528 — no channel on the payload: 'auto' (the customer's email on
+      // file, else a text), the same rule as send_invoice / send_estimate.
+      channel: 'auto',
       customMessage: 'Any questions?',
       // #1145 — the nudge is claimed per occurrence (estimate, version,
       // reminderCount + 1), so a retried first nudge dedupes and a later one does not.

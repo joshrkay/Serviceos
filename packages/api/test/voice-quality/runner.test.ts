@@ -442,3 +442,168 @@ describe('VQ2-014 — loadLayer2Corpus', () => {
     expect(layer2.map((s) => s.id)).toEqual(['layer2-only-script']);
   });
 });
+
+// #1331 / D-028 follow-up — a script that asks operator-only actions
+// (add material, log an expense, apply a credit …) declares
+// `harnessOperatorTaxonomy`. Layer 1 honours it by classifying on the full
+// operator taxonomy; Layer 2 drives the production processor, which (rightly)
+// refuses those actions on a customer's line. Owner decision 2026-10-01: on
+// Layer 2 those scripts run as the OWNER line — the real surface where an
+// owner asks for these actions by phone.
+describe('#1331 — Layer 2 owner-line persona', () => {
+  it('loadLayer2Corpus runs operator-taxonomy scripts as the owner line; others and Layer 1 are unchanged', () => {
+    const layer2 = new Map(loadLayer2Corpus().map((s) => [s.id, s]));
+    expect(layer2.get('add-material-known-customer')?.callerIsOwner).toBe(true);
+    expect(layer2.get('apply-credit-known-customer')?.callerIsOwner).toBe(true);
+    expect(layer2.get('create-appointment-known-customer')?.callerIsOwner).toBe(false);
+
+    const layer1 = new Map(loadCorpus().map((s) => [s.id, s]));
+    expect(layer1.get('add-material-known-customer')?.callerIsOwner).toBe(false);
+  });
+
+  // #1331 — the phone turn engine never drafts a write on the request turn:
+  // it reads the request back ("Just to confirm — add material. Is that
+  // right?") and drafts only on the caller's yes. The corpus encodes the
+  // Layer 1 text-mode contract (draft on the request turn), so on Layer 2 the
+  // caller answers the readback; the drafted-reply expectation moves to that
+  // answer turn. Layer 1 keeps the one-turn script.
+  it('loadLayer2Corpus answers the phone readback with a yes after every write turn', () => {
+    const script = loadLayer2Corpus().find((s) => s.id === 'add-material-known-customer')!;
+    expect(script.turns).toHaveLength(2);
+    expect(script.turns[0]!.caller).toBe('Add three boxes of half-inch PEX to the shopping list.');
+    expect(script.turns[0]!.expected).toEqual({
+      intent: 'add_material',
+      proposalType: 'add_material',
+      slots: { quantity: 3 },
+      escalates: false,
+    });
+    expect(script.turns[0]!.hangupAfter).toBe(false);
+    expect(script.turns[1]).toEqual({
+      caller: "Yes, that's right.",
+      expected: {
+        spokenAnswerMatches:
+          "Got it — I've drafted an add material for review. Anything else I can help you with?",
+      },
+      hangupAfter: false,
+    });
+
+    const lookup = loadLayer2Corpus().find((s) => s.id === 'lookup-jobs-known-customer')!;
+    expect(lookup.turns).toHaveLength(1);
+    const layer1 = loadCorpus().find((s) => s.id === 'add-material-known-customer')!;
+    expect(layer1.turns).toHaveLength(1);
+  });
+});
+
+// #1331 — appointment / invoice fixture rows reach the repos with real Dates,
+// as Pg-hydrated rows do. Seeded as JSON strings, the shared appointment
+// lookup threw "a.scheduledStart.getTime is not a function" the moment a
+// lookup fixture linked its appointment to the caller (B8.10's class of bug,
+// fixed then for jobs / estimates / proposals only).
+describe('#1331 — runScript seeds appointment and invoice dates as Dates', () => {
+  it('hands the driver appointments and invoices whose date fields are Date objects', async () => {
+    const script: VoiceQualityScript = {
+      ...syntheticLookupScript(),
+      fixtures: {
+        ...syntheticLookupScript().fixtures,
+        appointments: [
+          {
+            id: '00000000-0000-4000-8000-0000000000b1',
+            tenantId: 't-vq-008',
+            jobId: '00000000-0000-4000-8000-0000000000c1',
+            scheduledStart: '2026-06-12T16:00:00.000Z',
+            scheduledEnd: '2026-06-12T18:00:00.000Z',
+            arrivalWindowStart: '2026-06-12T16:00:00.000Z',
+            arrivalWindowEnd: '2026-06-12T16:30:00.000Z',
+            timezone: 'America/Los_Angeles',
+            status: 'scheduled',
+            createdBy: 'user_seed',
+            createdAt: '2026-04-30T10:00:00.000Z',
+            updatedAt: '2026-04-30T10:00:00.000Z',
+          },
+        ],
+        invoices: [
+          {
+            id: '00000000-0000-4000-8000-0000000000d1',
+            tenantId: 't-vq-008',
+            jobId: '00000000-0000-4000-8000-0000000000c1',
+            invoiceNumber: 'INV-1',
+            status: 'sent',
+            lineItems: [],
+            totals: { subtotalCents: 100, discountCents: 0, taxCents: 0, totalCents: 100 },
+            amountPaidCents: 0,
+            amountDueCents: 100,
+            issuedAt: '2026-04-15T10:00:00.000Z',
+            dueDate: '2026-05-15T10:00:00.000Z',
+            createdBy: 'user_seed',
+            createdAt: '2026-04-15T10:00:00.000Z',
+            updatedAt: '2026-04-15T10:00:00.000Z',
+          },
+        ],
+      },
+    } as unknown as VoiceQualityScript;
+
+    const seen: Record<string, unknown> = {};
+    await runScript(script, {
+      repoMode: 'memory',
+      driverFactory: (fctx) => ({
+        startSession: async () => {
+          const [appt] = await fctx.repos.appointmentRepo.findByDateRange(
+            't-vq-008',
+            new Date('2026-01-01T00:00:00Z'),
+            new Date('2027-01-01T00:00:00Z'),
+          );
+          const inv = await fctx.repos.invoiceRepo.findById('t-vq-008', '00000000-0000-4000-8000-0000000000d1');
+          seen.scheduledStart = appt?.scheduledStart;
+          seen.arrivalWindowEnd = appt?.arrivalWindowEnd;
+          seen.dueDate = inv?.dueDate;
+          seen.issuedAt = inv?.issuedAt;
+          return { sessionId: 's-1' };
+        },
+        speak: async () => ({ agentResponse: '', latencyMs: 0 }),
+        hangup: async () => {},
+        endSession: async () => {},
+      }),
+    });
+
+    expect(seen.scheduledStart).toEqual(new Date('2026-06-12T16:00:00.000Z'));
+    expect(seen.arrivalWindowEnd).toEqual(new Date('2026-06-12T16:30:00.000Z'));
+    expect(seen.dueDate).toEqual(new Date('2026-05-15T10:00:00.000Z'));
+    expect(seen.issuedAt).toEqual(new Date('2026-04-15T10:00:00.000Z'));
+  });
+});
+
+// #1331 — production contracts validate record ids as UUIDs
+// (`customerId: Invalid uuid`). Corpus fixtures use readable ids
+// ("cust_02_add_material_owner") that Layer 1's mocks tolerate, so on Layer 2
+// every write proposal was gated on a bad customerId and lookup_balance
+// failed outright (run 36829085635 log). The Layer 2 persona maps each
+// readable fixture id to a stable UUID everywhere it appears.
+describe('#1331 — loadLayer2Corpus fixture ids', () => {
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  it('gives every Layer 2 fixture record a UUID id, and keeps references and expected slots pointing at it', () => {
+    const layer2 = loadLayer2Corpus();
+    const create = layer2.find((s) => s.id === 'create-appointment-known-customer')!;
+    const customer = (create.fixtures.customers as Array<{ id: string; tenantId: string }>)[0]!;
+    expect(customer.id).toMatch(UUID);
+    expect(create.turns[0]!.expected.slots?.customerId).toBe(customer.id);
+    // Tenant ids are not record ids and stay as authored.
+    expect(customer.tenantId).toBe('t_02_create_appointment');
+
+    const cancel = layer2.find((s) => s.id === 'cancel-appointment-known-customer')!;
+    const appt = (cancel.fixtures.appointments as Array<{ id: string; jobId: string }>)[0]!;
+    expect(appt.id).toMatch(UUID);
+    expect(appt.jobId).toMatch(UUID);
+    expect(cancel.turns[0]!.expected.slots?.appointmentId).toBe(appt.id);
+
+    // Stable across loads, so the three voting runs and every week agree.
+    expect(
+      loadLayer2Corpus().find((s) => s.id === 'create-appointment-known-customer')!.turns[0]!
+        .expected.slots?.customerId,
+    ).toBe(customer.id);
+
+    // Layer 1 is untouched.
+    const layer1 = loadCorpus().find((s) => s.id === 'create-appointment-known-customer')!;
+    expect((layer1.fixtures.customers as Array<{ id: string }>)[0]!.id).toBe('cust_02_create_appt_jane');
+  });
+});

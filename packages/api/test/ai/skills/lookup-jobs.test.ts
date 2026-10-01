@@ -93,7 +93,7 @@ describe('P11-001 — lookupJobs skill', () => {
       expect(result.summary).toContain('AC tune-up');
     });
 
-    it('P18-004 lookup-jobs multi result — TTS lists count and latest detail', async () => {
+    it('P18-004 lookup-jobs multi result — TTS lists count and every recent job (#1331 owner decision)', async () => {
       await seed({ summary: 'a' });
       await seed({ summary: 'b' });
       await seed({ summary: 'c' });
@@ -103,7 +103,8 @@ describe('P11-001 — lookupJobs skill', () => {
       );
       if (result.status !== 'found') throw new Error('expected found');
       expect(result.summary).toMatch(/3 recent jobs/);
-      expect(result.summary.toLowerCase()).toContain('latest');
+      // #1331 (2026-10-01): every recent job is named, not only the latest.
+      for (const s of [' a,', ' b,', ' c,']) expect(result.summary).toContain(s);
     });
 
     it('P18-004 lookup-jobs empty — TTS uses friendly "not seeing any jobs" phrasing', async () => {

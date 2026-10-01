@@ -18,6 +18,7 @@ import type {
   EntityKind,
 } from '../../resolution/entity-resolver';
 import type { ExtractedEntities } from '../../orchestration/intent-classifier';
+import type { AppointmentRepository } from '../../../appointments/appointment';
 import { resolveDateTime } from '../../scheduling/resolve-datetime';
 import { isRuntimeTimezone } from '../../../shared/timezone';
 
@@ -514,6 +515,32 @@ export interface SchedulingResolutionOptions {
    * pick resolves only the references still outstanding.
    */
   pinnedRefs?: Record<string, string>;
+  /**
+   * #1540 §1 — the current window of a resolved appointment, for a
+   * reschedule's "<day> at the same time". Absent ⇒ that phrase stays
+   * unresolved (gated), exactly as before.
+   */
+  appointmentWindow?: (
+    appointmentId: string,
+  ) => Promise<{ startUtc: string; endUtc: string } | undefined>;
+}
+
+/**
+ * #1540 §1 — `appointmentWindow` over an appointment repository: the
+ * appointment's current [start, end) as UTC ISO strings, tenant-scoped.
+ */
+export function appointmentWindowFrom(
+  appointmentRepo: Pick<AppointmentRepository, 'findById'>,
+  tenantId: string,
+): NonNullable<SchedulingResolutionOptions['appointmentWindow']> {
+  return async (appointmentId) => {
+    const appt = await appointmentRepo.findById(tenantId, appointmentId);
+    if (!appt) return undefined;
+    return {
+      startUtc: new Date(appt.scheduledStart).toISOString(),
+      endUtc: new Date(appt.scheduledEnd).toISOString(),
+    };
+  };
 }
 
 /**
@@ -529,6 +556,7 @@ export interface SchedulingResolutionOptions {
 function resolveSpokenWindow(
   desc: string,
   opts: SchedulingResolutionOptions | undefined,
+  sameTimeAs?: { startUtc: string; endUtc: string },
 ): ParsedWindow | undefined {
   const timezone =
     typeof opts?.timezone === 'string' && isRuntimeTimezone(opts.timezone.trim())
@@ -542,6 +570,7 @@ function resolveSpokenWindow(
   const resolved = resolveDateTime(desc, {
     timezone,
     ...(opts?.now ? { now: opts.now } : {}),
+    ...(sameTimeAs ? { sameTimeAs } : {}),
   });
   if (!resolved.ok) return undefined;
   return { scheduledStart: resolved.startUtc, scheduledEnd: resolved.endUtc };
@@ -1008,6 +1037,21 @@ export async function resolveSchedulingEntities(
 
   if (intent === 'cancel_appointment' && typeof entities.reason !== 'string') {
     refs.reason = 'Requested by caller via voice session';
+  }
+
+  // #1540 §1 — "Wednesday at the same time" is relative to the appointment
+  // being moved, so it can only resolve once that appointment has: its
+  // tenant-local clock time and length land on the new day. Same zone gate
+  // as every spoken time (no zone ⇒ nothing resolved).
+  if (newDt && !refs.newScheduledStart && refs.appointmentId && opts?.appointmentWindow) {
+    const anchor = await opts.appointmentWindow(refs.appointmentId).catch(() => undefined);
+    if (anchor) {
+      const win = resolveSpokenWindow(newDt, opts, anchor);
+      if (win) {
+        refs.newScheduledStart = win.scheduledStart;
+        refs.newScheduledEnd = win.scheduledEnd;
+      }
+    }
   }
 
   return { status: 'resolved', refs };

@@ -200,12 +200,12 @@ type Classification = 'harness' | 'cross-document-aggregate' | 'violation';
 
 const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }> = [
   {
-    at: 'src/ai/voice-quality/inapp-50/world.ts:600',
+    at: 'src/ai/voice-quality/inapp-50/world.ts:161',
     as: 'harness',
     why: 'inapp-50 eval world seeding a fixture line item; not a caller-facing path (same exemption as I1′).',
   },
   {
-    at: 'src/ai/skills/lookup-estimates.ts:173',
+    at: 'src/ai/skills/lookup-estimates.ts:190',
     as: 'cross-document-aggregate',
     why: 'Sums the engine-produced total of N estimates for a spoken "you have 3 estimates totaling $X". A report over documents, not a document\'s total.',
   },

@@ -39,6 +39,36 @@ EVIDENCE="$OUT/evidence.txt"
 log() { echo "[maestro-device-run] $*" | tee -a "$EVIDENCE"; }
 fail() { log "FAIL: $*"; exit 1; }
 
+# On any failure, leave what is needed to diagnose it next to the Maestro
+# debug output: the device log tail and the screen the app was left on.
+on_exit() {
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    adb logcat -d 2>/dev/null | tail -n 4000 >"$OUT/logcat-tail.txt" || true
+    adb exec-out screencap -p >"$OUT/final-screen.png" 2>/dev/null || true
+    log "exit $rc — logcat tail + final screen written to $OUT"
+  fi
+}
+trap on_exit EXIT
+
+# The debug build loads its JS from Metro. Request the exact bundle the app
+# asks for ONCE, up front: a Babel/transform error then fails here in seconds
+# with Metro's own message, instead of as a red box behind a 2-minute Maestro
+# wait (run 36765536371). It also warms Metro's cache for the first launch.
+BUNDLE_URL='http://localhost:8081/.expo/.virtual-metro-entry.bundle?platform=android&dev=true&lazy=true&minify=false&app=com.serviceos.app&modulesOnly=false&runModule=true&excludeSource=true&sourcePaths=url-server'
+check_bundle() {
+  local code
+  log "requesting the Android dev bundle from Metro"
+  code="$(curl -sS --max-time 900 -o "$OUT/bundle-check.txt" -w '%{http_code}' "$BUNDLE_URL" || echo 000)"
+  if [ "$code" != "200" ]; then
+    head -c 4000 "$OUT/bundle-check.txt" 2>/dev/null | tee -a "$EVIDENCE" || true
+    echo | tee -a "$EVIDENCE"
+    fail "Metro returned HTTP $code for the Android bundle"
+  fi
+  log "bundle OK ($(wc -c <"$OUT/bundle-check.txt") bytes)"
+  rm -f "$OUT/bundle-check.txt"
+}
+
 # --- dev-auth token: byte-identical to src/dev/clerk-expo-dev-shim.tsx's -----
 b64url() { printf '%s' "$1" | base64 | tr -d '=\n' | tr '/+' '_-'; }
 TOKEN="$(b64url '{"alg":"none","typ":"JWT"}').$(b64url '{"sub":"dev_owner","sid":"dev-session","role":"owner"}').x"
@@ -60,10 +90,21 @@ LOCATION_ID="$(api_post /api/locations "{\"customerId\":\"$CUSTOMER_ID\",\"stree
 [ -n "$LOCATION_ID" ] || fail "location seed returned no id"
 api_post /api/jobs "{\"customerId\":\"$CUSTOMER_ID\",\"locationId\":\"$LOCATION_ID\",\"summary\":\"$JOB_SUMMARY\",\"priority\":\"normal\"}" >/dev/null
 
+# takeScreenshot PNGs land under the flow dir or, with --debug-output, under
+# debug/<flow>/.maestro/tests/<run>/<flow name>/takeScreenshot/. Copy them all
+# into one flat, uploaded dir after every flow (pass or fail).
+collect_screenshots() {
+  mkdir -p "$OUT/screenshots"
+  find "$FLOWS" -maxdepth 2 -name '*.png' -exec mv -f {} "$OUT/screenshots/" \; 2>/dev/null || true
+  find "$OUT/debug" -path '*/takeScreenshot/*.png' -exec cp -f {} "$OUT/screenshots/" \; 2>/dev/null || true
+}
+
 run_flow() {
-  local flow="$1"; shift
+  local flow="$1" rc=0; shift
   log "maestro test $flow"
-  (cd "$OUT" && maestro test --format junit --output "$OUT/${flow%.yaml}.xml" "$FLOWS/$flow" "$@")
+  (cd "$OUT" && maestro test --format junit --output "$OUT/${flow%.yaml}.xml" --debug-output "$OUT/debug/${flow%.yaml}" "$FLOWS/$flow" "$@") || rc=$?
+  collect_screenshots
+  return "$rc"
 }
 
 # --- fresh app state -----------------------------------------------------
@@ -121,6 +162,8 @@ check_flushed() {
   log "voice_recordings rows with the journaled key: $rows"
   [ "$rows" = "1" ] || fail "expected exactly one voice_recordings row for the journaled key, got $rows"
 }
+
+check_bundle
 
 # --- PRD 3.3 -----------------------------------------------------------------
 reset_app

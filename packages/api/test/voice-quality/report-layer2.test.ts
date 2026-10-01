@@ -33,6 +33,7 @@ interface FixtureOpts {
   dispositionPassed?: boolean;
   perceivedPassed?: boolean;
   ttfaMedianMs?: number;
+  firstAudibleMedianMs?: number;
   lookupMedianMs?: number;
   repromptRatioMedian?: number;
   flakeIndicator?: boolean;
@@ -58,6 +59,7 @@ function fixtureAggregated(opts: FixtureOpts): AggregatedResult {
     },
     callerExperience: {
       ttfaMedianMs: opts.ttfaMedianMs ?? 500,
+      firstAudibleMedianMs: opts.firstAudibleMedianMs ?? 300,
       lookupMedianMs: opts.lookupMedianMs ?? 1500,
       durationMedianMs: 5000,
       repromptRatioMedian: opts.repromptRatioMedian ?? 0.05,
@@ -84,6 +86,7 @@ function fixtureRun(opts: FixtureOpts = {}): RunScriptLayer2Result {
         disposition: { passed: aggregated.disposition.passed, failedCriteria: [], slotValues: {} },
         callerExperience: {
           ttfaMs: aggregated.callerExperience.ttfaMedianMs,
+          firstAudibleMs: 0,
           lookupMs: aggregated.callerExperience.lookupMedianMs,
           durationMs: aggregated.callerExperience.durationMedianMs,
           repromptRatio: aggregated.callerExperience.repromptRatioMedian,
@@ -96,6 +99,7 @@ function fixtureRun(opts: FixtureOpts = {}): RunScriptLayer2Result {
         disposition: { passed: aggregated.disposition.passed, failedCriteria: [], slotValues: {} },
         callerExperience: {
           ttfaMs: aggregated.callerExperience.ttfaMedianMs,
+          firstAudibleMs: 0,
           lookupMs: aggregated.callerExperience.lookupMedianMs,
           durationMs: aggregated.callerExperience.durationMedianMs,
           repromptRatio: aggregated.callerExperience.repromptRatioMedian,
@@ -108,6 +112,7 @@ function fixtureRun(opts: FixtureOpts = {}): RunScriptLayer2Result {
         disposition: { passed: aggregated.disposition.passed, failedCriteria: [], slotValues: {} },
         callerExperience: {
           ttfaMs: aggregated.callerExperience.ttfaMedianMs,
+          firstAudibleMs: 0,
           lookupMs: aggregated.callerExperience.lookupMedianMs,
           durationMs: aggregated.callerExperience.durationMedianMs,
           repromptRatio: aggregated.callerExperience.repromptRatioMedian,
@@ -188,18 +193,61 @@ describe('VQ2-015 — Layer 2 report aggregator', () => {
     expect(badRateBlocker).toBeDefined();
   });
 
-  it('VQ2-015 — TTFA P95 = 850ms (>800): blocker; 800ms exactly: pass (inclusive)', () => {
-    // P95 of 14 samples: floor((95/100) * 13) = 12, so the 13th sorted index.
-    const high = fixtureSuite(14, (i) => ({ ttfaMedianMs: i >= 12 ? 850 : 500 }));
+  // #1331 — the weekly run printed "overall pass rate 0.0%" beside a vitest
+  // summary of 12 passed: the per-script tests assert the floor only, while a
+  // script counts toward the pass rate only when floor AND disposition AND
+  // perceived completion all majority-pass. The blocker now says so.
+  it('#1331 — the overall-pass-rate blocker names which aggregate component each script missed', () => {
+    const results = [
+      fixtureRun({ scriptId: 'write-a', floorPassed: true, dispositionPassed: false, perceivedPassed: true }),
+      fixtureRun({ scriptId: 'lookup-b', floorPassed: false, dispositionPassed: true, perceivedPassed: false }),
+    ];
+    const report = buildLayer2Report(results);
+    const blocker = report.launchGate.blockers.find((b) => b.includes('overall pass rate'));
+    expect(blocker).toBe(
+      'overall pass rate 0.0% below threshold 85% ' +
+        '(a script passes only when floor, disposition and perceived completion all pass: ' +
+        'floor 1/2, disposition 1/2, perceived completion 1/2)',
+    );
+  });
+
+  // #1331 (owner decision 2026-10-01) — the 800 ms P95 budget is the
+  // product's FIRST-AUDIBLE SLO (production filler or first reply frame).
+  it('#1331 — first-audible P95 above 800ms is a blocker; exactly 800ms passes; both are reported', () => {
+    const high = fixtureSuite(14, (i) => ({ firstAudibleMedianMs: i >= 12 ? 850 : 300 }));
     const highReport = buildLayer2Report(high);
-    const blocker = highReport.launchGate.blockers.find((b) => b.includes('TTFA'));
-    expect(blocker).toBeDefined();
+    expect(highReport.callerExperience.firstAudibleMedians).toEqual({ p50: 300, p95: 850 });
+    expect(highReport.launchGate.measured.firstAudibleP95Ms).toBe(850);
+    expect(highReport.launchGate.blockers).toContain('first-audible P95 850ms above threshold 800ms');
+
+    const exact = fixtureSuite(14, (i) => ({ firstAudibleMedianMs: i >= 12 ? 800 : 300 }));
+    const exactReport = buildLayer2Report(exact);
+    expect(exactReport.launchGate.blockers.some((b) => b.startsWith('first-audible'))).toBe(false);
+  });
+
+  it('#1331 — no first-audible timing on any script is a blocker, not a 0 ms pass', () => {
+    const r = buildLayer2Report(fixtureSuite(14, () => ({ firstAudibleMedianMs: 0 })));
+    expect(r.launchGate.blockers).toContain(
+      'first-audible not measured on any script (no transcript→filler/first-audio timing in the observations)',
+    );
+  });
+
+  // #1331 (owner decision 2026-10-01) — answer-audio TTFA (transcript → first
+  // REAL reply frame: classify + reply + full TTS synthesis) gets its own
+  // budget. First live measurement (run 36811698452): per-script medians
+  // p50 2577 ms, p95 3379 ms, max 3628 ms → P95 ≤ 4000 ms.
+  it('#1331 — answer-audio (TTFA) P95 above 4000ms is a blocker; exactly 4000ms passes', () => {
+    // P95 of 14 samples: floor((95/100) * 13) = 12, so the 13th sorted index.
+    const high = fixtureSuite(14, (i) => ({ ttfaMedianMs: i >= 12 ? 4_100 : 2_500 }));
+    const highReport = buildLayer2Report(high);
+    expect(highReport.launchGate.blockers).toContain(
+      'answer-audio (TTFA) P95 4100ms above threshold 4000ms',
+    );
     expect(highReport.launchGate.pass).toBe(false);
 
-    const exact = fixtureSuite(14, (i) => ({ ttfaMedianMs: i >= 12 ? 800 : 500 }));
+    const exact = fixtureSuite(14, (i) => ({ ttfaMedianMs: i >= 12 ? 4_000 : 2_500 }));
     const exactReport = buildLayer2Report(exact);
-    const blockerExact = exactReport.launchGate.blockers.find((b) => b.includes('TTFA'));
-    expect(blockerExact).toBeUndefined();
+    expect(exactReport.launchGate.blockers.some((b) => b.includes('TTFA'))).toBe(false);
     expect(exactReport.launchGate.pass).toBe(true);
   });
 
@@ -299,10 +347,21 @@ describe('VQ2-015 — Layer 2 report aggregator', () => {
     expect(r.launchGate.thresholds.ttfaP95MaxMs).toBe(400);
   });
 
+  it('#1331 — the markdown summary reports first-audible and answer-audio latency separately', () => {
+    const md = formatLayer2ReportMarkdown(
+      buildLayer2Report(fixtureSuite(3, () => ({ firstAudibleMedianMs: 270, ttfaMedianMs: 2_600 }))),
+    );
+    expect(md).toContain('- First-audible median P95: 270ms');
+    expect(md).toContain('- Answer-audio (TTFA) median P95: 2600ms');
+  });
+
   it('VQ2-015 — DEFAULT_LAYER2_THRESHOLDS match plan §"Caller-experience thresholds"', () => {
     expect(DEFAULT_LAYER2_THRESHOLDS.floorAllScripts).toBe(true);
     expect(DEFAULT_LAYER2_THRESHOLDS.overallPassRateMin).toBe(0.85);
-    expect(DEFAULT_LAYER2_THRESHOLDS.ttfaP95MaxMs).toBe(800);
+    // #1331 (owner decision 2026-10-01): 800 ms is the first-audible SLO;
+    // answer-audio TTFA has its own 4000 ms budget.
+    expect(DEFAULT_LAYER2_THRESHOLDS.firstAudibleP95MaxMs).toBe(800);
+    expect(DEFAULT_LAYER2_THRESHOLDS.ttfaP95MaxMs).toBe(4000);
     expect(DEFAULT_LAYER2_THRESHOLDS.perceivedCompletionPassRateMin).toBe(0.9);
     expect(DEFAULT_LAYER2_THRESHOLDS.costCappedScriptsMax).toBe(0);
   });

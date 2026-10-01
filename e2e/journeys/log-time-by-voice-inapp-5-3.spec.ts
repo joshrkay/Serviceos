@@ -33,8 +33,14 @@ import { getJobProfit } from '../../packages/api/src/jobs/job-profit';
  * on the S1 proposal allowlist (proposals/surface.ts) — see
  * e2e/journeys/log-time-by-voice.spec.ts, which still characterises that.
  *
- * T1: tenant B has its own Carlos and its own "Garcia job"; A's card never
- * shows on B's inbox, B's job profit stays at zero, and A's entry is A's.
+ * T2: tenant B has its own Carlos and its own same-named "Garcia job", and
+ * in the SAME run B's Carlos logs three hours on it. Both drafts are pending
+ * side by side; each owner's inbox lists exactly one log-time card; each
+ * draft carries its own tenant's job id (the resolver never sees the
+ * neighbour's Garcia — with the job lookup's tenant predicate removed, A's
+ * "Garcia job" has two candidates and A's draft never carries A's job: the
+ * planted fault this leg was proven red against); and each tenant's
+ * job-profit answer is its own (120 vs 180 minutes).
  *
  * Runs on `chromium-noauthbypass` (production-shaped auth: the
  * authorization loader resolves each session's internal user).
@@ -44,6 +50,8 @@ const API_URL = process.env.E2E_NOAUTHBYPASS_API_URL ?? 'http://localhost:3002';
 const TZ = 'America/Chicago';
 const SHOTS = 'docs/audit/lane-reports/1015-1018-rows-rung5';
 const UTTERANCE = 'log two hours on the Garcia job';
+const NEIGHBOUR_UTTERANCE = 'log three hours on the Garcia job';
+const T2_SHOTS = 'docs/audit/lane-reports/t2-legs-rung5';
 
 interface Shop {
   owner: RealOwner;
@@ -130,12 +138,16 @@ test.describe('5.3 — Carlos logs his hours by talking (in-app voice), real Pos
     await pool?.end();
   });
 
-  test('"log two hours on the Garcia job" → the owner approves → one time entry on that job, one audit event, counted by job profit; tenant B untouched (T1)', async ({ browser, baseURL }) => {
-    test.setTimeout(180_000);
-    const pageErrors: string[] = [];
-
-    // ── Carlos speaks (text mode of the live session) on /assistant. ──────
-    const carlosPage = await signedInPage(browser, baseURL!, shopA.carlos.sub, shopA.carlos.token);
+  /** Carlos (of `shop`) says `utterance` in the live session and confirms; returns the queued draft. */
+  async function speakTimeLog(
+    browser: Browser,
+    baseURL: string,
+    shop: Shop,
+    utterance: string,
+    pageErrors: string[],
+    shot?: string,
+  ): Promise<{ id: string; payload: Record<string, unknown> }> {
+    const carlosPage = await signedInPage(browser, baseURL, shop.carlos.sub, shop.carlos.token);
     carlosPage.on('pageerror', (err) => pageErrors.push(err.message));
     await carlosPage.goto('/assistant');
     await carlosPage.getByRole('button', { name: /live session/i }).click();
@@ -143,7 +155,7 @@ test.describe('5.3 — Carlos logs his hours by talking (in-app voice), real Pos
     const input = carlosPage.getByPlaceholder('Type your message…');
     await expect(input).toBeEnabled({ timeout: 15_000 });
 
-    await input.fill(UTTERANCE);
+    await input.fill(utterance);
     await carlosPage.getByRole('button', { name: /^send$/i }).click();
     // The session reaches the confirm readback (state badge intent_confirm).
     await expect(carlosPage.getByText('intent_confirm')).toBeVisible({ timeout: 20_000 });
@@ -152,62 +164,103 @@ test.describe('5.3 — Carlos logs his hours by talking (in-app voice), real Pos
     await input.fill('yes');
     await carlosPage.getByRole('button', { name: /^send$/i }).click();
     await expect(carlosPage.getByText('Proposals queued: 1')).toBeVisible({ timeout: 20_000 });
-    await carlosPage.screenshot({ path: `${SHOTS}/5.3-carlos-live-session.png`, fullPage: true });
+    if (shot) await carlosPage.screenshot({ path: shot, fullPage: true });
 
     const { rows: drafted } = await pool.query<{ id: string; status: string; payload: Record<string, unknown> }>(
       `SELECT id, status, payload FROM proposals WHERE tenant_id = $1 AND proposal_type = 'log_time_entry'`,
-      [shopA.owner.tenantId],
+      [shop.owner.tenantId],
     );
     expect(drafted).toHaveLength(1);
-    expect(drafted[0].payload).toMatchObject({ jobId: shopA.jobId, durationMinutes: 120 });
-    expect(
-      (await pool.query(`SELECT id FROM time_entries WHERE tenant_id = $1`, [shopA.owner.tenantId])).rows,
-      'nothing is written before the owner approves',
-    ).toHaveLength(0);
+    return drafted[0];
+  }
 
-    // ── The owner approves on the real Inbox. ─────────────────────────────
-    const ownerPage = await signedInPage(browser, baseURL!, shopA.owner.sub, shopA.owner.token);
+  /** The owner of `shop` approves the single log-time card on the real Inbox. */
+  async function approveOnInbox(
+    browser: Browser,
+    baseURL: string,
+    shop: Shop,
+    proposalId: string,
+    pageErrors: string[],
+    shot?: string,
+  ): Promise<void> {
+    const ownerPage = await signedInPage(browser, baseURL, shop.owner.sub, shop.owner.token);
     ownerPage.on('pageerror', (err) => pageErrors.push(err.message));
     await ownerPage.goto('/inbox');
     const card = ownerPage.getByTestId('inbox-row').filter({ hasText: /log time entry/i });
+    // Exactly ONE log-time card — the neighbour's pending draft is never listed.
     await expect(card).toHaveCount(1, { timeout: 20_000 });
-    await ownerPage.screenshot({ path: `${SHOTS}/5.3-owner-inbox.png`, fullPage: true });
+    if (shot) await ownerPage.screenshot({ path: shot, fullPage: true });
     const approved = ownerPage.waitForResponse(
-      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/proposals/${drafted[0].id}/approve`,
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/proposals/${proposalId}/approve`,
     );
     await card.getByRole('button', { name: /^approve$/i }).click();
     expect((await approved).status()).toBeLessThan(300);
+  }
 
-    // ── The executor writes exactly one entry on the resolved job. ────────
-    await expect
-      .poll(
-        async () =>
-          (await pool.query(`SELECT id FROM time_entries WHERE tenant_id = $1 AND job_id = $2`, [shopA.owner.tenantId, shopA.jobId]))
-            .rows.length,
-        { timeout: 30_000, message: 'the approved time log never became a time_entries row' },
+  async function entriesFor(tenantId: string) {
+    return (
+      await pool.query<{ id: string; job_id: string; duration_minutes: number }>(
+        `SELECT id, job_id, duration_minutes FROM time_entries WHERE tenant_id = $1`,
+        [tenantId],
       )
-      .toBe(1);
-    const { rows: entries } = await pool.query<{ id: string; job_id: string; duration_minutes: number }>(
-      `SELECT id, job_id, duration_minutes FROM time_entries WHERE tenant_id = $1`,
-      [shopA.owner.tenantId],
-    );
+    ).rows;
+  }
+
+  async function timeEntryAudits(tenantId: string, entryId: string) {
+    return (
+      await pool.query<{ event_type: string }>(
+        `SELECT event_type FROM audit_events WHERE tenant_id = $1 AND entity_type = 'time_entry' AND entity_id = $2`,
+        [tenantId, entryId],
+      )
+    ).rows;
+  }
+
+  test('"log two hours on the Garcia job" → the owner approves → one time entry on that job, one audit event, counted by job profit; a neighbour logging its own Garcia hours in the same run changes none of it (T2)', async ({ browser, baseURL }) => {
+    test.setTimeout(240_000);
+    const pageErrors: string[] = [];
+
+    // ── Carlos (A) speaks; the draft carries HIS Garcia job, though tenant B
+    //    has a same-named "Garcia" job the resolver must never consider. ────
+    const draftA = await speakTimeLog(browser, baseURL!, shopA, UTTERANCE, pageErrors, `${SHOTS}/5.3-carlos-live-session.png`);
+    expect(draftA.payload).toMatchObject({ jobId: shopA.jobId, durationMinutes: 120 });
+    expect(await entriesFor(shopA.owner.tenantId), 'nothing is written before the owner approves').toHaveLength(0);
+
+    // ── T2: in the same run the neighbour's Carlos logs THREE hours on the
+    //    neighbour's own Garcia job; both drafts are pending side by side. ──
+    const draftB = await speakTimeLog(browser, baseURL!, shopB, NEIGHBOUR_UTTERANCE, pageErrors);
+    expect(draftB.payload).toMatchObject({ jobId: shopB.jobId, durationMinutes: 180 });
+
+    // ── Each owner approves on the real Inbox and sees only its own card. ──
+    await approveOnInbox(browser, baseURL!, shopA, draftA.id, pageErrors, `${SHOTS}/5.3-owner-inbox.png`);
+    await approveOnInbox(browser, baseURL!, shopB, draftB.id, pageErrors, `${T2_SHOTS}/5.3-neighbour-inbox.png`);
+
+    // ── The executor writes exactly one entry per tenant on its own job. ──
+    for (const shop of [shopA, shopB]) {
+      await expect
+        .poll(
+          async () =>
+            (await pool.query(`SELECT id FROM time_entries WHERE tenant_id = $1 AND job_id = $2`, [shop.owner.tenantId, shop.jobId]))
+              .rows.length,
+          { timeout: 30_000, message: 'the approved time log never became a time_entries row' },
+        )
+        .toBe(1);
+    }
+    const entries = await entriesFor(shopA.owner.tenantId);
     expect(entries).toHaveLength(1);
-    expect(entries[0].duration_minutes).toBe(120);
-    const { rows: audits } = await pool.query<{ event_type: string }>(
-      `SELECT event_type FROM audit_events WHERE tenant_id = $1 AND entity_type = 'time_entry' AND entity_id = $2`,
-      [shopA.owner.tenantId, entries[0].id],
-    );
+    expect(entries[0]).toMatchObject({ job_id: shopA.jobId, duration_minutes: 120 });
+    const audits = await timeEntryAudits(shopA.owner.tenantId, entries[0].id);
     expect(audits, `time-entry audit rows: ${JSON.stringify(audits)}`).toHaveLength(1);
-    expect(await laborMinutes(pool, shopA.owner.tenantId, shopA.jobId)).toBe(120);
     console.log(`[5.3] tenant A entry: ${JSON.stringify(entries)} audit: ${JSON.stringify(audits)}`);
 
-    // ── T1: tenant B's owner never sees A's card; B's job is untouched. ──
-    const ownerBPage = await signedInPage(browser, baseURL!, shopB.owner.sub, shopB.owner.token);
-    await ownerBPage.goto('/inbox');
-    await expect(ownerBPage.getByRole('heading').first()).toBeVisible({ timeout: 15_000 });
-    await expect(ownerBPage.getByTestId('inbox-row').filter({ hasText: /log time entry/i })).toHaveCount(0);
-    expect((await pool.query(`SELECT id FROM time_entries WHERE tenant_id = $1`, [shopB.owner.tenantId])).rows).toHaveLength(0);
-    expect(await laborMinutes(pool, shopB.owner.tenantId, shopB.jobId)).toBe(0);
+    const entriesB = await entriesFor(shopB.owner.tenantId);
+    expect(entriesB).toHaveLength(1);
+    expect(entriesB[0]).toMatchObject({ job_id: shopB.jobId, duration_minutes: 180 });
+    expect(await timeEntryAudits(shopB.owner.tenantId, entriesB[0].id)).toHaveLength(1);
+
+    // ── T2: the job-profit answers are each tenant's own — A's 120 minutes is
+    //    not moved by B's 180 on a same-named job, and vice versa. ─────────
+    expect(await laborMinutes(pool, shopA.owner.tenantId, shopA.jobId)).toBe(120);
+    expect(await laborMinutes(pool, shopB.owner.tenantId, shopB.jobId)).toBe(180);
     expect(
       (await pool.query(`SELECT id FROM time_entries WHERE id = $1 AND tenant_id <> $2`, [entries[0].id, shopA.owner.tenantId])).rows,
     ).toHaveLength(0);

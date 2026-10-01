@@ -16,6 +16,7 @@ import request from 'supertest';
 import { createAssistantRouter, type AssistantRouterDeps } from '../../src/routes/assistant';
 import { InMemoryProposalRepository, missingFieldsFor, type Proposal } from '../../src/proposals/proposal';
 import { approveProposal } from '../../src/proposals/actions';
+import { sendRecipientReferenceCheck } from '../../src/proposals/approval-reference-checks';
 import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
@@ -315,6 +316,17 @@ describe('#1513 — approving the AST-07 chain in order executes every leg throu
     expect(invoice?.estimateId).toBe(estimateId);
     expect(invoice?.lineItems.map((li) => [li.description, li.unitPriceCents])).toEqual([['Water heater install', 120_000]]);
     expect(invoice?.totals.totalCents).toBe(estimate!.totals.totalCents);
+
+    // #1524 — "create and send" named no channel, and the chain's customer
+    // has a phone and no email: once the invoice is issued, the send leg
+    // approves (it goes by text) instead of "nothing on file to send it to".
+    await invoiceRepo.update(TEST_TENANT, invoiceId, { status: 'open' });
+    const sendStep = (await proposalRepo.findByTenant(TEST_TENANT)).find((p) => p.proposalType === 'send_invoice')!;
+    await expect(
+      approveProposal(proposalRepo, TEST_TENANT, sendStep.id, TEST_USER, 'owner', undefined, 'ui', {
+        referenceChecks: [sendRecipientReferenceCheck({ invoiceRepo, jobRepo, customerRepo })],
+      }),
+    ).resolves.toMatchObject({ status: 'approved' });
   });
 });
 

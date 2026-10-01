@@ -265,7 +265,7 @@ export const COVERAGE_TABLE: Readonly<Record<IntentFamilyId, CoverageRow>> = {
       module:
         'ai/voice-turn/create-voice-turn-processor.ts#speechTurn (generic FSM path → INTENT_TO_PROPOSAL_TYPE → handleCreateProposal)',
       notes:
-        'Reachable but NOT via the P18-001 handler: the intent takes the multi-turn confirm round-trip and mints the generic drafting envelope, not the contract shape the Gather branch builds — declared drift.',
+        'An already-a-customer caller (caller surface) hears the same "I\'ve got you in our system already" line as Gather, in one turn, with no draft (#1540 §3 — ai/voice-turn/existing-customer-signup.ts). A NEW caller still is NOT served by the P18-001 handler: the intent takes the multi-turn confirm round-trip and mints the generic drafting envelope, not the contract shape the Gather branch builds — declared drift.',
     },
     inapp: {
       status: 'reachable',

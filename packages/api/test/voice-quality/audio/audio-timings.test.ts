@@ -11,6 +11,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   ttfaPerTurn,
+  firstAudiblePerTurn,
   lookupToSpeakLatency,
   totalCallDurationMs,
 } from '../../../src/ai/voice-quality/audio/audio-timings';
@@ -184,6 +185,25 @@ function makeTtsProvider(audio: Buffer): TtsProvider {
     },
   };
 }
+
+// #1331 — production's caller-facing latency SLO is FIRST-AUDIBLE: the
+// adapter plays a cached filler 250 ms after the caller finishes when the
+// answer is not ready ("caller hears something"). TTFA above stays the
+// answer-audio metric (first REAL reply frame).
+describe('#1331 — firstAudiblePerTurn', () => {
+  it('a filler that plays before the answer is the first audible moment', () => {
+    const events: VoiceSessionEvent[] = [
+      { type: 'transcript_received', ts: 1_000 },
+      { type: 'filler_fired', fillerText: 'One moment.', ts: 1_260 },
+      { type: 'audio_frame_emitted', ts: 3_400, byteCount: 640 },
+      { type: 'transcript_received', ts: 9_000 },
+      { type: 'audio_frame_emitted', ts: 9_180, byteCount: 640 },
+    ];
+    expect(firstAudiblePerTurn(events)).toEqual([260, 180]);
+    // The answer-audio metric is unchanged by the filler.
+    expect(ttfaPerTurn(events)).toEqual([2_400, 180]);
+  });
+});
 
 describe('VQ2-004 mediastream-adapter emit sites', () => {
   let store: VoiceSessionStore;

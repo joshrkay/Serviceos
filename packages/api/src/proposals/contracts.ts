@@ -26,7 +26,10 @@ import { recordRefundPayloadSchema } from './contracts/record-refund';
 import { applyCreditPayloadSchema } from './contracts/apply-credit';
 import { sendCustomerMessagePayloadSchema } from './contracts/send-customer-message';
 import { createChangeOrderPayloadSchema } from './contracts/create-change-order';
-import { createServiceAgreementPayloadSchema } from './contracts/create-service-agreement';
+import {
+  createServiceAgreementPayloadSchema,
+  createServiceAgreementPayloadSchemaAsOf,
+} from './contracts/create-service-agreement';
 import { addMaterialPayloadSchema } from './contracts/add-material';
 import { addCatalogItemPayloadSchema } from './contracts/add-catalog-item';
 import { adoptEntityAliasPayloadSchema } from './contracts/adopt-entity-alias';
@@ -740,6 +743,13 @@ export const sendEstimateNudgePayloadSchema = z
   .object({
     estimateId: z.string().uuid().optional(),
     estimateReference: z.string().min(1).optional(),
+    /**
+     * #1528 — 'auto': no channel was named; the nudge uses the customer's
+     * email when one is on file, else a text to their phone. Optional so a
+     * nudge drafted before #1528 still validates (its executor reads a
+     * missing channel as 'auto').
+     */
+    channel: z.enum(['email', 'sms', 'auto']).optional(),
     /** Optional note appended to the outbound message. */
     note: z.string().optional(),
   })
@@ -904,9 +914,18 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
 
 export function validateProposalPayload(
   proposalType: string,
-  payload: unknown
+  payload: unknown,
+  /**
+   * #1331 — the clock a clock-relative check ("startsOn must not be in the
+   * past") reads. Omitted ⇒ the wall clock. The voice payload builder passes
+   * the clock it filled the payload from, so the two can never disagree.
+   */
+  options?: { now?: () => Date },
 ): { valid: boolean; errors?: string[] } {
-  const schema = PROPOSAL_TYPE_SCHEMAS[proposalType as ProposalType];
+  const schema =
+    proposalType === 'create_service_agreement' && options?.now
+      ? createServiceAgreementPayloadSchemaAsOf(options.now)
+      : PROPOSAL_TYPE_SCHEMAS[proposalType as ProposalType];
   if (!schema) {
     return { valid: false, errors: [`Unknown proposal type: ${proposalType}`] };
   }
