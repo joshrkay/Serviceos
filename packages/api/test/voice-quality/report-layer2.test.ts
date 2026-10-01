@@ -188,6 +188,24 @@ describe('VQ2-015 — Layer 2 report aggregator', () => {
     expect(badRateBlocker).toBeDefined();
   });
 
+  // #1331 — the weekly run printed "overall pass rate 0.0%" beside a vitest
+  // summary of 12 passed: the per-script tests assert the floor only, while a
+  // script counts toward the pass rate only when floor AND disposition AND
+  // perceived completion all majority-pass. The blocker now says so.
+  it('#1331 — the overall-pass-rate blocker names which aggregate component each script missed', () => {
+    const results = [
+      fixtureRun({ scriptId: 'write-a', floorPassed: true, dispositionPassed: false, perceivedPassed: true }),
+      fixtureRun({ scriptId: 'lookup-b', floorPassed: false, dispositionPassed: true, perceivedPassed: false }),
+    ];
+    const report = buildLayer2Report(results);
+    const blocker = report.launchGate.blockers.find((b) => b.includes('overall pass rate'));
+    expect(blocker).toBe(
+      'overall pass rate 0.0% below threshold 85% ' +
+        '(a script passes only when floor, disposition and perceived completion all pass: ' +
+        'floor 1/2, disposition 1/2, perceived completion 1/2)',
+    );
+  });
+
   it('VQ2-015 — TTFA P95 = 850ms (>800): blocker; 800ms exactly: pass (inclusive)', () => {
     // P95 of 14 samples: floor((95/100) * 13) = 12, so the 13th sorted index.
     const high = fixtureSuite(14, (i) => ({ ttfaMedianMs: i >= 12 ? 850 : 500 }));

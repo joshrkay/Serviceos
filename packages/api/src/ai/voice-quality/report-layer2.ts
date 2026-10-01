@@ -243,10 +243,16 @@ export function buildLayer2Report(
     blockers.push(`floor failure on scripts: ${failingIds}`);
   }
   if (totalScripts > 0 && overallPassRate < thresholds.overallPassRateMin) {
+    // #1331 — the per-script vitest tests assert the floor only, so name the
+    // component counts; "0.0%" beside "12 passed" otherwise reads as bad math.
+    const count = (pick: (a: AggregatedResult) => boolean): string =>
+      `${results.filter((r) => pick(r.aggregated)).length}/${totalScripts}`;
     blockers.push(
       `overall pass rate ${(overallPassRate * 100).toFixed(1)}% below threshold ${(
         thresholds.overallPassRateMin * 100
-      ).toFixed(0)}%`,
+      ).toFixed(0)}% (a script passes only when floor, disposition and perceived completion all pass: ` +
+        `floor ${count((a) => a.floor.passed)}, disposition ${count((a) => a.disposition.passed)}, ` +
+        `perceived completion ${count((a) => a.perceivedCompletion.passed)})`,
     );
   }
   // #1387 — zero TTFA samples means the observations carried no

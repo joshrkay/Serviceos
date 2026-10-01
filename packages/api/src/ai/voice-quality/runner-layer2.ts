@@ -256,6 +256,19 @@ function mergeSlotValues(
   return merged;
 }
 
+/** #1331 — union of two graders' reasons; a criterion both failed keeps both. */
+function mergeReasons(
+  a: Record<number, string> | undefined,
+  b: Record<number, string> | undefined,
+): Record<number, string> {
+  const merged: Record<number, string> = { ...a };
+  for (const [k, v] of Object.entries(b ?? {})) {
+    const id = Number(k);
+    merged[id] = merged[id] ? `${merged[id]}; ${v}` : v;
+  }
+  return merged;
+}
+
 /**
  * Resolve the LLM gateway used by the LLM-judge graders. Preference:
  *   1. Explicit `ctx.gateway` (production audio path)
@@ -329,13 +342,14 @@ async function gradeOneRun(
   });
 
   return {
-    floor: { passed: floor.passed, failedCriteria: floor.failedCriteria },
+    floor: { passed: floor.passed, failedCriteria: floor.failedCriteria, reasons: floor.reasons },
     disposition: {
       // Hard-disposition pass requires BOTH the structured grader's
       // verdict AND the LLM grader's verdict (criterion 12 + soft slot
       // 10). Either failure flips this run to disposition-fail.
       passed: dispStruct.passed && dispLlm.failedCriteria.length === 0,
       failedCriteria: [...dispStruct.failedCriteria, ...dispLlm.failedCriteria],
+      reasons: mergeReasons(dispStruct.reasons, dispLlm.reasons),
       slotValues: mergeSlotValues(dispStruct.perTurnDetail),
     },
     callerExperience: {

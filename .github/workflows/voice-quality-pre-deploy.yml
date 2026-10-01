@@ -36,7 +36,7 @@ permissions:
 jobs:
   layer2:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     concurrency:
       # Per-ref group so different release branches can run in parallel,
       # but two pushes to the same release branch serialize.

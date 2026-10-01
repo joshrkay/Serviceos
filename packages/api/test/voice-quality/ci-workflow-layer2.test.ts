@@ -7,7 +7,7 @@
  *
  *  - `.github/workflows/voice-quality-pre-deploy.yml` exists, parses,
  *    and declares a `layer2` job.
- *  - The job pins Node 20, has `timeout-minutes: 30`, installs ffmpeg,
+ *  - The job pins Node 20, has `timeout-minutes: 45`, installs ffmpeg,
  *    runs the `voice-quality:layer2` npm script, and uploads the
  *    `voice-quality-layer2-report` artifact.
  *  - The Layer 2 step is a GATE (no `continue-on-error`).
@@ -53,9 +53,12 @@ describe('VQ2-016 — Layer 2 pre-deploy CI workflow', () => {
     expectEffectiveNode20(readWorkflow(), 'voice-quality-pre-deploy.yml');
   });
 
-  it('VQ2-016 — workflow has timeout-minutes: 30', () => {
+  // #1331 — the live suite now measures real turns: weekly run 36811698452
+  // spent 1770 s (29.5 min) in the Layer 2 step alone, so a 30-minute job
+  // (setup + npm ci + suite) is cut off before the launch-gate verdict.
+  it('#1331 — workflow has timeout-minutes: 45 (live suite takes ~30 min)', () => {
     const src = readWorkflow();
-    expect(src).toMatch(/timeout-minutes:\s*30/);
+    expect(src).toMatch(/timeout-minutes:\s*45/);
   });
 
   it('VQ2-016 — workflow installs ffmpeg', () => {

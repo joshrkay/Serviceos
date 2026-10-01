@@ -42,7 +42,7 @@ permissions:
 jobs:
   trend:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
       # #1331 — the agent + judges run on the provider production runs
       # (Railway prod/dev), built by createLLMGateway from these vars.
