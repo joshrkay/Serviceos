@@ -110,7 +110,7 @@ async function knownCallerCall(classifier = LOOKUP_APPOINTMENTS) {
   });
   const turn = async (speechResult: string) =>
     spoken(await processor.speechTurn({ session, speechResult, callSid: CALL_SID, tenantId: TENANT }));
-  return { session, gateway, turn, maria, proposalRepo };
+  return { session, gateway, turn, maria, proposalRepo, customerRepo };
 }
 
 describe('#1331 — a low-confidence caller name gets one yes/no identity check', () => {
@@ -159,6 +159,61 @@ describe('#1331 — a low-confidence caller name gets one yes/no identity check'
     const second = await call.turn('Hmm, I am not sure.');
     expect(second).toMatch(/who am I speaking with/i);
     expect(call.gateway.complete).not.toHaveBeenCalled();
+  });
+});
+
+describe('#1331 Layer 2 (run 36925905917) — after "yes", the held request is understood', () => {
+  /**
+   * The real classifier, given the request with the garbled name still in it
+   * ("Hi this is Mmmmaria Roddrrgez calling about my appointment"), came back
+   * unknown in 2 of 3 Layer 2 runs, and the caller who had just said "yes"
+   * heard "can you say that again?". Once the caller confirms they ARE the
+   * account holder, the name is no longer in doubt: the request is the one
+   * they made, naming the confirmed account.
+   */
+  function garbleSensitiveGateway() {
+    return {
+      complete: vi.fn(async (req: LLMRequest) => {
+        const user = (req.messages ?? []).filter((m) => m.role === 'user').map((m) => String(m.content)).join('\n');
+        const garbled = /Mmmmaria|Roddrrgez/.test(user);
+        return {
+          content: garbled
+            ? JSON.stringify({ intentType: 'unknown', confidence: 0.4, extractedEntities: {} })
+            : LOOKUP_APPOINTMENTS,
+          model: 'mock',
+          provider: 'mock',
+          tokenUsage: { input: 1, output: 1, total: 2 },
+          latencyMs: 1,
+        };
+      }),
+    } as unknown as LLMGateway & { complete: ReturnType<typeof vi.fn> };
+  }
+
+  it('"Yes, that\'s me." answers the appointment question instead of asking the caller to repeat it', async () => {
+    const call = await knownCallerCall();
+    const gateway = garbleSensitiveGateway();
+    const processor = createVoiceTurnProcessor({
+      store: stores[stores.length - 1]!,
+      gateway,
+      businessName: 'Test HVAC Co',
+      systemActorId: 'test-actor',
+      auditRepo: new InMemoryAuditRepository(),
+      proposalRepo: call.proposalRepo,
+      customerRepo: call.customerRepo,
+      lookups: {} as PhoneLookupDeps,
+    });
+    const turn = async (speechResult: string) =>
+      spoken(await processor.speechTurn({ session: call.session, speechResult, callSid: CALL_SID, tenantId: TENANT }));
+    const intents: string[] = [];
+    call.session.events.on('voice-event', (e: { type: string; intentType?: string }) => {
+      if (e.type === 'intent_classified' && e.intentType) intents.push(e.intentType);
+    });
+
+    expect(await turn('Hi this is Mmmmaria Roddrrgez calling about my appointment')).toMatch(/is this Maria Rodriguez\?/i);
+    const reply = await turn("Yes, that's me.");
+
+    expect(reply).not.toMatch(/say that again/i);
+    expect(intents).toEqual(['lookup_appointments']);
   });
 });
 

@@ -18,6 +18,8 @@ import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
 import { InMemoryCustomerRepository, createCustomer } from '../../../src/customers/customer';
 import type { LLMGateway, LLMRequest } from '../../../src/ai/gateway/gateway';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
+import { InMemorySettingsRepository } from '../../../src/settings/settings';
+import { InMemoryAppointmentRepository } from '../../../src/appointments/appointment';
 
 const TENANT = 'tenant-1538-phone';
 const CALL_SID = 'CA-1538';
@@ -163,6 +165,86 @@ describe('#1538 — phone: a detail given at the readback', () => {
     const reply = spoken(await turn('Hmm, whatever works for you.'));
     expect(reply).toMatch(/with no day or time yet/);
     expect(session.machine.currentContext.extractedEntities?.dateTimeDescription).toBeUndefined();
+  });
+});
+
+describe('#1331 Layer 2 (run 36925905917) — two-step booking, known customer', () => {
+  // Criterion 9 failed on all 3 runs: "turn 1: expected intent
+  // 'create_appointment', got 'unknown'". The caller's "Tuesday at 2pm." is
+  // the day/time for the booking they are confirming — the turn's request
+  // is still that booking, not an unknown one.
+  it('the day/time answer at the readback is reported as the booking request it continues', async () => {
+    const NOTHING = JSON.stringify({ intentType: 'unknown', confidence: 0.3, extractedEntities: {} });
+    const { session, turn } = await makeCall({ 'Tuesday at 2pm': NOTHING });
+    const intents: string[] = [];
+    session.events.on('voice-event', (e: { type: string; intentType?: string }) => {
+      if (e.type === 'intent_classified' && e.intentType) intents.push(e.intentType);
+    });
+    await turn('I want to book a service appointment.');
+    await turn('Tuesday at 2pm.');
+
+    expect(intents).toEqual(['create_appointment', 'create_appointment']);
+  });
+
+  // Criterion 12, run 0: the yes was answered "I've noted that appointment
+  // request. Someone from our team will confirm the time with you shortly."
+  // — no time, and nothing saying what was done. The request WAS drafted,
+  // with the time the caller gave; the expected answer (corpus) is "I've
+  // drafted a service appointment for Tuesday May 5 at 2pm; an operator will
+  // confirm before it's booked."
+  it('the yes says the appointment was drafted for the time given, pending confirmation', async () => {
+    const NOTHING = JSON.stringify({ intentType: 'unknown', confidence: 0.3, extractedEntities: {} });
+    const store = new VoiceSessionStore({ startInterval: false });
+    stores.push(store);
+    const proposalRepo = new InMemoryProposalRepository();
+    const customerRepo = new InMemoryCustomerRepository();
+    const settingsRepo = new InMemorySettingsRepository();
+    await settingsRepo.create({
+      id: 'settings-two-step',
+      tenantId: TENANT,
+      businessName: 'Test HVAC Co',
+      timezone: 'America/Los_Angeles',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as unknown as Parameters<InMemorySettingsRepository['create']>[0]);
+    const jane = await createCustomer(
+      { tenantId: TENANT, firstName: 'Jane', lastName: 'Smith', primaryPhone: '+15555550204', createdBy: 'test' },
+      customerRepo,
+    );
+    const session = store.create(TENANT, 'telephony', { callSid: CALL_SID });
+    session.machine.dispatch({ type: 'incoming_call', callSid: CALL_SID, from: '+15555550204', to: '+15125550999', tenantId: TENANT });
+    session.machine.dispatch({ type: 'greeted_ok' });
+    session.machine.dispatch({ type: 'caller_known', customerId: jane.id });
+    session.customerId = jane.id;
+    session.callerPhone = '+15555550204';
+    const processor = createVoiceTurnProcessor({
+      store,
+      gateway: phoneGateway({
+        'book a service appointment': JSON.stringify({ intentType: 'create_appointment', confidence: 0.95, extractedEntities: {} }),
+        'Tuesday at 2pm': NOTHING,
+      }),
+      businessName: 'Test HVAC Co',
+      systemActorId: 'test-actor',
+      auditRepo: new InMemoryAuditRepository(),
+      proposalRepo,
+      customerRepo,
+      appointmentRepo: new InMemoryAppointmentRepository(),
+      settingsRepo,
+      // Friday 2026-05-01 in Los Angeles — "Tuesday" is May 5.
+      now: () => new Date('2026-05-01T12:00:00.000Z'),
+    });
+    const turn = async (speechResult: string) =>
+      spoken(await processor.speechTurn({ session, speechResult, callSid: CALL_SID, tenantId: TENANT }));
+
+    await turn('Hi, this is Jane Smith. I want to book a service appointment.');
+    await turn('Tuesday at 2pm.');
+    const reply = await turn("Yes, that's right.");
+
+    expect(reply).not.toMatch(/noted that appointment request/i);
+    expect(reply).toMatch(/drafted/i);
+    expect(reply).toMatch(/Tuesday, May 5/);
+    expect(reply).toMatch(/2(:00)?\s?PM/i);
+    expect(reply).toMatch(/confirm/i);
   });
 });
 

@@ -32,6 +32,16 @@ export function spokenBookingDraftOnly(): string {
   return `I've noted that appointment request. Someone from our team will confirm the time with you shortly.`;
 }
 
+/**
+ * #1331 (Layer 2 run 36925905917) — spoken when only a draft exists (no hold)
+ * but the caller's time resolved: say what was drafted, for when, and that it
+ * is not booked until the team confirms. The time-less draft line above hid
+ * the time the caller had just confirmed.
+ */
+export function spokenBookingDraftForTime(timeReadback: string): string {
+  return `I've drafted an appointment for ${timeReadback}. Someone from our team will confirm it before it's booked.`;
+}
+
 export function bookingSpeechForLane(
   evaluation: AutonomousLaneEvaluation | undefined,
   timeReadback: string | undefined,
