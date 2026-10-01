@@ -49,7 +49,6 @@ import type { ConversationRepository } from '../conversations/conversation-servi
 import { logInboundCallOnCustomerTimeline } from './inbound-call-log';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
-import { confirmIntent } from '../ai/skills/confirm-intent';
 import { detectConfirmTurnQuestion } from '../ai/voice-turn/confirm-turn-question';
 import { intentClassifiedEvent, languageSwitchedEvent } from '../ai/voice-quality/events';
 import {
@@ -93,6 +92,9 @@ import { answerPhoneEnRoute, type PhoneEnRouteDeps } from '../ai/voice-turn/phon
 import {
   createVoiceTurnProcessor,
   auditOffSurfaceClassification,
+  ASK_CALLER_HELP_PROMPT,
+  EXISTING_CUSTOMER_SIGNUP_COPY,
+  isAskCallerHelpPrompt,
   appendAgentTts,
   callerTranscriptText,
   preloadSessionCatalog,
@@ -104,6 +106,7 @@ import type { CurrentQuoteResolver } from '../conversations/negotiation/current-
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { classifyCallerSafety } from '../ai/agents/customer-calling/emergency-tier';
+import { askCallerUtteranceCarriesRequest } from '../ai/voice-turn/ask-caller-request';
 import { detectPromptInjection } from '../ai/agents/customer-calling/untrusted-content';
 import {
   renderTtsText,
@@ -2490,6 +2493,29 @@ export class TwilioGatherAdapter {
     const confirmQuestion =
       currentState === 'intent_confirm' ? detectConfirmTurnQuestion(opts.speechResult) : null;
 
+    // #1540 §2 (owner decision 2026-10-01) — an unknown caller's ask_caller
+    // answer usually carries their request. The SAME shared handler the
+    // media-streams speechTurn runs identifies/creates them by phone; once
+    // that lands in intent_capture, this same utterance is classified below
+    // (S1 surface rules intact) instead of "How can I help you today?".
+    // A still-unresolved caller keeps the FSM's own retry/escalate path.
+    let turnState: string = currentState;
+    if (currentState === 'ask_caller') {
+      const askCallerFx = await this.processor.handleAskCaller(session, opts.tenantId);
+      // Identity only (no request to carry) → no classify call: identify and
+      // ask how to help, exactly as before (ask-caller-request.ts).
+      if (
+        session.machine.currentState !== 'intent_capture' ||
+        !askCallerUtteranceCarriesRequest(opts.speechResult)
+      ) {
+        sideEffectsAll.push(...askCallerFx);
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+      sideEffectsAll.push(...askCallerFx.filter((fx) => !isAskCallerHelpPrompt(fx)));
+      turnState = 'intent_capture';
+    }
+
     // 2. Branch on FSM state.
     if (confirmQuestion) {
       sideEffectsAll.push(
@@ -2501,44 +2527,18 @@ export class TwilioGatherAdapter {
         )),
       );
     } else if (currentState === 'intent_confirm') {
-      // confirm_intent: caller is responding to a yes/no readback.
-      try {
-        const ctx = session.machine.currentContext;
-        const intentSummary = ctx.currentIntent ?? 'that';
-        const confirmation = await confirmIntent({
-          intentSummary,
-          callerResponse: opts.speechResult,
-          tenantId: opts.tenantId,
-          gateway: this.deps.gateway,
-        });
-        // Wire token usage into the cost tracker.
-        const capExceeded = this.processor.recordCost(session, confirmation.tokenUsage);
-        if (capExceeded) {
-          sideEffectsAll.push(...session.machine.dispatch({ type: 'cost_cap_exceeded' }));
-        } else if (confirmation.confirmed) {
-          sideEffectsAll.push(...session.machine.dispatch({ type: 'confirmed' }));
-        } else {
-          sideEffectsAll.push(
-            ...session.machine.dispatch({
-              type: 'correction',
-              newTranscript: confirmation.correction ?? opts.speechResult,
-            })
-          );
-        }
-      } catch (err) {
-        logger.error('confirmIntent failed', {
-          error: err instanceof Error ? err.message : String(err),
-          sessionId: opts.sessionId,
-        });
-        // Treat as correction so the caller is re-prompted, not auto-queued.
-        sideEffectsAll.push(
-          ...session.machine.dispatch({
-            type: 'correction',
-            newTranscript: opts.speechResult,
-          })
-        );
-      }
-    } else if (currentState === 'intent_capture' || currentState === 'closing') {
+      // confirm_intent: caller is responding to a yes/no readback. #1538 —
+      // the processor's shared confirm-turn rule (the same one speechTurn
+      // runs): a detail merges and is read back, a "no" or a different
+      // request corrects.
+      sideEffectsAll.push(
+        ...(await this.processor.handleIntentConfirmTurn(
+          session,
+          opts.speechResult,
+          opts.tenantId,
+        )),
+      );
+    } else if (turnState === 'intent_capture' || turnState === 'closing') {
       // 3. Classify intent. Failure → confidence_low so the bounded
       //    reprompt path triggers instead of bubbling 5xx out to Twilio
       //    (which would hang the caller mid-call).
@@ -2547,6 +2547,8 @@ export class TwilioGatherAdapter {
       // #866 — captured alongside the intent so the lookup branch below reads
       // it directly rather than re-narrowing `classifierEvent`.
       let classifiedEntities: Record<string, unknown> = {};
+      // #1540 §2 — an off-surface interception keeps its own repair copy.
+      let classifiedOffSurface = false;
       // #897 — the one shared classify-context assembly (speechTurn and the
       // voice-quality driver call the same function), so every phone surface
       // and the corpus send the same prompt. The profile is hoisted so the
@@ -2562,6 +2564,7 @@ export class TwilioGatherAdapter {
           classifyContext,
           this.deps.gateway,
         );
+        classifiedOffSurface = Boolean(classification.offSurfaceIntent);
         session.aiInfraRetryCount = 0;
         // VQ-003: surface the classifier outcome for the harness.
         session.events.emit(
@@ -2644,6 +2647,19 @@ export class TwilioGatherAdapter {
             reason: systemFailureReasonForInfra(infraKind),
           }),
         );
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+
+      // #1540 §2 — the ask_caller answer carried no request we can act on
+      // (just a name / address): ask what they need, exactly as before.
+      if (
+        currentState === 'ask_caller' &&
+        !classifiedOffSurface &&
+        classifierEvent?.type === 'intent_classified' &&
+        (classifierEvent.confidence < TAU_INT || classifierEvent.intentType === 'unknown')
+      ) {
+        sideEffectsAll.push({ type: 'tts_play', payload: { text: ASK_CALLER_HELP_PROMPT } });
         await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }
@@ -2807,7 +2823,11 @@ export class TwilioGatherAdapter {
         );
         this.processor.expandDisambiguationTemplate(session, resolutionFx);
         sideEffectsAll.push(...resolutionFx);
-        this.processor.expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
+        this.processor.expandIntentConfirmTemplate(
+          sideEffectsAll,
+          classifierEvent.intentType,
+          session.language === 'es' ? 'es' : 'en',
+        );
       }
     } else if (currentState === 'entity_resolution') {
       // #1118 — the caller is answering the disambiguation question; the SAME
@@ -2820,17 +2840,6 @@ export class TwilioGatherAdapter {
           opts.tenantId,
           opts.speechResult,
         )),
-      );
-    } else if (currentState === 'ask_caller') {
-      // Unknown caller on the PSTN/Gather path just gave their info. Reuse the
-      // SAME find-or-create-customer + advance-to-intake logic the media-
-      // streams adapter runs (shared handleAskCaller). Without this branch the
-      // turn fell to the generic `else` below → confidence_low, which the
-      // ask_caller state ignores, so unknown callers looped forever on a bare
-      // <Gather> reprompt. Now they advance (caller_known → intent_capture) and
-      // the FSM's own reprompt/escalate handles a still-unresolved caller.
-      sideEffectsAll.push(
-        ...(await this.processor.handleAskCaller(session, opts.tenantId)),
       );
     } else {
       // Other states: log and reprompt with a generic message. Treat as a
@@ -3199,14 +3208,14 @@ export class TwilioGatherAdapter {
     opts: { sessionId: string; callSid: string; tenantId: string; speechResult: string },
     sideEffectsAll: SideEffect[],
   ): Promise<boolean> {
-    // Caller already matched — confirm identity instead.
-    if (session.customerId) {
+    // Caller already a customer — say so and ask what they need (#1540 §3:
+    // the shared rule's copy). A record this call's ask_caller turn just
+    // created from the phone number is not "already" a customer: their
+    // sign-up (with their name) proceeds below.
+    if (session.customerId && !session.callerCreatedThisCall) {
       sideEffectsAll.push({
         type: 'tts_play',
-        payload: {
-          text:
-            "I've got you in our system already. Let me know what you'd like help with today.",
-        },
+        payload: { text: EXISTING_CUSTOMER_SIGNUP_COPY },
       });
       return true;
     }

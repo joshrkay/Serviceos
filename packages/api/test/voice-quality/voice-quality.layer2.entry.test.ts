@@ -63,8 +63,13 @@ describe('VQ2-followup — Layer 2 entry-test wiring', () => {
 
     // First-audible is measured like production only if the adapter under
     // test has the same 250 ms filler path production wires in app.ts.
-    expect(entrySource).toMatch(/buildLayer2FillerCache\(\{[\s\S]*fillerDir:[\s\S]*customer-calling\/fillers/);
-    expect(entrySource).toMatch(/attachMediaStreamServer\(httpServer, \{[\s\S]*fillerEngine: new FillerEngine\(\)[\s\S]*fillerCache: fillers\.cache/);
+    // #1534 — and the clips come from the PRODUCTION mechanism: the same
+    // FillerAudioCache loads the fillers dir and fills the missing clips
+    // with fillMissing (awaited here so every measured turn has them).
+    expect(entrySource).toMatch(/new FillerAudioCache\([\s\S]*customer-calling\/fillers/);
+    expect(entrySource).toMatch(/await fillerCache\.fillMissing\(/);
+    expect(entrySource).not.toMatch(/buildLayer2FillerCache/);
+    expect(entrySource).toMatch(/attachMediaStreamServer\(httpServer, \{[\s\S]*fillerEngine: new FillerEngine\(\)[\s\S]*fillerCache,/);
   });
 
   it('VQ2-followup — empty corpus produces a valid Layer2Report with launchGate.pass=false', () => {

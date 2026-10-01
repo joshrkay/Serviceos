@@ -64,7 +64,17 @@ export interface ResolveDateTimeOptions {
   now?: Date;
   /** Appointment length when only a start time is given. */
   defaultDurationMin?: number;
+  /**
+   * #1540 §1 — the window of the appointment a reschedule moves. A phrase
+   * that names a day and "the same time" ("Wednesday at the same time")
+   * resolves to that appointment's tenant-local time-of-day on the new day,
+   * keeping its length. Without it, "same time" stays `ambiguous_no_time`.
+   */
+  sameTimeAs?: { startUtc: string; endUtc: string };
 }
+
+/** "same time" / "the same time" — the caller keeps the original slot's clock time. */
+const SAME_TIME_RE = /\bsame\s+time\b/i;
 
 export type ResolveDateTimeFailureReason =
   | 'empty'
@@ -289,10 +299,14 @@ export function resolveDateTime(
 
   const hasExactTime = start.isCertain('hour');
   const daypart = hasExactTime ? undefined : detectDaypart(text);
+  // #1540 §1 — "Wednesday at the same time": the time comes from the
+  // appointment being moved, never from a guess.
+  const sameTime =
+    !hasExactTime && opts.sameTimeAs && SAME_TIME_RE.test(text) ? opts.sameTimeAs : undefined;
 
   // A bare date with neither an explicit time nor a daypart is ambiguous —
   // ask rather than guess a default hour.
-  if (!hasExactTime && !daypart) return { ok: false, reason: 'ambiguous_no_time' };
+  if (!hasExactTime && !daypart && !sameTime) return { ok: false, reason: 'ambiguous_no_time' };
 
   let startDt: DateTime;
   let endDt: DateTime;
@@ -300,7 +314,22 @@ export function resolveDateTime(
   let arrivalStart: DateTime | undefined;
   let arrivalEnd: DateTime | undefined;
 
-  if (hasExactTime) {
+  if (sameTime) {
+    precision = 'exact';
+    const anchorStart = DateTime.fromISO(sameTime.startUtc, { zone: 'utc' }).setZone(timezone);
+    const anchorEnd = DateTime.fromISO(sameTime.endUtc, { zone: 'utc' });
+    startDt = wallToUtc(
+      {
+        year: day.year,
+        month: day.month,
+        day: day.dayOfMonth,
+        hour: anchorStart.hour,
+        minute: anchorStart.minute,
+      },
+      timezone,
+    );
+    endDt = startDt.plus({ milliseconds: anchorEnd.toMillis() - anchorStart.toMillis() });
+  } else if (hasExactTime) {
     precision = 'exact';
     startDt = wallToUtc(
       {

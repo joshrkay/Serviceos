@@ -196,10 +196,16 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
    * confirms the readback. Returns the real `proposals` row id.
    */
   async function bookThroughTheCall(c: Call): Promise<string> {
-    if (c.session.machine.currentState === 'ask_caller') {
-      await turn(c, 'Casey Rivera, 12 Oak Street');
-    }
-    await turn(c, 'I need an appointment tomorrow at 9am');
+    // #1540 §2 — the unknown caller's identification turn also carries their
+    // request (identify by phone + classify in ONE turn), so the caller says
+    // who they are and what they need together, then confirms the readback.
+    // An already-identified caller just asks.
+    await turn(
+      c,
+      c.session.machine.currentState === 'ask_caller'
+        ? 'Casey Rivera, 12 Oak Street — I need an appointment tomorrow at 9am'
+        : 'I need an appointment tomorrow at 9am',
+    );
     expect(c.session.machine.currentState).toBe('intent_confirm');
     await turn(c, 'yes that is right');
     expect(c.session.proposalIds).toHaveLength(1);
@@ -240,9 +246,10 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
 
   it('ENGLISH: a gas leak is recognised with the LLM gateway DOWN — the call terminates on the life-safety path and the audit row carries tier E1', async () => {
     const c = await inboundCall(tenantA.tenantId);
-    if (c.session.machine.currentState === 'ask_caller') {
-      await turn(c, 'Casey Rivera, 12 Oak Street');
-    }
+    // #1540 §2 — the gas leak is the unknown caller's FIRST utterance: the
+    // turn that would identify them and carry their request into
+    // classification. The deterministic scan must claim it before either.
+    expect(c.session.machine.currentState).toBe('ask_caller');
 
     // "Before any AI thinks about it" needs BOTH halves, because either alone
     // is too weak (Codex review, PR #1054):
@@ -286,13 +293,43 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
       keyword: 'smell gas',
     });
 
-    // No classification ever ran on this call AT ALL: the ask_caller turn
-    // does not classify, and the E1 turn was consumed by the deterministic
-    // scan before the classify call could be reached.
+    // No classification ever ran on this call AT ALL: the E1 utterance was
+    // the caller's first, and the deterministic scan consumed it before the
+    // identify + carry-forward classification (#1540 §2) could be reached.
     const classified = (await sessionAudit(tenantA.tenantId, c.session.id)).filter((e) =>
       e.eventType.endsWith(CLASSIFIED_EVENT_SUFFIX),
     );
     expect(classified).toHaveLength(0);
+    // …and nothing was drafted from it.
+    expect(c.session.proposalIds).toHaveLength(0);
+  });
+
+  it('ENGLISH (#1540): gateway DOWN from the start — a name-only identify turn answers promptly with no model call, then the gas leak takes the life-safety path with no classification on the whole call', async () => {
+    const c = await inboundCall(tenantA.tenantId);
+    expect(c.session.machine.currentState).toBe('ask_caller');
+    c.llm.mockRejectedValue(new Error('LLM gateway is down'));
+
+    // The identify turn carries no request, so it must not wait on (or even
+    // call) the classifier before the caller can say what is wrong.
+    const t0 = performance.now();
+    const identifyTwiml = await turn(c, 'Casey Rivera, 12 Oak Street');
+    expect(performance.now() - t0).toBeLessThan(2_000);
+    expect(identifyTwiml).toContain('How can I help you today?');
+
+    const twiml = await turn(c, EN_GAS);
+
+    const nonSummaryCalls = c.llm.mock.calls.filter(
+      ([req]) => (req as { taskType?: string })?.taskType !== 'summarize_conversation',
+    );
+    expect(nonSummaryCalls).toHaveLength(0);
+    expect(c.session.machine.currentState).toBe('terminated');
+    expect(c.session.machine.currentContext.escalationReason).toBe('life_safety_e1');
+    expect(twiml).toContain('911');
+    expect(twiml).toContain('<Hangup/>');
+    const rows = await sessionAudit(tenantA.tenantId, c.session.id);
+    expect(emergencyRow(rows)?.metadata).toMatchObject({ tier: 'E1', reason: 'life_safety_e1' });
+    expect(rows.filter((e) => e.eventType.endsWith(CLASSIFIED_EVENT_SUFFIX))).toHaveLength(0);
+    expect(c.session.proposalIds).toHaveLength(0);
   });
 
   it('ENGLISH: it NEVER books — a booking drafted earlier in the call is revoked in real Postgres with its own audit row', async () => {

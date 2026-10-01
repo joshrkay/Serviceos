@@ -149,6 +149,21 @@ function ttsPlay(text: string, extra?: Record<string, unknown>): SideEffect {
   };
 }
 
+/**
+ * The `intent_confirm` readback. #1539 — carries the request's entities so the
+ * renderer (tts-copy `confirm_intent`) can say WHAT will be drafted.
+ */
+function confirmIntentTts(
+  context: CallingAgentContext,
+  entities: Record<string, unknown> | undefined,
+): SideEffect {
+  return ttsPlay('intent_confirm', {
+    template: 'confirm_intent',
+    intent: context.currentIntent,
+    entities: { ...(entities ?? {}) },
+  });
+}
+
 function endSession(context: CallingAgentContext, reason: string): SideEffect {
   return {
     type: 'end_session',
@@ -1162,7 +1177,7 @@ function transitionEntityResolution(
       nextState: 'intent_confirm',
       sideEffects: [
         auditLog(context, 'entity_resolution', 'intent_confirm', 'entity_resolved'),
-        ttsPlay('intent_confirm', { template: 'confirm_intent', intent: context.currentIntent }),
+        confirmIntentTts(context, { ...context.extractedEntities, ...event.refs }),
       ],
       updatedContext: {
         ...context,
@@ -1295,7 +1310,7 @@ function transitionEntityConfirm(
           entityKind: pending.entityKind,
           candidateId: pending.candidate.id,
         }),
-        ttsPlay('intent_confirm', { template: 'confirm_intent', intent: context.currentIntent }),
+        confirmIntentTts(context, { ...context.extractedEntities, ...refs }),
       ],
       updatedContext: {
         ...context,
@@ -1414,7 +1429,7 @@ function transitionIntentConfirm(
             intentType: context.currentIntent,
             confirmDetailRetryCount: noProgressCount,
           }),
-          ttsPlay('intent_confirm', { template: 'confirm_intent', intent: context.currentIntent }),
+          confirmIntentTts(context, context.extractedEntities),
         ],
         updatedContext: { ...context, confirmDetailRetryCount: noProgressCount },
       };

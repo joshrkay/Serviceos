@@ -190,6 +190,12 @@ export interface VoiceSession {
    */
   callerPhone?: string;
   /**
+   * #1540 §3 — true when this call's ask_caller turn CREATED the caller's
+   * customer record from their phone number. Such a caller is not "already a
+   * customer" — their sign-up request is the record's first real content.
+   */
+  callerCreatedThisCall?: boolean;
+  /**
    * #1223 — Twilio's STIR/SHAKEN verdict (`StirVerstat`) from the inbound
    * webhook, verbatim; absent when Twilio sent none. Owner-line authority
    * requires full A-attestation (`telephony/stir-attestation.ts`).

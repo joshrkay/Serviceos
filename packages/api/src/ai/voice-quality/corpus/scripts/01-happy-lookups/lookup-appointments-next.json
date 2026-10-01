@@ -45,6 +45,22 @@
         "createdAt": "2026-04-30T10:00:00.000Z",
         "updatedAt": "2026-04-30T10:00:00.000Z"
       }
+    ],
+    "jobs": [
+      {
+        "id": "job_01_appts_1",
+        "tenantId": "t_01_lookup_appointments",
+        "customerId": "cust_01_appts_evan",
+        "jobNumber": "JOB-APPOINTMENTS-1",
+        "summary": "Heat pump diagnostic",
+        "problemDescription": "Heat pump diagnostic",
+        "status": "scheduled",
+        "priority": "normal",
+        "assignedTechnicianId": null,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-01T08:00:00.000Z",
+        "updatedAt": "2026-04-01T08:00:00.000Z"
+      }
     ]
   },
   "turns": [

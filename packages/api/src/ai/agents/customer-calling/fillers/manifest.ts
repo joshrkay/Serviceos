@@ -15,11 +15,12 @@
  * and the adapter plays NOTHING for that turn (silence) — it must never
  * fall back to an English filler on a Spanish call.
  *
- * DEPLOY-TIME STEP: the Spanish clips do not exist until
- * `ELEVENLABS_API_KEY=... npx tsx scripts/render-fillers.ts` is re-run
- * (the script renders `language: 'es'` entries with the
- * eleven_multilingual_v2 model). Until then Spanish calls degrade
- * gracefully to silent fillers.
+ * #1534 — no clips ship in the image: at boot, every clip missing from
+ * disk (English and Spanish) is synthesized once in memory with the
+ * production TTS (`startFillerSynthesis`; a Spanish entry passes
+ * language 'es', which selects the multilingual model). Until a clip lands,
+ * or if its synthesis fails, that filler is silence. Pre-rendered clips
+ * from `scripts/render-fillers.ts` still win when present on disk.
  */
 export interface Filler {
   id: string;

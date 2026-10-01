@@ -91,6 +91,7 @@
 import { performance } from 'node:perf_hooks';
 import { v4 as uuidv4 } from 'uuid';
 import { LLMGateway } from '../gateway/gateway';
+import { TAU_INT } from '../agents/customer-calling/transitions';
 import {
   classifyIntent,
   isLookupIntent,
@@ -929,9 +930,25 @@ export class TextModeDriver implements AgentDriver {
           break;
         }
         case 'mutation':
-        default:
-          agentResponse = await this.runMutation(session, callerTranscript, state);
+        default: {
+          // #1540 §3 — the phone transports' shared rule: an existing
+          // customer asking to "sign up" is told so and asked what they
+          // need; no duplicate create_customer draft. Checked here so the
+          // harness's escalation / abuse decisions above keep precedence.
+          const signupReply =
+            classification.confidence >= TAU_INT
+              ? this.voiceProcessor.existingCustomerSignupReplyFor(
+                  session,
+                  intent,
+                  this.deps.operatorTaxonomyOverride
+                    ? 'operator'
+                    : (classifyContext.classifierProfile ?? 'operator'),
+                )
+              : null;
+          agentResponse =
+            signupReply ?? (await this.runMutation(session, callerTranscript, state));
           break;
+        }
       }
 
       emitIntentClassified();
