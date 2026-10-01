@@ -107,6 +107,18 @@ describe('#1540 §2 — the ask_caller turn carries the caller\'s request forwar
     expect(reply).toMatch(/^Just to confirm/);
   });
 
+  it('S1 intact: a first utterance asking for an owner-only action gets the off-surface repair, not "How can I help"', async () => {
+    const call = await unknownCallerAtAskCaller(
+      JSON.stringify({ intentType: 'send_invoice', confidence: 0.96, extractedEntities: { jobReference: 'Henderson' } }),
+    );
+
+    const reply = spoken(await call.turn('My name is Casey Rivera. Send the Henderson invoice to me now.'));
+
+    expect(reply).toContain('can you say that again?');
+    expect(reply).not.toContain('How can I help you today?');
+    expect(await call.proposalRepo.findByTenant(TENANT)).toEqual([]);
+  });
+
   it('a turn that carried only the caller\'s name still gets asked what they need', async () => {
     const call = await unknownCallerAtAskCaller(
       JSON.stringify({ intentType: 'unknown', confidence: 0.2, extractedEntities: {} }),

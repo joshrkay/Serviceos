@@ -5112,6 +5112,8 @@ export function createVoiceTurnProcessor(
       }
 
       let classifierEvent: CallingAgentEvent | null = null;
+      // #1540 §2 — an off-surface interception keeps its own repair copy.
+      let classifiedOffSurface = false;
       // #897 — the one shared context assembly (Gather + the voice-quality
       // driver call the same function). The profile is hoisted so the
       // off-surface audit below records the same profile the guard enforced.
@@ -5123,6 +5125,7 @@ export function createVoiceTurnProcessor(
           classifyContext,
           deps.gateway,
         );
+        classifiedOffSurface = Boolean(classification.offSurfaceIntent);
         // Successful classify clears infra-retry budget for this session.
         session.aiInfraRetryCount = 0;
         session.events.emit(
@@ -5221,6 +5224,7 @@ export function createVoiceTurnProcessor(
       // rather than a "say that again" repair for words that were heard.
       if (
         currentState === 'ask_caller' &&
+        !classifiedOffSurface &&
         classifierEvent.type === 'intent_classified' &&
         (classifierEvent.confidence < TAU_INT || classifierEvent.intentType === 'unknown')
       ) {

@@ -71,6 +71,41 @@ describe('#1540 §2 — Gather: the ask_caller turn carries the request forward'
   });
 });
 
+describe('#1540 §2 — S1 intact: an off-surface request on the carry-forward turn', () => {
+  it('a stranger\'s FIRST utterance asking for an owner-only action is intercepted exactly like any caller turn — repair, not "How can I help"', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: scriptedGateway(
+        JSON.stringify({ intentType: 'send_invoice', confidence: 0.96, extractedEntities: { jobReference: 'Henderson' } }),
+      ),
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      auditRepo,
+      proposalRepo,
+      customerRepo: new InMemoryCustomerRepository(),
+    });
+    await adapter.handleInbound({ callSid: 'CA-1540-g5', from: '+15555550399', to: '+15125550000', tenantId: TENANT });
+    const session = store.findByCallSid('CA-1540-g5')!;
+    expect(session.machine.currentState).toBe('ask_caller');
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-1540-g5',
+      speechResult: 'My name is Casey Rivera. Please send the Henderson invoice to me right now.',
+      confidence: 0.9,
+      tenantId: TENANT,
+    });
+
+    expect(auditRepo.getAll().filter((e) => e.eventType === 'voice.intent_off_surface')).toHaveLength(1);
+    expect(await proposalRepo.findByTenant(TENANT)).toEqual([]);
+    expect(twiml).toContain('can you say that again?');
+    expect(twiml).not.toContain('How can I help you today?');
+  });
+});
+
 describe('#1540 §3 — Gather: an existing customer asking to sign up', () => {
   it('is told they are already a customer and asked what they need — no create_customer draft', async () => {
     const store = new VoiceSessionStore({ startInterval: false });

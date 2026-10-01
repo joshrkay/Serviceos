@@ -297,15 +297,10 @@ describe('Postgres integration — #1386 owner writes the reviewed E1 script', (
     if (session.machine.currentState === 'greeting') {
       session.machine.dispatch({ type: 'greeted_ok' });
     }
-    if (session.machine.currentState === 'ask_caller') {
-      await adapter.handleGather({
-        sessionId: session.id,
-        callSid,
-        speechResult: 'Casey Rivera, 12 Oak Street',
-        confidence: 0.95,
-        tenantId,
-      });
-    }
+    // #1540 §2 — no separate identification turn: an unknown caller's first
+    // utterance is identified by phone AND carries their request, so each
+    // test's first turn is what the caller actually says (the booking below,
+    // or the E1 hazard straight away).
     return { session, adapter, callSid, tenantId, sms, llm };
   }
 
@@ -372,7 +367,12 @@ describe('Postgres integration — #1386 owner writes the reviewed E1 script', (
   // ─── Life-safety proof on the placeholder (O-2: hard-flagged, not voicemail) ─
 
   async function bookThroughTheCall(c: Call): Promise<string> {
-    await turn(c, 'I need an appointment tomorrow at 9am');
+    await turn(
+      c,
+      c.session.machine.currentState === 'ask_caller'
+        ? 'Casey Rivera, 12 Oak Street — I need an appointment tomorrow at 9am'
+        : 'I need an appointment tomorrow at 9am',
+    );
     expect(c.session.machine.currentState).toBe('intent_confirm');
     await turn(c, 'yes that is right');
     expect(c.session.proposalIds).toHaveLength(1);

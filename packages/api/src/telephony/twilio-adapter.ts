@@ -2541,6 +2541,8 @@ export class TwilioGatherAdapter {
       // #866 — captured alongside the intent so the lookup branch below reads
       // it directly rather than re-narrowing `classifierEvent`.
       let classifiedEntities: Record<string, unknown> = {};
+      // #1540 §2 — an off-surface interception keeps its own repair copy.
+      let classifiedOffSurface = false;
       // #897 — the one shared classify-context assembly (speechTurn and the
       // voice-quality driver call the same function), so every phone surface
       // and the corpus send the same prompt. The profile is hoisted so the
@@ -2556,6 +2558,7 @@ export class TwilioGatherAdapter {
           classifyContext,
           this.deps.gateway,
         );
+        classifiedOffSurface = Boolean(classification.offSurfaceIntent);
         session.aiInfraRetryCount = 0;
         // VQ-003: surface the classifier outcome for the harness.
         session.events.emit(
@@ -2646,6 +2649,7 @@ export class TwilioGatherAdapter {
       // (just a name / address): ask what they need, exactly as before.
       if (
         currentState === 'ask_caller' &&
+        !classifiedOffSurface &&
         classifierEvent?.type === 'intent_classified' &&
         (classifierEvent.confidence < TAU_INT || classifierEvent.intentType === 'unknown')
       ) {
