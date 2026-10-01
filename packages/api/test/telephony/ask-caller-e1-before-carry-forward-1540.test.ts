@@ -40,12 +40,13 @@ function harness(callSid: string) {
     tokenUsage: { input: 1, output: 1, total: 2 },
     latencyMs: 1,
   }));
+  const auditRepo = new InMemoryAuditRepository();
   const adapter = new TwilioGatherAdapter({
     store,
     gateway: { complete: llm },
     businessName: 'Acme Plumbing',
     publicBaseUrl: 'https://example.com',
-    auditRepo: new InMemoryAuditRepository(),
+    auditRepo,
     proposalRepo,
     customerRepo,
   } as never);
@@ -53,6 +54,7 @@ function harness(callSid: string) {
     store,
     adapter,
     llm,
+    auditRepo,
     customerRepo,
     proposalRepo,
     start: async () => {
@@ -104,5 +106,67 @@ describe('#1540 §2 — E1 runs before the unknown-caller carry-forward classifi
     expect(nonSummaryModelCalls(h.llm)).toBe(0);
     expect(await h.proposalRepo.findByTenant(TENANT)).toEqual([]);
     expect(await h.customerRepo.findByTenant(TENANT)).toEqual([]);
+  });
+});
+
+const NAME_ONLY = 'Casey Rivera, 12 Oak Street';
+const EN_GAS = 'I smell gas in my kitchen and it is getting stronger';
+/** Generous for an in-memory turn; far below any classify deadline. */
+const PROMPT_TURN_MS = 1_000;
+
+describe('#1540 §2 — gateway DOWN: a name-only identify turn does not wait on the classifier, then E1 still wins', () => {
+  async function nameThenGas(
+    h: ReturnType<typeof harness>,
+    speak: (speech: string) => Promise<string>,
+  ): Promise<{ identifyReply: string; identifyMs: number; e1Reply: string }> {
+    h.llm.mockRejectedValue(new Error('LLM gateway is down'));
+    const t0 = performance.now();
+    const identifyReply = await speak(NAME_ONLY);
+    const identifyMs = performance.now() - t0;
+    const e1Reply = await speak(EN_GAS);
+    return { identifyReply, identifyMs, e1Reply };
+  }
+
+  function classifiedRows(h: ReturnType<typeof harness>): number {
+    return h.auditRepo.getAll().filter((e) => e.eventType.endsWith('.intent_classified')).length;
+  }
+
+  it('Gather: name only → "How can I help you today?" with NO classifier call; then the gas leak → 911, nothing drafted, no classification on the call', async () => {
+    const h = harness('CA-1540-down-g');
+    const session = await h.start();
+    const speak = (speech: string) =>
+      h.adapter.handleGather({ sessionId: session.id, callSid: 'CA-1540-down-g', speechResult: speech, confidence: 0.95, tenantId: TENANT });
+
+    const r = await nameThenGas(h, speak);
+
+    expect(r.identifyReply).toContain('How can I help you today?');
+    expect(r.identifyMs).toBeLessThan(PROMPT_TURN_MS);
+    expect(session.machine.currentContext.escalationReason).toBe('life_safety_e1');
+    expect(r.e1Reply).toContain('911');
+    expect(nonSummaryModelCalls(h.llm)).toBe(0);
+    expect(classifiedRows(h)).toBe(0);
+    expect(await h.proposalRepo.findByTenant(TENANT)).toEqual([]);
+  });
+
+  it('media-streams (speechTurn): the same name-only turn → prompt, NO classifier call; then the gas leak → E1, nothing drafted, no classification', async () => {
+    const h = harness('CA-1540-down-ms');
+    const session = await h.start();
+    const speak = async (speech: string) =>
+      (
+        await h.adapter.processCallerUtterance({ sessionId: session.id, callSid: 'CA-1540-down-ms', speechResult: speech, tenantId: TENANT })
+      )
+        .filter((f) => f.type === 'tts_play')
+        .map((f) => String(f.payload.text))
+        .join(' ');
+
+    const r = await nameThenGas(h, speak);
+
+    expect(r.identifyReply).toContain('How can I help you today?');
+    expect(r.identifyMs).toBeLessThan(PROMPT_TURN_MS);
+    expect(session.machine.currentContext.escalationReason).toBe('life_safety_e1');
+    expect(r.e1Reply).toContain('911');
+    expect(nonSummaryModelCalls(h.llm)).toBe(0);
+    expect(classifiedRows(h)).toBe(0);
+    expect(await h.proposalRepo.findByTenant(TENANT)).toEqual([]);
   });
 });

@@ -106,6 +106,7 @@ import type { CurrentQuoteResolver } from '../conversations/negotiation/current-
 import type { RepairTemplate } from '../verticals/registry';
 import { detectFrustration } from '../ai/agents/customer-calling/frustration-detector';
 import { classifyCallerSafety } from '../ai/agents/customer-calling/emergency-tier';
+import { askCallerUtteranceCarriesRequest } from '../ai/voice-turn/ask-caller-request';
 import { detectPromptInjection } from '../ai/agents/customer-calling/untrusted-content';
 import {
   renderTtsText,
@@ -2501,7 +2502,12 @@ export class TwilioGatherAdapter {
     let turnState: string = currentState;
     if (currentState === 'ask_caller') {
       const askCallerFx = await this.processor.handleAskCaller(session, opts.tenantId);
-      if (session.machine.currentState !== 'intent_capture') {
+      // Identity only (no request to carry) → no classify call: identify and
+      // ask how to help, exactly as before (ask-caller-request.ts).
+      if (
+        session.machine.currentState !== 'intent_capture' ||
+        !askCallerUtteranceCarriesRequest(opts.speechResult)
+      ) {
         sideEffectsAll.push(...askCallerFx);
         await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);

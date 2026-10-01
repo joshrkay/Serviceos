@@ -304,6 +304,34 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
     expect(c.session.proposalIds).toHaveLength(0);
   });
 
+  it('ENGLISH (#1540): gateway DOWN from the start — a name-only identify turn answers promptly with no model call, then the gas leak takes the life-safety path with no classification on the whole call', async () => {
+    const c = await inboundCall(tenantA.tenantId);
+    expect(c.session.machine.currentState).toBe('ask_caller');
+    c.llm.mockRejectedValue(new Error('LLM gateway is down'));
+
+    // The identify turn carries no request, so it must not wait on (or even
+    // call) the classifier before the caller can say what is wrong.
+    const t0 = performance.now();
+    const identifyTwiml = await turn(c, 'Casey Rivera, 12 Oak Street');
+    expect(performance.now() - t0).toBeLessThan(2_000);
+    expect(identifyTwiml).toContain('How can I help you today?');
+
+    const twiml = await turn(c, EN_GAS);
+
+    const nonSummaryCalls = c.llm.mock.calls.filter(
+      ([req]) => (req as { taskType?: string })?.taskType !== 'summarize_conversation',
+    );
+    expect(nonSummaryCalls).toHaveLength(0);
+    expect(c.session.machine.currentState).toBe('terminated');
+    expect(c.session.machine.currentContext.escalationReason).toBe('life_safety_e1');
+    expect(twiml).toContain('911');
+    expect(twiml).toContain('<Hangup/>');
+    const rows = await sessionAudit(tenantA.tenantId, c.session.id);
+    expect(emergencyRow(rows)?.metadata).toMatchObject({ tier: 'E1', reason: 'life_safety_e1' });
+    expect(rows.filter((e) => e.eventType.endsWith(CLASSIFIED_EVENT_SUFFIX))).toHaveLength(0);
+    expect(c.session.proposalIds).toHaveLength(0);
+  });
+
   it('ENGLISH: it NEVER books — a booking drafted earlier in the call is revoked in real Postgres with its own audit row', async () => {
     const c = await inboundCall(tenantA.tenantId);
     const bookingId = await bookThroughTheCall(c);

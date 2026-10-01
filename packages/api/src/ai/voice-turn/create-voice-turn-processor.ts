@@ -67,6 +67,7 @@ import {
 } from '../orchestration/intent-classifier';
 import type { ClassifierProfile } from '../orchestration/classifier-profile';
 import { EXISTING_CUSTOMER_SIGNUP_COPY, existingCustomerSignupReply } from './existing-customer-signup';
+import { askCallerUtteranceCarriesRequest } from './ask-caller-request';
 import {
   AI_BUSY_HOLD_LINE,
   classifyInfraFailure,
@@ -5022,7 +5023,12 @@ export function createVoiceTurnProcessor(
     let turnState = currentState;
     if (currentState === 'ask_caller') {
       const askCallerFx = await handleAskCaller(session, tenantId);
-      if (session.machine.currentState !== 'intent_capture') {
+      // Identity only (no request to carry) → no classify call: identify and
+      // ask how to help, exactly as before (ask-caller-request.ts).
+      if (
+        session.machine.currentState !== 'intent_capture' ||
+        !askCallerUtteranceCarriesRequest(speechResult)
+      ) {
         sideEffectsAll.push(...askCallerFx);
         await executeSideEffects(session, sideEffectsAll, tenantId);
         return sideEffectsAll;
