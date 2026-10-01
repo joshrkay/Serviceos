@@ -84,7 +84,9 @@ export async function lookupCatalog(
     if (active.length === 0) {
       const summary = input.search
         ? `I couldn't find any catalog items matching "${input.search}".`
-        : 'Your service catalog is empty right now.';
+        : // #1331 — a concrete next step (the web app's Settings → Price
+          // book page, /settings/price-book), not just "it's empty".
+          'Your service catalog is empty right now. You can add services in the app under Settings, then Price book.';
       await record('none', 0, summary);
       return { status: 'none', summary, data: { count: 0, names: [], items: [] } };
     }

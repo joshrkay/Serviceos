@@ -2883,9 +2883,17 @@ describe('createVoiceTurnProcessor — owner-line close for a card awaiting appr
     expect(closing).toMatch(/approv/i);
   });
 
-  it('an S1 caller (new this call) whose sign-up is queued for the owner keeps the caller close', async () => {
+  // #1331 (Layer 2 run 36925905917) — the S1 caller's request is a DRAFT
+  // queued for the team. "Great, I've got that taken care of" claims the
+  // change already happened (the disposition judge failed all 3 runs of
+  // create-customer-new-signup / -with-address / reschedule on it). The
+  // caller hears what is true: it was passed to the team, who will confirm.
+  it('an S1 caller (new this call) whose sign-up is queued hears it was passed to the team — never "taken care of"', async () => {
     const { proposals, closing } = await confirmCreateCustomer(false);
     expect(proposals).toHaveLength(1);
-    expect(closing).toBe(GENERIC_CLOSING_LINE);
+    expect(['draft', 'ready_for_review']).toContain(proposals[0]!.status);
+    expect(closing).toBe(
+      "I've passed that along to our team, and someone will confirm it with you shortly. Is there anything else I can help you with?",
+    );
   });
 });
