@@ -45,7 +45,7 @@ RUN echo "build: $RAILWAY_GIT_COMMIT_SHA" && cd packages/api && npx tsc --projec
 # digest, so this is the image that was already shipping. Dependabot's `docker`
 # ecosystem (.github/dependabot.yml) bumps it; do not replace it with a bare
 # tag to avoid the bump.
-FROM nginx:1.31.6-alpine@sha256:d10753d9289b8e3f884386351f73554ce72b631378949deddd75e83ee296c427 AS web
+FROM nginx:1.31.6-alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2 AS web
 COPY --from=web-build /app/packages/web/dist /usr/share/nginx/html
 COPY packages/web/nginx.conf /etc/nginx/conf.d/default.conf
 COPY packages/web/security-headers.conf /etc/nginx/security-headers.conf
