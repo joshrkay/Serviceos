@@ -68,7 +68,7 @@
       "caller": "When's my next appointment?",
       "expected": {
         "intent": "lookup_appointments",
-        "spokenAnswerMatches": "Evan's next appointment is on June 12 with a 9:00 AM Pacific arrival window"
+        "spokenAnswerMatches": "Evan's next appointment is Friday, June 12, with a 9:00 AM Pacific arrival window"
       },
       "hangupAfter": false
     }
