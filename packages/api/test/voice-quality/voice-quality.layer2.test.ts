@@ -105,6 +105,7 @@ import type { AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
 import type { DriverFactoryContext } from '../../src/ai/voice-quality/runner';
 import { createVoiceTurnProcessor } from '../../src/ai/voice-turn';
 import { buildHarnessPhoneLookups } from '../../src/ai/voice-quality/harness-lookups';
+import { buildLayer2ProcessorWorld } from '../../src/ai/voice-quality/layer2-world';
 import type { SpeechTurnHandler } from '../../src/telephony/media-streams/mediastream-adapter';
 import { normalizePhone } from '../../src/compliance/dnc';
 
@@ -375,6 +376,9 @@ describe('Voice Quality Layer 2 — corpus', () => {
             const processorRef: {
               current: ReturnType<typeof createVoiceTurnProcessor> | null;
             } = { current: null };
+            // #1331 — tenant zone, on-call rotation and the corpus clock,
+            // wired from the fixtures as app.ts wires them from tenant rows.
+            const world = buildLayer2ProcessorWorld(script, factoryCtx.tenantId);
             const processor = createVoiceTurnProcessor({
               store: suiteState.voiceSessionStore!,
               gateway: driverDeps.gateway,
@@ -383,10 +387,16 @@ describe('Voice Quality Layer 2 — corpus', () => {
               customerRepo: factoryCtx.repos.customerRepo,
               appointmentRepo: factoryCtx.repos.appointmentRepo,
               jobRepo: factoryCtx.repos.jobRepo,
+              settingsRepo: world.settingsRepo,
+              onCallRepo: world.onCallRepo,
+              now: world.now,
               // #1395 — media_streams answers lookup_* through the shared
               // dispatch; invoice / estimate / lead reads reach it only via
               // this bundle (the same builder Layer 1 uses).
-              lookups: buildHarnessPhoneLookups(factoryCtx.repos),
+              lookups: buildHarnessPhoneLookups(factoryCtx.repos, {
+                settingsRepo: world.settingsRepo,
+                now: world.now,
+              }),
               businessName: 'Test Tenant',
               systemActorId: 'voice-quality-layer2',
               onSessionTerminated: async (session) => {
@@ -408,6 +418,9 @@ describe('Voice Quality Layer 2 — corpus', () => {
                   conversationId: session.conversationId ?? session.id,
                 });
                 session.machine.dispatch({ type: 'greeted_ok' });
+                // #1331 — the inbound adapter stamps Twilio `From` on the
+                // session; the ask_caller turn resolves an unknown caller by it.
+                if (!opts.callerIdBlocked && opts.callerId) session.callerPhone = opts.callerId;
 
                 const matches =
                   !opts.callerIdBlocked && opts.callerId &&
