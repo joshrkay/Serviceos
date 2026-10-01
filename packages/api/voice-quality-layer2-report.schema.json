@@ -40,12 +40,14 @@
       "additionalProperties": false,
       "required": [
         "ttfaMedians",
+        "firstAudibleMedians",
         "lookupMedians",
         "repromptRatioOverall",
         "perceivedCompletionRate"
       ],
       "properties": {
         "ttfaMedians": { "$ref": "#/$defs/percentilePair" },
+        "firstAudibleMedians": { "$ref": "#/$defs/percentilePair" },
         "lookupMedians": { "$ref": "#/$defs/percentilePair" },
         "repromptRatioOverall": { "type": "number", "minimum": 0, "maximum": 1 },
         "perceivedCompletionRate": { "type": "number", "minimum": 0, "maximum": 1 }
@@ -111,6 +113,7 @@
         "floorAllScripts",
         "overallPassRateMin",
         "ttfaP95MaxMs",
+        "firstAudibleP95MaxMs",
         "perceivedCompletionPassRateMin",
         "costCappedScriptsMax"
       ],
@@ -118,6 +121,7 @@
         "floorAllScripts": { "type": "boolean", "const": true },
         "overallPassRateMin": { "type": "number", "minimum": 0, "maximum": 1 },
         "ttfaP95MaxMs": { "type": "number", "minimum": 0 },
+        "firstAudibleP95MaxMs": { "type": "number", "minimum": 0 },
         "perceivedCompletionPassRateMin": { "type": "number", "minimum": 0, "maximum": 1 },
         "costCappedScriptsMax": { "type": "integer", "minimum": 0 }
       }
@@ -129,6 +133,7 @@
         "floorAllPass",
         "overallPassRate",
         "ttfaP95Ms",
+        "firstAudibleP95Ms",
         "perceivedCompletionPassRate",
         "costCappedScripts"
       ],
@@ -136,6 +141,7 @@
         "floorAllPass": { "type": "boolean" },
         "overallPassRate": { "type": "number", "minimum": 0, "maximum": 1 },
         "ttfaP95Ms": { "type": "number", "minimum": 0 },
+        "firstAudibleP95Ms": { "type": "number", "minimum": 0 },
         "perceivedCompletionPassRate": { "type": "number", "minimum": 0, "maximum": 1 },
         "costCappedScripts": { "type": "integer", "minimum": 0 }
       }

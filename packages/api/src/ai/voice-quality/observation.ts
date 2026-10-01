@@ -43,12 +43,17 @@ export interface Observation {
   totalCostCents: number;
   totalDurationMs: number;
   /**
-   * Approximate latency per agent turn, in ms. v1 heuristic: deltas
-   * between consecutive `intent_classified` events, with a tail entry
-   * `callEndedAtMs - lastIntentClassified.ts` so we always emit one
-   * number per turn the agent took. With zero intent_classified events
-   * this is `[]`. Will be refined to lookup→speak boundaries in a later
-   * task once the speak side-effect carries a timestamp.
+   * Latency per agent turn, in ms (floor criterion 3 reads it).
+   *
+   * Live transport (any `transcript_received` on the log — the Layer 2
+   * audio path): caller done (final transcript) → the agent's first reply
+   * audio, or → the session's end when it terminated first. A turn with
+   * neither before the next transcript (or call end) counts its whole wait
+   * — that is a hang (#1331).
+   *
+   * Text mode (no transcript events — Layer 1): deltas between consecutive
+   * `intent_classified` events plus a tail entry
+   * `callEndedAtMs - lastIntentClassified.ts`. `[]` with no classifications.
    */
   perTurnLatencyMs: number[];
   sessionEndedAs: 'completed' | 'terminated';
@@ -71,6 +76,48 @@ export interface ObservationBuilderInput {
   audit: AuditEvent[];
   callStartedAtMs: number;
   callEndedAtMs: number;
+}
+
+function classificationDeltaLatencies(
+  events: readonly VoiceSessionEvent[],
+  callEndedAtMs: number,
+): number[] {
+  const intentTimestamps: number[] = [];
+  for (const e of events) {
+    if (e.type === 'intent_classified') intentTimestamps.push(e.ts);
+  }
+  const latencies: number[] = [];
+  for (let i = 1; i < intentTimestamps.length; i++) {
+    latencies.push(intentTimestamps[i] - intentTimestamps[i - 1]);
+  }
+  if (intentTimestamps.length > 0) {
+    latencies.push(callEndedAtMs - intentTimestamps[intentTimestamps.length - 1]);
+  }
+  return latencies;
+}
+
+function liveTransportTurnLatencies(
+  events: readonly VoiceSessionEvent[],
+  callEndedAtMs: number,
+): number[] {
+  const latencies: number[] = [];
+  let pendingTranscriptTs: number | null = null;
+  for (const e of events) {
+    if (e.type === 'transcript_received') {
+      // The previous turn never got reply audio — it waited this long.
+      if (pendingTranscriptTs !== null) latencies.push(e.ts - pendingTranscriptTs);
+      pendingTranscriptTs = e.ts;
+    } else if (
+      (e.type === 'audio_frame_emitted' || e.type === 'session_terminated') &&
+      pendingTranscriptTs !== null
+    ) {
+      // First reply audio — or the call ended, so no one is left waiting.
+      latencies.push(e.ts - pendingTranscriptTs);
+      pendingTranscriptTs = null;
+    }
+  }
+  if (pendingTranscriptTs !== null) latencies.push(callEndedAtMs - pendingTranscriptTs);
+  return latencies;
 }
 
 /**
@@ -96,21 +143,16 @@ export function buildObservation(input: ObservationBuilderInput): Observation {
     }
   }
 
-  // Per-turn latency: deltas between consecutive intent_classified
-  // events, plus a tail entry to `callEndedAtMs`. Empty when the agent
-  // never classified an intent (e.g., a script that hung up before any
-  // gather turn).
-  const intentTimestamps: number[] = [];
-  for (const e of events) {
-    if (e.type === 'intent_classified') intentTimestamps.push(e.ts);
-  }
-  const perTurnLatencyMs: number[] = [];
-  for (let i = 1; i < intentTimestamps.length; i++) {
-    perTurnLatencyMs.push(intentTimestamps[i] - intentTimestamps[i - 1]);
-  }
-  if (intentTimestamps.length > 0) {
-    perTurnLatencyMs.push(input.callEndedAtMs - intentTimestamps[intentTimestamps.length - 1]);
-  }
+  // Per-turn latency — see `Observation.perTurnLatencyMs`.
+  // #1331 — on a live transport (the Layer 2 audio path) the caller's turn
+  // is bracketed by `transcript_received` (caller done) and the agent's
+  // `audio_frame_emitted` (first reply audio). Between two classifications
+  // sit the caller's speech, the agent's real-time playback and the
+  // emulator's end-of-turn silence window — none of which is the agent
+  // hanging — so there the turn latency is transcript → first reply audio.
+  const perTurnLatencyMs = events.some((e) => e.type === 'transcript_received')
+    ? liveTransportTurnLatencies(events, input.callEndedAtMs)
+    : classificationDeltaLatencies(events, input.callEndedAtMs);
 
   // Session end classification. The last session_terminated event wins;
   // if none fired (e.g., harness aborted) we conservatively call it
