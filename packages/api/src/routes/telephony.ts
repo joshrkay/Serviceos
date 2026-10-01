@@ -66,6 +66,7 @@ import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import { createAuditEvent } from '../audit/audit';
 import { isValidTenantId } from '../db/schema';
 import { recordVoiceError } from '../analytics/posthog';
+import { isCredentialFailure, type TtsHealthCheck, type TtsHealthState } from '../ai/tts/tts-health';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -233,6 +234,13 @@ export interface TelephonyRouterDeps {
    * Useful for verifying a Railway deploy without grepping logs.
    */
   getHealth?: () => TelephonyHealthReport;
+  /**
+   * #1536 — cached liveness probe of the configured TTS provider. When
+   * wired, `/health` folds its verdict into `capabilities.tts` (a key that
+   * cannot synthesize reports false) and adds `ttsCheck`. When unwired the
+   * report stays config-only.
+   */
+  ttsHealth?: TtsHealthCheck;
   pool?: Pool;
   settingsRepo?: SettingsRepository;
   leadRepo?: LeadRepository;
@@ -269,6 +277,49 @@ export interface TelephonyHealthReport {
     businessName: string | null;
   };
   warnings: string[];
+  /** #1536 — the TTS provider probe verdict (present when `ttsHealth` is wired). */
+  ttsCheck?: TtsHealthState;
+  /**
+   * #1536 — true when a capability is lost but calls are still served by a
+   * fallback (a rejected TTS key → Gather). Independent of `ok`, which stays
+   * the "can the line serve calls" verdict the deploy smoke asserts.
+   */
+  degraded?: boolean;
+}
+
+/**
+ * #1536 — folds the TTS probe verdict into the config-only report. Only a
+ * definite `failed` flips `tts` to false; `unknown` (probe still running)
+ * and `config_only` leave the configuration answer standing.
+ */
+function withTtsCheck(report: TelephonyHealthReport, ttsCheck: TtsHealthState): TelephonyHealthReport {
+  if (!report.capabilities.tts) return { ...report, ttsCheck };
+  if (ttsCheck.status !== 'failed') return { ...report, ttsCheck };
+  if (isCredentialFailure(ttsCheck)) {
+    // /voice routes calls to Gather (Twilio <Say>) on a credential failure
+    // (shouldUseRealtimeStream gate a2), so calls are still served: degraded,
+    // not down. `ok` keeps every OTHER gate's answer (database, LLM, STT).
+    return {
+      ...report,
+      degraded: true,
+      capabilities: { ...report.capabilities, tts: false },
+      ttsCheck,
+      warnings: [
+        ...report.warnings,
+        `TTS key rejected (${ttsCheck.reason}) — calls fall back to Gather (Twilio <Say>)`,
+      ],
+    };
+  }
+  return {
+    ...report,
+    ok: report.capabilities.mediaStreams ? false : report.ok,
+    capabilities: { ...report.capabilities, tts: false },
+    ttsCheck,
+    warnings: [
+      ...report.warnings,
+      `TTS provider rejected the probe (${ttsCheck.reason ?? 'unknown'}) — voice replies will fail`,
+    ],
+  };
 }
 
 export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
@@ -282,9 +333,11 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
   // capabilities are wired.
   if (deps.getHealth) {
     const getHealth = deps.getHealth;
-    router.get('/health', (_req: Request, res: Response) => {
+    const ttsHealth = deps.ttsHealth;
+    router.get('/health', async (_req: Request, res: Response) => {
       try {
-        res.status(200).json(getHealth());
+        const report = getHealth();
+        res.status(200).json(ttsHealth ? withTtsCheck(report, await ttsHealth.check()) : report);
       } catch (err) {
         logger.error('telephony/health: failed', {
           error: err instanceof Error ? err.message : String(err),
@@ -1206,6 +1259,22 @@ async function shouldUseRealtimeStream(opts: {
   if (deps.realtimePrerequisitesMet && !deps.realtimePrerequisitesMet()) {
     logger.warn('telephony/voice: realtime prerequisites missing → Gather fallback', {
       callSid,
+    });
+    return false;
+  }
+
+  // (a2) #1536 — the cached TTS probe verdict. Only a CREDENTIAL failure
+  // (missing_permissions / unauthorized) diverts: it is deterministic until
+  // the key is fixed, and a Stream would connect but speak no reply, while
+  // Gather's <Say> is voiced by Twilio and works. unknown / probe_pending /
+  // unreachable keep the Stream (no flapping on a transient vendor blip; live
+  // session failures already trip the realtime circuit below). Read without
+  // waiting — a live call never blocks on the provider.
+  const ttsVerdict = deps.ttsHealth?.latest() ?? null;
+  if (isCredentialFailure(ttsVerdict)) {
+    logger.warn('telephony/voice: TTS key rejected by provider → Gather fallback', {
+      callSid,
+      reason: ttsVerdict?.reason,
     });
     return false;
   }

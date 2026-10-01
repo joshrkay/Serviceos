@@ -161,8 +161,10 @@ describe('VQ2-014 — Bucket 08 audio-only Layer-2 scripts', () => {
       const script = loadScript(file);
       expect(script.id).toBe(scriptId);
       expect(script.bucket).toBe('08-ambiguity');
-      // Single-turn audio-only scripts.
-      expect(script.turns.length).toBe(1);
+      // Audio-only scripts. #1331 (owner decision 2026-10-01): the mumbled
+      // name is asked a yes/no identity check, so that script has a second
+      // turn — the caller's "yes" — on which the held lookup is answered.
+      expect(script.turns.length).toBe(scriptId === 'mumbled-name-recovery' ? 2 : 1);
       expect(script.callerId).toMatch(/^\+1\d{10}$/);
       expect(script.callerIdBlocked).toBe(false);
     },

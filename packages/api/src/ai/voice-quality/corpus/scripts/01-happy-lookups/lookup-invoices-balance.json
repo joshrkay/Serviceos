@@ -36,7 +36,7 @@
         "jobId": "job_01_invoices_1",
         "estimateId": null,
         "invoiceNumber": "INV-3001",
-        "status": "sent",
+        "status": "open",
         "lineItems": [
           { "description": "Compressor replacement", "quantity": 1, "unitPriceCents": 75000 },
           { "description": "Refrigerant recharge", "quantity": 1, "unitPriceCents": 15000 }
@@ -51,6 +51,22 @@
         "createdAt": "2026-04-15T10:00:00.000Z",
         "updatedAt": "2026-04-15T10:00:00.000Z"
       }
+    ],
+    "jobs": [
+      {
+        "id": "job_01_invoices_1",
+        "tenantId": "t_01_lookup_invoices",
+        "customerId": "cust_01_invoices_fiona",
+        "jobNumber": "JOB-INVOICES-1",
+        "summary": "Compressor replacement",
+        "problemDescription": "Compressor replacement",
+        "status": "scheduled",
+        "priority": "normal",
+        "assignedTechnicianId": null,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-01T08:00:00.000Z",
+        "updatedAt": "2026-04-01T08:00:00.000Z"
+      }
     ]
   },
   "turns": [
@@ -58,7 +74,8 @@
       "caller": "What do I owe?",
       "expected": {
         "intent": "lookup_invoices",
-        "spokenAnswerMatches": "Fiona's outstanding balance is $972.00 on invoice INV-3001"
+        "alsoAcceptedIntents": ["lookup_balance"],
+        "spokenAnswerMatches": "Fiona's outstanding balance is $972.00, due May 15 (her one open invoice is INV-3001; naming the invoice number is optional — the balance answer does not)"
       },
       "hangupAfter": false
     }

@@ -190,6 +190,24 @@ export interface VoiceSession {
    */
   callerPhone?: string;
   /**
+   * #1540 §3 — true when this call's ask_caller turn CREATED the caller's
+   * customer record from their phone number. Such a caller is not "already a
+   * customer" — their sign-up request is the record's first real content.
+   */
+  callerCreatedThisCall?: boolean;
+  /**
+   * #1331 (owner decision 2026-10-01) — the caller-ID-identified caller said
+   * a name that does not confidently match the account, and was asked "is
+   * this <name on the account>?". Holds the request they made until they
+   * answer (caller-identity-check.ts).
+   */
+  callerIdentityCheck?: { heldUtterance: string; accountName: string; reasks: number };
+  /**
+   * #1331 — the caller's answer to that check (or a confident name match):
+   * 'confirmed' never asks again; 'rejected' unbound the account for this call.
+   */
+  callerIdentity?: 'confirmed' | 'rejected';
+  /**
    * #1223 — Twilio's STIR/SHAKEN verdict (`StirVerstat`) from the inbound
    * webhook, verbatim; absent when Twilio sent none. Owner-line authority
    * requires full A-attestation (`telephony/stir-attestation.ts`).

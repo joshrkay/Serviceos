@@ -2465,6 +2465,11 @@ export class TwilioMediaStreamAdapter {
   private async emitSideEffects(sideEffects: SideEffect[]): Promise<void> {
     const ttsProvider = this.deps.ttsProvider;
     if (!ttsProvider) return;
+    // #1331 — a filler covers the wait BEFORE a reply starts. Once a line of
+    // this reply has played, the synthesis gap before its next line is a
+    // pause inside the reply, not a wait: no filler there ("…due May 20th.
+    // One moment. Anything else…").
+    let replyStarted = false;
     for (const fx of sideEffects) {
       if (fx.type === 'emit_quality_event' && this.state.session) {
         const eventType = String((fx.payload as { eventType?: string }).eventType ?? '');
@@ -2533,7 +2538,8 @@ export class TwilioMediaStreamAdapter {
       try {
         // runTurnWithFiller returns the final turnId — it may have been
         // bumped if a filler was preempted by the real TTS arrival.
-        turnId = await this.runTurnWithFiller(ttsProvider, text, turnId, lang);
+        turnId = await this.runTurnWithFiller(ttsProvider, text, turnId, lang, !replyStarted);
+        if (this.state.turnAudioBytes > 0) replyStarted = true;
       } catch (err) {
         logger.warn('mediastream: TTS turn failed', {
           error: err instanceof Error ? err.message : String(err),
@@ -2786,6 +2792,8 @@ export class TwilioMediaStreamAdapter {
      * filler (silence) — never a clip from the other language.
      */
     lang: SessionLanguage = 'en',
+    /** #1331 — false for a later line of a reply that has already started playing. */
+    allowFiller = true,
   ): Promise<number> {
     if (this.state.session) this.state.session.ttsCharacters += text.length;
     const delayMs = this.deps.fillerDelayMs ?? 250;
@@ -2816,7 +2824,7 @@ export class TwilioMediaStreamAdapter {
     };
 
     // Schedule a filler if both engine and cache are wired.
-    const fillerTimer = engine && cache
+    const fillerTimer = engine && cache && allowFiller
       ? setTimeout(() => {
           if (realStarted || turnId !== this.state.outboundTurnId || !this.state.agentSpeaking) {
             return;

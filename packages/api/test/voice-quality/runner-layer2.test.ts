@@ -286,6 +286,23 @@ describe('VQ2-013 — Layer 2 voting runner', () => {
     });
   });
 
+  it('#1331 — the aggregated perceived completion carries each run\'s judge rationale and agent turns', async () => {
+    harness.perceivedReturn = {
+      passed: false,
+      verdict: { perceivedSatisfaction: 'poor', rationale: 'Agent never answered.', abandonmentRisk: 1 },
+      agentTurns: ['<response not captured>'],
+    } as never;
+
+    const result = await runScriptLayer2(eligibleScript(), makeCtx());
+
+    expect(result.aggregated.perceivedCompletion.runResults?.[0]).toEqual({
+      satisfaction: 'poor',
+      abandonmentRisk: 1,
+      rationale: 'Agent never answered.',
+      agentTurns: ['<response not captured>'],
+    });
+  });
+
   it('#1331 — the aggregated caller experience carries the median first-audible latency', async () => {
     harness.callerExpReturn = {
       ttfaP95Ms: 2_900,

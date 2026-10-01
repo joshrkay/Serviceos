@@ -445,7 +445,7 @@ describeSdk('§5 I15 scope caveat (STRUCTURAL) — NO provider SDK, not just Ope
     }
   });
 
-  itSdk('the three speech call sites this exclusion covers are still exactly those three', () => {
+  itSdk('the four speech call sites this exclusion covers are still exactly those four', () => {
     // Named so the exclusion cannot quietly grow: a fourth vendor-host fetch
     // that happens to sit under /v1/audio/ still shows up in review here.
     const speechSites = (listSourceFiles([API_SRC_DIR]) as SourceFile[])
@@ -462,7 +462,12 @@ describeSdk('§5 I15 scope caveat (STRUCTURAL) — NO provider SDK, not just Ope
       )
       .map((x) => x.at);
     expectSdk(speechSites.sort()).toEqual([
-      'src/ai/tts/tts-provider.ts:94',
+      'src/ai/tts/tts-provider.ts:109',
+      // #1331 — the voice-quality Layer 2 harness's Whisper upload (agent
+      // audio → transcript for the graders). Moved here from the Layer 2
+      // entry test so its WAV wire format is unit-tested; speech-to-text,
+      // not a chat completion. Harness-only: no production route reaches it.
+      'src/ai/voice-quality/audio/openai-whisper-buffer-transcriber.ts:17',
       'src/voice/transcription-providers.ts:166',
       'src/voice/voice-service.ts:315',
     ]);

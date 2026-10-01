@@ -11,7 +11,7 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"summary\":\"Service appointment\",\"confidence_score\":0.95,\"dateTimePhrase\":\"May 12 2026 2:00 PM\",\"durationMinutes\":120}",
+        "content": "{\"summary\":\"Service appointment\",\"confidence_score\":0.95,\"dateTimePhrase\":\"May 5 2026 2:00 PM\",\"durationMinutes\":120}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
@@ -26,7 +26,7 @@
         "outputTokens": 10,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.244Z"
+      "recordedAt": "2026-10-01T13:57:30.370Z"
     },
     {
       "requestHash": "sha256:b94f079bf45c8726d42cd538133d4e76ff9002ef5ca7664caba0289e4f3af611",
@@ -51,7 +51,7 @@
         "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.239Z"
+      "recordedAt": "2026-10-01T13:57:30.364Z"
     },
     {
       "requestHash": "sha256:f377deea73f6692eaa4124c028f0ca92f309e3ddfe482324824c31eabeae709c",
@@ -76,7 +76,7 @@
         "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.241Z"
+      "recordedAt": "2026-10-01T13:57:30.368Z"
     }
   ]
 }

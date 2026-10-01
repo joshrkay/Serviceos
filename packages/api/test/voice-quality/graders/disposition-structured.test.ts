@@ -167,6 +167,106 @@ describe('VQ-021 — gradeDispositionStructured', () => {
     expect(result.perTurnDetail[0].hardSlotMismatches).not.toContain('appointmentId');
   });
 
+  // #1331 — the "long string is soft" rule (> 30 chars) ran before the id
+  // rule, so a real 36-char UUID id was never graded: once Layer 2 fixtures
+  // carry UUIDs, a wrong appointmentId would have passed criterion 10.
+  it('#1331 — a UUID record id is a hard slot: the wrong appointment fails criterion 10', () => {
+    const script = makeScript({
+      turns: [
+        {
+          caller: 'cancel my Tuesday appointment',
+          expected: {
+            intent: 'cancel_appointment',
+            slots: { appointmentId: '3f1c2a54-9d7e-5b21-8c4f-0a6e9b2d7c11' },
+            proposalType: 'cancel_appointment',
+          },
+          hangupAfter: false,
+        },
+      ],
+    });
+    const obs = makeObservation({
+      events: [intentEvent('cancel_appointment', 1_000)],
+      proposals: [
+        makeProposal({ appointmentId: '9a8b7c6d-5e4f-5a3b-9c2d-1e0f9a8b7c6d' }, 'cancel_appointment'),
+      ],
+    });
+
+    const result = gradeDispositionStructured(obs, script);
+
+    expect(result.failedCriteria).toContain(10);
+    expect(result.perTurnDetail[0].hardSlotMismatches).toEqual(['appointmentId']);
+  });
+
+  // #1331 — turn pairing follows the turns, not event positions. On the phone
+  // a write is drafted on the caller's "yes" turn AFTER the request turn, and
+  // a turn handled before the classifier (a slot answer) emits no
+  // intent_classified. Positional pairing then read the yes turn's 'confirm'
+  // as the slot turn's intent and looked for the drafted proposal one turn
+  // too early (two-step-booking, run 36829085635). Each turn's events are
+  // the ones up to its own speech_outbound; a proposal-expecting turn owns
+  // the first proposal drafted from its window until the next such turn.
+  it('#1331 — pairs intents and drafted proposals by turn window, not by position', () => {
+    const script = makeScript({
+      turns: [
+        { caller: 'I want to book a service appointment.', expected: { intent: 'create_appointment' }, hangupAfter: false },
+        {
+          caller: 'Tuesday at 2pm.',
+          expected: { intent: 'create_appointment', proposalType: 'create_appointment' },
+          hangupAfter: false,
+        },
+        { caller: "Yes, that's right.", expected: {}, hangupAfter: false },
+      ],
+    });
+    const obs = makeObservation({
+      events: [
+        intentEvent('create_appointment', 1_000),
+        { type: 'speech_outbound', transcript: 'What day and time work for you?', turnIndex: 0, ts: 1_001 },
+        // turn 1: a slot answer — no classifier call, no intent event
+        { type: 'speech_outbound', transcript: 'Just to confirm — Tuesday at 2pm?', turnIndex: 1, ts: 1_002 },
+        intentEvent('confirm', 1_003),
+        { type: 'proposal_created', proposalId: 'p-1', ts: 1_004 } as VoiceSessionEvent,
+        { type: 'speech_outbound', transcript: "I've drafted that.", turnIndex: 2, ts: 1_005 },
+      ],
+      proposals: [makeProposal({}, 'create_appointment')],
+    });
+
+    const result = gradeDispositionStructured(obs, script);
+
+    expect(result.perTurnDetail[1].actualIntent).toBeUndefined();
+    expect(result.reasons[9]).toBe("turn 1: expected intent 'create_appointment', got '<none>'");
+    expect(result.perTurnDetail[1].actualProposalType).toBe('create_appointment');
+    expect(result.perTurnDetail[1].proposalTypeMatched).toBe(true);
+  });
+
+  it('#1331 — with no proposal_created events (the phone transport), proposal-expecting turns take the drafted proposals in order', () => {
+    const script = makeScript({
+      turns: [
+        { caller: 'I want to book a service appointment.', expected: { intent: 'create_appointment' }, hangupAfter: false },
+        {
+          caller: 'Tuesday at 2pm.',
+          expected: { intent: 'create_appointment', proposalType: 'create_appointment' },
+          hangupAfter: false,
+        },
+        { caller: "Yes, that's right.", expected: {}, hangupAfter: false },
+      ],
+    });
+    const obs = makeObservation({
+      events: [
+        intentEvent('create_appointment', 1_000),
+        { type: 'speech_outbound', transcript: 'What day and time work for you?', turnIndex: 0, ts: 1_001 },
+        { type: 'speech_outbound', transcript: 'Just to confirm — Tuesday at 2pm?', turnIndex: 1, ts: 1_002 },
+        intentEvent('confirm', 1_003),
+        { type: 'speech_outbound', transcript: "I've drafted that.", turnIndex: 2, ts: 1_005 },
+      ],
+      proposals: [makeProposal({}, 'create_appointment')],
+    });
+
+    const result = gradeDispositionStructured(obs, script);
+
+    expect(result.perTurnDetail[1].actualProposalType).toBe('create_appointment');
+    expect(result.perTurnDetail[1].proposalTypeMatched).toBe(true);
+  });
+
   it('VQ-021 — passes criterion 10 with soft-slot differences (notes wording differs)', () => {
     const script = makeScript({
       turns: [

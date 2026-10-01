@@ -98,11 +98,14 @@ describe('Inbound unknown-caller booking', () => {
       callerPhoneResolver: (s) => s.callerPhone,
     });
 
-    // Turn 1 — caller gives their info. The ask_caller wire creates the customer,
-    // logs the call, and advances the FSM to intent_capture.
+    // Turn 1 — caller gives their info AND their request. The ask_caller wire
+    // creates the customer and logs the call, and (#1540 §2, owner decision
+    // 2026-10-01) the same utterance is classified, so the caller hears the
+    // readback straight away instead of "How can I help you today?" —
+    // nothing is written yet.
     await processor.speechTurn({
       session,
-      speechResult: 'Hi, my name is Dana Reyes and my furnace stopped heating',
+      speechResult: 'Hi, my name is Dana Reyes and my furnace stopped heating, can someone come out Tuesday at 2pm?',
       callSid: CALL_SID,
       tenantId: TENANT,
     });
@@ -110,7 +113,8 @@ describe('Inbound unknown-caller booking', () => {
     expect(customerRows).toHaveLength(1); // a real customer was created
     expect(customerRows[0].primaryPhone).toBe(CALLER_NUMBER);
     expect(session.customerId).toBe(customerRows[0].id);
-    expect(session.machine.currentState).toBe('intent_capture');
+    expect(session.machine.currentState).toBe('intent_confirm');
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
 
     // The call is on the new customer's timeline.
     const threads = await conversationRepo.findByEntity(TENANT, 'customer', customerRows[0].id);
@@ -118,17 +122,7 @@ describe('Inbound unknown-caller booking', () => {
     const msgs = await conversationRepo.getMessages(TENANT, threads[0].id);
     expect(msgs.some((m) => m.source === 'inbound_call')).toBe(true);
 
-    // Turn 2 — caller states the booking → readback (nothing written yet).
-    await processor.speechTurn({
-      session,
-      speechResult: 'Can someone come out Tuesday at 2pm?',
-      callSid: CALL_SID,
-      tenantId: TENANT,
-    });
-    expect(session.machine.currentState).toBe('intent_confirm');
-    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
-
-    // Turn 3 — caller confirms → the booking proposal is persisted, review-gated,
+    // Turn 2 — caller confirms → the booking proposal is persisted, review-gated,
     // scoped to the tenant the dialed number resolved to.
     await processor.speechTurn({
       session,

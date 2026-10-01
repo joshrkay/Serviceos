@@ -1048,6 +1048,54 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       expect(ttsStarted).toBe(true);
     });
 
+    // #1331 — Layer 2 run 36895893912 recorded callers hearing "Your current
+    // balance is $135, due May 20th. One moment. Anything else I can help you
+    // with?": a filler fired in the synthesis gap BETWEEN two lines of one
+    // reply. A filler covers the wait before a reply starts, never a pause
+    // inside one.
+    it('#1331: does NOT play a filler between two lines of the same reply', async () => {
+      let line = 0;
+      const tts = {
+        synthesize: vi.fn(),
+        synthesizeStream: vi.fn(() => {
+          const delay = line++ === 0 ? 0 : 150; // 2nd line slower than the filler delay
+          return {
+            async *[Symbol.asyncIterator]() {
+              await new Promise((r) => setTimeout(r, delay));
+              yield { pcm: Buffer.alloc(640), isFinal: true };
+            },
+          };
+        }),
+      };
+      const fillerCache = makeFakeFillerCache(['one-moment']);
+      const fillerEngine = {
+        selectNext: vi.fn(() => ({ id: 'one-moment', text: 'One moment.', approxDurationMs: 600 })),
+      };
+      const { adapter, ws } = setupAdapter({
+        ttsProvider: tts,
+        fillerCache,
+        fillerEngine,
+        fillerDelayMs: 50,
+        callSid: 'CA-filler-between-lines',
+        // Keep this connection out of the process-wide registry (per-tenant cap).
+        connectionRegistry: new InMemoryConnectionRegistry(),
+      });
+      ws.inboundJson({
+        event: 'start',
+        streamSid: 'MZ-filler-between-lines',
+        start: { callSid: 'CA-filler-between-lines', accountSid: 'AC', streamSid: 'MZ-filler-between-lines', tracks: ['inbound'] },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
+        { type: 'tts_play', payload: { text: 'Your current balance is $135, due May 20th.' } },
+        { type: 'tts_play', payload: { text: 'Anything else I can help you with?' } },
+      ]);
+
+      expect(tts.synthesizeStream).toHaveBeenCalledTimes(2);
+      expect(fillerEngine.selectNext).not.toHaveBeenCalled();
+    });
+
     it('does NOT play a filler when TTS starts within 250ms', async () => {
       const fastStreamingProvider = {
         synthesize: vi.fn(),

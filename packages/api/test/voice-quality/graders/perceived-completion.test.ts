@@ -330,6 +330,69 @@ describe('VQ2-010 — gradePerceivedCompletion', () => {
     expect(observedUserPrompt).toContain('Agent: <response not captured>');
   });
 
+  // #1331 — the judge must grade against the product's contract, not an
+  // imagined one where the agent executes changes mid-call. On the phone a
+  // write is read back ("Just to confirm — … Is that right?") and, on the
+  // caller's yes, DRAFTED for human approval (proposals never auto-execute);
+  // the owner hears "it's in your approvals". Without that context the judge
+  // has no way to tell an honest drafted-for-review close from a failure.
+  it('#1331 — tells the judge the read-back-then-draft-for-approval contract and who is calling', async () => {
+    const { gateway, provider } = createMockLLMGateway(verdict('good', 0));
+    await gradePerceivedCompletion({
+      observation: makeObservation(),
+      script: makeScript({ callerIsOwner: true }),
+      gateway,
+    });
+
+    const [call] = provider.getCalls();
+    const system = call.messages.find((m) => m.role === 'system')!.content;
+    const user = call.messages.find((m) => m.role === 'user')!.content;
+    expect(system).toMatch(/never carries out a change during the call/i);
+    expect(system).toMatch(/drafted for human approval/i);
+    expect(user).toContain('Caller: the business owner, calling their own business line');
+
+    const { gateway: g2, provider: p2 } = createMockLLMGateway(verdict('good', 0));
+    await gradePerceivedCompletion({ observation: makeObservation(), script: makeScript(), gateway: g2 });
+    const user2 = p2.getCalls()[0].messages.find((m) => m.role === 'user')!.content;
+    expect(user2).toContain('Caller: a customer of the business');
+  });
+
+  // #1331 (run 36925905917) — lookup-appointments-next: the agent said
+  // "Friday, June 12th at 9 a.m." (right: the corpus world is Friday
+  // 2026-05-01 and June 12, 2026 is a Friday) and this judge called it "the
+  // wrong date" — with no call date it guessed the year. The criterion-12
+  // judge already gets the corpus call date; this one must too.
+  it('#1331 — tells the judge the corpus call date, so spoken dates are judged against that calendar', async () => {
+    const { gateway, provider } = createMockLLMGateway(verdict('good', 0));
+    await gradePerceivedCompletion({ observation: makeObservation(), script: makeScript(), gateway });
+
+    const user = provider.getCalls()[0].messages.find((m) => m.role === 'user')!.content;
+    expect(user).toContain('Call date: Friday, May 1, 2026');
+  });
+
+  it('#1331 — returns the per-turn agent lines the judge read, so the report can show them', async () => {
+    const { gateway } = createMockLLMGateway(verdict('good', 0));
+    const script = makeScript({
+      turns: [
+        { caller: 'Add three boxes of PEX.', expected: {}, hangupAfter: false },
+        { caller: "Yes, that's right.", expected: {}, hangupAfter: false },
+      ],
+    });
+    const result = await gradePerceivedCompletion({
+      observation: makeObservation({
+        events: [
+          { type: 'speech_outbound', transcript: 'Just to confirm — add material. Is that right?', turnIndex: 0, ts: 1 },
+        ],
+      }),
+      script,
+      gateway,
+    });
+    expect(result.agentTurns).toEqual([
+      'Just to confirm — add material. Is that right?',
+      '<response not captured>',
+    ]);
+  });
+
   it('VQ2-010 — verdict shape validated by Zod (rejects malformed responses)', async () => {
     // Valid JSON, but wrong shape — abandonmentRisk out of range, satisfaction not in enum.
     const { gateway } = createMockLLMGateway(

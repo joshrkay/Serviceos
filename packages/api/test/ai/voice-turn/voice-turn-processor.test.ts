@@ -1391,7 +1391,9 @@ describe('createVoiceTurnProcessor.expandIntentConfirmTemplate', () => {
       { type: 'tts_play', payload: { text: 'unchanged' } },
     ];
     processor.expandIntentConfirmTemplate(sideEffects, 'create_invoice');
-    expect(sideEffects[0]!.payload.text).toMatch(/create invoice/);
+    expect(sideEffects[0]!.payload.text).toBe(
+      "Just to confirm — you'd like to draft an invoice. Is that right?",
+    );
     expect(sideEffects[1]!.payload.text).toBe('unchanged');
   });
 });
@@ -2847,6 +2849,10 @@ describe('createVoiceTurnProcessor — owner-line close for a card awaiting appr
       withRepos: true,
       ...(ownerSession ? { ownerSession: true } : {}),
     });
+    // #1540 §3 — on the caller line, create_customer drafts only for a caller
+    // whose record this call just created from their number (an established
+    // customer is told they're already in the system instead).
+    if (!ownerSession) session.callerCreatedThisCall = true;
     await processor.speechTurn({
       session,
       speechResult: 'add a new customer Jane Smith 512 555 0100',
@@ -2877,9 +2883,17 @@ describe('createVoiceTurnProcessor — owner-line close for a card awaiting appr
     expect(closing).toMatch(/approv/i);
   });
 
-  it('an S1 caller whose request is queued for the owner keeps the caller close', async () => {
+  // #1331 (Layer 2 run 36925905917) — the S1 caller's request is a DRAFT
+  // queued for the team. "Great, I've got that taken care of" claims the
+  // change already happened (the disposition judge failed all 3 runs of
+  // create-customer-new-signup / -with-address / reschedule on it). The
+  // caller hears what is true: it was passed to the team, who will confirm.
+  it('an S1 caller (new this call) whose sign-up is queued hears it was passed to the team — never "taken care of"', async () => {
     const { proposals, closing } = await confirmCreateCustomer(false);
     expect(proposals).toHaveLength(1);
-    expect(closing).toBe(GENERIC_CLOSING_LINE);
+    expect(['draft', 'ready_for_review']).toContain(proposals[0]!.status);
+    expect(closing).toBe(
+      "I've passed that along to our team, and someone will confirm it with you shortly. Is there anything else I can help you with?",
+    );
   });
 });

@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { FILLER_LIBRARY, type Filler } from './fillers/manifest';
 import type { TtsProvider } from '../../tts/tts-provider';
+import { isTtsAuthCode, TtsProviderRejectedError } from '../../tts/tts-errors';
 
 /**
  * #1534 — renders one filler clip as raw PCM16 LE @ 16 kHz mono (the format
@@ -57,6 +58,7 @@ const DEFAULT_FILL_TIMEOUT_MS = 10_000;
 interface FillerCacheLogger {
   warn: (msg: string, meta?: unknown) => void;
   info?: (msg: string, meta?: unknown) => void;
+  error?: (msg: string, meta?: unknown) => void;
 }
 
 /**
@@ -122,7 +124,7 @@ export class FillerAudioCache {
   ): Promise<void> {
     const timeoutMs = opts.timeoutMs ?? DEFAULT_FILL_TIMEOUT_MS;
     const synthesized: string[] = [];
-    const failed: Array<{ id: string; error: string }> = [];
+    const failed: Array<{ id: string; error: string; code?: string; provider?: string }> = [];
     for (const filler of FILLER_LIBRARY) {
       if (this.cache.has(filler.id)) continue;
       try {
@@ -130,7 +132,11 @@ export class FillerAudioCache {
         this.cache.set(filler.id, pcm);
         synthesized.push(filler.id);
       } catch (err) {
-        failed.push({ id: filler.id, error: err instanceof Error ? err.message : String(err) });
+        failed.push({
+          id: filler.id,
+          error: err instanceof Error ? err.message : String(err),
+          ...(err instanceof TtsProviderRejectedError ? { code: err.code, provider: err.provider } : {}),
+        });
       }
     }
     if (synthesized.length > 0) {
@@ -139,6 +145,29 @@ export class FillerAudioCache {
         failedCount: failed.length,
         synthesizedIds: synthesized,
       });
+    }
+    // #1536 — every clip refused for the same credential reason means the
+    // key itself cannot synthesize (so no live reply can be spoken either).
+    // Say so ONCE, naming the code and the env var to fix.
+    const authCode = failed[0]?.code;
+    if (
+      synthesized.length === 0 &&
+      failed.length > 0 &&
+      isTtsAuthCode(authCode) &&
+      failed.every((f) => f.code === authCode)
+    ) {
+      const provider = failed[0].provider ?? 'tts';
+      const fix =
+        provider === 'elevenlabs'
+          ? authCode === 'missing_permissions'
+            ? 'ELEVENLABS_API_KEY needs the Text to Speech permission'
+            : 'ELEVENLABS_API_KEY is invalid or revoked — set a valid key with the Text to Speech permission'
+          : 'the TTS provider API key cannot synthesize speech';
+      (this.logger.error ?? this.logger.warn).call(
+        this.logger,
+        `TTS key rejected (${authCode}): ${fix}. Every filler clip failed; live voice replies will fail the same way.`,
+        { code: authCode, provider, failedCount: failed.length },
+      );
     }
     if (failed.length > 0) {
       this.logger.warn('filler audio synthesis failed', {

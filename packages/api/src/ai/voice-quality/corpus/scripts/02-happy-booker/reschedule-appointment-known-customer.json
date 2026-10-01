@@ -29,15 +29,30 @@
         "updatedAt": "2026-04-01T10:00:00.000Z"
       }
     ],
+    "jobs": [
+      {
+        "id": "job_02_reschedule_1",
+        "tenantId": "t_02_reschedule_appointment",
+        "customerId": "cust_02_reschedule_jane",
+        "locationId": "loc_02_reschedule_home",
+        "jobNumber": "JOB-0202",
+        "summary": "AC service",
+        "status": "scheduled",
+        "priority": "normal",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-15T10:00:00.000Z",
+        "updatedAt": "2026-04-15T10:00:00.000Z"
+      }
+    ],
     "appointments": [
       {
         "id": "appt_02_reschedule_existing",
         "tenantId": "t_02_reschedule_appointment",
         "jobId": "job_02_reschedule_1",
-        "scheduledStart": "2026-05-12T21:00:00.000Z",
-        "scheduledEnd": "2026-05-12T23:00:00.000Z",
-        "arrivalWindowStart": "2026-05-12T21:00:00.000Z",
-        "arrivalWindowEnd": "2026-05-12T21:30:00.000Z",
+        "scheduledStart": "2026-05-05T21:00:00.000Z",
+        "scheduledEnd": "2026-05-05T23:00:00.000Z",
+        "arrivalWindowStart": "2026-05-05T21:00:00.000Z",
+        "arrivalWindowEnd": "2026-05-05T21:30:00.000Z",
         "timezone": "America/Los_Angeles",
         "status": "scheduled",
         "notes": "AC service",
@@ -55,8 +70,8 @@
         "proposalType": "reschedule_appointment",
         "slots": {
           "appointmentId": "appt_02_reschedule_existing",
-          "newScheduledStart": "2026-05-13T21:00:00.000Z",
-          "newScheduledEnd": "2026-05-13T23:00:00.000Z"
+          "newScheduledStart": "2026-05-06T21:00:00.000Z",
+          "newScheduledEnd": "2026-05-06T23:00:00.000Z"
         },
         "spokenAnswerMatches": "I've drafted a reschedule of your Tuesday appointment to Wednesday at the same time; an operator will confirm before it's applied.",
         "escalates": false
