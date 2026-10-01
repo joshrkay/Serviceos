@@ -40,6 +40,7 @@ import { SYSTEM_TENANT_ID } from '../../gateway/gateway';
 import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
 import { parseJsonResponse } from './parse-json-response';
+import { describeCorpusCall } from '../layer2-world';
 
 export interface PerceivedCompletionInput {
   observation: Observation;
@@ -124,9 +125,9 @@ export async function gradePerceivedCompletion(
   const agentTurns = agentLines(input.observation, input.script);
   const transcript = buildTranscriptSummary(input.observation, input.script, agentTurns);
   const expected = describeExpected(input.script);
-  const caller = input.script.callerIsOwner
-    ? 'Caller: the business owner, calling their own business line.'
-    : 'Caller: a customer of the business.';
+  // #1331 — persona + the corpus call date, the same context the
+  // criterion-12 judge gets, so a spoken date is judged on the right calendar.
+  const caller = describeCorpusCall(input.script);
   const userPrompt = `${caller}\n\nFull call transcript:\n${transcript}\n\nExpected behavior (per spec):\n${expected}`;
 
   const response = await input.gateway.complete({
