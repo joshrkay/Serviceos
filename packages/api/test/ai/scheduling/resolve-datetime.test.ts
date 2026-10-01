@@ -319,3 +319,24 @@ describe('resolveDateTime — spoken "at <word>"', () => {
     if (res.ok) expect(res.startUtc).toBe('2026-06-02T19:00:00.000Z');
   });
 });
+
+describe('#1540 §4 — "next <weekday>" means the COMING one (owner decision 2026-10-01)', () => {
+  // The voice-quality corpus world: Friday 2026-05-01 noon UTC, an LA tenant.
+  const FRIDAY_MAY_1 = new Date('2026-05-01T12:00:00.000Z');
+
+  it('"next Tuesday at 2pm" on Friday May 1 is Tuesday May 5, not May 12', () => {
+    const r = resolveDateTime('next Tuesday at 2pm', {
+      timezone: 'America/Los_Angeles',
+      now: FRIDAY_MAY_1,
+    });
+    expect(r.ok && r.startUtc).toBe('2026-05-05T21:00:00.000Z');
+  });
+
+  it('bare "Tuesday at 2pm" lands on the same coming Tuesday', () => {
+    const r = resolveDateTime('Tuesday at 2pm', {
+      timezone: 'America/Los_Angeles',
+      now: FRIDAY_MAY_1,
+    });
+    expect(r.ok && r.startUtc).toBe('2026-05-05T21:00:00.000Z');
+  });
+});
