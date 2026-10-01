@@ -24,15 +24,21 @@ export interface TtsHealthCheck {
 }
 
 /**
- * #1536 — verdicts that mean the configured key itself cannot synthesize.
- * Deterministic until an operator changes the key (and redeploys), unlike
- * `unreachable`, which can be a transient network/vendor blip.
+ * #1536 — verdicts that mean the provider will refuse every synthesis until an
+ * operator acts: the key itself (missing permission / invalid) or the account's
+ * billing (ElevenLabs 402 `payment_required`, e.g. a free plan using a library
+ * voice, or an exhausted quota). Deterministic until someone changes the key or
+ * the plan, unlike `unreachable`, which can be a transient network/vendor blip.
  */
+const PERSISTENT_REFUSALS = new Set([
+  'missing_permissions',
+  'unauthorized',
+  'payment_required',
+  'quota_exceeded',
+]);
+
 export function isCredentialFailure(state: TtsHealthState | null): boolean {
-  return (
-    state?.status === 'failed' &&
-    (state.reason === 'missing_permissions' || state.reason === 'unauthorized')
-  );
+  return state?.status === 'failed' && PERSISTENT_REFUSALS.has(state.reason ?? '');
 }
 
 /** Default verdict lifetime: a probe costs a provider call, so at most one per window. */
