@@ -32,6 +32,8 @@ import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-
 import type { Appointment } from '../../src/appointments/appointment';
 import { InMemoryUserRepository } from '../../src/users/user';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
+import { InMemoryAgreementRepository } from '../../src/agreements/agreement';
 
 const TENANT = 'tenant-1';
 const TZ = 'America/New_York';
@@ -172,5 +174,62 @@ describe('executeLookupAnswer — lookup_pending_items recoveries port', () => {
 
     expect(execution.kind).toBe('answer');
     expect(listUnansweredRecoveries).toHaveBeenCalledWith('t1');
+  });
+});
+
+// #1331 — lookup_appointments reads "upcoming" from the caller's `now`, not
+// the wall clock: the dispatch already takes `input.now` for every other
+// clock-dependent answer, and the voice-quality corpus (a pinned world) asked
+// for its next appointment and was told "not seeing any upcoming appointments".
+describe('executeLookupAnswer — lookup_appointments honours input.now', () => {
+  it('speaks an appointment that is upcoming relative to now, even when the wall clock has passed it', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create(makeJob({ id: 'job-1', customerId: 'cust-1', summary: 'Furnace tune-up' }));
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    // 2h after NOW (2026-06-11T11:00Z) — long before the real clock of any run.
+    await appointmentRepo.create(makeAppointment({ id: 'appt-1', jobId: 'job-1' }));
+
+    const execution = await executeLookupAnswer(
+      {
+        tenantId: TENANT,
+        sessionId: 'sess-1',
+        intent: 'lookup_appointments',
+        customerId: 'cust-1',
+        timezone: TZ,
+        now: NOW,
+      },
+      {},
+      { jobRepo, appointmentRepo, proposalRepo: new InMemoryProposalRepository() },
+    );
+
+    expect(execution.kind).toBe('answer');
+    if (execution.kind !== 'answer') throw new Error('unreachable');
+    expect(execution.answer.summary).not.toMatch(/not seeing any upcoming/i);
+  });
+
+  it('lookup_account_summary reads its upcoming appointment from now too', async () => {
+    // The account summary's answer card references the customer by id (uuid).
+    const CUSTOMER_UUID = '33333333-4444-4555-8666-777777777777';
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create(makeJob({ id: 'job-1', customerId: CUSTOMER_UUID, summary: 'Furnace tune-up' }));
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    await appointmentRepo.create(makeAppointment({ id: 'appt-1', jobId: 'job-1' }));
+
+    const execution = await executeLookupAnswer(
+      {
+        tenantId: TENANT,
+        sessionId: 'sess-1',
+        intent: 'lookup_account_summary',
+        customerId: CUSTOMER_UUID,
+        timezone: TZ,
+        now: NOW,
+      },
+      { invoiceRepo: new InMemoryInvoiceRepository(), agreementRepo: new InMemoryAgreementRepository() },
+      { jobRepo, appointmentRepo, proposalRepo: new InMemoryProposalRepository() },
+    );
+
+    expect(execution).toMatchObject({ kind: 'answer' });
+    if (execution.kind !== 'answer') throw new Error('unreachable');
+    expect(execution.answer.summary).not.toMatch(/not seeing any upcoming/i);
   });
 });

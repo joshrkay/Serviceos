@@ -320,6 +320,19 @@ const ESTIMATE_DATE_FIELDS = [
 
 const JOB_DATE_FIELDS = ['completedAt', 'createdAt', 'updatedAt'] as const;
 
+// #1331 — same coercion for appointments / invoices: the shared appointment
+// lookup calls `scheduledStart.getTime()`, and date-range reads compare Dates.
+const APPOINTMENT_DATE_FIELDS = [
+  'scheduledStart',
+  'scheduledEnd',
+  'arrivalWindowStart',
+  'arrivalWindowEnd',
+  'createdAt',
+  'updatedAt',
+] as const;
+
+const INVOICE_DATE_FIELDS = ['issuedAt', 'dueDate', 'createdAt', 'updatedAt'] as const;
+
 async function seedFixtures(
   script: VoiceQualityScript,
   repos: RepoBundle,
@@ -329,12 +342,14 @@ async function seedFixtures(
   }
   if (script.fixtures.appointments) {
     for (const a of script.fixtures.appointments as Appointment[]) {
-      await repos.appointmentRepo.create(a);
+      await repos.appointmentRepo.create(coerceFixtureDates(a, APPOINTMENT_DATE_FIELDS));
     }
   }
   if (script.fixtures.invoices) {
     for (const i of script.fixtures.invoices as Invoice[]) {
-      await repos.invoiceRepo.create(i);
+      await repos.invoiceRepo.create(
+        coerceFixtureDates(i, INVOICE_DATE_FIELDS),
+      );
     }
   }
   // WS21b — pending proposals so an owner-approval script has real targets to

@@ -121,6 +121,35 @@ describe('VQ2-012 — majority-vote aggregator', () => {
     expect(out.flakeIndicator).toBe(true);
   });
 
+  // #1331 — run 36829085635's report said only "poor, poor, poor" for 24
+  // scripts; with no rationale and no agent transcript the failures could not
+  // be diagnosed without another paid run. Each run's judge rationale and the
+  // agent's per-turn transcript now travel into the aggregated verdict.
+  it('#1331 — keeps each run’s judge rationale and agent transcript in run order', () => {
+    const poor = makeRun({
+      perceivedCompletion: {
+        satisfaction: 'poor',
+        abandonmentRisk: 1,
+        rationale: 'Agent never answered the question.',
+        agentTurns: ['<response not captured>'],
+      },
+    });
+    const good = makeRun({
+      perceivedCompletion: {
+        satisfaction: 'good',
+        abandonmentRisk: 0,
+        rationale: 'Read the balance back correctly.',
+        agentTurns: ['You owe $972 on invoice INV-3001.'],
+      },
+    });
+    const out = aggregate([poor, good, good]);
+    expect(out.perceivedCompletion.runResults).toEqual([
+      { satisfaction: 'poor', abandonmentRisk: 1, rationale: 'Agent never answered the question.', agentTurns: ['<response not captured>'] },
+      { satisfaction: 'good', abandonmentRisk: 0, rationale: 'Read the balance back correctly.', agentTurns: ['You owe $972 on invoice INV-3001.'] },
+      { satisfaction: 'good', abandonmentRisk: 0, rationale: 'Read the balance back correctly.', agentTurns: ['You owe $972 on invoice INV-3001.'] },
+    ]);
+  });
+
   it("VQ2-012 — perceived completion all 'poor' → passed=false, flakeIndicator=false", () => {
     const poor = makeRun({
       perceivedCompletion: { satisfaction: 'poor', abandonmentRisk: 1 },

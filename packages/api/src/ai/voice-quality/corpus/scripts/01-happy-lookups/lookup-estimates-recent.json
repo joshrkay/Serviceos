@@ -47,6 +47,22 @@
         "createdAt": "2026-04-22T10:00:00.000Z",
         "updatedAt": "2026-04-22T10:00:00.000Z"
       }
+    ],
+    "jobs": [
+      {
+        "id": "job_01_estimates_1",
+        "tenantId": "t_01_lookup_estimates",
+        "customerId": "cust_01_estimates_grace",
+        "jobNumber": "JOB-ESTIMATES-1",
+        "summary": "New thermostat install",
+        "problemDescription": "New thermostat install",
+        "status": "scheduled",
+        "priority": "normal",
+        "assignedTechnicianId": null,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-01T08:00:00.000Z",
+        "updatedAt": "2026-04-01T08:00:00.000Z"
+      }
     ]
   },
   "turns": [

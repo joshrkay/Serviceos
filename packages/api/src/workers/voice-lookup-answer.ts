@@ -598,7 +598,7 @@ export async function executeLookupAnswer(
         ) {
           return { kind: 'unsupported' };
         }
-        const r = await lookupAccountSummary(sharedInput, {
+        const r = await lookupAccountSummary({ ...sharedInput, dateFrom: input.now }, {
           jobRepo: shared.jobRepo,
           appointmentRepo: shared.appointmentRepo,
           invoiceRepo: deps.invoiceRepo,
@@ -622,7 +622,8 @@ export async function executeLookupAnswer(
 
       case 'lookup_appointments': {
         if (!shared.jobRepo || !shared.appointmentRepo) return { kind: 'unsupported' };
-        const r = await lookupAppointments(sharedInput, {
+        // #1331 — "upcoming" is relative to the caller's clock (input.now).
+        const r = await lookupAppointments({ ...sharedInput, dateFrom: input.now }, {
           jobRepo: shared.jobRepo,
           appointmentRepo: shared.appointmentRepo,
           ...events,
