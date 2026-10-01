@@ -364,6 +364,8 @@ async function gradeOneRun(
     perceivedCompletion: {
       satisfaction: perceived.verdict.perceivedSatisfaction,
       abandonmentRisk: perceived.verdict.abandonmentRisk,
+      rationale: perceived.verdict.rationale,
+      ...(perceived.agentTurns ? { agentTurns: perceived.agentTurns } : {}),
     },
   };
 }
