@@ -136,6 +136,97 @@ describe('#1538 — phone: a detail given at the readback', () => {
     expect(proposals).toHaveLength(1);
     expect(proposals[0].proposalType).toBe('create_appointment');
   });
+
+  // #1331 — Layer 2 run 36895893912 (two-step-booking, all 3 runs): the live
+  // classifier named no intent AND extracted no slot from the bare answer
+  // "Tuesday at 2pm.", so nothing merged and the caller heard the same
+  // "…with no day or time yet. Is that right?" again; the yes then drafted a
+  // booking with no time. A booking still missing its WHEN, answered with a
+  // phrase that IS a day/time, takes that phrase as the time.
+  it('takes a bare day/time answer as the booking time even when the classifier extracted nothing', async () => {
+    const NOTHING = JSON.stringify({ intentType: 'unknown', confidence: 0.3, extractedEntities: {} });
+    const { session, proposalRepo, turn } = await makeCall({ 'Tuesday at 2pm': NOTHING });
+    await turn('I want to book a service appointment.');
+
+    const reply = spoken(await turn('Tuesday at 2pm.'));
+    expect(reply).toBe("Just to confirm — you'd like to schedule an appointment, Tuesday at 2pm. Is that right?");
+    expect(session.machine.currentContext.extractedEntities?.dateTimeDescription).toBe('Tuesday at 2pm');
+
+    await turn("Yes, that's right.");
+    expect((await proposalRepo.findByTenant(TENANT)).map((p) => p.proposalType)).toEqual(['create_appointment']);
+  });
+
+  it('an answer that is not a day/time still merges nothing (the readback is re-asked unchanged)', async () => {
+    const NOTHING = JSON.stringify({ intentType: 'unknown', confidence: 0.3, extractedEntities: {} });
+    const { session, turn } = await makeCall({ 'whatever works': NOTHING });
+    await turn('I want to book a service appointment.');
+    const reply = spoken(await turn('Hmm, whatever works for you.'));
+    expect(reply).toMatch(/with no day or time yet/);
+    expect(session.machine.currentContext.extractedEntities?.dateTimeDescription).toBeUndefined();
+  });
+});
+
+describe('#1331 — phone: the yes/no model is unreachable at the readback', () => {
+  // Run 36895893912 logged "speechTurn: confirmIntent failed — All providers
+  // failed. Last error: Request was aborted." twice; each time a plain "Yes,
+  // that's right." became a correction ("My apologies — let me try again")
+  // and the confirmed request was thrown away. In-app already decides a
+  // plain yes deterministically (confirm-turn.ts isAffirmation).
+  function confirmDownGateway(classifier: string): LLMGateway {
+    return {
+      complete: vi.fn(async (req: LLMRequest) => {
+        if ((req.metadata as { skill?: string } | undefined)?.skill === 'confirm_intent') {
+          throw new Error('All providers failed. Last error: Request was aborted.');
+        }
+        return { content: classifier, model: 'mock', provider: 'mock', tokenUsage: { input: 1, output: 1, total: 2 }, latencyMs: 1 };
+      }),
+    } as unknown as LLMGateway;
+  }
+
+  async function callWith(gateway: LLMGateway) {
+    const store = new VoiceSessionStore({ startInterval: false });
+    stores.push(store);
+    const proposalRepo = new InMemoryProposalRepository();
+    const customerRepo = new InMemoryCustomerRepository();
+    const customer = await createCustomer(
+      { tenantId: TENANT, firstName: 'Dana', lastName: 'Reyes', primaryPhone: '+14805550199', createdBy: 'test' },
+      customerRepo,
+    );
+    const session = store.create(TENANT, 'telephony', { callSid: CALL_SID });
+    session.machine.dispatch({ type: 'incoming_call', callSid: CALL_SID, from: CALLER_ID, to: '+15125550999', tenantId: TENANT });
+    session.machine.dispatch({ type: 'greeted_ok' });
+    session.machine.dispatch({ type: 'caller_known', customerId: customer.id });
+    session.customerId = customer.id;
+    session.callerPhone = CALLER_ID;
+    const processor = createVoiceTurnProcessor({
+      store, gateway, businessName: 'Acme Plumbing', systemActorId: 'test-actor',
+      auditRepo: new InMemoryAuditRepository(), proposalRepo, customerRepo,
+    });
+    const turn = (speechResult: string) =>
+      processor.speechTurn({ session, speechResult, callSid: CALL_SID, tenantId: TENANT });
+    return { session, proposalRepo, turn };
+  }
+
+  const BOOK = JSON.stringify({
+    intentType: 'create_appointment',
+    confidence: 0.95,
+    extractedEntities: { dateTimeDescription: 'Tuesday at 2pm' },
+  });
+
+  it('a plain yes still drafts the confirmed request', async () => {
+    const { proposalRepo, turn } = await callWith(confirmDownGateway(BOOK));
+    await turn('Book me for Tuesday at 2pm.');
+    const reply = spoken(await turn("Yes, that's right."));
+    expect(reply).not.toMatch(/let me try again/i);
+    expect((await proposalRepo.findByTenant(TENANT)).map((p) => p.proposalType)).toEqual(['create_appointment']);
+  });
+
+  it('anything that is not a plain yes is still not taken as one', async () => {
+    const { proposalRepo, turn } = await callWith(confirmDownGateway(BOOK));
+    await turn('Book me for Tuesday at 2pm.');
+    await turn('Hmm, hold on a second.');
+    expect(await proposalRepo.findByTenant(TENANT)).toEqual([]);
+  });
 });
 
 describe('#1538 — phone: a real correction at the readback still corrects', () => {
