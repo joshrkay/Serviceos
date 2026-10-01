@@ -466,7 +466,7 @@ describe('voice approval & edit — spoken dialogue on the phone, deliberate ref
 
 // ── create_customer ─────────────────────────────────────────────────────────
 
-describe('create_customer — dedicated one-turn handler on Gather, generic FSM round-trip on media-streams', () => {
+describe('create_customer — dedicated one-turn handler on Gather; media-streams answers an existing customer the same way, new callers take the generic round-trip', () => {
   it('gather: the P18-001 branch consumes the turn (already-matched caller variant) (cell: reachable)', async () => {
     expect(COVERAGE_TABLE.create_customer.gather.status).toBe('reachable');
     const h = makeGatherHarness({
@@ -482,7 +482,7 @@ describe('create_customer — dedicated one-turn handler on Gather, generic FSM 
     expect(h.proposalRepo.create).not.toHaveBeenCalled();
   });
 
-  it('media_streams: the SAME turn takes the generic drafting round-trip instead (cell: reachable + hole — declared drift)', async () => {
+  it('media_streams: an already-matched caller now gets the SAME one-turn answer (#1540 §3); the new-caller drift stays declared (cell: reachable + hole)', async () => {
     const cell = COVERAGE_TABLE.create_customer.media_streams;
     expect(cell.status).toBe('reachable');
     expect(cell.status === 'reachable' && cell.hole).toBe(true);
@@ -492,14 +492,12 @@ describe('create_customer — dedicated one-turn handler on Gather, generic FSM 
 
     const fx = await h.turn('new customer, Maria Alvarez');
 
-    // No P18-001 one-turn consume: the FSM advanced into the multi-turn
-    // confirm funnel (entity_resolution → intent_confirm readback).
     const spoken = fx
       .filter((f) => f.type === 'tts_play')
       .map((f) => String((f.payload as { text?: string }).text ?? ''))
       .join(' | ');
-    expect(spoken).not.toContain('in our system already');
-    expect(h.session.machine.currentState).not.toBe('intent_capture');
+    expect(spoken).toContain('in our system already');
+    expect(h.session.machine.currentState).toBe('intent_capture');
   });
 });
 

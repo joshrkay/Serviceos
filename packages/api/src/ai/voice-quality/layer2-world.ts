@@ -21,6 +21,9 @@ import {
   type TenantSettings,
 } from '../../settings/settings';
 import type { VoiceQualityScript } from './schema';
+import type { RepoBundle } from './runner';
+import type { EntityResolver } from '../resolution/entity-resolver';
+import { fixtureEntityResolverForBundle } from './fixture-entity-resolver';
 
 /** The pinned "now" of the voice-quality corpus world (Layer 1's booking clock). */
 export const VOICE_QUALITY_CORPUS_EPOCH = '2026-05-01T12:00:00.000Z';
@@ -29,6 +32,12 @@ export interface Layer2ProcessorWorld {
   settingsRepo: SettingsRepository;
   onCallRepo: InMemoryOnCallRepository;
   now: () => Date;
+  /**
+   * #1540 §1 — app.ts wires `PgEntityResolver`; the harness wires the shared
+   * fixture resolver over the runner's seeded repo bundle, in this world's
+   * zone and clock. Present when the bundle is passed.
+   */
+  entityResolver?: EntityResolver;
 }
 
 /** Settings repo whose one row is synthesized from the fixture tenant. */
@@ -48,6 +57,7 @@ class FixtureSettingsRepository extends InMemorySettingsRepository {
 export function buildLayer2ProcessorWorld(
   script: VoiceQualityScript,
   tenantId: string,
+  repos?: RepoBundle,
 ): Layer2ProcessorWorld {
   const tenant = (script.fixtures.tenant ?? {}) as Record<string, unknown>;
   const businessHours = tenant.businessHours as
@@ -68,5 +78,11 @@ export function buildLayer2ProcessorWorld(
   );
 
   const fixed = new Date(businessHours?.callMomentLocal ?? VOICE_QUALITY_CORPUS_EPOCH);
-  return { settingsRepo, onCallRepo, now: () => fixed };
+  const now = (): Date => fixed;
+  return {
+    settingsRepo,
+    onCallRepo,
+    now,
+    ...(repos ? { entityResolver: fixtureEntityResolverForBundle(repos, { tenantId, timezone, now }) } : {}),
+  };
 }

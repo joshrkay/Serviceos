@@ -2849,6 +2849,10 @@ describe('createVoiceTurnProcessor — owner-line close for a card awaiting appr
       withRepos: true,
       ...(ownerSession ? { ownerSession: true } : {}),
     });
+    // #1540 §3 — on the caller line, create_customer drafts only for a caller
+    // whose record this call just created from their number (an established
+    // customer is told they're already in the system instead).
+    if (!ownerSession) session.callerCreatedThisCall = true;
     await processor.speechTurn({
       session,
       speechResult: 'add a new customer Jane Smith 512 555 0100',
@@ -2879,7 +2883,7 @@ describe('createVoiceTurnProcessor — owner-line close for a card awaiting appr
     expect(closing).toMatch(/approv/i);
   });
 
-  it('an S1 caller whose request is queued for the owner keeps the caller close', async () => {
+  it('an S1 caller (new this call) whose sign-up is queued for the owner keeps the caller close', async () => {
     const { proposals, closing } = await confirmCreateCustomer(false);
     expect(proposals).toHaveLength(1);
     expect(closing).toBe(GENERIC_CLOSING_LINE);

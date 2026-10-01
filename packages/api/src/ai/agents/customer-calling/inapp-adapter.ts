@@ -84,6 +84,7 @@ import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 import {
+  appointmentWindowFrom,
   namedJobNotFoundIsTerminal,
   acceptsNetNewCustomer,
   requiresExistingEntity,
@@ -746,9 +747,13 @@ export class InAppVoiceAdapter {
     const resolver = this.getEntityResolver();
     try {
       const timezone = await this.resolveSessionTimezone(tenantId, session);
+      const appointmentRepo = this.deps.lookups?.shared.appointmentRepo;
       const opts = {
         ...(timezone ? { timezone } : {}),
         ...(pinnedRefs ? { pinnedRefs } : {}),
+        // #1540 §1 — a reschedule's "<day> at the same time" reads the
+        // resolved appointment's current window.
+        ...(appointmentRepo ? { appointmentWindow: appointmentWindowFrom(appointmentRepo, tenantId) } : {}),
       };
       return await resolveSchedulingEntities(
         resolver,
@@ -2874,6 +2879,31 @@ export class InAppVoiceAdapter {
               ...(outcome.anyUncatalogued
                 ? { meta: { overallConfidence: 'low' as const } }
                 : {}),
+              missingFields: outcome.missingFields,
+              ...(outcome.anyUncatalogued && rawConfidence !== undefined
+                ? { confidenceScore: Math.min(rawConfidence, UNCATALOGUED_CONFIDENCE_CAP) }
+                : {}),
+            };
+          },
+          // #1540 §6 — tenant context (same posture as the phone leg): the
+          // tenant zone fills spentAt / startsOn, unset ⇒ they stay gated.
+          ...(await (async () => {
+            const timezone = await this.resolveSessionTimezone(session.tenantId, session);
+            return timezone ? { timezone } : {};
+          })()),
+          // #1540 §6 — a change order's spoken-price line, catalog-grounded
+          // with the same uncatalogued cap as the line items above.
+          groundPricedLineItems: async (lines) => {
+            const outcome = await groundLineItemPricing(
+              lines.map((line) => ({ ...line })),
+              'unitPriceCents',
+              this.deps.catalogRepo
+                ? () => this.deps.catalogRepo!.listByTenant(session.tenantId)
+                : null,
+            );
+            return {
+              lineItems: outcome.lineItems,
+              ...(outcome.anyUncatalogued ? { meta: { overallConfidence: 'low' as const } } : {}),
               missingFields: outcome.missingFields,
               ...(outcome.anyUncatalogued && rawConfidence !== undefined
                 ? { confidenceScore: Math.min(rawConfidence, UNCATALOGUED_CONFIDENCE_CAP) }

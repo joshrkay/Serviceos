@@ -104,10 +104,10 @@ const CLOCK_TIME_PATTERN =
  * unique stays a one-tap clarification, never a guess; anything outside it
  * falls through to the pre-existing branches rather than being answered.
  */
-const CLOCK_TIME_TOLERANCE_MS = 15 * 60 * 1000;
+export const CLOCK_TIME_TOLERANCE_MS = 15 * 60 * 1000;
 
 /** True when the reference states a time of day at all. See CLOCK_TIME_PATTERN. */
-function hasClockTime(reference: string): boolean {
+export function hasClockTime(reference: string): boolean {
   return CLOCK_TIME_PATTERN.test(reference);
 }
 

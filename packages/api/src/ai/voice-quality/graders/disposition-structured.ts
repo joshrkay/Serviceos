@@ -423,6 +423,22 @@ function turnWindows(
  * provided; pass `undefined` and we fall back to the script's expected
  * slots (matching authoring during corpus development).
  */
+/**
+ * Criterion 9 for one turn: the classified intent is the expected one or
+ * (#1540 §5) one of its `alsoAcceptedIntents`. No expectation → pass.
+ */
+function intentAccepted(
+  expected: VoiceQualityScript['turns'][number]['expected'],
+  actualIntent: string | undefined,
+): boolean {
+  if (expected.intent === undefined) return true;
+  if (actualIntent === undefined) return false;
+  const actual = actualIntent.toLowerCase();
+  return [expected.intent, ...(expected.alsoAcceptedIntents ?? [])].some(
+    (accepted) => accepted.toLowerCase() === actual,
+  );
+}
+
 export function gradeDispositionStructured(
   observation: Observation,
   script: VoiceQualityScript,
@@ -466,11 +482,7 @@ export function gradeDispositionStructured(
         : observation.proposals[i]);
 
     const actualIntent = intentEv?.intentType;
-    const intentMatched =
-      expected.intent === undefined
-        ? true
-        : actualIntent !== undefined &&
-          expected.intent.toLowerCase() === actualIntent.toLowerCase();
+    const intentMatched = intentAccepted(expected, actualIntent);
 
     const expectedSlots =
       goldenProposals?.[i] ?? (expected.slots as Record<string, unknown> | undefined);

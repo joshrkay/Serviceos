@@ -74,6 +74,7 @@
       "caller": "What do I owe?",
       "expected": {
         "intent": "lookup_invoices",
+        "alsoAcceptedIntents": ["lookup_balance"],
         "spokenAnswerMatches": "Fiona's outstanding balance is $972.00 on invoice INV-3001"
       },
       "hangupAfter": false

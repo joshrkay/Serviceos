@@ -66,6 +66,7 @@ import {
   type IntentType,
 } from '../orchestration/intent-classifier';
 import type { ClassifierProfile } from '../orchestration/classifier-profile';
+import { EXISTING_CUSTOMER_SIGNUP_COPY, existingCustomerSignupReply } from './existing-customer-signup';
 import {
   AI_BUSY_HOLD_LINE,
   classifyInfraFailure,
@@ -253,6 +254,7 @@ import {
 } from '../../proposals/approval-reference-checks';
 import {
   MAX_DISAMBIGUATION_ATTEMPTS,
+  appointmentWindowFrom,
   refKeyForEntityKind,
   namedJobNotFoundIsTerminal,
   requiresExistingEntity,
@@ -395,6 +397,17 @@ function buildContractFailureClarification(
  * AND the live-quote refinement path (`applyQuoteRefinement`) compute the read-
  * back and the money-correctness gate identically. Pure — no I/O.
  */
+/**
+ * #1540 §2 — the generic prompt `transitionAskCaller` speaks on `caller_known`
+ * (transitions.ts). Dropped when the same turn goes on to classify the
+ * caller's request, which answers instead.
+ */
+export const ASK_CALLER_HELP_PROMPT = 'How can I help you today?';
+
+export function isAskCallerHelpPrompt(fx: SideEffect): boolean {
+  return fx.type === 'tts_play' && fx.payload.text === ASK_CALLER_HELP_PROMPT;
+}
+
 function finalizeGroundedQuote(
   outcome: Awaited<ReturnType<typeof groundLineItemPricing>>,
   catalogAvailable: boolean,
@@ -1100,6 +1113,15 @@ export interface VoiceTurnProcessor {
     session: VoiceSession,
     tenantId: string,
   ): Promise<SideEffect[]>;
+  /**
+   * #1540 §3 — the reply for an existing customer asking to "sign up" on
+   * the caller surface (say so, ask what they need), or null.
+   */
+  existingCustomerSignupReplyFor(
+    session: VoiceSession,
+    intentType: string,
+    profile: ClassifierProfile,
+  ): string | null;
   /**
    * #962 (PR-B) — the transport-side entry of the ported Gather
    * silence/low-STT ladder for a NON-empty turn: the acoustic confidence
@@ -1865,6 +1887,11 @@ export function createVoiceTurnProcessor(
               ...(timezone ? { timezone } : {}),
               ...(pinnedRefs ? { pinnedRefs } : {}),
               ...(deps.now ? { now: deps.now() } : {}),
+              // #1540 §1 — a reschedule's "<day> at the same time" reads the
+              // resolved appointment's current window.
+              ...(deps.appointmentRepo
+                ? { appointmentWindow: appointmentWindowFrom(deps.appointmentRepo, tenantId) }
+                : {}),
             }
           : undefined,
       );
@@ -2469,6 +2496,32 @@ export function createVoiceTurnProcessor(
               // the read-back the caller heard; hand back that exact outcome so
               // the spoken quote and the stored payload can never disagree.
               ...(estimateQuote ? { groundLineItems: async () => estimateQuote } : {}),
+              // #1540 §6 — tenant context for the fields the task handlers
+              // fill from it (spentAt, startsOn): the session's tenant zone
+              // (unset ⇒ nothing guessed, the field stays gated) and the
+              // processor's clock.
+              ...(await (async () => {
+                const timezone = await resolveSessionTimezone(session, tenantId);
+                return timezone ? { timezone } : {};
+              })()),
+              ...(deps.now ? { now: deps.now } : {}),
+              // #1540 §6 — a change order's spoken-price line, grounded
+              // against the session catalog exactly as the quote path does.
+              groundPricedLineItems: async (lines) => {
+                preloadSessionCatalog(session, deps.catalogRepo);
+                const catalog = await resolveSessionCatalog(session);
+                const outcome = await groundLineItemPricing(
+                  lines.map((line) => ({ ...line })),
+                  'unitPriceCents',
+                  catalog ? () => Promise.resolve(catalog) : null,
+                );
+                return finalizeGroundedQuote(
+                  outcome,
+                  catalog !== null,
+                  'unitPriceCents',
+                  typeof fx.payload.confidence === 'number' ? fx.payload.confidence : undefined,
+                );
+              },
             },
           );
           payloadConfidence = built.confidence;
@@ -4451,6 +4504,24 @@ export function createVoiceTurnProcessor(
     }
   }
 
+  /**
+   * #1540 §3 — the reply for an existing customer asking to "sign up" on the
+   * caller surface, or null (see existing-customer-signup.ts). Shared by
+   * speechTurn and the voice-quality text driver.
+   */
+  function existingCustomerSignupReplyFor(
+    session: VoiceSession,
+    intentType: string,
+    profile: ClassifierProfile,
+  ): string | null {
+    return existingCustomerSignupReply({
+      intentType,
+      profile,
+      ...(session.customerId ? { callerCustomerId: session.customerId } : {}),
+      ...(session.callerCreatedThisCall ? { callerCreatedThisCall: true } : {}),
+    });
+  }
+
   async function handleAskCaller(
     session: VoiceSession,
     tenantId: string,
@@ -4478,6 +4549,9 @@ export function createVoiceTurnProcessor(
           return out;
         }
         session.customerId = resolved.customerId;
+        // #1540 §3 — a record created from the phone number just now is not
+        // "already a customer" (existing-customer-signup.ts).
+        session.callerCreatedThisCall = resolved.status === 'created';
         if (deps.conversationRepo) {
           try {
             await logInboundCallOnCustomerTimeline({
@@ -4694,15 +4768,10 @@ export function createVoiceTurnProcessor(
     tenantId: string,
     sideEffectsAll: SideEffect[],
   ): Promise<boolean> {
-    // Caller already matched — confirm identity instead.
-    if (session.customerId) {
-      sideEffectsAll.push({
-        type: 'tts_play',
-        payload: {
-          text:
-            "I've got you in our system already. Let me know what you'd like help with today.",
-        },
-      });
+    // Caller already a customer — say so (#1540 §3's shared copy). A record
+    // this call's ask_caller turn just created is not "already" a customer.
+    if (session.customerId && !session.callerCreatedThisCall) {
+      sideEffectsAll.push({ type: 'tts_play', payload: { text: EXISTING_CUSTOMER_SIGNUP_COPY } });
       return true;
     }
 
@@ -4943,10 +5012,23 @@ export function createVoiceTurnProcessor(
       lowConfidenceStreak.delete(session.id);
     }
 
+    // #1540 §2 (owner decision 2026-10-01) — the state this turn is handled
+    // in. An unknown caller's ask_caller answer usually carries their request
+    // ("I'd like to schedule service for my home"): once the caller is
+    // identified/created by phone, the SAME utterance goes on to intent
+    // capture — classified on the caller's surface like any other turn, so
+    // every S1 rule still applies — instead of the generic "How can I help
+    // you today?" that made them repeat themselves.
+    let turnState = currentState;
     if (currentState === 'ask_caller') {
-      sideEffectsAll.push(...(await handleAskCaller(session, tenantId)));
-      await executeSideEffects(session, sideEffectsAll, tenantId);
-      return sideEffectsAll;
+      const askCallerFx = await handleAskCaller(session, tenantId);
+      if (session.machine.currentState !== 'intent_capture') {
+        sideEffectsAll.push(...askCallerFx);
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        return sideEffectsAll;
+      }
+      sideEffectsAll.push(...askCallerFx.filter((fx) => !isAskCallerHelpPrompt(fx)));
+      turnState = 'intent_capture';
     }
 
     // #1476 — a QUESTION at the readback is neither a yes nor a no; the
@@ -4967,7 +5049,7 @@ export function createVoiceTurnProcessor(
     if (currentState === 'intent_confirm') {
       // #1538 — the shared confirm-turn rule (also the Gather adapter's).
       sideEffectsAll.push(...(await handleIntentConfirmTurn(session, speechResult, tenantId)));
-    } else if (currentState === 'intent_capture' || currentState === 'closing') {
+    } else if (turnState === 'intent_capture' || turnState === 'closing') {
       // WS18 — deterministic post-quote pre-check. Runs ONLY in `closing` with a
       // live pendingQuote, BEFORE the classifier (the classifier prompt/schema
       // stay byte-stable). Closes the discard bug: "yes, book it" and "make it
@@ -5030,6 +5112,8 @@ export function createVoiceTurnProcessor(
       }
 
       let classifierEvent: CallingAgentEvent | null = null;
+      // #1540 §2 — an off-surface interception keeps its own repair copy.
+      let classifiedOffSurface = false;
       // #897 — the one shared context assembly (Gather + the voice-quality
       // driver call the same function). The profile is hoisted so the
       // off-surface audit below records the same profile the guard enforced.
@@ -5041,6 +5125,7 @@ export function createVoiceTurnProcessor(
           classifyContext,
           deps.gateway,
         );
+        classifiedOffSurface = Boolean(classification.offSurfaceIntent);
         // Successful classify clears infra-retry budget for this session.
         session.aiInfraRetryCount = 0;
         session.events.emit(
@@ -5132,6 +5217,40 @@ export function createVoiceTurnProcessor(
         await executeSideEffects(session, sideEffectsAll, tenantId);
         appendAgentTts(deps.store, session.id, sideEffectsAll);
         return sideEffectsAll;
+      }
+
+      // #1540 §2 — the ask_caller answer carried no request we can act on
+      // (just a name / address): ask what they need, exactly as before,
+      // rather than a "say that again" repair for words that were heard.
+      if (
+        currentState === 'ask_caller' &&
+        !classifiedOffSurface &&
+        classifierEvent.type === 'intent_classified' &&
+        (classifierEvent.confidence < TAU_INT || classifierEvent.intentType === 'unknown')
+      ) {
+        sideEffectsAll.push({ type: 'tts_play', payload: { text: ASK_CALLER_HELP_PROMPT } });
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
+      }
+
+      // #1540 §3 — an existing customer asking to "sign up": say so and ask
+      // what they need; never read back / draft a duplicate create_customer.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        const signupReply = existingCustomerSignupReplyFor(
+          session,
+          classifierEvent.intentType,
+          classifierProfile,
+        );
+        if (signupReply) {
+          sideEffectsAll.push({ type: 'tts_play', payload: { text: signupReply } });
+          await executeSideEffects(session, sideEffectsAll, tenantId);
+          appendAgentTts(deps.store, session.id, sideEffectsAll);
+          return sideEffectsAll;
+        }
       }
 
       // #962 (PR-B) / P11-001 / #866 — lookup intents bypass the
@@ -5465,6 +5584,7 @@ export function createVoiceTurnProcessor(
     handleVoiceApprovalIntent,
     handleVoiceEditIntent,
     handleAskCaller,
+    existingCustomerSignupReplyFor,
     maybeHandleLowSttConfidence,
   };
 }

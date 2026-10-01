@@ -378,7 +378,7 @@ describe('Voice Quality Layer 2 — corpus', () => {
             } = { current: null };
             // #1331 — tenant zone, on-call rotation and the corpus clock,
             // wired from the fixtures as app.ts wires them from tenant rows.
-            const world = buildLayer2ProcessorWorld(script, factoryCtx.tenantId);
+            const world = buildLayer2ProcessorWorld(script, factoryCtx.tenantId, factoryCtx.repos);
             const processor = createVoiceTurnProcessor({
               store: suiteState.voiceSessionStore!,
               gateway: driverDeps.gateway,
@@ -399,6 +399,10 @@ describe('Voice Quality Layer 2 — corpus', () => {
               }),
               businessName: 'Test Tenant',
               systemActorId: 'voice-quality-layer2',
+              // #1540 §1 — app.ts wires `PgEntityResolver`; the harness wires
+              // the fixture resolver over the SAME bundle the runner seeded,
+              // in the corpus world, so "my appointment on Tuesday" resolves.
+              ...(world.entityResolver ? { entityResolver: world.entityResolver } : {}),
               onSessionTerminated: async (session) => {
                 await processorRef.current?.runSummary(session);
               },

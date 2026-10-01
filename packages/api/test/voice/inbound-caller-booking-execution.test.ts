@@ -562,6 +562,11 @@ async function driveRealPathProposal(
     extractedEntities: c.entities,
   });
   const h = await makeInboundCall(gatewaySequence([classification, CONFIRM_YES]), world);
+  // #1540 §3 — on the caller line a sign-up drafts only for a caller whose
+  // record this call just created from their number (the unknown-caller
+  // ask_caller path); an established customer is told they're already in
+  // the system. The create_customer case is that new caller.
+  if (c.intent === 'create_customer') h.session.callerCreatedThisCall = true;
 
   await h.processor.speechTurn({
     session: h.session,

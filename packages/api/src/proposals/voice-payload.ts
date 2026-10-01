@@ -43,6 +43,9 @@ import {
   type ProposalConfidenceMeta,
 } from './contracts';
 import { parseJobEditFields } from './job-edit-phrases';
+import { changeOrderTitle } from './contracts/create-change-order';
+import { localDateKey, tzMidnight } from '../shared/timezone';
+import { recurrenceRuleForCadence, resolveAgreementStartsOn } from '../agreements/spoken-terms';
 
 /**
  * Structural view of `ai/resolution/catalog-resolver.ts`'s
@@ -135,7 +138,33 @@ export interface BuildVoiceProposalPayloadInput {
 export interface BuildVoiceProposalPayloadDeps {
   tenantId: string;
   groundLineItems?: GroundLineItemsFn;
+  /**
+   * #1540 §6 — the tenant's configured IANA zone. Fields the task handlers
+   * derive from the tenant-local calendar (log_expense.spentAt, a service
+   * agreement's startsOn) are filled only when this is present; without it
+   * nothing is guessed and the field stays a named gate.
+   */
+  timezone?: string;
+  /** #1540 §6 — the clock for those fields. Defaults to the wall clock. */
+  now?: () => Date;
+  /**
+   * #1540 §6 — injected catalog grounding for lines that carry a SPOKEN
+   * price (a change order's "for 1800 dollars"), mirroring the task
+   * handlers' `groundLineItemPricing(lines, 'unitPriceCents', catalog)`.
+   */
+  groundPricedLineItems?: GroundPricedLineItemsFn;
 }
+
+/** One drafted line with an optional spoken price (integer cents). */
+export interface VoicePricedLine {
+  description: string;
+  quantity: number;
+  unitPriceCents?: number;
+}
+
+export type GroundPricedLineItemsFn = (
+  lines: VoicePricedLine[],
+) => Promise<VoiceLineItemGrounding | undefined>;
 
 /**
  * The built payload always comes back, `ok` reports whether it satisfies its
@@ -393,6 +422,42 @@ function namedContractGap(
 }
 
 /**
+ * #1540 §6 — fill the fields the task handlers derive from tenant context.
+ * Additive only (never overwrites a field already set) and never guesses a
+ * zone: with no `deps.timezone` the tenant-calendar fields stay gated.
+ *
+ *   log_expense.spentAt — midnight of the tenant-local today as a UTC
+ *     instant, byte-identical to `LogExpenseTaskHandler`
+ *     (ai/tasks/voice-extended-tasks.ts): a bare date would be read as UTC
+ *     midnight and render as the previous day west of UTC.
+ */
+function fillFromTenantContext(
+  proposalType: ProposalType,
+  entities: Record<string, unknown>,
+  flat: Record<string, unknown>,
+  deps: BuildVoiceProposalPayloadDeps,
+): void {
+  const timezone = nonEmptyString(deps.timezone);
+  const now = deps.now?.() ?? new Date();
+  if (proposalType === 'log_expense' && flat.spentAt === undefined && timezone) {
+    flat.spentAt = tzMidnight(localDateKey(now, timezone), timezone).toISOString();
+  }
+  if (proposalType === 'create_service_agreement') {
+    if (flat.recurrenceRule === undefined) {
+      const rrule = recurrenceRuleForCadence(entities.serviceAgreementCadence);
+      if (rrule) flat.recurrenceRule = rrule;
+    }
+    if (flat.startsOn === undefined && timezone) {
+      flat.startsOn = resolveAgreementStartsOn(
+        nonEmptyString(entities.serviceAgreementStartsOn),
+        timezone,
+        now,
+      );
+    }
+  }
+}
+
+/**
  * Build the FLAT, contract-valid payload for a voice-originated proposal.
  *
  * Never throws on payload content: a payload that fails its type contract
@@ -559,6 +624,10 @@ export async function buildVoiceProposalPayload(
     if (reference) flat.invoiceReference = reference;
   }
 
+  // #1540 §6 — fields that need TENANT CONTEXT, filled exactly the way the
+  // memo/chat task handlers fill them (see `fillFromTenantContext`).
+  fillFromTenantContext(proposalType, entities, flat, deps);
+
   // cancel_appointment (#1272): the classifier emits `cancellationReason`,
   // `cancelAppointmentPayloadSchema` wants `reason` + a `cancellationType`
   // enum a spoken cancel almost never names. Same defaults, same precedence,
@@ -576,10 +645,11 @@ export async function buildVoiceProposalPayload(
 
   // #1331 — tradesperson write intents. The classifier names these with its
   // taxonomy keys; the contracts read the flat names. Same mapping, same
-  // defaults, as the memo/chat task handlers named on each line — fields that
-  // need tenant context the payload layer does not have (log_expense's
-  // tenant-local `spentAt`, a service agreement's cadence rule / start date,
-  // a change order's grounded line) stay gated for the operator, as before.
+  // defaults, as the memo/chat task handlers named on each line. Fields that
+  // need tenant context (log_expense's tenant-local `spentAt`, a service
+  // agreement's cadence rule / start date, a change order's grounded line)
+  // are filled by `fillFromTenantContext` and the change-order block below
+  // (#1540 §6).
   if (proposalType === 'add_material') {
     // AddMaterialTaskHandler (ai/tasks/add-material-task.ts).
     if (flat.description === undefined) {
@@ -622,9 +692,9 @@ export async function buildVoiceProposalPayload(
   }
   if (proposalType === 'log_expense') {
     // LogExpenseTaskHandler (ai/tasks/voice-extended-tasks.ts): category
-    // defaults to 'other', description to the spoken request. `spentAt` is
-    // the TENANT-LOCAL today, which needs the tenant zone — not available
-    // here, so it stays a named gate the operator fills.
+    // defaults to 'other', description to the spoken request. `spentAt` (the
+    // TENANT-LOCAL today) is filled by `fillFromTenantContext` when the
+    // tenant zone is known, and stays a named gate otherwise.
     if (flat.amountCents === undefined) {
       const cents = positiveCents(entities.amount);
       if (cents !== undefined) flat.amountCents = cents;
@@ -638,8 +708,8 @@ export async function buildVoiceProposalPayload(
   }
   if (proposalType === 'create_service_agreement') {
     // CreateServiceAgreementTaskHandler (ai/tasks/create-service-agreement-task.ts).
-    // Its cadence → RRULE table and spoken start-date parse live with the
-    // task handler (and need the tenant zone); those stay gated here.
+    // Its cadence → RRULE and start date come from agreements/spoken-terms.ts
+    // via `fillFromTenantContext` (#1540 §6).
     if (flat.name === undefined) {
       const name = nonEmptyString(entities.serviceAgreementName);
       if (name) flat.name = name.trim();
@@ -688,6 +758,31 @@ export async function buildVoiceProposalPayload(
       if (lineItemOutcome) {
         flat.lineItems = lineItemOutcome.lineItems;
       }
+    }
+  }
+  // #1540 §6 — create_change_order, shaped exactly like
+  // `CreateChangeOrderTaskHandler` (ai/tasks/create-change-order-task.ts):
+  // the title from the spoken scope, and ONE line — the scope at quantity 1
+  // carrying the spoken price — grounded against the tenant catalog by the
+  // injected grounding (a catalog match overrides the spoken price; an
+  // uncatalogued line is marked and confidence-capped there). Without a
+  // wired grounding no line is drafted and the contract gates `lineItems`.
+  // `jobId` is never inferred here: it is present only when entity
+  // resolution resolved the spoken job, otherwise the contract gates it.
+  if (proposalType === 'create_change_order') {
+    const description = nonEmptyString(entities.changeOrderDescription)?.trim();
+    if (flat.title === undefined) flat.title = changeOrderTitle(description);
+    if (flat.lineItems === undefined && deps.groundPricedLineItems) {
+      const cents = entities.amount;
+      const line: VoicePricedLine = {
+        description: description ?? 'Additional work',
+        quantity: 1,
+        ...(typeof cents === 'number' && Number.isFinite(cents) && cents > 0
+          ? { unitPriceCents: Math.round(cents) }
+          : {}),
+      };
+      lineItemOutcome = await deps.groundPricedLineItems([line]);
+      if (lineItemOutcome) flat.lineItems = lineItemOutcome.lineItems;
     }
   }
 
