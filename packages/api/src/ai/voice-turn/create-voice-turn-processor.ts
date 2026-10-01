@@ -151,6 +151,11 @@ import {
   REFINEMENT_CAP_LINE,
 } from '../agents/customer-calling/transitions';
 import {
+  confirmTurnSlotFillEvent,
+  isNegation,
+  SLOT_FILL_INTENTS,
+} from '../agents/customer-calling/confirm-turn';
+import {
   classifyPostQuoteUtterance,
   type PostQuoteEdit,
 } from './post-quote-precheck';
@@ -974,6 +979,16 @@ export interface VoiceTurnProcessor {
     speechResult: string,
     tenantId: string,
   ): Promise<SideEffect[]>;
+  /**
+   * #1538 — the caller's answer to the `intent_confirm` readback (yes / no /
+   * a detail for the same request). Shared by `speechTurn` and the Gather
+   * adapter so both phone transports apply the in-app slot-fill rule.
+   */
+  handleIntentConfirmTurn(
+    session: VoiceSession,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<SideEffect[]>;
   /** Replace a placeholder `intent_confirm` tts_play with a concrete readback. */
   expandIntentConfirmTemplate(
     sideEffects: SideEffect[],
@@ -1401,6 +1416,110 @@ export function createVoiceTurnProcessor(
       entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
     });
     return { text, capExceeded: false };
+  }
+
+  /**
+   * #1538 — the caller's answer to the `intent_confirm` readback, for BOTH
+   * phone transports (speechTurn and the Gather adapter call this one
+   * function). The confirm_intent skill stays the authority on "yes". A
+   * non-yes is no longer always a correction: when the pending request is a
+   * creation-family one and the answer is not an explicit "no", the turn is
+   * re-classified (unchanged classifier prompt) purely to extract slots, and
+   * the SHARED in-app rule (`confirmTurnSlotFillEvent`, confirm-turn.ts)
+   * decides — a detail for the same request merges and is read back again;
+   * a different request, or the bounded no-progress limit, still corrects.
+   */
+  async function handleIntentConfirmTurn(
+    session: VoiceSession,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<SideEffect[]> {
+    const ctx = session.machine.currentContext;
+    let confirmation: Awaited<ReturnType<typeof confirmIntent>>;
+    try {
+      confirmation = await confirmIntent({
+        intentSummary: ctx.currentIntent ?? 'that',
+        callerResponse: speechResult,
+        tenantId,
+        gateway: deps.gateway,
+      });
+    } catch (err) {
+      logger.error('speechTurn: confirmIntent failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      // Treat as correction so the caller is re-prompted, not auto-queued.
+      return session.machine.dispatch({ type: 'correction', newTranscript: speechResult });
+    }
+    if (recordCost(session, confirmation.tokenUsage)) {
+      return session.machine.dispatch({ type: 'cost_cap_exceeded' });
+    }
+    if (confirmation.confirmed) {
+      return session.machine.dispatch({ type: 'confirmed' });
+    }
+    const correction: CallingAgentEvent = {
+      type: 'correction',
+      newTranscript: confirmation.correction ?? speechResult,
+    };
+    const pendingIntent = ctx.currentIntent;
+    if (isNegation(speechResult) || !pendingIntent || !SLOT_FILL_INTENTS.has(pendingIntent)) {
+      return session.machine.dispatch(correction);
+    }
+
+    let classification: Awaited<ReturnType<typeof classifyIntent>>;
+    try {
+      classification = await classifyIntent(
+        speechResult,
+        await buildPhoneClassifyContext(session, tenantId),
+        deps.gateway,
+      );
+    } catch (err) {
+      logger.warn('speechTurn: confirm-turn slot classify failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      return session.machine.dispatch(correction);
+    }
+    session.events.emit(
+      'voice-event',
+      intentClassifiedEvent({
+        intentType: classification.intentType,
+        confidence: classification.confidence,
+        tokenUsage: classification.tokenUsage,
+      }),
+    );
+    if (recordCost(session, classification.tokenUsage)) {
+      return session.machine.dispatch({ type: 'cost_cap_exceeded' });
+    }
+    const event = confirmTurnSlotFillEvent({
+      pendingIntent,
+      pendingEntities: ctx.extractedEntities as Record<string, unknown> | undefined,
+      confirmDetailRetryCount: ctx.confirmDetailRetryCount,
+      // An off-surface pick is masked to `unknown` by the classifier guard;
+      // the gate must see what was actually asked for, or a different
+      // request ("send the Henderson invoice") would read as a bare detail.
+      classifiedIntent: classification.offSurfaceIntent ?? classification.intentType,
+      classifiedEntities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
+      text: speechResult,
+    });
+    const sideEffects = session.machine.dispatch(event);
+    if (event.type === 'intent_details_supplied' && session.machine.currentState === 'entity_resolution') {
+      // The FSM merged the delta; re-resolve the ACCUMULATED request so the
+      // new readback (or a "which one?") reflects everything said so far.
+      const merged = session.machine.currentContext;
+      const resolutionFx = session.machine.dispatch(
+        await resolveTurnEntityEvent(
+          session,
+          tenantId,
+          merged.currentIntent ?? pendingIntent,
+          (merged.extractedEntities ?? {}) as Record<string, unknown>,
+        ),
+      );
+      expandDisambiguationTemplate(session, resolutionFx);
+      sideEffects.push(...resolutionFx);
+    }
+    expandIntentConfirmTemplate(sideEffects, session.machine.currentContext.currentIntent ?? 'that');
+    return sideEffects;
   }
 
   function expandIntentConfirmTemplate(
@@ -4814,44 +4933,8 @@ export function createVoiceTurnProcessor(
     }
 
     if (currentState === 'intent_confirm') {
-      try {
-        const ctx = session.machine.currentContext;
-        const intentSummary = ctx.currentIntent ?? 'that';
-        const confirmation = await confirmIntent({
-          intentSummary,
-          callerResponse: speechResult,
-          tenantId,
-          gateway: deps.gateway,
-        });
-        const capExceeded = recordCost(session, confirmation.tokenUsage);
-        if (capExceeded) {
-          sideEffectsAll.push(
-            ...session.machine.dispatch({ type: 'cost_cap_exceeded' }),
-          );
-        } else if (confirmation.confirmed) {
-          sideEffectsAll.push(
-            ...session.machine.dispatch({ type: 'confirmed' }),
-          );
-        } else {
-          sideEffectsAll.push(
-            ...session.machine.dispatch({
-              type: 'correction',
-              newTranscript: confirmation.correction ?? speechResult,
-            }),
-          );
-        }
-      } catch (err) {
-        logger.error('speechTurn: confirmIntent failed', {
-          error: err instanceof Error ? err.message : String(err),
-          sessionId: session.id,
-        });
-        sideEffectsAll.push(
-          ...session.machine.dispatch({
-            type: 'correction',
-            newTranscript: speechResult,
-          }),
-        );
-      }
+      // #1538 — the shared confirm-turn rule (also the Gather adapter's).
+      sideEffectsAll.push(...(await handleIntentConfirmTurn(session, speechResult, tenantId)));
     } else if (currentState === 'intent_capture' || currentState === 'closing') {
       // WS18 — deterministic post-quote pre-check. Runs ONLY in `closing` with a
       // live pendingQuote, BEFORE the classifier (the classifier prompt/schema
@@ -5338,6 +5421,7 @@ export function createVoiceTurnProcessor(
     executeSideEffects,
     recordCost,
     answerConfirmTurnQuestion,
+    handleIntentConfirmTurn,
     expandIntentConfirmTemplate,
     resolveVerticalPromptSection,
     resolvePlanPromptSection,
