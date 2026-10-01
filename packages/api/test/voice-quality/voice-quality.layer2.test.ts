@@ -78,6 +78,8 @@ import {
   type SuiteCostTracker,
 } from '../../src/ai/voice-quality/runner-layer2';
 import { createLayer2AudioDriver } from '../../src/ai/voice-quality/audio/layer2-audio-driver';
+import { FillerAudioCache } from '../../src/ai/agents/customer-calling/filler-audio-cache';
+import { FillerEngine } from '../../src/ai/agents/customer-calling/filler-engine';
 import type { WhisperBufferTranscriber } from '../../src/ai/voice-quality/audio/whisper-real-provider';
 import { TtsFixtureCache } from '../../src/ai/voice-quality/audio/tts-fixture-cache';
 import {
@@ -273,10 +275,28 @@ describe('Voice Quality Layer 2 — corpus', () => {
       },
     };
 
+    // #1331 — first-audible is gated like production: the adapter under test
+    // gets the same filler engine + 250 ms filler path app.ts wires.
+    // #1534 — and the same clip mechanism: FillerAudioCache loads any clip
+    // rendered into the production fillers dir, then fillMissing synthesizes
+    // the rest once (English and Spanish, as boot does). Production runs it
+    // fire-and-forget; the harness awaits it so every measured turn has them.
+    const fillerCache = new FillerAudioCache(
+      path.resolve(__dirname, '../../src/ai/agents/customer-calling/fillers'),
+      { warn: () => {}, info: (msg, meta) => console.log(`Layer 2 ${msg}`, meta) },
+    );
+    fillerCache.load();
+    await fillerCache.fillMissing(
+      async (filler) =>
+        (await layerTwoTtsProvider.synthesize({ text: filler.text, language: filler.language })).audio,
+    );
+
     const { dispose } = attachMediaStreamServer(httpServer, {
       store: suiteState.voiceSessionStore,
       streamingProvider,
       ttsProvider: layerTwoTtsProvider,
+      fillerEngine: new FillerEngine(),
+      fillerCache,
       // VQ2-FOLLOWUP — replaces the no-op stub with the real agent loop
       // extracted from TwilioGatherAdapter#processCallerUtterance. The
       // factory closure-captures all helpers (cost, audit, proposal,
@@ -536,6 +556,7 @@ function makeCostCappedResult(scriptId: string): RunScriptLayer2Result {
       },
       callerExperience: {
         ttfaMedianMs: 0,
+        firstAudibleMedianMs: 0,
         lookupMedianMs: 0,
         durationMedianMs: 0,
         repromptRatioMedian: 0,

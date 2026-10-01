@@ -1498,7 +1498,7 @@ function undraftedCompoundSteps(
  */
 interface ChainStepPlan {
   text: string;
-  sendInvoiceTail?: { channel: 'email' | 'sms' };
+  sendInvoiceTail?: { channel?: 'email' | 'sms' };
 }
 
 /** "create and send (the invoice …)" — the send verb rides the create verb. */
@@ -1510,8 +1510,16 @@ const BARE_CREATE_VERB_END_RE = /(?:^|\s)(?:create|draft|make|write\s+up|generat
 /** A send clause whose object is the thing the previous step drafts. */
 const SEND_IT_CLAUSE_RE = /^(send|text|email)\s+(?:it|that|this|them|her|him|the\s+invoice)\b/i;
 
-function sendChannelFor(verb: string, clause: string): 'email' | 'sms' {
-  return /^text$/i.test(verb) || /\b(?:by|via|over)\s+(?:text|sms)\b/i.test(clause) ? 'sms' : 'email';
+/**
+ * The channel the operator NAMED for "send it": text → sms, email → email.
+ * #1524 — a bare "send" names none (undefined): the send_invoice drafter then
+ * writes 'auto' (the customer's email, else a text), never an invented
+ * 'email' a phone-only customer can't receive.
+ */
+function sendChannelFor(verb: string, clause: string): 'email' | 'sms' | undefined {
+  if (/^text$/i.test(verb) || /\b(?:by|via|over)\s+(?:text|sms)\b/i.test(clause)) return 'sms';
+  if (/^email$/i.test(verb) || /\b(?:by|via|over)\s+e-?mail\b/i.test(clause)) return 'email';
+  return undefined;
 }
 
 /**
@@ -3870,7 +3878,7 @@ async function generateAssistantReply(
             }
             segClass = {
               intentType: 'send_invoice',
-              extractedEntities: { sendChannel: step.sendInvoiceTail.channel },
+              extractedEntities: step.sendInvoiceTail.channel ? { sendChannel: step.sendInvoiceTail.channel } : {},
             };
           } else {
             try {

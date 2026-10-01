@@ -58,10 +58,11 @@ import type {
   AgentDriverSpeakResult,
   AgentDriverStartOpts,
 } from '../text-mode-driver';
+import { OWNER_IDENTITY_LOOKUP_SKILL, vqOwnerActorId } from '../text-mode-driver';
 import type { VoiceSession } from '../../agents/customer-calling/voice-session-store';
 import type { AgentEventBus } from '../event-bus';
 import type { VoiceSessionStore } from '../../agents/customer-calling/voice-session-store';
-import { speechOutboundEvent } from '../events';
+import { lookupExecutedEvent, speechOutboundEvent } from '../events';
 import type { TwilioStreamEmulator } from './twilio-stream-emulator';
 import type { WhisperRealProvider } from './whisper-real-provider';
 import type { TtsFixtureCache, SupportedVoice } from './tts-fixture-cache';
@@ -130,6 +131,19 @@ export class AudioModeDriver implements AgentDriver {
     // (intent_classified, lookup_executed, audio_frame_emitted, …) make
     // it into the harness observation log.
     this.deps.bus.subscribe(session);
+
+    // #1331 — the owner line is established as production establishes it
+    // (twilio-adapter: ownerSession + the D-026 phone actor) and as the
+    // Layer 1 driver does: the harness's synthetic owner subject, plus the
+    // identity-resolving `verify_owner_identity` stamp the floor PII grader
+    // keys on. Identity only — money movement stays behind the voice PIN.
+    if (opts.callerIsOwner === true) {
+      session.actorUserId = vqOwnerActorId(opts.tenantId);
+      session.events.emit(
+        'voice-event',
+        lookupExecutedEvent(OWNER_IDENTITY_LOOKUP_SKILL, 0, true),
+      );
+    }
 
     await this.deps.onSessionCreated?.(session, opts);
 

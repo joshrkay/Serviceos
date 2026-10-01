@@ -14,7 +14,10 @@ import {
   lookupExecutedEvent,
   costIncurredEvent,
   sessionTerminatedEvent,
+  transcriptReceivedEvent,
+  audioFrameEmittedEvent,
 } from '../../src/ai/voice-quality/events';
+import { noHang } from '../../src/ai/voice-quality/graders/floor';
 import { buildObservation } from '../../src/ai/voice-quality/observation';
 import type { AuditEvent } from '../../src/audit/audit';
 import type { VoiceSessionEvent } from '../../src/ai/agents/customer-calling/voice-session-store';
@@ -177,5 +180,60 @@ describe('VQ-004 — buildObservation', () => {
     // Defensive copy: mutating the returned array must not affect the bus.
     obs.events.push(sessionTerminatedEvent('completed', 9_999));
     expect(bus.events()).toHaveLength(4);
+  });
+
+  // #1331 — on a live transport (Layer 2 audio) the caller's speech, the
+  // agent's real-time playback and the emulator's end-of-turn silence window
+  // all sit between two intent classifications, so the classification-delta
+  // heuristic reported a 9 s "hang" for a turn the agent answered in 2.5 s.
+  // Turn latency there is caller-done (final transcript) → agent's first
+  // reply audio.
+  it('#1331 — on a live-audio call, turn latency is final transcript → first reply audio, not classify → call end', () => {
+    const session = store.create('t-1', 'telephony');
+    const bus = new AgentEventBus();
+    bus.subscribe(session);
+
+    emit(session, transcriptReceivedEvent({ ts: 10_000 }));
+    emit(session, intentClassifiedEvent({ intentType: 'lookup_jobs', confidence: 0.9 }, 11_000));
+    emit(session, audioFrameEmittedEvent({ byteCount: 320, ts: 12_500 }));
+    // agent audio plays in real time until ~18 s, then a 1.5 s silence window.
+
+    const obs = buildObservation({ ...baseInput, bus, callStartedAtMs: 9_000, callEndedAtMs: 20_000 });
+
+    expect(obs.perTurnLatencyMs).toEqual([2_500]);
+    expect(noHang(obs).passed).toBe(true);
+  });
+
+  it('#1331 — on a live-audio call, a turn the agent never answers still reads as a hang (≥ 7 s hard cap)', () => {
+    const session = store.create('t-1', 'telephony');
+    const bus = new AgentEventBus();
+    bus.subscribe(session);
+
+    // Turn 1 answered in 2 s; turn 2 classified but no reply audio before the
+    // emulator gave up and the call ended 12 s after the caller finished.
+    emit(session, transcriptReceivedEvent({ ts: 10_000 }));
+    emit(session, audioFrameEmittedEvent({ byteCount: 320, ts: 12_000 }));
+    emit(session, transcriptReceivedEvent({ ts: 20_000 }));
+    emit(session, intentClassifiedEvent({ intentType: 'create_appointment', confidence: 0.9 }, 21_000));
+
+    const obs = buildObservation({ ...baseInput, bus, callStartedAtMs: 9_000, callEndedAtMs: 32_000 });
+
+    expect(obs.perTurnLatencyMs).toEqual([2_000, 12_000]);
+    expect(noHang(obs).passed).toBe(false);
+  });
+
+  it('#1331 — on a live-audio call, a session that ends after the caller spoke closes that turn at the termination', () => {
+    const session = store.create('t-1', 'telephony');
+    const bus = new AgentEventBus();
+    bus.subscribe(session);
+
+    // The caller hangs up 400 ms after finishing; the harness only tears the
+    // call down 11 s later. Nobody was left waiting on the agent.
+    emit(session, transcriptReceivedEvent({ ts: 10_000 }));
+    emit(session, sessionTerminatedEvent('hangup', 10_400));
+
+    const obs = buildObservation({ ...baseInput, bus, callStartedAtMs: 9_000, callEndedAtMs: 21_000 });
+
+    expect(obs.perTurnLatencyMs).toEqual([400]);
   });
 });

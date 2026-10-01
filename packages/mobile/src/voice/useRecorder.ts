@@ -42,6 +42,15 @@ export interface UseRecorder {
   cancel: () => void;
 }
 
+/**
+ * expo-audio 0.3.5 on Android reports the recording as a bare path
+ * ("/data/user/0/…/recording.m4a"); expo-file-system and uploads need a URI.
+ * Upstream wraps it in Uri.fromFile from 0.4.x — normalize here until then.
+ */
+function toFileUri(uri: string | null): string | null {
+  return uri && uri.startsWith('/') ? `file://${uri}` : uri;
+}
+
 export function useRecorder(): UseRecorder {
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const recStateRef = useRef<'idle' | 'starting' | 'recording'>('idle');
@@ -96,7 +105,7 @@ export function useRecorder(): UseRecorder {
     } catch {
       // ignore — the consumer handles a missing/empty uri
     }
-    return recorder.uri;
+    return toFileUri(recorder.uri);
   }, [recorder]);
 
   const cancel = useCallback(() => {

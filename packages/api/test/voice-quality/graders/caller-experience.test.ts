@@ -249,3 +249,18 @@ describe('VQ2-009 — gradeCallerExperience', () => {
     });
   });
 });
+
+// #1331 — first-audible (production filler or first reply frame) is reported
+// alongside answer-audio TTFA so the launch gate can budget each.
+describe('#1331 — gradeCallerExperience first-audible', () => {
+  it('reports the P95 of first-audible latency next to answer-audio TTFA', () => {
+    const events: VoiceSessionEvent[] = [
+      { type: 'transcript_received', ts: 0 },
+      { type: 'filler_fired', fillerText: 'One moment.', ts: 255 },
+      { type: 'audio_frame_emitted', ts: 2_900, byteCount: 640 },
+    ];
+    const result = gradeCallerExperience(makeObservation({ events }), makeScript());
+    expect(result.firstAudibleP95Ms).toBe(255);
+    expect(result.ttfaP95Ms).toBe(2_900);
+  });
+});

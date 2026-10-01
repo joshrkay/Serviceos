@@ -28,6 +28,7 @@ function makeRun(overrides: Partial<PerRunResult> = {}): PerRunResult {
     },
     callerExperience: {
       ttfaMs: 200,
+      firstAudibleMs: 0,
       lookupMs: 1000,
       durationMs: 60_000,
       repromptRatio: 0,
@@ -142,13 +143,13 @@ describe('VQ2-012 — majority-vote aggregator', () => {
 
   it('VQ2-012 — caller-experience medians: median([100,200,300]) === 200, median([100,100,300]) === 100', () => {
     const r1 = makeRun({
-      callerExperience: { ttfaMs: 100, lookupMs: 100, durationMs: 100, repromptRatio: 0, recoveryTurns: 0 },
+      callerExperience: { ttfaMs: 100, firstAudibleMs: 0, lookupMs: 100, durationMs: 100, repromptRatio: 0, recoveryTurns: 0 },
     });
     const r2 = makeRun({
-      callerExperience: { ttfaMs: 200, lookupMs: 100, durationMs: 100, repromptRatio: 0.1, recoveryTurns: 1 },
+      callerExperience: { ttfaMs: 200, firstAudibleMs: 0, lookupMs: 100, durationMs: 100, repromptRatio: 0.1, recoveryTurns: 1 },
     });
     const r3 = makeRun({
-      callerExperience: { ttfaMs: 300, lookupMs: 300, durationMs: 100, repromptRatio: 0.2, recoveryTurns: 3 },
+      callerExperience: { ttfaMs: 300, firstAudibleMs: 0, lookupMs: 300, durationMs: 100, repromptRatio: 0.2, recoveryTurns: 3 },
     });
     const out = aggregate([r1, r2, r3]);
     expect(out.callerExperience.ttfaMedianMs).toBe(200);

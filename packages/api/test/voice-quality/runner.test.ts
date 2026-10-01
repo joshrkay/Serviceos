@@ -442,3 +442,54 @@ describe('VQ2-014 — loadLayer2Corpus', () => {
     expect(layer2.map((s) => s.id)).toEqual(['layer2-only-script']);
   });
 });
+
+// #1331 / D-028 follow-up — a script that asks operator-only actions
+// (add material, log an expense, apply a credit …) declares
+// `harnessOperatorTaxonomy`. Layer 1 honours it by classifying on the full
+// operator taxonomy; Layer 2 drives the production processor, which (rightly)
+// refuses those actions on a customer's line. Owner decision 2026-10-01: on
+// Layer 2 those scripts run as the OWNER line — the real surface where an
+// owner asks for these actions by phone.
+describe('#1331 — Layer 2 owner-line persona', () => {
+  it('loadLayer2Corpus runs operator-taxonomy scripts as the owner line; others and Layer 1 are unchanged', () => {
+    const layer2 = new Map(loadLayer2Corpus().map((s) => [s.id, s]));
+    expect(layer2.get('add-material-known-customer')?.callerIsOwner).toBe(true);
+    expect(layer2.get('apply-credit-known-customer')?.callerIsOwner).toBe(true);
+    expect(layer2.get('create-appointment-known-customer')?.callerIsOwner).toBe(false);
+
+    const layer1 = new Map(loadCorpus().map((s) => [s.id, s]));
+    expect(layer1.get('add-material-known-customer')?.callerIsOwner).toBe(false);
+  });
+
+  // #1331 — the phone turn engine never drafts a write on the request turn:
+  // it reads the request back ("Just to confirm — add material. Is that
+  // right?") and drafts only on the caller's yes. The corpus encodes the
+  // Layer 1 text-mode contract (draft on the request turn), so on Layer 2 the
+  // caller answers the readback; the drafted-reply expectation moves to that
+  // answer turn. Layer 1 keeps the one-turn script.
+  it('loadLayer2Corpus answers the phone readback with a yes after every write turn', () => {
+    const script = loadLayer2Corpus().find((s) => s.id === 'add-material-known-customer')!;
+    expect(script.turns).toHaveLength(2);
+    expect(script.turns[0]!.caller).toBe('Add three boxes of half-inch PEX to the shopping list.');
+    expect(script.turns[0]!.expected).toEqual({
+      intent: 'add_material',
+      proposalType: 'add_material',
+      slots: { quantity: 3 },
+      escalates: false,
+    });
+    expect(script.turns[0]!.hangupAfter).toBe(false);
+    expect(script.turns[1]).toEqual({
+      caller: "Yes, that's right.",
+      expected: {
+        spokenAnswerMatches:
+          "Got it — I've drafted an add material for review. Anything else I can help you with?",
+      },
+      hangupAfter: false,
+    });
+
+    const lookup = loadLayer2Corpus().find((s) => s.id === 'lookup-jobs-known-customer')!;
+    expect(lookup.turns).toHaveLength(1);
+    const layer1 = loadCorpus().find((s) => s.id === 'add-material-known-customer')!;
+    expect(layer1.turns).toHaveLength(1);
+  });
+});

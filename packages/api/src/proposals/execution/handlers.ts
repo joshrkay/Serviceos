@@ -1092,6 +1092,19 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
 // a belt-and-braces fallback when the dispatch repo isn't wired.
 export const ESTIMATE_NUDGE_COOLDOWN_MS = 48 * 60 * 60 * 1000;
 
+/**
+ * #1528 — the channel a nudge goes out on: the one named on the payload
+ * (email / sms), else 'auto' — the customer's email when one is on file,
+ * else a text to their phone (SendService resolves it with
+ * defaultSendChannel, the same rule send_invoice / send_estimate use). A
+ * nudge drafted before #1528 carries no channel and resolves as 'auto' too,
+ * so an email-only customer is emailed instead of failing a text.
+ */
+function nudgeChannelFromPayload(payload: Record<string, unknown>): 'email' | 'sms' | 'auto' {
+  const named = payload.channel ?? payload.sendChannel;
+  return named === 'email' || named === 'sms' ? named : 'auto';
+}
+
 export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_estimate_nudge';
   // Awaits dispatchEstimateNudge → sendService.sendEstimate (outbound estimate
@@ -1211,7 +1224,7 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
         {
           tenantId: context.tenantId,
           estimate,
-          channel: 'sms',
+          channel: nudgeChannelFromPayload(payload),
           asOf,
           actorId: context.executedBy,
           ...(typeof payload.note === 'string' && payload.note.trim().length > 0

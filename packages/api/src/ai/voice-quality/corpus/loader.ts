@@ -91,7 +91,57 @@ export function loadCorpus(corpusRoot?: string): VoiceQualityScript[] {
  * so the Layer 2 runner exercises the full audio-only corpus.
  */
 export function loadLayer2Corpus(corpusRoot?: string): VoiceQualityScript[] {
-  return loadCorpus(corpusRoot).filter((s) => s.layer2Eligible);
+  return loadCorpus(corpusRoot).filter((s) => s.layer2Eligible).map(asLayer2Persona);
+}
+
+/**
+ * #1331 — Layer 2's view of a corpus script: the production phone surface.
+ * (1) Owner line (D-028 follow-up, owner decision 2026-10-01) — a script that asks
+ * operator-only actions declares `fixtures.tenant.harnessOperatorTaxonomy`.
+ * Layer 1 classifies it on the operator taxonomy; Layer 2 drives the
+ * production processor, which correctly refuses operator actions on a
+ * customer's line (S1). On Layer 2 the script therefore runs as the OWNER
+ * line (`callerIsOwner` → RV-070 ownerSession, S2 surface) — the real
+ * production surface for an owner asking these actions by phone. Drafting
+ * needs no voice PIN; the PIN gates owner APPROVAL of money movement.
+ * (2) Every write turn answers the phone readback — see `answerPhoneReadback`.
+ * Layer 1 (`loadCorpus`) is unchanged.
+ */
+function asLayer2Persona(script: VoiceQualityScript): VoiceQualityScript {
+  const tenant = (script.fixtures.tenant ?? {}) as Record<string, unknown>;
+  const owner = tenant.harnessOperatorTaxonomy === true;
+  return {
+    ...script,
+    ...(owner ? { callerIsOwner: true } : {}),
+    turns: script.turns.flatMap(answerPhoneReadback),
+  };
+}
+
+/** The caller's answer to the phone engine's yes/no readback. */
+const READBACK_YES = "Yes, that's right.";
+
+/**
+ * #1331 — the phone turn engine (media streams → voice-turn processor) never
+ * drafts a write on the request turn: it reads the request back ("Just to
+ * confirm — … Is that right?") and drafts only on the caller's yes. The
+ * corpus encodes Layer 1's text-mode contract (drafted on the request turn),
+ * so on Layer 2 the caller answers the readback. The request turn keeps the
+ * intent / proposal / slot expectations (the drafted proposal is still that
+ * turn's proposal); the drafted-reply copy and any hangup move to the answer.
+ */
+function answerPhoneReadback(
+  turn: VoiceQualityScript['turns'][number],
+): VoiceQualityScript['turns'] {
+  if (turn.expected.proposalType === undefined) return [turn];
+  const { spokenAnswerMatches, ...requestExpected } = turn.expected;
+  return [
+    { ...turn, expected: requestExpected, hangupAfter: false },
+    {
+      caller: READBACK_YES,
+      expected: spokenAnswerMatches !== undefined ? { spokenAnswerMatches } : {},
+      hangupAfter: turn.hangupAfter,
+    },
+  ];
 }
 
 /**
