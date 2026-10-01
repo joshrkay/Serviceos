@@ -162,6 +162,7 @@ import {
 } from '../agents/customer-calling/confirm-turn';
 import {
   callerIdentityCheckLine,
+  withConfirmedSelfName,
   callerNameMatchesAccount,
   spokenSelfName,
 } from '../agents/customer-calling/caller-identity-check';
@@ -185,13 +186,14 @@ import {
   type HoldFeasibility,
 } from '../scheduling/place-hold';
 import type { FeasibilityDependencies } from '../../scheduling/feasibility-types';
-import { formatForReadback } from '../scheduling/resolve-datetime';
+import { DEFAULT_TENANT_TIMEZONE, formatForReadback } from '../scheduling/resolve-datetime';
 import { checkBusinessHours } from '../../compliance/business-hours';
 import { parseOnboardingBusinessHours } from '../../telephony/business-hours-loader';
 import { updateAppointment } from '../../appointments/appointment';
 import type { TenantSettings } from '../../settings/settings';
 import {
   bookingSpeechForLane,
+  spokenBookingDraftForTime,
   buildLaneInputFromSettings,
   laneStampIfPresent,
   timeReadbackFromHold,
@@ -1548,17 +1550,6 @@ export function createVoiceTurnProcessor(
       });
       return session.machine.dispatch(correction);
     }
-    session.events.emit(
-      'voice-event',
-      intentClassifiedEvent({
-        intentType: classification.intentType,
-        confidence: classification.confidence,
-        tokenUsage: classification.tokenUsage,
-      }),
-    );
-    if (recordCost(session, classification.tokenUsage)) {
-      return session.machine.dispatch({ type: 'cost_cap_exceeded' });
-    }
     const event = confirmTurnSlotFillEvent({
       pendingIntent,
       pendingEntities: ctx.extractedEntities as Record<string, unknown> | undefined,
@@ -1570,6 +1561,21 @@ export function createVoiceTurnProcessor(
       classifiedEntities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
       text: speechResult,
     });
+    // #1331 (Layer 2 run 36925905917, two-step booking) — a detail merged
+    // into the pending request IS that request's turn: "Tuesday at 2pm."
+    // classifies `unknown` on its own, but the caller is still booking.
+    session.events.emit(
+      'voice-event',
+      intentClassifiedEvent({
+        intentType:
+          event.type === 'intent_details_supplied' ? pendingIntent : classification.intentType,
+        confidence: classification.confidence,
+        tokenUsage: classification.tokenUsage,
+      }),
+    );
+    if (recordCost(session, classification.tokenUsage)) {
+      return session.machine.dispatch({ type: 'cost_cap_exceeded' });
+    }
     const sideEffects = session.machine.dispatch(event);
     if (event.type === 'intent_details_supplied' && session.machine.currentState === 'entity_resolution') {
       // The FSM merged the delta; re-resolve the ACCUMULATED request so the
@@ -2666,6 +2672,19 @@ export function createVoiceTurnProcessor(
           entities.dateTimeDescription,
           entities.dateTimePhrase,
         ].find((v): v is string => typeof v === 'string' && v.trim().length > 0);
+        // #1331 — no hold placed: a draft whose time resolved says so, with
+        // the time; only a time-less draft keeps the generic "noted" line.
+        const settingsRepo = deps.settingsRepo;
+        const draftOnlySpeech = async (): Promise<string> => {
+          const start = payload.scheduledStart;
+          if (typeof start !== 'string' || Number.isNaN(Date.parse(start))) {
+            return bookingSpeechForLane(undefined, undefined);
+          }
+          const settings = await settingsRepo.findByTenant(tenantId).catch(() => null);
+          return spokenBookingDraftForTime(
+            formatForReadback(start, settings?.timezone ?? DEFAULT_TENANT_TIMEZONE),
+          );
+        };
         if (customerId && jobId && dateTimeDescription) {
           try {
             const settings = await deps.settingsRepo.findByTenant(tenantId).catch(() => null);
@@ -2735,13 +2754,13 @@ export function createVoiceTurnProcessor(
                 // lane means draft create_booking, not auto-approve.
               }
             } else {
-              bookingUtterance = bookingSpeechForLane(undefined, undefined);
+              bookingUtterance = await draftOnlySpeech();
             }
           } catch {
-            bookingUtterance = bookingSpeechForLane(undefined, undefined);
+            bookingUtterance = await draftOnlySpeech();
           }
         } else if (payloadProposalType === 'create_appointment') {
-          bookingUtterance = bookingSpeechForLane(undefined, undefined);
+          bookingUtterance = await draftOnlySpeech();
         }
       }
 
@@ -4572,7 +4591,10 @@ export function createVoiceTurnProcessor(
       if (isAffirmation(utterance)) {
         session.callerIdentityCheck = undefined;
         session.callerIdentity = 'confirmed';
-        return { kind: 'proceed', utterance: pending.heldUtterance };
+        return {
+          kind: 'proceed',
+          utterance: withConfirmedSelfName(pending.heldUtterance, pending.accountName),
+        };
       }
       // Neither yes nor no: ask once more, then treat it as "no" — the
       // account is never acted on without a confirmed yes.

@@ -2052,6 +2052,16 @@ const NEW_BOOKING_PHRASES: ReadonlyArray<RegExp> = [
       String.raw`(?:(?!(?:an?|the)\s)[a-z][a-z-]{1,20}\s+){1,3}(?:appointment|visit|booking|inspection|service\s+call)\s*[?.!]?\s*$`,
     'i',
   ),
+  // #1331 (Layer 2 run 36925905917, find-or-create-lead-unknown-caller) —
+  // "(Hi,) I'd like to schedule service (for my home)": the model returned no
+  // usable intent on 2 of 3 live runs and the unknown caller's request was
+  // dropped. Still entity-free: "my home/house" names no address, and a
+  // greeting carries nothing.
+  new RegExp(
+    String.raw`^\s*(?:(?:hi|hello|hey)(?:\s+there)?[,.!]?\s+)?${NEW_BOOKING_LEAD}(?:book|schedule|set\s+up)\s+(?:some\s+)?service` +
+      String.raw`(?:\s+(?:for|at)\s+(?:my|our)\s+(?:home|house|place|property))?\s*[?.!]?\s*$`,
+    'i',
+  ),
 ];
 
 /**
