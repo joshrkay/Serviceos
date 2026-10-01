@@ -248,6 +248,7 @@ import {
 } from '../../proposals/approval-reference-checks';
 import {
   MAX_DISAMBIGUATION_ATTEMPTS,
+  appointmentWindowFrom,
   refKeyForEntityKind,
   namedJobNotFoundIsTerminal,
   requiresExistingEntity,
@@ -1724,6 +1725,11 @@ export function createVoiceTurnProcessor(
               ...(timezone ? { timezone } : {}),
               ...(pinnedRefs ? { pinnedRefs } : {}),
               ...(deps.now ? { now: deps.now() } : {}),
+              // #1540 §1 — a reschedule's "<day> at the same time" reads the
+              // resolved appointment's current window.
+              ...(deps.appointmentRepo
+                ? { appointmentWindow: appointmentWindowFrom(deps.appointmentRepo, tenantId) }
+                : {}),
             }
           : undefined,
       );

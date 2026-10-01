@@ -84,6 +84,7 @@ import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
 import { deriveCallOutcome } from './outcome-mapper';
 import {
+  appointmentWindowFrom,
   namedJobNotFoundIsTerminal,
   acceptsNetNewCustomer,
   requiresExistingEntity,
@@ -1063,9 +1064,13 @@ export class InAppVoiceAdapter {
     const resolver = this.getEntityResolver();
     try {
       const timezone = await this.resolveSessionTimezone(tenantId, session);
+      const appointmentRepo = this.deps.lookups?.shared.appointmentRepo;
       const opts = {
         ...(timezone ? { timezone } : {}),
         ...(pinnedRefs ? { pinnedRefs } : {}),
+        // #1540 §1 — a reschedule's "<day> at the same time" reads the
+        // resolved appointment's current window.
+        ...(appointmentRepo ? { appointmentWindow: appointmentWindowFrom(appointmentRepo, tenantId) } : {}),
       };
       return await resolveSchedulingEntities(
         resolver,
