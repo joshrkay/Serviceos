@@ -47,7 +47,11 @@ export interface EstimateReminderWorkerDeps {
   reminderAfterDays?: number;
   /** Max follow-up reminders per estimate. Default 1. */
   maxReminders?: number;
-  /** Channel used for the nudge. Defaults to 'sms' (matches the send route). */
+  /**
+   * Channel used for the nudge. Defaults to 'auto' (#1528): the customer's
+   * email when one is on file, else a text — the same rule the
+   * send_estimate_nudge proposal follows through dispatchEstimateNudge.
+   */
   channel?: SendChannel;
 }
 
@@ -57,7 +61,7 @@ export async function runEstimateReminderSweep(
   const now = deps.now ?? (() => new Date());
   const reminderAfterDays = deps.reminderAfterDays ?? 3;
   const maxReminders = deps.maxReminders ?? 1;
-  const channel = deps.channel ?? 'sms';
+  const channel = deps.channel ?? 'auto';
 
   let tenantIds: string[];
   try {

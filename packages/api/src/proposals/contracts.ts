@@ -740,6 +740,13 @@ export const sendEstimateNudgePayloadSchema = z
   .object({
     estimateId: z.string().uuid().optional(),
     estimateReference: z.string().min(1).optional(),
+    /**
+     * #1528 — 'auto': no channel was named; the nudge uses the customer's
+     * email when one is on file, else a text to their phone. Optional so a
+     * nudge drafted before #1528 still validates (its executor reads a
+     * missing channel as 'auto').
+     */
+    channel: z.enum(['email', 'sms', 'auto']).optional(),
     /** Optional note appended to the outbound message. */
     note: z.string().optional(),
   })
