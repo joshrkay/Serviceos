@@ -352,7 +352,9 @@ describe('#1014 row 2.4 — a stranger on the phone cannot reach owner-only capa
     const after = await proposalRepo.findByTenant(tenantA.tenantId);
     expect(after.length).toBe(before.length);
     expect(h.session.machine.currentState).toBe('intent_capture');
-    expect(twiml).not.toContain('send invoice. Is that right?');
+    // #1539 — the per-intent readback for send_invoice; a stranger never reaches it.
+    expect(twiml).not.toContain('send the invoice');
+    expect(twiml).not.toContain('Is that right?');
     expect(twiml).toContain('can you say that again?');
   });
 
@@ -368,7 +370,7 @@ describe('#1014 row 2.4 — a stranger on the phone cannot reach owner-only capa
     // FSM asked for confirmation. That is the layer difference this row is
     // about — the stranger never reached it.
     expect(h.session.machine.currentState).toBe('intent_confirm');
-    expect(twiml).toContain('send invoice. Is that right?');
+    expect(twiml).toContain('you&apos;d like to send the invoice. Is that right?'); // #1539
   });
 
   it('an owner-grade LOOKUP from a stranger is refused by the REAL RBAC — a different layer from the write guard', async () => {
