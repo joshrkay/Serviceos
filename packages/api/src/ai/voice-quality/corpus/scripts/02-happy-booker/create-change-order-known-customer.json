@@ -28,6 +28,40 @@
         "createdBy": "user_seed",
         "createdAt": "2026-01-15T10:00:00.000Z",
         "updatedAt": "2026-04-01T10:00:00.000Z"
+      },
+      {
+        "id": "00000000-0000-4000-8000-000002170001",
+        "tenantId": "t_02_change_order",
+        "firstName": "Maria",
+        "lastName": "Garcia",
+        "displayName": "Maria Garcia",
+        "companyName": null,
+        "primaryPhone": "+15555550497",
+        "secondaryPhone": null,
+        "email": "maria.garcia@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-02-02T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "jobs": [
+      {
+        "id": "00000000-0000-4000-8000-000002170002",
+        "tenantId": "t_02_change_order",
+        "customerId": "00000000-0000-4000-8000-000002170001",
+        "jobNumber": "JOB-2170",
+        "summary": "Ductless mini-split install",
+        "problemDescription": "Ductless mini-split install, living room zone",
+        "status": "in_progress",
+        "priority": "normal",
+        "assignedTechnicianId": null,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-20T08:00:00.000Z",
+        "updatedAt": "2026-04-28T08:00:00.000Z"
       }
     ]
   },
@@ -44,8 +78,22 @@
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
-    "appliesDisposition": [9, 10, 11, 12]
+    "appliesFloor": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "appliesDisposition": [
+      9,
+      10,
+      11,
+      12
+    ]
   },
   "layer2Eligible": true
 }
