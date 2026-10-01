@@ -2,6 +2,8 @@ export {
   createVoiceTurnProcessor,
   classifierProfileForSession,
   auditOffSurfaceClassification,
+  ASK_CALLER_HELP_PROMPT,
+  isAskCallerHelpPrompt,
   type VoiceTurnProcessor,
   type VoiceTurnProcessorDeps,
 } from './create-voice-turn-processor';

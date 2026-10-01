@@ -93,6 +93,8 @@ import { answerPhoneEnRoute, type PhoneEnRouteDeps } from '../ai/voice-turn/phon
 import {
   createVoiceTurnProcessor,
   auditOffSurfaceClassification,
+  ASK_CALLER_HELP_PROMPT,
+  isAskCallerHelpPrompt,
   appendAgentTts,
   callerTranscriptText,
   preloadSessionCatalog,
@@ -2490,6 +2492,24 @@ export class TwilioGatherAdapter {
     const confirmQuestion =
       currentState === 'intent_confirm' ? detectConfirmTurnQuestion(opts.speechResult) : null;
 
+    // #1540 §2 (owner decision 2026-10-01) — an unknown caller's ask_caller
+    // answer usually carries their request. The SAME shared handler the
+    // media-streams speechTurn runs identifies/creates them by phone; once
+    // that lands in intent_capture, this same utterance is classified below
+    // (S1 surface rules intact) instead of "How can I help you today?".
+    // A still-unresolved caller keeps the FSM's own retry/escalate path.
+    let turnState: string = currentState;
+    if (currentState === 'ask_caller') {
+      const askCallerFx = await this.processor.handleAskCaller(session, opts.tenantId);
+      if (session.machine.currentState !== 'intent_capture') {
+        sideEffectsAll.push(...askCallerFx);
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+      sideEffectsAll.push(...askCallerFx.filter((fx) => !isAskCallerHelpPrompt(fx)));
+      turnState = 'intent_capture';
+    }
+
     // 2. Branch on FSM state.
     if (confirmQuestion) {
       sideEffectsAll.push(
@@ -2538,7 +2558,7 @@ export class TwilioGatherAdapter {
           })
         );
       }
-    } else if (currentState === 'intent_capture' || currentState === 'closing') {
+    } else if (turnState === 'intent_capture' || turnState === 'closing') {
       // 3. Classify intent. Failure → confidence_low so the bounded
       //    reprompt path triggers instead of bubbling 5xx out to Twilio
       //    (which would hang the caller mid-call).
@@ -2644,6 +2664,18 @@ export class TwilioGatherAdapter {
             reason: systemFailureReasonForInfra(infraKind),
           }),
         );
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+
+      // #1540 §2 — the ask_caller answer carried no request we can act on
+      // (just a name / address): ask what they need, exactly as before.
+      if (
+        currentState === 'ask_caller' &&
+        classifierEvent?.type === 'intent_classified' &&
+        (classifierEvent.confidence < TAU_INT || classifierEvent.intentType === 'unknown')
+      ) {
+        sideEffectsAll.push({ type: 'tts_play', payload: { text: ASK_CALLER_HELP_PROMPT } });
         await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }
@@ -2820,17 +2852,6 @@ export class TwilioGatherAdapter {
           opts.tenantId,
           opts.speechResult,
         )),
-      );
-    } else if (currentState === 'ask_caller') {
-      // Unknown caller on the PSTN/Gather path just gave their info. Reuse the
-      // SAME find-or-create-customer + advance-to-intake logic the media-
-      // streams adapter runs (shared handleAskCaller). Without this branch the
-      // turn fell to the generic `else` below → confidence_low, which the
-      // ask_caller state ignores, so unknown callers looped forever on a bare
-      // <Gather> reprompt. Now they advance (caller_known → intent_capture) and
-      // the FSM's own reprompt/escalate handles a still-unresolved caller.
-      sideEffectsAll.push(
-        ...(await this.processor.handleAskCaller(session, opts.tenantId)),
       );
     } else {
       // Other states: log and reprompt with a generic message. Treat as a

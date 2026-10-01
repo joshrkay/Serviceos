@@ -391,6 +391,17 @@ function buildContractFailureClarification(
  * AND the live-quote refinement path (`applyQuoteRefinement`) compute the read-
  * back and the money-correctness gate identically. Pure — no I/O.
  */
+/**
+ * #1540 §2 — the generic prompt `transitionAskCaller` speaks on `caller_known`
+ * (transitions.ts). Dropped when the same turn goes on to classify the
+ * caller's request, which answers instead.
+ */
+export const ASK_CALLER_HELP_PROMPT = 'How can I help you today?';
+
+export function isAskCallerHelpPrompt(fx: SideEffect): boolean {
+  return fx.type === 'tts_play' && fx.payload.text === ASK_CALLER_HELP_PROMPT;
+}
+
 function finalizeGroundedQuote(
   outcome: Awaited<ReturnType<typeof groundLineItemPricing>>,
   catalogAvailable: boolean,
@@ -4834,10 +4845,23 @@ export function createVoiceTurnProcessor(
       lowConfidenceStreak.delete(session.id);
     }
 
+    // #1540 §2 (owner decision 2026-10-01) — the state this turn is handled
+    // in. An unknown caller's ask_caller answer usually carries their request
+    // ("I'd like to schedule service for my home"): once the caller is
+    // identified/created by phone, the SAME utterance goes on to intent
+    // capture — classified on the caller's surface like any other turn, so
+    // every S1 rule still applies — instead of the generic "How can I help
+    // you today?" that made them repeat themselves.
+    let turnState = currentState;
     if (currentState === 'ask_caller') {
-      sideEffectsAll.push(...(await handleAskCaller(session, tenantId)));
-      await executeSideEffects(session, sideEffectsAll, tenantId);
-      return sideEffectsAll;
+      const askCallerFx = await handleAskCaller(session, tenantId);
+      if (session.machine.currentState !== 'intent_capture') {
+        sideEffectsAll.push(...askCallerFx);
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        return sideEffectsAll;
+      }
+      sideEffectsAll.push(...askCallerFx.filter((fx) => !isAskCallerHelpPrompt(fx)));
+      turnState = 'intent_capture';
     }
 
     // #1476 — a QUESTION at the readback is neither a yes nor a no; the
@@ -4894,7 +4918,7 @@ export function createVoiceTurnProcessor(
           }),
         );
       }
-    } else if (currentState === 'intent_capture' || currentState === 'closing') {
+    } else if (turnState === 'intent_capture' || turnState === 'closing') {
       // WS18 — deterministic post-quote pre-check. Runs ONLY in `closing` with a
       // live pendingQuote, BEFORE the classifier (the classifier prompt/schema
       // stay byte-stable). Closes the discard bug: "yes, book it" and "make it
@@ -5056,6 +5080,20 @@ export function createVoiceTurnProcessor(
             reason: systemFailureReasonForInfra(infraKind),
           }),
         );
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
+      }
+
+      // #1540 §2 — the ask_caller answer carried no request we can act on
+      // (just a name / address): ask what they need, exactly as before,
+      // rather than a "say that again" repair for words that were heard.
+      if (
+        currentState === 'ask_caller' &&
+        classifierEvent.type === 'intent_classified' &&
+        (classifierEvent.confidence < TAU_INT || classifierEvent.intentType === 'unknown')
+      ) {
+        sideEffectsAll.push({ type: 'tts_play', payload: { text: ASK_CALLER_HELP_PROMPT } });
         await executeSideEffects(session, sideEffectsAll, tenantId);
         appendAgentTts(deps.store, session.id, sideEffectsAll);
         return sideEffectsAll;
