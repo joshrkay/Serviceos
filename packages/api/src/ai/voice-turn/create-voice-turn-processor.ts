@@ -156,6 +156,7 @@ import {
 import {
   confirmTurnSlotFillEvent,
   isNegation,
+  isAffirmation,
   SLOT_FILL_INTENTS,
 } from '../agents/customer-calling/confirm-turn';
 import {
@@ -1484,7 +1485,14 @@ export function createVoiceTurnProcessor(
         error: err instanceof Error ? err.message : String(err),
         sessionId: session.id,
       });
-      // Treat as correction so the caller is re-prompted, not auto-queued.
+      // #1331 — the yes/no model is unreachable: a plain yes is still a yes
+      // (the shared deterministic rule in-app already decides with), so the
+      // confirmed request is not thrown away on a provider timeout. Anything
+      // else is treated as a correction so the caller is re-prompted, never
+      // auto-queued.
+      if (isAffirmation(speechResult)) {
+        return session.machine.dispatch({ type: 'confirmed' });
+      }
       return session.machine.dispatch({ type: 'correction', newTranscript: speechResult });
     }
     if (recordCost(session, confirmation.tokenUsage)) {

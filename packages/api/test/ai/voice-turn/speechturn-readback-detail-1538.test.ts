@@ -166,6 +166,69 @@ describe('#1538 — phone: a detail given at the readback', () => {
   });
 });
 
+describe('#1331 — phone: the yes/no model is unreachable at the readback', () => {
+  // Run 36895893912 logged "speechTurn: confirmIntent failed — All providers
+  // failed. Last error: Request was aborted." twice; each time a plain "Yes,
+  // that's right." became a correction ("My apologies — let me try again")
+  // and the confirmed request was thrown away. In-app already decides a
+  // plain yes deterministically (confirm-turn.ts isAffirmation).
+  function confirmDownGateway(classifier: string): LLMGateway {
+    return {
+      complete: vi.fn(async (req: LLMRequest) => {
+        if ((req.metadata as { skill?: string } | undefined)?.skill === 'confirm_intent') {
+          throw new Error('All providers failed. Last error: Request was aborted.');
+        }
+        return { content: classifier, model: 'mock', provider: 'mock', tokenUsage: { input: 1, output: 1, total: 2 }, latencyMs: 1 };
+      }),
+    } as unknown as LLMGateway;
+  }
+
+  async function callWith(gateway: LLMGateway) {
+    const store = new VoiceSessionStore({ startInterval: false });
+    stores.push(store);
+    const proposalRepo = new InMemoryProposalRepository();
+    const customerRepo = new InMemoryCustomerRepository();
+    const customer = await createCustomer(
+      { tenantId: TENANT, firstName: 'Dana', lastName: 'Reyes', primaryPhone: '+14805550199', createdBy: 'test' },
+      customerRepo,
+    );
+    const session = store.create(TENANT, 'telephony', { callSid: CALL_SID });
+    session.machine.dispatch({ type: 'incoming_call', callSid: CALL_SID, from: CALLER_ID, to: '+15125550999', tenantId: TENANT });
+    session.machine.dispatch({ type: 'greeted_ok' });
+    session.machine.dispatch({ type: 'caller_known', customerId: customer.id });
+    session.customerId = customer.id;
+    session.callerPhone = CALLER_ID;
+    const processor = createVoiceTurnProcessor({
+      store, gateway, businessName: 'Acme Plumbing', systemActorId: 'test-actor',
+      auditRepo: new InMemoryAuditRepository(), proposalRepo, customerRepo,
+    });
+    const turn = (speechResult: string) =>
+      processor.speechTurn({ session, speechResult, callSid: CALL_SID, tenantId: TENANT });
+    return { session, proposalRepo, turn };
+  }
+
+  const BOOK = JSON.stringify({
+    intentType: 'create_appointment',
+    confidence: 0.95,
+    extractedEntities: { dateTimeDescription: 'Tuesday at 2pm' },
+  });
+
+  it('a plain yes still drafts the confirmed request', async () => {
+    const { proposalRepo, turn } = await callWith(confirmDownGateway(BOOK));
+    await turn('Book me for Tuesday at 2pm.');
+    const reply = spoken(await turn("Yes, that's right."));
+    expect(reply).not.toMatch(/let me try again/i);
+    expect((await proposalRepo.findByTenant(TENANT)).map((p) => p.proposalType)).toEqual(['create_appointment']);
+  });
+
+  it('anything that is not a plain yes is still not taken as one', async () => {
+    const { proposalRepo, turn } = await callWith(confirmDownGateway(BOOK));
+    await turn('Book me for Tuesday at 2pm.');
+    await turn('Hmm, hold on a second.');
+    expect(await proposalRepo.findByTenant(TENANT)).toEqual([]);
+  });
+});
+
 describe('#1538 — phone: a real correction at the readback still corrects', () => {
   it('an explicit "no" drops the pending request', async () => {
     const { session, proposalRepo, turn } = await makeCall();

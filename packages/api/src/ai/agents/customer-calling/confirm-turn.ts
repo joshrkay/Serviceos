@@ -448,8 +448,11 @@ export function confirmTurnSlotFillEvent(input: ConfirmTurnSlotFillInput): Calli
   // whether the words ARE a day/time.
   const hasWhen = (bag: Record<string, unknown> | undefined): boolean =>
     WHEN_ENTITY_KEYS.some((k) => usable(bag?.[k]));
+  // Only for a bare fragment (`unknown`) or the same request — never a
+  // sibling, whose entities the slot gate deliberately keeps out (Train-7).
   if (
     TIMED_BOOKING_INTENTS.has(pendingIntent ?? '') &&
+    (input.classifiedIntent === 'unknown' || input.classifiedIntent === pendingIntent) &&
     !hasWhen(newSlots) &&
     !hasWhen(input.pendingEntities)
   ) {
