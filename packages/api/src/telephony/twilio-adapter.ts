@@ -49,7 +49,6 @@ import type { ConversationRepository } from '../conversations/conversation-servi
 import { logInboundCallOnCustomerTimeline } from './inbound-call-log';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
-import { confirmIntent } from '../ai/skills/confirm-intent';
 import { detectConfirmTurnQuestion } from '../ai/voice-turn/confirm-turn-question';
 import { intentClassifiedEvent, languageSwitchedEvent } from '../ai/voice-quality/events';
 import {
@@ -2501,43 +2500,17 @@ export class TwilioGatherAdapter {
         )),
       );
     } else if (currentState === 'intent_confirm') {
-      // confirm_intent: caller is responding to a yes/no readback.
-      try {
-        const ctx = session.machine.currentContext;
-        const intentSummary = ctx.currentIntent ?? 'that';
-        const confirmation = await confirmIntent({
-          intentSummary,
-          callerResponse: opts.speechResult,
-          tenantId: opts.tenantId,
-          gateway: this.deps.gateway,
-        });
-        // Wire token usage into the cost tracker.
-        const capExceeded = this.processor.recordCost(session, confirmation.tokenUsage);
-        if (capExceeded) {
-          sideEffectsAll.push(...session.machine.dispatch({ type: 'cost_cap_exceeded' }));
-        } else if (confirmation.confirmed) {
-          sideEffectsAll.push(...session.machine.dispatch({ type: 'confirmed' }));
-        } else {
-          sideEffectsAll.push(
-            ...session.machine.dispatch({
-              type: 'correction',
-              newTranscript: confirmation.correction ?? opts.speechResult,
-            })
-          );
-        }
-      } catch (err) {
-        logger.error('confirmIntent failed', {
-          error: err instanceof Error ? err.message : String(err),
-          sessionId: opts.sessionId,
-        });
-        // Treat as correction so the caller is re-prompted, not auto-queued.
-        sideEffectsAll.push(
-          ...session.machine.dispatch({
-            type: 'correction',
-            newTranscript: opts.speechResult,
-          })
-        );
-      }
+      // confirm_intent: caller is responding to a yes/no readback. #1538 —
+      // the processor's shared confirm-turn rule (the same one speechTurn
+      // runs): a detail merges and is read back, a "no" or a different
+      // request corrects.
+      sideEffectsAll.push(
+        ...(await this.processor.handleIntentConfirmTurn(
+          session,
+          opts.speechResult,
+          opts.tenantId,
+        )),
+      );
     } else if (currentState === 'intent_capture' || currentState === 'closing') {
       // 3. Classify intent. Failure → confidence_low so the bounded
       //    reprompt path triggers instead of bubbling 5xx out to Twilio
@@ -2807,7 +2780,11 @@ export class TwilioGatherAdapter {
         );
         this.processor.expandDisambiguationTemplate(session, resolutionFx);
         sideEffectsAll.push(...resolutionFx);
-        this.processor.expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
+        this.processor.expandIntentConfirmTemplate(
+          sideEffectsAll,
+          classifierEvent.intentType,
+          session.language === 'es' ? 'es' : 'en',
+        );
       }
     } else if (currentState === 'entity_resolution') {
       // #1118 — the caller is answering the disambiguation question; the SAME

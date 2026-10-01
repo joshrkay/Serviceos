@@ -1391,7 +1391,9 @@ describe('createVoiceTurnProcessor.expandIntentConfirmTemplate', () => {
       { type: 'tts_play', payload: { text: 'unchanged' } },
     ];
     processor.expandIntentConfirmTemplate(sideEffects, 'create_invoice');
-    expect(sideEffects[0]!.payload.text).toMatch(/create invoice/);
+    expect(sideEffects[0]!.payload.text).toBe(
+      "Just to confirm — you'd like to draft an invoice. Is that right?",
+    );
     expect(sideEffects[1]!.payload.text).toBe('unchanged');
   });
 });
