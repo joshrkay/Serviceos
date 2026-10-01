@@ -2780,7 +2780,11 @@ export class TwilioGatherAdapter {
         );
         this.processor.expandDisambiguationTemplate(session, resolutionFx);
         sideEffectsAll.push(...resolutionFx);
-        this.processor.expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
+        this.processor.expandIntentConfirmTemplate(
+          sideEffectsAll,
+          classifierEvent.intentType,
+          session.language === 'es' ? 'es' : 'en',
+        );
       }
     } else if (currentState === 'entity_resolution') {
       // #1118 — the caller is answering the disambiguation question; the SAME

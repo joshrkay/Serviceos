@@ -158,7 +158,9 @@ describe('#1331 — owner line: money write is read back, drafted on yes, left p
     });
 
     const readback = spoken(await c.turn("Give Dana Reyes a fifty dollar credit."));
-    expect(readback).toBe('Just to confirm — apply credit. Is that right?');
+    // #1539 — names the customer. (`amountCents` is not a classifier entity key —
+    // the dictionary's money field is `amount` — so no amount reaches the readback.)
+    expect(readback).toBe("Just to confirm — you'd like to apply a credit for Dana Reyes. Is that right?");
     expect(await c.proposalRepo.findByTenant(TENANT)).toEqual([]);
 
     const reply = spoken(await c.turn('Yes, go ahead.'));

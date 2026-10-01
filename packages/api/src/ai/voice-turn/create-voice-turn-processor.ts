@@ -993,6 +993,7 @@ export interface VoiceTurnProcessor {
   expandIntentConfirmTemplate(
     sideEffects: SideEffect[],
     intentType: string,
+    language?: SessionLanguage,
   ): void;
   /**
    * #897 / #890 — the ONE assembly of a phone turn's classifier context:
@@ -1367,10 +1368,15 @@ export function createVoiceTurnProcessor(
       { type: 'tts_play', payload: { text: answer, source: 'confirm_question' } },
       {
         type: 'tts_play',
-        payload: { text: 'intent_confirm', template: 'confirm_intent', intent: ctx.currentIntent },
+        payload: {
+          text: 'intent_confirm',
+          template: 'confirm_intent',
+          intent: ctx.currentIntent,
+          entities: { ...entities },
+        },
       },
     ];
-    expandIntentConfirmTemplate(effects, ctx.currentIntent ?? 'that');
+    expandIntentConfirmTemplate(effects, ctx.currentIntent ?? 'that', sessionLanguage(session));
     return effects;
   }
 
@@ -1518,13 +1524,22 @@ export function createVoiceTurnProcessor(
       expandDisambiguationTemplate(session, resolutionFx);
       sideEffects.push(...resolutionFx);
     }
-    expandIntentConfirmTemplate(sideEffects, session.machine.currentContext.currentIntent ?? 'that');
+    expandIntentConfirmTemplate(
+      sideEffects,
+      session.machine.currentContext.currentIntent ?? 'that',
+      sessionLanguage(session),
+    );
     return sideEffects;
+  }
+
+  function sessionLanguage(session: VoiceSession): SessionLanguage {
+    return session.language === 'es' ? 'es' : 'en';
   }
 
   function expandIntentConfirmTemplate(
     sideEffects: SideEffect[],
     intentType: string,
+    language: SessionLanguage = 'en',
   ): void {
     for (const fx of sideEffects) {
       if (
@@ -1532,7 +1547,14 @@ export function createVoiceTurnProcessor(
         (fx.payload.text === 'intent_confirm' ||
           fx.payload.template === 'confirm_intent')
       ) {
-        fx.payload.text = `Just to confirm — ${intentType.replace(/_/g, ' ')}. Is that right?`;
+        // #1539 — the SAME render the transports speak (they re-render this
+        // payload through renderTtsText), so the transcript line and what
+        // the caller hears are one string naming what will be drafted.
+        fx.payload.text = renderTtsText(
+          'intent_confirm',
+          { ...fx.payload, template: 'confirm_intent', intent: fx.payload.intent ?? intentType },
+          language,
+        );
       }
     }
   }
@@ -2044,7 +2066,7 @@ export function createVoiceTurnProcessor(
     }
     const sideEffects = session.machine.dispatch(event);
     expandDisambiguationTemplate(session, sideEffects);
-    expandIntentConfirmTemplate(sideEffects, ctx.currentIntent ?? 'that');
+    expandIntentConfirmTemplate(sideEffects, ctx.currentIntent ?? 'that', sessionLanguage(session));
     return sideEffects;
   }
 
@@ -5358,7 +5380,7 @@ export function createVoiceTurnProcessor(
         );
         expandDisambiguationTemplate(session, resolutionFx);
         sideEffectsAll.push(...resolutionFx);
-        expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType);
+        expandIntentConfirmTemplate(sideEffectsAll, classifierEvent.intentType, sessionLanguage(session));
       }
     } else if (currentState === 'entity_resolution') {
       // #1118 — the caller is answering the disambiguation question.
