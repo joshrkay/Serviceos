@@ -286,6 +286,20 @@ describe('VQ2-013 — Layer 2 voting runner', () => {
     });
   });
 
+  it('#1331 — the aggregated caller experience carries the median first-audible latency', async () => {
+    harness.callerExpReturn = {
+      ttfaP95Ms: 2_900,
+      firstAudibleP95Ms: 270,
+      lookupP95Ms: 500,
+      totalDurationMs: 30_000,
+    } as never;
+
+    const result = await runScriptLayer2(eligibleScript(), makeCtx());
+
+    expect(result.aggregated.callerExperience.firstAudibleMedianMs).toBe(270);
+    expect(result.aggregated.callerExperience.ttfaMedianMs).toBe(2_900);
+  });
+
   it('VQ2-013 — accumulates per-run cost; total = sum of run costs', async () => {
     harness.runScriptCostsCents = [50, 70, 30];
     const script = eligibleScript();

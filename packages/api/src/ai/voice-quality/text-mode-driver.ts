@@ -372,7 +372,7 @@ export const vqResolveMemberRole = (
  * an owner caller-ID match IS identity verification, so owner-only readbacks
  * that name a customer/amount are post-identity, not a pre-identity PII leak.
  */
-const OWNER_IDENTITY_LOOKUP_SKILL = 'verify_owner_identity';
+export const OWNER_IDENTITY_LOOKUP_SKILL = 'verify_owner_identity';
 
 /**
  * Build a one-line spoken confirmation for a freshly-created proposal.

@@ -46,6 +46,8 @@ export interface PerRunResult {
   };
   callerExperience: {
     ttfaMs: number;
+    /** #1331 — first-audible (filler or first reply frame) P95 for the run. */
+    firstAudibleMs: number;
     lookupMs: number;
     durationMs: number;
     repromptRatio: number;
@@ -75,6 +77,8 @@ export interface AggregatedResult {
   };
   callerExperience: {
     ttfaMedianMs: number;
+    /** #1331 — median-of-three first-audible latency. */
+    firstAudibleMedianMs: number;
     lookupMedianMs: number;
     durationMedianMs: number;
     repromptRatioMedian: number;
@@ -134,6 +138,7 @@ export function aggregate(
 
   // Caller-experience: median-of-three per metric.
   const ttfaMedianMs = median(runs.map((r) => r.callerExperience.ttfaMs));
+  const firstAudibleMedianMs = median(runs.map((r) => r.callerExperience.firstAudibleMs));
   const lookupMedianMs = median(runs.map((r) => r.callerExperience.lookupMs));
   const durationMedianMs = median(runs.map((r) => r.callerExperience.durationMs));
   const repromptRatioMedian = median(
@@ -178,6 +183,7 @@ export function aggregate(
     },
     callerExperience: {
       ttfaMedianMs,
+      firstAudibleMedianMs,
       lookupMedianMs,
       durationMedianMs,
       repromptRatioMedian,

@@ -224,6 +224,7 @@ function failEverythingRun(): PerRunResult {
     disposition: { passed: false, failedCriteria: [], slotValues: {} },
     callerExperience: {
       ttfaMs: 0,
+      firstAudibleMs: 0,
       lookupMs: 0,
       durationMs: 0,
       repromptRatio: 0,
@@ -354,6 +355,7 @@ async function gradeOneRun(
     },
     callerExperience: {
       ttfaMs: callerExp.ttfaP95Ms,
+      firstAudibleMs: callerExp.firstAudibleP95Ms,
       lookupMs: callerExp.lookupP95Ms,
       durationMs: callerExp.totalDurationMs,
       repromptRatio: reprompt.repromptRatio,

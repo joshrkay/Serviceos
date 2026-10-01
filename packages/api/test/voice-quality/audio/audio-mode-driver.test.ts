@@ -20,6 +20,7 @@ import {
   type AudioModeDriverDeps,
 } from '../../../src/ai/voice-quality/audio/audio-mode-driver';
 import { AgentEventBus } from '../../../src/ai/voice-quality/event-bus';
+import { vqOwnerActorId } from '../../../src/ai/voice-quality/text-mode-driver';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import type { TurnResult, TwilioStreamEmulator } from '../../../src/ai/voice-quality/audio/twilio-stream-emulator';
 import type { WhisperRealProvider } from '../../../src/ai/voice-quality/audio/whisper-real-provider';
@@ -142,6 +143,41 @@ describe('VQ2-008 — AudioModeDriver', () => {
     // Emulator was opened with the matching CallSid.
     expect(emulator.start).toHaveBeenCalledTimes(1);
     expect(emulator.start).toHaveBeenCalledWith(session!.callSid);
+  });
+
+  // #1331 — the owner line on Layer 2 must be established the way production
+  // (twilio-adapter establishment) and the Layer 1 driver establish it: the
+  // RV-070 ownerSession flag, the D-026 phone actor (the harness's synthetic
+  // owner subject), and — for the floor PII grader — the identity-resolving
+  // `verify_owner_identity` stamp before any turn speaks.
+  it('#1331 — startSession on the owner line stamps ownerSession, the owner actor and the owner-identity verification', async () => {
+    const { deps, bus, voiceSessionStore } = makeDeps();
+    cleanups.push(() => voiceSessionStore.dispose());
+    const driver = new AudioModeDriver(deps);
+
+    const { sessionId } = await driver.startSession({ ...START_OPTS, callerIsOwner: true });
+
+    const session = voiceSessionStore.peek(sessionId)!;
+    expect(session.machine.currentContext.ownerSession).toBe(true);
+    expect(session.actorUserId).toBe(vqOwnerActorId('tenant-1'));
+    expect(
+      bus.events().some(
+        (e) => e.type === 'lookup_executed' && e.skillName === 'verify_owner_identity' && e.success,
+      ),
+    ).toBe(true);
+  });
+
+  it('#1331 — startSession for a non-owner caller stamps no owner identity', async () => {
+    const { deps, bus, voiceSessionStore } = makeDeps();
+    cleanups.push(() => voiceSessionStore.dispose());
+    const driver = new AudioModeDriver(deps);
+
+    const { sessionId } = await driver.startSession(START_OPTS);
+
+    const session = voiceSessionStore.peek(sessionId)!;
+    expect(session.machine.currentContext.ownerSession).not.toBe(true);
+    expect(session.actorUserId).toBeUndefined();
+    expect(bus.events().some((e) => e.type === 'lookup_executed')).toBe(false);
   });
 
   it('VQ2-008 — runs session lifecycle hooks for Layer-2 processor routing', async () => {
