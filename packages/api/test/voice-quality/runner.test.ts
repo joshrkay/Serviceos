@@ -494,6 +494,84 @@ describe('#1331 — Layer 2 owner-line persona', () => {
   });
 });
 
+// #1331 — appointment / invoice fixture rows reach the repos with real Dates,
+// as Pg-hydrated rows do. Seeded as JSON strings, the shared appointment
+// lookup threw "a.scheduledStart.getTime is not a function" the moment a
+// lookup fixture linked its appointment to the caller (B8.10's class of bug,
+// fixed then for jobs / estimates / proposals only).
+describe('#1331 — runScript seeds appointment and invoice dates as Dates', () => {
+  it('hands the driver appointments and invoices whose date fields are Date objects', async () => {
+    const script: VoiceQualityScript = {
+      ...syntheticLookupScript(),
+      fixtures: {
+        ...syntheticLookupScript().fixtures,
+        appointments: [
+          {
+            id: '00000000-0000-4000-8000-0000000000b1',
+            tenantId: 't-vq-008',
+            jobId: '00000000-0000-4000-8000-0000000000c1',
+            scheduledStart: '2026-06-12T16:00:00.000Z',
+            scheduledEnd: '2026-06-12T18:00:00.000Z',
+            arrivalWindowStart: '2026-06-12T16:00:00.000Z',
+            arrivalWindowEnd: '2026-06-12T16:30:00.000Z',
+            timezone: 'America/Los_Angeles',
+            status: 'scheduled',
+            createdBy: 'user_seed',
+            createdAt: '2026-04-30T10:00:00.000Z',
+            updatedAt: '2026-04-30T10:00:00.000Z',
+          },
+        ],
+        invoices: [
+          {
+            id: '00000000-0000-4000-8000-0000000000d1',
+            tenantId: 't-vq-008',
+            jobId: '00000000-0000-4000-8000-0000000000c1',
+            invoiceNumber: 'INV-1',
+            status: 'sent',
+            lineItems: [],
+            totals: { subtotalCents: 100, discountCents: 0, taxCents: 0, totalCents: 100 },
+            amountPaidCents: 0,
+            amountDueCents: 100,
+            issuedAt: '2026-04-15T10:00:00.000Z',
+            dueDate: '2026-05-15T10:00:00.000Z',
+            createdBy: 'user_seed',
+            createdAt: '2026-04-15T10:00:00.000Z',
+            updatedAt: '2026-04-15T10:00:00.000Z',
+          },
+        ],
+      },
+    } as unknown as VoiceQualityScript;
+
+    const seen: Record<string, unknown> = {};
+    await runScript(script, {
+      repoMode: 'memory',
+      driverFactory: (fctx) => ({
+        startSession: async () => {
+          const [appt] = await fctx.repos.appointmentRepo.findByDateRange(
+            't-vq-008',
+            new Date('2026-01-01T00:00:00Z'),
+            new Date('2027-01-01T00:00:00Z'),
+          );
+          const inv = await fctx.repos.invoiceRepo.findById('t-vq-008', '00000000-0000-4000-8000-0000000000d1');
+          seen.scheduledStart = appt?.scheduledStart;
+          seen.arrivalWindowEnd = appt?.arrivalWindowEnd;
+          seen.dueDate = inv?.dueDate;
+          seen.issuedAt = inv?.issuedAt;
+          return { sessionId: 's-1' };
+        },
+        speak: async () => ({ agentResponse: '', latencyMs: 0 }),
+        hangup: async () => {},
+        endSession: async () => {},
+      }),
+    });
+
+    expect(seen.scheduledStart).toEqual(new Date('2026-06-12T16:00:00.000Z'));
+    expect(seen.arrivalWindowEnd).toEqual(new Date('2026-06-12T16:30:00.000Z'));
+    expect(seen.dueDate).toEqual(new Date('2026-05-15T10:00:00.000Z'));
+    expect(seen.issuedAt).toEqual(new Date('2026-04-15T10:00:00.000Z'));
+  });
+});
+
 // #1331 — production contracts validate record ids as UUIDs
 // (`customerId: Invalid uuid`). Corpus fixtures use readable ids
 // ("cust_02_add_material_owner") that Layer 1's mocks tolerate, so on Layer 2
