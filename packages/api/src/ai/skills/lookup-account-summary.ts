@@ -25,6 +25,8 @@ export interface LookupAccountSummaryInput {
   sessionId?: string;
   /** P11-002: spoken-summary language. Defaults to 'en'. */
   language?: Language;
+  /** #1331 — "upcoming" is measured from here; defaults to the wall clock. */
+  dateFrom?: Date;
 }
 
 export interface LookupAccountSummaryDeps {
@@ -91,6 +93,7 @@ export async function lookupAccountSummary(
         customerId: input.customerId,
         language: lang,
         ...(input.timezone ? { timezone: input.timezone } : {}),
+        ...(input.dateFrom ? { dateFrom: input.dateFrom } : {}),
       },
       { jobRepo: deps.jobRepo, appointmentRepo: deps.appointmentRepo },
     ),
