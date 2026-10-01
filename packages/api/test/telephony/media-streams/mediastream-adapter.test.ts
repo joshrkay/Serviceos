@@ -968,6 +968,8 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
         fillerCache,
         fillerEngine: new FillerEngine(),
         callSid: 'CA-filler-1534',
+        // Keep this call off the process-wide per-tenant cap later tests use.
+        connectionRegistry: new InMemoryConnectionRegistry(),
       });
       ws.inboundJson({
         event: 'start',
