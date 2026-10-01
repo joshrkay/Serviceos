@@ -1017,7 +1017,12 @@ export class SendEstimateNudgeTaskHandler implements TaskHandler {
 
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
-    const payload: Record<string, unknown> = {};
+    const payload: Record<string, unknown> = {
+      // #1528 — no channel named is 'auto' (email on file, else a text to the
+      // phone), the same rule as send_invoice / send_estimate — never a fixed
+      // text an email-only customer can't receive.
+      channel: ee.sendChannel ?? 'auto',
+    };
     const reference = ee.jobReference ?? ee.customerName;
     if (reference) payload.estimateReference = reference;
 
