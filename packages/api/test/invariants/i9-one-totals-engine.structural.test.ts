@@ -205,7 +205,7 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     why: 'inapp-50 eval world seeding a fixture line item; not a caller-facing path (same exemption as I1′).',
   },
   {
-    at: 'src/ai/skills/lookup-estimates.ts:173',
+    at: 'src/ai/skills/lookup-estimates.ts:190',
     as: 'cross-document-aggregate',
     why: 'Sums the engine-produced total of N estimates for a spoken "you have 3 estimates totaling $X". A report over documents, not a document\'s total.',
   },

@@ -74,6 +74,23 @@ function humanizeStatus(s: EstimateStatus): string {
   }
 }
 
+function spokenDate(d: Date, timezone?: string): string {
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'long',
+    day: 'numeric',
+    ...(timezone ? { timeZone: timezone } : {}),
+  }).format(d);
+}
+
+/** "sent on April 22" / "accepted, sent on April 22" / "in draft, created on April 27". */
+function statusWithDate(e: LookupEstimatesItem, timezone?: string): string {
+  if (e.status === 'sent') return `sent on ${spokenDate(e.sentAt ?? e.createdAt, timezone)}`;
+  const when = e.sentAt
+    ? `sent on ${spokenDate(e.sentAt, timezone)}`
+    : `created on ${spokenDate(e.createdAt, timezone)}`;
+  return `${humanizeStatus(e.status)}, ${when}`;
+}
+
 function toItem(e: Estimate): LookupEstimatesItem {
   const item: LookupEstimatesItem = {
     estimateId: e.id,
@@ -173,13 +190,16 @@ export async function lookupEstimates(
   const totalCents = items.reduce((sum, i) => sum + i.totalCents, 0);
   const head = items[0];
   let summary: string;
+  // #1331 owner decision (2026-10-01): every estimate read back says its
+  // date — when it was sent, or when it was drafted if it never was.
+  const describe = (e: LookupEstimatesItem): string =>
+    `${e.estimateNumber} for ${formatCents(e.totalCents)}, ${statusWithDate(e, input.timezone)}`;
   if (items.length === 1) {
-    summary =
-      `You have one estimate — ${head.estimateNumber} for ${formatCents(head.totalCents)}, ${humanizeStatus(head.status)}.`;
+    summary = `You have one estimate — ${describe(head)}.`;
   } else {
     summary =
-      `You have ${items.length} estimates totaling ${formatCents(totalCents)}. ` +
-      `The most recent is ${head.estimateNumber} for ${formatCents(head.totalCents)}, ${humanizeStatus(head.status)}.`;
+      `You have ${items.length} estimates totaling ${formatCents(totalCents)}: ` +
+      `${items.slice(0, 3).map(describe).join('; ')}.`;
   }
 
   await recordEvent({

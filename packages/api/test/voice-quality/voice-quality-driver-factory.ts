@@ -168,7 +168,11 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
     if (script.callerId) entities.phone = script.callerId;
   }
   if (intent === 'cancel_appointment') {
-    entities.cancellationType = 'customer_request';
+    // #1331 — the labelled slot, like every other slot-sourced entity here (a
+    // caller who gives no reason is labelled with the payload's documented
+    // default, 'other', which is what the live classifier lands on).
+    entities.cancellationType =
+      typeof slots.cancellationType === 'string' ? slots.cancellationType : 'customer_request';
     entities.appointmentReference = 'the appointment';
   }
   // WS21b — owner approval / reject / edit. The classifier surfaces a

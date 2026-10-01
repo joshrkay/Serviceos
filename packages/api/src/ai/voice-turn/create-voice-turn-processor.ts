@@ -155,10 +155,15 @@ import {
 } from '../agents/customer-calling/transitions';
 import {
   confirmTurnSlotFillEvent,
-  isNegation,
   isAffirmation,
+  isNegation,
   SLOT_FILL_INTENTS,
 } from '../agents/customer-calling/confirm-turn';
+import {
+  callerIdentityCheckLine,
+  callerNameMatchesAccount,
+  spokenSelfName,
+} from '../agents/customer-calling/caller-identity-check';
 import {
   classifyPostQuoteUtterance,
   type PostQuoteEdit,
@@ -918,6 +923,11 @@ export interface VoiceTurnProcessorDeps {
   voiceApprovalPinLockAlertRetry?: PinLockAlertRetryScheduler;
 }
 
+/** #1331 — what the caller-name identity check did with this turn. */
+export type CallerIdentityCheckOutcome =
+  | { kind: 'respond'; effects: SideEffect[] }
+  | { kind: 'proceed'; utterance: string };
+
 export interface VoiceTurnProcessor {
   /**
    * Drives a single speech turn through the FSM and returns the
@@ -1116,6 +1126,19 @@ export interface VoiceTurnProcessor {
     session: VoiceSession,
     tenantId: string,
   ): Promise<SideEffect[]>;
+  /**
+   * #1331 (owner decision 2026-10-01) — the caller-name identity check,
+   * shared by BOTH phone transports (caller-identity-check.ts). Returns null
+   * when it does not apply; `respond` when it consumed the turn (the check
+   * was asked, re-asked, or answered "no"); `proceed` with the utterance to
+   * handle as this turn (the request held while the caller said "yes").
+   */
+  handleCallerIdentityCheck(
+    session: VoiceSession,
+    utterance: string,
+    tenantId: string,
+    turnState: string,
+  ): Promise<CallerIdentityCheckOutcome | null>;
   /**
    * #1540 §3 — the reply for an existing customer asking to "sign up" on
    * the caller surface (say so, ask what they need), or null.
@@ -4535,6 +4558,67 @@ export function createVoiceTurnProcessor(
     });
   }
 
+  async function handleCallerIdentityCheck(
+    session: VoiceSession,
+    utterance: string,
+    tenantId: string,
+    turnState: string,
+  ): Promise<CallerIdentityCheckOutcome | null> {
+    const pending = session.callerIdentityCheck;
+    if (pending) {
+      if (isAffirmation(utterance)) {
+        session.callerIdentityCheck = undefined;
+        session.callerIdentity = 'confirmed';
+        return { kind: 'proceed', utterance: pending.heldUtterance };
+      }
+      // Neither yes nor no: ask once more, then treat it as "no" — the
+      // account is never acted on without a confirmed yes.
+      if (!isNegation(utterance) && pending.reasks < 1) {
+        pending.reasks += 1;
+        return {
+          kind: 'respond',
+          effects: [
+            { type: 'tts_play', payload: { text: callerIdentityCheckLine(pending.accountName) } },
+          ],
+        };
+      }
+      session.callerIdentityCheck = undefined;
+      session.callerIdentity = 'rejected';
+      session.customerId = undefined;
+      return {
+        kind: 'respond',
+        effects: session.machine.dispatch({ type: 'caller_identity_rejected' }),
+      };
+    }
+    if (turnState !== 'intent_capture' && turnState !== 'closing') return null;
+    if (
+      !session.customerId ||
+      session.machine.currentContext.ownerSession === true ||
+      session.actorUserId ||
+      session.callerCreatedThisCall ||
+      session.callerIdentity
+    ) {
+      return null;
+    }
+    const spokenName = spokenSelfName(utterance);
+    if (!spokenName || !deps.customerRepo) return null;
+    const account = await deps.customerRepo.findById(tenantId, session.customerId).catch(() => null);
+    if (!account) return null;
+    if (callerNameMatchesAccount(spokenName, account)) {
+      session.callerIdentity = 'confirmed';
+      return null;
+    }
+    session.callerIdentityCheck = {
+      heldUtterance: utterance,
+      accountName: account.displayName,
+      reasks: 0,
+    };
+    return {
+      kind: 'respond',
+      effects: [{ type: 'tts_play', payload: { text: callerIdentityCheckLine(account.displayName) } }],
+    };
+  }
+
   async function handleAskCaller(
     session: VoiceSession,
     tenantId: string,
@@ -5047,6 +5131,28 @@ export function createVoiceTurnProcessor(
       }
       sideEffectsAll.push(...askCallerFx.filter((fx) => !isAskCallerHelpPrompt(fx)));
       turnState = 'intent_capture';
+    }
+
+    // #1331 (owner decision 2026-10-01) — a caller-ID caller whose spoken
+    // name does not confidently match the account is asked ONE yes/no
+    // identity check before anything acts on the account.
+    const identityCheck = await handleCallerIdentityCheck(session, speechResult, tenantId, turnState);
+    if (identityCheck?.kind === 'respond') {
+      sideEffectsAll.push(...identityCheck.effects);
+      await executeSideEffects(session, sideEffectsAll, tenantId);
+      appendAgentTts(deps.store, session.id, sideEffectsAll);
+      return sideEffectsAll;
+    }
+    if (identityCheck?.kind === 'proceed') {
+      // "Yes, that's me" — handle the request they made before the check,
+      // as this turn (already on the transcript when they said it).
+      return speechTurn({
+        session,
+        speechResult: identityCheck.utterance,
+        callSid: _callSid,
+        tenantId,
+        transcriptAppended: true,
+      });
     }
 
     // #1476 — a QUESTION at the readback is neither a yes nor a no; the
@@ -5602,6 +5708,7 @@ export function createVoiceTurnProcessor(
     handleVoiceApprovalIntent,
     handleVoiceEditIntent,
     handleAskCaller,
+    handleCallerIdentityCheck,
     existingCustomerSignupReplyFor,
     maybeHandleLowSttConfidence,
   };

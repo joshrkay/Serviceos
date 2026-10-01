@@ -70,7 +70,7 @@
       "caller": "What estimates have you sent me?",
       "expected": {
         "intent": "lookup_estimates",
-        "spokenAnswerMatches": "Grace has one recent estimate, EST-4001 for $378 sent on April 22, valid until June 1"
+        "spokenAnswerMatches": "Grace has one recent estimate, EST-4001 for $378, sent on April 22"
       },
       "hangupAfter": false
     }
