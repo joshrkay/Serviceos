@@ -211,6 +211,8 @@ export function executionAnchorReferenceCheck(): ApprovalReferenceCheck {
 const SEND_DOCUMENT_ID_FIELD: Partial<Record<ProposalType, 'invoiceId' | 'estimateId'>> = {
   send_invoice: 'invoiceId',
   send_estimate: 'estimateId',
+  // #1528 — a nudge re-sends the estimate through the same SendService path.
+  send_estimate_nudge: 'estimateId',
 };
 
 export function sendRecipientReferenceCheck(deps: {
@@ -231,7 +233,10 @@ export function sendRecipientReferenceCheck(deps: {
     const document = SEND_DOCUMENT_ID_FIELD[proposal.proposalType];
     if (!document) return [];
     const { payload } = proposal;
-    const channel = payload.channel ?? payload.sendChannel;
+    // #1528 — a nudge drafted before it carried a channel goes out as 'auto'
+    // (its executor's rule), so it is checked as 'auto'.
+    const channel =
+      payload.channel ?? payload.sendChannel ?? (proposal.proposalType === 'send_estimate_nudge' ? 'auto' : undefined);
     if (channel !== 'email' && channel !== 'sms' && channel !== 'auto') return [];
     if (typeof payload.recipient === 'string' && payload.recipient.trim().length > 0) return [];
     const documentId = payload[document];
