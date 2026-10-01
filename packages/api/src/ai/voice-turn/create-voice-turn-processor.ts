@@ -839,6 +839,12 @@ export interface VoiceTurnProcessorDeps {
    * Optional: when absent, all three channels default to enabled.
    */
   settingsRepo?: SettingsRepository;
+  /**
+   * #1331 — clock for spoken-time resolution ("Tuesday at 2pm"), passed to
+   * `resolveSchedulingEntities` as its existing `now` seam. Production leaves
+   * it unset (wall clock); the voice-quality harness pins its corpus world.
+   */
+  now?: () => Date;
   /** F3 — whisper TwiML cache for dispatcher ear-only context. */
   whisperCache?: WhisperCache;
   /** F4 — outbound SMS to dispatcher on escalation. */
@@ -1713,8 +1719,12 @@ export function createVoiceTurnProcessor(
         entities,
         // SCH-03 — sticky job anchor for "the appointment for that job".
         session.machine.currentContext.jobId,
-        timezone || pinnedRefs
-          ? { ...(timezone ? { timezone } : {}), ...(pinnedRefs ? { pinnedRefs } : {}) }
+        timezone || pinnedRefs || deps.now
+          ? {
+              ...(timezone ? { timezone } : {}),
+              ...(pinnedRefs ? { pinnedRefs } : {}),
+              ...(deps.now ? { now: deps.now() } : {}),
+            }
           : undefined,
       );
     } catch (err) {
@@ -2318,6 +2328,32 @@ export function createVoiceTurnProcessor(
               // the read-back the caller heard; hand back that exact outcome so
               // the spoken quote and the stored payload can never disagree.
               ...(estimateQuote ? { groundLineItems: async () => estimateQuote } : {}),
+              // #1540 §6 — tenant context for the fields the task handlers
+              // fill from it (spentAt, startsOn): the session's tenant zone
+              // (unset ⇒ nothing guessed, the field stays gated) and the
+              // processor's clock.
+              ...(await (async () => {
+                const timezone = await resolveSessionTimezone(session, tenantId);
+                return timezone ? { timezone } : {};
+              })()),
+              ...(deps.now ? { now: deps.now } : {}),
+              // #1540 §6 — a change order's spoken-price line, grounded
+              // against the session catalog exactly as the quote path does.
+              groundPricedLineItems: async (lines) => {
+                preloadSessionCatalog(session, deps.catalogRepo);
+                const catalog = await resolveSessionCatalog(session);
+                const outcome = await groundLineItemPricing(
+                  lines.map((line) => ({ ...line })),
+                  'unitPriceCents',
+                  catalog ? () => Promise.resolve(catalog) : null,
+                );
+                return finalizeGroundedQuote(
+                  outcome,
+                  catalog !== null,
+                  'unitPriceCents',
+                  typeof fx.payload.confidence === 'number' ? fx.payload.confidence : undefined,
+                );
+              },
             },
           );
           payloadConfidence = built.confidence;

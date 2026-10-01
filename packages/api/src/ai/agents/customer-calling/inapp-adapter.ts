@@ -3278,6 +3278,31 @@ export class InAppVoiceAdapter {
                 : {}),
             };
           },
+          // #1540 §6 — tenant context (same posture as the phone leg): the
+          // tenant zone fills spentAt / startsOn, unset ⇒ they stay gated.
+          ...(await (async () => {
+            const timezone = await this.resolveSessionTimezone(session.tenantId, session);
+            return timezone ? { timezone } : {};
+          })()),
+          // #1540 §6 — a change order's spoken-price line, catalog-grounded
+          // with the same uncatalogued cap as the line items above.
+          groundPricedLineItems: async (lines) => {
+            const outcome = await groundLineItemPricing(
+              lines.map((line) => ({ ...line })),
+              'unitPriceCents',
+              this.deps.catalogRepo
+                ? () => this.deps.catalogRepo!.listByTenant(session.tenantId)
+                : null,
+            );
+            return {
+              lineItems: outcome.lineItems,
+              ...(outcome.anyUncatalogued ? { meta: { overallConfidence: 'low' as const } } : {}),
+              missingFields: outcome.missingFields,
+              ...(outcome.anyUncatalogued && rawConfidence !== undefined
+                ? { confidenceScore: Math.min(rawConfidence, UNCATALOGUED_CONFIDENCE_CAP) }
+                : {}),
+            };
+          },
         },
         );
       }

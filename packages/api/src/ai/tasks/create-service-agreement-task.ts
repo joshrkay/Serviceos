@@ -127,8 +127,6 @@
  * at any confidence — same posture as `create_change_order` /
  * `create_standing_instruction`.
  */
-import * as chrono from 'chrono-node';
-import { DateTime } from 'luxon';
 import { createProposal } from '../../proposals/proposal';
 import { assertValidProposalPayload } from '../../proposals/contracts';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
@@ -141,29 +139,19 @@ import {
   resolveTenantTimezone,
   ResolvedTenantTimezone,
 } from './task-input';
-import { localDateKey } from '../../shared/timezone';
+import { CADENCE_TO_RRULE, resolveAgreementStartsOn } from '../../agreements/spoken-terms';
 import { formatUsdCentsPlain } from '@ai-service-os/shared';
 
 type ServiceAgreementCadence = NonNullable<ExtractedEntities['serviceAgreementCadence']>;
 
 /**
- * The 4 cadence tokens the classifier may emit, mapped to the RRULE the
- * recurrence engine (agreements/recurrence.ts) understands. Typed against
- * `ServiceAgreementCadence` itself (quality-review I3) so a fifth token
- * added to `ExtractedEntities` without a matching entry here is a COMPILE
- * error, not a silent runtime `undefined`.
+ * Compile-time parity: the shared cadence table (agreements/spoken-terms.ts,
+ * also read by the live voice turn) must cover every token the classifier
+ * may emit (quality-review I3) — a fifth token added to `ExtractedEntities`
+ * without a matching RRULE is a COMPILE error here.
  */
-const CADENCE_TO_RRULE: Record<ServiceAgreementCadence, string> = {
-  monthly: 'FREQ=MONTHLY',
-  quarterly: 'FREQ=MONTHLY;INTERVAL=3',
-  // Quality-review minor — FREQ=QUARTERLY;INTERVAL=2 (recurrence.ts's
-  // nextOccurrence: quarterly steps are `interval * 3` months) is EQUALLY
-  // valid RRULE for "every 6 months"; MONTHLY;INTERVAL=6 was chosen so
-  // every multi-month cadence in this table rides the same FREQ, not
-  // because the engine lacks a QUARTERLY-based equivalent.
-  twice_a_year: 'FREQ=MONTHLY;INTERVAL=6',
-  annual: 'FREQ=YEARLY',
-};
+const _cadenceTableCoversClassifier: Record<ServiceAgreementCadence, string> = CADENCE_TO_RRULE;
+void _cadenceTableCoversClassifier;
 
 /** Plain-language cadence labels for the review-card `explanation` (see module doc comment). */
 const CADENCE_LABELS: Record<ServiceAgreementCadence, string> = {
@@ -174,61 +162,6 @@ const CADENCE_LABELS: Record<ServiceAgreementCadence, string> = {
 };
 
 
-/**
- * First of next month, as a `YYYY-MM-DD` string, computed from the
- * tenant's LOCAL calendar date — never raw server-local `Date` math (see
- * module doc comment "startsOn" section above).
- */
-function firstOfNextMonth(now: Date, timezone: string): string {
-  const todayLocal = localDateKey(now, timezone); // 'YYYY-MM-DD', tenant-local
-  const [y, m] = todayLocal.split('-').map(Number);
-  // `m` is 1-indexed (Jan=1); `Date.UTC`'s month param is 0-indexed, so
-  // passing `m` straight through lands one calendar month ahead of
-  // `todayLocal` — exactly "first of next month". Date.UTC normalizes a
-  // December (m=12) rollover into January of the following year.
-  return new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
-}
-
-/**
- * Best-effort parse of a spoken starts-on phrase into a calendar date,
- * anchored to the tenant-local "now" (same chrono+luxon reference-date
- * construction `ai/scheduling/resolve-datetime.ts` uses). Returns
- * `undefined` — never throws — when the phrase doesn't yield a
- * sufficiently-certain, non-past date; the caller falls back to
- * `firstOfNextMonth`. See the module doc comment's "startsOn" section for
- * the two guards (quality-review I2).
- */
-function parseSpokenStartsOn(phrase: string, timezone: string, now: Date): string | undefined {
-  const refLocal = DateTime.fromJSDate(now).setZone(timezone);
-  const referenceDate = new Date(
-    refLocal.year,
-    refLocal.month - 1,
-    refLocal.day,
-    refLocal.hour,
-    refLocal.minute,
-    refLocal.second,
-    refLocal.millisecond,
-  );
-  const results = chrono.parse(phrase, referenceDate, { forwardDate: true });
-  if (results.length === 0) return undefined;
-  const start = results[0].start;
-
-  // Guard 1 (I2) — reject a fully ambiguous relative phrase.
-  if (!start.isCertain('month') && !start.isCertain('day')) return undefined;
-
-  const year = start.get('year');
-  const month = start.get('month');
-  const day = start.get('day');
-  if (year == null || month == null || day == null) return undefined;
-  const dt = DateTime.fromObject({ year, month, day }, { zone: timezone });
-  if (!dt.isValid) return undefined;
-  const resolved = dt.toFormat('yyyy-MM-dd');
-
-  // Guard 2 (I2) — reject a date already in the tenant's past.
-  if (resolved < localDateKey(now, timezone)) return undefined;
-
-  return resolved;
-}
 
 /** `MMM d, yyyy` label for the review-card explanation (the bare calendar date, never tz-shifted). */
 function formatStartsOnLabel(startsOn: string): string {
@@ -308,11 +241,11 @@ export class CreateServiceAgreementTaskHandler implements TaskHandler {
 
     const tz = resolveTenantTimezone(context);
     const now = context.now ?? new Date();
-    const spokenStartsOn =
-      typeof ee.serviceAgreementStartsOn === 'string' ? ee.serviceAgreementStartsOn.trim() : '';
-    const startsOn =
-      (spokenStartsOn.length > 0 ? parseSpokenStartsOn(spokenStartsOn, tz.timezone, now) : undefined) ??
-      firstOfNextMonth(now, tz.timezone);
+    const startsOn = resolveAgreementStartsOn(
+      typeof ee.serviceAgreementStartsOn === 'string' ? ee.serviceAgreementStartsOn : undefined,
+      tz.timezone,
+      now,
+    );
     payload.startsOn = startsOn;
 
     // P2-002 — the MANDATORY payload contract gate (proposals/contracts.ts
