@@ -345,6 +345,65 @@ function lifeSafetyFailure(
 }
 
 /**
+ * #1331 — turn windows. Both drivers record one `speech_outbound` per turn
+ * (`turnIndex`) once the agent has replied, so turn i's events are the ones
+ * after turn i-1's speech marker and up to its own. When every turn has a
+ * marker, events pair with turns by window:
+ *   - intent: the first `intent_classified` in the turn's window (a turn
+ *     handled before the classifier — a slot answer — has none);
+ *   - proposal: for a turn that expects one (proposalType / slots), the first
+ *     `proposal_created` from its window up to the next proposal-expecting
+ *     turn — the phone drafts on the caller's yes, the turn AFTER the request.
+ * Without a full set of markers (an early hang-up, older observations) the
+ * grader keeps positional pairing.
+ */
+function turnWindows(
+  observation: Observation,
+  turnCount: number,
+): {
+  intentFor: (turn: number) => IntentClassifiedEvent | undefined;
+  proposalFor: (turn: number, script: VoiceQualityScript) => ProposalCreatedEvent | undefined;
+} | undefined {
+  const events = observation.events;
+  const markerAt: number[] = [];
+  events.forEach((e, idx) => {
+    if (e.type === 'speech_outbound' && markerAt[e.turnIndex] === undefined) {
+      markerAt[e.turnIndex] = idx;
+    }
+  });
+  for (let t = 0; t < turnCount; t++) {
+    if (markerAt[t] === undefined) return undefined;
+  }
+  const windowOf = (idx: number): number => markerAt.findIndex((m) => idx <= m);
+  const firstInWindows = <T extends VoiceSessionEvent>(
+    type: T['type'],
+    from: number,
+    to: number,
+  ): T | undefined => {
+    for (let idx = 0; idx < events.length; idx++) {
+      const e = events[idx]!;
+      if (e.type !== type) continue;
+      const w = windowOf(idx);
+      if (w >= from && w < to) return e as T;
+    }
+    return undefined;
+  };
+  const expectsProposal = (turn: VoiceQualityScript['turns'][number]): boolean =>
+    turn.expected.proposalType !== undefined || turn.expected.slots !== undefined;
+  return {
+    intentFor: (turn) => firstInWindows<IntentClassifiedEvent>('intent_classified', turn, turn + 1),
+    proposalFor: (turn, script) => {
+      if (!expectsProposal(script.turns[turn]!)) {
+        return firstInWindows<ProposalCreatedEvent>('proposal_created', turn, turn + 1);
+      }
+      let end = turn + 1;
+      while (end < turnCount && !expectsProposal(script.turns[end]!)) end++;
+      return firstInWindows<ProposalCreatedEvent>('proposal_created', turn, end);
+    },
+  };
+}
+
+/**
  * Grade criteria 9, 11, and the hard-slot subset of 10. Soft slots and
  * criterion 12 (caller-facing answer) are owned by VQ-022.
  *
@@ -375,16 +434,20 @@ export function gradeDispositionStructured(
   const failedSet = new Set<number>();
   const reasons: Record<number, string> = {};
 
+  const windows = turnWindows(observation, script.turns.length);
+
   for (let i = 0; i < script.turns.length; i++) {
     const turn = script.turns[i];
     const expected = turn.expected;
-    const intentEv = intents[i];
-    const propEv = proposalEvents[i];
+    // Positional pairing (the i-th event ↔ the i-th turn) unless every turn
+    // left a speech_outbound marker — see `turnWindows`.
+    const intentEv = windows ? windows.intentFor(i) : intents[i];
+    const propEv = windows ? windows.proposalFor(i, script) : proposalEvents[i];
     // Resolve actual proposal payload either by id (when emitted) or
     // by positional fallback against `observation.proposals`.
     const proposal =
       (propEv && proposalsById.get(propEv.proposalId)) ||
-      observation.proposals[i];
+      (windows ? undefined : observation.proposals[i]);
 
     const actualIntent = intentEv?.intentType;
     const intentMatched =
