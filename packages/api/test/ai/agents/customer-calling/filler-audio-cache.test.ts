@@ -8,6 +8,7 @@ import {
   startFillerSynthesis,
 } from '../../../../src/ai/agents/customer-calling/filler-audio-cache';
 import type { TtsProvider } from '../../../../src/ai/tts/tts-provider';
+import { TtsProviderRejectedError } from '../../../../src/ai/tts/tts-errors';
 
 describe('FillerAudioCache', () => {
   it('loads files present on disk and skips missing ones without throwing', () => {
@@ -192,5 +193,46 @@ describe('#1534 — fillerSynthesizerFromTts (the production TTS the adapter spe
     expect(
       fillerSynthesizerFromTts({ synthesize: async () => ({ audio: Buffer.alloc(1), contentType: 'audio/mpeg', provider: 'x' }) }),
     ).toBeUndefined();
+  });
+});
+
+// #1536 — a key without the Text to Speech permission fails every clip; boot
+// must say so ONCE, naming the code and the env var, not bury it in 16 errors.
+describe('#1536 — startFillerSynthesis when the TTS key cannot synthesize', () => {
+  const rejectingProvider = (code: string): TtsProvider => ({
+    synthesize: async () => { throw new Error('unused'); },
+    synthesizeStream: () => (async function* () {
+      throw new TtsProviderRejectedError('elevenlabs', code, `ElevenLabs rejected the speech request (${code})`);
+    })(),
+  });
+
+  it('logs ONE error naming missing_permissions and ELEVENLABS_API_KEY when every clip is rejected', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fillers-1536-'));
+    const errors: Array<{ msg: string; meta?: unknown }> = [];
+    const cache = new FillerAudioCache(dir, {
+      warn: () => {},
+      info: () => {},
+      error: (msg, meta) => errors.push({ msg, meta }),
+    });
+    cache.load();
+
+    await startFillerSynthesis(cache, rejectingProvider('missing_permissions'));
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].msg).toContain('missing_permissions');
+    expect(errors[0].msg).toContain('ELEVENLABS_API_KEY');
+    expect(errors[0].msg).toContain('Text to Speech permission');
+    expect(errors[0].meta).toMatchObject({ code: 'missing_permissions', failedCount: 16 });
+  });
+
+  it('does not raise the key error for a non-credential rejection', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fillers-1536-'));
+    const errors: string[] = [];
+    const cache = new FillerAudioCache(dir, { warn: () => {}, info: () => {}, error: (m) => errors.push(m) });
+    cache.load();
+
+    await startFillerSynthesis(cache, rejectingProvider('quota_exceeded'));
+
+    expect(errors).toEqual([]);
   });
 });
