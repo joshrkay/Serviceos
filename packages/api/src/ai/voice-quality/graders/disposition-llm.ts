@@ -12,21 +12,14 @@
  *     transcript. Hard slots (IDs, enums, datetime) are graded by the
  *     structured grader (VQ-021); this only judges free-text fields.
  *
- * v1 spoken-answer extraction is conservative. The voice agent doesn't
- * yet emit a `speech_outbound` event carrying the agent's TTS string
- * (VQ-024 will wire that), so we fall back to:
- *   1. The corresponding proposal's `summary` (what the agent would have
- *      spoken back as confirmation), when a proposal exists for that turn.
- *   2. `script.turns[i].expected.spokenAnswerMatches` only as a SAFETY
- *      net for the prompt context — never as the agent's own output
- *      (that would tautologically pass the judge).
- *
- * In v1 this means we are grading "the proposal contract surface" rather
- * than the actual emitted TTS, which is acceptable: every script that
- * exercises a mutation has a proposal to grade, and pure-lookup scripts
- * (no proposal) skip the judge with a documented rationale until VQ-024
- * lands. The same key path will swap from `proposal.summary` to the
- * captured TTS string with no API change to graders.
+ * Spoken-answer extraction (#1331): the turn's `speech_outbound`
+ * transcript — what the caller heard (Layer 2: Whisper-recovered audio;
+ * Layer 1: the text driver's reply). The proposal `summary` is only the
+ * fallback when no speech was captured for the turn, and
+ * `script.turns[i].expected.spokenAnswerMatches` is only ever the
+ * expectation — never the agent's own output (that would tautologically
+ * pass the judge). Before #1331 this graded `proposal.summary` (an
+ * operator-card title such as "Add material") and skipped every lookup.
  *
  * Concurrency: judge calls run in parallel via a hand-rolled bounded
  * pool (cap 5). Promise.all on a giant array would saturate the LLM
@@ -129,7 +122,7 @@ export async function gradeDispositionLlm(
     callerTranscript: string;
   }> = script.turns.map((turn, i) => {
     const proposal = observation.proposals[i] as Proposal | undefined;
-    const spokenAnswer = extractSpokenAnswer(proposal);
+    const spokenAnswer = extractSpokenAnswer(observation, i, proposal);
     const softSlots = extractSoftSlots(proposal);
     return {
       turnIndex: i,
@@ -295,13 +288,27 @@ async function callJudge(
 }
 
 /**
- * v1 spoken-answer extraction. We use the proposal's `summary` (the
- * TTS-ready confirmation string the agent would speak back) when a
- * proposal exists for the turn. When there is no proposal — e.g., a
- * pure lookup turn — we return null and the turn is skipped with a
- * documented rationale until VQ-024 captures the actual emitted TTS.
+ * The agent's spoken answer for turn `turnIndex`: the `speech_outbound`
+ * transcript the driver recorded for that turn (Layer 2: Whisper-recovered
+ * from the audio the caller heard; Layer 1: the string the text driver
+ * spoke). #1331 — criterion 12 is "right caller-facing answer", so it grades
+ * what was SAID. The proposal `summary` is an operator-card title ("Add
+ * material"), not a reply; it remains only as the fallback for an
+ * observation with no captured speech for the turn. No speech and no
+ * proposal → null, and the turn is skipped (see evaluateTurn).
  */
-function extractSpokenAnswer(proposal: Proposal | undefined): string | null {
+function extractSpokenAnswer(
+  observation: Observation,
+  turnIndex: number,
+  proposal: Proposal | undefined,
+): string | null {
+  let spoken: string | undefined;
+  for (const e of observation.events) {
+    if (e.type === 'speech_outbound' && e.turnIndex === turnIndex && e.transcript.trim().length > 0) {
+      spoken = e.transcript;
+    }
+  }
+  if (spoken !== undefined) return spoken;
   if (!proposal) return null;
   if (typeof proposal.summary === 'string' && proposal.summary.length > 0) {
     return proposal.summary;
