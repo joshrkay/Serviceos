@@ -89,6 +89,19 @@ engineering work only. Their code halves shipped in PR #904. These two are opera
 | #905 telephony | Rivet HVAC's telephony was provisioned with Twilio **test** credentials (stub provider data, the magic test number). Audit which Twilio credentials prod uses and the provisioning worker's `NODE_ENV`. Claim a real inbound number through the onboarding Phone step once the credentials are right. Optionally set a real Business-profile phone. | The witnessed production phone call (B4) and launch rung 6. No rung-5 row. |
 | #906 billing | The Rivet HVAC tenant's linked Stripe customer no longer exists. Determine why: a Dashboard deletion, or a test/live key-mode mismatch. Re-link the tenant manually (Stripe Dashboard plus a production DB update; no admin endpoint exists, and auto-recreate is forbidden by the pinned decision). Decide whether an owner-approved recreate-on-demand path should ever ship. | That tenant's billing portal. The UI already shows re-link guidance (PR #904). No rung-5 row. |
 
+**#905 audit result (2026-10-01, read-only via the Twilio API).** The premise above is obsolete: production
+holds **live** Twilio credentials (account active, type Full), and tenant numbers are bought on per-tenant
+subaccounts whose Messaging Service carries the inbound-SMS URL (`/webhooks/twilio/sms/:tenantId`), so an
+empty SMS URL on those numbers is expected. The remaining operator task is unchanged: claim Rivet HVAC's real
+number through the onboarding Phone step (it buys a new number; it does not attach an existing one).
+
+- **Platform sending number (`TWILIO_FROM_NUMBER`) — owner decision 2026-10-01: leave as is.** Its voice
+  webhook points at production correctly; its SMS webhook still points at Twilio's demo reply. It is a
+  shared platform number with no tenant, and the app has no platform-level inbound-SMS route, so there is
+  nothing correct to point it at. Twilio's own opt-out handling still blocks sends after a STOP reply; the
+  app just never records it. Revisit if the number becomes one tenant's business line.
+- **Dev number:** its SMS webhook points at `/api/telephony/sms`, which does not exist. Dev only; harmless.
+
 ---
 
 ## Reconciliation 2026-09-26 (#1024 close-out, `origin/main` @ 284ff29d2)
