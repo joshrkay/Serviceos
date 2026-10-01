@@ -363,6 +363,11 @@ function turnWindows(
 ): {
   intentFor: (turn: number) => IntentClassifiedEvent | undefined;
   proposalFor: (turn: number, script: VoiceQualityScript) => ProposalCreatedEvent | undefined;
+  ordinalProposal: (
+    turn: number,
+    script: VoiceQualityScript,
+    proposals: readonly Proposal[],
+  ) => Proposal | undefined;
 } | undefined {
   const events = observation.events;
   const markerAt: number[] = [];
@@ -399,6 +404,13 @@ function turnWindows(
       let end = turn + 1;
       while (end < turnCount && !expectsProposal(script.turns[end]!)) end++;
       return firstInWindows<ProposalCreatedEvent>('proposal_created', turn, end);
+    },
+    // A transport that emits no proposal_created (the media-streams leg):
+    // the k-th proposal-expecting turn takes the k-th drafted proposal.
+    ordinalProposal: (turn, script, proposals) => {
+      if (!expectsProposal(script.turns[turn]!)) return undefined;
+      const k = script.turns.slice(0, turn).filter(expectsProposal).length;
+      return proposals[k];
     },
   };
 }
@@ -447,7 +459,11 @@ export function gradeDispositionStructured(
     // by positional fallback against `observation.proposals`.
     const proposal =
       (propEv && proposalsById.get(propEv.proposalId)) ||
-      (windows ? undefined : observation.proposals[i]);
+      (windows
+        ? proposalEvents.length === 0
+          ? windows.ordinalProposal(i, script, observation.proposals)
+          : undefined
+        : observation.proposals[i]);
 
     const actualIntent = intentEv?.intentType;
     const intentMatched =

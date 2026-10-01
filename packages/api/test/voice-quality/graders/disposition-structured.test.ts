@@ -238,6 +238,35 @@ describe('VQ-021 — gradeDispositionStructured', () => {
     expect(result.perTurnDetail[1].proposalTypeMatched).toBe(true);
   });
 
+  it('#1331 — with no proposal_created events (the phone transport), proposal-expecting turns take the drafted proposals in order', () => {
+    const script = makeScript({
+      turns: [
+        { caller: 'I want to book a service appointment.', expected: { intent: 'create_appointment' }, hangupAfter: false },
+        {
+          caller: 'Tuesday at 2pm.',
+          expected: { intent: 'create_appointment', proposalType: 'create_appointment' },
+          hangupAfter: false,
+        },
+        { caller: "Yes, that's right.", expected: {}, hangupAfter: false },
+      ],
+    });
+    const obs = makeObservation({
+      events: [
+        intentEvent('create_appointment', 1_000),
+        { type: 'speech_outbound', transcript: 'What day and time work for you?', turnIndex: 0, ts: 1_001 },
+        { type: 'speech_outbound', transcript: 'Just to confirm — Tuesday at 2pm?', turnIndex: 1, ts: 1_002 },
+        intentEvent('confirm', 1_003),
+        { type: 'speech_outbound', transcript: "I've drafted that.", turnIndex: 2, ts: 1_005 },
+      ],
+      proposals: [makeProposal({}, 'create_appointment')],
+    });
+
+    const result = gradeDispositionStructured(obs, script);
+
+    expect(result.perTurnDetail[1].actualProposalType).toBe('create_appointment');
+    expect(result.perTurnDetail[1].proposalTypeMatched).toBe(true);
+  });
+
   it('VQ-021 — passes criterion 10 with soft-slot differences (notes wording differs)', () => {
     const script = makeScript({
       turns: [
