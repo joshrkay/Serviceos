@@ -12,7 +12,7 @@ import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
-import { InMemoryCustomerRepository } from '../../src/customers/customer';
+import { InMemoryCustomerRepository, createCustomer } from '../../src/customers/customer';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 
 const TENANT = 't-1540-gather-ask';
@@ -68,5 +68,77 @@ describe('#1540 §2 — Gather: the ask_caller turn carries the request forward'
     expect(session.machine.currentState).toBe('intent_confirm');
     expect(twiml).toContain('Just to confirm');
     expect(twiml).not.toContain('How can I help you today?');
+  });
+});
+
+describe('#1540 §3 — Gather: an existing customer asking to sign up', () => {
+  it('is told they are already a customer and asked what they need — no create_customer draft', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const customerRepo = new InMemoryCustomerRepository();
+    const proposalRepo = new InMemoryProposalRepository();
+    const maria = await createCustomer(
+      { tenantId: TENANT, firstName: 'Maria', lastName: 'Alvarez', primaryPhone: '+15555550303', createdBy: 'seed' },
+      customerRepo,
+    );
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: scriptedGateway(JSON.stringify({ intentType: 'create_customer', confidence: 0.9, extractedEntities: {} })),
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      auditRepo: new InMemoryAuditRepository(),
+      proposalRepo,
+      customerRepo,
+    });
+    await adapter.handleInbound({ callSid: 'CA-1540-g3', from: '+15555550303', to: '+15125550000', tenantId: TENANT });
+    const session = store.findByCallSid('CA-1540-g3')!;
+    // Caller-ID matched Maria (no Pool here, so the match is applied directly).
+    session.machine.dispatch({ type: 'caller_known', customerId: maria.id });
+    session.customerId = maria.id;
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-1540-g3',
+      speechResult: 'Hi, can I sign up?',
+      confidence: 0.9,
+      tenantId: TENANT,
+    });
+
+    expect(twiml).toContain('in our system already');
+    expect(session.machine.currentState).toBe('intent_capture');
+    expect(await proposalRepo.findByTenant(TENANT)).toEqual([]);
+  });
+
+  it('an unknown caller created from their number THIS call is not told they are already a customer', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const proposalRepo = new InMemoryProposalRepository();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: scriptedGateway(
+        JSON.stringify({
+          intentType: 'create_customer',
+          confidence: 0.92,
+          extractedEntities: { displayName: 'Jane Smith' },
+        }),
+      ),
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      auditRepo: new InMemoryAuditRepository(),
+      proposalRepo,
+      customerRepo: new InMemoryCustomerRepository(),
+    });
+    await adapter.handleInbound({ callSid: 'CA-1540-g4', from: '+15555550301', to: '+15125550000', tenantId: TENANT });
+    const session = store.findByCallSid('CA-1540-g4')!;
+    expect(session.machine.currentState).toBe('ask_caller');
+
+    const twiml = await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-1540-g4',
+      speechResult: "I'd like to sign up as a new customer. My name is Jane Smith.",
+      confidence: 0.9,
+      tenantId: TENANT,
+    });
+
+    expect(twiml).not.toContain('in our system already');
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(1);
   });
 });

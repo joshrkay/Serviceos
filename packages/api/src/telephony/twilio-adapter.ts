@@ -94,6 +94,7 @@ import {
   createVoiceTurnProcessor,
   auditOffSurfaceClassification,
   ASK_CALLER_HELP_PROMPT,
+  EXISTING_CUSTOMER_SIGNUP_COPY,
   isAskCallerHelpPrompt,
   appendAgentTts,
   callerTranscriptText,
@@ -3220,14 +3221,14 @@ export class TwilioGatherAdapter {
     opts: { sessionId: string; callSid: string; tenantId: string; speechResult: string },
     sideEffectsAll: SideEffect[],
   ): Promise<boolean> {
-    // Caller already matched — confirm identity instead.
-    if (session.customerId) {
+    // Caller already a customer — say so and ask what they need (#1540 §3:
+    // the shared rule's copy). A record this call's ask_caller turn just
+    // created from the phone number is not "already" a customer: their
+    // sign-up (with their name) proceeds below.
+    if (session.customerId && !session.callerCreatedThisCall) {
       sideEffectsAll.push({
         type: 'tts_play',
-        payload: {
-          text:
-            "I've got you in our system already. Let me know what you'd like help with today.",
-        },
+        payload: { text: EXISTING_CUSTOMER_SIGNUP_COPY },
       });
       return true;
     }

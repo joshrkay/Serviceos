@@ -66,6 +66,7 @@ import {
   type IntentType,
 } from '../orchestration/intent-classifier';
 import type { ClassifierProfile } from '../orchestration/classifier-profile';
+import { EXISTING_CUSTOMER_SIGNUP_COPY, existingCustomerSignupReply } from './existing-customer-signup';
 import {
   AI_BUSY_HOLD_LINE,
   classifyInfraFailure,
@@ -1096,6 +1097,15 @@ export interface VoiceTurnProcessor {
     session: VoiceSession,
     tenantId: string,
   ): Promise<SideEffect[]>;
+  /**
+   * #1540 §3 — the reply for an existing customer asking to "sign up" on
+   * the caller surface (say so, ask what they need), or null.
+   */
+  existingCustomerSignupReplyFor(
+    session: VoiceSession,
+    intentType: string,
+    profile: ClassifierProfile,
+  ): string | null;
   /**
    * #962 (PR-B) — the transport-side entry of the ported Gather
    * silence/low-STT ladder for a NON-empty turn: the acoustic confidence
@@ -4353,6 +4363,24 @@ export function createVoiceTurnProcessor(
     }
   }
 
+  /**
+   * #1540 §3 — the reply for an existing customer asking to "sign up" on the
+   * caller surface, or null (see existing-customer-signup.ts). Shared by
+   * speechTurn and the voice-quality text driver.
+   */
+  function existingCustomerSignupReplyFor(
+    session: VoiceSession,
+    intentType: string,
+    profile: ClassifierProfile,
+  ): string | null {
+    return existingCustomerSignupReply({
+      intentType,
+      profile,
+      ...(session.customerId ? { callerCustomerId: session.customerId } : {}),
+      ...(session.callerCreatedThisCall ? { callerCreatedThisCall: true } : {}),
+    });
+  }
+
   async function handleAskCaller(
     session: VoiceSession,
     tenantId: string,
@@ -4380,6 +4408,9 @@ export function createVoiceTurnProcessor(
           return out;
         }
         session.customerId = resolved.customerId;
+        // #1540 §3 — a record created from the phone number just now is not
+        // "already a customer" (existing-customer-signup.ts).
+        session.callerCreatedThisCall = resolved.status === 'created';
         if (deps.conversationRepo) {
           try {
             await logInboundCallOnCustomerTimeline({
@@ -4596,15 +4627,10 @@ export function createVoiceTurnProcessor(
     tenantId: string,
     sideEffectsAll: SideEffect[],
   ): Promise<boolean> {
-    // Caller already matched — confirm identity instead.
-    if (session.customerId) {
-      sideEffectsAll.push({
-        type: 'tts_play',
-        payload: {
-          text:
-            "I've got you in our system already. Let me know what you'd like help with today.",
-        },
-      });
+    // Caller already a customer — say so (#1540 §3's shared copy). A record
+    // this call's ask_caller turn just created is not "already" a customer.
+    if (session.customerId && !session.callerCreatedThisCall) {
+      sideEffectsAll.push({ type: 'tts_play', payload: { text: EXISTING_CUSTOMER_SIGNUP_COPY } });
       return true;
     }
 
@@ -5099,6 +5125,25 @@ export function createVoiceTurnProcessor(
         return sideEffectsAll;
       }
 
+      // #1540 §3 — an existing customer asking to "sign up": say so and ask
+      // what they need; never read back / draft a duplicate create_customer.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        const signupReply = existingCustomerSignupReplyFor(
+          session,
+          classifierEvent.intentType,
+          classifierProfile,
+        );
+        if (signupReply) {
+          sideEffectsAll.push({ type: 'tts_play', payload: { text: signupReply } });
+          await executeSideEffects(session, sideEffectsAll, tenantId);
+          appendAgentTts(deps.store, session.id, sideEffectsAll);
+          return sideEffectsAll;
+        }
+      }
+
       // #962 (PR-B) / P11-001 / #866 — lookup intents bypass the
       // proposal-draft path, ported from the Gather branch (which keeps its
       // copy until cutover). Routes through the SAME shared dispatch bundle
@@ -5429,6 +5474,7 @@ export function createVoiceTurnProcessor(
     handleVoiceApprovalIntent,
     handleVoiceEditIntent,
     handleAskCaller,
+    existingCustomerSignupReplyFor,
     maybeHandleLowSttConfidence,
   };
 }

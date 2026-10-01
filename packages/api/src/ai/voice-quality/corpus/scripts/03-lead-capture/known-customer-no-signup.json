@@ -31,7 +31,11 @@
     {
       "caller": "Hi, can I sign up?",
       "expected": {
-        "intent": "lookup_account_summary"
+        "intent": "create_customer",
+        "alsoAcceptedIntents": ["lookup_account_summary"],
+        "spokenIncludes": ["in our system already"],
+        "spokenAnswerMatches": "I've got you in our system already. Let me know what you'd like help with today.",
+        "escalates": false
       },
       "hangupAfter": false
     }
