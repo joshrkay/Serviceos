@@ -92,7 +92,11 @@ describe('#1540 §3 — an existing customer asking to sign up', () => {
 
     const reply = spoken(await turn('Hi, can I sign up?'));
 
-    expect(reply).toBe("I've got you in our system already. Let me know what you'd like help with today.");
+    // #1331 — the perceived-completion judge rated the bare "let me know
+    // what you'd like" as no clear next step: name what the caller can do.
+    expect(reply).toBe(
+      "I've got you in our system already, so there's nothing to sign up for. I can book a visit, check your balance, or look up an appointment — what would you like?",
+    );
     expect(session.machine.currentState).toBe('intent_capture');
     expect(await proposalRepo.findByTenant(TENANT)).toEqual([]);
   });

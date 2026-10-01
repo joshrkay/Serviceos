@@ -204,6 +204,18 @@ export const WHICH_APPOINTMENT_COPY = {
   default: "Which appointment is this about? You can tell me the customer's name.",
 } as const;
 
+/**
+ * #1331 — closing line for an S1 CALLER whose confirmed request was
+ * persisted as a card waiting on the team's approval (`draft` /
+ * `ready_for_review`). The FSM's default "Great, I've got that taken care
+ * of. You'll receive a confirmation shortly." claims the change already
+ * happened; nothing runs until a person approves it. The caller hears what
+ * is true — it was passed to the team, who will confirm. Operator twin:
+ * {@link OPERATOR_DRAFTED_FOR_REVIEW_COPY}.
+ */
+export const CALLER_REQUEST_QUEUED_COPY =
+  "I've passed that along to our team, and someone will confirm it with you shortly. Is there anything else I can help you with?";
+
 export const CALLER_INCOMPLETE_REQUEST_COPY =
   "I've passed that along, but a few details still need to be sorted out before it's final — someone from our team will follow up with you. Is there anything else I can help you with?";
 
@@ -217,6 +229,8 @@ export const CALLER_INCOMPLETE_REQUEST_COPY =
  * stale the moment a new sentence was added and failed correct responses).
  */
 export const SENTENCE_CATALOG_ES: Record<string, string> = {
+  [CALLER_REQUEST_QUEUED_COPY]:
+    'Ya le pasé su solicitud a nuestro equipo, y alguien se la confirmará en breve. ¿Hay algo más en lo que pueda ayudarle?',
   "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?":
     'Perfecto, ya quedó registrado. Recibirá una confirmación en breve. ¿Hay algo más en lo que pueda ayudarle?',
   'How can I help you today?': '¿En qué puedo ayudarle hoy?',

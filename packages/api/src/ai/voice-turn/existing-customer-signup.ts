@@ -18,8 +18,12 @@
  */
 import type { ClassifierProfile } from '../orchestration/classifier-profile';
 
+// #1331 — names concrete next steps (each one a caller-surface intent:
+// create_appointment, lookup_balance, lookup_appointments). The bare "let me
+// know what you'd like" was rated "no clear next step" by the Layer 2
+// perceived-completion judge on every run.
 export const EXISTING_CUSTOMER_SIGNUP_COPY =
-  "I've got you in our system already. Let me know what you'd like help with today.";
+  "I've got you in our system already, so there's nothing to sign up for. I can book a visit, check your balance, or look up an appointment — what would you like?";
 
 export interface ExistingCustomerSignupInput {
   intentType: string;
