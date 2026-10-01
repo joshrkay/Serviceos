@@ -50,7 +50,8 @@
  *     - has length > 30 chars
  *     - contains 'text', 'message', or 'note'
  *   When both rules fire, SOFT wins (fail-safe: don't false-positive a slot
- *   the LLM-judge will look at anyway).
+ *   the LLM-judge will look at anyway) — except that an id key is hard
+ *   whatever its length (#1331: a UUID is 36 chars).
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -162,13 +163,15 @@ export function isHardSlot(key: string, value: unknown): boolean {
   for (const sub of SOFT_KEY_SUBSTRINGS) {
     if (lowerKey.includes(sub)) return false;
   }
+  // #1331 — record ids are hard whatever their length: a 36-char UUID used
+  // to fall to the long-string rule below and was never graded.
+  if (key.endsWith('Id') || key.endsWith('_id')) return true;
+  if (KNOWN_ID_KEYS.has(key)) return true;
   if (typeof value === 'string' && value.length > 30 && !isIso8601(value)) {
     return false;
   }
 
   // Hard signals.
-  if (key.endsWith('Id') || key.endsWith('_id')) return true;
-  if (KNOWN_ID_KEYS.has(key)) return true;
   if (key.includes('Cents')) return true;
   if (isIso8601(value)) return true;
   if (looksLikeEnum(value)) return true;

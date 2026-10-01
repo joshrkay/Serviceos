@@ -167,6 +167,36 @@ describe('VQ-021 — gradeDispositionStructured', () => {
     expect(result.perTurnDetail[0].hardSlotMismatches).not.toContain('appointmentId');
   });
 
+  // #1331 — the "long string is soft" rule (> 30 chars) ran before the id
+  // rule, so a real 36-char UUID id was never graded: once Layer 2 fixtures
+  // carry UUIDs, a wrong appointmentId would have passed criterion 10.
+  it('#1331 — a UUID record id is a hard slot: the wrong appointment fails criterion 10', () => {
+    const script = makeScript({
+      turns: [
+        {
+          caller: 'cancel my Tuesday appointment',
+          expected: {
+            intent: 'cancel_appointment',
+            slots: { appointmentId: '3f1c2a54-9d7e-5b21-8c4f-0a6e9b2d7c11' },
+            proposalType: 'cancel_appointment',
+          },
+          hangupAfter: false,
+        },
+      ],
+    });
+    const obs = makeObservation({
+      events: [intentEvent('cancel_appointment', 1_000)],
+      proposals: [
+        makeProposal({ appointmentId: '9a8b7c6d-5e4f-5a3b-9c2d-1e0f9a8b7c6d' }, 'cancel_appointment'),
+      ],
+    });
+
+    const result = gradeDispositionStructured(obs, script);
+
+    expect(result.failedCriteria).toContain(10);
+    expect(result.perTurnDetail[0].hardSlotMismatches).toEqual(['appointmentId']);
+  });
+
   it('VQ-021 — passes criterion 10 with soft-slot differences (notes wording differs)', () => {
     const script = makeScript({
       turns: [
