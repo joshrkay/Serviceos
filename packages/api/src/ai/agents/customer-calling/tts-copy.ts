@@ -16,6 +16,8 @@
  * prompt rendered here.
  */
 
+import { intentReadbackPhrase } from './intent-readback';
+
 export type SessionLanguage = 'en' | 'es';
 
 const ES_MARKERS = [
@@ -36,46 +38,6 @@ export function detectLanguage(utterance: string): SessionLanguage {
     if (hits >= 2) return 'es';
   }
   return 'en';
-}
-
-const INTENT_LABELS: Record<SessionLanguage, Record<string, string>> = {
-  en: {
-    create_customer: 'add a new customer',
-    create_appointment: 'schedule an appointment',
-    create_booking: 'schedule an appointment',
-    reschedule_appointment: 'reschedule your appointment',
-    cancel_appointment: 'cancel your appointment',
-    confirm_appointment: 'confirm your appointment',
-    draft_estimate: 'put together an estimate',
-    update_estimate: 'update your estimate',
-    draft_invoice: 'prepare an invoice',
-    send_invoice: 'send your invoice',
-    record_payment: 'record a payment',
-    add_note: 'add a note',
-    create_job: 'open a new job',
-    _default: 'take care of that request',
-  },
-  es: {
-    create_customer: 'registrar un nuevo cliente',
-    create_appointment: 'agendar una cita',
-    create_booking: 'agendar una cita',
-    reschedule_appointment: 'reprogramar su cita',
-    cancel_appointment: 'cancelar su cita',
-    confirm_appointment: 'confirmar su cita',
-    draft_estimate: 'preparar un presupuesto',
-    update_estimate: 'actualizar su presupuesto',
-    draft_invoice: 'preparar una factura',
-    send_invoice: 'enviar su factura',
-    record_payment: 'registrar un pago',
-    add_note: 'agregar una nota',
-    create_job: 'abrir un nuevo trabajo',
-    _default: 'atender su solicitud',
-  },
-};
-
-function intentLabel(intent: string | undefined, lang: SessionLanguage): string {
-  const table = INTENT_LABELS[lang];
-  return (intent && table[intent]) || table._default;
 }
 
 /**
@@ -412,10 +374,16 @@ export function renderTtsText(
   const intent = typeof payload.intent === 'string' ? payload.intent : undefined;
   switch (key) {
     case 'confirm_intent':
-    case 'intent_confirm':
+    case 'intent_confirm': {
+      // #1539 — say WHAT will be drafted, from the request's own entities.
+      const entities =
+        typeof payload.entities === 'object' && payload.entities !== null
+          ? (payload.entities as Record<string, unknown>)
+          : undefined;
       return lang === 'es'
-        ? `Para confirmar: usted desea ${intentLabel(intent, 'es')}. ¿Es correcto?`
-        : `Just to confirm — you'd like to ${intentLabel(intent, 'en')}. Is that right?`;
+        ? `Para confirmar: usted desea ${intentReadbackPhrase(intent, entities, 'es')}. ¿Es correcto?`
+        : `Just to confirm — you'd like to ${intentReadbackPhrase(intent, entities, 'en')}. Is that right?`;
+    }
     case 'disambiguate':
       // VOX-52 — a free-text reference matched more than one record above the
       // resolver threshold. Voice the distinct candidate names so the caller
