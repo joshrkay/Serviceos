@@ -279,6 +279,12 @@ export interface TelephonyHealthReport {
   warnings: string[];
   /** #1536 — the TTS provider probe verdict (present when `ttsHealth` is wired). */
   ttsCheck?: TtsHealthState;
+  /**
+   * #1536 — true when a capability is lost but calls are still served by a
+   * fallback (a rejected TTS key → Gather). Independent of `ok`, which stays
+   * the "can the line serve calls" verdict the deploy smoke asserts.
+   */
+  degraded?: boolean;
 }
 
 /**
@@ -289,6 +295,21 @@ export interface TelephonyHealthReport {
 function withTtsCheck(report: TelephonyHealthReport, ttsCheck: TtsHealthState): TelephonyHealthReport {
   if (!report.capabilities.tts) return { ...report, ttsCheck };
   if (ttsCheck.status !== 'failed') return { ...report, ttsCheck };
+  if (isCredentialFailure(ttsCheck)) {
+    // /voice routes calls to Gather (Twilio <Say>) on a credential failure
+    // (shouldUseRealtimeStream gate a2), so calls are still served: degraded,
+    // not down. `ok` keeps every OTHER gate's answer (database, LLM, STT).
+    return {
+      ...report,
+      degraded: true,
+      capabilities: { ...report.capabilities, tts: false },
+      ttsCheck,
+      warnings: [
+        ...report.warnings,
+        `TTS key rejected (${ttsCheck.reason}) — calls fall back to Gather (Twilio <Say>)`,
+      ],
+    };
+  }
   return {
     ...report,
     ok: report.capabilities.mediaStreams ? false : report.ok,
