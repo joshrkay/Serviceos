@@ -28,6 +28,71 @@
         "createdBy": "user_seed",
         "createdAt": "2026-01-15T10:00:00.000Z",
         "updatedAt": "2026-04-01T10:00:00.000Z"
+      },
+      {
+        "id": "00000000-0000-4000-8000-000002160001",
+        "tenantId": "t_02_apply_credit",
+        "firstName": "Tom",
+        "lastName": "Henderson",
+        "displayName": "Tom Henderson",
+        "companyName": null,
+        "primaryPhone": "+15555550496",
+        "secondaryPhone": null,
+        "email": "tom.henderson@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-02-02T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "jobs": [
+      {
+        "id": "00000000-0000-4000-8000-000002160002",
+        "tenantId": "t_02_apply_credit",
+        "customerId": "00000000-0000-4000-8000-000002160001",
+        "jobNumber": "JOB-2160",
+        "summary": "AC not cooling — callback",
+        "problemDescription": "AC not cooling; tech returned for a callback",
+        "status": "completed",
+        "priority": "normal",
+        "assignedTechnicianId": null,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-10T08:00:00.000Z",
+        "updatedAt": "2026-04-20T08:00:00.000Z"
+      }
+    ],
+    "invoices": [
+      {
+        "id": "00000000-0000-4000-8000-000002160003",
+        "tenantId": "t_02_apply_credit",
+        "jobId": "00000000-0000-4000-8000-000002160002",
+        "estimateId": null,
+        "invoiceNumber": "INV-2160",
+        "status": "open",
+        "lineItems": [
+          {
+            "description": "AC repair",
+            "quantity": 1,
+            "unitPriceCents": 45000
+          }
+        ],
+        "totals": {
+          "subtotalCents": 45000,
+          "discountCents": 0,
+          "taxCents": 0,
+          "totalCents": 45000
+        },
+        "amountPaidCents": 0,
+        "amountDueCents": 45000,
+        "issuedAt": "2026-04-20T10:00:00.000Z",
+        "dueDate": "2026-05-20T10:00:00.000Z",
+        "customerMessage": null,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-20T10:00:00.000Z",
+        "updatedAt": "2026-04-20T10:00:00.000Z"
       }
     ]
   },

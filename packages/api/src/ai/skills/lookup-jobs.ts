@@ -123,10 +123,15 @@ export async function lookupJobs(
   }));
 
   const head = items[0];
+  // #1331 owner decision (2026-10-01): name every recent job (up to 3,
+  // newest first — the repo's order), not only the latest.
   const summary =
     items.length === 1
       ? `Your most recent job is ${head.jobNumber} — ${head.summary}, currently ${humanizeStatus(head.status)}.`
-      : `You have ${items.length} recent jobs. The latest is ${head.jobNumber} — ${head.summary}, ${humanizeStatus(head.status)}.`;
+      : `You have ${items.length} recent jobs: ${items
+          .slice(0, 3)
+          .map((j) => `${j.jobNumber} — ${j.summary}, ${humanizeStatus(j.status)}`)
+          .join('; ')}.`;
 
   await recordEvent({
     resultStatus: 'found',

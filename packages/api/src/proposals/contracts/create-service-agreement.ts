@@ -127,11 +127,24 @@ export const createServiceAgreementShapeSchema = z.object({
   startsOn: startsOnShapeSchema,
 });
 
-export const createServiceAgreementPayloadSchema = createServiceAgreementShapeSchema.refine(
-  // Computed fresh per call — never hoist "today" to module-load time.
-  // See the module doc comment (N3) for why this compares in UTC.
-  (data) => data.startsOn >= new Date().toISOString().slice(0, 10),
-  { message: 'startsOn must not be in the past', path: ['startsOn'] },
+/**
+ * The full contract with "today" read from `now` (UTC, see N3). #1331: the
+ * voice payload builder fills `startsOn` from its injected clock, and its
+ * contract gate must judge "in the past" on that SAME clock — otherwise a
+ * pinned-clock call gates a start date that is in its own future. Every
+ * other caller uses `createServiceAgreementPayloadSchema` (the wall clock).
+ */
+export function createServiceAgreementPayloadSchemaAsOf(now: () => Date) {
+  return createServiceAgreementShapeSchema.refine(
+    // Computed fresh per call — never hoist "today" to module-load time.
+    // See the module doc comment (N3) for why this compares in UTC.
+    (data) => data.startsOn >= now().toISOString().slice(0, 10),
+    { message: 'startsOn must not be in the past', path: ['startsOn'] },
+  );
+}
+
+export const createServiceAgreementPayloadSchema = createServiceAgreementPayloadSchemaAsOf(
+  () => new Date(),
 );
 
 export type CreateServiceAgreementPayload = z.infer<typeof createServiceAgreementPayloadSchema>;

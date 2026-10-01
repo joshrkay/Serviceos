@@ -809,7 +809,12 @@ export async function buildVoiceProposalPayload(
     ...(lineItemOutcome ? { lineItemOutcome } : {}),
   };
 
-  const validation = validateProposalPayload(proposalType, payload);
+  // #1331 — the gate reads the clock the payload was filled from (above).
+  const validation = validateProposalPayload(
+    proposalType,
+    payload,
+    deps.now ? { now: deps.now } : undefined,
+  );
   if (!validation.valid) {
     const errors = validation.errors ?? ['payload failed contract validation'];
     // #1067 — a failure on a SYSTEM-SUPPLIED id (contracts.ts

@@ -2516,6 +2516,26 @@ export class TwilioGatherAdapter {
       turnState = 'intent_capture';
     }
 
+    // #1331 (owner decision 2026-10-01) — the processor's shared caller-name
+    // identity check (same rule as speechTurn): a caller-ID caller whose
+    // spoken name does not confidently match the account is asked "is this
+    // <name>?" before anything acts on it. A "yes" hands back the request
+    // they made before the check, handled below as this turn.
+    const identityCheck = await this.processor.handleCallerIdentityCheck(
+      session,
+      opts.speechResult,
+      opts.tenantId,
+      turnState,
+    );
+    if (identityCheck?.kind === 'respond') {
+      sideEffectsAll.push(...identityCheck.effects);
+      await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+      return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+    }
+    if (identityCheck?.kind === 'proceed') {
+      opts = { ...opts, speechResult: identityCheck.utterance };
+    }
+
     // 2. Branch on FSM state.
     if (confirmQuestion) {
       sideEffectsAll.push(

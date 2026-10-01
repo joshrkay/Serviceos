@@ -71,7 +71,7 @@
         "proposalType": "cancel_appointment",
         "slots": {
           "appointmentId": "appt_02_cancel_existing",
-          "cancellationType": "customer_request"
+          "cancellationType": "other"
         },
         "spokenAnswerMatches": "I've drafted a cancellation of your Tuesday appointment; an operator will confirm before it's applied.",
         "escalates": false
