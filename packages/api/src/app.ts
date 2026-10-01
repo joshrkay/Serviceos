@@ -237,7 +237,7 @@ import { buildVerticalPromptResolver } from './verticals/resolve-active-pack';
 import { VerticalTerminologyProvider } from './voice/vertical-terminology-provider';
 import { TenantGlossaryProvider } from './voice/tenant-glossary-provider';
 import { FillerEngine } from './ai/agents/customer-calling/filler-engine';
-import { FillerAudioCache } from './ai/agents/customer-calling/filler-audio-cache';
+import { FillerAudioCache, startFillerSynthesis } from './ai/agents/customer-calling/filler-audio-cache';
 import { classifyTurnSentiment } from './ai/agents/customer-calling/sentiment-classifier';
 import { gradeVulnerability } from './ai/agents/customer-calling/vulnerability-grader';
 import { createVulnerabilityTriageHook } from './ai/agents/customer-calling/vulnerability-triage-hook';
@@ -4433,10 +4433,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // each other's audio, and round-robin over 8 fillers means no caller
       // hears the same filler back-to-back regardless. The cache loads all
       // PCM files from disk once at boot; missing files are logged (warn).
+      // #1534 — the image ships no clips, so each missing clip is then
+      // synthesized once with the same TTS the adapter speaks replies with
+      // (fire-and-forget: boot never waits; a clip plays once it lands).
       const fillerCache = new FillerAudioCache(
         require('path').resolve(__dirname, 'ai/agents/customer-calling/fillers'),
       );
       fillerCache.load();
+      void startFillerSynthesis(fillerCache, sharedTtsProvider);
       const fillerEngine = new FillerEngine();
 
       // F6c — wire LLM-backed sentiment classifier into the MediaStream adapter.

@@ -140,4 +140,12 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
       }
     });
   });
+
+  it('#1534 — boot starts filler synthesis with the shared media-streams TTS, never awaited', () => {
+    // No clips ship in the image; the boot fill is the only way the 250 ms
+    // filler ever plays. It must use the same TTS the adapter speaks with and
+    // must not block boot (fire-and-forget, never `await`ed).
+    expect(src).toMatch(/fillerCache\.load\(\);\s*void startFillerSynthesis\(fillerCache, sharedTtsProvider\);/);
+    expect(src).not.toMatch(/await\s+startFillerSynthesis/);
+  });
 });
