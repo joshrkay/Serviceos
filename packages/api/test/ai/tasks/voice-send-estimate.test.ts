@@ -70,11 +70,12 @@ describe('SendEstimateTaskHandler', () => {
     expect(res.proposal.payload.channel).toBe('sms');
   });
 
-  it('defaults channel to email when not extracted', async () => {
+  // #1524 — no channel named is 'auto' (the customer's email, else a text).
+  it("defaults channel to 'auto' when not extracted", async () => {
     const res = await new SendEstimateTaskHandler().handle(
       ctx({ existingEntities: { customerName: 'Khan' } }),
     );
-    expect(res.proposal.payload.channel).toBe('email');
+    expect(res.proposal.payload.channel).toBe('auto');
   });
 });
 

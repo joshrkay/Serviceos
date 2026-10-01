@@ -141,6 +141,24 @@ describe('run-intent-eval.ts --live (CLI seam, stub provider)', () => {
     expect(written.goldenSet?.rows).toBe(3);
   }, 60_000);
 
+  // #1469 — the 2026-09-29 live run printed only the top-8 confusion PAIRS,
+  // so 8 of its 21 misses could not be traced to a row and the misses could
+  // not be bucketed (gold-label error vs scorer bug vs model confusion)
+  // without paying for another run. The report must list every miss with its
+  // utterance. The stub answers create_customer for every row; the first
+  // sampled held-out row is gold lookup_account_summary.
+  it('lists every missed row with its utterance, gold and predicted intent', async () => {
+    const baseline = freshBaselinePath('intent-live.json');
+
+    const r = await runCli('run-intent-eval.ts', ['--live', '--max-utterances', '3', '--record-baseline', baseline]);
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toMatch(/misses \(gold ⇒ pred\):/);
+    expect(r.stdout).toContain(
+      'lookup_account_summary ⇒ create_customer  "Give me the highlights on the Oak Court account."',
+    );
+  }, 60_000);
+
   it('exits non-zero — never a silent green — when the provider keeps failing, and records nothing', async () => {
     behaviour = { rateLimitFirst: 'all' };
     const baseline = freshBaselinePath('intent-live.json');

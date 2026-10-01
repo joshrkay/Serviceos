@@ -58,6 +58,15 @@ describe('VQ2-followup — Layer 2 entry-test wiring', () => {
     );
   });
 
+  it('#1331 — the live suite wires the production filler engine + a filler cache into the media-streams server', () => {
+    const entrySource = fs.readFileSync(ENTRY_PATH, 'utf8');
+
+    // First-audible is measured like production only if the adapter under
+    // test has the same 250 ms filler path production wires in app.ts.
+    expect(entrySource).toMatch(/buildLayer2FillerCache\(\{[\s\S]*fillerDir:[\s\S]*customer-calling\/fillers/);
+    expect(entrySource).toMatch(/attachMediaStreamServer\(httpServer, \{[\s\S]*fillerEngine: new FillerEngine\(\)[\s\S]*fillerCache: fillers\.cache/);
+  });
+
   it('VQ2-followup — empty corpus produces a valid Layer2Report with launchGate.pass=false', () => {
     const report = buildLayer2Report([]);
 
@@ -114,6 +123,7 @@ describe('VQ2-followup — Layer 2 entry-test wiring', () => {
         },
         callerExperience: {
           ttfaMedianMs: 0,
+          firstAudibleMedianMs: 0,
           lookupMedianMs: 0,
           durationMedianMs: 0,
           repromptRatioMedian: 0,
@@ -177,6 +187,7 @@ describe('VQ2-followup — Layer 2 entry-test wiring', () => {
         },
         callerExperience: {
           ttfaMedianMs: 200,
+          firstAudibleMedianMs: 0,
           lookupMedianMs: 400,
           durationMedianMs: 30_000,
           repromptRatioMedian: 0,

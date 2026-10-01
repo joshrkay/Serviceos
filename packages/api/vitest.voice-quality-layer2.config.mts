@@ -4,7 +4,7 @@
  * Distinct from `vitest.voice-quality.config.mts` (Layer 1) because:
  *   - Layer 2 uses the real LLM gateway + real Whisper + AudioModeDriver,
  *     so each script is an order of magnitude slower than Layer 1.
- *   - Per-script timeout bumped to 60s; a single script with real audio
+ *   - Per-script timeout bumped to 180s (#1331); a single script with real audio
  *     can take 30s+ once you include TTS synthesis, telephony emulator
  *     framing, Whisper transcription, and 3-way voting.
  *   - Pool is pinned to 1 fork. Voting is inherently sequential per
@@ -40,7 +40,12 @@ export default defineConfig({
     pool: 'forks',
     maxWorkers: 1,
     minWorkers: 1,
-    testTimeout: 60_000,    // single script can take 30s+ with real audio
+    // #1331 — one test = 3 voting runs of a live call (~14 s per one-turn
+    // run on run 36811698452, ~9 s more per turn); write scripts now answer
+    // the phone readback (an extra turn) and the two-step booking has three
+    // turns (~100 s). A per-test runner bound, not a quality threshold — the
+    // hang check is floor criterion 3.
+    testTimeout: 180_000,
     hookTimeout: 120_000,
     globals: false,
     reporters: ['default', 'json'],

@@ -2423,8 +2423,12 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
   // #1427 bumped it to 1.20.0: draft_estimate now names a customer asking
   // what new work would cost, with a customer-voiced example — prompt text
   // only, no intent or slot changes.
-  it('taxonomy version reflects the latest coordinated bump (1.20.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.20.0');
+  // #1469/#1468 bumped it to 1.21.0: operator-voiced lookup_jobs /
+  // lookup_account_summary / lookup_leads phrasings, a confirm vs lookup
+  // appointment rule, and a problemDescription entity (+ serviceAddress on
+  // create_appointment / emergency_dispatch) for the launch slots.
+  it('taxonomy version reflects the latest coordinated bump (1.21.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.21.0');
   });
 
   // Task 11 (2026-08-07 tradesperson plan) — log_mileage is a new intent
@@ -2928,5 +2932,51 @@ describe('intent-classifier — ai_run_id surfacing', () => {
     // without it the run persists under the 'system' fallback and fails the
     // tenants FK on Postgres (aiRunId would come back undefined → null link).
     expect(call.tenantId).toBe('tenant-real');
+  });
+});
+
+describe('#1018 row 5.3 — spoken time logging classifies deterministically (no model)', () => {
+  // The in-app technician/operator surface ('inapp' channel → 'operator').
+  const inapp = { tenantId: 't1', classifierProfile: 'operator' as const };
+
+  it('"log two hours on the Garcia job" routes to log_time_entry with 120 minutes on the Garcia job, NO LLM call', async () => {
+    const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+    const result = await classifyIntent('log two hours on the Garcia job', inapp, gateway);
+    expect(result.intentType).toBe('log_time_entry');
+    expect(result.confidence).toBeGreaterThanOrEqual(TAU_INT);
+    expect(result.extractedEntities).toMatchObject({
+      timeEntryType: 'job',
+      durationMinutes: 120,
+      jobReference: 'Garcia',
+    });
+    expect(gateway.complete).not.toHaveBeenCalled();
+  });
+
+  it('does NOT short-circuit on a phone profile that does not offer log_time_entry (caller, field_tech)', async () => {
+    // PROFILE_INTENTS.caller / .field_tech do not accept log_time_entry — a
+    // deterministic matcher must never mint an off-surface intent; it falls
+    // through to the LLM path, whose post-parse guard owns off-surface.
+    for (const classifierProfile of ['caller', 'field_tech'] as const) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      const result = await classifyIntent(
+        'log two hours on the Garcia job',
+        { tenantId: 't1', classifierProfile },
+        gateway,
+      );
+      expect(result.intentType).not.toBe('log_time_entry');
+      expect(gateway.complete).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('negative control: a richer or slot-less time utterance stays LLM-routed', async () => {
+    for (const transcript of [
+      'log two hours on the Garcia job and add a note about the filter',
+      'log two hours',
+      'how many hours did I log on the Garcia job',
+    ]) {
+      const gateway = mockGateway('{"intentType":"unknown","confidence":0.2}');
+      await classifyIntent(transcript, inapp, gateway);
+      expect(gateway.complete, `"${transcript}" must stay LLM-routed`).toHaveBeenCalledTimes(1);
+    }
   });
 });

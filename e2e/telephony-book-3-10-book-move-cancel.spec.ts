@@ -55,6 +55,19 @@
  * Tuesday's Garcia appointment to Thursday at 2 PM") — that needs a model to
  * classify; the tests below pin it. T1: a neighbour tenant's identical
  * owner-line calls leave tenant A untouched.
+ *
+ * T2 (non-interference, same run): the neighbour holds its OWN "Garcia" and
+ * "Okafor" appointments — the exact names tenant A's owner answers with —
+ * while A's move/cancel resolves. A's answer is unchanged by them: each
+ * resolves to A's one appointment, never "more than one". The name is
+ * resolved in two tenant-scoped layers — jobs by name (`resolveJob`), then
+ * those jobs' appointments — and each alone still hides the neighbour; with
+ * BOTH stripped of their tenant predicate, A's "The Garcia appointment" has
+ * two candidates and the call asks again (the planted fault this leg was
+ * proven red against; the job layer alone stays green). The
+ * last test has the neighbour cancel its own Garcia by talking in the same
+ * run: it resolves to the neighbour's appointment and leaves A's rows as
+ * they were.
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { Pool } from 'pg';
@@ -90,6 +103,8 @@ const dbReady = !!process.env.DATABASE_URL;
 let pool: Pool;
 let tenantA: ProvisionedTenant;
 let tenantNeighbour: ProvisionedTenant;
+let neighbourGarciaId: string;
+let garciaAId: string;
 
 test.describe.configure({ mode: 'serial' });
 
@@ -275,21 +290,25 @@ test.describe('#1015 row 3.10 — book, move and cancel by talking, on the owner
   async function spokenChange(
     request: APIRequestContext,
     leg: { opening: string; answer: string; readback: string; type: string },
+    tenant: ProvisionedTenant = tenantA,
+    ownerPhone: string = A_OWNER_PHONE,
   ): Promise<{ id: string; status: string; payload: Record<string, unknown> }> {
     const callSid = `CA-book310-chg-${crypto.randomUUID().slice(0, 8)}`;
-    const sid = await startOwnerCall(request, tenantA, A_OWNER_PHONE, callSid);
-    const opening = await gatherTurn(request, tenantA, A_OWNER_PHONE, callSid, sid, leg.opening);
+    const sid = await startOwnerCall(request, tenant, ownerPhone, callSid);
+    const opening = await gatherTurn(request, tenant, ownerPhone, callSid, sid, leg.opening);
     // One question — which appointment — not a readback of an unactionable request.
     expect(opening.twiml.toLowerCase()).toContain('which appointment');
     expect(opening.twiml.toLowerCase()).not.toContain('is that right');
 
-    const answer = await gatherTurn(request, tenantA, A_OWNER_PHONE, callSid, opening.sid, leg.answer);
+    const answer = await gatherTurn(request, tenant, ownerPhone, callSid, opening.sid, leg.answer);
+    // T2 — resolved to ONE appointment: never "more than one record".
+    expect(answer.twiml.toLowerCase()).not.toContain('more than one');
     expect(answer.twiml.toLowerCase()).toContain(`${leg.readback}. is that right`);
 
-    await gatherTurn(request, tenantA, A_OWNER_PHONE, callSid, answer.sid, 'Yes');
+    await gatherTurn(request, tenant, ownerPhone, callSid, answer.sid, 'Yes');
     const { rows } = await pool.query<{ id: string; status: string; payload: Record<string, unknown> }>(
       `SELECT id, status, payload FROM proposals WHERE tenant_id = $1 AND proposal_type = $2`,
-      [tenantA.tenantId, leg.type],
+      [tenant.tenantId, leg.type],
     );
     expect(rows).toHaveLength(1);
     // Drafted, never executed on the call.
@@ -308,9 +327,11 @@ test.describe('#1015 row 3.10 — book, move and cancel by talking, on the owner
     request,
   }) => {
     const garcia = await seedAppointment(tenantA, 'Garcia', 3);
-    // T1 — the neighbour holds its OWN "Garcia" appointment, the most
-    // tempting wrong answer there is.
+    // T2 — the neighbour holds its OWN "Garcia" appointment, the most
+    // tempting wrong answer there is, present while A's answer resolves.
     const neighbourGarcia = await seedAppointment(tenantNeighbour, 'Garcia', 3);
+    neighbourGarciaId = neighbourGarcia.appointmentId;
+    garciaAId = garcia.appointmentId;
     const proposal = await spokenChange(request, {
       opening: 'I need to cancel my appointment',
       answer: 'The Garcia appointment',
@@ -396,6 +417,8 @@ test.describe('#1015 row 3.10 — book, move and cancel by talking, on the owner
     request,
   }) => {
     const okafor = await seedAppointment(tenantA, 'Okafor', 4);
+    // T2 — the neighbour's own same-named Okafor appointment, same day.
+    const neighbourOkafor = await seedAppointment(tenantNeighbour, 'Okafor', 4);
     const proposal = await spokenChange(request, {
       opening: 'I need to reschedule my appointment',
       answer: 'The Okafor appointment',
@@ -427,6 +450,14 @@ test.describe('#1015 row 3.10 — book, move and cancel by talking, on the owner
     );
     expect(moved).toHaveLength(1);
     expect(await auditsFor(tenantA.tenantId, okafor.appointmentId, 'appointment.rescheduled')).toHaveLength(1);
+    // The neighbour's Okafor never moved and has no audit trail.
+    const nbOkafor = await pool.query<{ status: string; scheduled_start: Date }>(
+      `SELECT status, scheduled_start FROM appointments WHERE id = $1`,
+      [neighbourOkafor.appointmentId],
+    );
+    expect(nbOkafor.rows[0].status).toBe('scheduled');
+    expect(nbOkafor.rows[0].scheduled_start.getTime()).toBe(neighbourOkafor.start.getTime());
+    expect((await pool.query(`SELECT id FROM audit_events WHERE entity_id = $1`, [neighbourOkafor.appointmentId])).rows).toHaveLength(0);
   });
 
   test('T1 with a neighbour: the neighbour tenant\'s identical owner-line calls reach the same frontier independently, and tenant A stays untouched', async ({
@@ -445,15 +476,62 @@ test.describe('#1015 row 3.10 — book, move and cancel by talking, on the owner
     expect(move.twiml.toLowerCase()).not.toContain('reschedule');
 
     expect((await proposalsFor(tenantNeighbour.tenantId)).rows).toHaveLength(0);
-    // Only the neighbour's own seeded Garcia appointment exists, unchanged.
+    // Only the neighbour's own seeded Garcia and Okafor appointments exist, unchanged.
     const nbAppts = await pool.query<{ status: string }>(
       `SELECT status FROM appointments WHERE tenant_id = $1`,
       [tenantNeighbour.tenantId],
     );
-    expect(nbAppts.rows.map((r) => r.status)).toEqual(['scheduled']);
+    expect(nbAppts.rows.map((r) => r.status)).toEqual(['scheduled', 'scheduled']);
 
     // Tenant A's own (empty) state from the earlier tests in this serial
     // file is unaffected by the neighbour's independent calls.
     expect(await proposalsFor(tenantA.tenantId)).toEqual(beforeA);
+  });
+
+  test('T2 — the neighbour cancels its OWN Garcia by talking in the same run: it resolves to the neighbour\'s appointment, and tenant A\'s rows are exactly as A left them', async ({
+    request,
+  }) => {
+    const aProposalsBefore = await pool.query(`SELECT id, status FROM proposals WHERE tenant_id = $1 ORDER BY id`, [tenantA.tenantId]);
+    const aApptsBefore = await pool.query(
+      `SELECT id, status, scheduled_start FROM appointments WHERE tenant_id = $1 ORDER BY id`,
+      [tenantA.tenantId],
+    );
+
+    const proposal = await spokenChange(
+      request,
+      {
+        opening: 'I need to cancel my appointment',
+        answer: 'The Garcia appointment',
+        readback: 'cancel appointment',
+        type: 'cancel_appointment',
+      },
+      tenantNeighbour,
+      NEIGHBOUR_OWNER_PHONE,
+    );
+    expect(proposal.payload.appointmentId).toBe(neighbourGarciaId);
+    expect(proposal.payload.appointmentId).not.toBe(garciaAId);
+
+    const auth = { authorization: `Bearer ${devAuthBearerToken(tenantNeighbour.userId)}` };
+    const approve = await request.post(`${API_URL}/api/proposals/${proposal.id}/approve`, { headers: auth, data: {} });
+    expect(approve.status()).toBe(200);
+    await pollFor<{ id: string }>(
+      pool,
+      `SELECT id FROM appointments WHERE tenant_id = $1 AND id = $2 AND status = 'canceled'`,
+      [tenantNeighbour.tenantId, neighbourGarciaId],
+    );
+    expect(await auditsFor(tenantNeighbour.tenantId, neighbourGarciaId, 'appointment.canceled')).toHaveLength(1);
+
+    // Tenant A: same proposals, same appointments, same statuses and times.
+    expect(
+      (await pool.query(`SELECT id, status FROM proposals WHERE tenant_id = $1 ORDER BY id`, [tenantA.tenantId])).rows,
+    ).toEqual(aProposalsBefore.rows);
+    expect(
+      (
+        await pool.query(`SELECT id, status, scheduled_start FROM appointments WHERE tenant_id = $1 ORDER BY id`, [
+          tenantA.tenantId,
+        ])
+      ).rows,
+    ).toEqual(aApptsBefore.rows);
+    expect(await auditsFor(tenantA.tenantId, garciaAId, 'appointment.canceled')).toHaveLength(1);
   });
 });

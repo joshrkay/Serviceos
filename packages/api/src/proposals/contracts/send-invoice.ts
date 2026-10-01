@@ -16,7 +16,9 @@ export const sendInvoicePayloadSchema = z
   .object({
     invoiceId: z.string().uuid().optional(),
     invoiceReference: z.string().optional(),
-    channel: z.enum(['email', 'sms']),
+    // #1524 — 'auto': no channel was named; the send uses the customer's
+    // email when one is on file, else a text to their phone.
+    channel: z.enum(['email', 'sms', 'auto']),
     recipient: z.string().optional(),
     customMessage: z.string().optional(),
   })

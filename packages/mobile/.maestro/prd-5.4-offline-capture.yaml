@@ -1,0 +1,36 @@
+# PRD 5.4 (#1018) phase A — capture a voice note with no signal.
+# Real Android airplane mode (Maestro setAirplaneMode is Android-only, per
+# research #1002). The clip must be journaled (offline-queue.json) and its
+# audio kept under files/offline-audio/ — scripts/maestro-device-run.sh reads
+# both over `adb run-as` after this flow and records the idempotency key.
+appId: com.serviceos.app
+name: PRD 5.4 A — offline capture is journaled
+tags:
+  - prd-5.4
+---
+# App state is reset by the harness (reset_app), not clearState — see
+# scripts/maestro-device-run.sh.
+- launchApp:
+    clearState: false
+    permissions:
+      all: allow
+- runFlow: subflows/signed-in.yaml
+- tapOn: "Assistant"
+- setAirplaneMode: enabled
+- extendedWaitUntil:
+    visible: "You're offline.*"
+    timeout: 30000
+- assertVisible: "Hold to record"
+# Hold the mic ~10 s with a slow in-place swipe (press-in → release). Maestro's
+# longPressOn (~3 s) released before the emulator's MediaRecorder reached
+# RECORDING (run 36772438631). Coordinates: the "Hold" circle on the CI AVD's
+# 320x640 screen (centre ≈ 160,279).
+- swipe:
+    start: "50%,42%"
+    end: "50%,45%"
+    duration: 10000
+- extendedWaitUntil:
+    visible: "Saved offline"
+    timeout: 30000
+- assertVisible: "You're offline — 1 action waiting\\."
+- takeScreenshot: prd-5.4-a-offline-queued

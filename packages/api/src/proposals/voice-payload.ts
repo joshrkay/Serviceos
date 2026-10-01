@@ -229,6 +229,27 @@ function hasAnyJobEditField(flat: Record<string, unknown>): boolean {
 const MANUAL_REMINDER_STEP_KEY = 'manual';
 
 /**
+ * #1497 — note target kinds `AddNoteExecutionHandler` can persist (its
+ * NOTE_ENTITY_TYPES; no 'appointment'). Same set, same reason, as
+ * `EXECUTABLE_NOTE_TARGET_KINDS` in `AddNoteTaskHandler`
+ * (ai/tasks/voice-extended-tasks.ts) on the memo/chat leg.
+ */
+const EXECUTABLE_NOTE_TARGET_KINDS: ReadonlySet<string> = new Set([
+  'job',
+  'customer',
+  'invoice',
+  'estimate',
+]);
+
+/** Same check the add_note executor applies to `targetId`. */
+function isUuid(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value)
+  );
+}
+
+/**
  * #1476 — proposal types whose executor needs an ANCHOR record: a `jobId`
  * (or `linkedJobId`) to work under, or a `customerId` it can open a job for.
  * With neither, the executor can only fail after the operator's approval tap:
@@ -348,6 +369,17 @@ function namedContractGap(
         nonEmptyString(flat.notes)
         ? []
         : ['updatedField'];
+    // #1497 — `addNotePayloadSchema`'s "targetId or targetReference" refine
+    // reports `path: []`, and `AddNoteExecutionHandler` needs a uuid
+    // `targetId` of a kind the note store holds anyway. Gate exactly as
+    // `AddNoteTaskHandler` does on the memo/chat leg: `targetKind` when the
+    // kind cannot be stored, `targetId` whenever no verified id is present.
+    case 'add_note': {
+      const gaps: string[] = [];
+      if (!EXECUTABLE_NOTE_TARGET_KINDS.has(String(flat.targetKind))) gaps.push('targetKind');
+      if (!isUuid(flat.targetId)) gaps.push('targetId');
+      return gaps;
+    }
     default:
       return [];
   }
@@ -407,6 +439,12 @@ export async function buildVoiceProposalPayload(
     const title = nonEmptyString(entities.jobTitle) ?? nonEmptyString(entities.jobReference);
     if (title) flat.title = title;
   }
+  // log_time_entry (#1018 5.3): classifier emits `timeEntryType`;
+  // `logTimeEntryPayloadSchema` requires `entryType`. Same mapping and 'job'
+  // default as `LogTimeEntryTaskHandler` (ai/tasks/voice-extended-tasks.ts).
+  if (proposalType === 'log_time_entry' && flat.entryType === undefined) {
+    flat.entryType = nonEmptyString(entities.timeEntryType) ?? 'job';
+  }
   // update_customer: the classifier (and the deterministic owner-command
   // matchers in ai/orchestration/intent-classifier.ts, which emit
   // `updatedPhone`/`updatedAddress` for the two stereotyped phrasings) names
@@ -426,6 +464,35 @@ export async function buildVoiceProposalPayload(
   // The resolved customer every record-linking handler reads off `customerId`.
   const customerId = resolveCustomerId(entities, input.callerCustomerId);
   if (customerId) flat.customerId = customerId;
+
+  // add_note (#1497): the classifier emits `noteBody` / `noteTargetKind`;
+  // `addNotePayloadSchema` and `AddNoteExecutionHandler` read `body` /
+  // `targetKind` / `targetId`. Without this every live-turn voice note was
+  // persisted with neither required key and approve refused it forever
+  // ("unfilled required fields: targetKind, body"). Same mapping, same
+  // precedence, as `AddNoteTaskHandler` (ai/tasks/voice-extended-tasks.ts):
+  // kind defaults to 'job', body falls back to the spoken request, the target
+  // id is the RESOLVED id for that kind (customer → `customerId`, else
+  // `<kind>Id`), and the spoken reference is carried for the review card.
+  if (proposalType === 'add_note') {
+    if (flat.targetKind === undefined) {
+      flat.targetKind = nonEmptyString(entities.noteTargetKind) ?? 'job';
+    }
+    if (flat.body === undefined) {
+      const body = nonEmptyString(entities.noteBody) ?? nonEmptyString(input.utterance);
+      if (body) flat.body = body;
+    }
+    if (flat.targetId === undefined) {
+      const kind = String(flat.targetKind);
+      const candidate = kind === 'customer' ? flat.customerId : flat[kind + 'Id'];
+      if (isUuid(candidate)) flat.targetId = candidate;
+    }
+    if (flat.targetId === undefined && flat.targetReference === undefined) {
+      const reference =
+        nonEmptyString(entities.jobReference) ?? nonEmptyString(entities.customerName);
+      if (reference) flat.targetReference = reference;
+    }
+  }
 
   // update_job: the operator's spoken status/priority ("... to in progress",
   // "mark it urgent priority"). `update_job` extracts only `jobReference`, so

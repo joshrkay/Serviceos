@@ -12,6 +12,78 @@ waiting* names the §5/§8 rows and the rung they cannot reach until the answer 
 
 ---
 
+## Reconciliation 2026-09-30 (#1024 final close-out, `origin/main` @ b94936af6)
+
+This pass reconciles the file with the rows as they stand after #1515 (§8.9 close lane), #1516
+(§8.3/§8.5 lane) and #1525 (the Maestro device run). The census is
+`python3 docs/audit/tooling/prd-rung-census.py` → **124 rows: 64 at 5, 51 at 4 or 4−, 9 at 3 or
+below, 0 at 6**. Rung 6 is empty on purpose, because rung 5 is this map's ceiling (#999). Every row
+still parked is named in the table below, with the owner action that would move it.
+
+**Still parked on Josh: 6 open items, and 5 of them hold rows.** The 2026-09-26 count was 7; the
+O-9 PRD amendment is now made (PRD §8.10 #5, C5, 7.11, §12.4e, §14):
+
+| # | Blocker | Kind | Row(s) held, and where they sit now |
+|---|---|---|---|
+| 1 | **Intuit consent click** (answered 2026-09-26: Josh clicks through on a sandbox company) — not yet done | owner action | 9.11 **4 (T1·T4)**, fully audited since #1515; 5 waits on the click |
+| 2 | **Google Business Profile connect on one tenant** (answered 2026-09-26) — not yet done | owner action | 9.4 sweep half **4 (T4)** (the approval half is already 5) |
+| 3 | **Stripe test-mode key + a Connect test account** — no key issued | owner action (credential) | 5.5's live-charge half (5.5 is at 4 (T1)); 8.5's off-session and card-present halves (3); 8.12's "dues collect" clause |
+| 4 | **Live Twilio subaccount credential** for 1.6 | owner action (credential) | 1.6 **3** |
+| 5 | **1.10 brand-voice flag**: an ops/self-service enable path, or a ceiling of 4 | owner decision | 1.10 **4** |
+| 6 | **#1011 §E** E2 (`aiModel` editability), E3 (consent vs platform kill-switch), E4 (the `autonomousCloseEnabled` label), E5 (speed-to-lead: wire or retire), E7 (2.7's rung-5 proof shape) | owner decisions | **None held below 5 now.** 2.7 reached **5 (T3·T4)** through the signed-webhook shape, which settles E7 in practice. 2.6's **4 (T3)** is held by its missing owner control (#1011 PR-2), which is engineering work, not this decision. E6 (the rung-5 runner) was adopted in practice; the Maestro device runner (`mobile-maestro.yml`) joined that practice 2026-09-30. Still not formally ratified |
+
+**Moved since 2026-09-27**, each with its command in its PRD row:
+- 3.3 4 (T3) → **5 (T3)**: the defaults notice on a signed-in Android slot step (run 36780860209).
+- 5.4 4 (T1) → **5 (T2)**: offline → process death → reconnect on device, with one `voice_recordings` row.
+- 3.12 → **5 (T1)**, and 5.1, 5.2, 5.3 (in-app) → **5 (T1)** (#1516).
+- 9.1, 9.2, 9.7, 9.9, 9.10 → **5**, and 9.12's suggestion half → **5 (T2)** (#1515).
+- 9.11 4− → **4 (T1·T4)**: the sync is now audited (#1515).
+- 9.8 is held at **4 (T2) as its ceiling** by owner decision (b).
+
+**Answered 2026-09-30** (recorded in their entries below or in `docs/decisions.md`):
+- The §8.12 memberships minimum: auto-collect is the default, and the no-card path raises the dues
+  invoice. The follow-up is to flip `autoCollectDues`.
+- #1238 item 5: keep the rule.
+- #1215 item 4: keep the #1203 behaviour.
+- 9.8: option (b), corrections stay catalog-only.
+- Map #833's three open questions: D-036, the as-built behaviour. D-036 also fixes 5.3's phone half
+  outside the S1 allowlist.
+- The mobile dev-auth path plus the Maestro device harness for 3.3 / 5.4: owner-approved
+  2026-09-30, which answers the "owner call left open on #1015" in 3.3's row.
+
+**Corrections to the 2026-09-26 table below.** The entries themselves are kept as history.
+- *§8.5 card-on-file audit — "Open (money-class emission not landed)"* is **stale**. `7070220c9`
+  emits `payment_method.saved` (entity `payment_method`, `webhooks/routes.ts:1461`), and
+  `test/integration/stripe-webhook-account-binding-refund-dispute-setup.test.ts` asserts it at
+  real Postgres. This is not parked on Josh. Row 8.5's card-on-file cell still prints 4−: that
+  is a §8.8 re-grade to do, not a blocker.
+- *4.7* is now at **5**, and *3.8* is now at **5 (T1·T3)**.
+- *Hardware:* 5.4's device proof is **done**. See the Hardware table.
+
+**Ceilings set by an owner decision.** These are not parked, and nothing an agent does moves them:
+- 9.8: 4 (T2), by option (b).
+- 5.3's phone half: the S1 allowlist and the `field_tech` profile do not offer `log_time_entry`,
+  ratified as-built by D-036.
+- 4.9: 2, fixed as "fix the lie" (#1001).
+- 4.10: 0, out of scope.
+- 6.8: 0, parked (#1001 / #1019).
+- Invariants: 4 is their in-repo ceiling (#1020).
+
+**Not on this map: the launch effort's rung 6.** O-2's sign-off itself (trade professional plus
+counsel), O-8 north-star instrumentation, and #905 all belong to the launch effort. #905 is the
+operator half of a real inbound Twilio number for the pilot tenant, and it blocks the witnessed
+production call. None of the three holds a rung-5 row.
+
+**Owner operations moved here from the issue tracker (owner decision 2026-09-30).** The tracker holds
+engineering work only. Their code halves shipped in PR #904. These two are operator tasks:
+
+| Ticket (closed, tracked here) | Operator task | Blocks |
+|---|---|---|
+| #905 telephony | Rivet HVAC's telephony was provisioned with Twilio **test** credentials (stub provider data, the magic test number). Audit which Twilio credentials prod uses and the provisioning worker's `NODE_ENV`. Claim a real inbound number through the onboarding Phone step once the credentials are right. Optionally set a real Business-profile phone. | The witnessed production phone call (B4) and launch rung 6. No rung-5 row. |
+| #906 billing | The Rivet HVAC tenant's linked Stripe customer no longer exists. Determine why: a Dashboard deletion, or a test/live key-mode mismatch. Re-link the tenant manually (Stripe Dashboard plus a production DB update; no admin endpoint exists, and auto-recreate is forbidden by the pinned decision). Decide whether an owner-approved recreate-on-demand path should ever ship. | That tenant's billing portal. The UI already shows re-link guidance (PR #904). No rung-5 row. |
+
+---
+
 ## Reconciliation 2026-09-26 (#1024 close-out, `origin/main` @ 284ff29d2)
 
 Every parked entry below, checked against its ticket and its row. The entries
@@ -22,12 +94,14 @@ themselves are kept as written (history); this table is the current state.
 | O-2 E1 script sign-off | #1000 (closed) | **Answered 2026-09-26** (trade professional + counsel; placeholder hard-flagged until then; engineering adds a write path). ~~Not yet reconciled with the code~~ **Reconciled 2026-09-27:** #1388 (placeholder hard-flagged, no voicemail) + #1404 (owner write path, two sign-offs); the phone fixture writes no E1 SQL | 2.5 4 (T1), I8 4; phone rows 3.1 / 3.7 (phone) now 5, 3.10 held by its MOVE/CANCEL frontier instead |
 | O-4 static PIN | #1000 | Answered 2026-09-26 (accept for now) | I3 4 (T1) |
 | O-6 approval transport | #1000 | Answered 2026-09-26 (`speechTurn`, Gather degrade, #838) | I3; §8.6 voice-approval rows |
-| O-9 second classifier | #1000 | Answered 2026-09-26 (amend the commitment to name the covered surfaces) — the PRD text amendment is not yet made | C5 2, 7.11 3 |
+| O-9 second classifier | #1000 | Answered 2026-09-26 (amend the commitment to name the covered surfaces). ~~The PRD text amendment is not yet made~~ **Amendment made 2026-09-30** (#1024 final close-out: PRD §8.10 #5, C5, 7.11, §12.4e, §14) | C5 2, 7.11 3. Neither is re-graded against the amended text; the evidence on file for the named paths is unit-level |
 | Q12 discount/tax | #1000 | Answered 2026-09-26 (fail closed; implemented with #1288) | no story row |
 | Intuit consent click | #1000 | Answered 2026-09-26 (Josh clicks through on a sandbox company) — **not yet done**. The fan-out half this entry also named is **done** (lane Z: accounting-sync entry in `sweep-tenant-fanout.test.ts`) | 9.11 3 → **4− (T1·T4)**; 5 waits on the click |
 | Google Business Profile | #1000 | Answered 2026-09-26 (Josh connects one tenant) — not yet done | 9.4 sweep 4 (T4) / approval half 5 |
 | Railway census | #999 / #1000 | Resolved (rung 5 is the map's ceiling) | — |
-| §8.12 memberships minimum | #1058 (closed) | Lane T built all three of (a)/(b)/(c) on every path; **Josh's "intended minimum" answer is still not recorded** — if it is "auto-collect is the path", the port reverts | 8.12 3 → **4 (T1·T4)** |
+| §8.12 memberships minimum | #1058 (closed) | Lane T built all three of (a)/(b)/(c) on every path. ~~Josh's "intended minimum" answer is still not recorded~~ **Answered 2026-09-30:** auto-collect is the intended default, and the no-card path raises the dues invoice. So the port **stays** (it is not reverted). Open follow-up: `autoCollectDues` still defaults to `false` (see the §8.12 entry below) | 8.12 3 → **4 (T1·T4)** |
+| #1238 item 5 (PIN-attempt clock skew) | #1238 (closed) | **Answered 2026-09-30:** keep the current rule. A PIN attempt stamped more than 60s in the future is still rejected, and a decision test already pins this. No change | I3 (unchanged) |
+| #1215 item 4 (T&M plan vs a later-accepted estimate) | #1215 (closed) | **Answered 2026-09-30:** keep the current behaviour, which is the #1203 design. Convert returns a readable 409, and auto-invoice stands aside. No change | no story row |
 | Stripe test key (dues, off-session, Terminal) | #1000 | Open — no key issued | 8.5b/c 3; 5.5 live-charge half |
 | Spanish E1 (#1056) | #1056 (closed) | **Fixed** — "fuga de gas" reaches E1 at the real handler (`e1-life-safety-handler.test.ts`, 31/31) | 2.5 4 (T1), Spanish clause met |
 | §8.5 card-on-file audit | — | Open (money-class emission not landed) | 8.5 card-on-file 4− |
@@ -40,10 +114,14 @@ themselves are kept as written (history); this table is the current state.
 | 5.5 simulated reader | #1018 | Open — needs the Stripe test key above | 5.5 live-charge half |
 | #1102 refuse vs skip | #1102 (closed) | Fixed by PR #1107 (refuse); #1109 closed too | 5.5 4 (T1) both halves |
 
-**Count still parked on Josh:** 8 *(was 9; the O-2/voice-gate conflict below is resolved in code — lane RG, 2026-09-27)* —
+**Count still parked on Josh:** 7 *(was 8; the 8.12 minimum was answered 2026-09-30. Was 9 before that; the O-2/voice-gate conflict below was resolved in code — lane RG, 2026-09-27)* —
 the Intuit click, the GBP connect, the Stripe test key (covers 8.5b/c and
-5.5), the 8.12 minimum, 1.6's Twilio subaccount, 1.10's flag, the §E questions
+5.5), 1.6's Twilio subaccount, 1.10's flag, the §E questions
 E2–E5/E7, and the O-9 PRD amendment (answered; the text change is not made).
+
+**Also answered 2026-09-30, outside the rung map:** the three open questions on voice map #833
+(entity resolution per surface, the undo window under voice approval, and the S1 posture). The
+answer is the as-built behaviour, recorded in `docs/decisions.md` D-036.
 
 ### NEW 2026-09-26 — the O-2 answer and the shipped voice gate disagree (from lane Z's re-grade of #1015)
 - **What:** O-2's answer says E1 may launch publicly *with the placeholder hard-flagged* until a trade
@@ -72,7 +150,7 @@ E2–E5/E7, and the O-9 PRD amendment (answered; the text change is not made).
 | **O-2** Who signs off on the E1 life-safety script? | `E1_SCRIPT_REVIEW_REQUIRED=true` is hard-coded and boot only warns (*"E1 life-safety script is an UNREVIEWED PLACEHOLDER"* on every API start); no write surface exists for `tenant_settings.e1_reviewed_script` — it is one of the twelve keys absent from `updateSettingsSchema` (PRD §12.4c). Not an engineering decision. | **2.5**, **I8** — both can reach 4 (Docker proof) and 5 (reachable) speaking the placeholder; **rung 6 / launch** waits here | 2026-09-12 || **Answered 2026-09-26:** a licensed trade professional plus counsel sign off; until then E1 may launch publicly only with the placeholder hard-flagged. Engineering adds a settings write path for `e1_reviewed_script`. Sign-off itself stays with Josh. **Write path built (#1386):** owner-only, audited `PUT`/`DELETE /api/settings/e1-script` stores the script with the reviewer attestation (name, role, reviewed-at; migration 293); the voice gate no longer sends calls to voicemail for a missing script — E1 runs the placeholder hard-flagged (`e1ScriptPlaceholder: true` on every E1 audit row, a persistent owner banner, the boot warning). **Two structured sign-offs + owner form (#1389):** a save now needs TWO reviewer entries, one licensed trade professional AND one counsel (name, credential, reviewed-at each; migration 294), and E1 calls speak the script only when both are on file (a pre-#1389 single-reviewer row keeps the placeholder). Owners enter it at Settings → E1 safety script (`/settings/e1-script`), linked from the banner. **Still Josh's:** obtaining the trade + counsel sign-off and saving the signed script. |
 | **O-4** Per-approval voice codes, or accept static PIN exposure? | The voice-approval PIN is a static per-tenant secret re-spoken on every recorded approval; redaction shipped, per-approval codes did not (§12.2). PRD §14: *"Money-class voice approval should not be considered shipped until this resolves."* | **I3** (spoken challenge on money/irreversible) — stops at 4; 5 is claimable only if the static PIN is accepted | 2026-09-12 || **Answered 2026-09-26:** accept the static PIN for now (#850 redaction, #1051 attempt reservation and the 3-strike lockout have shipped). Revisit per-approval SMS codes once money-by-voice usage appears. |
 | **O-6** Which realtime transport carries voice approval? | An approval exchange does not fit inside the resilient transport's hang timer (§14). | **I3**; the §8.6 voice-approval rows on the phone surface | 2026-09-12 || **Answered 2026-09-26:** the `speechTurn` pipeline (Media Streams), with Gather as the degrade path, per #838 (map #962). |
-| **O-9** Does "a second classifier reviews every booking and quote" still hold, or does the commitment change? | `getSupervisorReviewGate()` has 2 call sites against 93 `createProposal(` sites; the conditional site skips `draft` (low-confidence) quotes; default mode `shadow` never holds; `pricing_anomaly` is not in `CUSTOMER_HARM_CHECKS` so it cannot hold in any mode (§12.4e). Two honest resolutions; *continuing to state it as written is the one option that is not available.* The supervisor gate is untouchable on this map. | **C5** (rung 2, NOT KEPT), **7.11** (rung 3) — neither moves | 2026-09-12 || **Answered 2026-09-26:** amend the commitment to name the surfaces the supervisor gate actually covers; wiring every `createProposal` site is a separate effort. |
+| **O-9** Does "a second classifier reviews every booking and quote" still hold, or does the commitment change? | `getSupervisorReviewGate()` has 2 call sites against 93 `createProposal(` sites; the conditional site skips `draft` (low-confidence) quotes; default mode `shadow` never holds; `pricing_anomaly` is not in `CUSTOMER_HARM_CHECKS` so it cannot hold in any mode (§12.4e). Two honest resolutions; *continuing to state it as written is the one option that is not available.* The supervisor gate is untouchable on this map. | **C5** (rung 2, NOT KEPT), **7.11** (rung 3) — neither moves | 2026-09-12 || **Answered 2026-09-26:** amend the commitment to name the surfaces the supervisor gate actually covers; wiring every `createProposal` site is a separate effort. **Amendment made 2026-09-30** (#1024 final close-out). The commitment now covers what the voice action router drafts: every chain head, and a single action at `ready_for_review`. It annotates in `shadow` and holds only on `missed_urgency` / `account_routing` in `enforce`. |
 | **Q12** Discount/tax defect: fail closed, alert loudly, or leave it? | The full discount is subtracted from both the tax base and the subtotal — systematic under-taxing on mixed-taxability invoices (§12.3, worked example: $5 under-collected on a $200 invoice). Discount/tax math is untouchable on this map. | No story row; blocks the §12.3 proportional-allocation fix | 2026-09-12 || **Answered 2026-09-26:** fail closed on mixed taxability plus a discount until proportional allocation lands (implemented with #1288). |
 
 ## Credentials
@@ -87,7 +165,7 @@ E2–E5/E7, and the O-9 PRD amendment (answered; the text change is not made).
 
 | Hardware | What blocks | Rows waiting | Parked | Answer |
 |---|---|---|---|---|
-| *(none parked)* | Research #1002 found the mobile offline-reconnect edge (**5.4**) provable hermetically with Maestro on the Android emulator (real airplane-mode toggle + real process kill, `expo-dev-client` build, no macOS runner). Whether to build that harness is the §8.5 move ticket's call, not a hardware blocker. | — | — | — |
+| *(none parked)* | Research #1002 found the mobile offline-reconnect edge (**5.4**) provable hermetically with Maestro on the Android emulator (real airplane-mode toggle + real process kill, `expo-dev-client` build, no macOS runner). Whether to build that harness is the §8.5 move ticket's call, not a hardware blocker. **Done 2026-09-30:** the harness was built (#1511, owner-approved) and passed on device in `Mobile Maestro (device)` run 36780860209 (#1525). 5.4 → **5 (T2)** and 3.3 → **5 (T3)** | — | — | — |
 
 ## Scope questions pending on the map (Josh answers on the ticket, not here)
 
@@ -108,6 +186,18 @@ O-1 is resolved: Basic is $50/month and Enterprise is $150/month; both include 3
 - **Josh's call:** does "recurring revenue is actually recurring" require (a) issuing the dues invoice, (b) a due date so the cadence chases it, (c) numbering off the tenant sequence — all three, or a different minimum? The correction above sharpens this into a concrete choice: the configured path already does (a) and (b), so is the answer *"auto-collect IS the intended path, and the default should flip / onboarding must drive owners to it"*, or *"the default path must stand on its own and issue dues regardless"*? The severity turns on how many real memberships sit on the default path or have no saved card — which only you can see.
 - **Until decided:** row 8.12 stays at 3 STORY NOT MET; #1058 holds the analysis with file:line.
 - **2026-09-26 (lane T, #1058):** built the issue's own stated desired behaviour — all three of (a) issue, (b) due date on tenant terms, (c) tenant-sequence numbering — on EVERY path (`agreements/agreement-invoices-port.ts`). If Josh's answer is instead *"auto-collect is the intended path"*, revert that port to draft-only; the tests in `membership-renewal-sweep.test.ts` say exactly what to flip.
+- **Answered 2026-09-30 (Josh):** **auto-collect is the intended default, and the no-card path
+  raises the dues invoice.** The revert condition above does not apply, because the answer keeps
+  issuance on the no-card path. So lane T's port stays as built: every cycle issues a
+  tenant-sequence invoice with a due date on tenant terms (`agreements/agreement-invoices-port.ts`),
+  and a `no_card` collection still leaves that issued, dunnable invoice
+  (`agreements/agreement-service.ts`, `service_agreement.auto_collect_skipped`).
+  **Engineering follow-up this answer implies (not done here):** the as-built default is still
+  opt-in. `autoCollectDues` defaults to `false` in `createAgreement`
+  (`packages/api/src/agreements/agreement-service.ts:219`) and in the row mapper
+  (`agreements/pg-agreement.ts:48`, `:95`). Making auto-collect the default means flipping that for
+  new memberships (a code change with its own tests). It does not mean touching existing rows
+  without an owner's consent.
 
 ### Stripe test-mode key for `StripeDuesCollector` (from #1023) — Credentials
 - **What:** **narrowed on review (PR #1053).** The orchestration is now proven at real Postgres by injecting `stripeFetch` — the HTTPS boundary only, as the deposit-checkout path already does — leaving the real collector, invoice ops, `issueInvoice`, `recordPayment` and repositories in the path; success, 402 decline (with decline metadata surviving to the audit row) and no-card are all covered. The earlier claim that "any injected collector is *mocked is not proven*" conflated injecting a fake `DuesCollector` (which would be) with injecting the HTTP boundary (which is not). What a test-mode credential would still add is narrower: that Stripe's API accepts our PaymentIntent request shape and that real decline codes come back in the shape we parse. Same credential unblocks §8.5's off-session-charge half (see the #1022 entry above).
@@ -126,6 +216,10 @@ O-1 is resolved: Basic is $50/month and Enterprise is $150/month; both include 3
   move is *the audit read-back*, and there is nothing to read; it stays where the #1009 entry audit put it
   (4−, T1, no audit) until someone lands the emission in a money-class branch. Full evidence:
   `docs/audit/lane-reports/1022-payments.md` (row 8.5b).
+  **Landed (noted 2026-09-30, #1024 final close-out):** `7070220c9` emits `payment_method.saved`
+  (`webhooks/routes.ts:1461`), asserted at real Postgres in
+  `test/integration/stripe-webhook-account-binding-refund-dispute-setup.test.ts`. The row's 4− is now
+  a §8.8 re-grade to do, not a blocker.
 - **Stripe test-mode credentials** (none in the cloud sandbox; the repo's only record/replay layer,
   `CassetteLLMGateway` in `src/ai/voice-quality/cassette-gateway.ts`, records LLM exchanges — nothing records
   Stripe HTTP): `chargeOffSession`
@@ -260,3 +354,9 @@ named, not answered — see this file's own rule at the top.
 - **Josh's call (the fix lane implements the first unless told otherwise):** (1) **refuse** a connected-origin event whose `account` does not match the tenant's own connected account — a 4xx-class outcome, an audit row naming the reason, the `webhook_events` row not marked processed-as-settled (Stripe retries; the operator sees it); or (2) **200 + skipped** with the same audit row (kinder to the retry queue, silent to Stripe). Either way platform-origin events (no `event.account`) keep today's behaviour, asserted by a control test.
 - **Until decided:** row 5.5's settlement half is graded 3 (T1 FAILED — #1102); the clean-409 half keeps 4 (T1). The fix PR is Opus, isolated branch `fix/stripe-webhook-account-binding`, draft; Josh reviews and merges.
 - **Parked:** 2026-09-13 · **Answer:**
+
+### ~~9.8 the owner's correction has no app control — a price edit on the AI's draft?~~ **Answered 2026-09-30 (b)** (from the #1013 close lane, 2026-09-30)
+- **What:** 9.8's loop now runs end to end inside the running app — the owner approves on `/inbox`, the app's execution worker records the `labor_rate_changed` lesson and cascades the rate, and the lesson shows under *What I learned today* on `/digest`, where 9.9's new Undo reverses it (`e2e/journeys/correction-lesson-undo-9-8-9-9.spec.ts`). The one step no persona can take on a surface is the correction itself: no web screen edits a drafted line's price (the inbox edits only address / review-response fields, the assistant card only gated `editFields`), and mobile deliberately withholds free-text price entry (`packages/mobile/src/proposals/proposalEdit.ts`: "free-text price entry is deliberately NOT offered — CLAUDE.md catalog rule"). The spec drives that step through `PUT /api/proposals/:id`.
+- **Josh's call:** (a) give the owner a price edit on a drafted estimate's labor line (web inbox and/or mobile) — the owner correcting the AI is exactly the input the correction loop learns from, and the catalog rule governs AI-drafted prices, not the owner's; or (b) corrections stay catalog-grounded only (swap a line to another catalog item), in which case a labor-rate lesson needs a catalog labor item and 9.8's criterion should say so.
+- **Until decided:** row 9.8 stays at 4 (T2), reached everywhere except the edit.
+- **Parked:** 2026-09-30 · **Answer (Josh, 2026-09-30): (b)** — corrections stay catalog-only; no labor-price edit on AI-drafted lines (prices stay tied to the catalog; mobile deliberately omits free-text price entry). Row 9.8 is reworded to the catalog-bound correction loop and its ceiling recorded at 4 (T2) by owner decision (PR #1515).

@@ -897,6 +897,24 @@ export function normalizeDraftLineItems(raw: unknown[]): {
   return { lineItems, malformed };
 }
 
+/**
+ * #1499 — the name of a job opened to hold a drafted estimate. It used to be
+ * `proposal.summary`, which on chat is the operator's raw sentence ("Draft an
+ * estimate for … $89."), so the job list read like a chat log. The work itself
+ * — the line descriptions — names it. Undefined when no line has a
+ * description (the caller keeps its old fallback).
+ */
+function jobSummaryFromLineItems(lineItems: ReadonlyArray<{ description?: unknown }>): string | undefined {
+  const descriptions = lineItems
+    .map((line) => (typeof line.description === 'string' ? line.description.trim() : ''))
+    .filter((d) => d.length > 0);
+  if (descriptions.length === 0) return undefined;
+  const joined = descriptions.join(', ');
+  if (joined.length <= 120) return joined;
+  const cut = joined.slice(0, 120);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(' '), 1)).replace(/[\s,]+$/, '')}…`;
+}
+
 export class DraftEstimateExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'draft_estimate';
 
@@ -1016,7 +1034,7 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
             summary:
               typeof payload.summary === 'string' && payload.summary.trim().length > 0
                 ? payload.summary.trim()
-                : proposal.summary || lineItems[0].description,
+                : jobSummaryFromLineItems(lineItems) ?? proposal.summary,
             createdBy: context.executedBy,
             actorRole: context.executedByRole,
           },
@@ -1073,6 +1091,19 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
 // recency, ignoring failed rows) plus the estimate's own last_reminder_at as
 // a belt-and-braces fallback when the dispatch repo isn't wired.
 export const ESTIMATE_NUDGE_COOLDOWN_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * #1528 — the channel a nudge goes out on: the one named on the payload
+ * (email / sms), else 'auto' — the customer's email when one is on file,
+ * else a text to their phone (SendService resolves it with
+ * defaultSendChannel, the same rule send_invoice / send_estimate use). A
+ * nudge drafted before #1528 carries no channel and resolves as 'auto' too,
+ * so an email-only customer is emailed instead of failing a text.
+ */
+function nudgeChannelFromPayload(payload: Record<string, unknown>): 'email' | 'sms' | 'auto' {
+  const named = payload.channel ?? payload.sendChannel;
+  return named === 'email' || named === 'sms' ? named : 'auto';
+}
 
 export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'send_estimate_nudge';
@@ -1193,7 +1224,7 @@ export class SendEstimateNudgeExecutionHandler implements ExecutionHandler {
         {
           tenantId: context.tenantId,
           estimate,
-          channel: 'sms',
+          channel: nudgeChannelFromPayload(payload),
           asOf,
           actorId: context.executedBy,
           ...(typeof payload.note === 'string' && payload.note.trim().length > 0

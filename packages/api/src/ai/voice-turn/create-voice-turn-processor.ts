@@ -48,6 +48,12 @@
 import type { PinLockAlertRetryScheduler } from '../tasks/voice-approval-pin-lock-alert';
 import type { VoiceApprovalPinLockAlertRepository } from '../../settings/voice-approval-pin-lock-alert';
 import type { Pool } from 'pg';
+import {
+  InMemoryTransactionRunner,
+  PgTenantTransactionRunner,
+  type TenantTransactionRunner,
+} from '../../db/tenant-transaction';
+import { tenantContextStore } from '../../middleware/tenant-context';
 import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
 import {
@@ -117,6 +123,7 @@ import {
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   CALLER_INCOMPLETE_REQUEST_COPY,
+  OPERATOR_DRAFTED_FOR_REVIEW_COPY,
   type SessionLanguage,
 } from '../agents/customer-calling/tts-copy';
 import {
@@ -269,6 +276,12 @@ import {
   type SpeechTurnHandler,
 } from '../../telephony/media-streams/mediastream-adapter';
 import { createLogger } from '../../logging/logger';
+import {
+  answerCallbackNumberQuestion,
+  answerPendingDetailQuestion,
+  detectConfirmTurnQuestion,
+  type ConfirmTurnQuestionKind,
+} from './confirm-turn-question';
 import { xmlEscape } from '../../telephony/shared/xml-escape';
 import { queueCallbackProposal as queueCallbackProposalShared } from '../../telephony/shared/queue-callback-proposal';
 
@@ -948,6 +961,19 @@ export interface VoiceTurnProcessor {
     session: VoiceSession,
     usage: { input: number; output: number } | undefined,
   ): boolean;
+  /**
+   * #1476 — the side effects for a QUESTION asked at the `intent_confirm`
+   * readback (answer + readback re-asked; FSM not dispatched). Shared by
+   * `speechTurn` and the Gather adapter so both phone transports apply the
+   * identical S1 callback-number rules. `kind` comes from
+   * `detectConfirmTurnQuestion`.
+   */
+  answerConfirmTurnQuestion(
+    session: VoiceSession,
+    kind: ConfirmTurnQuestionKind,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<SideEffect[]>;
   /** Replace a placeholder `intent_confirm` tts_play with a concrete readback. */
   expandIntentConfirmTemplate(
     sideEffects: SideEffect[],
@@ -1258,6 +1284,123 @@ export function createVoiceTurnProcessor(
     capEndedSessions.add(session);
     session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
     return true;
+  }
+
+  /**
+   * #1476 — the side effects for a question asked at the `intent_confirm`
+   * readback: an audit row, the answer, and the readback re-asked. The FSM
+   * is not dispatched, so the pending request (and its retry budgets) are
+   * untouched.
+   *
+   * Surface rule for the callback number: an S1 caller hears only what they
+   * gave on this call or their own caller-ID masked — never a number off a
+   * customer record. The owner line may hear the number on file.
+   */
+  async function answerConfirmTurnQuestion(
+    session: VoiceSession,
+    kind: ConfirmTurnQuestionKind,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<SideEffect[]> {
+    const ctx = session.machine.currentContext;
+    const entities = (ctx.extractedEntities ?? {}) as Record<string, unknown>;
+    let answer: string;
+    if (kind === 'callback_number') {
+      const untrustedCaller = isUntrustedS1Session(session);
+      let onFile: string | undefined;
+      // Trusted line only: an S1 caller never gets a record read to them.
+      if (!untrustedCaller && deps.customerRepo) {
+        const customerId =
+          (typeof entities.customerId === 'string' ? entities.customerId : undefined) ??
+          session.customerId;
+        const customer = customerId
+          ? await deps.customerRepo.findById(session.tenantId, customerId).catch(() => null)
+          : null;
+        onFile = customer?.primaryPhone ?? customer?.secondaryPhone;
+      }
+      answer = answerCallbackNumberQuestion({
+        untrustedCaller,
+        givenThisCall: typeof entities.phone === 'string' ? entities.phone : undefined,
+        callerId: deps.callerPhoneResolver?.(session) ?? session.callerPhone,
+        onFile,
+      });
+    } else {
+      let looked: string | undefined;
+      const detail = answerPendingDetailQuestion(kind, entities);
+      if (detail === undefined) {
+        const lookup = await answerConfirmTurnQuestionByLookup(session, speechResult, tenantId);
+        // The lookup classify crossed the session cap: escalation supersedes
+        // the answer, exactly as on a capture-state classifier turn.
+        if (lookup.capExceeded) return session.machine.dispatch({ type: 'cost_cap_exceeded' });
+        looked = lookup.text;
+      }
+      answer = detail ?? looked ?? "I don't have that detail on this one yet.";
+    }
+    const effects: SideEffect[] = [
+      {
+        type: 'audit_log',
+        payload: {
+          eventType: 'agent.calling.intent_confirm.question_answered',
+          sessionId: session.id,
+          tenantId: session.tenantId,
+          state: 'intent_confirm',
+          questionKind: kind,
+          intentType: ctx.currentIntent,
+          ts: Date.now(),
+        },
+      },
+      { type: 'tts_play', payload: { text: answer, source: 'confirm_question' } },
+      {
+        type: 'tts_play',
+        payload: { text: 'intent_confirm', template: 'confirm_intent', intent: ctx.currentIntent },
+      },
+    ];
+    expandIntentConfirmTemplate(effects, ctx.currentIntent ?? 'that');
+    return effects;
+  }
+
+  /**
+   * #1476 — a confirm-step question the pending request cannot answer goes
+   * through the EXISTING lookup path: the unchanged classifier names the
+   * lookup, `answerPhoneLookup` answers it with its S1/D-026 rules intact,
+   * gated on the surface's declared (lookup, surface) cell. Anything else —
+   * a mutation intent, low confidence, a classifier failure — is undefined:
+   * a question never becomes an instruction here.
+   */
+  async function answerConfirmTurnQuestionByLookup(
+    session: VoiceSession,
+    speechResult: string,
+    tenantId: string,
+  ): Promise<{ text?: string; capExceeded: boolean }> {
+    if (!servesFamilyHere('lookup')) return { capExceeded: false };
+    let classification: Awaited<ReturnType<typeof classifyIntent>>;
+    try {
+      classification = await classifyIntent(
+        speechResult,
+        await buildPhoneClassifyContext(session, tenantId),
+        deps.gateway,
+      );
+    } catch (err) {
+      logger.warn('speechTurn: confirm-question classify failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+      return { capExceeded: false };
+    }
+    if (recordCost(session, classification.tokenUsage)) return { capExceeded: true };
+    if (
+      classification.confidence < TAU_INT ||
+      !isLookupIntent(classification.intentType as IntentType)
+    ) {
+      return { capExceeded: false };
+    }
+    const text = await answerPhoneLookup(deps.lookups, {
+      session,
+      tenantId,
+      intent: classification.intentType as IntentType,
+      entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
+    });
+    return { text, capExceeded: false };
   }
 
   function expandIntentConfirmTemplate(
@@ -2500,6 +2643,14 @@ export function createVoiceTurnProcessor(
       // "You'll receive a confirmation shortly".
       const incompleteRequest =
         surfaceAllowed && (degradedFromContract || missingFieldsFor(stored).length > 0);
+      // #1497 — the owner line is an operator surface. The FSM's default
+      // close ("taken care of … You'll receive a confirmation shortly") is
+      // caller copy; to the owner it claims work that has not run. Unless the
+      // card actually executed, say it is drafted and awaiting their approval.
+      // An S1 caller keeps the default: their request IS queued for the
+      // owner, which is what that line reports to them.
+      const operatorAwaitingReview =
+        surfaceAllowed && surface !== 'S1' && stored.status !== 'executed';
       const followUps = session.machine.dispatch({
         type: 'proposal_queued',
         proposalId: stored.id,
@@ -2515,7 +2666,9 @@ export function createVoiceTurnProcessor(
             ? { utterance: bookingUtterance }
             : incompleteRequest
               ? { utterance: CALLER_INCOMPLETE_REQUEST_COPY }
-              : {}),
+              : operatorAwaitingReview
+                ? { utterance: OPERATOR_DRAFTED_FOR_REVIEW_COPY }
+                : {}),
         // WS18 — a grounded ESTIMATE (only) becomes a live, refinable/closeable
         // pendingQuote on the FSM. Scoped to draft_estimate: an invoice quote is
         // for completed work, not a sale to close on the call.
@@ -2891,6 +3044,20 @@ export function createVoiceTurnProcessor(
    * created this session and best-effort releases any tentative appointment
    * hold on a known job. A life-safety call must never leave a booking behind.
    */
+  // #1514 — the unit of work an E1 booking revocation commits in. Inside an
+  // ambient tenant transaction (a request that already owns one) the repos
+  // already share that client, so opening a second connection would only
+  // risk waiting on our own row lock — run in place instead.
+  const ownRevocationTx: TenantTransactionRunner = deps.pool
+    ? new PgTenantTransactionRunner(deps.pool)
+    : new InMemoryTransactionRunner();
+  const revocationTx: Pick<TenantTransactionRunner, 'run'> = {
+    run: (tenantId, fn) =>
+      tenantContextStore.getStore()?.tenantId === tenantId
+        ? new InMemoryTransactionRunner().run(tenantId, fn)
+        : ownRevocationTx.run(tenantId, fn),
+  };
+
   async function handleRevokePendingBookings(
     session: VoiceSession,
     fx: SideEffect,
@@ -2913,22 +3080,32 @@ export function createVoiceTurnProcessor(
           // approved → executing → executed between the read above and the
           // write. `updateStatusIf` folds the precondition into the UPDATE, so
           // a lost race returns null rather than rejecting an executed booking.
-          const revoked = await deps.proposalRepo.updateStatusIf(
-            tenantId,
-            id,
-            REVOCABLE_FROM_STATUSES,
-            'rejected',
-            {
-              rejectionReason: 'life_safety_emergency',
-              rejectionDetails: `Booking revoked — E1 life-safety signal (${reason}) during the call; a hazard call is never booked.`,
-            },
-          );
-          if (revoked) {
-            // Repo rule: all mutations emit an audit event. Cancelling a
-            // customer's booking is exactly what an operator reconstructing an
-            // E1 call will need to see.
-            if (deps.auditRepo) {
-              try {
+          //
+          // #1514 — the status flip and its audit row are ONE unit of work.
+          // They used to be two separate commits, so a reader (an operator,
+          // or main's T1) could see the booking `rejected` before the
+          // `e1_booking_revoked` row existed — and a failed audit insert left
+          // a revoked booking with no trail at all. Both repos reuse the
+          // runner's client (tenantContextStore), so they commit together or
+          // not at all.
+          const proposalRepo = deps.proposalRepo;
+          let revoked: Proposal | null;
+          try {
+            revoked = await revocationTx.run(tenantId, async () => {
+              const flipped = await proposalRepo.updateStatusIf(
+                tenantId,
+                id,
+                REVOCABLE_FROM_STATUSES,
+                'rejected',
+                {
+                  rejectionReason: 'life_safety_emergency',
+                  rejectionDetails: `Booking revoked — E1 life-safety signal (${reason}) during the call; a hazard call is never booked.`,
+                },
+              );
+              // Repo rule: all mutations emit an audit event. Cancelling a
+              // customer's booking is exactly what an operator reconstructing
+              // an E1 call will need to see.
+              if (flipped && deps.auditRepo) {
                 await deps.auditRepo.create(
                   createAuditEvent({
                     tenantId,
@@ -2936,25 +3113,32 @@ export function createVoiceTurnProcessor(
                     actorRole: 'system',
                     eventType: 'agent.calling.e1_booking_revoked',
                     entityType: 'proposal',
-                    entityId: revoked.id,
+                    entityId: flipped.id,
                     correlationId: session.id,
                     metadata: {
-                      proposalId: revoked.id,
-                      proposalType: revoked.proposalType,
+                      proposalId: flipped.id,
+                      proposalType: flipped.proposalType,
                       fromStatus: p.status,
                       reason,
                     },
                   }),
                 );
-              } catch (err) {
-                logger.warn('e1_booking_revoked audit persist failed', {
-                  error: err instanceof Error ? err.message : String(err),
-                  sessionId: session.id,
-                  proposalId: revoked.id,
-                });
               }
-            }
-          } else {
+              return flipped;
+            });
+          } catch (err) {
+            // The unit of work rolled back, so the booking is still LIVE on a
+            // life-safety call — never silent: compensate like a lost race.
+            logger.error('revoke_pending_bookings: revocation rolled back', {
+              error: err instanceof Error ? err.message : String(err),
+              sessionId: session.id,
+              proposalId: id,
+            });
+            const current = await deps.proposalRepo.findById(tenantId, id);
+            await recordRevokeBlocked(session, tenantId, current ?? p);
+            continue;
+          }
+          if (!revoked) {
             // Lost the race. Re-read so the audit/task carry the real status.
             const current = await deps.proposalRepo.findById(tenantId, id);
             await recordRevokeBlocked(session, tenantId, current ?? p);
@@ -4614,6 +4798,21 @@ export function createVoiceTurnProcessor(
       return sideEffectsAll;
     }
 
+    // #1476 — a QUESTION at the readback is neither a yes nor a no; the
+    // confirm_intent skill would read it as "not a yes" → correction, and
+    // the pending request would be lost. Answer it, keep the request,
+    // re-ask. Detection is English-only (confirm-turn-question.ts).
+    const confirmQuestion =
+      currentState === 'intent_confirm' ? detectConfirmTurnQuestion(speechResult) : null;
+    if (confirmQuestion) {
+      sideEffectsAll.push(
+        ...(await answerConfirmTurnQuestion(session, confirmQuestion, speechResult, tenantId)),
+      );
+      await executeSideEffects(session, sideEffectsAll, tenantId);
+      appendAgentTts(deps.store, session.id, sideEffectsAll);
+      return sideEffectsAll;
+    }
+
     if (currentState === 'intent_confirm') {
       try {
         const ctx = session.machine.currentContext;
@@ -5138,6 +5337,7 @@ export function createVoiceTurnProcessor(
     expandDisambiguationTemplate,
     executeSideEffects,
     recordCost,
+    answerConfirmTurnQuestion,
     expandIntentConfirmTemplate,
     resolveVerticalPromptSection,
     resolvePlanPromptSection,

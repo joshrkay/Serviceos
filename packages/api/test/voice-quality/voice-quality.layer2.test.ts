@@ -78,6 +78,8 @@ import {
   type SuiteCostTracker,
 } from '../../src/ai/voice-quality/runner-layer2';
 import { createLayer2AudioDriver } from '../../src/ai/voice-quality/audio/layer2-audio-driver';
+import { buildLayer2FillerCache } from '../../src/ai/voice-quality/audio/layer2-fillers';
+import { FillerEngine } from '../../src/ai/agents/customer-calling/filler-engine';
 import type { WhisperBufferTranscriber } from '../../src/ai/voice-quality/audio/whisper-real-provider';
 import { TtsFixtureCache } from '../../src/ai/voice-quality/audio/tts-fixture-cache';
 import {
@@ -273,10 +275,25 @@ describe('Voice Quality Layer 2 — corpus', () => {
       },
     };
 
+    // #1331 — first-audible is gated like production: the adapter under test
+    // gets the same filler engine + 250 ms filler path app.ts wires. Clips
+    // rendered offline into the production fillers dir are used as-is; the
+    // missing English ones are synthesized once here (see layer2-fillers.ts).
+    const fillers = await buildLayer2FillerCache({
+      fillerDir: path.resolve(__dirname, '../../src/ai/agents/customer-calling/fillers'),
+      synthesize: async (text) => (await layerTwoTtsProvider.synthesize({ text })).audio,
+    });
+    console.log(
+      `Layer 2 fillers: ${fillers.source.onDisk} rendered clip(s) on disk, ` +
+        `${fillers.source.synthesized} synthesized by the harness`,
+    );
+
     const { dispose } = attachMediaStreamServer(httpServer, {
       store: suiteState.voiceSessionStore,
       streamingProvider,
       ttsProvider: layerTwoTtsProvider,
+      fillerEngine: new FillerEngine(),
+      fillerCache: fillers.cache,
       // VQ2-FOLLOWUP — replaces the no-op stub with the real agent loop
       // extracted from TwilioGatherAdapter#processCallerUtterance. The
       // factory closure-captures all helpers (cost, audit, proposal,
@@ -536,6 +553,7 @@ function makeCostCappedResult(scriptId: string): RunScriptLayer2Result {
       },
       callerExperience: {
         ttfaMedianMs: 0,
+        firstAudibleMedianMs: 0,
         lookupMedianMs: 0,
         durationMedianMs: 0,
         repromptRatioMedian: 0,

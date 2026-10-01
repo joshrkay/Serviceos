@@ -11,12 +11,20 @@ const { getDefaultConfig } = require('expo/metro-config');
 const { withNativeWind } = require('nativewind/metro');
 const path = require('path');
 const fs = require('fs');
+const { resolveDevAuth } = require('./scripts/dev-auth-guard.cjs');
 
 const projectRoot = __dirname;
 const workspaceRoot = path.resolve(projectRoot, '../..');
 const sharedSrc = path.resolve(workspaceRoot, 'packages/shared/src');
 
 const config = getDefaultConfig(projectRoot);
+
+// DEV/TEST-ONLY (PRD 3.3, #1015): EXPO_PUBLIC_AUTH_MODE=dev swaps the Clerk SDK
+// for src/dev/clerk-expo-dev-shim.tsx so the Maestro device harness reaches
+// signed-in screens against an API in DEV_AUTH_BYPASS mode. resolveDevAuth
+// THROWS here for a production build (EAS profile other than `development`,
+// or NODE_ENV=production) — see scripts/dev-auth-guard.cjs.
+const devAuth = resolveDevAuth(process.env);
 
 config.watchFolders = [workspaceRoot];
 config.resolver.nodeModulesPaths = [
@@ -26,6 +34,9 @@ config.resolver.nodeModulesPaths = [
 
 const baseResolveRequest = config.resolver.resolveRequest;
 config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (devAuth.shimPath && moduleName === '@clerk/clerk-expo') {
+    return { type: 'sourceFile', filePath: devAuth.shimPath };
+  }
   // Stripe Terminal is native-only; web e2e export must not load NativeModules.
   if (
     platform === 'web' &&

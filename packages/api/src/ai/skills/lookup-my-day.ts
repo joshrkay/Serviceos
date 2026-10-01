@@ -1,91 +1,82 @@
 /**
- * Task 10 (2026-08-07 tradesperson plan) — `lookup_my_day` voice skill.
+ * The ONE schedule lookup — `lookup_my_day`, and (#1498) every other
+ * "what's on the schedule?" question the operator surfaces answer:
+ * `lookup_appointments` asked with no customer, and `lookup_day_overview`'s
+ * appointment sentence. Chat and in-app voice both reach it through
+ * `workers/voice-lookup-answer.ts#executeLookupAnswer`, so the two surfaces
+ * can no longer give two different answers to the same question (the QA
+ * sweep heard "7 appointments today" and "You have nothing left today" for
+ * the same tenant, same minute).
  *
- * The SPEAKER asks about their OWN schedule today ("What's my next job?",
- * "What's on my schedule today?", "Where am I going after this one?").
- * Available to ANY technician — deliberately absent from BOTH
- * `OWNER_EXTENDED_LOOKUP_INTENT_TYPES` and `LOOKUP_REQUIRED_PERMISSION`
- * (intent-classifier.ts / workers/voice-lookup-answer.ts).
+ * ── Scope: whose schedule ────────────────────────────────────────────────
  *
- * ── Self-scoping IS the access control (the single most important
- *    property of this intent) ─────────────────────────────────────────
+ * The CALLER decides, and says so explicitly — there is no default:
+ *   - `technicianId` — a technician's own assignments (via
+ *     `job.assignedTechnicianId`). For a technician this self-scoping IS the
+ *     access control: `lookup_my_day` carries no permission gate, so the
+ *     caller resolves the speaker (`resolveCanonicalUser`) BEFORE this runs
+ *     and fails the turn when it can't — never falling back to a wider day.
+ *   - `wholeTenant: true` — the business's schedule. Only for an actor whose
+ *     DB-authoritative role holds `dispatch:view` (owner, dispatcher): an
+ *     owner asking "what's on my schedule today?" means the business's day,
+ *     and scoping them to their own (usually empty) assignment list is what
+ *     produced "nothing left today" against a seven-visit day.
  *
- * Because this intent carries no permission gate, `technicianId` on
- * `LookupMyDayInput` is REQUIRED, not optional — there is no code path in
- * this module that can answer without one. The CALLER
- * (workers/voice-lookup-answer.ts's `lookup_my_day` case) resolves the
- * asking actor via `users/user.ts`'s `resolveCanonicalUser` BEFORE this
- * skill ever runs, and returns `{ kind: 'failed', error: 'could not match
- * you to a technician' }` immediately when that resolution fails — this
- * skill is never invoked with an unresolved or absent identity, and never
- * falls back to a tenant-wide or whole-crew day. Mirrors
- * `lookup_job_profit`'s "the job is resolved upstream" contract, applied
- * to the speaker's own identity instead of a spoken job reference.
+ * ── Which day ────────────────────────────────────────────────────────────
  *
- * ── Data shape mirrors lookup-day-overview.ts, self-scoped ──────────────
+ * `day` is a tenant-local `YYYY-MM-DD` the caller resolved from the words
+ * ("tomorrow", "Friday"); absent means TODAY in the tenant's zone. The answer
+ * always names the day it reports ("today", "tomorrow", "on Friday,
+ * October 2"), so a misheard day is audible rather than silent.
  *
- * Reuses the exact same bounded-fetch pattern `lookup-day-overview.ts`
- * established: today's appointments via
- * `AppointmentRepository.findByDateRange` (bounded to the day, tenant-
- * wide), technician assignment via `job.assignedTechnicianId` (never a
- * second, unbounded `AssignmentRepository.findByTechnician` fetch — see
- * `lookup-crew-schedule.ts`'s identical rationale).
+ * ── What "left today" means (precisely) ──────────────────────────────────
  *
- * Jobs are resolved by id from TODAY's appointments alone
- * (`JobRepository.findByIds`, quality-review C2) — NOT a
- * `findByTenant({ technicianId, limit })` page. That page is ordered by
- * `createdAt DESC`, so once a technician has done more jobs than the page
- * limit over their tenure, a job created long ago that still has a live
- * appointment today silently falls off the page and the appointment is
- * filtered out of "my day" entirely — a technician who has worked at a
- * shop for over a year (a normal tenure, not an edge case) would
- * routinely be told their real day was clear. `findByIds` is bounded to
- * exactly the day's distinct job ids and correct at any job-count
- * history.
+ * A day's appointments are every visit that day that was not canceled or a
+ * no-show. Of those, the ones LEFT are the ones not marked completed whose
+ * scheduled end has not passed yet. For today the answer gives both numbers
+ * when they differ ("You have 4 appointments today, 1 still ahead: …"), and
+ * "Nothing left today" is said ONLY when the day had visits and none remain
+ * — it is never used for an empty day, which is "nothing on the schedule
+ * today". Another day has nothing "left": every visit on it is listed.
  *
- * No urgent-jobs section, no pending-approvals count, no overnight
- * digest — those are owner-facing concepts `lookup_day_overview` speaks;
- * this intent is deliberately just "your appointments today."
- *
- * ── Only what's STILL ahead today (quality-review I5) ────────────────────
- *
- * Filtered to appointments that are not yet finished
- * (`status !== 'completed'` AND `scheduledEnd >= now`) — a DELIBERATE
- * divergence from `lookup-day-overview.ts`, which speaks the WHOLE day
- * unfiltered by time (including appointments already past). The taxonomy
- * (intent-classifier.ts) advertises "What's my next job?" and "Where am I
- * going after this one?" for this intent — phrasings that promise
- * FORWARD-looking information; a technician asking at 3pm must not hear
- * their 8am job read back first (or at all). `lookup_crew_schedule` makes
- * the OPPOSITE choice for the SAME "completed" status on purpose — from a
- * dispatcher's planning perspective a completed job still occupied that
- * technician's day, which is exactly what "who was busy" needs to answer
- * correctly. Two different questions, two different correct filters.
+ * Jobs are resolved by id from the day's appointments alone
+ * (`JobRepository.findByIds`, quality-review C2) — never a
+ * `findByTenant({ limit })` page, which drops an old job with a live
+ * appointment once the tenant has more jobs than the page holds.
  */
 import type { Appointment, AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
+import type { UserRepository } from '../../users/user';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
 import { resolveDayWindow } from '../../reports/money-dashboard';
-import { localDateString } from '../../digest/digest-service';
-import { plural, formatTime } from './spoken-format';
+import { localDateString, nextDateString } from '../../digest/digest-service';
+import { plural, formatTime, technicianDisplayName } from './spoken-format';
 
-export interface LookupMyDayInput {
+export type LookupMyDayInput = {
   tenantId: string;
   sessionId?: string;
-  /**
-   * The SPEAKER's own canonical technician id, already resolved by the
-   * caller (`users/user.ts`'s `resolveCanonicalUser`). REQUIRED — see
-   * module doc comment: this is not an optional narrowing filter, it is
-   * the entire access-control story for this intent.
-   */
-  technicianId: string;
   timezone?: string;
   now?: Date;
-}
+  /** Tenant-local `YYYY-MM-DD`; absent → today. */
+  day?: string;
+} & (
+  | {
+      /**
+       * The SPEAKER's own canonical technician id, already resolved by the
+       * caller — see the module doc: for a technician this is the whole
+       * access-control story.
+       */
+      technicianId: string;
+      wholeTenant?: never;
+    }
+  | { wholeTenant: true; technicianId?: never }
+);
 
 export interface LookupMyDayDeps {
   appointmentRepo: AppointmentRepository;
   jobRepo: Pick<JobRepository, 'findByIds'>;
+  /** Optional — crew names on a whole-tenant schedule. Decorative. */
+  userRepo?: Pick<UserRepository, 'findByTenant'>;
   lookupEvents?: LookupEventService;
 }
 
@@ -95,19 +86,71 @@ export interface MyDayAppointment {
   jobSummary?: string;
   scheduledStart: Date;
   scheduledEnd: Date;
+  technicianName?: string;
 }
 
 export type LookupMyDayResult =
   | {
       status: 'found' | 'none';
       summary: string;
-      data: { appointments: MyDayAppointment[] };
+      data: {
+        /** The tenant-local day reported, `YYYY-MM-DD`. */
+        day: string;
+        /** Every visit that day (not canceled / no-show), in start order. */
+        dayAppointments: MyDayAppointment[];
+        /** The visits still LEFT (today) — or all of them (another day). */
+        appointments: MyDayAppointment[];
+      };
     }
   | { status: 'error'; summary: string; data: { error: string } };
 
 const DEFAULT_TIMEZONE = 'America/New_York';
 /** Spoken cap — a busy day must not become a monologue. */
 const MAX_SPOKEN_APPOINTMENTS = 5;
+
+/** "today" / "tomorrow" / "on Friday, October 2" — the day, as spoken. */
+function dayLabel(day: string, today: string, timezone: string): string {
+  if (day === today) return 'today';
+  if (day === nextDateString(today)) return 'tomorrow';
+  const noon = new Date(resolveDayWindow(day, timezone).start.getTime() + 12 * 3_600_000);
+  return `on ${new Intl.DateTimeFormat('en-US', {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    timeZone: timezone,
+  }).format(noon)}`;
+}
+
+function spokenList(appointments: MyDayAppointment[], timezone: string): string {
+  const spoken = appointments.slice(0, MAX_SPOKEN_APPOINTMENTS).map((a) => {
+    const what = a.jobSummary ? ` — ${a.jobSummary}` : '';
+    const who = a.technicianName ? ` with ${a.technicianName}` : '';
+    return `${formatTime(a.scheduledStart, timezone)}${what}${who}`;
+  });
+  const rest = appointments.length - spoken.length;
+  return `${spoken.join('; ')}${rest > 0 ? `; and ${rest} more` : ''}`;
+}
+
+function summarize(
+  label: string,
+  isToday: boolean,
+  dayAppointments: MyDayAppointment[],
+  left: MyDayAppointment[],
+  timezone: string,
+): string {
+  const total = dayAppointments.length;
+  const noun = plural(total, 'appointment');
+  if (total === 0) {
+    return isToday ? 'You have nothing on the schedule today.' : `Nothing is scheduled ${label}.`;
+  }
+  if (!isToday || left.length === total) {
+    return `You have ${total} ${noun} ${label}: ${spokenList(dayAppointments, timezone)}.`;
+  }
+  if (left.length === 0) {
+    return `Nothing left today — ${total === 1 ? "today's one appointment is" : `all ${total} of today's appointments are`} behind you.`;
+  }
+  return `You have ${total} ${noun} today, ${left.length} still ahead: ${spokenList(left, timezone)}.`;
+}
 
 export async function lookupMyDay(
   input: LookupMyDayInput,
@@ -139,73 +182,65 @@ export async function lookupMyDay(
   };
 
   try {
-    const today = resolveDayWindow(localDateString(now, timezone), timezone);
+    // No scope, no answer: this module never guesses whose day to read.
+    if (!input.wholeTenant && !input.technicianId) {
+      throw new Error('schedule lookup needs a technician or the whole tenant');
+    }
+    const today = localDateString(now, timezone);
+    const day = input.day ?? today;
+    const isToday = day === today;
+    const window = resolveDayWindow(day, timezone);
 
-    // Bounded to TODAY, tenant-wide (mirrors lookup-day-overview.ts).
     const rawAppointments = await deps.appointmentRepo.findByDateRange(
       input.tenantId,
-      today.start,
-      today.end,
+      window.start,
+      window.end,
     );
-
-    // Jobs resolved by id from TODAY's appointments only (C2) — never a
-    // findByTenant({ technicianId, limit }) page, which is ordered by
-    // createdAt DESC and silently drops an old job with a live
-    // appointment today once a technician has more jobs than the page
-    // limit in their history. See module doc comment.
-    const jobIds = Array.from(new Set(rawAppointments.map((a) => a.jobId)));
+    const live = rawAppointments.filter(
+      (a: Appointment) => a.status !== 'canceled' && a.status !== 'no_show',
+    );
+    const jobIds = Array.from(new Set(live.map((a) => a.jobId)));
     const jobs = jobIds.length > 0 ? await deps.jobRepo.findByIds(input.tenantId, jobIds) : [];
     const jobById = new Map(jobs.map((j) => [j.id, j] as const));
 
-    const appointments: MyDayAppointment[] = rawAppointments
-      .filter((a: Appointment) => {
-        if (a.status === 'canceled' || a.status === 'no_show' || a.status === 'completed') {
-          return false;
-        }
-        // I5 — only what's still ahead: "what's my next job" must never
-        // read back a visit that's already over. See module doc comment.
-        if (a.scheduledEnd < now) return false;
-        const job = jobById.get(a.jobId);
-        // Strictly scoped to THIS technician's own assignment — never a
-        // coworker's appointment on a job this fetch happened to load.
-        return job?.assignedTechnicianId === input.technicianId;
-      })
+    let nameById = new Map<string, string>();
+    if (input.wholeTenant && deps.userRepo) {
+      try {
+        const users = await deps.userRepo.findByTenant(input.tenantId);
+        nameById = new Map(users.map((u) => [u.id, technicianDisplayName(u)]));
+      } catch {
+        // Names are decorative — never fail the schedule over them.
+      }
+    }
+
+    const dayAppointments: MyDayAppointment[] = live
+      // Strictly the technician's own assignments when scoped to one —
+      // never a coworker's visit on a job this fetch happened to load.
+      .filter((a) => input.wholeTenant || jobById.get(a.jobId)?.assignedTechnicianId === input.technicianId)
       .sort((a, b) => a.scheduledStart.getTime() - b.scheduledStart.getTime())
       .map((a) => {
         const job = jobById.get(a.jobId);
+        const technicianName = job?.assignedTechnicianId ? nameById.get(job.assignedTechnicianId) : undefined;
         return {
           appointmentId: a.id,
           jobId: a.jobId,
           ...(job?.summary ? { jobSummary: job.summary } : {}),
           scheduledStart: a.scheduledStart,
           scheduledEnd: a.scheduledEnd,
+          ...(technicianName ? { technicianName } : {}),
         };
       });
+    const statusById = new Map(live.map((a) => [a.id, a.status] as const));
+    const left = isToday
+      ? dayAppointments.filter(
+          (a) => statusById.get(a.appointmentId) !== 'completed' && a.scheduledEnd >= now,
+        )
+      : dayAppointments;
 
-    if (appointments.length === 0) {
-      // Task 10 residual (two re-reviews) — "clear" reads as "you had
-      // nothing on today", which is false at 5pm after a full day of
-      // already-worked (now-filtered-out, per I5 above) appointments.
-      // "Nothing left today" is honest either way: no day happened at
-      // all, or a full day already happened and finished. Quality-review
-      // minor — "You have nothing left today." reads better spoken than
-      // the bare fragment.
-      const summary = 'You have nothing left today.';
-      await record('none', 0, summary);
-      return { status: 'none', summary, data: { appointments: [] } };
-    }
-
-    const spoken = appointments.slice(0, MAX_SPOKEN_APPOINTMENTS).map((a) => {
-      const time = formatTime(a.scheduledStart, timezone);
-      return `${time}${a.jobSummary ? ` — ${a.jobSummary}` : ''}`;
-    });
-    const rest = appointments.length - spoken.length;
-    const summary =
-      `You have ${appointments.length} ${plural(appointments.length, 'appointment')} left today: ` +
-      `${spoken.join('; ')}${rest > 0 ? `; and ${rest} more` : ''}.`;
-
-    await record('found', appointments.length, summary);
-    return { status: 'found', summary, data: { appointments } };
+    const summary = summarize(dayLabel(day, today, timezone), isToday, dayAppointments, left, timezone);
+    const status = left.length > 0 ? 'found' : 'none';
+    await record(status, left.length, summary);
+    return { status, summary, data: { day, dayAppointments, appointments: left } };
   } catch (err) {
     const summary = "I'm having trouble pulling up your day right now.";
     await record('error', 0, summary);

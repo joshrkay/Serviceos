@@ -41,7 +41,7 @@
  */
 import type { Pool } from 'pg';
 import type { Estimate, EstimateRepository } from './estimate';
-import type { SendChannel, SendService } from '../notifications/send-service';
+import type { SendChannel, SendResult, SendService } from '../notifications/send-service';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { withSendClaim } from '../notifications/send-claim-ledger';
 
@@ -127,6 +127,16 @@ export async function dispatchEstimateNudge(
     idempotencyContext: estimateNudgeClaimKey(estimate.id, estimate.version, occurrence),
   };
 
+  // #1528 — the channel the nudge actually went out on. With 'auto' the
+  // send picks it (email on file, else a text); the audit names what it
+  // picked. A reconciled 'sent' tombstone carries no send result, so it keeps
+  // the requested channel.
+  let sentChannel: SendChannel = channel;
+  const recordSent = (result: SendResult | undefined) => {
+    const used = result?.channelsSent?.map((c) => c.channel) ?? [];
+    if (used.length === 1) sentChannel = used[0];
+  };
+
   if (deps.pool) {
     const claimKey = estimateNudgeClaimKey(estimate.id, estimate.version, occurrence);
     // Deferred 'sending' transition (Codex P1, PR #705): sendEstimate does
@@ -160,9 +170,11 @@ export async function dispatchEstimateNudge(
       if (outcome.priorStatus !== 'sent') {
         throw new EstimateNudgeAlreadyClaimedError(estimate.id, occurrence);
       }
+    } else {
+      recordSent(outcome.result);
     }
   } else {
-    await deps.sendService.sendEstimate(sendInput);
+    recordSent(await deps.sendService.sendEstimate(sendInput));
   }
 
   await deps.estimateRepo.update(tenantId, estimate.id, {
@@ -183,7 +195,7 @@ export async function dispatchEstimateNudge(
         metadata: {
           estimateNumber: estimate.estimateNumber,
           reminderCount: occurrence,
-          channel,
+          channel: sentChannel,
         },
       }),
     );

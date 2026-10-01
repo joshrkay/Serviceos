@@ -1,0 +1,23 @@
+# PRD 5.4 (#1018) phase B — process death while the note is still queued.
+# killApp is a real "System-initiated Process Death" on Android (research
+# #1002). Still offline on relaunch, the journaled item must be recovered, not
+# lost: the root-level banner shows it waiting again. The harness then re-reads
+# the journal and asserts the SAME idempotency key and the audio file still there.
+# No signed-in subflow here: offline, GET /api/onboarding/status fails and the
+# gate fails open, so there is no onboarding screen to skip — the banner sits
+# above every screen (app/_layout.tsx).
+# (The mid-flush kill window — crash between verify and POST /recordings — is
+# timing-dependent and NOT covered by this flow; see the PRD 5.4 row.)
+appId: com.serviceos.app
+name: PRD 5.4 B — queued note survives process death
+tags:
+  - prd-5.4
+---
+- killApp
+- launchApp:
+    clearState: false
+- extendedWaitUntil:
+    visible: "You're offline — 1 action waiting\\."
+    timeout: 120000
+- assertNotVisible: "Check your email"
+- takeScreenshot: prd-5.4-b-relaunched-still-queued

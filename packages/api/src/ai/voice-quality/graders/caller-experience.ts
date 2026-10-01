@@ -25,6 +25,7 @@
  */
 import {
   ttfaPerTurn,
+  firstAudiblePerTurn,
   lookupToSpeakLatency,
   totalCallDurationMs,
 } from '../audio/audio-timings';
@@ -52,6 +53,12 @@ export const DEFAULT_CALLER_EXPERIENCE_THRESHOLDS: CallerExperienceThresholds = 
 export interface CallerExperienceResult {
   /** Computed P95 of per-turn TTFA values (0 when no turns recorded). */
   ttfaP95Ms: number;
+  /**
+   * #1331 — P95 of per-turn first-audible latency (filler or first reply
+   * frame; 0 when no turns recorded). Informational here; the Layer 2
+   * launch gate budgets it.
+   */
+  firstAudibleP95Ms: number;
   /** Computed P95 of lookup→speak latencies (0 when no lookups recorded). */
   lookupP95Ms: number;
   /** Total wall-clock duration of the call from event-bus timestamps. */
@@ -108,6 +115,7 @@ export function gradeCallerExperience(
 
   return {
     ttfaP95Ms: ttfaP95,
+    firstAudibleP95Ms: percentile(firstAudiblePerTurn(observation.events), 95),
     lookupP95Ms: lookupP95,
     totalDurationMs: totalMs,
     passes,

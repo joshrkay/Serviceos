@@ -100,6 +100,7 @@ import { lookupCrewSchedule } from '../ai/skills/lookup-crew-schedule';
 import { lookupTimesheets } from '../ai/skills/lookup-timesheets';
 import { lookupMyDay } from '../ai/skills/lookup-my-day';
 import { formatHours } from '../ai/skills/spoken-format';
+import { resolveSpokenDay } from '../ai/scheduling/resolve-datetime';
 
 /**
  * Permission-gated lookups: the DB-authoritative permission the ASKING
@@ -310,6 +311,36 @@ const LEADS_REFUSAL_SUMMARY =
 export const LOOKUP_UNAVAILABLE_LINE =
   "I'm having trouble pulling that up right now. Let me get a person to help.";
 
+/**
+ * Does the asking actor's DB-authoritative role hold `permission`? Fails
+ * closed: no resolver, no actor, an unknown role or a resolver error → false.
+ */
+export async function actorHolds(
+  deps: VoiceLookupAnswerDeps,
+  tenantId: string,
+  actorId: string | undefined,
+  permission: Permission,
+): Promise<boolean> {
+  if (!deps.resolveMemberRole || !actorId) return false;
+  try {
+    const role = await deps.resolveMemberRole(tenantId, actorId);
+    return Boolean(role && isValidRole(role) && hasPermission(role, permission));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The tenant-local day a schedule question names ("tomorrow" → 2026-09-30),
+ * or undefined for "today" / no phrase / a phrase naming no one day. The
+ * schedule answer always says which day it reports, so falling back to
+ * today on an unreadable phrase is audible, never silent.
+ */
+function spokenDay(phrase: string | undefined, timezone: string | undefined, now: Date): string | undefined {
+  if (!phrase) return undefined;
+  return resolveSpokenDay(phrase, { ...(timezone ? { timezone } : {}), now }) ?? undefined;
+}
+
 /** Honest per-intent refusal copy — never data, never a fabricated answer. */
 export function refusalSummary(intent: IntentType): string {
   if (intent === 'lookup_catalog') return CATALOG_REFUSAL_SUMMARY;
@@ -386,18 +417,9 @@ export async function executeLookupAnswer(
 
   // ── Authorization gate (permission-gated lookups fail closed) ───────────
   const requiredPermission = LOOKUP_REQUIRED_PERMISSION.get(intent);
-  if (requiredPermission) {
-    let role: string | null = null;
-    if (deps.resolveMemberRole && input.actorId) {
-      try {
-        role = await deps.resolveMemberRole(tenantId, input.actorId);
-      } catch {
-        role = null; // fail closed — refusal, never data
-      }
-    }
-    if (!role || !isValidRole(role) || !hasPermission(role, requiredPermission)) {
-      return { kind: 'answer', answer: buildAnswer(intent, 'refused', refusalSummary(intent)) };
-    }
+  if (requiredPermission && !(await actorHolds(deps, tenantId, input.actorId, requiredPermission))) {
+    // Fail closed — refusal, never data.
+    return { kind: 'answer', answer: buildAnswer(intent, 'refused', refusalSummary(intent)) };
   }
 
   // ── Customer-scoped lookups require a resolved customerId ───────────────
@@ -890,33 +912,47 @@ export async function executeLookupAnswer(
         return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
       }
 
-      // Task 10 — the SPEAKER asks about their OWN schedule today.
-      // Deliberately NOT in LOOKUP_REQUIRED_PERMISSION (available to any
-      // technician) — self-scoping to the resolved SPEAKER is this
-      // intent's entire access-control story, so the speaker is resolved
-      // to a concrete technician HERE, before the skill ever runs. An
-      // unresolvable speaker fails the turn — it must NEVER fall back to
-      // an unscoped (whole-crew) answer.
+      // Task 10 / #1498 — the ONE schedule lookup (ai/skills/lookup-my-day.ts
+      // documents scope, day and the "left today" rule). Deliberately NOT in
+      // LOOKUP_REQUIRED_PERMISSION: any technician may hear their own day.
+      // WHOSE day is decided here, from the DB-authoritative role:
+      //   - `dispatch:view` (owner, dispatcher) → the business's schedule;
+      //   - anyone else → the resolved SPEAKER's own assignments. An
+      //     unresolvable speaker fails the turn — it must NEVER fall back to
+      //     an unscoped (whole-crew) answer. An unresolvable ROLE fails
+      //     closed to that same self-scoped path.
       case 'lookup_my_day': {
-        if (!shared.appointmentRepo || !shared.jobRepo || !shared.userRepo) {
-          return { kind: 'unsupported' };
+        if (!shared.appointmentRepo || !shared.jobRepo) return { kind: 'unsupported' };
+        let scope: { wholeTenant: true } | { technicianId: string };
+        if (await actorHolds(deps, tenantId, input.actorId, 'dispatch:view')) {
+          scope = { wholeTenant: true };
+        } else {
+          if (!shared.userRepo) return { kind: 'unsupported' };
+          if (!input.actorId) {
+            return { kind: 'failed', error: 'could not match you to a technician' };
+          }
+          const technician = await resolveCanonicalUser(shared.userRepo, tenantId, input.actorId);
+          if (!technician) {
+            return { kind: 'failed', error: 'could not match you to a technician' };
+          }
+          scope = { technicianId: technician.id };
         }
-        if (!input.actorId) {
-          return { kind: 'failed', error: 'could not match you to a technician' };
-        }
-        const technician = await resolveCanonicalUser(shared.userRepo, tenantId, input.actorId);
-        if (!technician) {
-          return { kind: 'failed', error: 'could not match you to a technician' };
-        }
+        const day = spokenDay(input.dateTimeDescription, timezone, now);
         const r = await lookupMyDay(
           {
             tenantId,
             sessionId,
-            technicianId: technician.id,
+            ...scope,
+            ...(day ? { day } : {}),
             ...(timezone ? { timezone } : {}),
             now,
           },
-          { appointmentRepo: shared.appointmentRepo, jobRepo: shared.jobRepo, ...events },
+          {
+            appointmentRepo: shared.appointmentRepo,
+            jobRepo: shared.jobRepo,
+            ...(shared.userRepo ? { userRepo: shared.userRepo } : {}),
+            ...events,
+          },
         );
         if (r.status === 'error') return { kind: 'failed', error: r.data.error };
         const rows: VoiceAnswerRow[] =
@@ -942,8 +978,15 @@ export async function executeLookupAnswer(
 
       case 'lookup_day_overview': {
         if (!shared.appointmentRepo || !shared.jobRepo) return { kind: 'unsupported' };
+        const overviewDay = spokenDay(input.dateTimeDescription, timezone, now);
         const r = await lookupDayOverview(
-          { tenantId, sessionId, now, ...(timezone ? { timezone } : {}) },
+          {
+            tenantId,
+            sessionId,
+            now,
+            ...(timezone ? { timezone } : {}),
+            ...(overviewDay ? { day: overviewDay } : {}),
+          },
           {
             appointmentRepo: shared.appointmentRepo,
             jobRepo: shared.jobRepo,

@@ -95,6 +95,13 @@ updates:
         update-types: ['version-update:semver-minor']
       - dependency-name: 'react-native-*'
         update-types: ['version-update:semver-minor']
+      # nativewind 4.2 pulls react-native-css-interop 0.2, whose Babel preset
+      # names react-native-worklets/plugin (Reanimated 4 / SDK 54+). On SDK 52
+      # + Reanimated 3 every Metro bundle then fails (Maestro run 36765536371).
+      # Pinned to 4.1.x until the Expo SDK upgrade; src/dev/babelToolchain.test.ts
+      # guards the pairing.
+      - dependency-name: 'nativewind'
+        update-types: ['version-update:semver-minor']
 
   - package-ecosystem: github-actions
     directory: '/'

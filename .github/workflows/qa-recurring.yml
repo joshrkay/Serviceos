@@ -1,37 +1,109 @@
-name: QA Recurring Daily
+name: QA Recurring Every 2 Days
 
 on:
   schedule:
     - cron: '0 4 * * *'
   workflow_dispatch:
+    inputs:
+      force_run:
+        description: 'Skip 48-hour gate and run immediately'
+        required: false
+        default: 'false'
 
 jobs:
   qa-run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Check if 48 hours have passed since last QA run
+        id: gate
+        run: |
+          # Daily schedule; internal gate ensures ~48-hour spacing across month boundaries.
+          # Query for runs that produced actual QA reports (not gate-only skips).
+          LAST_RUN=""
+          for run_id in $(gh run list --workflow qa-recurring.yml --status success --limit 50 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$run_id" --dir /tmp/qa-check --pattern '**/qa-status.json' 2>/dev/null; then
+              LAST_RUN="$run_id"
+              break
+            fi
+          done
+
+          if [ -z "$LAST_RUN" ] || [ "$FORCE_RUN" = "true" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            LAST_TS=$(gh run view "$LAST_RUN" --json completedAt --jq '.completedAt' 2>/dev/null || echo "")
+            if [ -z "$LAST_TS" ]; then
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+            else
+              LAST_EPOCH=$(date -d "$LAST_TS" +%s 2>/dev/null || echo "0")
+              NOW_EPOCH=$(date +%s)
+              DIFF_SECONDS=$((NOW_EPOCH - LAST_EPOCH))
+              DIFF_HOURS=$((DIFF_SECONDS / 3600))
+
+              if [ "$DIFF_HOURS" -ge 48 ]; then
+                echo "should_run=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "should_run=false" >> "$GITHUB_OUTPUT"
+                echo "Last QA test execution was $DIFF_HOURS hours ago (need 48+); skipping."
+              fi
+            fi
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_RUN: ${{ github.event.inputs.force_run }}
+
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: steps.gate.outputs.should_run == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '20'
           cache: npm
 
       - name: Install dependencies
+        if: steps.gate.outputs.should_run == 'true'
         run: npm ci
 
+      - name: Download previous QA artifacts
+        if: steps.gate.outputs.should_run == 'true'
+        run: |
+          mkdir -p qa/reports/previous
+          # Find the latest run that has an actual QA report artifact
+          LAST_RUN=""
+          for run_id in $(gh run list --workflow qa-recurring.yml --status success --limit 50 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$run_id" --dir /tmp/qa-latest --pattern '**/qa-status.json' 2>/dev/null; then
+              LAST_RUN="$run_id"
+              break
+            fi
+          done
+
+          if [ -n "$LAST_RUN" ]; then
+            # Extract the artifact and flatten it into the expected directory
+            gh run download "$LAST_RUN" --dir /tmp/qa-extract --repo ${{ github.repository }} 2>/dev/null
+            # Copy qa-status.json to the comparison script's expected location
+            find /tmp/qa-extract -name 'qa-status.json' -exec cp {} qa/reports/previous/qa-status.json \;
+            echo "Restored previous QA report from run $LAST_RUN"
+          else
+            echo "No previous QA artifacts found (first run)."
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Fix apt sources and update
+        if: steps.gate.outputs.should_run == 'true'
         run: |
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
           sudo apt-get update -qq || true
 
       - name: Install Playwright Chromium
+        if: steps.gate.outputs.should_run == 'true'
         run: npx playwright install --with-deps chromium
 
       - name: Run QA suite
+        if: steps.gate.outputs.should_run == 'true'
         run: |
           chmod +x ./scripts/qa-comparison.sh
           ./scripts/qa-comparison.sh --verbose
@@ -40,7 +112,7 @@ jobs:
           E2E_API_URL: ${{ secrets.E2E_API_URL }}
 
       - name: Upload QA reports
-        if: always()
+        if: always() && steps.gate.outputs.should_run == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: qa-reports-${{ github.run_id }}
@@ -48,7 +120,7 @@ jobs:
           retention-days: 90
 
       - name: Check QA results
-        if: always()
+        if: always() && steps.gate.outputs.should_run == 'true'
         run: |
           if [ -d "qa/reports" ]; then
             echo "QA reports directory created"

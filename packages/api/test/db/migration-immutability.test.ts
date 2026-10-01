@@ -572,6 +572,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['300_sms_recipient_sends', 'fa81cb555d36784af228249bbd086acc43f83c5238b20cfd765491bf755f8d05'],
   // #1478 — repair the legacy trg_no_double_booking function's status set in place.
   ['301_legacy_double_booking_trigger_statuses', '9ce706b061f7ac1a8db7850127a141c16dcd4e784eb3a8bf15dbce31b1a26303'],
+  // #1489 — HTTP Idempotency-Key store for the create routes (idempotency_keys).
+  ['302_idempotency_keys', '731622d3be77734b7b1bbb31ea6a15ab07f6787d689d4f236cba7349ad7f8eb4'],
 ];
 
 function hashMigration(value: string): string {

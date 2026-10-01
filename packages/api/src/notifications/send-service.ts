@@ -23,7 +23,22 @@ import {
 import { DeliveryError } from './notification-errors';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 
-export type SendChannel = 'sms' | 'email' | 'both';
+export type SendChannel = 'sms' | 'email' | 'both' | 'auto';
+
+/**
+ * #1524 — the channel a send with no channel named goes out on: the
+ * customer's email when one is on file, else a text to their phone; nothing
+ * when neither is on file. The one rule the approval-time recipient check and
+ * the send itself share.
+ */
+export function defaultSendChannel(customer: {
+  email?: string | null;
+  primaryPhone?: string | null;
+}): 'email' | 'sms' | undefined {
+  if (typeof customer.email === 'string' && customer.email.trim().length > 0) return 'email';
+  if (typeof customer.primaryPhone === 'string' && customer.primaryPhone.trim().length > 0) return 'sms';
+  return undefined;
+}
 
 /**
  * #1145 — caller-supplied tag identifying WHY this send is happening,
@@ -98,7 +113,7 @@ export interface SendPortalLinkResult {
  * 'void'/'canceled' are dead invoices with nothing to collect. See the
  * sendInvoice() guard below.
  */
-const UNSENDABLE_INVOICE_STATUSES: ReadonlySet<InvoiceStatus> = new Set([
+export const UNSENDABLE_INVOICE_STATUSES: ReadonlySet<InvoiceStatus> = new Set([
   'draft',
   'void',
   'canceled',
@@ -777,6 +792,15 @@ function resolveChannels(args: {
   recipientEmail?: string;
 }): ChannelTarget[] {
   const targets: ChannelTarget[] = [];
+  if (args.channel === 'auto') {
+    const picked = defaultSendChannel(args.customer);
+    if (!picked) {
+      throw new ValidationError(
+        'Cannot send — the customer has no email or phone number on file'
+      );
+    }
+    return resolveChannels({ ...args, channel: picked });
+  }
   const wantSms = args.channel === 'sms' || args.channel === 'both';
   const wantEmail = args.channel === 'email' || args.channel === 'both';
 

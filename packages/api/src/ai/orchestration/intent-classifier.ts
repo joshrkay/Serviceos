@@ -618,8 +618,26 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           example. Paid for by dropping the skill-routing notes from the
  *           lookup_invoices / lookup_availability blocks (caller first turn
  *           shrinks net). No intent or slot changes.
+ *   1.21.0 — #1469 + #1468 (live voice eval, 2026-09-30). Prompt text +
+ *           one new entity slot, no intent changes. (a) Operator-voiced
+ *           lookups: lookup_jobs (a named job / work order, filtered job
+ *           lists), lookup_account_summary (a named customer's history) and
+ *           lookup_leads (lists filtered by source / follow-up status, not
+ *           only a count) — the live model sent these to `unknown`. The
+ *           caller profile keeps its caller-voiced lookup_jobs /
+ *           lookup_account_summary blocks via INTENT_BLOCK_VARIANTS (budget).
+ *           (b) A distinction rule: a QUESTION about a booking =
+ *           lookup_appointments, a STATEMENT of attendance =
+ *           confirm_appointment. (c) New `problemDescription` entity (the
+ *           problem as described) on create_appointment / create_job /
+ *           emergency_dispatch, and `serviceAddress` now also asked on
+ *           create_appointment / emergency_dispatch — both projected by
+ *           extractLaunchSlots (voice/launch-slots.ts). (d) The customerName
+ *           field also carries the caller's own name, and the
+ *           reschedule_appointment / emergency_dispatch blocks ask for it
+ *           (the live model left it empty on those calls).
  */
-export const INTENT_TAXONOMY_VERSION = '1.20.0';
+export const INTENT_TAXONOMY_VERSION = '1.21.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -796,6 +814,11 @@ export interface ExtractedEntities {
   paymentReference?: string;
   // create_job intent: title of the new job.
   jobTitle?: string;
+  // #1468 — create_appointment / create_job / emergency_dispatch: the
+  // caller's problem or symptoms in their own words ("water heater leaking
+  // from the bottom"). Distinct from jobTitle (a short NAME for the work):
+  // the launch-slot `problem_description` is sourced from here first.
+  problemDescription?: string;
   // update_customer intent. These hold the NEW values the caller wants
   // written to an EXISTING customer record (resolved via customerName or
   // the identified caller). Kept distinct from create_customer's
@@ -2099,6 +2122,50 @@ export function matchAppointmentChangeOpening(
 }
 
 /**
+ * #1018 row 5.3 — deterministic short-circuit for the stereotyped spoken
+ * time log: "log two hours on the Garcia job". Same technique #1119 used for
+ * the confirm/move/cancel turns: without a live model (the hermetic no-key
+ * gateway) this utterance classified `unknown`, so a technician could never
+ * log hours by talking.
+ *
+ * ANCHORED and narrow: a spelled or numeric duration in hours/minutes and a
+ * "the <X> job" reference, nothing else. Anything richer ("log two hours on
+ * the Garcia job and add a note") falls through to the LLM with its
+ * extraction intact. The duration lands in whole minutes (the unit
+ * `time_entries.duration_minutes` stores) and the job reference goes through
+ * the SAME entity resolver (`JOB_REF_INTENTS`) the LLM-classified path uses.
+ *
+ * Safe for a WRITE intent for the usual reasons: D-004 — the result is a
+ * capture proposal a human confirms, and `LogTimeEntryTaskHandler` gates on a
+ * resolved `jobId`. The caller gates the match on the classifier profile.
+ */
+const SPOKEN_DURATION_NUMBERS: Readonly<Record<string, number>> = {
+  a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
+  eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20,
+  thirty: 30, forty: 40, 'forty-five': 45, fifty: 50,
+};
+const LOG_TIME_PATTERN = new RegExp(
+  String.raw`^\s*(?:please\s+)?(?:log|put\s+(?:me\s+)?down(?:\s+for)?)\s+` +
+    String.raw`(\d{1,3}|${Object.keys(SPOKEN_DURATION_NUMBERS).join('|')})\s+(hours?|minutes?)\s+` +
+    String.raw`(?:on|for|to)\s+the\s+(.{1,80}?)\s+job\s*[.!]?\s*$`,
+  'i',
+);
+
+export function matchLogTimePhrase(
+  transcript: string,
+): { durationMinutes: number; jobReference: string } | null {
+  if (!transcript) return null;
+  const match = LOG_TIME_PATTERN.exec(transcript);
+  if (!match) return null;
+  const rawCount = match[1].toLowerCase();
+  const count = /^\d+$/.test(rawCount) ? Number(rawCount) : SPOKEN_DURATION_NUMBERS[rawCount];
+  const jobReference = match[3].trim();
+  if (!count || !jobReference) return null;
+  const durationMinutes = /^hour/i.test(match[2]) ? count * 60 : count;
+  return { durationMinutes, jobReference };
+}
+
+/**
  * A06 (2026-08-30 live sweep, sweep-10) — deterministic short-circuit for the
  * canonical dictated `issue_invoice` phrasing: "Issue invoice INV-0010" /
  * "Issue the invoice INV-0010". Anchored, doc-number-shaped capture, same
@@ -2559,6 +2626,7 @@ export function parseClassifierJson(content: string): IntentClassification | nul
     if (typeof ee.paymentReference === 'string') extracted.paymentReference = ee.paymentReference;
     // create_job fields
     if (typeof ee.jobTitle === 'string') extracted.jobTitle = ee.jobTitle;
+    if (typeof ee.problemDescription === 'string') extracted.problemDescription = ee.problemDescription;
     // update_customer fields
     if (typeof ee.updatedName === 'string') extracted.updatedName = ee.updatedName;
     if (typeof ee.updatedEmail === 'string') extracted.updatedEmail = ee.updatedEmail;
@@ -2909,6 +2977,25 @@ async function classifyIntentRaw(
       intentType: appointmentChange,
       confidence: 0.95,
       reasoning: `matched deterministic ${appointmentChange} opening phrasing`,
+    };
+  }
+
+  // #1018 row 5.3 — the anchored spoken time log. Profile-gated like the
+  // move/cancel opening above; see matchLogTimePhrase's doc comment.
+  const logTimeMatch = matchLogTimePhrase(transcript);
+  if (
+    logTimeMatch &&
+    isIntentAcceptedOnProfile(context.classifierProfile ?? 'operator', 'log_time_entry')
+  ) {
+    return {
+      intentType: 'log_time_entry',
+      confidence: 0.95,
+      reasoning: 'matched deterministic log_time_entry phrasing',
+      extractedEntities: {
+        timeEntryType: 'job',
+        durationMinutes: logTimeMatch.durationMinutes,
+        jobReference: logTimeMatch.jobReference,
+      },
     };
   }
 

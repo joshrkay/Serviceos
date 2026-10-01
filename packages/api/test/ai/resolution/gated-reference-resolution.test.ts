@@ -827,8 +827,18 @@ describe('buildUnresolvedPrompt — every registered kind gets an honest line, n
     expect(buildUnresolvedPrompt('lead')).toMatch(/name/i);
   });
 
-  it('appointment asks for a date/time, not a name', () => {
-    expect(buildUnresolvedPrompt('appointment')).toMatch(/date.*time|time.*date/i);
+  // #1499 — was "the date and time", asked even when the operator had just
+  // given the new time; what is missing is WHICH booking to act on.
+  it('appointment asks which appointment, not for a date and time', () => {
+    const prompt = buildUnresolvedPrompt('appointment');
+    expect(prompt).toMatch(/which appointment/i);
+    expect(prompt).not.toMatch(/date and time/i);
+  });
+
+  it('names every unresolved kind, once each', () => {
+    const prompt = buildUnresolvedPrompt('appointment', 'technician', 'technician');
+    expect(prompt).toMatch(/which appointment/i);
+    expect(prompt.match(/team member's name/g)).toHaveLength(1);
   });
 
   it('an EntityKind with no GATED_REFERENCE_SOURCES entry degrades to a generic (but still non-silent) line', () => {

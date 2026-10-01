@@ -27,6 +27,8 @@ import { resolveInvoiceReference } from './execution/issue-invoice-handler';
 import type { UserRepository } from '../users/user';
 import { findActiveTenantMember } from '../users/tenant-member';
 import { isChainRefToken } from './chain';
+import { UNSENDABLE_INVOICE_STATUSES, defaultSendChannel } from '../notifications/send-service';
+import type { GatedMessageDelivery, SmsSuppressionReason } from '../notifications/gated-message-delivery';
 import { lacksExecutionAnchor } from './voice-payload';
 
 export type ApprovalReferenceCheck = (tenantId: string, proposal: Proposal) => Promise<string[]>;
@@ -76,6 +78,33 @@ export function invoiceReferenceCheck(
     return (await resolveInvoiceReference(tenantId, id, invoiceRepo)) ? [] : ['invoiceId'];
   };
 }
+
+/**
+ * #1480 item 4 — `send_invoice` for an invoice that exists but cannot be sent:
+ * a draft (never issued — no due date, no working payment link) or a dead one
+ * (void / canceled). The send service refuses both after the tap
+ * (`SendService.sendInvoice`), so approval refuses them first. The gap is a
+ * sentence: the fix is issuing the invoice (its own approval, D-023), not an
+ * edit to this card.
+ */
+export function invoiceSendableReferenceCheck(
+  invoiceRepo: Pick<InvoiceRepository, 'findById'>,
+): ApprovalReferenceCheck {
+  return async (tenantId, proposal) => {
+    if (proposal.proposalType !== 'send_invoice') return [];
+    const id = proposal.payload.invoiceId;
+    if (typeof id !== 'string' || !UUID_RE.test(id)) return [];
+    const invoice = await invoiceRepo.findById(tenantId, id);
+    if (!invoice || !UNSENDABLE_INVOICE_STATUSES.has(invoice.status)) return [];
+    return [invoice.status === 'draft' ? INVOICE_NOT_ISSUED : INVOICE_NOT_SENDABLE];
+  };
+}
+
+const INVOICE_NOT_ISSUED = 'invoiceNotIssued';
+const INVOICE_NOT_SENDABLE = 'invoiceNotSendable';
+const INVOICE_NOT_ISSUED_SENTENCE =
+  "the invoice is still a draft — issue it first (say \"issue it\"), then approve the send";
+const INVOICE_NOT_SENDABLE_SENTENCE = 'the invoice is void or canceled — there is nothing to send';
 
 /**
  * #1490 — estimate-sending proposals whose handler reads `payload.estimateId`
@@ -174,31 +203,102 @@ export function executionAnchorReferenceCheck(): ApprovalReferenceCheck {
  * provided and customer has no email on file"), after the approval tap. The
  * gap is `recipient`, a payload field the card's Edit fills, so it lifts.
  * Walks invoice → job → customer, the same hop the send service makes.
+ *
+ * #1524 — `send_estimate` gets the same check (estimate → job → customer):
+ * it goes through the same SendService recipient resolution, so it failed
+ * the same way after the tap.
  */
+const SEND_DOCUMENT_ID_FIELD: Partial<Record<ProposalType, 'invoiceId' | 'estimateId'>> = {
+  send_invoice: 'invoiceId',
+  send_estimate: 'estimateId',
+  // #1528 — a nudge re-sends the estimate through the same SendService path.
+  send_estimate_nudge: 'estimateId',
+};
+
 export function sendRecipientReferenceCheck(deps: {
   invoiceRepo: Pick<InvoiceRepository, 'findById'>;
+  /** #1524 — for send_estimate; without it an estimate send is not checked. */
+  estimateRepo?: Pick<EstimateRepository, 'findById'>;
   jobRepo: Pick<JobRepository, 'findById'>;
   customerRepo: Pick<CustomerRepository, 'findById'>;
+  /**
+   * #1524 — the outbound SMS gate, asked whether a text to the customer's
+   * phone would go out. When a send with no channel named falls back to SMS,
+   * a text the gate would suppress is refused here with its reason. Absent
+   * (no delivery wired) → not asked.
+   */
+  smsPreflight?: Pick<GatedMessageDelivery, 'preflightCustomerSms'>;
 }): ApprovalReferenceCheck {
   return async (tenantId, proposal) => {
-    if (proposal.proposalType !== 'send_invoice') return [];
+    const document = SEND_DOCUMENT_ID_FIELD[proposal.proposalType];
+    if (!document) return [];
     const { payload } = proposal;
-    const channel = payload.channel ?? payload.sendChannel;
-    if (channel !== 'email' && channel !== 'sms') return [];
+    // #1528 — a nudge drafted before it carried a channel goes out as 'auto'
+    // (its executor's rule), so it is checked as 'auto'.
+    const channel =
+      payload.channel ?? payload.sendChannel ?? (proposal.proposalType === 'send_estimate_nudge' ? 'auto' : undefined);
+    if (channel !== 'email' && channel !== 'sms' && channel !== 'auto') return [];
     if (typeof payload.recipient === 'string' && payload.recipient.trim().length > 0) return [];
-    const invoiceId = payload.invoiceId;
-    // No invoice id yet is a different gate (invoiceId), never this one.
-    if (typeof invoiceId !== 'string' || invoiceId.length === 0 || isChainRefToken(invoiceId)) return [];
-    const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
-    if (!invoice) return [];
-    const job = await deps.jobRepo.findById(tenantId, invoice.jobId);
+    const documentId = payload[document];
+    // No document id yet is a different gate (invoiceId / estimateId), never this one.
+    if (typeof documentId !== 'string' || documentId.length === 0 || isChainRefToken(documentId)) return [];
+    const sent =
+      document === 'invoiceId'
+        ? await deps.invoiceRepo.findById(tenantId, documentId)
+        : await deps.estimateRepo?.findById(tenantId, documentId);
+    if (!sent) return [];
+    const job = await deps.jobRepo.findById(tenantId, sent.jobId);
     if (!job) return [];
     const customer = await deps.customerRepo.findById(tenantId, job.customerId);
     if (!customer) return [];
-    const onFile = channel === 'email' ? customer.email : customer.primaryPhone;
-    return typeof onFile === 'string' && onFile.trim().length > 0 ? [] : ['recipient'];
+    const onFile = (value: string | undefined) => typeof value === 'string' && value.trim().length > 0;
+    if (channel === 'auto') {
+      const picked = defaultSendChannel(customer);
+      if (!picked) return ['recipient'];
+      if (picked === 'email' || !deps.smsPreflight || !customer.primaryPhone) return [];
+      const blocked = await deps.smsPreflight.preflightCustomerSms({
+        tenantId,
+        to: customer.primaryPhone,
+        smsConsent: customer.smsConsent === true,
+      });
+      return blocked ? [SMS_BLOCKED_GAP[blocked]] : [];
+    }
+    return onFile(channel === 'email' ? customer.email : customer.primaryPhone) ? [] : ['recipient'];
   };
 }
+
+/**
+ * #1524 — the gap a send falling back to SMS carries when the text would be
+ * suppressed. Each is a sentence (fixed on the customer record or by typing
+ * an email on the card), never "nothing on file": a phone IS on file.
+ */
+const SMS_NO_CONSENT = 'smsNoConsent';
+const SMS_DO_NOT_CONTACT = 'smsDoNotContact';
+const SMS_RECIPIENT_CAP = 'smsRecipientCap';
+const SMS_DISABLED = 'smsDisabled';
+const SMS_BLOCKED_GAP: Record<SmsSuppressionReason, string> = {
+  no_consent: SMS_NO_CONSENT,
+  missing_consent_context: SMS_NO_CONSENT,
+  dnc: SMS_DO_NOT_CONTACT,
+  revoked: SMS_DO_NOT_CONTACT,
+  recipient_volume_cap: SMS_RECIPIENT_CAP,
+  channel_disabled: SMS_DISABLED,
+};
+const SMS_BLOCKED_SENTENCES: ReadonlyArray<[string, string]> = [
+  [
+    SMS_NO_CONSENT,
+    "the customer has no email on file and hasn't agreed to receive texts — add an email, or record their text consent, before approving",
+  ],
+  [
+    SMS_DO_NOT_CONTACT,
+    'the customer has no email on file and their phone is on the do-not-contact list — add an email before approving',
+  ],
+  [
+    SMS_RECIPIENT_CAP,
+    "the customer has no email on file and their phone has already had the most texts allowed for now — add an email, or try again later",
+  ],
+  [SMS_DISABLED, 'the customer has no email on file and texting is turned off — add an email before approving'],
+];
 
 /**
  * #1490 — a draft_invoice naming an estimate that ANOTHER invoice already
@@ -224,10 +324,13 @@ const ESTIMATE_ALREADY_INVOICED = 'estimateAlreadyInvoiced';
 
 /** Gaps that are a missing piece to supply, not an id naming nothing. */
 const SENTENCE_GAPS: ReadonlySet<string> = new Set([
+  INVOICE_NOT_ISSUED,
+  INVOICE_NOT_SENDABLE,
   'locationId',
   'recipient',
   'customerId',
   ESTIMATE_ALREADY_INVOICED,
+  ...SMS_BLOCKED_SENTENCES.map(([gap]) => gap),
 ]);
 
 const ESTIMATE_ALREADY_INVOICED_SENTENCE =
@@ -252,6 +355,9 @@ export function describeDanglingReferences(fields: readonly string[]): string {
     parts.push('the customer has no service location — add one before approving');
   }
   if (fields.includes(ESTIMATE_ALREADY_INVOICED)) parts.push(ESTIMATE_ALREADY_INVOICED_SENTENCE);
+  if (fields.includes(INVOICE_NOT_ISSUED)) parts.push(INVOICE_NOT_ISSUED_SENTENCE);
+  if (fields.includes(INVOICE_NOT_SENDABLE)) parts.push(INVOICE_NOT_SENDABLE_SENTENCE);
+  for (const [gap, sentence] of SMS_BLOCKED_SENTENCES) if (fields.includes(gap)) parts.push(sentence);
   return `Cannot approve proposal: ${parts.join('; ')}`;
 }
 
@@ -315,16 +421,22 @@ export function askForExecutabilityGaps(
     asks.push("the customer has no service location yet — what's the service address?");
   }
   if (gaps.includes('recipient')) {
+    const channel = payload.channel ?? payload.sendChannel;
     asks.push(
-      (payload.channel ?? payload.sendChannel) === 'sms'
+      channel === 'sms'
         ? 'the customer has no phone number on file — what number should it go to?'
-        : 'the customer has no email on file — what email address should it go to?',
+        : channel === 'auto'
+          ? 'the customer has no email or phone number on file — where should it go?'
+          : 'the customer has no email on file — what email address should it go to?',
     );
   }
   if (gaps.includes('customerId')) {
     asks.push("it isn't linked to a customer or a job yet — which customer is it for?");
   }
   if (gaps.includes(ESTIMATE_ALREADY_INVOICED)) asks.push(ESTIMATE_ALREADY_INVOICED_SENTENCE);
+  if (gaps.includes(INVOICE_NOT_ISSUED)) asks.push(INVOICE_NOT_ISSUED_SENTENCE);
+  if (gaps.includes(INVOICE_NOT_SENDABLE)) asks.push(INVOICE_NOT_SENDABLE_SENTENCE);
+  for (const [gap, sentence] of SMS_BLOCKED_SENTENCES) if (gaps.includes(gap)) asks.push(sentence);
   const unknown = gaps.filter((g) => !SENTENCE_GAPS.has(g));
   if (unknown.length > 0) asks.push(`${unknown.join(', ')} does not name an existing record`);
   return `This can't go ahead yet: ${asks.join('; ')}`;

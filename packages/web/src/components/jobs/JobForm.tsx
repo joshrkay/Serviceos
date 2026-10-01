@@ -5,6 +5,7 @@ import { Input, Textarea, Select, Field, Button } from '../ui';
 import { useTechnicianRoster } from '../../hooks/useTechnicianRoster';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { datetimeLocalToUtc } from '../../utils/formatInTenantTz';
+import { IDEMPOTENCY_HEADER, useIdempotencyKey } from '../../lib/idempotencyKey';
 
 const PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const;
 
@@ -128,6 +129,9 @@ export function JobForm({ onCreated, onCancel, initialCustomerId }: JobFormProps
     };
   }, [form.customer]);
 
+  // #1489 — one Idempotency-Key per create submission, reused on retry.
+  const submissionKey = useIdempotencyKey();
+
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
@@ -170,6 +174,7 @@ export function JobForm({ onCreated, onCancel, initialCustomerId }: JobFormProps
       try {
         const res = await apiFetch('/api/jobs', {
           method: 'POST',
+          headers: { [IDEMPOTENCY_HEADER]: submissionKey.keyFor(body) },
           body: JSON.stringify(body),
         });
         if (!res.ok) {
@@ -177,6 +182,7 @@ export function JobForm({ onCreated, onCancel, initialCustomerId }: JobFormProps
           throw new Error(json?.message ?? `HTTP ${res.status}`);
         }
         const created = await res.json();
+        submissionKey.settle();
         onCreated?.(created.id);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to create job');
@@ -184,7 +190,7 @@ export function JobForm({ onCreated, onCancel, initialCustomerId }: JobFormProps
         setSubmitting(false);
       }
     },
-    [form, onCreated, timezone]
+    [form, onCreated, timezone, submissionKey]
   );
 
   return (

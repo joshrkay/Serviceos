@@ -23,6 +23,7 @@ import type { AddressInfo } from 'net';
 import { TwilioStreamEmulator } from '../../../src/ai/voice-quality/audio/twilio-stream-emulator';
 import { AgentEventBus } from '../../../src/ai/voice-quality/event-bus';
 import { frameForTwilio, pcm16ToMulaw } from '../../../src/ai/voice-quality/audio/pcm-codec';
+import { audioFrameEmittedEvent, transcriptReceivedEvent } from '../../../src/ai/voice-quality/events';
 
 // ─── Stub server ────────────────────────────────────────────────────────────
 
@@ -329,6 +330,35 @@ describe('VQ2-006 — TwilioStreamEmulator', () => {
     // (2 × 20 ms) precedes transcript delivery, so TTFA lands well above
     // 300 ms.
     expect(result.ttfaMs).toBeGreaterThan(300);
+  });
+
+  it('#1331 — on the live bridge, a filler before the answer does not close the turn; the turn ends after the REAL reply', async () => {
+    // The production adapter plays a cached filler ~250 ms after the caller
+    // finishes when the answer is not ready, then the real reply seconds
+    // later. The silence window must measure the end of the REAL reply
+    // (marked on the bus by the adapter's audio_frame_emitted), or the
+    // turn closes on the filler and the answer leaks into the next turn.
+    emulator = new TwilioStreamEmulator({
+      serverUrl: stub.url,
+      bus,
+      silenceWindowMs: 100,
+      firstAudioTimeoutMs: 1_000,
+      deliverFinalTranscript: () => {
+        bus.record(transcriptReceivedEvent({}));
+        setTimeout(() => stub.sendInboundFrame(inboundFramePayload()), 30); // filler
+        setTimeout(() => {
+          bus.record(audioFrameEmittedEvent({ byteCount: 320 }));
+          stub.sendInboundFrame(inboundFramePayload());
+        }, 400);
+        setTimeout(() => stub.sendInboundFrame(inboundFramePayload()), 420);
+      },
+    });
+    await emulator.start('CA_FILLER_THEN_ANSWER');
+    await stub.waitForConnection();
+
+    const result = await emulator.sendCallerUtterance(shortPcmSilence(), 0, 'what do I owe');
+
+    expect(result.numFrames).toBe(3);
   });
 
   it('VQ2-006 — sendCallerUtterance returns ttfaMs = 0 when no inbound frames (handles silent agent)', async () => {

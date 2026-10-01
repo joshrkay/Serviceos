@@ -212,10 +212,12 @@ export async function buildLiveGateway(
     const { createHarnessLLMGateway } = await import('../api/src/ai/gateway/harness-gateway');
     const { loadConfig } = await import('../api/src/shared/config');
     const { withPathSmokeSpendTracking } = await import('../api/src/ai/voice-quality/path-smoke/provider');
-    return withPathSmokeSpendTracking(createHarnessLLMGateway(loadConfig(env)), {
-      fallbackModel: selection.model,
-      addCents,
-    });
+    return withRateLimitRetry(
+      withPathSmokeSpendTracking(createHarnessLLMGateway(loadConfig(env)), {
+        fallbackModel: selection.model,
+        addCents,
+      }),
+    );
   }
   const { createRealLayerTwoGateway } = await import('../api/src/ai/gateway/real-layer-two-factory');
   const { AgentEventBus } = await import('../api/src/ai/voice-quality/event-bus');
@@ -230,6 +232,42 @@ export async function buildLiveGateway(
       },
       totalCents: () => harnessCents,
     },
+  });
+}
+
+/** Default retry budget for {@link withRateLimitRetry}. */
+export const RATE_LIMIT_MAX_RETRIES = 8;
+const RATE_LIMIT_FALLBACK_WAIT_MS = 2_000;
+
+/**
+ * Wrap the live eval gateway so a provider throttle (the gateway's typed
+ * `LLM_RATE_LIMITED`, raised once its own retries are spent) waits out the
+ * provider's retry hint and retries the SAME request, up to `maxRetries`
+ * times. A sequential live run on gpt-4o-mini sends ~15k prompt tokens per
+ * call and crosses a 200k tokens-per-minute org limit on its own; without
+ * this the first throttle aborted the whole run with no report. A throttle is
+ * never a classification result, so it must never be scored as one. Any
+ * other error is rethrown at once.
+ */
+export function withRateLimitRetry(
+  gateway: LLMGateway,
+  opts: { sleep?: (ms: number) => Promise<void>; maxRetries?: number } = {},
+): LLMGateway {
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const maxRetries = opts.maxRetries ?? RATE_LIMIT_MAX_RETRIES;
+  const complete: LLMGateway['complete'] = async (request) => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await gateway.complete(request);
+      } catch (err) {
+        const e = err as { code?: string; details?: { retryAfterMs?: number } };
+        if (e?.code !== 'LLM_RATE_LIMITED' || attempt >= maxRetries) throw err;
+        await sleep(e.details?.retryAfterMs ?? RATE_LIMIT_FALLBACK_WAIT_MS);
+      }
+    }
+  };
+  return new Proxy(gateway, {
+    get: (target, prop, receiver) => (prop === 'complete' ? complete : Reflect.get(target, prop, receiver)),
   });
 }
 
@@ -312,8 +350,21 @@ export interface IntentRow {
   intent: string;
 }
 
+/** One row the classifier got wrong — enough to bucket it without a re-run (#1469). */
+export interface LiveIntentMiss {
+  utterance: string;
+  gold: string;
+  pred: string;
+  /** When pred is 'unknown': why the classifier fell through (low_confidence, intent_off_surface, parse_failed, unknown_intent…). */
+  unknownReason?: string;
+  /** When pred is 'unknown': the intent the model actually picked (below the confidence floor / off the surface). */
+  modelIntent?: string;
+}
+
 export interface LiveIntentResult {
   pairs: { gold: string; pred: string }[];
+  /** Every row whose prediction differs from gold, in sample order. */
+  misses: LiveIntentMiss[];
   /** Count of rows resolved by a deterministic short-circuit (no LLM call). */
   fastPathHits: number;
   llmCalls: number;
@@ -335,16 +386,24 @@ export async function runLiveIntentEval(
 ): Promise<LiveIntentResult> {
   const { classifyIntent } = await import('../api/src/ai/orchestration/intent-classifier');
   const pairs: { gold: string; pred: string }[] = [];
+  const misses: LiveIntentMiss[] = [];
   let fastPathHits = 0;
   let llmCalls = 0;
   for (const r of rows) {
     const res = await classifyIntent(r.utterance, ctx, gateway);
     pairs.push({ gold: r.intent, pred: res.intentType });
+    if (res.intentType !== r.intent) {
+      const miss: LiveIntentMiss = { utterance: r.utterance, gold: r.intent, pred: res.intentType };
+      if (res.unknownReason) miss.unknownReason = res.unknownReason;
+      const modelIntent = res.lowConfidenceIntent ?? res.offSurfaceIntent;
+      if (modelIntent) miss.modelIntent = modelIntent;
+      misses.push(miss);
+    }
     if (res.tokenUsage) llmCalls++;
     else fastPathHits++;
     afterRow?.();
   }
-  return { pairs, fastPathHits, llmCalls };
+  return { pairs, misses, fastPathHits, llmCalls };
 }
 
 export interface SlotExample {

@@ -33,6 +33,12 @@ function readWorkflow(): string {
 }
 
 describe('VQ2-017 — Layer 2 weekly-trend CI workflow', () => {
+  // #1331 — run 36811698452 spent 1770 s in the suite step and ~31 min end
+  // to end against a 35-minute job; the trend steps after it must not be cut.
+  it('#1331 — weekly job has timeout-minutes: 60 (live suite ~30 min + Layer 2 readback-answer turns)', () => {
+    expect(readWorkflow()).toMatch(/timeout-minutes:\s*60/);
+  });
+
   it('VQ2-017 — voice-quality-weekly-trend.yml exists + parses', () => {
     expect(fs.existsSync(weeklyWorkflowPath)).toBe(true);
     const src = readWorkflow();

@@ -1,0 +1,164 @@
+name: Mobile Maestro (device)
+
+# PRD 3.3 (#1015) + 5.4 (#1018) device proofs, per research #1002: Maestro on
+# the Android emulator (no macOS runner). Runs the flows in
+# packages/mobile/.maestro/ through packages/mobile/scripts/maestro-device-run.sh
+# against a real API (DEV_AUTH_BYPASS, NODE_ENV=dev) on real Postgres.
+#
+# Deliberately NOT a pull_request check: an emulator run is ~5–8 min plus the
+# Android build and carries emulator flakiness. Manual dispatch + nightly only.
+# The static half (flow YAML contract, dev-auth guards) gates every PR in the
+# "Mobile unit tests" step of pr-checks.yml.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 9 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-maestro
+  cancel-in-progress: false
+
+jobs:
+  android-emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: maestro
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://postgres:test@localhost:5432/maestro
+      DB_SSL: 'false'
+      # The emulator reaches the host at 10.0.2.2. That path goes through the
+      # emulated network, so airplane mode really cuts the app off the API.
+      EXPO_PUBLIC_API_URL: http://10.0.2.2:3000
+      # Dev/test-only: Metro swaps @clerk/clerk-expo for the dev shim
+      # (packages/mobile/scripts/dev-auth-guard.cjs refuses this in any
+      # production build; the shim refuses to load when __DEV__ is false).
+      EXPO_PUBLIC_AUTH_MODE: dev
+      EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_dev_auth_shim
+      MAESTRO_VERSION: 2.11.0
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            packages/mobile/package-lock.json
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install root workspace deps
+        run: npm ci
+
+      - name: Install mobile deps
+        run: npm ci
+        working-directory: packages/mobile
+
+      - name: Build shared
+        run: npm run build -w packages/shared
+
+      - name: Migrate Postgres
+        run: npm run migrate:apply
+        working-directory: packages/api
+
+      - name: Start API (DEV_AUTH_BYPASS, real Postgres)
+        run: |
+          nohup npm run dev > "$RUNNER_TEMP/api.log" 2>&1 &
+          for _ in $(seq 1 90); do
+            curl -fsS http://localhost:3000/health > /dev/null && exit 0
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/api.log"
+          exit 1
+        working-directory: packages/api
+        env:
+          NODE_ENV: dev
+          DEV_AUTH_BYPASS: 'true'
+          PORT: '3000'
+          PUBLIC_API_URL: http://10.0.2.2:3000
+          TELEPHONY_ENABLED: 'false'
+          EMAIL_ENABLED: 'false'
+          LOG_LEVEL: warn
+
+      - name: Prebuild + assemble debug APK (x86_64)
+        run: |
+          npx expo prebuild --platform android --no-install
+          cd android && ./gradlew assembleDebug -PreactNativeArchitectures=x86_64 --no-daemon
+        working-directory: packages/mobile
+
+      - name: Start Metro (dev-auth bundle)
+        run: |
+          nohup npx expo start --port 8081 > "$RUNNER_TEMP/metro.log" 2>&1 &
+          for _ in $(seq 1 90); do
+            curl -fsS http://localhost:8081/status | grep -q running && exit 0
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/metro.log"
+          exit 1
+        working-directory: packages/mobile
+        env:
+          CI: '1'
+          # Don't let `expo start` rewrite the self-contained tsconfig.json.
+          EXPO_NO_TYPESCRIPT_SETUP: '1'
+
+      - name: Install Maestro
+        run: |
+          curl -fsSL https://get.maestro.mobile.dev | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run Maestro flows on the Android emulator
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        env:
+          API_URL: http://localhost:3000
+          MAESTRO_OUT: ${{ runner.temp }}/maestro-out
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          # No -noaudio: the 5.4 flow records a real (silent) clip.
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim
+          script: |
+            adb reverse tcp:8081 tcp:8081
+            adb install -r packages/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+            bash packages/mobile/scripts/maestro-device-run.sh
+
+      - name: Upload Maestro evidence
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: maestro-device-evidence
+          path: |
+            ${{ runner.temp }}/maestro-out/
+            ${{ runner.temp }}/api.log
+            ${{ runner.temp }}/metro.log
+            ~/.maestro/tests/
+          # Maestro's debug output nests under dot-directories (.maestro/…).
+          include-hidden-files: true
+          retention-days: 14
