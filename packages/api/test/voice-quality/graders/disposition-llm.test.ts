@@ -160,6 +160,47 @@ describe('VQ-022 — gradeDispositionLlm', () => {
     expect(provider.getCalls()).toHaveLength(0);
   });
 
+  // #1331 — criterion 12 grades what the caller HEARD. Weekly run
+  // 36829085635 judged `proposal.summary` ("Add material") as the agent's
+  // reply ("too vague"), and never judged a lookup at all (no proposal).
+  it('#1331 — judges the captured agent speech for a lookup turn that drafted no proposal', async () => {
+    const { gateway, provider } = createMockLLMGateway(PASS_RESPONSE);
+    const observation = makeObservation({
+      events: [
+        { type: 'speech_outbound', transcript: 'Your next appointment is Tuesday at 10 AM.', turnIndex: 0, ts: 1 },
+      ],
+    });
+
+    await gradeDispositionLlm({ observation, script: makeScript(), gateway });
+
+    expect(provider.getCalls()).toHaveLength(1);
+    const userMsg = provider.getCalls()[0].messages.find((m) => m.role === 'user')!.content;
+    expect(userMsg).toContain('Agent said: "Your next appointment is Tuesday at 10 AM."');
+  });
+
+  it('#1331 — grades the spoken reply, not the operator-card summary, when a turn drafted a proposal', async () => {
+    const { gateway, provider } = createMockLLMGateway(PASS_RESPONSE);
+    const observation = makeObservation({
+      proposals: [{ ...makeProposal({}), summary: 'Add material' } as Proposal],
+      events: [
+        {
+          type: 'speech_outbound',
+          transcript: "I've drafted that — it's in your approvals waiting for you to review.",
+          turnIndex: 0,
+          ts: 1,
+        },
+      ],
+    });
+
+    await gradeDispositionLlm({ observation, script: makeScript(), gateway });
+
+    const userMsg = provider.getCalls()[0].messages.find((m) => m.role === 'user')!.content;
+    expect(userMsg).toContain(
+      `Agent said: "I've drafted that — it's in your approvals waiting for you to review."`,
+    );
+    expect(userMsg).not.toContain('Add material');
+  });
+
   it('VQ-022 — handles missing expected answer (judges for reasonableness only)', async () => {
     const { gateway, provider } = createMockLLMGateway(PASS_RESPONSE);
     const script = makeScript({

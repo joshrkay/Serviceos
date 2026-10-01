@@ -213,6 +213,13 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
+/** A classifier money amount (already integer cents) that a contract can take. */
+function positiveCents(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.round(value)
+    : undefined;
+}
+
 /**
  * Which customer id the payload carries.
  *
@@ -634,6 +641,100 @@ export async function buildVoiceProposalPayload(
       const reason = nonEmptyString(entities.cancellationReason) ?? nonEmptyString(input.utterance);
       if (reason) flat.reason = reason;
     }
+  }
+
+  // #1331 — tradesperson write intents. The classifier names these with its
+  // taxonomy keys; the contracts read the flat names. Same mapping, same
+  // defaults, as the memo/chat task handlers named on each line. Fields that
+  // need tenant context (log_expense's tenant-local `spentAt`, a service
+  // agreement's cadence rule / start date, a change order's grounded line)
+  // are filled by `fillFromTenantContext` and the change-order block below
+  // (#1540 §6).
+  if (proposalType === 'add_material') {
+    // AddMaterialTaskHandler (ai/tasks/add-material-task.ts).
+    if (flat.description === undefined) {
+      const description = nonEmptyString(entities.materialDescription);
+      if (description) flat.description = description.trim();
+    }
+    if (flat.quantity === undefined) {
+      const q = entities.materialQuantity;
+      if (typeof q === 'number' && Number.isFinite(q) && q > 0) flat.quantity = Math.round(q);
+    }
+  }
+  if (proposalType === 'apply_credit') {
+    // ApplyCreditTaskHandler (ai/tasks/apply-credit-task.ts). The classifier's
+    // `amount` is already integer cents (parseClassifierJson).
+    if (flat.amountCents === undefined) {
+      const cents = positiveCents(entities.amount);
+      if (cents !== undefined) flat.amountCents = cents;
+    }
+    if (flat.reason === undefined) {
+      const reason = nonEmptyString(entities.creditReason);
+      if (reason) flat.reason = reason.trim();
+    }
+  }
+  if (proposalType === 'record_refund') {
+    // RecordRefundTaskHandler (ai/tasks/voice-extended-tasks.ts): method
+    // defaults to cash, the most common manual refund.
+    if (flat.amountCents === undefined) {
+      const cents = positiveCents(entities.amount);
+      if (cents !== undefined) flat.amountCents = cents;
+    }
+    if (flat.method === undefined) flat.method = nonEmptyString(entities.refundMethod) ?? 'cash';
+    if (flat.reason === undefined) {
+      const reason = nonEmptyString(entities.refundReason);
+      if (reason) flat.reason = reason.trim();
+    }
+    if (flat.checkNumber === undefined) {
+      const checkNumber = nonEmptyString(entities.refundCheckNumber);
+      if (checkNumber) flat.checkNumber = checkNumber.trim();
+    }
+  }
+  if (proposalType === 'log_expense') {
+    // LogExpenseTaskHandler (ai/tasks/voice-extended-tasks.ts): category
+    // defaults to 'other', description to the spoken request. `spentAt` (the
+    // TENANT-LOCAL today) is filled by `fillFromTenantContext` when the
+    // tenant zone is known, and stays a named gate otherwise.
+    if (flat.amountCents === undefined) {
+      const cents = positiveCents(entities.amount);
+      if (cents !== undefined) flat.amountCents = cents;
+    }
+    if (flat.category === undefined) flat.category = nonEmptyString(entities.expenseCategory) ?? 'other';
+    if (flat.description === undefined) {
+      const description =
+        nonEmptyString(entities.expenseDescription) ?? nonEmptyString(input.utterance);
+      if (description) flat.description = description.trim();
+    }
+  }
+  if (proposalType === 'create_service_agreement') {
+    // CreateServiceAgreementTaskHandler (ai/tasks/create-service-agreement-task.ts).
+    // Its cadence → RRULE and start date come from agreements/spoken-terms.ts
+    // via `fillFromTenantContext` (#1540 §6).
+    if (flat.name === undefined) {
+      const name = nonEmptyString(entities.serviceAgreementName);
+      if (name) flat.name = name.trim();
+    }
+    if (flat.priceCents === undefined) {
+      const cents = positiveCents(entities.amount);
+      if (cents !== undefined) flat.priceCents = cents;
+    }
+  }
+  if (proposalType === 'send_customer_message') {
+    // SendCustomerMessageTaskHandler (ai/tasks/send-customer-message-task.ts):
+    // sms unless email was said. The task leg may also LLM-polish the body;
+    // the live turn drafts the caller's own words for the operator to review.
+    if (flat.channel === undefined) {
+      flat.channel = entities.customerMessageChannel === 'email' ? 'email' : 'sms';
+    }
+    if (flat.body === undefined) {
+      const body = nonEmptyString(entities.customerMessageBody);
+      if (body) flat.body = body.trim();
+    }
+  }
+  if (proposalType === 'mark_lead_lost' && flat.reason === undefined) {
+    // MarkLeadLostTaskHandler (ai/tasks/voice-extended-tasks.ts).
+    const reason = nonEmptyString(entities.lostReason) ?? nonEmptyString(input.utterance);
+    if (reason) flat.reason = reason.trim();
   }
 
   // Whole-object contract refines carry `path: []`, so `fieldPathsFrom` below
