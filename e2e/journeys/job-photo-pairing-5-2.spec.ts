@@ -37,6 +37,17 @@ import {
  * attachments API). T1: a neighbour tenant's owner cannot list the photos
  * or pair against tenant A's attachment.
  *
+ * T2 (a neighbour working in the same run): the neighbour has its own job
+ * and, before Carlos starts, captures its OWN before/after photos and pairs
+ * them through the same real routes; it also tries to attach a photo to
+ * tenant A's job id. None of it changes A's answer: A's job carries exactly
+ * Carlos's two photos (counted across ALL tenants — no neighbour row ever
+ * lands on A's job), the gallery offers only A's own photo as a pair
+ * candidate, and A's pairing leaves the neighbour's pair group, roles and
+ * single `attachment.paired` audit exactly as they were. Proven red against
+ * a planted fault: the job-ownership lookup (`PgJobRepository.findById`)
+ * without its tenant predicate lets the neighbour's photo land on A's job.
+ *
  * Runs on `chromium-noauthbypass` (NO_AUTH_BYPASS_SPECS): the technician's
  * own day view needs the DB-authoritative authorization loader (#1086).
  */
@@ -84,6 +95,7 @@ test.describe('5.2 — before/after photos: category and pairing survive the rou
   let carlos: RealTechnician;
   let neighbour: RealOwner;
   let jobId: string;
+  let neighbourJobId: string;
 
   test.beforeAll(async () => {
     test.setTimeout(180_000); // seeding through the real API is slow under load
@@ -117,14 +129,66 @@ test.describe('5.2 — before/after photos: category and pairing survive the rou
       technicianId: carlos.techId,
     });
     jobId = job.id;
+
+    // T2 — the neighbour's own job, created through the real API.
+    const nbCustomer = await postJson(api, `${API_URL}/api/customers`, neighbour.headers, {
+      firstName: 'Neighbour',
+      lastName: `Photos ${Date.now()}`,
+      primaryPhone: '512-555-0153',
+    });
+    const nbLocation = await postJson(api, `${API_URL}/api/locations`, neighbour.headers, {
+      customerId: nbCustomer.id,
+      street1: '53 Neighbour Ln',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78701',
+      isPrimary: true,
+    });
+    const nbJob = await postJson(api, `${API_URL}/api/jobs`, neighbour.headers, {
+      customerId: nbCustomer.id,
+      locationId: nbLocation.id,
+      summary: 'Neighbour water heater swap',
+      priority: 'normal',
+    });
+    neighbourJobId = nbJob.id;
   });
+
+  /** Presign + attach one photo through the real job-photo routes; returns the HTTP statuses and photo. */
+  async function attachViaApi(
+    headers: Record<string, string>,
+    targetJobId: string,
+    category: 'before' | 'after',
+  ): Promise<{ presign: number; attach: number | null; photoId?: string }> {
+    const presign = await api.post(`${API_URL}/api/jobs/${targetJobId}/photos/presign-upload`, {
+      headers: { 'content-type': 'application/json', ...headers },
+      data: JSON.stringify({ filename: `${category}.jpg`, contentType: 'image/jpeg', sizeBytes: 2048 }),
+    });
+    if (presign.status() !== 201) return { presign: presign.status(), attach: null };
+    const { fileId } = (await presign.json()) as { fileId: string };
+    const attach = await api.post(`${API_URL}/api/jobs/${targetJobId}/photos`, {
+      headers: { 'content-type': 'application/json', ...headers },
+      data: JSON.stringify({ fileId, category }),
+    });
+    const body = attach.ok() ? ((await attach.json()) as { id: string }) : undefined;
+    return { presign: presign.status(), attach: attach.status(), photoId: body?.id };
+  }
+
+  async function neighbourAttachments() {
+    return (
+      await pool.query<{ id: string; category: string; pair_group_id: string | null; pair_role: string | null }>(
+        `SELECT id, category, pair_group_id, pair_role FROM attachments
+          WHERE tenant_id = $1 AND entity_type = 'job' AND entity_id = $2 ORDER BY category`,
+        [neighbour.tenantId, neighbourJobId],
+      )
+    ).rows;
+  }
 
   test.afterAll(async () => {
     await api?.dispose();
     await pool?.end();
   });
 
-  test('Carlos captures a before and an after photo on his job, pairs them in the gallery, and the pair survives a reload; a neighbour cannot see or pair them (T1)', async ({ page, baseURL }) => {
+  test('Carlos captures a before and an after photo on his job, pairs them in the gallery, and the pair survives a reload; a neighbour pairing its own photos in the same run changes none of it (T2)', async ({ page, baseURL }) => {
     test.setTimeout(180_000);
     const pageErrors: string[] = [];
     page.on('pageerror', (err) => pageErrors.push(err.message));
@@ -138,6 +202,26 @@ test.describe('5.2 — before/after photos: category and pairing survive the rou
       }
     });
     await allowOnlyAppAndApi(page, baseURL!);
+
+    // ── T2 setup: the neighbour's own before/after, paired, BEFORE Carlos
+    //    starts — plus an attempt to put a photo on tenant A's job. ────────
+    const nbBefore = await attachViaApi(neighbour.headers, neighbourJobId, 'before');
+    const nbAfter = await attachViaApi(neighbour.headers, neighbourJobId, 'after');
+    expect([nbBefore.attach, nbAfter.attach], 'the neighbour attaches to its own job').toEqual([201, 201]);
+    const nbRowsBefore = await neighbourAttachments();
+    expect(nbRowsBefore.map((r) => r.category)).toEqual(['after', 'before']);
+    const nbBeforeAttachment = nbRowsBefore.find((r) => r.category === 'before')!;
+    const nbAfterAttachment = nbRowsBefore.find((r) => r.category === 'after')!;
+    const nbPair = await api.post(`${API_URL}/api/attachments/${nbBeforeAttachment.id}/pair`, {
+      headers: { 'content-type': 'application/json', ...neighbour.headers },
+      data: JSON.stringify({ otherId: nbAfterAttachment.id, role: 'before' }),
+    });
+    expect(nbPair.status(), `neighbour pairs its own photos -> ${await nbPair.text()}`).toBe(200);
+    const nbPaired = await neighbourAttachments();
+    expect(nbPaired[0].pair_group_id).toMatch(UUID_RE);
+    expect(nbPaired[1].pair_group_id).toBe(nbPaired[0].pair_group_id);
+    const intoA = await attachViaApi(neighbour.headers, jobId, 'after');
+    expect.soft(intoA, 'the neighbour cannot put a photo on tenant A\'s job').toEqual({ presign: 404, attach: null });
 
     // ── Carlos's own day → his job screen. ─────────────────────────────────
     await page.goto('/technician/day');
@@ -169,12 +253,21 @@ test.describe('5.2 — before/after photos: category and pairing survive the rou
     );
     expect(photoRows.map((r) => r.category)).toEqual(['before', 'after']);
     const [beforePhoto, afterPhoto] = photoRows;
+    // T2 — across ALL tenants, A's job carries exactly Carlos's two photos.
+    const { rows: allOnJobA } = await pool.query(`SELECT id FROM job_photos WHERE job_id = $1`, [jobId]);
+    expect(allOnJobA, 'no neighbour photo ever lands on tenant A\'s job').toHaveLength(2);
 
     // ── The full gallery: pair the before photo with the after photo. ──────
     await page.getByRole('link', { name: /open full photo gallery/i }).click();
     await expect(page.getByTestId('job-photos-page')).toBeVisible({ timeout: 15_000 });
     const select = page.getByTestId(`job-photo-pair-select-${beforePhoto.id}`);
     await expect(select).toBeVisible({ timeout: 15_000 });
+    // T2 — the pair candidates are A's own other photo only; the neighbour's
+    // two photos are never offered.
+    const offered = await select.locator('option').evaluateAll((opts) =>
+      opts.map((o) => (o as HTMLOptionElement).value).filter((v) => v !== ''),
+    );
+    expect(offered).toEqual([afterPhoto.id]);
     await select.selectOption(afterPhoto.id);
     const pairResponse = page.waitForResponse(
       (r) => r.request().method() === 'POST' && /\/api\/attachments\/[^/]+\/pair$/.test(new URL(r.url()).pathname),
@@ -237,11 +330,18 @@ test.describe('5.2 — before/after photos: category and pairing survive the rou
       data: JSON.stringify({ otherId: afterAttachment.id, role: 'before' }),
     });
     expect(crossPair.status(), 'a neighbour must not pair tenant A\'s attachments').toBe(404);
-    const { rows: neighbourAudits } = await pool.query(
-      `SELECT id FROM audit_events WHERE tenant_id = $1 AND event_type = 'attachment.paired'`,
+    const { rows: neighbourAudits } = await pool.query<{ entity_id: string }>(
+      `SELECT entity_id FROM audit_events WHERE tenant_id = $1 AND event_type = 'attachment.paired'`,
       [neighbour.tenantId],
     );
-    expect(neighbourAudits).toHaveLength(0);
+    // Only the neighbour's own pairing, on its own job — nothing from A's.
+    expect(neighbourAudits.map((r) => r.entity_id)).toEqual([neighbourJobId]);
+
+    // ── T2: A's pairing left the neighbour's pair exactly as it was. ──────
+    expect(await neighbourAttachments()).toEqual(nbPaired);
+    expect(nbPaired[0].pair_group_id).not.toBe(beforeAttachment.pair_group_id);
+    const nbListed = await api.get(`${API_URL}/api/jobs/${neighbourJobId}/photos`, { headers: neighbour.headers });
+    expect(((await nbListed.json()) as Array<{ category: string }>).map((p) => p.category).sort()).toEqual(['after', 'before']);
 
     expect(pageErrors, 'no uncaught page errors across the photo journey').toEqual([]);
   });
