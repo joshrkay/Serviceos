@@ -74,6 +74,13 @@ counsel), O-8 north-star instrumentation, and #905 all belong to the launch effo
 operator half of a real inbound Twilio number for the pilot tenant, and it blocks the witnessed
 production call. None of the three holds a rung-5 row.
 
+**Clerk user-enumeration posture: owner decision 2026-10-01.** Clerk's dev instance (`romantic-lark-48`) runs
+**Bulk** user enumeration protection. Rate limits stop bulk email harvesting, but one targeted sign-in can still
+learn whether an email has an account ("Couldn't find your account"). The workspace is on Clerk's **Hobby** plan, and
+**Strict** did not stick when set; it is likely a paid-plan feature. The owner accepted Bulk for now, which closes
+QA §1 (#1293), §18 (#1310) and the QA map (#1264). **Follow-up:** set Strict on the production instance
+(`clerk.therivetapp.com`) at launch, or once the Clerk plan is upgraded. Prod is also Bulk today.
+
 **Owner operations moved here from the issue tracker (owner decision 2026-09-30).** The tracker holds
 engineering work only. Their code halves shipped in PR #904. These two are operator tasks:
 
