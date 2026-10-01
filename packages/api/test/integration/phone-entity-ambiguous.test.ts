@@ -84,7 +84,9 @@ const FOLLOW_UP = 'The one on 12 Oak Street';
 /** renderDisambiguation's line for identically-named candidates (tts-copy.ts). */
 const ASK_FOR_ADDRESS = 'more than one record under that name';
 /** expandIntentConfirmTemplate's create_job readback. */
-const CREATE_JOB_READBACK = 'Just to confirm — create job. Is that right?';
+// #1539 — the readback names the job and the (resolved) customer the caller named.
+const CREATE_JOB_READBACK =
+  "Just to confirm — you&apos;d like to open a new job for Jamie Rivera: leaking faucet repair. Is that right?";
 
 interface TenantFixture {
   tenantId: string;

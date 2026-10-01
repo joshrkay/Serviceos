@@ -11,6 +11,7 @@
  * file. Tests override the root with a temp directory so they don't
  * depend on the real corpus existing yet (Phase-2 stories author it).
  */
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -110,10 +111,79 @@ export function loadLayer2Corpus(corpusRoot?: string): VoiceQualityScript[] {
 function asLayer2Persona(script: VoiceQualityScript): VoiceQualityScript {
   const tenant = (script.fixtures.tenant ?? {}) as Record<string, unknown>;
   const owner = tenant.harnessOperatorTaxonomy === true;
+  const withUuids = withUuidRecordIds(script);
+  return {
+    ...withUuids,
+    ...(owner ? { callerIsOwner: true } : {}),
+    turns: withUuids.turns.flatMap(answerPhoneReadback),
+  };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A record-id key in a fixture row: `id` or `<x>Id` — never `tenantId`. */
+function isRecordIdKey(key: string): boolean {
+  return key === 'id' || (key.endsWith('Id') && key !== 'tenantId');
+}
+
+/** Stable name-based UUID (v5 layout over sha1) for a readable fixture id. */
+function stableUuid(readable: string): string {
+  const h = createHash('sha1').update(`voice-quality-fixture:${readable}`).digest();
+  h[6] = (h[6]! & 0x0f) | 0x50;
+  h[8] = (h[8]! & 0x3f) | 0x80;
+  const hex = h.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * #1331 — production payload contracts and lookups validate record ids as
+ * UUIDs; Layer 1 fixtures use readable ids ("cust_02_add_material_owner")
+ * that its mocks tolerate. On Layer 2 those ids failed every write proposal's
+ * contract (`customerId: Invalid uuid`, so the draft was gated) and broke
+ * lookup_balance outright. Every readable record id found in a fixture row is
+ * mapped to a stable UUID, and every string equal to it — in the fixtures and
+ * in the turns' expected slots — is rewritten, so references stay intact.
+ */
+function withUuidRecordIds(script: VoiceQualityScript): VoiceQualityScript {
+  const mapping = new Map<string, string>();
+  for (const [key, rows] of Object.entries(script.fixtures)) {
+    if (key === 'tenant' || !Array.isArray(rows)) continue;
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      for (const [field, value] of Object.entries(row as Record<string, unknown>)) {
+        if (isRecordIdKey(field) && typeof value === 'string' && !UUID_RE.test(value)) {
+          mapping.set(value, stableUuid(value));
+        }
+      }
+    }
+  }
+  if (mapping.size === 0) return script;
+  const rewrite = (value: unknown): unknown => {
+    if (typeof value === 'string') return mapping.get(value) ?? value;
+    if (Array.isArray(value)) return value.map(rewrite);
+    if (value && typeof value === 'object' && !(value instanceof Date)) {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, rewrite(v)]),
+      );
+    }
+    return value;
+  };
   return {
     ...script,
-    ...(owner ? { callerIsOwner: true } : {}),
-    turns: script.turns.flatMap(answerPhoneReadback),
+    fixtures: Object.fromEntries(
+      Object.entries(script.fixtures).map(([k, v]) => [k, k === 'tenant' ? v : rewrite(v)]),
+    ) as VoiceQualityScript['fixtures'],
+    turns: script.turns.map((turn) =>
+      turn.expected.slots
+        ? {
+            ...turn,
+            expected: {
+              ...turn.expected,
+              slots: rewrite(turn.expected.slots) as typeof turn.expected.slots,
+            },
+          }
+        : turn,
+    ),
   };
 }
 

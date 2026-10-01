@@ -239,11 +239,11 @@ describe('#1014 row 2.4 — a stranger on the phone cannot reach owner-only capa
     });
 
   /**
-   * Advance the real FSM to `intent_capture` the way production does, then
-   * speak `utterance`. An unrecognised caller-ID is parked in `ask_caller`
-   * after establishment, so the FIRST Gather turn is the
-   * find-or-create-customer turn (`handleAskCaller`) and the SECOND is the one
-   * that classifies — exactly the two webhook round trips Twilio delivers. No
+   * Speak `utterance` the way production delivers it. An unrecognised
+   * caller-ID is parked in `ask_caller` after establishment; since #1540 §2
+   * that FIRST Gather turn both finds-or-creates the caller (`handleAskCaller`)
+   * AND classifies their request, so a caller there says who they are and
+   * what they want in one turn. An already-identified caller just speaks. No
    * FSM event is hand-dispatched except `greeted_ok`, which the Gather
    * transport itself owns.
    */
@@ -252,7 +252,7 @@ describe('#1014 row 2.4 — a stranger on the phone cannot reach owner-only capa
       h.session.machine.dispatch({ type: 'greeted_ok' });
     }
     if (h.session.machine.currentState === 'ask_caller') {
-      await turn(h, tenantId, 'My name is Casey Rivera, 12 Oak Street');
+      return turn(h, tenantId, `My name is Casey Rivera, 12 Oak Street. ${utterance}`);
     }
     expect(h.session.machine.currentState).toBe('intent_capture');
     return turn(h, tenantId, utterance);
@@ -352,7 +352,9 @@ describe('#1014 row 2.4 — a stranger on the phone cannot reach owner-only capa
     const after = await proposalRepo.findByTenant(tenantA.tenantId);
     expect(after.length).toBe(before.length);
     expect(h.session.machine.currentState).toBe('intent_capture');
-    expect(twiml).not.toContain('send invoice. Is that right?');
+    // #1539 — the per-intent readback for send_invoice; a stranger never reaches it.
+    expect(twiml).not.toContain('send the invoice');
+    expect(twiml).not.toContain('Is that right?');
     expect(twiml).toContain('can you say that again?');
   });
 
@@ -368,7 +370,7 @@ describe('#1014 row 2.4 — a stranger on the phone cannot reach owner-only capa
     // FSM asked for confirmation. That is the layer difference this row is
     // about — the stranger never reached it.
     expect(h.session.machine.currentState).toBe('intent_confirm');
-    expect(twiml).toContain('send invoice. Is that right?');
+    expect(twiml).toContain('you&apos;d like to send the invoice. Is that right?'); // #1539
   });
 
   it('an owner-grade LOOKUP from a stranger is refused by the REAL RBAC — a different layer from the write guard', async () => {

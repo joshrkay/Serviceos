@@ -53,10 +53,17 @@ export interface PerRunResult {
     repromptRatio: number;
     recoveryTurns: number;
   };
-  perceivedCompletion: {
-    satisfaction: 'good' | 'acceptable' | 'poor';
-    abandonmentRisk: 0 | 1 | 2;
-  };
+  perceivedCompletion: RunPerceivedCompletion;
+}
+
+/** One run's perceived-completion verdict. */
+export interface RunPerceivedCompletion {
+  satisfaction: 'good' | 'acceptable' | 'poor';
+  abandonmentRisk: 0 | 1 | 2;
+  /** #1331 — the judge's own rationale, for diagnosis without a re-run. */
+  rationale?: string;
+  /** #1331 — what the agent said each turn, as the judge read it. */
+  agentTurns?: string[];
 }
 
 export interface AggregatedResult {
@@ -88,6 +95,8 @@ export interface AggregatedResult {
     /** 2-of-3: satisfaction !== 'poor' AND abandonmentRisk !== 2. */
     passed: boolean;
     satisfactions: ReadonlyArray<'good' | 'acceptable' | 'poor'>;
+    /** #1331 — each run's verdict, rationale and agent transcript, in run order. */
+    runResults?: ReadonlyArray<RunPerceivedCompletion>;
   };
   /** True iff the three runs disagree on any binary outcome. */
   flakeIndicator: boolean;
@@ -192,6 +201,7 @@ export function aggregate(
     perceivedCompletion: {
       passed: pcMajority,
       satisfactions: runs.map((r) => r.perceivedCompletion.satisfaction),
+      runResults: runs.map((r) => ({ ...r.perceivedCompletion })),
     },
     flakeIndicator,
   };

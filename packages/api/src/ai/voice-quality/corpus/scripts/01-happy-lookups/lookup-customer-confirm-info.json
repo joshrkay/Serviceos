@@ -35,7 +35,7 @@
       "caller": "I'd like to confirm my contact information on file",
       "expected": {
         "intent": "lookup_customer",
-        "spokenAnswerMatches": "read back the contact info on file for Carlos Rivera (phone +1 555 555 0102 and email carlos.rivera@example.com)"
+        "spokenAnswerMatches": "confirm Carlos Rivera is on file with his phone number MASKED to its last four digits (ending in 0102) — by privacy posture the full number and the email are not read aloud"
       },
       "hangupAfter": false
     }

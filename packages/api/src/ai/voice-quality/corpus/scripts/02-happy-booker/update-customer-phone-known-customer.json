@@ -38,7 +38,7 @@
         "intent": "update_customer",
         "proposalType": "update_customer",
         "slots": {
-          "phone": "+15555550143"
+          "phone": "555-0143"
         },
         "spokenAnswerMatches": "I've drafted an update to your contact details for review; an operator will confirm before it's applied.",
         "escalates": false

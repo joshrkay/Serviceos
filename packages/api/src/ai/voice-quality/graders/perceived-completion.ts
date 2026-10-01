@@ -40,6 +40,7 @@ import { SYSTEM_TENANT_ID } from '../../gateway/gateway';
 import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
 import { parseJsonResponse } from './parse-json-response';
+import { describeCorpusCall } from '../layer2-world';
 
 export interface PerceivedCompletionInput {
   observation: Observation;
@@ -65,6 +66,8 @@ export interface PerceivedCompletionVerdict {
 export interface PerceivedCompletionResult {
   passed: boolean;
   verdict: PerceivedCompletionVerdict;
+  /** #1331 — the agent's line per script turn, exactly as the judge read it. */
+  agentTurns: string[];
 }
 
 const VerdictSchema = z.object({
@@ -76,6 +79,20 @@ const VerdictSchema = z.object({
 const JUDGE_SYSTEM = `You are a strict but fair evaluator of a voice agent's interaction with a caller.
 Given the full caller transcript and the agent's spoken responses (Whisper-recovered),
 determine whether the caller experienced this as a successful interaction.
+
+How this product works (grade against THIS contract, not an imagined one):
+- The agent never carries out a change during the call. For any request that
+  changes something (book, cancel, update, refund, message, ...) it first reads
+  the request back ("Just to confirm — ... Is that right?") and, on the caller's
+  yes, the change is drafted for human approval: a person on the business's team
+  reviews it before anything happens. The business owner hears that it is in
+  their approvals; a customer hears that the team will confirm.
+- So a readback followed by "drafted / in your approvals / the team will
+  confirm" IS the caller getting what they asked for. Do not mark a call poor
+  because the change was not applied live, or because the agent asked the
+  readback question.
+- It is still a failure when the agent drafted the wrong thing, lost the
+  request, gave wrong information, or left the caller without an answer.
 
 Evaluate:
 1. Did the agent address the caller's actual intent (or correctly escalate when out of scope)?
@@ -102,12 +119,16 @@ export async function gradePerceivedCompletion(
 
   const cached = input.cache?.get(cacheKey);
   if (cached) {
-    return { passed: verdictPasses(cached), verdict: cached };
+    return { passed: verdictPasses(cached), verdict: cached, agentTurns: agentLines(input.observation, input.script) };
   }
 
-  const transcript = buildTranscriptSummary(input.observation, input.script);
+  const agentTurns = agentLines(input.observation, input.script);
+  const transcript = buildTranscriptSummary(input.observation, input.script, agentTurns);
   const expected = describeExpected(input.script);
-  const userPrompt = `Full call transcript:\n${transcript}\n\nExpected behavior (per spec):\n${expected}`;
+  // #1331 — persona + the corpus call date, the same context the
+  // criterion-12 judge gets, so a spoken date is judged on the right calendar.
+  const caller = describeCorpusCall(input.script);
+  const userPrompt = `${caller}\n\nFull call transcript:\n${transcript}\n\nExpected behavior (per spec):\n${expected}`;
 
   const response = await input.gateway.complete({
     taskType: 'voice_quality_perceived_completion',
@@ -144,7 +165,7 @@ export async function gradePerceivedCompletion(
 
   if (input.cache) input.cache.set(cacheKey, verdict);
 
-  return { passed: verdictPasses(verdict), verdict };
+  return { passed: verdictPasses(verdict), verdict, agentTurns };
 }
 
 function verdictPasses(v: PerceivedCompletionVerdict): boolean {
@@ -167,6 +188,24 @@ function makeCacheKey(scriptId: string, observation: Observation): string {
 }
 
 /**
+ * The agent's line for each script turn, read off `speech_outbound`
+ * (later-emitted overrides earlier for a duplicated turn). A turn with no
+ * captured speech — Layer 1 pre-emit fallback, or a Layer 2 turn whose
+ * Whisper recovery came back empty — is `<response not captured>`, so a
+ * silent / un-transcribable turn is a signal to the judge, never elided.
+ */
+function agentLines(observation: Observation, script: VoiceQualityScript): string[] {
+  const agentByTurn = new Map<number, string>();
+  for (const e of observation.events) {
+    if (e.type === 'speech_outbound') agentByTurn.set(e.turnIndex, e.transcript);
+  }
+  return script.turns.map((_, i) => {
+    const agent = agentByTurn.get(i);
+    return agent !== undefined && agent.length > 0 ? agent : '<response not captured>';
+  });
+}
+
+/**
  * Transcript synthesis. Renders each scripted caller utterance plus
  * the agent's recovered reply (read off `speech_outbound` events on
  * the bus — Layer 2 supplies Whisper-recovered transcripts, Layer 1
@@ -179,29 +218,15 @@ function makeCacheKey(scriptId: string, observation: Observation): string {
  * judge (the agent failed to speak that turn) rather than silently
  * eliding it.
  */
-function buildTranscriptSummary(observation: Observation, script: VoiceQualityScript): string {
-  // Index speech_outbound events by turnIndex for O(1) lookup. The
-  // driver emits one per turn, but we tolerate duplicates by keeping
-  // the most recent (later-emitted overrides earlier).
-  const agentByTurn = new Map<number, string>();
-  for (const e of observation.events) {
-    if (e.type === 'speech_outbound') {
-      agentByTurn.set(e.turnIndex, e.transcript);
-    }
-  }
+function buildTranscriptSummary(
+  observation: Observation,
+  script: VoiceQualityScript,
+  agentTurns: string[],
+): string {
   const lines: string[] = [];
   for (let i = 0; i < script.turns.length; i++) {
-    const turn = script.turns[i];
-    lines.push(`Caller: ${turn.caller}`);
-    const agent = agentByTurn.get(i);
-    if (agent !== undefined && agent.length > 0) {
-      lines.push(`Agent: ${agent}`);
-    } else {
-      // Layer 1 text-mode pre-emit fallback OR a Layer 2 turn whose
-      // Whisper recovery returned empty. Surface this to the judge
-      // so a silent / un-transcribable turn shows up as a signal.
-      lines.push(`Agent: <response not captured>`);
-    }
+    lines.push(`Caller: ${script.turns[i].caller}`);
+    lines.push(`Agent: ${agentTurns[i]}`);
   }
   if (observation.events.length > 0) {
     const eventTypes = observation.events.map((e) => e.type).join(', ');

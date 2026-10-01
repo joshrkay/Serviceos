@@ -338,12 +338,20 @@ export class TwilioStreamEmulator {
     const firstReply = firstReplyFrame();
     if (firstReply) {
       let lastFrameTs = this.receivedFrames[this.receivedFrames.length - 1]!.ts;
-      while (performance.now() - lastFrameTs < silenceWindowMs || awaitingRealReply()) {
+      let wasAwaiting = awaitingRealReply();
+      while (performance.now() - lastFrameTs < silenceWindowMs || wasAwaiting) {
         await new Promise((r) => setTimeout(r, SILENCE_POLL_MS));
         const newest = this.receivedFrames[this.receivedFrames.length - 1];
         if (newest && newest.ts > lastFrameTs) {
           lastFrameTs = newest.ts;
         }
+        // The adapter marks the real reply on the bus as it SENDS the frame;
+        // the frame lands a WS transit later. Start the silence window at the
+        // mark (not at the old filler frame), or the turn closes in that
+        // transit gap with the reply still in flight.
+        const awaiting = awaitingRealReply();
+        if (wasAwaiting && !awaiting) lastFrameTs = Math.max(lastFrameTs, performance.now());
+        wasAwaiting = awaiting;
       }
     }
 

@@ -30,15 +30,30 @@
         "updatedAt": "2026-04-01T10:00:00.000Z"
       }
     ],
+    "jobs": [
+      {
+        "id": "job_02_confirm_1",
+        "tenantId": "t_02_confirm_appt",
+        "customerId": "cust_02_confirm_jane",
+        "locationId": "loc_02_confirm_home",
+        "jobNumber": "JOB-0401",
+        "summary": "AC service",
+        "status": "scheduled",
+        "priority": "normal",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-15T10:00:00.000Z",
+        "updatedAt": "2026-04-15T10:00:00.000Z"
+      }
+    ],
     "appointments": [
       {
         "id": "appt_02_confirm_existing",
         "tenantId": "t_02_confirm_appt",
         "jobId": "job_02_confirm_1",
-        "scheduledStart": "2026-05-26T21:00:00.000Z",
-        "scheduledEnd": "2026-05-26T23:00:00.000Z",
-        "arrivalWindowStart": "2026-05-26T21:00:00.000Z",
-        "arrivalWindowEnd": "2026-05-26T21:30:00.000Z",
+        "scheduledStart": "2026-05-02T21:00:00.000Z",
+        "scheduledEnd": "2026-05-02T23:00:00.000Z",
+        "arrivalWindowStart": "2026-05-02T21:00:00.000Z",
+        "arrivalWindowEnd": "2026-05-02T21:30:00.000Z",
         "timezone": "America/Los_Angeles",
         "status": "scheduled",
         "notes": "AC service",

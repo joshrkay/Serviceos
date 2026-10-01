@@ -402,6 +402,7 @@ import { createEvaluationRouter } from './routes/evaluation';
 import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
 import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
 import { createTtsProvider, assertTtsProviderSupportsMediaStreams } from './ai/tts/tts-provider';
+import { createTtsHealthCheck } from './ai/tts/tts-health';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
 import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-event-transport';
@@ -4280,6 +4281,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           warnings,
         };
       },
+      // #1536 — config alone said `tts: true` while the ElevenLabs key lacked
+      // the Text to Speech permission and every reply failed. Probe the
+      // provider the env selects (cached ~10 min, bounded so a slow vendor
+      // never slows /health); a provider without a probe (OpenAI tts-1)
+      // reports `ttsCheck.status: 'config_only'`.
+      ttsHealth: createTtsHealthCheck({
+        provider: createTtsProvider({
+          TTS_PROVIDER: process.env.TTS_PROVIDER,
+          ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+          ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
+          AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+        }),
+      }),
       // §10 onboarding voice gates — only wired when both pool and auditRepo
       // exist (production / integration test). In-memory dev mode skips
       // gating entirely (the route stays legacy behavior).
