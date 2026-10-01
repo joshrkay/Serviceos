@@ -126,6 +126,7 @@ import {
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   CALLER_INCOMPLETE_REQUEST_COPY,
   OPERATOR_DRAFTED_FOR_REVIEW_COPY,
+  INAPP_INCOMPLETE_DRAFT_COPY,
   type SessionLanguage,
 } from '../agents/customer-calling/tts-copy';
 import {
@@ -155,6 +156,7 @@ import {
 import {
   confirmTurnSlotFillEvent,
   isNegation,
+  isAffirmation,
   SLOT_FILL_INTENTS,
 } from '../agents/customer-calling/confirm-turn';
 import {
@@ -1483,7 +1485,14 @@ export function createVoiceTurnProcessor(
         error: err instanceof Error ? err.message : String(err),
         sessionId: session.id,
       });
-      // Treat as correction so the caller is re-prompted, not auto-queued.
+      // #1331 — the yes/no model is unreachable: a plain yes is still a yes
+      // (the shared deterministic rule in-app already decides with), so the
+      // confirmed request is not thrown away on a provider timeout. Anything
+      // else is treated as a correction so the caller is re-prompted, never
+      // auto-queued.
+      if (isAffirmation(speechResult)) {
+        return session.machine.dispatch({ type: 'confirmed' });
+      }
       return session.machine.dispatch({ type: 'correction', newTranscript: speechResult });
     }
     if (recordCost(session, confirmation.tokenUsage)) {
@@ -2870,7 +2879,10 @@ export function createVoiceTurnProcessor(
           : bookingUtterance
             ? { utterance: bookingUtterance }
             : incompleteRequest
-              ? { utterance: CALLER_INCOMPLETE_REQUEST_COPY }
+              ? // #1331 — the owner line is an operator surface (#1497): the
+                // incomplete card is theirs to finish, so "someone from our
+                // team will follow up with you" (S1 caller copy) is untrue there.
+                { utterance: surface === 'S1' ? CALLER_INCOMPLETE_REQUEST_COPY : INAPP_INCOMPLETE_DRAFT_COPY }
               : operatorAwaitingReview
                 ? { utterance: OPERATOR_DRAFTED_FOR_REVIEW_COPY }
                 : {}),

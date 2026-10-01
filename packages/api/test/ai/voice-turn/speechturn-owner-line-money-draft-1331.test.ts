@@ -170,4 +170,42 @@ describe('#1331 — owner line: money write is read back, drafted on yes, left p
     expect(proposals[0]!.status).not.toBe('executed');
     expect(reply.toLowerCase()).not.toContain('pin');
   });
+
+  it('a draft still missing details tells the OWNER it is on their card — not "someone from our team will follow up with you"', async () => {
+    // Run 36895893912: apply-credit / record-refund / change-order /
+    // service-agreement were drafted with an unfilled gate on the owner line,
+    // and the owner heard the S1 caller line promising a team follow-up — the
+    // owner IS the team. (#1497's operator posture, for an incomplete card.)
+    const c = await makeCall({
+      ownerSession: true,
+      actorUserId: 'vq-owner:tenant-1476-phone',
+      classifier: JSON.stringify({
+        intentType: 'apply_credit',
+        confidence: 0.95,
+        extractedEntities: { amount: 5000, customerName: 'Dana Reyes' },
+      }),
+    });
+    await c.turn('Give Dana Reyes a fifty dollar credit.');
+    const reply = spoken(await c.turn('Yes, go ahead.'));
+
+    const [proposal] = await c.proposalRepo.findByTenant(TENANT);
+    expect(proposal!.sourceContext?.missingFields).toEqual(['invoiceId']);
+    expect(reply).toBe(
+      "I've drafted that, but it still needs a few details before it can be approved — open the card to fill them in. Is there anything else I can help you with?",
+    );
+  });
+
+  it('an S1 caller with the same incomplete request still hears the honest team follow-up line', async () => {
+    const c = await makeCall({
+      ownerSession: false,
+      classifier: JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.95,
+        extractedEntities: { jobReference: 'furnace not heating' },
+      }),
+    });
+    await c.turn('I need someone to look at my furnace.');
+    const reply = spoken(await c.turn('Yes, go ahead.'));
+    expect(reply).not.toContain('open the card');
+  });
 });

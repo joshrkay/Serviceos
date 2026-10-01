@@ -167,7 +167,9 @@ export const VOICE_APPROVAL_REFUSAL =
  * VOX-05). These state only what is true: a draft exists and still needs
  * details — no confirmation is promised.
  *
- * In-app: the speaker is the authenticated operator who owns the card.
+ * In-app: the speaker is the authenticated operator who owns the card. Also
+ * spoken on the OWNER phone line (#1331) — the owner owns the card too; only
+ * an S1 caller hears {@link CALLER_INCOMPLETE_REQUEST_COPY}.
  */
 export const INAPP_INCOMPLETE_DRAFT_COPY =
   "I've drafted that, but it still needs a few details before it can be approved — open the card to fill them in. Is there anything else I can help you with?";
