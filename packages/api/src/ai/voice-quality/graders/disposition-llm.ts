@@ -41,7 +41,7 @@ import type { Observation } from '../observation';
 import type { VoiceQualityScript } from '../schema';
 import type { Proposal } from '../../../proposals/proposal';
 import { parseJsonResponse } from './parse-json-response';
-import { corpusCallMoment, corpusTimezone } from '../layer2-world';
+import { describeCorpusCall } from '../layer2-world';
 
 export interface DispositionLlmInput {
   observation: Observation;
@@ -149,7 +149,7 @@ export async function gradeDispositionLlm(
     };
   });
 
-  const callContext = describeCall(script);
+  const callContext = describeCorpusCall(script);
 
   // Run with bounded concurrency.
   const perTurnDetail: DispositionLlmTurnDetail[] = new Array(turnTasks.length);
@@ -263,25 +263,6 @@ interface JudgeUserPromptInput {
   spokenAnswer: string | null;
   expectedAnswer?: string;
   softSlots: Record<string, unknown>;
-}
-
-/**
- * #1331 — who is calling and on what date, so a drafted-reply / date answer is
- * graded against the right persona and the corpus world's calendar (not the
- * judge's guess at "this year").
- */
-function describeCall(script: VoiceQualityScript): string {
-  const caller = script.callerIsOwner
-    ? 'Caller: the business owner, calling their own business line.'
-    : 'Caller: a customer of the business.';
-  const date = new Intl.DateTimeFormat('en-US', {
-    timeZone: corpusTimezone(script),
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
-  }).format(corpusCallMoment(script));
-  return `${caller}\nCall date: ${date}`;
 }
 
 function buildUserPrompt(input: JudgeUserPromptInput): string {
