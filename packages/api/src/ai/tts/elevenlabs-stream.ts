@@ -1,5 +1,6 @@
 import NodeWebSocket from 'ws';
 import type { TtsStreamChunk, TtsSynthesizeStreamInput } from './tts-provider';
+import { classifyElevenLabsError, TtsProviderRejectedError } from './tts-errors';
 
 /**
  * VOX-33 — max wait for the NEXT audio frame (connect→first-frame and
@@ -218,7 +219,14 @@ export class ElevenLabsStreamConnection {
         };
         if (data.error) {
           // Do not echo provider payloads, which may contain credentials.
-          errorState = new Error('ElevenLabs rejected the speech request');
+          // #1536 — carry only the safe code token (e.g. missing_permissions)
+          // so the cause is visible in logs without the payload.
+          const code = classifyElevenLabsError(data);
+          errorState = new TtsProviderRejectedError(
+            'elevenlabs',
+            code,
+            `ElevenLabs rejected the speech request (${code})`,
+          );
           finish();
           ws.close();
           return;
