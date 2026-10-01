@@ -10,7 +10,9 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { buildLayer2ProcessorWorld } from '../../src/ai/voice-quality/layer2-world';
+import { buildLayer2ProcessorWorld, establishLayer2Caller } from '../../src/ai/voice-quality/layer2-world';
+import { VoiceSessionStore, type VoiceSessionEvent } from '../../src/ai/agents/customer-calling/voice-session-store';
+import { InMemoryCustomerRepository, type Customer } from '../../src/customers/customer';
 import { loadLayer2Corpus } from '../../src/ai/voice-quality/corpus/loader';
 import { runScript, type RepoBundle } from '../../src/ai/voice-quality/runner';
 
@@ -83,5 +85,53 @@ describe('#1331 — buildLayer2ProcessorWorld', () => {
     };
     const world = buildLayer2ProcessorWorld(pinned, 't_01_lookup_catalog');
     expect(world.now().toISOString()).toBe('2026-05-05T05:00:00.000Z');
+  });
+});
+
+describe('#1331 — establishLayer2Caller (session establishment, as twilio-adapter does it)', () => {
+  const tenantId = 't_caller_id';
+  const customer = (id: string, phone: string): Customer =>
+    ({
+      id,
+      tenantId,
+      firstName: 'Fiona',
+      lastName: 'Test',
+      displayName: `Fiona ${id}`,
+      primaryPhone: phone,
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: 'seed',
+      createdAt: new Date('2026-01-01T00:00:00Z'),
+      updatedAt: new Date('2026-01-01T00:00:00Z'),
+    }) as Customer;
+
+  async function establish(customers: Customer[], callerId: string, callerIdBlocked = false) {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const session = store.create(tenantId, 'telephony', { callSid: `CA_${Math.random()}` });
+    const events: VoiceSessionEvent[] = [];
+    session.events.on('voice-event', (e: VoiceSessionEvent) => events.push(e));
+    const customerRepo = new InMemoryCustomerRepository();
+    for (const c of customers) await customerRepo.create(c);
+    await establishLayer2Caller(session, { callerId, callerIdBlocked }, customerRepo);
+    store.dispose();
+    return { session, identityStamps: events.filter((e) => e.type === 'lookup_executed' && e.skillName === 'identify_caller_by_caller_id') };
+  }
+
+  it('a caller-ID matching exactly one customer identifies that customer and stamps the identity', async () => {
+    const { session, identityStamps } = await establish([customer('c-1', '+15555550105')], '+15555550105');
+    expect(session.customerId).toBe('c-1');
+    expect(session.callerPhone).toBe('+15555550105');
+    expect(identityStamps).toHaveLength(1);
+  });
+
+  it('an ambiguous, unknown or blocked caller-ID is never stamped', async () => {
+    const twoAccounts = await establish([customer('c-1', '+15555550105'), customer('c-2', '+15555550105')], '+15555550105');
+    const unknown = await establish([customer('c-1', '+15555550105')], '+15555550999');
+    const blocked = await establish([customer('c-1', '+15555550105')], '+15555550105', true);
+    for (const r of [twoAccounts, unknown, blocked]) {
+      expect(r.session.customerId).toBeUndefined();
+      expect(r.identityStamps).toHaveLength(0);
+    }
   });
 });

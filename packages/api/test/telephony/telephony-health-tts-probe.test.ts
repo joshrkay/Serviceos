@@ -43,7 +43,13 @@ function stubProvider(probe: () => Promise<TtsProbeResult>): TtsProvider & { pro
 
 function appWith(
   provider: TtsProvider,
-  opts: { ttlMs?: number; responseDeadlineMs?: number; probeTimeoutMs?: number; now?: () => number } = {},
+  opts: {
+    ttlMs?: number;
+    responseDeadlineMs?: number;
+    probeTimeoutMs?: number;
+    now?: () => number;
+    report?: () => TelephonyHealthReport;
+  } = {},
 ) {
   const app = express();
   app.use(
@@ -52,7 +58,7 @@ function appWith(
       adapter: {} as TwilioGatherAdapter,
       authTokenGetter: () => 'unused',
       resolveTenantId: () => undefined,
-      getHealth: configOnlyReport,
+      getHealth: opts.report ?? configOnlyReport,
       ttsHealth: createTtsHealthCheck({ provider, ...opts }),
     }),
   );
@@ -68,10 +74,57 @@ describe('#1536 — /api/telephony/health probes the TTS provider', () => {
     expect(res.status).toBe(200);
     expect(res.body.capabilities.tts).toBe(false);
     expect(res.body.ttsCheck).toMatchObject({ status: 'failed', reason: 'missing_permissions' });
-    expect(res.body.ok).toBe(false);
+    // Calls still work: /voice routes them to Gather (Twilio <Say>) on a
+    // credential failure (#1537 gate a2), so the line is degraded, not down —
+    // and a key permission must not fail every deploy's smoke check.
+    expect(res.body.ok).toBe(true);
+    expect(res.body.degraded).toBe(true);
     expect(res.body.warnings).toContain(
-      'TTS provider rejected the probe (missing_permissions) — voice replies will fail',
+      'TTS key rejected (missing_permissions) — calls fall back to Gather (Twilio <Say>)',
     );
+  });
+
+  it('a billing refusal (payment_required) is degraded, not down: calls fall back to Gather', async () => {
+    const provider = stubProvider(async () => ({ ok: false, reason: 'payment_required' }));
+
+    const res = await request(appWith(provider)).get('/api/telephony/health');
+
+    expect(res.body.capabilities.tts).toBe(false);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.degraded).toBe(true);
+  });
+
+  it('a credential failure does not mask a hard failure: no database → ok:false', async () => {
+    const provider = stubProvider(async () => ({ ok: false, reason: 'unauthorized' }));
+    const base = configOnlyReport();
+    const report: TelephonyHealthReport = {
+      ...base,
+      ok: false,
+      capabilities: { ...base.capabilities, database: false },
+    };
+
+    const res = await request(appWith(provider, { report: () => report })).get('/api/telephony/health');
+
+    expect(res.body.ok).toBe(false);
+    expect(res.body.degraded).toBe(true);
+    expect(res.body.capabilities.tts).toBe(false);
+  });
+
+  it('a verified key → ok:true and not degraded', async () => {
+    const res = await request(appWith(stubProvider(async () => ({ ok: true })))).get('/api/telephony/health');
+
+    expect(res.body.ok).toBe(true);
+    expect(res.body.degraded).toBeUndefined();
+    expect(res.body.capabilities.tts).toBe(true);
+  });
+
+  it('a non-credential failure (unreachable) still reports ok:false, as before — no Gather fallback covers it', async () => {
+    const provider = stubProvider(async () => ({ ok: false, reason: 'unreachable' }));
+
+    const res = await request(appWith(provider)).get('/api/telephony/health');
+
+    expect(res.body.ok).toBe(false);
+    expect(res.body.capabilities.tts).toBe(false);
   });
 
   it('caches the verdict: repeated health hits within the TTL probe the provider once, then re-probe after it', async () => {

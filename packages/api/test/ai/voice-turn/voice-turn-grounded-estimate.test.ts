@@ -19,7 +19,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { createVoiceTurnProcessor } from '../../../src/ai/voice-turn';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryProposalRepository, missingFieldsFor } from '../../../src/proposals/proposal';
-import { CALLER_INCOMPLETE_REQUEST_COPY } from '../../../src/ai/agents/customer-calling/tts-copy';
+import { CALLER_INCOMPLETE_REQUEST_COPY, INAPP_INCOMPLETE_DRAFT_COPY } from '../../../src/ai/agents/customer-calling/tts-copy';
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import type { CatalogItem, CatalogItemRepository } from '../../../src/catalog/catalog-item';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
@@ -371,7 +371,9 @@ describe('WS5 — grounded estimate at handleCreateProposal', () => {
     // No quote read-back for a non-grounded type. This spoken payment names
     // no amount, so the draft is missingFields-gated and gets the honest
     // incomplete-request line rather than a promised confirmation (#1272).
+    // This is the OWNER line, so it is the operator's incomplete-card line —
+    // never the S1 "someone from our team will follow up with you" (#1331).
     expect(missingFieldsFor(p).length).toBeGreaterThan(0);
-    expect(lastTts(sideEffects)).toBe(CALLER_INCOMPLETE_REQUEST_COPY);
+    expect(lastTts(sideEffects)).toBe(INAPP_INCOMPLETE_DRAFT_COPY);
   });
 });

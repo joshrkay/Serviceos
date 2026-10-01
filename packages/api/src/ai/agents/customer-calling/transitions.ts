@@ -955,10 +955,38 @@ function transitionAskCaller(
   return ignoredTransition('ask_caller', event, context);
 }
 
+/**
+ * #1331 (owner decision 2026-10-01) — "no, that's not me" to the caller-name
+ * identity check. The caller-ID account is UNBOUND (context.customerId
+ * cleared), so nothing later on the call reads from or drafts on it; the
+ * agent asks who it is speaking with and keeps listening.
+ */
+export const CALLER_IDENTITY_REJECTED_LINE =
+  "Sorry about that. Who am I speaking with, and how can I help you today?";
+
+function callerIdentityRejected(
+  from: CallingAgentState,
+  context: CallingAgentContext,
+): TransitionResult {
+  const { customerId: _unbound, ...rest } = context;
+  const updatedContext: CallingAgentContext = { ...rest };
+  return {
+    nextState: 'intent_capture',
+    sideEffects: [
+      auditLog(updatedContext, from, 'intent_capture', 'caller_identity_rejected'),
+      ttsPlay(CALLER_IDENTITY_REJECTED_LINE),
+    ],
+    updatedContext,
+  };
+}
+
 function transitionIntentCapture(
   event: CallingAgentEvent,
   context: CallingAgentContext
 ): TransitionResult {
+  if (event.type === 'caller_identity_rejected') {
+    return callerIdentityRejected('intent_capture', context);
+  }
   if (event.type === 'intent_classified') {
     // emergency_dispatch → fast-path directly to escalating (skip entity_resolution and intent_confirm)
     if (event.intentType === 'emergency_dispatch') {
@@ -1556,6 +1584,9 @@ function transitionClosing(
   event: CallingAgentEvent,
   context: CallingAgentContext
 ): TransitionResult {
+  if (event.type === 'caller_identity_rejected') {
+    return callerIdentityRejected('closing', context);
+  }
   if (event.type === 'closed') {
     return {
       nextState: 'terminated',
