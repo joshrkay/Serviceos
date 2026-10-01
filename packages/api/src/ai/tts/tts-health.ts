@@ -13,7 +13,26 @@ export interface TtsHealthState {
 }
 
 export interface TtsHealthCheck {
+  /** Health endpoint: a fresh-enough verdict, waiting at most the response deadline. */
   check(): Promise<TtsHealthState>;
+  /**
+   * Call path: the last verdict WITHOUT waiting (null before the first probe
+   * lands). Never blocks a live call on the provider; a stale or missing
+   * verdict starts a background re-probe for the next caller.
+   */
+  latest(): TtsHealthState | null;
+}
+
+/**
+ * #1536 — verdicts that mean the configured key itself cannot synthesize.
+ * Deterministic until an operator changes the key (and redeploys), unlike
+ * `unreachable`, which can be a transient network/vendor blip.
+ */
+export function isCredentialFailure(state: TtsHealthState | null): boolean {
+  return (
+    state?.status === 'failed' &&
+    (state.reason === 'missing_permissions' || state.reason === 'unauthorized')
+  );
 }
 
 /** Default verdict lifetime: a probe costs a provider call, so at most one per window. */
@@ -69,6 +88,11 @@ export function createTtsHealthCheck(opts: TtsHealthCheckOpts): TtsHealthCheck {
         status: 'unknown',
         reason: 'probe_pending',
       });
+    },
+    latest() {
+      if (!provider || typeof provider.probe !== 'function') return { status: 'config_only' };
+      if (!cached || now() - cached.at >= ttlMs) void runProbe(provider.probe.bind(provider));
+      return cached?.state ?? null;
     },
   };
 }

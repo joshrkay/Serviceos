@@ -66,7 +66,7 @@ import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import { createAuditEvent } from '../audit/audit';
 import { isValidTenantId } from '../db/schema';
 import { recordVoiceError } from '../analytics/posthog';
-import type { TtsHealthCheck, TtsHealthState } from '../ai/tts/tts-health';
+import { isCredentialFailure, type TtsHealthCheck, type TtsHealthState } from '../ai/tts/tts-health';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -1238,6 +1238,22 @@ async function shouldUseRealtimeStream(opts: {
   if (deps.realtimePrerequisitesMet && !deps.realtimePrerequisitesMet()) {
     logger.warn('telephony/voice: realtime prerequisites missing → Gather fallback', {
       callSid,
+    });
+    return false;
+  }
+
+  // (a2) #1536 — the cached TTS probe verdict. Only a CREDENTIAL failure
+  // (missing_permissions / unauthorized) diverts: it is deterministic until
+  // the key is fixed, and a Stream would connect but speak no reply, while
+  // Gather's <Say> is voiced by Twilio and works. unknown / probe_pending /
+  // unreachable keep the Stream (no flapping on a transient vendor blip; live
+  // session failures already trip the realtime circuit below). Read without
+  // waiting — a live call never blocks on the provider.
+  const ttsVerdict = deps.ttsHealth?.latest() ?? null;
+  if (isCredentialFailure(ttsVerdict)) {
+    logger.warn('telephony/voice: TTS key rejected by provider → Gather fallback', {
+      callSid,
+      reason: ttsVerdict?.reason,
     });
     return false;
   }
