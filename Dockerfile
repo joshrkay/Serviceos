@@ -31,8 +31,9 @@ RUN echo "build: $RAILWAY_GIT_COMMIT_SHA" && cd packages/api && npx tsc --projec
 # Provider credentials are runtime-only. Never declare them as Docker ARGs or
 # interpolate them in RUN instructions: builders persist expanded commands in
 # logs and image history. Optional filler PCM files are generated offline and
-# checked into a release artifact; when absent, the existing runtime cache
-# degrades gracefully without exposing a production credential.
+# checked into a release artifact; when absent, the API synthesizes them in
+# memory at runtime boot with the runtime TTS credential (#1534), so no
+# production credential is ever needed at build time.
 
 # Web static files (served by nginx) — used by @serviceos/web
 #
