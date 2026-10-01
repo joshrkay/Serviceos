@@ -46,6 +46,31 @@ export function ttfaPerTurn(events: ReadonlyArray<VoiceSessionEvent>): number[] 
 }
 
 /**
+ * #1331 — per-turn FIRST-AUDIBLE latency (ms): from `transcript_received`
+ * to the first moment the caller hears anything — a production filler
+ * (`filler_fired`, emitted as the clip starts streaming) or the first real
+ * reply frame (`audio_frame_emitted`), whichever comes first. This is the
+ * product's caller-facing SLO ("caller hears something"); `ttfaPerTurn`
+ * stays the answer-audio metric. Same pairing rules as `ttfaPerTurn`.
+ */
+export function firstAudiblePerTurn(events: ReadonlyArray<VoiceSessionEvent>): number[] {
+  const latencies: number[] = [];
+  let pendingTranscriptTs: number | null = null;
+  for (const e of events) {
+    if (e.type === 'transcript_received') {
+      pendingTranscriptTs = e.ts;
+    } else if (
+      (e.type === 'filler_fired' || e.type === 'audio_frame_emitted') &&
+      pendingTranscriptTs !== null
+    ) {
+      latencies.push(e.ts - pendingTranscriptTs);
+      pendingTranscriptTs = null;
+    }
+  }
+  return latencies;
+}
+
+/**
  * Compute lookup→speak latencies (in ms) from an event timeline.
  *
  * Pairs each `lookup_executed` with the next `audio_frame_emitted`.
