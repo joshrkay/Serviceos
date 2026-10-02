@@ -163,4 +163,19 @@ describe('#1577 — phone: a booking with no day or time asks for one', () => {
     expect(reply).toMatch(/let me try again/i);
     expect(session.machine.currentContext.currentIntent).toBeUndefined();
   });
+
+  it('a Spanish-language call is asked in Spanish', async () => {
+    const { session, turn } = await makeCall({
+      'Quiero reservar': JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.93,
+        extractedEntities: {},
+      }),
+    });
+    session.language = 'es';
+
+    const reply = spoken(await turn('Quiero reservar una cita de servicio.'));
+
+    expect(reply).toBe('¿Qué fecha y hora le convienen?');
+  });
 });

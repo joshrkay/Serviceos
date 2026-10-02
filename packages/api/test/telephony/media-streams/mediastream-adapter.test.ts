@@ -2592,26 +2592,6 @@ describe('UB-C2 — streaming TTS language + copy rendering', () => {
     expect(arg.text).toContain('agendar una cita');
   });
 
-  it('#1577 — a Spanish booking with no day or time asks for one, in Spanish', async () => {
-    const tts = {
-      synthesize: vi.fn(async (_input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => ({
-        audio: Buffer.alloc(640),
-        contentType: 'audio/pcm',
-        provider: 'test',
-      })),
-    };
-    const { adapter } = await setupSpanishSession({ ttsProvider: tts });
-
-    await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
-      {
-        type: 'tts_play',
-        payload: { text: 'intent_confirm', template: 'confirm_intent', intent: 'create_appointment' },
-      },
-    ]);
-
-    expect(tts.synthesize.mock.calls[0][0].text).toBe('¿Qué fecha y hora le convienen?');
-  });
-
   it('threads language into synthesizeStream on the streaming path', async () => {
     const synthesizeStream = vi.fn((input: { text: string; language?: string }) => ({
       async *[Symbol.asyncIterator]() {
