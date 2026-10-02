@@ -146,5 +146,15 @@ export interface EntityResolver {
      * An empty job reference is still `skipped`.
      */
     customerId?: string;
+    /**
+     * #1576 — which of an anchored customer's invoices an UNNAMED invoice
+     * lookup may offer. Default (absent) is "open": issued and not fully
+     * settled, the paperwork with money still owed. `'refundable'` is the
+     * opposite end — invoices with money already received (`paid`,
+     * `partially_paid`) — because a refund gives back money that was paid.
+     * Only consulted for `kind: 'invoice'` with a `customerId` anchor and no
+     * document number; a named invoice resolves exactly as before.
+     */
+    invoiceScope?: 'refundable';
   }): Promise<EntityResolverResult>;
 }

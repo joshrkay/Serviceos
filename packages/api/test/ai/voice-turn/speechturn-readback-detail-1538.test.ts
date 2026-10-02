@@ -158,12 +158,13 @@ describe('#1538 — phone: a detail given at the readback', () => {
     expect((await proposalRepo.findByTenant(TENANT)).map((p) => p.proposalType)).toEqual(['create_appointment']);
   });
 
-  it('an answer that is not a day/time still merges nothing (the readback is re-asked unchanged)', async () => {
+  it('an answer that is not a day/time still merges nothing (the date-and-time question is re-asked)', async () => {
     const NOTHING = JSON.stringify({ intentType: 'unknown', confidence: 0.3, extractedEntities: {} });
     const { session, turn } = await makeCall({ 'whatever works': NOTHING });
     await turn('I want to book a service appointment.');
     const reply = spoken(await turn('Hmm, whatever works for you.'));
-    expect(reply).toMatch(/with no day or time yet/);
+    // #1577 — a timeless booking is asked for its time, not read back.
+    expect(reply).toBe('What date and time work for you?');
     expect(session.machine.currentContext.extractedEntities?.dateTimeDescription).toBeUndefined();
   });
 });

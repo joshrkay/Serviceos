@@ -29,6 +29,8 @@ const CALL_SID = 'CA-1567-area';
 const NEW_CALLER = '+15555550567';
 const LA_ZIPS = ['90001', '90002', '90012'];
 
+/** #1577 — a booking with no day or time goes on to ask for one (the usual booking flow). */
+const ASKS_FOR_TIME = 'What date and time work for you?';
 const OUT_OF_AREA_LINE = "We don't usually service that area, but I'll pass your details to the team.";
 
 const BOOKING = JSON.stringify({
@@ -130,7 +132,7 @@ describe('#1567 — new caller booking outside the tenant service area', () => {
     expect(c.session.machine.currentState).not.toBe('intent_confirm');
   });
 
-  it('asks a new caller for the service-address ZIP, then books as usual when it is in the area', async () => {
+  it('asks a new caller for the service-address ZIP, then the booking goes on as usual when it is in the area', async () => {
     const c = await call({ serviceAreaZips: LA_ZIPS });
 
     const ask = await c.turn("Hi, I'd like to schedule HVAC service.");
@@ -138,7 +140,7 @@ describe('#1567 — new caller booking outside the tenant service area', () => {
     expect(c.session.machine.currentState).not.toBe('intent_confirm');
 
     const reply = await c.turn('It is 90012.');
-    expect(reply).toMatch(/^Just to confirm — you'd like to schedule an appointment/);
+    expect(reply).toBe(ASKS_FOR_TIME);
     expect(await c.leadRepo.findByTenant(TENANT)).toEqual([]);
   });
 
@@ -164,7 +166,7 @@ describe('#1567 — new caller booking outside the tenant service area', () => {
     );
     const reply = await c.turn('no idea, sorry');
 
-    expect(reply).toMatch(/^Just to confirm — you'd like to schedule an appointment/);
+    expect(reply).toBe(ASKS_FOR_TIME);
     expect(await c.leadRepo.findByTenant(TENANT)).toEqual([]);
   });
 });
@@ -175,7 +177,7 @@ describe('#1567 — where the service-area check does not apply', () => {
 
     const reply = await c.turn("Hi, I'm in 30309 Atlanta and I'd like to schedule HVAC service.");
 
-    expect(reply).toMatch(/^Just to confirm — you'd like to schedule an appointment/);
+    expect(reply).toBe(ASKS_FOR_TIME);
     expect(await c.leadRepo.findByTenant(TENANT)).toEqual([]);
   });
 
@@ -184,7 +186,34 @@ describe('#1567 — where the service-area check does not apply', () => {
 
     const reply = await c.turn("I'm in 30309 now and I'd like to schedule HVAC service.");
 
-    expect(reply).toMatch(/^Just to confirm — you'd like to schedule an appointment/);
+    expect(reply).toBe(ASKS_FOR_TIME);
     expect(await c.leadRepo.findByTenant(TENANT)).toEqual([]);
   });
 });
+
+describe('#1567 × #1577 — a new caller booking with no ZIP and no time', () => {
+  // Order: the ZIP check comes FIRST. An out-of-area caller is never asked
+  // for a date and time for a visit the business will not make; an in-area
+  // caller is asked for the time next.
+  it('is asked for the ZIP before the time; out of area, they are never asked for a time', async () => {
+    const c = await call({ serviceAreaZips: LA_ZIPS });
+
+    const first = await c.turn("Hi, I'd like to schedule HVAC service.");
+    expect(first).toBe("Sure — what's the ZIP code for the address where you need the service?");
+
+    const second = await c.turn('30309');
+    expect(second).toBe(OUT_OF_AREA_LINE);
+    expect(second).not.toContain(ASKS_FOR_TIME);
+    expect(await c.proposalRepo.findByTenant(TENANT)).toEqual([]);
+  });
+
+  it('in area, the time question follows the ZIP', async () => {
+    const c = await call({ serviceAreaZips: LA_ZIPS });
+
+    expect(await c.turn("Hi, I'd like to schedule HVAC service.")).toBe(
+      "Sure — what's the ZIP code for the address where you need the service?",
+    );
+    expect(await c.turn('90001')).toBe(ASKS_FOR_TIME);
+  });
+});
+

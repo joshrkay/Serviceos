@@ -106,7 +106,8 @@ describe('#1540 §2 — the ask_caller turn carries the caller\'s request forwar
     expect(call.session.machine.currentContext.currentIntent).toBe('create_appointment');
     expect(reply).not.toContain('How can I help you today?');
     expect(call.session.machine.currentState).not.toBe('intent_capture');
-    expect(reply).toMatch(/^Just to confirm/);
+    // #1577 — no time was given, so the agent asks for one.
+    expect(reply).toBe('What date and time work for you?');
   });
 
   it('S1 intact: a first utterance asking for an owner-only action gets the off-surface repair, not "How can I help"', async () => {
@@ -149,6 +150,7 @@ describe('#1331 Layer 2 (run 36925905917) — find-or-create-lead-unknown-caller
 
     expect(await call.customerRepo.findByTenant(TENANT)).toHaveLength(1);
     expect(reply).not.toContain('How can I help you today?');
-    expect(reply).toBe("Just to confirm — you'd like to schedule an appointment, with no day or time yet. Is that right?");
+    // #1577 — the kept booking has no time yet, so the agent asks for one.
+    expect(reply).toBe('What date and time work for you?');
   });
 });

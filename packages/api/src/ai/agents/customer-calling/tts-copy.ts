@@ -18,6 +18,7 @@
 
 import { intentReadbackPhrase } from './intent-readback';
 import { OUT_OF_SERVICE_AREA_COPY, SERVICE_AREA_ZIP_QUESTION } from '../../voice-turn/service-area-gate';
+import { bookingAwaitsTime } from './confirm-turn';
 
 export type SessionLanguage = 'en' | 'es';
 
@@ -411,6 +412,13 @@ export function renderTtsText(
         typeof payload.entities === 'object' && payload.entities !== null
           ? (payload.entities as Record<string, unknown>)
           : undefined;
+      // #1577 — a booking with no day or time asks for one first; the
+      // readback comes once there is a time to read back.
+      if (bookingAwaitsTime(intent, entities)) {
+        return lang === 'es'
+          ? '¿Qué fecha y hora le convienen?'
+          : 'What date and time work for you?';
+      }
       return lang === 'es'
         ? `Para confirmar: usted desea ${intentReadbackPhrase(intent, entities, 'es')}. ¿Es correcto?`
         : `Just to confirm — you'd like to ${intentReadbackPhrase(intent, entities, 'en')}. Is that right?`;

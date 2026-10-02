@@ -81,7 +81,8 @@ describe('#1331 — Gather: a low-confidence caller name gets the yes/no identit
 
     expect(call.gateway.complete).toHaveBeenCalled();
     expect(call.session.machine.currentState).toBe('intent_confirm');
-    expect(twiml).toContain('Just to confirm');
+    // #1577 — the held booking has no time yet: the agent asks for one.
+    expect(twiml).toContain('What date and time work for you?');
     expect(call.session.customerId).toBe(call.maria.id);
   });
 

@@ -79,13 +79,14 @@ describe('#1567 — Gather: service area on a new caller\'s booking', () => {
     expect(c.session.machine.currentState).not.toBe('intent_confirm');
   });
 
-  it('no ZIP → asked for it; an in-area answer goes on to the readback', async () => {
+  it('no ZIP → asked for it; an in-area answer goes on with the booking', async () => {
     const c = await gatherCall('CA-1567-g2');
 
     const ask = await c.say("Hi, I'd like to schedule HVAC service.");
     expect(ask).toContain('ZIP code for the address where you need the service?');
 
     const twiml = await c.say('nine zero zero one two');
-    expect(twiml).toContain('Just to confirm');
+    // The booking continues as usual: #1577 asks a timeless booking for a time.
+    expect(twiml).toContain('What date and time work for you?');
   });
 });

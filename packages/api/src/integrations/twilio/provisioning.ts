@@ -306,8 +306,6 @@ function classifyTwilioError(error: unknown): ProvisioningFailure {
 export type TwilioProvisioningClient = {
   createSubaccount(input: { friendlyName: string }): Promise<{ sid: string }>;
   createMessagingService(input: { accountSid: string; friendlyName: string }): Promise<{ sid: string }>;
-  initiateBrandRegistration(input: { accountSid: string; legalBusinessName: string; taxId: string }): Promise<{ brandSid: string }>;
-  initiateCampaignRegistration(input: { accountSid: string; brandSid: string; usecase: string; description: string }): Promise<{ campaignSid: string }>;
   searchAvailableNumbers(input: { accountSid: string; areaCode?: string; contains?: string; limit: number }): Promise<Array<{ phoneNumber: string; locality?: string; region?: string }>>;
   purchaseNumber(input: { accountSid: string; phoneNumber: string; messagingServiceSid?: string }): Promise<{ sid: string; phoneNumber: string }>;
   configureNumberWebhook(input: { accountSid: string; phoneNumberSid: string; smsUrl: string; statusCallbackUrl?: string }): Promise<{ sid: string }>;
@@ -332,15 +330,10 @@ export async function createTwilioMessagingService(client: TwilioProvisioningCli
   }
 }
 
-export async function initiateTenDlcBrandAndCampaign(client: TwilioProvisioningClient, input: { accountSid: string; legalBusinessName: string; taxId: string; campaignUsecase: string; campaignDescription: string }): Promise<ProvisioningResult<{ brandSid: string; campaignSid: string }>> {
-  try {
-    const brand = await client.initiateBrandRegistration({ accountSid: input.accountSid, legalBusinessName: input.legalBusinessName, taxId: input.taxId });
-    const campaign = await client.initiateCampaignRegistration({ accountSid: input.accountSid, brandSid: brand.brandSid, usecase: input.campaignUsecase, description: input.campaignDescription });
-    return { ok: true, value: { brandSid: brand.brandSid, campaignSid: campaign.campaignSid } };
-  } catch (error) {
-    return { ok: false, failure: classifyTwilioError(error) };
-  }
-}
+// US A2P 10DLC brand + campaign registration (#1564) lives in
+// ./a2p-10dlc/ — a real TrustHub → BrandRegistration → UsAppToPerson client
+// driven by an async worker — replacing the brand/campaign stubs that were
+// here.
 
 export async function searchNumberLadder(client: TwilioProvisioningClient, input: { accountSid: string; candidates: Array<{ areaCode?: string; contains?: string }>; limitPerCandidate?: number }): Promise<ProvisioningResult<{ selectedNumber: string; locality?: string; region?: string }>> {
   try {
