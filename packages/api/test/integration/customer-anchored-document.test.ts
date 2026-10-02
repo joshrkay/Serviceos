@@ -150,6 +150,7 @@ describe('Postgres integration — customer-anchored estimate/invoice resolution
     status: InvoiceStatus,
     amountDueCents: number,
     dueInDays = 30,
+    amountPaidCents = 0,
   ): Promise<string> {
     const invoice = await createInvoice(
       {
@@ -169,6 +170,7 @@ describe('Postgres integration — customer-anchored estimate/invoice resolution
       issuedAt: new Date(),
       dueDate: new Date(Date.now() + dueInDays * 24 * 3600 * 1000),
       amountDueCents,
+      amountPaidCents,
     });
     return invoice.id;
   }
@@ -342,6 +344,70 @@ describe('Postgres integration — customer-anchored estimate/invoice resolution
       expect(result.kind).toBe('ambiguous');
       if (result.kind === 'ambiguous') {
         expect(result.candidates.map((c) => c.id)).toEqual([sooner, later]);
+      }
+    });
+  });
+
+  // #1576 — "refund the Smiths": a refund gives back money already received,
+  // so the anchored lookup offers the customer's PAID invoices.
+  describe("kind: invoice, invoiceScope 'refundable'", () => {
+    it('resolves the customer’s one paid invoice, hinted by the amount PAID', async () => {
+      const customerId = await seedCustomer('Refund Smith');
+      const jobId = await seedJob(customerId, 'AC refrigerant recharge');
+      const paid = await seedInvoice(jobId, 'paid', 0, 30, 32000);
+
+      const result = await resolver.resolve({
+        tenantId: tenant.tenantId,
+        reference: 'Refund Smith',
+        kind: 'invoice',
+        customerId,
+        invoiceScope: 'refundable',
+      });
+
+      expect(result.kind).toBe('resolved');
+      if (result.kind === 'resolved') {
+        expect(result.candidate.id).toBe(paid);
+        // Off `invoices.amount_paid_cents` — what could be given back.
+        expect(result.candidate.hint).toBe('paid · $320.00');
+      }
+    });
+
+    it.each<InvoiceStatus>(['draft', 'open', 'void', 'canceled'])(
+      'a %s invoice has nothing to refund and is not offered',
+      async (status) => {
+        const customerId = await seedCustomer(`Refund Inv ${status}`);
+        const jobId = await seedJob(customerId, `Refund ${status} job`);
+        await seedInvoice(jobId, status, 30000);
+
+        const result = await resolver.resolve({
+          tenantId: tenant.tenantId,
+          reference: '',
+          kind: 'invoice',
+          customerId,
+          invoiceScope: 'refundable',
+        });
+
+        expect(result.kind).toBe('not_found');
+      },
+    );
+
+    it('two refundable invoices are the which-one question, never a pick', async () => {
+      const customerId = await seedCustomer('Refund Two');
+      const jobId = await seedJob(customerId, 'Two refundable invoices');
+      const paid = await seedInvoice(jobId, 'paid', 0, 30, 32000);
+      const partial = await seedInvoice(jobId, 'partially_paid', 10000, 30, 15000);
+
+      const result = await resolver.resolve({
+        tenantId: tenant.tenantId,
+        reference: '',
+        kind: 'invoice',
+        customerId,
+        invoiceScope: 'refundable',
+      });
+
+      expect(result.kind).toBe('ambiguous');
+      if (result.kind === 'ambiguous') {
+        expect(new Set(result.candidates.map((c) => c.id))).toEqual(new Set([paid, partial]));
       }
     });
   });

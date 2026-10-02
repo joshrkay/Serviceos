@@ -82,6 +82,12 @@ describe('createRedisClient', () => {
     });
   });
 
+  it('pins the RESP2 wire protocol — ioredis 6 defaults to RESP3, which the owner has not opted into', async () => {
+    await createRedisClient('redis://localhost:6379');
+    expect(h.instances).toHaveLength(1);
+    expect(h.instances[0].opts).toMatchObject({ protocol: 2 });
+  });
+
   it('returns null (does not throw) when the connect fails', async () => {
     expect(await createRedisClient('redis://unreachable:6379')).toBeNull();
   });

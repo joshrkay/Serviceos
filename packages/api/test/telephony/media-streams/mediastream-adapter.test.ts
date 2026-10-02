@@ -2573,7 +2573,13 @@ describe('UB-C2 — streaming TTS language + copy rendering', () => {
     await (adapter as unknown as { emitSideEffects: (fx: unknown[]) => Promise<void> }).emitSideEffects([
       {
         type: 'tts_play',
-        payload: { text: 'intent_confirm', template: 'confirm_intent', intent: 'create_appointment' },
+        // #1577 — with a time: a booking with none asks for one instead.
+        payload: {
+          text: 'intent_confirm',
+          template: 'confirm_intent',
+          intent: 'create_appointment',
+          entities: { dateTimeDescription: 'el martes a las 2' },
+        },
       },
     ]);
 
