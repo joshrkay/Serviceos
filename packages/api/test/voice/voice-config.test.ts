@@ -28,7 +28,7 @@ const auditRepo = { create: vi.fn(async () => undefined) } as never;
 describe('saveVoiceConfig', () => {
   it('persists the preset + auto-greeting and pushes them to the Vapi assistant', async () => {
     const { pool, updates } = makePool({ business_name: 'Acme HVAC', services_offered: ['heating'], vapi_assistant_id: 'asst_1' });
-    const vapiClient = { createAssistant: vi.fn(), updateAssistant: vi.fn(async () => undefined), linkPhoneNumber: vi.fn() };
+    const vapiClient = { createAssistant: vi.fn(), updateAssistant: vi.fn(async () => undefined), linkPhoneNumber: vi.fn(), deletePhoneNumber: vi.fn() };
 
     const res = await saveVoiceConfig({ pool, auditRepo, vapiClient }, { tenantId: 't1', actorId: 'u1', voiceId: 'adam' });
 
@@ -46,7 +46,7 @@ describe('saveVoiceConfig', () => {
 
   it('honors an explicit greeting override', async () => {
     const { pool } = makePool({ vapi_assistant_id: 'asst_1' });
-    const vapiClient = { createAssistant: vi.fn(), updateAssistant: vi.fn(async () => undefined), linkPhoneNumber: vi.fn() };
+    const vapiClient = { createAssistant: vi.fn(), updateAssistant: vi.fn(async () => undefined), linkPhoneNumber: vi.fn(), deletePhoneNumber: vi.fn() };
     const res = await saveVoiceConfig({ pool, auditRepo, vapiClient }, { tenantId: 't1', actorId: 'u1', voiceId: 'rachel', greeting: 'Hi, Acme here!' });
     expect(res.greeting).toBe('Hi, Acme here!');
   });

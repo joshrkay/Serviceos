@@ -59,6 +59,7 @@ export async function changeTenantNumber(input: {
       messagingServiceSid?: string;
       phoneNumberSid?: string;
       phoneE164?: string;
+      vapiPhoneNumberId?: string;
     } | null;
   }>(
     pool,
@@ -180,9 +181,14 @@ export async function changeTenantNumber(input: {
     );
   }
 
-  // Vapi (off by default): link the new number to the existing assistant.
-  // Best-effort, exactly like first provisioning.
+  // Vapi (off by default): link the new number to the existing assistant,
+  // then (#1575) delete the previous number's Vapi phone-number resource —
+  // nothing routes to it once the tenant is repointed, and the old Twilio
+  // number is released below. Best-effort, exactly like first provisioning:
+  // a Vapi failure never affects the Twilio line.
   if (vapi) {
+    const oldVapiId = pd.vapiPhoneNumberId ?? null;
+    let currentVapiId: string | null = oldVapiId;
     try {
       const cfg = await tenantQuery<{ vapi_assistant_id: string | null }>(
         pool,
@@ -192,13 +198,38 @@ export async function changeTenantNumber(input: {
       );
       const assistantId = cfg.rows[0]?.vapi_assistant_id;
       if (assistantId) {
-        await vapi.linkPhoneNumber({ assistantId, phoneE164: changeTo, twilioPhoneNumberSid: newSid });
+        const linked = await vapi.linkPhoneNumber({ assistantId, phoneE164: changeTo, twilioPhoneNumberSid: newSid });
+        currentVapiId = linked.phoneNumberId;
       }
     } catch (vapiErr) {
       logger.error('Vapi relink after number change failed (Twilio line unaffected)', {
         tenantId,
         error: vapiErr instanceof Error ? vapiErr.message : String(vapiErr),
       });
+    }
+    if (oldVapiId) {
+      try {
+        await vapi.deletePhoneNumber(oldVapiId);
+        if (currentVapiId === oldVapiId) currentVapiId = null;
+      } catch (vapiErr) {
+        // The stale resource only references a number we are releasing, so
+        // it cannot route a call; log the id so ops can delete it by hand.
+        logger.error('Deleting the previous Vapi phone number after a change FAILED — delete it by hand', {
+          tenantId,
+          vapiPhoneNumberId: oldVapiId,
+          error: vapiErr instanceof Error ? vapiErr.message : String(vapiErr),
+        });
+      }
+    }
+    if (currentVapiId !== oldVapiId) {
+      await tenantQuery(
+        pool,
+        tenantId,
+        `UPDATE tenant_integrations
+         SET provider_data = (provider_data - 'vapiPhoneNumberId') || $1::jsonb, updated_at = NOW()
+         WHERE tenant_id = $2 AND provider = 'twilio'`,
+        [JSON.stringify(currentVapiId ? { vapiPhoneNumberId: currentVapiId } : {}), tenantId],
+      );
     }
   }
 

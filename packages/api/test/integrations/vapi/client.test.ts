@@ -46,6 +46,31 @@ describe('HttpVapiClient (mocked fetch — no real Vapi calls)', () => {
     expect(body).toMatchObject({ provider: 'twilio', number: '+15125550000', assistantId: 'asst_1', twilioPhoneNumberSid: 'PN9' });
   });
 
+  // #1575 — https://docs.vapi.ai/api-reference/phone-numbers/delete
+  // (DELETE https://api.vapi.ai/phone-number/{id}, bearer auth, 200 + the deleted resource).
+  it('deletePhoneNumber DELETEs /phone-number/:id with bearer auth', async () => {
+    const fetchFn = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({ id: 'pn_old' }));
+    const client = new HttpVapiClient({ apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch });
+    await client.deletePhoneNumber('pn_old');
+    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit & { headers: Record<string, string> }];
+    expect(url).toBe('https://api.vapi.ai/phone-number/pn_old');
+    expect(init.method).toBe('DELETE');
+    expect(init.headers.Authorization).toBe('Bearer k');
+    expect(init.body).toBeUndefined();
+  });
+
+  it('deletePhoneNumber treats 404 as already deleted (idempotent cleanup)', async () => {
+    const fetchFn = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({ message: 'Not Found' }, 404));
+    const client = new HttpVapiClient({ apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch });
+    await expect(client.deletePhoneNumber('pn_gone')).resolves.toBeUndefined();
+  });
+
+  it('deletePhoneNumber throws on other failures', async () => {
+    const fetchFn = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({ message: 'boom' }, 500));
+    const client = new HttpVapiClient({ apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch });
+    await expect(client.deletePhoneNumber('pn_old')).rejects.toThrow(/Vapi DELETE \/phone-number\/pn_old failed: 500/);
+  });
+
   it('throws on a non-2xx response', async () => {
     const fetchFn = vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({ error: 'bad' }, 400));
     const client = new HttpVapiClient({ apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch });
