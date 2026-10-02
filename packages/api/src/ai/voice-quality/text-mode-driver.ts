@@ -477,6 +477,8 @@ export class TextModeDriver implements AgentDriver {
       ...(deps.catalogRepo ? { catalogRepo: deps.catalogRepo } : {}),
       ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
       ...(deps.customerRepo ? { customerRepo: deps.customerRepo } : {}),
+      // #1567 — an out-of-area new caller is kept as a lead.
+      ...(deps.leadRepo ? { leadRepo: deps.leadRepo } : {}),
       // P0 voice-safety — the harness resolves spoken references through the
       // same resolver the driver already hands the voice-action-router, so a
       // corpus script exercises real resolution rather than a free-text echo.
@@ -524,6 +526,12 @@ export class TextModeDriver implements AgentDriver {
     // and the shared dispatch's allowlist decides what they may hear.
     if (ownerSession) {
       session.actorUserId = vqOwnerActorId(opts.tenantId);
+    }
+    // The caller's number, as the inbound adapter stamps it (Twilio `From`);
+    // a blocked caller-ID has none. Read by the shared service-area gate's
+    // lead capture (#1567).
+    if (opts.callerId && !opts.callerIdBlocked) {
+      session.callerPhone = opts.callerId;
     }
 
     // WS21b — a recognized owner line is identity-resolved the instant the
@@ -771,6 +779,25 @@ export class TextModeDriver implements AgentDriver {
       return { agentResponse, latencyMs: latencyMsPending };
     }
 
+    // #1567 — the caller is answering the service-address ZIP question,
+    // through the SAME processor rule both phone transports run: out of area
+    // (or a re-ask) consumes the turn; in area hands back the held booking
+    // request, handled below as this turn.
+    const areaCheck = await this.voiceProcessor.handlePendingServiceAreaCheck(
+      session,
+      callerTranscript,
+      session.tenantId,
+    );
+    if (areaCheck?.kind === 'respond') {
+      agentResponse = firstTtsText(areaCheck.effects) ?? 'Got it.';
+      const latencyMsArea = performance.now() - startedAt;
+      this.appendAgentAndEmit(session, sessionId, agentResponse);
+      return { agentResponse, latencyMs: latencyMsArea };
+    }
+    if (areaCheck?.kind === 'proceed') {
+      callerTranscript = areaCheck.utterance;
+    }
+
     try {
       // #897 — the SAME context assembly the Gather adapter and speechTurn
       // call, so the corpus sees the production prompt (vertical + plan
@@ -945,8 +972,21 @@ export class TextModeDriver implements AgentDriver {
                     : (classifyContext.classifierProfile ?? 'operator'),
                 )
               : null;
+          // #1567 — the phone transports' shared service-area gate: a new
+          // caller's booking is checked against the tenant's ZIPs before
+          // anything is drafted.
+          const areaFx =
+            signupReply === null && classification.confidence >= TAU_INT
+              ? await this.voiceProcessor.serviceAreaGate(
+                  session,
+                  { intentType: intent, utterance: callerTranscript, entities },
+                  session.tenantId,
+                )
+              : null;
           agentResponse =
-            signupReply ?? (await this.runMutation(session, callerTranscript, state));
+            signupReply ??
+            (areaFx ? (firstTtsText(areaFx) ?? 'Got it.') : null) ??
+            (await this.runMutation(session, callerTranscript, state));
           break;
         }
       }

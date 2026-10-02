@@ -7,7 +7,7 @@
       "name": "VQ Bucket 05 — Coverage-Area Tenant",
       "timezone": "America/Los_Angeles",
       "serviceArea": {
-        "zipCodes": ["90001-90099"],
+        "zipCodes": ["90001", "90002", "90003", "90011", "90012", "90015"],
         "description": "Greater Los Angeles only"
       }
     },
@@ -23,7 +23,9 @@
       "expected": {
         "intent": "create_appointment",
         "escalates": false,
-        "spokenAnswerMatches": "Current product truth, not the target: the phone path does not read the tenant service area yet (#1567 — enforcement exists only on the web booking routes). Per #1540 §2 an unknown caller is identified (found or created by phone) AND their request is kept, so this out-of-area caller is NOT handed off; the agent drafts the booking and reads it back for a yes. Flip to the decided out-of-coverage behaviour when #1567 lands."
+        "spokenIncludes": ["We don't usually service that area, but I'll pass your details to the team."],
+        "noLiveBooking": true,
+        "spokenAnswerMatches": "#1567 owner decision (2026-10-02): a NEW caller booking outside the tenant's service area (30309 is not in the tenant's ZIP list) is told \"We don't usually service that area, but I'll pass your details to the team.\", kept as a lead, and no appointment is drafted or read back. Not a hand-off (#1540 §2: the caller is identified and their request kept, here as a lead)."
       },
       "hangupAfter": false
     }

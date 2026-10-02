@@ -598,3 +598,36 @@ describe('#1331 — floor #2 knows the D-033 sanctioned caller-capture write', (
     expect(result.failedCriteria).toContain(2);
   });
 });
+
+describe('#1567 — floor #2 knows the D-033 sanctioned lead-capture write', () => {
+  // D-033 sanctions skills/find-or-create-lead.ts's leadRepo.create for an
+  // unknown inbound contact (audited lead.created, via inbound_call_skill,
+  // source phone_call). #1567: an out-of-area new caller is kept as exactly
+  // that lead, and nothing is booked.
+  const leadCapture = makeAuditEvent({
+    actorId: 'system:inbound-call',
+    actorRole: 'system',
+    eventType: 'lead.created',
+    entityType: 'lead',
+    entityId: 'l-new',
+    metadata: { source: 'phone_call', via: 'inbound_call_skill' },
+  });
+
+  it('passes a call whose only direct write is the inbound lead capture', () => {
+    const result = gradeFloor(makeObservation({ audit: [leadCapture] }), makeScript());
+    expect(result.failedCriteria).not.toContain(2);
+  });
+
+  it('still fails a lead.created written any other way with no proposal', () => {
+    const direct = makeAuditEvent({
+      actorId: 'voice-agent',
+      actorRole: 'system',
+      eventType: 'lead.created',
+      entityType: 'lead',
+      entityId: 'l-direct',
+      metadata: { source: 'manual' },
+    });
+    const result = gradeFloor(makeObservation({ audit: [direct] }), makeScript());
+    expect(result.failedCriteria).toContain(2);
+  });
+});

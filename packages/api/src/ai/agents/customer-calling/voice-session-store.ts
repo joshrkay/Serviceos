@@ -208,6 +208,17 @@ export interface VoiceSession {
    */
   callerIdentity?: 'confirmed' | 'rejected';
   /**
+   * #1567 — a new caller on a booking was asked for the service-address ZIP
+   * (service-area-gate.ts). Holds the booking request until they answer.
+   */
+  serviceAreaCheck?: { heldUtterance: string; reasks: number };
+  /**
+   * #1567 — this call's service-area answer: 'out_of_area' declines every
+   * later booking on the call; 'in_area' / 'unknown' (no ZIP after the
+   * re-ask) never ask again.
+   */
+  serviceAreaVerdict?: 'in_area' | 'out_of_area' | 'unknown';
+  /**
    * #1223 — Twilio's STIR/SHAKEN verdict (`StirVerstat`) from the inbound
    * webhook, verbatim; absent when Twilio sent none. Owner-line authority
    * requires full A-attestation (`telephony/stir-attestation.ts`).

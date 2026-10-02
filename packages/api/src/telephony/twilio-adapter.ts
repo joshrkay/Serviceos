@@ -2499,6 +2499,24 @@ export class TwilioGatherAdapter {
     // that lands in intent_capture, this same utterance is classified below
     // (S1 surface rules intact) instead of "How can I help you today?".
     // A still-unresolved caller keeps the FSM's own retry/escalate path.
+    // #1567 — the processor's shared service-area gate (same rule as
+    // speechTurn): the caller is answering the service-address ZIP question.
+    // In area (or still no ZIP after one re-ask) hands back the held booking
+    // request, handled below as this turn.
+    const areaCheck = await this.processor.handlePendingServiceAreaCheck(
+      session,
+      opts.speechResult,
+      opts.tenantId,
+    );
+    if (areaCheck?.kind === 'respond') {
+      sideEffectsAll.push(...areaCheck.effects);
+      await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+      return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+    }
+    if (areaCheck?.kind === 'proceed') {
+      opts = { ...opts, speechResult: areaCheck.utterance };
+    }
+
     let turnState: string = currentState;
     if (currentState === 'ask_caller') {
       const askCallerFx = await this.processor.handleAskCaller(session, opts.tenantId);
@@ -2811,6 +2829,28 @@ export class TwilioGatherAdapter {
           sideEffectsAll,
         );
         if (handled) {
+          await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+          return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+        }
+      }
+
+      // #1567 — a new caller's booking is checked against the tenant's
+      // service area before anything is drafted (shared with speechTurn).
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        const areaFx = await this.processor.serviceAreaGate(
+          session,
+          {
+            intentType: classifierEvent.intentType,
+            utterance: opts.speechResult,
+            entities: classifierEvent.entities,
+          },
+          opts.tenantId,
+        );
+        if (areaFx) {
+          sideEffectsAll.push(...areaFx);
           await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
           return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
         }

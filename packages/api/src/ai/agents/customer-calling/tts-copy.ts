@@ -17,6 +17,7 @@
  */
 
 import { intentReadbackPhrase } from './intent-readback';
+import { OUT_OF_SERVICE_AREA_COPY, SERVICE_AREA_ZIP_QUESTION } from '../../voice-turn/service-area-gate';
 import { bookingAwaitsTime } from './confirm-turn';
 
 export type SessionLanguage = 'en' | 'es';
@@ -237,6 +238,11 @@ export const CALLER_INCOMPLETE_REQUEST_COPY =
  * stale the moment a new sentence was added and failed correct responses).
  */
 export const SENTENCE_CATALOG_ES: Record<string, string> = {
+  // #1567 — the service-area gate (voice-turn/service-area-gate.ts).
+  [OUT_OF_SERVICE_AREA_COPY]:
+    'Normalmente no damos servicio en esa zona, pero le pasaré sus datos al equipo.',
+  [SERVICE_AREA_ZIP_QUESTION]:
+    'Claro — ¿cuál es el código postal de la dirección donde necesita el servicio?',
   [CALLER_REQUEST_QUEUED_COPY]:
     'Ya le pasé su solicitud a nuestro equipo, y alguien se la confirmará en breve. ¿Hay algo más en lo que pueda ayudarle?',
   "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?":
