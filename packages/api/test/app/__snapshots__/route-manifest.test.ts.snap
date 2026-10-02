@@ -448,6 +448,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
 107  authenticated use    /api/onboarding    [router: router]
          └─ GET /billing/plans
          └─ GET /operator-hours
+         └─ GET /phone
          └─ GET /status
          └─ GET /voice/presets
          └─ POST /ai-check/retry
@@ -457,6 +458,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /calendar/choose
          └─ POST /pack
          └─ POST /phone/available
+         └─ POST /phone/change
          └─ POST /phone/claim
          └─ POST /phone/retry
          └─ POST /test-call/skip

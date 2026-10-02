@@ -895,6 +895,11 @@ export function SettingsPage() {
       title: 'Business',
       items: [
         { icon: Building2, label: 'Business profile',    description: 'Name, phone, email, timezone',                   action: () => setBusinessProfileOpen(true) },
+        // #1563 — the Rivet business number + change number (owner-only:
+        // changing it buys a number).
+        ...(me?.role === 'owner'
+          ? [{ icon: Phone, label: 'Business phone number', description: 'Your Rivet number — see its status or change it', action: () => navigate('/settings/phone') }]
+          : []),
         { icon: Phone,     label: 'On-call phone',       description: 'The number escalations ring when you are on call',     action: () => setTechnicianPhoneOpen(true) },
         { icon: Globe,     label: 'Language & region',   description: 'English / Español · Voice + customer messages', action: () => navigate('/settings/language') },
         { icon: FileText,  label: 'Terminology',         description: 'Customize labels (e.g. "Quote" vs "Estimate")',    action: () => setTerminologyOpen(true) },

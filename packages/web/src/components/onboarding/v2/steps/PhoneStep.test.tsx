@@ -121,3 +121,55 @@ describe('PhoneStep — number picker', () => {
     expect(screen.getByRole('button', { name: /let us pick a number for you/i })).toBeInTheDocument();
   });
 });
+
+// #1563 — checkout no longer buys a number: once the subaccount is ready the
+// step asks the owner to pick (or "Pick one for me"), never shows a spinner.
+describe('PhoneStep — awaiting the owner\'s pick (#1563)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('asks the owner to pick, with the picker and a 44px "Pick one for me" — no "claiming" spinner', () => {
+    render(
+      <PhoneStep
+        status={makeStatus({ status: 'current', metadata: { lineState: 'awaiting_pick' } })}
+        onAdvance={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole('heading', { level: 1, name: /pick your business number/i })).toBeInTheDocument();
+    expect(screen.queryByText(/claiming your phone number/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Area code')).toBeInTheDocument();
+    const auto = screen.getByRole('button', { name: /pick one for me/i });
+    expect(auto.className).toContain('min-h-11');
+  });
+
+  it('"Pick one for me" posts the auto-pick and refreshes status', async () => {
+    apiFetchMock.mockResolvedValue({ ok: true, json: async () => ({ ok: true, enqueued: true }) });
+    const onRetryComplete = vi.fn();
+    render(
+      <PhoneStep
+        status={makeStatus({ status: 'current', metadata: { lineState: 'awaiting_pick' } })}
+        onAdvance={() => {}}
+        onRetryComplete={onRetryComplete}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /pick one for me/i }));
+    await waitFor(() => expect(onRetryComplete).toHaveBeenCalled());
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/onboarding/phone/retry', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('while a pick is in flight it names the number being claimed', () => {
+    render(
+      <PhoneStep
+        status={makeStatus({
+          status: 'current',
+          metadata: { lineState: 'claiming', pendingNumber: '+15125550123' },
+        })}
+        onAdvance={() => {}}
+      />,
+    );
+    expect(screen.getByText(/claiming \(512\) 555-0123/i)).toBeInTheDocument();
+  });
+});

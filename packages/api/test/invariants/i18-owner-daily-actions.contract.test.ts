@@ -112,8 +112,8 @@ const OWNER_REQUIRED_DAILY_WEB_ACTIONS = 1;
 const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 7;
 // #1386: +2 (PUT/DELETE /api/settings/e1-script — occasional, reviewed E1 script).
 // #1402 §13: +1 (POST /api/users/:id/deactivate — occasional, offboarding).
-// #1564: +2 (GET occasional / PUT onboarding /api/settings/texting-registration).
-const OWNER_ONLY_ROUTES = 62;
+// #1563: +1 (POST /api/onboarding/phone/change — occasional, Settings → Phone).
+const OWNER_ONLY_ROUTES = 61;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 

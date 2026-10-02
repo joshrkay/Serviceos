@@ -1401,38 +1401,37 @@ the S1 allowlist. The in-app alias gap (1.4) is a bug to fix, not a decision to 
 - *Widen S1 once the owner is voice-first.* Rejected. The owner's gain comes from `ownerSession`
   (identity), not from loosening the caller boundary. The two are orthogonal by construction.
 
-## D-037 — A2P 10DLC status lives beside the phone integration, not in its readiness column
+## D-037 — Twilio costs are absorbed in pricing; the tenant's number is bought only when they pick it
 
 **Date:** 2026-10-01
-**Status:** Accepted (owner decision on #1564: build ISV registration, Rivet absorbs fees)
-**Resolves:** #1564
+**Status:** Accepted (owner decision 2026-10-01, issue #1563)
 
-**Context.** #1564 asks for the A2P 10DLC registration to show as `partial_readiness` while it is
-pending. `tenant_integrations.status` is already load-bearing for other things: the onboarding
-`phone` step is done only at `full_readiness` (`onboarding/derive-status.ts`), the phone claim/retry
-routes 409 on any other non-failed status, the provisioning worker re-runs unless the row is
-`full_readiness`, and `status-machine.ts` has no `full_readiness → partial_readiness` edge.
+**Context.** Trial checkout used to enqueue one `provision_twilio_subaccount` job that created the
+tenant's Twilio subaccount and Messaging Service *and* bought a random US number before the owner
+ever reached the Phone step. The number picker could only act after a failed provisioning, and a
+pick made while the checkout job was pending shared its idempotency key and was silently dropped
+by `PgQueue.send`'s `ON CONFLICT DO NOTHING`.
 
 **Decision.**
-1. Registration state is its own table, `a2p_registrations` (migration 303, FORCE RLS): owner
-   details, the EIN encrypted with `TENANT_ENCRYPTION_KEY` (last four kept for display), the Twilio
-   SIDs created so far, status `submitted → brand_pending → campaign_pending → approved | failed`, and
-   carrier failure reasons.
-2. `tenant_integrations.status` is **not** changed. The worker mirrors the registration status into
-   `provider_data.a2p10dlc`, and `GET /api/settings/texting-registration` reports texting
-   `readiness` as `partial_readiness` until the campaign is approved, then `full_readiness`.
-3. Outbound SMS while unregistered behaves as before (nothing is gated on the registration).
-4. One MIXED campaign per tenant on the tenant's existing Messaging Service; Standard Brand with
-   EIN. The async worker (P0-009) creates resources with the tenant subaccount's credentials,
-   checkpoints every SID, fails non-retryable Twilio 4xx with Twilio's reason, and re-polls every
-   6 h until terminal.
 
-**Consequences.** Voice, onboarding and provisioning are untouched by the registration. A future
-change that gates outbound SMS on approval reads `a2p_registrations.status`, not the integration
-row. Sole-proprietor (no-EIN) brands are out of scope.
+1. **No pass-through.** Twilio costs (subaccount, number rental, usage) stay absorbed in the plan
+   price. Nothing is itemised or billed back to the tenant; `docs/plans/per-call-pricing.md` is
+   unchanged.
+2. **Checkout sets up, the owner buys.** The checkout job creates the subaccount + Messaging Service
+   only (both free) and marks the line `awaitingPick`. A number is bought only on an explicit pick
+   (`POST /api/onboarding/phone/claim`) or "Pick one for me" (`POST /api/onboarding/phone/retry`,
+   area code from the business address's state, falling back to any US local number). The
+   Twilio-less dev stub is unchanged, so onboarding still completes without Twilio.
+3. **A pick is never swallowed.** Claim, auto-pick and change-number each enqueue on their own
+   idempotency key. Every provisioning job for a tenant runs under one per-tenant advisory lock
+   (`withTenantProvisioningLock`, `workers/provision-twilio.ts`), and each step resumes from
+   persisted state. Concurrent jobs therefore never create a second subaccount or buy a second
+   number.
+4. **The owner can change the number** (Settings → Phone, `POST /api/onboarding/phone/change`,
+   owner-only, billing-gated). The order is buy new → attach to the Messaging Service → repoint →
+   release old. Any failure before the repoint releases the new number, so the tenant keeps its
+   current line and is never left with zero numbers.
 
-**Alternatives rejected.**
-- *Write `partial_readiness` into `tenant_integrations.status`.* Rejected: it would un-complete the
-  onboarding phone step for every tenant, make the claim/retry routes refuse, and re-trigger
-  provisioning — a regression in voice onboarding to express a texting status.
-
+**Consequences.** Both onboarding and Settings show the line's state from one read model,
+`onboarding/phone-line.ts` (`GET /api/onboarding/phone`). The rest of A2P 10DLC registration is
+out of scope here (#1564).
