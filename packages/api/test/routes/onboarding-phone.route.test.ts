@@ -146,13 +146,36 @@ describe('POST /api/onboarding/phone/claim', () => {
     const msg = await queue.receive<{ tenantId: string; phoneNumber?: string }>();
     expect(msg?.type).toBe(PROVISION_TWILIO_JOB_TYPE);
     expect(msg?.payload.phoneNumber).toBe('+15125550123');
-    // Canonical key (shared with the trial-checkout auto-provision) so the
-    // production queue dedupes a claim against an in-flight provisioning job.
-    expect(msg?.idempotencyKey).toBe(`provision-twilio-${TENANT_ID}`);
 
     expect(createSpy).toHaveBeenCalledWith(
       expect.objectContaining({ eventType: 'tenant.phone_number_claimed' }),
     );
+  });
+
+  // #1563 — the claim used to share the checkout job's idempotency key, so a
+  // pick made while that job was pending was dropped by ON CONFLICT DO
+  // NOTHING while the route still answered {ok:true, enqueued:true}.
+  it('is never swallowed by a pending trial-checkout provisioning job', async () => {
+    const queue = new InMemoryQueue();
+    // The checkout webhook's job is still pending under the canonical key.
+    await queue.send(
+      PROVISION_TWILIO_JOB_TYPE,
+      { tenantId: TENANT_ID, region: null, baseUrl: 'https://api.test' },
+      `provision-twilio-${TENANT_ID}`,
+    );
+    const { app } = buildApp({ pool: fakePool('t0_requested'), queue });
+
+    const res = await request(app)
+      .post('/api/onboarding/phone/claim')
+      .send({ phoneNumber: '+15125550123' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, enqueued: true });
+
+    const payloads: Array<{ phoneNumber?: string }> = [];
+    for (let m = await queue.receive<{ phoneNumber?: string }>(); m; m = await queue.receive()) {
+      payloads.push(m.payload);
+    }
+    expect(payloads.map((p) => p.phoneNumber)).toContain('+15125550123');
   });
 
   it('409s with PHONE_BILLING_REQUIRED when the tenant has no live subscription', async () => {
@@ -241,6 +264,27 @@ describe('POST /api/onboarding/phone/retry', () => {
     const msg = await queue.receive();
     expect(msg?.type).toBe(PROVISION_TWILIO_JOB_TYPE);
   });
+
+  // #1563 — "Pick one for me" is an explicit buy: the job must say so (the
+  // checkout setup job never buys), and it must not collapse into a pending
+  // checkout job.
+  it('"Pick one for me" enqueues an autoPick job even while the checkout job is pending', async () => {
+    const queue = new InMemoryQueue();
+    await queue.send(
+      PROVISION_TWILIO_JOB_TYPE,
+      { tenantId: TENANT_ID, region: null, baseUrl: 'https://api.test' },
+      `provision-twilio-${TENANT_ID}`,
+    );
+    const { app } = buildApp({ pool: fakePool('t0_requested'), queue });
+    const res = await request(app).post('/api/onboarding/phone/retry');
+
+    expect(res.status).toBe(200);
+    const payloads: Array<{ autoPick?: boolean }> = [];
+    for (let m = await queue.receive<{ autoPick?: boolean }>(); m; m = await queue.receive()) {
+      payloads.push(m.payload);
+    }
+    expect(payloads.filter((p) => p.autoPick === true)).toHaveLength(1);
+  });
 });
 
 describe('POST /api/onboarding/pack — no guessed timezone on the auto-created settings row', () => {
@@ -280,5 +324,34 @@ describe('POST /api/onboarding/pack — no guessed timezone on the auto-created 
     const seeded = await settingsRepo.findByTenant(TENANT_ID);
     expect(seeded).not.toBeNull();
     expect(seeded!.timezone).toBeUndefined();
+  });
+});
+
+// #1563 — Settings → Phone "change number" (owner-only, billing-gated like claim).
+describe('POST /api/onboarding/phone/change', () => {
+  it('forbids a non-owner from changing the (paid) number', async () => {
+    const queue = new InMemoryQueue();
+    const { app } = buildApp({ pool: fakePool('full_readiness'), queue, role: 'dispatcher' });
+    const res = await request(app).post('/api/onboarding/phone/change').send({ phoneNumber: '+15125550123' });
+    expect(res.status).toBe(403);
+    expect(await queue.receive()).toBeNull();
+  });
+
+  it('409s until the current number is active (nothing to change yet)', async () => {
+    const queue = new InMemoryQueue();
+    const { app } = buildApp({ pool: fakePool('t0_requested'), queue });
+    const res = await request(app).post('/api/onboarding/phone/change').send({ phoneNumber: '+15125550123' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('PHONE_CHANGE_NOT_ALLOWED');
+    expect(await queue.receive()).toBeNull();
+  });
+
+  it('409s with PHONE_BILLING_REQUIRED when the tenant has no live subscription', async () => {
+    const queue = new InMemoryQueue();
+    const { app } = buildApp({ pool: fakePool('full_readiness', 'canceled'), queue });
+    const res = await request(app).post('/api/onboarding/phone/change').send({ phoneNumber: '+15125550123' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('PHONE_BILLING_REQUIRED');
+    expect(await queue.receive()).toBeNull();
   });
 });
