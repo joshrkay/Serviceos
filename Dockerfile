@@ -31,8 +31,9 @@ RUN echo "build: $RAILWAY_GIT_COMMIT_SHA" && cd packages/api && npx tsc --projec
 # Provider credentials are runtime-only. Never declare them as Docker ARGs or
 # interpolate them in RUN instructions: builders persist expanded commands in
 # logs and image history. Optional filler PCM files are generated offline and
-# checked into a release artifact; when absent, the existing runtime cache
-# degrades gracefully without exposing a production credential.
+# checked into a release artifact; when absent, the API synthesizes them in
+# memory at runtime boot with the runtime TTS credential (#1534), so no
+# production credential is ever needed at build time.
 
 # Web static files (served by nginx) — used by @serviceos/web
 #
@@ -44,7 +45,7 @@ RUN echo "build: $RAILWAY_GIT_COMMIT_SHA" && cd packages/api && npx tsc --projec
 # digest, so this is the image that was already shipping. Dependabot's `docker`
 # ecosystem (.github/dependabot.yml) bumps it; do not replace it with a bare
 # tag to avoid the bump.
-FROM nginx:1.31.6-alpine@sha256:d10753d9289b8e3f884386351f73554ce72b631378949deddd75e83ee296c427 AS web
+FROM nginx:1.31.6-alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2 AS web
 COPY --from=web-build /app/packages/web/dist /usr/share/nginx/html
 COPY packages/web/nginx.conf /etc/nginx/conf.d/default.conf
 COPY packages/web/security-headers.conf /etc/nginx/security-headers.conf

@@ -298,7 +298,7 @@ describe('#1015 row 3.10 — a spoken move/cancel names its appointment through 
     expect(twimls[0]!.toLowerCase()).toContain(WHICH_APPOINTMENT);
     expect(twimls[0]!.toLowerCase()).not.toContain('is that right');
     // The answer resolved: the call reads the cancel back.
-    expect(twimls[1]!.toLowerCase()).toContain('cancel appointment. is that right');
+    expect(twimls[1]!.toLowerCase()).toContain('you&apos;d like to cancel the garcia appointment. is that right'); // #1539 per-intent readback
 
     const rows = await proposalsOf(tenantA.tenantId, 'cancel_appointment');
     expect(rows).toHaveLength(1);
@@ -315,7 +315,7 @@ describe('#1015 row 3.10 — a spoken move/cancel names its appointment through 
     ]);
 
     expect(twimls[0]!.toLowerCase()).toContain(WHICH_APPOINTMENT);
-    expect(twimls[1]!.toLowerCase()).toContain('reschedule appointment. is that right');
+    expect(twimls[1]!.toLowerCase()).toContain('you&apos;d like to move the okafor appointment. is that right'); // #1539 per-intent readback
 
     const rows = await proposalsOf(tenantA.tenantId, 'reschedule_appointment');
     expect(rows).toHaveLength(1);

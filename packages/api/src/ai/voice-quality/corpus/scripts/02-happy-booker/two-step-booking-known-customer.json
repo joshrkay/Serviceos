@@ -47,9 +47,9 @@
         "proposalType": "create_appointment",
         "slots": {
           "customerId": "cust_02_two_step_jane",
-          "scheduledStart": "2026-05-12T21:00:00.000Z"
+          "scheduledStart": "2026-05-05T21:00:00.000Z"
         },
-        "spokenAnswerMatches": "I've drafted a service appointment for Tuesday May 12 at 2pm; an operator will confirm before it's booked.",
+        "spokenAnswerMatches": "I've drafted a service appointment for Tuesday May 5 at 2pm; an operator will confirm before it's booked.",
         "escalates": false
       },
       "hangupAfter": false

@@ -18,6 +18,7 @@ import type {
   EntityKind,
 } from '../../resolution/entity-resolver';
 import type { ExtractedEntities } from '../../orchestration/intent-classifier';
+import type { AppointmentRepository } from '../../../appointments/appointment';
 import { resolveDateTime } from '../../scheduling/resolve-datetime';
 import { isRuntimeTimezone } from '../../../shared/timezone';
 
@@ -76,6 +77,10 @@ const CUSTOMER_REF_INTENTS = new Set([
   'add_service_location',
   'mark_lead_lost',
   'confirm_appointment',
+  // #1331 — "the Garcias want a second zone — change order for 1800" names
+  // the PERSON whose job the change order belongs to. The resolved customer
+  // anchors the job lookup (see `planCustomerAnchoredJobLookup`).
+  'create_change_order',
   // Tradesperson wave 1 — each alias joins the SAME customer-reference
   // resolution its target proposal type already gets (per-alias, not a
   // blanket rule — a future alias must be checked against its own target,
@@ -514,6 +519,32 @@ export interface SchedulingResolutionOptions {
    * pick resolves only the references still outstanding.
    */
   pinnedRefs?: Record<string, string>;
+  /**
+   * #1540 §1 — the current window of a resolved appointment, for a
+   * reschedule's "<day> at the same time". Absent ⇒ that phrase stays
+   * unresolved (gated), exactly as before.
+   */
+  appointmentWindow?: (
+    appointmentId: string,
+  ) => Promise<{ startUtc: string; endUtc: string } | undefined>;
+}
+
+/**
+ * #1540 §1 — `appointmentWindow` over an appointment repository: the
+ * appointment's current [start, end) as UTC ISO strings, tenant-scoped.
+ */
+export function appointmentWindowFrom(
+  appointmentRepo: Pick<AppointmentRepository, 'findById'>,
+  tenantId: string,
+): NonNullable<SchedulingResolutionOptions['appointmentWindow']> {
+  return async (appointmentId) => {
+    const appt = await appointmentRepo.findById(tenantId, appointmentId);
+    if (!appt) return undefined;
+    return {
+      startUtc: new Date(appt.scheduledStart).toISOString(),
+      endUtc: new Date(appt.scheduledEnd).toISOString(),
+    };
+  };
 }
 
 /**
@@ -529,6 +560,7 @@ export interface SchedulingResolutionOptions {
 function resolveSpokenWindow(
   desc: string,
   opts: SchedulingResolutionOptions | undefined,
+  sameTimeAs?: { startUtc: string; endUtc: string },
 ): ParsedWindow | undefined {
   const timezone =
     typeof opts?.timezone === 'string' && isRuntimeTimezone(opts.timezone.trim())
@@ -542,6 +574,7 @@ function resolveSpokenWindow(
   const resolved = resolveDateTime(desc, {
     timezone,
     ...(opts?.now ? { now: opts.now } : {}),
+    ...(sameTimeAs ? { sameTimeAs } : {}),
   });
   if (!resolved.ok) return undefined;
   return { scheduledStart: resolved.startUtc, scheduledEnd: resolved.endUtc };
@@ -790,6 +823,33 @@ export function planCustomerAnchoredDocumentLookup(
   };
 }
 
+/**
+ * #1331 — intents whose contract REQUIRES an existing job but whose operator
+ * often names only the customer ("the Garcias want a second zone — change
+ * order for 1800"). Deliberately NOT every JOB_REF intent: for those the job
+ * link is optional and a missing reference simply leaves it unlinked.
+ */
+const CUSTOMER_ANCHORED_JOB_INTENTS = new Set(['create_change_order']);
+
+/**
+ * #1331 — the JOB twin of `planCustomerAnchoredAppointmentLookup`: the
+ * operator named the customer and no job, so the job is asked about WITHIN
+ * that verified customer. The resolver answers as it does for any anchored
+ * job reference naming only the customer: their one job resolves, several
+ * are the which-job question, none is not_found — never a pick.
+ */
+export function planCustomerAnchoredJobLookup(
+  intent: string,
+  entities: Record<string, unknown>,
+  customerId: string,
+): VoiceEntityLookup | undefined {
+  if (!CUSTOMER_ANCHORED_JOB_INTENTS.has(intent)) return undefined;
+  if (trimReference(entities.jobReference) ?? trimReference(entities.jobTitle)) return undefined;
+  const reference = trimReference(entities.customerName);
+  if (!reference) return undefined;
+  return { kind: 'job', reference, refKey: 'jobId', customerId };
+}
+
 function foldResolution(
   result: EntityResolverResult,
   entityKind: EntityKind,
@@ -824,6 +884,42 @@ function foldResolution(
   }
 }
 
+/**
+ * #1331 — the singular forms of a household named in the plural: "the
+ * Garcias" → "Garcia", "the Joneses" → "Jonese", "Jones". One word only
+ * (optionally after "the"); anything else has no family form and yields [].
+ * Tried in order, and only after the reference as spoken found nothing.
+ */
+export function familySurnameSingulars(reference: string): string[] {
+  const m = reference.trim().match(/^(?:the\s+)?([a-z][a-z'-]*s)$/i);
+  if (!m || m[1].length < 4) return [];
+  const word = m[1];
+  const out = [word.slice(0, -1)];
+  if (/es$/i.test(word)) out.push(word.slice(0, -2));
+  return out;
+}
+
+/**
+ * #1331 — `resolver.resolve`, retried with the singular surname when a
+ * household named in the plural ("the Garcias") found nothing as spoken.
+ * Word-matching resolvers (PgEntityResolver's strict_word_similarity, the
+ * fixture resolver's tokens) score "garcias" against "Garcia" below τ_ent.
+ * The resolver still answers one / several / none — the retry only changes
+ * WHICH WORD it is asked about, never what it may return.
+ */
+async function resolveNamingFamily(
+  resolver: EntityResolver,
+  input: Parameters<EntityResolver['resolve']>[0],
+): Promise<EntityResolverResult> {
+  const result = await resolver.resolve(input);
+  if (result.kind !== 'not_found' && result.kind !== 'low_confidence') return result;
+  for (const singular of familySurnameSingulars(input.reference)) {
+    const retry = await resolver.resolve({ ...input, reference: singular });
+    if (retry.kind !== 'not_found' && retry.kind !== 'skipped') return retry;
+  }
+  return result;
+}
+
 async function resolvePlannedLookups(
   resolver: EntityResolver | undefined,
   tenantId: string,
@@ -841,7 +937,7 @@ async function resolvePlannedLookups(
     // the customer in `refs` before the job lookup runs.)
     const customerId =
       lookup.customerId ?? (lookup.kind === 'job' ? refs.customerId : undefined);
-    let result = await resolver.resolve({
+    let result = await resolveNamingFamily(resolver, {
       tenantId,
       reference: lookup.reference,
       kind: lookup.kind,
@@ -856,7 +952,7 @@ async function resolvePlannedLookups(
     // are a which-job question). A reference naming no customer either keeps
     // the job's honest not_found (#1416).
     if (lookup.kind === 'job' && !customerId && result.kind === 'not_found') {
-      const asCustomer = await resolver.resolve({
+      const asCustomer = await resolveNamingFamily(resolver, {
         tenantId,
         reference: lookup.reference,
         kind: 'customer',
@@ -866,7 +962,7 @@ async function resolvePlannedLookups(
       }
       if (asCustomer.kind === 'resolved') {
         refs.customerId = asCustomer.candidate.id;
-        result = await resolver.resolve({
+        result = await resolveNamingFamily(resolver, {
           tenantId,
           reference: lookup.reference,
           kind: 'job',
@@ -994,6 +1090,15 @@ export async function resolveSchedulingEntities(
     }
   }
 
+  // #1331 — the JOB twin: the operator named the customer and no job.
+  if (refs.customerId && !refs.jobId) {
+    const anchoredJob = planCustomerAnchoredJobLookup(intent, entities, refs.customerId);
+    if (anchoredJob) {
+      const jobTerminal = await resolvePlannedLookups(resolver, tenantId, [anchoredJob], refs);
+      if (jobTerminal) return jobTerminal;
+    }
+  }
+
   // The DOCUMENT twin of the pass above, for the operator who named the person
   // and no paperwork ("nudge Khan about the pending estimate"). Same
   // preconditions: a verified customer in hand, and the id this intent's
@@ -1008,6 +1113,21 @@ export async function resolveSchedulingEntities(
 
   if (intent === 'cancel_appointment' && typeof entities.reason !== 'string') {
     refs.reason = 'Requested by caller via voice session';
+  }
+
+  // #1540 §1 — "Wednesday at the same time" is relative to the appointment
+  // being moved, so it can only resolve once that appointment has: its
+  // tenant-local clock time and length land on the new day. Same zone gate
+  // as every spoken time (no zone ⇒ nothing resolved).
+  if (newDt && !refs.newScheduledStart && refs.appointmentId && opts?.appointmentWindow) {
+    const anchor = await opts.appointmentWindow(refs.appointmentId).catch(() => undefined);
+    if (anchor) {
+      const win = resolveSpokenWindow(newDt, opts, anchor);
+      if (win) {
+        refs.newScheduledStart = win.scheduledStart;
+        refs.newScheduledEnd = win.scheduledEnd;
+      }
+    }
   }
 
   return { status: 'resolved', refs };

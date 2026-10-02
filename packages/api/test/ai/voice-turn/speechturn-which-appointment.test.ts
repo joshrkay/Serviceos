@@ -98,7 +98,7 @@ describe('#1015 row 3.10 — speechTurn asks which appointment a move/cancel is 
     expect(resolver.resolve).toHaveBeenCalledWith(
       expect.objectContaining({ tenantId: TENANT, kind: 'appointment', reference: 'The Garcia appointment' }),
     );
-    expect(spoken(answer)).toContain('cancel appointment. Is that right?');
+    expect(spoken(answer)).toContain("you'd like to cancel the Garcia appointment. Is that right?");
     expect(session.machine.currentState).toBe('intent_confirm');
     expect(session.machine.currentContext.extractedEntities?.appointmentId).toBe(APPT);
   });
@@ -111,7 +111,7 @@ describe('#1015 row 3.10 — speechTurn asks which appointment a move/cancel is 
     const answer = await unmatched.turn('The Zzyzx appointment');
 
     expect(spoken(answer)).not.toContain('Which appointment');
-    expect(spoken(answer)).toContain('reschedule appointment. Is that right?');
+    expect(spoken(answer)).toContain("you'd like to move the Zzyzx appointment. Is that right?");
     expect(unmatched.session.machine.currentContext.extractedEntities?.appointmentId).toBeUndefined();
   });
 
@@ -121,7 +121,7 @@ describe('#1015 row 3.10 — speechTurn asks which appointment a move/cancel is 
     const fx = await turn('I need to reschedule my appointment');
 
     // The request is understood and read back as before this change.
-    expect(spoken(fx)).toContain('reschedule appointment. Is that right?');
+    expect(spoken(fx)).toContain("you'd like to move your appointment. Is that right?");
     expect(spoken(fx)).not.toContain('Which appointment');
     expect(session.machine.currentContext.pendingEntityRequest).toBeUndefined();
   });

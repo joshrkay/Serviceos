@@ -11,22 +11,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"update_customer\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\",\"extractedEntities\":{\"updatedPhone\":\"+15555550143\"}}",
+        "content": "{\"intentType\":\"update_customer\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\",\"extractedEntities\":{\"updatedPhone\":\"555-0143\"}}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 16434,
-          "output": 37,
-          "total": 16471
+          "output": 36,
+          "total": 16470
         }
       },
       "tokenUsage": {
         "inputTokens": 16434,
-        "outputTokens": 37,
+        "outputTokens": 36,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.914Z"
+      "recordedAt": "2026-10-01T19:23:52.807Z"
     },
     {
       "requestHash": "sha256:40be8368774afc75b48dd767e1e9089bbe7ed015351cf0b0f71761de08b3bad1",
@@ -36,22 +36,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"update_customer\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\",\"extractedEntities\":{\"updatedPhone\":\"+15555550143\"}}",
+        "content": "{\"intentType\":\"update_customer\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\",\"extractedEntities\":{\"updatedPhone\":\"555-0143\"}}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 15577,
-          "output": 37,
-          "total": 15614
+          "output": 36,
+          "total": 15613
         }
       },
       "tokenUsage": {
         "inputTokens": 15577,
-        "outputTokens": 37,
+        "outputTokens": 36,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.918Z"
+      "recordedAt": "2026-10-01T19:23:52.814Z"
     }
   ]
 }

@@ -1,4 +1,6 @@
 import { ElevenLabsStreamConnection } from './elevenlabs-stream';
+import { speakableText } from './speakable-text';
+import { classifyElevenLabsError, TtsProviderRejectedError } from './tts-errors';
 
 /**
  * Text-to-speech provider interface for hands-free voice readback.
@@ -56,8 +58,21 @@ export interface TtsSynthesizeStreamInput extends TtsSynthesizeInput {
   signal?: AbortSignal;
 }
 
+/**
+ * #1536 — outcome of a cheap authenticated liveness check. `reason` is a
+ * safe code token only (e.g. `missing_permissions`, `unauthorized`,
+ * `unreachable`) — never a provider payload.
+ */
+export type TtsProbeResult = { ok: true } | { ok: false; reason: string };
+
 export interface TtsProvider {
   synthesize(input: TtsSynthesizeInput): Promise<TtsSynthesizeResult>;
+  /**
+   * #1536 — optional liveness probe proving the configured credential can
+   * synthesize speech. Health reporting calls it (cached); providers that
+   * do not implement it are reported as config-only.
+   */
+  probe?(signal: AbortSignal): Promise<TtsProbeResult>;
   /**
    * Optional WebSocket-backed streaming variant. When present, the
    * media-streams adapter prefers it because it removes ~400-800ms of
@@ -99,7 +114,7 @@ export class OpenAiTtsProvider implements TtsProvider {
       },
       body: JSON.stringify({
         model: this.model,
-        input: input.text,
+        input: speakableText(input.text, input.language),
         voice: input.voice ?? defaultVoice,
         response_format: 'mp3',
       }),
@@ -153,7 +168,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
           Accept: 'audio/mpeg',
         },
         body: JSON.stringify({
-          text: input.text,
+          text: speakableText(input.text, input.language),
           model_id: modelId,
           voice_settings: { stability: 0.5, similarity_boost: 0.75 },
         }),
@@ -163,8 +178,10 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       }
     );
     if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`ElevenLabs TTS error (${res.status}): ${body.slice(0, 200)}`);
+      // #1536 — the body is never echoed (it can quote request details);
+      // only the status and a safe code token like missing_permissions.
+      const code = classifyElevenLabsError(await res.json().catch(() => undefined));
+      throw new TtsProviderRejectedError('elevenlabs', code, `ElevenLabs TTS error (${res.status} ${code})`);
     }
     const buffer = Buffer.from(await res.arrayBuffer());
     return {
@@ -172,6 +189,41 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       contentType: 'audio/mpeg',
       provider: 'elevenlabs',
     };
+  }
+
+  /**
+   * #1536 — proves the key can synthesize. ElevenLabs has no permission
+   * introspection scoped to text_to_speech (GET /v1/user needs its own
+   * user_read permission, so it would misreport a TTS-only key), so this is
+   * the cheapest request that exercises the permission itself: a
+   * ONE-character synthesis on the configured voice (≈1 character of quota;
+   * the health check caches the verdict, so at most one per TTL window).
+   * Only a safe reason code is returned — never the provider body.
+   */
+  async probe(signal: AbortSignal): Promise<TtsProbeResult> {
+    let res: Response;
+    try {
+      res = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}?output_format=pcm_16000`,
+        {
+          method: 'POST',
+          headers: { 'xi-api-key': this.apiKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: 'a', model_id: this.modelId }),
+          signal,
+        },
+      );
+    } catch {
+      return { ok: false, reason: 'unreachable' };
+    }
+    if (res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return { ok: true };
+    }
+    if (res.status >= 500) return { ok: false, reason: 'unreachable' };
+    const code = classifyElevenLabsError(await res.json().catch(() => undefined));
+    if (code === 'missing_permissions') return { ok: false, reason: 'missing_permissions' };
+    if (res.status === 401 || res.status === 403) return { ok: false, reason: 'unauthorized' };
+    return { ok: false, reason: code === 'unknown' ? `http_${res.status}` : code };
   }
 
   synthesizeStream(input: TtsSynthesizeStreamInput): AsyncIterable<TtsStreamChunk> {
@@ -182,7 +234,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       voiceId: this.voiceId,
       modelId,
     });
-    return conn.synthesize(input);
+    return conn.synthesize({ ...input, text: speakableText(input.text, input.language) });
   }
 }
 

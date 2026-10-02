@@ -36,9 +36,17 @@
     {
       "caller": "Hi this is Mmmmaria Roddrrgez calling about my appointment",
       "expected": {
+        "escalates": false,
+        "spokenAnswerMatches": "#1331 owner decision (2026-10-01): the caller is identified by caller ID, but the spoken name does not confidently match the account, so the agent asks ONE yes/no identity check naming the account on this number (e.g. 'Just to make sure I have the right account — is this Maria Rodriguez?') before acting on it — no lookup answer yet, no verbose spelling reprompt"
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "Yes, that's me.",
+      "expected": {
         "intent": "lookup_appointments",
         "escalates": false,
-        "spokenAnswerMatches": "agent identity-resolves via caller-id (not by parsing the mumbled name) and asks a single clarifying yes/no (e.g. 'I have you as Maria Rodriguez at this number — is that right?') rather than reprompting verbosely about how to spell the name"
+        "spokenAnswerMatches": "with the identity confirmed, the agent answers the appointment question the caller asked before the check, on Maria Rodriguez's account (she has no upcoming appointments on file, so it says so)"
       },
       "hangupAfter": false
     }

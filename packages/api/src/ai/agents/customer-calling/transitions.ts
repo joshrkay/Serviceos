@@ -149,6 +149,21 @@ function ttsPlay(text: string, extra?: Record<string, unknown>): SideEffect {
   };
 }
 
+/**
+ * The `intent_confirm` readback. #1539 — carries the request's entities so the
+ * renderer (tts-copy `confirm_intent`) can say WHAT will be drafted.
+ */
+function confirmIntentTts(
+  context: CallingAgentContext,
+  entities: Record<string, unknown> | undefined,
+): SideEffect {
+  return ttsPlay('intent_confirm', {
+    template: 'confirm_intent',
+    intent: context.currentIntent,
+    entities: { ...(entities ?? {}) },
+  });
+}
+
 function endSession(context: CallingAgentContext, reason: string): SideEffect {
   return {
     type: 'end_session',
@@ -940,10 +955,38 @@ function transitionAskCaller(
   return ignoredTransition('ask_caller', event, context);
 }
 
+/**
+ * #1331 (owner decision 2026-10-01) — "no, that's not me" to the caller-name
+ * identity check. The caller-ID account is UNBOUND (context.customerId
+ * cleared), so nothing later on the call reads from or drafts on it; the
+ * agent asks who it is speaking with and keeps listening.
+ */
+export const CALLER_IDENTITY_REJECTED_LINE =
+  "Sorry about that. Who am I speaking with, and how can I help you today?";
+
+function callerIdentityRejected(
+  from: CallingAgentState,
+  context: CallingAgentContext,
+): TransitionResult {
+  const { customerId: _unbound, ...rest } = context;
+  const updatedContext: CallingAgentContext = { ...rest };
+  return {
+    nextState: 'intent_capture',
+    sideEffects: [
+      auditLog(updatedContext, from, 'intent_capture', 'caller_identity_rejected'),
+      ttsPlay(CALLER_IDENTITY_REJECTED_LINE),
+    ],
+    updatedContext,
+  };
+}
+
 function transitionIntentCapture(
   event: CallingAgentEvent,
   context: CallingAgentContext
 ): TransitionResult {
+  if (event.type === 'caller_identity_rejected') {
+    return callerIdentityRejected('intent_capture', context);
+  }
   if (event.type === 'intent_classified') {
     // emergency_dispatch → fast-path directly to escalating (skip entity_resolution and intent_confirm)
     if (event.intentType === 'emergency_dispatch') {
@@ -1162,7 +1205,7 @@ function transitionEntityResolution(
       nextState: 'intent_confirm',
       sideEffects: [
         auditLog(context, 'entity_resolution', 'intent_confirm', 'entity_resolved'),
-        ttsPlay('intent_confirm', { template: 'confirm_intent', intent: context.currentIntent }),
+        confirmIntentTts(context, { ...context.extractedEntities, ...event.refs }),
       ],
       updatedContext: {
         ...context,
@@ -1295,7 +1338,7 @@ function transitionEntityConfirm(
           entityKind: pending.entityKind,
           candidateId: pending.candidate.id,
         }),
-        ttsPlay('intent_confirm', { template: 'confirm_intent', intent: context.currentIntent }),
+        confirmIntentTts(context, { ...context.extractedEntities, ...refs }),
       ],
       updatedContext: {
         ...context,
@@ -1414,7 +1457,7 @@ function transitionIntentConfirm(
             intentType: context.currentIntent,
             confirmDetailRetryCount: noProgressCount,
           }),
-          ttsPlay('intent_confirm', { template: 'confirm_intent', intent: context.currentIntent }),
+          confirmIntentTts(context, context.extractedEntities),
         ],
         updatedContext: { ...context, confirmDetailRetryCount: noProgressCount },
       };
@@ -1541,6 +1584,9 @@ function transitionClosing(
   event: CallingAgentEvent,
   context: CallingAgentContext
 ): TransitionResult {
+  if (event.type === 'caller_identity_rejected') {
+    return callerIdentityRejected('closing', context);
+  }
   if (event.type === 'closed') {
     return {
       nextState: 'terminated',

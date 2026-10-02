@@ -160,6 +160,132 @@ describe('VQ-022 — gradeDispositionLlm', () => {
     expect(provider.getCalls()).toHaveLength(0);
   });
 
+  // #1331 — criterion 12 grades what the caller HEARD. Weekly run
+  // 36829085635 judged `proposal.summary` ("Add material") as the agent's
+  // reply ("too vague"), and never judged a lookup at all (no proposal).
+  it('#1331 — judges the captured agent speech for a lookup turn that drafted no proposal', async () => {
+    const { gateway, provider } = createMockLLMGateway(PASS_RESPONSE);
+    const observation = makeObservation({
+      events: [
+        { type: 'speech_outbound', transcript: 'Your next appointment is Tuesday at 10 AM.', turnIndex: 0, ts: 1 },
+      ],
+    });
+
+    await gradeDispositionLlm({ observation, script: makeScript(), gateway });
+
+    expect(provider.getCalls()).toHaveLength(1);
+    const userMsg = provider.getCalls()[0].messages.find((m) => m.role === 'user')!.content;
+    expect(userMsg).toContain('Agent said: "Your next appointment is Tuesday at 10 AM."');
+  });
+
+  it('#1331 — grades the spoken reply, not the operator-card summary, when a turn drafted a proposal', async () => {
+    const { gateway, provider } = createMockLLMGateway(PASS_RESPONSE);
+    const observation = makeObservation({
+      proposals: [{ ...makeProposal({}), summary: 'Add material' } as Proposal],
+      events: [
+        {
+          type: 'speech_outbound',
+          transcript: "I've drafted that — it's in your approvals waiting for you to review.",
+          turnIndex: 0,
+          ts: 1,
+        },
+      ],
+    });
+
+    await gradeDispositionLlm({ observation, script: makeScript(), gateway });
+
+    const userMsg = provider.getCalls()[0].messages.find((m) => m.role === 'user')!.content;
+    expect(userMsg).toContain(
+      `Agent said: "I've drafted that — it's in your approvals waiting for you to review."`,
+    );
+    expect(userMsg).not.toContain('Add material');
+  });
+
+  // #1331 — run 36895893912: on the phone a write is read back on the
+  // request turn and drafted on the caller's yes, so the drafted-reply
+  // expectation sits on the yes turn. The judge saw only `Caller said: "Yes,
+  // that's right."` + "I've drafted that — it's in your approvals…" and failed
+  // 15 scripts for "does not convey the service location" — the detail the
+  // caller had just heard in the read-back and confirmed.
+  it('#1331 — judges a turn with the agent line the caller was answering (the read-back they confirmed)', async () => {
+    const { gateway, provider } = createMockLLMGateway(PASS_RESPONSE);
+    const script = makeScript({
+      turns: [
+        {
+          caller: 'Please add a second service address for me at 412 Oak Street.',
+          expected: { intent: 'add_service_location', proposalType: 'add_service_location' },
+          hangupAfter: false,
+        },
+        {
+          caller: "Yes, that's right.",
+          expected: {
+            spokenAnswerMatches:
+              "I've drafted a new service location for review; an operator will confirm the address before it's added.",
+          },
+          hangupAfter: false,
+        },
+      ],
+    });
+    const observation = makeObservation({
+      events: [
+        {
+          type: 'speech_outbound',
+          transcript: "Just to confirm, you'd like to add 412 Oak Street as a service location for Jane. Is that right?",
+          turnIndex: 0,
+          ts: 1,
+        },
+        {
+          type: 'speech_outbound',
+          transcript: "I've drafted that. It's in your approvals waiting for you to review.",
+          turnIndex: 1,
+          ts: 2,
+        },
+      ],
+    });
+
+    await gradeDispositionLlm({ observation, script, gateway });
+
+    const userMsgs = provider.getCalls().map((c) => c.messages.find((m) => m.role === 'user')!.content);
+    const yesTurn = userMsgs.find((m) => m.includes(`Caller said: "Yes, that's right."`))!;
+    expect(yesTurn).toContain(
+      `Agent's previous line (what the caller was answering): "Just to confirm, you'd like to add 412 Oak Street as a service location for Jane. Is that right?"`,
+    );
+    const requestTurn = userMsgs.find((m) => m.includes('412 Oak Street.'))!;
+    expect(requestTurn).not.toContain("Agent's previous line");
+  });
+
+  // #1331 — run 36895893912: the judge failed confirm-appointment's correct
+  // read-back as "asks for confirmation, which is unnecessary", failed
+  // "Friday, June 12th" as "June 12 is not a Friday in 2023" (it is a Friday
+  // in 2026, the corpus world), and blamed the agent for Whisper hearing "PEX"
+  // as "pecks". It must grade against the product contract, on the call's date,
+  // knowing it reads speech-recognised audio.
+  it('#1331 — tells the judge the read-back/draft contract, who is calling, the call date, and that it reads ASR audio', async () => {
+    const { gateway, provider } = createMockLLMGateway(PASS_RESPONSE);
+    const observation = makeObservation({
+      events: [{ type: 'speech_outbound', transcript: 'Your next appointment is Friday, June 12th at 9 a.m.', turnIndex: 0, ts: 1 }],
+    });
+
+    await gradeDispositionLlm({ observation, script: makeScript({ callerIsOwner: true }), gateway });
+
+    const [call] = provider.getCalls();
+    const system = call.messages.find((m) => m.role === 'system')!.content;
+    const user = call.messages.find((m) => m.role === 'user')!.content;
+    expect(system).toMatch(/reads (the|a) (write )?request back/i);
+    expect(system).toMatch(/in your approvals/i);
+    expect(system).toMatch(/speech recogni/i);
+    expect(system).toMatch(/One moment/);
+    expect(user).toContain('Caller: the business owner, calling their own business line.');
+    expect(user).toContain('Call date: Friday, May 1, 2026');
+
+    resetJudgeCache();
+    const { gateway: g2, provider: p2 } = createMockLLMGateway(PASS_RESPONSE);
+    await gradeDispositionLlm({ observation, script: makeScript(), gateway: g2 });
+    expect(p2.getCalls()[0].messages.find((m) => m.role === 'user')!.content).toContain(
+      'Caller: a customer of the business.',
+    );
+  });
+
   it('VQ-022 — handles missing expected answer (judges for reasonableness only)', async () => {
     const { gateway, provider } = createMockLLMGateway(PASS_RESPONSE);
     const script = makeScript({
