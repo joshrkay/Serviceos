@@ -94,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **62** |
+| Owner-only routes in code | **63** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **7** |
-| `cadence: occasional` | **53** |
+| `cadence: occasional` | **54** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **7** |
 
@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 62,
+  "ownerOnlyRoutes": 63,
   "daily": 2,
   "onboarding": 7,
-  "occasional": 53,
+  "occasional": 54,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 7
 }
@@ -170,6 +170,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `POST /api/onboarding/billing/cancel` | occasional | Clears a pending checkout the owner abandoned — a recovery path, not a required step. | false | none | |
 | `POST /api/onboarding/calendar/choose` | occasional | Calendar-provider pick. Not one of the 7 wizard steps; the built-in scheduler is the default. | false | none | |
 | `POST /api/onboarding/conversation/turn` | occasional | The conversational variant of the wizard. An alternative path through onboarding, not an additional required step. | false | none | |
+| `POST /api/onboarding/phone/change` | occasional | Settings → Phone "change number" (#1563): replaces the business line with a newly picked number (buy new → attach → repoint → release old). Rare by construction — the number is picked once at onboarding. | false | none | |
 | `POST /api/settings/brand-voice/rollback` | occasional | Reverts a brand-voice change — a correction path. | false | none | |
 | `POST /api/standing-instructions/` | occasional | Creates a persistent agent instruction — a policy change. Listed as occasional rather than daily even though voice can reach it. | true | voice_intent:create_standing_instruction | |
 | `POST /api/users/:id/deactivate` | occasional | Offboarding a departed teammate (#1402 §13); rare in a 1–3-truck shop. | false | none | |

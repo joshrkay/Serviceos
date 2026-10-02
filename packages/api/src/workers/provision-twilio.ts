@@ -15,8 +15,10 @@ import {
 import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
 import { isTwilioDeploymentEnv } from '../integrations/credentials';
 import { isTwilioTestNumber } from '../telephony/phone-policy';
+import { usStateFromAddress } from '../telephony/address-state';
 import { buildAssistantConfig } from '../integrations/vapi/assistant-config';
 import { isBillingLiveStatus } from '../billing/tenant-billing-state';
+import { changeTenantNumber } from './change-twilio-number';
 
 // Status values match migration 071_widen_tenant_integrations_status:
 // 't0_requested' = provisioning in flight; 'full_readiness' = fully active.
@@ -53,9 +55,63 @@ export interface ProvisionTwilioPayload {
   // Number picker: the specific E.164 the tradesperson claimed. When set, the
   // worker orders exactly this number instead of auto-picking by region.
   phoneNumber?: string;
+  // #1563 — "Pick one for me": buy a number chosen by the worker (area code
+  // from the business address's state, falling back to any US local).
+  // Without phoneNumber or autoPick the job is the trial-checkout SETUP job:
+  // it creates the subaccount + Messaging Service only and buys nothing.
+  autoPick?: boolean;
+  // #1563 — Settings → Phone "change number": replace the tenant's ACTIVE
+  // number with this E.164 (buy new → attach → repoint → release old).
+  changeTo?: string;
 }
 
 export const PROVISION_TWILIO_JOB_TYPE = 'provision_twilio_subaccount';
+
+/**
+ * #1563 — every provisioning job for a tenant runs under one per-tenant
+ * Postgres advisory lock. Checkout (setup), claim, "pick one for me" and
+ * change-number jobs carry DISTINCT idempotency keys (so a pick is never
+ * swallowed by a pending checkout job), which means two of them can be
+ * delivered concurrently; serializing them here is what stops a concurrent
+ * pair from creating two subaccounts or buying two numbers. Each step after
+ * the lock is resumable from persisted state, so the second job simply sees
+ * the first one's work.
+ *
+ * Contention throws (no Twilio call, no row write): the queue retries the
+ * job with backoff once the running job has released the lock. The lock is
+ * session-scoped on a dedicated connection, so a crashed worker's lock dies
+ * with its connection.
+ */
+function withTenantProvisioningLock(
+  pool: Pool,
+  run: (message: QueueMessage<ProvisionTwilioPayload>, logger: Logger) => Promise<void>,
+): (message: QueueMessage<ProvisionTwilioPayload>, logger: Logger) => Promise<void> {
+  return async (message, logger) => {
+    const lockKey = `provision-twilio:${message.payload.tenantId}`;
+    const client = await pool.connect();
+    let locked = false;
+    try {
+      const { rows } = await client.query<{ locked: boolean }>(
+        'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
+        [lockKey],
+      );
+      locked = rows[0]?.locked === true;
+      if (!locked) {
+        throw new Error(
+          `Twilio provisioning already running for tenant ${message.payload.tenantId} — will retry`,
+        );
+      }
+      await run(message, logger);
+    } finally {
+      if (locked) {
+        await client
+          .query('SELECT pg_advisory_unlock(hashtext($1))', [lockKey])
+          .catch(() => undefined);
+      }
+      client.release();
+    }
+  };
+}
 
 export function createProvisionTwilioWorker(deps: {
   pool: Pool;
@@ -67,8 +123,12 @@ export function createProvisionTwilioWorker(deps: {
   return {
     type: PROVISION_TWILIO_JOB_TYPE,
 
-    async handle(message: QueueMessage<ProvisionTwilioPayload>, logger: Logger): Promise<void> {
-      const { tenantId, region, baseUrl, phoneNumber: preferredNumber } = message.payload;
+    handle: withTenantProvisioningLock(deps.pool, async (
+      message: QueueMessage<ProvisionTwilioPayload>,
+      logger: Logger,
+    ): Promise<void> => {
+      const { tenantId, region, baseUrl, phoneNumber: preferredNumber, autoPick, changeTo } = message.payload;
+      const wantsNumber = !!preferredNumber || autoPick === true;
       const { pool } = deps;
 
       // WS14 — three-service topology support. This job runs on web/worker/all
@@ -169,6 +229,21 @@ export function createProvisionTwilioWorker(deps: {
         return;
       }
 
+      // #1563 — Settings → Phone "change number" (needs an ACTIVE line).
+      if (changeTo) {
+        await changeTenantNumber({
+          pool,
+          tenantId,
+          changeTo,
+          voiceBaseUrl,
+          encKey,
+          vapi: deps.vapiClient ?? getVapiClient(),
+          message,
+          logger,
+        });
+        return;
+      }
+
       // Check current state — idempotent: skip if already active
       const { rows } = await tenantQuery<{
         status: string;
@@ -257,6 +332,28 @@ export function createProvisionTwilioWorker(deps: {
           );
         }
 
+        // #1563 — the trial-checkout job stops here: the subaccount and
+        // Messaging Service are free, the number is not. A number is bought
+        // only on the owner's explicit pick (/phone/claim) or "Pick one for
+        // me" (/phone/retry → autoPick). Status stays 't0_requested' (the
+        // phone step stays 'current'); `awaitingPick` tells the UI to show
+        // the picker instead of a "claiming…" spinner.
+        if (!wantsNumber && !providerData.phoneNumberSid) {
+          await tenantQuery(
+            pool,
+            tenantId,
+            `UPDATE tenant_integrations
+             SET provider_data = provider_data || $1::jsonb, updated_at = NOW()
+             WHERE tenant_id = $2 AND provider = 'twilio'`,
+            [JSON.stringify({ awaitingPick: true }), tenantId]
+          );
+          logger.info('Twilio subaccount + Messaging Service ready — awaiting the owner\'s number pick', {
+            tenantId,
+            subaccountSid,
+          });
+          return;
+        }
+
         // Step 3 — purchase phone number.
         // Idempotency: if we have a SID persisted, reuse it. Otherwise list
         // any numbers already owned by this subaccount before buying — this
@@ -279,12 +376,24 @@ export function createProvisionTwilioWorker(deps: {
               region,
               preferred: preferredNumber ?? null,
             });
+            // #1563 — "Pick one for me": default to the business address's
+            // state area code; purchasePhoneNumber falls back to any US local.
+            let searchRegion = region;
+            if (!preferredNumber && !searchRegion) {
+              const addr = await tenantQuery<{ business_address: string | null }>(
+                pool,
+                tenantId,
+                `SELECT business_address FROM tenant_settings WHERE tenant_id = $1`,
+                [tenantId],
+              );
+              searchRegion = usStateFromAddress(addr.rows[0]?.business_address);
+            }
             let number;
             try {
               number = await purchasePhoneNumber(
                 subaccountSid,
                 authToken,
-                region,
+                searchRegion,
                 // VoiceUrl must return TwiML — point it at the existing
                 // /api/telephony/voice handler which resolves tenant from
                 // the inbound `to` number. The /webhooks/twilio/* routes only
@@ -319,7 +428,8 @@ export function createProvisionTwilioWorker(deps: {
                     pool,
                     tenantId,
                     `UPDATE tenant_integrations
-                     SET status = 'failed', last_error = $1, updated_at = NOW()
+                     SET status = 'failed', last_error = $1,
+                 provider_data = provider_data - 'pendingPick', updated_at = NOW()
                      WHERE tenant_id = $2 AND provider = 'twilio'`,
                     [msg, tenantId]
                   );
@@ -363,7 +473,8 @@ export function createProvisionTwilioWorker(deps: {
               pool,
               tenantId,
               `UPDATE tenant_integrations
-               SET status = 'failed', last_error = $1, updated_at = NOW()
+               SET status = 'failed', last_error = $1,
+                 provider_data = provider_data - 'pendingPick', updated_at = NOW()
                WHERE tenant_id = $2 AND provider = 'twilio'`,
               [msg, tenantId]
             );
@@ -440,7 +551,8 @@ export function createProvisionTwilioWorker(deps: {
               pool,
               tenantId,
               `UPDATE tenant_integrations
-               SET status = 'failed', last_error = $1, updated_at = NOW()
+               SET status = 'failed', last_error = $1,
+                 provider_data = provider_data - 'pendingPick', updated_at = NOW()
                WHERE tenant_id = $2 AND provider = 'twilio'`,
               [msg, tenantId]
             );
@@ -544,12 +656,14 @@ export function createProvisionTwilioWorker(deps: {
           }
         }
 
-        // Step 5 — mark active
+        // Step 5 — mark active (the pick, if any, is done)
         await tenantQuery(
           pool,
           tenantId,
           `UPDATE tenant_integrations
-           SET status = $2, provisioned_at = NOW(), updated_at = NOW()
+           SET status = $2, provisioned_at = NOW(),
+               provider_data = provider_data - 'pendingPick' - 'awaitingPick',
+               updated_at = NOW()
            WHERE tenant_id = $1 AND provider = 'twilio'`,
           [tenantId, STATUS_ACTIVE]
         );
@@ -574,12 +688,13 @@ export function createProvisionTwilioWorker(deps: {
           pool,
           tenantId,
           `UPDATE tenant_integrations
-           SET status = 'failed', last_error = $1, updated_at = NOW()
+           SET status = 'failed', last_error = $1,
+                 provider_data = provider_data - 'pendingPick', updated_at = NOW()
            WHERE tenant_id = $2 AND provider = 'twilio'`,
           [error, tenantId]
         ).catch(() => {});
         throw err;
       }
-    },
+    }),
   };
 }
