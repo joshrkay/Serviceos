@@ -11,6 +11,10 @@ const apiFetchMock = vi.fn();
 vi.mock('../../lib/apiClient', () => ({
   useApiClient: () => (...args: unknown[]) => apiFetchMock(...args),
 }));
+// #1564 — the texting-registration panel on this page uses the shared apiFetch.
+vi.mock('../../utils/api-fetch', () => ({
+  apiFetch: (...args: unknown[]) => apiFetchMock(...args),
+}));
 
 import { PhoneSettingsPage } from './PhoneSettingsPage';
 
@@ -104,5 +108,37 @@ describe('PhoneSettingsPage', () => {
     expect(section.className).toContain('min-w-0');
     expect(section.className).toContain('w-full');
     expect(section.className).not.toMatch(/\bw-\[\d+px\]/);
+  });
+
+  it('#1564 — shows the A2P 10DLC texting registration below the number', async () => {
+    apiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/onboarding/phone') return json(ACTIVE);
+      if (path === '/api/settings/texting-registration') {
+        return json({
+          status: 'brand_pending',
+          readiness: 'partial_readiness',
+          details: {
+            legalBusinessName: 'Acme Plumbing LLC',
+            einLast4: '6789',
+            businessType: 'Limited Liability Corporation',
+            businessIndustry: 'CONSTRUCTION',
+            websiteUrl: null,
+            address: { street: '1 Main St', street2: null, city: 'Austin', region: 'TX', postalCode: '78701' },
+            contact: { firstName: 'Pat', lastName: 'Owner', email: 'pat@example.com', phone: '+15125550100', title: 'Owner', jobPosition: 'CEO' },
+          },
+          failureReasons: [],
+          submittedAt: '2026-10-01T00:00:00Z',
+          approvedAt: null,
+          updatedAt: '2026-10-01T00:00:00Z',
+        });
+      }
+      return json({}, 404);
+    });
+    renderPage();
+
+    const section = await screen.findByTestId('phone-settings');
+    expect(await screen.findByRole('heading', { name: /texting registration/i })).toBeInTheDocument();
+    expect(screen.getByText(/business under carrier review/i)).toBeInTheDocument();
+    expect(section.contains(screen.getByRole('heading', { name: /texting registration/i }))).toBe(true);
   });
 });

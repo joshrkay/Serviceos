@@ -107,11 +107,14 @@ const INVENTORY_PATH = path.resolve(REPO_ROOT, 'docs/reference/owner-daily-actio
 
 /** PRD §5.0c (b) — the budget. A PR that moves one of these is self-documenting. */
 const OWNER_REQUIRED_DAILY_WEB_ACTIONS = 1;
-const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 6;
+// #1564: +1 (PUT /api/settings/texting-registration — one-time A2P 10DLC
+// registration; reviewed exemption in the doc).
+const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 7;
 // #1386: +2 (PUT/DELETE /api/settings/e1-script — occasional, reviewed E1 script).
 // #1402 §13: +1 (POST /api/users/:id/deactivate — occasional, offboarding).
 // #1563: +1 (POST /api/onboarding/phone/change — occasional, Settings → Phone).
-const OWNER_ONLY_ROUTES = 61;
+// #1564: +2 (GET occasional / PUT onboarding /api/settings/texting-registration).
+const OWNER_ONLY_ROUTES = 63;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 

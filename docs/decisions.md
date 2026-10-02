@@ -1435,3 +1435,38 @@ by `PgQueue.send`'s `ON CONFLICT DO NOTHING`.
 **Consequences.** Both onboarding and Settings show the line's state from one read model,
 `onboarding/phone-line.ts` (`GET /api/onboarding/phone`). The rest of A2P 10DLC registration is
 out of scope here (#1564).
+
+## D-038 — A2P 10DLC status lives beside the phone integration, not in its readiness column
+
+**Date:** 2026-10-01
+**Status:** Accepted (owner decision on #1564: build ISV registration, Rivet absorbs fees)
+**Resolves:** #1564
+
+**Context.** #1564 asks for the A2P 10DLC registration to show as `partial_readiness` while it is
+pending. `tenant_integrations.status` is already load-bearing for other things: the onboarding
+`phone` step is done only at `full_readiness` (`onboarding/derive-status.ts`), the phone claim/retry
+routes 409 on any other non-failed status, the provisioning worker re-runs unless the row is
+`full_readiness`, and `status-machine.ts` has no `full_readiness → partial_readiness` edge.
+
+**Decision.**
+1. Registration state is its own table, `a2p_registrations` (migration 303, FORCE RLS): owner
+   details, the EIN encrypted with `TENANT_ENCRYPTION_KEY` (last four kept for display), the Twilio
+   SIDs created so far, status `submitted → brand_pending → campaign_pending → approved | failed`, and
+   carrier failure reasons.
+2. `tenant_integrations.status` is **not** changed. The worker mirrors the registration status into
+   `provider_data.a2p10dlc`, and `GET /api/settings/texting-registration` reports texting
+   `readiness` as `partial_readiness` until the campaign is approved, then `full_readiness`.
+3. Outbound SMS while unregistered behaves as before (nothing is gated on the registration).
+4. One MIXED campaign per tenant on the tenant's existing Messaging Service; Standard Brand with
+   EIN. The async worker (P0-009) creates resources with the tenant subaccount's credentials,
+   checkpoints every SID, fails non-retryable Twilio 4xx with Twilio's reason, and re-polls every
+   6 h until terminal.
+
+**Consequences.** Voice, onboarding and provisioning are untouched by the registration. A future
+change that gates outbound SMS on approval reads `a2p_registrations.status`, not the integration
+row. Sole-proprietor (no-EIN) brands are out of scope.
+
+**Alternatives rejected.**
+- *Write `partial_readiness` into `tenant_integrations.status`.* Rejected: it would un-complete the
+  onboarding phone step for every tenant, make the claim/retry routes refuse, and re-trigger
+  provisioning — a regression in voice onboarding to express a texting status.
