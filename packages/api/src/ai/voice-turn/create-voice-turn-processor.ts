@@ -241,7 +241,7 @@ import type { InvoiceRepository } from '../../invoices/invoice';
 import type { AgreementRepository } from '../../agreements/agreement';
 import type { Customer, CustomerRepository } from '../../customers/customer';
 import type { ConversationRepository } from '../../conversations/conversation-service';
-import { findOrCreateCustomerByPhone } from '../skills/find-or-create-customer';
+import { findCustomerByPhone, findOrCreateCustomerByPhone } from '../skills/find-or-create-customer';
 import { findOrCreateLeadByPhone } from '../skills/find-or-create-lead';
 import type { LeadRepository } from '../../leads/lead';
 import { checkServiceArea } from '../../scheduling/service-area';
@@ -1188,6 +1188,17 @@ export interface VoiceTurnProcessor {
     utterance: string,
     tenantId: string,
   ): Promise<CallerIdentityCheckOutcome | null>;
+  /**
+   * #1582 — a classified request from a new caller whose customer record is
+   * HELD (tenant has a service area): anything but a booking creates and
+   * binds the record now; a booking waits for {@link serviceAreaGate}.
+   * No-op when nothing is held.
+   */
+  releaseHeldCallerForRequest(
+    session: VoiceSession,
+    intentType: string,
+    tenantId: string,
+  ): Promise<void>;
   /**
    * #1540 §3 — the reply for an existing customer asking to "sign up" on
    * the caller surface (say so, ask what they need), or null.
@@ -4723,7 +4734,23 @@ export function createVoiceTurnProcessor(
     return [{ type: 'tts_play', payload: { text: OUT_OF_SERVICE_AREA_COPY } }];
   }
 
+  /**
+   * #1582 — the gate, plus the held new caller's record: a booking that goes
+   * ahead creates it; an out-of-area booking never does (lead only); the ZIP
+   * question keeps holding it.
+   */
   async function serviceAreaGate(
+    session: VoiceSession,
+    turn: { intentType: string; utterance: string; entities: Record<string, unknown> },
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    const fx = await serviceAreaGateRule(session, turn, tenantId);
+    if (fx === null) await releaseHeldCaller(session, tenantId);
+    else if (session.serviceAreaVerdict === 'out_of_area') session.callerCreateHeld = undefined;
+    return fx;
+  }
+
+  async function serviceAreaGateRule(
     session: VoiceSession,
     turn: { intentType: string; utterance: string; entities: Record<string, unknown> },
     tenantId: string,
@@ -4773,6 +4800,8 @@ export function createVoiceTurnProcessor(
     }
     const zips = (await tenantServiceAreaZips(tenantId)) ?? [];
     const declined = await applyServiceAreaZip(session, tenantId, zips, zip, pending.heldUtterance);
+    // #1582 — out of area: the held caller stays a lead only.
+    if (declined) session.callerCreateHeld = undefined;
     return declined
       ? { kind: 'respond', effects: declined }
       : { kind: 'proceed', utterance: pending.heldUtterance };
@@ -4842,6 +4871,80 @@ export function createVoiceTurnProcessor(
     };
   }
 
+  /** The caller's record found/created by phone is this call's customer (+ timeline entry). */
+  async function bindCallerCustomer(
+    session: VoiceSession,
+    tenantId: string,
+    callerPhone: string,
+    resolved: { status: 'found' | 'created'; customerId: string },
+  ): Promise<void> {
+    session.customerId = resolved.customerId;
+    // #1540 §3 — a record created from the phone number just now is not
+    // "already a customer" (existing-customer-signup.ts).
+    session.callerCreatedThisCall = resolved.status === 'created';
+    if (deps.conversationRepo) {
+      try {
+        await logInboundCallOnCustomerTimeline({
+          conversationRepo: deps.conversationRepo,
+          tenantId,
+          customerId: resolved.customerId,
+          fromPhone: callerPhone,
+          ...(session.callSid ? { callSid: session.callSid } : {}),
+          actorId: deps.systemActorId ?? 'system:inbound-call',
+          ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+        });
+      } catch (err) {
+        logger.error('ask_caller: inbound call timeline log failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+      }
+    }
+  }
+
+  /**
+   * #1582 — create the HELD new caller's record now (#1540 §2's
+   * find-or-create, D-033's sanctioned capture write) and bind it to the
+   * call, before the request is dispatched. No-op when nothing is held.
+   */
+  async function releaseHeldCaller(session: VoiceSession, tenantId: string): Promise<void> {
+    const held = session.callerCreateHeld;
+    if (!held || !deps.customerRepo) return;
+    session.callerCreateHeld = undefined;
+    try {
+      const resolved = await findOrCreateCustomerByPhone({
+        tenantId,
+        fromPhone: held.callerPhone,
+        customerRepo: deps.customerRepo,
+        ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+        systemActorId: deps.systemActorId ?? 'system:inbound-call',
+      });
+      // Several accounts appeared on this number mid-call: never pick one.
+      if (resolved.status === 'ambiguous') return;
+      await bindCallerCustomer(session, tenantId, held.callerPhone, resolved);
+      session.machine.dispatch({ type: 'caller_bound', customerId: resolved.customerId });
+    } catch (err) {
+      logger.error('held caller: find-or-create customer failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
+  /**
+   * #1582 — a classified request from a HELD new caller: anything but a
+   * booking creates their record now (#1540 §2 unchanged for non-booking
+   * requests); a booking waits for the service-area gate.
+   */
+  async function releaseHeldCallerForRequest(
+    session: VoiceSession,
+    intentType: string,
+    tenantId: string,
+  ): Promise<void> {
+    if (SERVICE_AREA_BOOKING_INTENTS.has(intentType)) return;
+    await releaseHeldCaller(session, tenantId);
+  }
+
   async function handleAskCaller(
     session: VoiceSession,
     tenantId: string,
@@ -4850,6 +4953,22 @@ export function createVoiceTurnProcessor(
     const callerPhone = deps.callerPhoneResolver?.(session) ?? session.callerPhone;
     if (deps.customerRepo && callerPhone) {
       try {
+        // #1582 — on a tenant with a service area, a caller with no record is
+        // HELD: the record waits until their request is known not to be an
+        // out-of-area booking (#1567), so an out-of-area caller is a lead only.
+        const zips = await tenantServiceAreaZips(tenantId);
+        if (zips && zips.length > 0) {
+          const existing = await findCustomerByPhone({
+            tenantId,
+            fromPhone: callerPhone,
+            customerRepo: deps.customerRepo,
+          });
+          if (existing.status === 'not_found') {
+            session.callerCreateHeld = { callerPhone };
+            out.push(...session.machine.dispatch({ type: 'caller_held' }));
+            return out;
+          }
+        }
         const resolved = await findOrCreateCustomerByPhone({
           tenantId,
           fromPhone: callerPhone,
@@ -4868,28 +4987,7 @@ export function createVoiceTurnProcessor(
           out.push(...session.machine.dispatch({ type: 'unknown_caller' }));
           return out;
         }
-        session.customerId = resolved.customerId;
-        // #1540 §3 — a record created from the phone number just now is not
-        // "already a customer" (existing-customer-signup.ts).
-        session.callerCreatedThisCall = resolved.status === 'created';
-        if (deps.conversationRepo) {
-          try {
-            await logInboundCallOnCustomerTimeline({
-              conversationRepo: deps.conversationRepo,
-              tenantId,
-              customerId: resolved.customerId,
-              fromPhone: callerPhone,
-              ...(session.callSid ? { callSid: session.callSid } : {}),
-              actorId: deps.systemActorId ?? 'system:inbound-call',
-              ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
-            });
-          } catch (err) {
-            logger.error('ask_caller: inbound call timeline log failed', {
-              error: err instanceof Error ? err.message : String(err),
-              sessionId: session.id,
-            });
-          }
-        }
+        await bindCallerCustomer(session, tenantId, callerPhone, resolved);
         out.push(
           ...session.machine.dispatch({ type: 'caller_known', customerId: resolved.customerId }),
         );
@@ -5601,6 +5699,16 @@ export function createVoiceTurnProcessor(
         return sideEffectsAll;
       }
 
+      // #1582 — a held new caller's non-booking request creates their record
+      // now, before any branch below reads session.customerId; a booking
+      // waits for the service-area gate.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        await releaseHeldCallerForRequest(session, classifierEvent.intentType, tenantId);
+      }
+
       // #1540 §3 — an existing customer asking to "sign up": say so and ask
       // what they need; never read back / draft a duplicate create_customer.
       if (
@@ -5977,6 +6085,7 @@ export function createVoiceTurnProcessor(
     handleCallerIdentityCheck,
     serviceAreaGate,
     handlePendingServiceAreaCheck,
+    releaseHeldCallerForRequest,
     existingCustomerSignupReplyFor,
     maybeHandleLowSttConfidence,
   };

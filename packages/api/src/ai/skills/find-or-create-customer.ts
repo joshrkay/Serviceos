@@ -47,6 +47,35 @@ export function callerDisplayName(input: {
 }
 
 /**
+ * #1582 — the lookup half of {@link findOrCreateCustomerByPhone}, with no
+ * write: `not_found` when no customer has this number (or it is too short to
+ * match reliably). Lets the voice turn hold a new caller's record until the
+ * service-area check passes.
+ */
+export async function findCustomerByPhone(input: {
+  tenantId: string;
+  fromPhone: string;
+  customerRepo: CustomerRepository;
+}): Promise<
+  | Exclude<FindOrCreateCustomerByPhoneResult, { status: 'created' }>
+  | { status: 'not_found' }
+> {
+  const { tenantId, fromPhone, customerRepo } = input;
+  const normalized = normalizePhone(fromPhone);
+  if (normalized.length >= 7 && customerRepo.findByPhoneNormalized) {
+    const matches = await customerRepo.findByPhoneNormalized(tenantId, normalized);
+    // An active match beats an archived one; ambiguity is then judged inside
+    // whichever set we're left with, so archiving a duplicate resolves it.
+    const active = matches.filter((c) => !c.isArchived);
+    const candidates = active.length > 0 ? active : matches;
+    if (candidates.length > 1) return { status: 'ambiguous', candidates };
+    const existing = candidates[0];
+    if (existing) return { status: 'found', customerId: existing.id, customer: existing };
+  }
+  return { status: 'not_found' };
+}
+
+/**
  * Look up an existing customer by the caller's phone number, or create one when
  * none matches. The inbound-call counterpart of {@link findOrCreateLeadByPhone}
  * — used when the AI receptionist needs a real CUSTOMER (not just a CRM lead)
@@ -82,20 +111,10 @@ export async function findOrCreateCustomerByPhone(
     auditVia = 'inbound_call_skill',
   } = input;
 
-  const normalized = normalizePhone(fromPhone);
-
   // Phone too short to identify reliably — still create the customer so the
   // call is captured, but skip the (false-positive-prone) tail lookup.
-  if (normalized.length >= 7 && customerRepo.findByPhoneNormalized) {
-    const matches = await customerRepo.findByPhoneNormalized(tenantId, normalized);
-    // An active match beats an archived one; ambiguity is then judged inside
-    // whichever set we're left with, so archiving a duplicate resolves it.
-    const active = matches.filter((c) => !c.isArchived);
-    const candidates = active.length > 0 ? active : matches;
-    if (candidates.length > 1) return { status: 'ambiguous', candidates };
-    const existing = candidates[0];
-    if (existing) return { status: 'found', customerId: existing.id, customer: existing };
-  }
+  const lookup = await findCustomerByPhone({ tenantId, fromPhone, customerRepo });
+  if (lookup.status !== 'not_found') return lookup;
 
   const now = new Date();
   const customer: Customer = {
