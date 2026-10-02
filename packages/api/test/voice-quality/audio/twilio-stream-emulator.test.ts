@@ -23,7 +23,11 @@ import type { AddressInfo } from 'net';
 import { TwilioStreamEmulator } from '../../../src/ai/voice-quality/audio/twilio-stream-emulator';
 import { AgentEventBus } from '../../../src/ai/voice-quality/event-bus';
 import { frameForTwilio, pcm16ToMulaw } from '../../../src/ai/voice-quality/audio/pcm-codec';
-import { audioFrameEmittedEvent, transcriptReceivedEvent } from '../../../src/ai/voice-quality/events';
+import {
+  audioFrameEmittedEvent,
+  repairTemplateFiredEvent,
+  transcriptReceivedEvent,
+} from '../../../src/ai/voice-quality/events';
 
 // ─── Stub server ────────────────────────────────────────────────────────────
 
@@ -383,6 +387,38 @@ describe('VQ2-006 — TwilioStreamEmulator', () => {
     await stub.waitForConnection();
 
     const result = await emulator.sendCallerUtterance(shortPcmSilence(), 0, 'what do I owe');
+
+    expect(result.numFrames).toBe(2);
+  });
+
+  it('#1331 — after a slow-turn hold line, the turn keeps waiting for the REAL reply instead of closing on the hold', async () => {
+    // The adapter speaks an honest hold line when a turn is still thinking at
+    // its hold deadline (repair_template_fired trigger 'turn_hold', then the
+    // hold's own audio_frame_emitted). The answer is marked by a SECOND
+    // audio_frame_emitted when it starts; a quiet gap longer than the silence
+    // window between the hold and the answer is still the agent thinking.
+    emulator = new TwilioStreamEmulator({
+      serverUrl: stub.url,
+      bus,
+      silenceWindowMs: 100,
+      firstAudioTimeoutMs: 2_000,
+      deliverFinalTranscript: () => {
+        bus.record(transcriptReceivedEvent({}));
+        setTimeout(() => {
+          bus.record(repairTemplateFiredEvent({ trigger: 'turn_hold', text: 'hold' }));
+          bus.record(audioFrameEmittedEvent({ byteCount: 320 }));
+          stub.sendInboundFrame(inboundFramePayload()); // hold line
+        }, 50);
+        setTimeout(() => {
+          bus.record(audioFrameEmittedEvent({ byteCount: 320 }));
+          stub.sendInboundFrame(inboundFramePayload()); // real reply, 400 ms later
+        }, 450);
+      },
+    });
+    await emulator.start('CA_HOLD_THEN_ANSWER');
+    await stub.waitForConnection();
+
+    const result = await emulator.sendCallerUtterance(shortPcmSilence(), 0, 'yes');
 
     expect(result.numFrames).toBe(2);
   });
