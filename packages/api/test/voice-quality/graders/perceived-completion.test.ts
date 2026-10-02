@@ -357,6 +357,19 @@ describe('VQ2-010 — gradePerceivedCompletion', () => {
     expect(user2).toContain('Caller: a customer of the business');
   });
 
+  // #1331 (run 36925905917) — lookup-appointments-next: the agent said
+  // "Friday, June 12th at 9 a.m." (right: the corpus world is Friday
+  // 2026-05-01 and June 12, 2026 is a Friday) and this judge called it "the
+  // wrong date" — with no call date it guessed the year. The criterion-12
+  // judge already gets the corpus call date; this one must too.
+  it('#1331 — tells the judge the corpus call date, so spoken dates are judged against that calendar', async () => {
+    const { gateway, provider } = createMockLLMGateway(verdict('good', 0));
+    await gradePerceivedCompletion({ observation: makeObservation(), script: makeScript(), gateway });
+
+    const user = provider.getCalls()[0].messages.find((m) => m.role === 'user')!.content;
+    expect(user).toContain('Call date: Friday, May 1, 2026');
+  });
+
   it('#1331 — returns the per-turn agent lines the judge read, so the report can show them', async () => {
     const { gateway } = createMockLLMGateway(verdict('good', 0));
     const script = makeScript({

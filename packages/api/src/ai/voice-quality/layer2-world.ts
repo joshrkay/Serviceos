@@ -128,6 +128,25 @@ export function corpusCallMoment(script: VoiceQualityScript): Date {
   return new Date(fixtureBusinessHours(script)?.callMomentLocal ?? VOICE_QUALITY_CORPUS_EPOCH);
 }
 
+/**
+ * #1331 — who is calling and on what date, for the LLM judges: a drafted
+ * reply is graded against the right persona, and a spoken date against the
+ * corpus world's calendar (not the judge's guess at "this year").
+ */
+export function describeCorpusCall(script: VoiceQualityScript): string {
+  const caller = script.callerIsOwner
+    ? 'Caller: the business owner, calling their own business line.'
+    : 'Caller: a customer of the business.';
+  const date = new Intl.DateTimeFormat('en-US', {
+    timeZone: corpusTimezone(script),
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(corpusCallMoment(script));
+  return `${caller}\nCall date: ${date}`;
+}
+
 export function buildLayer2ProcessorWorld(
   script: VoiceQualityScript,
   tenantId: string,

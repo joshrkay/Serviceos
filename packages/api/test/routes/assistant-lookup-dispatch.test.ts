@@ -609,7 +609,11 @@ describe('POST /api/assistant/chat — U7 parity: lookup_leads / lookup_catalog'
 
     expect(res.status).toBe(200);
     expect(res.body.taskType).toBe('assistant.lookup.lookup_catalog');
-    expect(res.body.message.content).toBe('Your service catalog is empty right now.');
+    // #1331 — the bare "empty right now" was rated no help by the Layer 2
+    // perceived-completion judge: say where services get added.
+    expect(res.body.message.content).toBe(
+      'Your service catalog is empty right now. You can add services in the app under Settings, then Price book.',
+    );
   });
 });
 

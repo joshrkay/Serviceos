@@ -34,7 +34,7 @@
         "intent": "create_customer",
         "alsoAcceptedIntents": ["lookup_account_summary"],
         "spokenIncludes": ["in our system already"],
-        "spokenAnswerMatches": "I've got you in our system already. Let me know what you'd like help with today.",
+        "spokenAnswerMatches": "I've got you in our system already, so there's nothing to sign up for. I can book a visit, check your balance, or look up an appointment — what would you like?",
         "escalates": false
       },
       "hangupAfter": false

@@ -1,4 +1,5 @@
 import { ElevenLabsStreamConnection } from './elevenlabs-stream';
+import { speakableText } from './speakable-text';
 import { classifyElevenLabsError, TtsProviderRejectedError } from './tts-errors';
 
 /**
@@ -113,7 +114,7 @@ export class OpenAiTtsProvider implements TtsProvider {
       },
       body: JSON.stringify({
         model: this.model,
-        input: input.text,
+        input: speakableText(input.text, input.language),
         voice: input.voice ?? defaultVoice,
         response_format: 'mp3',
       }),
@@ -167,7 +168,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
           Accept: 'audio/mpeg',
         },
         body: JSON.stringify({
-          text: input.text,
+          text: speakableText(input.text, input.language),
           model_id: modelId,
           voice_settings: { stability: 0.5, similarity_boost: 0.75 },
         }),
@@ -233,7 +234,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       voiceId: this.voiceId,
       modelId,
     });
-    return conn.synthesize(input);
+    return conn.synthesize({ ...input, text: speakableText(input.text, input.language) });
   }
 }
 
