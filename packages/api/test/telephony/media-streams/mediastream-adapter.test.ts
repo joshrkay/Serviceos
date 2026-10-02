@@ -3896,6 +3896,11 @@ describe('U5 absolute per-call duration cap', () => {
         finalizeOnClose,
         realtimeCircuit: circuit,
         connectionRegistry: new InMemoryConnectionRegistry(),
+        // The held synth stands in for an utterance still in flight across
+        // the wrap-up window, not a stalled vendor — keep the #1331
+        // per-attempt TTS bound (pinned in mediastream-turn-latency-1331)
+        // out of these serialization scenarios.
+        ttsAttemptTimeoutMs: 120_000,
         ...(opts.maxCallDurationMs !== undefined ? { maxCallDurationMs: opts.maxCallDurationMs } : {}),
       },
       ws,
