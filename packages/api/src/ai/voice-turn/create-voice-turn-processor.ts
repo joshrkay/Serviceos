@@ -156,6 +156,7 @@ import {
 } from '../agents/customer-calling/transitions';
 import {
   confirmTurnSlotFillEvent,
+  bookingAwaitsTime,
   isAffirmation,
   isNegation,
   SLOT_FILL_INTENTS,
@@ -236,6 +237,7 @@ import { maskPhone } from '../../telephony/twilio-call-control';
 import type { DispatcherPhoneResolver } from '../skills/escalate-to-human';
 import type { JobRepository } from '../../jobs/job';
 import type { AppointmentRepository } from '../../appointments/appointment';
+import type { InvoiceRepository } from '../../invoices/invoice';
 import type { AgreementRepository } from '../../agreements/agreement';
 import type { Customer, CustomerRepository } from '../../customers/customer';
 import type { ConversationRepository } from '../../conversations/conversation-service';
@@ -271,6 +273,7 @@ import {
   requiresExistingEntity,
   resolveDisambiguationFollowUp,
   resolveSchedulingEntities,
+  invoiceCustomerFrom,
   type PendingEntityAmbiguity,
   type SchedulingEntityResolution,
 } from '../agents/customer-calling/entity-resolution';
@@ -770,6 +773,11 @@ export interface VoiceTurnProcessorDeps {
   businessPhoneFallbackResolver?: (tenantId: string) => Promise<string | null>;
   jobRepo?: JobRepository;
   appointmentRepo?: AppointmentRepository;
+  /**
+   * #1576 — with `jobRepo`, a refund's customer is read off its resolved
+   * invoice (invoice → job → customer) instead of the caller's identity row.
+   */
+  invoiceRepo?: Pick<InvoiceRepository, 'findById'>;
   /**
    * #1045 / PRD 3.12 — shared feasibility composer deps. Wired, every hold the
    * live call places is checked for a back-to-back drive that does not fit,
@@ -1498,39 +1506,51 @@ export function createVoiceTurnProcessor(
     tenantId: string,
   ): Promise<SideEffect[]> {
     const ctx = session.machine.currentContext;
-    let confirmation: Awaited<ReturnType<typeof confirmIntent>>;
-    try {
-      confirmation = await confirmIntent({
-        intentSummary: ctx.currentIntent ?? 'that',
-        callerResponse: speechResult,
-        tenantId,
-        gateway: deps.gateway,
-      });
-    } catch (err) {
-      logger.error('speechTurn: confirmIntent failed', {
-        error: err instanceof Error ? err.message : String(err),
-        sessionId: session.id,
-      });
-      // #1331 — the yes/no model is unreachable: a plain yes is still a yes
-      // (the shared deterministic rule in-app already decides with), so the
-      // confirmed request is not thrown away on a provider timeout. Anything
-      // else is treated as a correction so the caller is re-prompted, never
-      // auto-queued.
-      if (isAffirmation(speechResult)) {
+    // #1577 — a booking with no day or time was asked "What date and time
+    // work for you?", not "Is that right?": there is nothing to say yes to
+    // yet, so the answer is never judged as a confirmation. It goes straight
+    // to slot-filling (a time merges and is read back; a bare "yes" re-asks,
+    // bounded by MAX_CONFIRM_DETAIL_RETRIES), and a "no" still corrects.
+    const awaitingTime = bookingAwaitsTime(
+      ctx.currentIntent,
+      ctx.extractedEntities as Record<string, unknown> | undefined,
+    );
+    let correction: CallingAgentEvent = { type: 'correction', newTranscript: speechResult };
+    if (!awaitingTime) {
+      let confirmation: Awaited<ReturnType<typeof confirmIntent>>;
+      try {
+        confirmation = await confirmIntent({
+          intentSummary: ctx.currentIntent ?? 'that',
+          callerResponse: speechResult,
+          tenantId,
+          gateway: deps.gateway,
+        });
+      } catch (err) {
+        logger.error('speechTurn: confirmIntent failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+        // #1331 — the yes/no model is unreachable: a plain yes is still a yes
+        // (the shared deterministic rule in-app already decides with), so the
+        // confirmed request is not thrown away on a provider timeout. Anything
+        // else is treated as a correction so the caller is re-prompted, never
+        // auto-queued.
+        if (isAffirmation(speechResult)) {
+          return session.machine.dispatch({ type: 'confirmed' });
+        }
+        return session.machine.dispatch({ type: 'correction', newTranscript: speechResult });
+      }
+      if (recordCost(session, confirmation.tokenUsage)) {
+        return session.machine.dispatch({ type: 'cost_cap_exceeded' });
+      }
+      if (confirmation.confirmed) {
         return session.machine.dispatch({ type: 'confirmed' });
       }
-      return session.machine.dispatch({ type: 'correction', newTranscript: speechResult });
+      correction = {
+        type: 'correction',
+        newTranscript: confirmation.correction ?? speechResult,
+      };
     }
-    if (recordCost(session, confirmation.tokenUsage)) {
-      return session.machine.dispatch({ type: 'cost_cap_exceeded' });
-    }
-    if (confirmation.confirmed) {
-      return session.machine.dispatch({ type: 'confirmed' });
-    }
-    const correction: CallingAgentEvent = {
-      type: 'correction',
-      newTranscript: confirmation.correction ?? speechResult,
-    };
     const pendingIntent = ctx.currentIntent;
     if (isNegation(speechResult) || !pendingIntent || !SLOT_FILL_INTENTS.has(pendingIntent)) {
       return session.machine.dispatch(correction);
@@ -1922,7 +1942,7 @@ export function createVoiceTurnProcessor(
         entities,
         // SCH-03 — sticky job anchor for "the appointment for that job".
         session.machine.currentContext.jobId,
-        timezone || pinnedRefs || deps.now
+        timezone || pinnedRefs || deps.now || (deps.invoiceRepo && deps.jobRepo)
           ? {
               ...(timezone ? { timezone } : {}),
               ...(pinnedRefs ? { pinnedRefs } : {}),
@@ -1931,6 +1951,10 @@ export function createVoiceTurnProcessor(
               // resolved appointment's current window.
               ...(deps.appointmentRepo
                 ? { appointmentWindow: appointmentWindowFrom(deps.appointmentRepo, tenantId) }
+                : {}),
+              // #1576 — a refund is drafted for its invoice's customer.
+              ...(deps.invoiceRepo && deps.jobRepo
+                ? { invoiceCustomer: invoiceCustomerFrom(deps.invoiceRepo, deps.jobRepo, tenantId) }
                 : {}),
             }
           : undefined,

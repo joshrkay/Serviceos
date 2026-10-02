@@ -529,6 +529,13 @@ export const ANCHORED_ESTIMATE_OPEN_STATUSES = ['draft', 'ready_for_review', 'se
 export const ANCHORED_INVOICE_OPEN_STATUSES = ['open', 'partially_paid'] as const;
 
 /**
+ * #1576 — statuses a customer-anchored REFUND lookup may offer: money has
+ * been received. `open` / `draft` have nothing to give back; `void` /
+ * `canceled` are closed books.
+ */
+export const ANCHORED_INVOICE_REFUNDABLE_STATUSES = ['paid', 'partially_paid'] as const;
+
+/**
  * The one-tap picker hint for an anchored document candidate: two of a
  * customer's own estimates are told apart out loud by their AMOUNT, not by
  * their status. Amounts stay integer cents in the row and are formatted only
@@ -563,8 +570,9 @@ export class PgEntityResolver implements EntityResolver {
     kind: EntityKind;
     jobId?: string;
     customerId?: string;
+    invoiceScope?: 'refundable';
   }): Promise<EntityResolverResult> {
-    const { tenantId, reference, kind, jobId, customerId } = input;
+    const { tenantId, reference, kind, jobId, customerId, invoiceScope } = input;
 
     // Guard: empty/null/whitespace-only references are not resolvable —
     // EXCEPT a customer-ANCHORED lookup, where the anchor IS the scope and an
@@ -595,7 +603,7 @@ export class PgEntityResolver implements EntityResolver {
         // accepted/closed document is still found through the named path
         // (review finding on PR #992).
         return customerId && !looksLikeDocumentNumber(reference)
-          ? this.resolveInvoiceByCustomer(tenantId, reference, customerId)
+          ? this.resolveInvoiceByCustomer(tenantId, reference, customerId, invoiceScope)
           : this.resolveInvoice(tenantId, reference);
       case 'appointment':
         return this.resolveAppointment(tenantId, reference, jobId, customerId);
@@ -1900,12 +1908,26 @@ export class PgEntityResolver implements EntityResolver {
     );
   }
 
-  /** Invoice twin of `resolveEstimateByCustomer` — see that doc comment. */
+  /**
+   * Invoice twin of `resolveEstimateByCustomer` — see that doc comment.
+   *
+   * #1576 — `scope: 'refundable'` offers the customer's invoices with money
+   * already received instead of their open ones (a refund gives back money
+   * that was paid), newest first, told apart by the amount PAID.
+   */
   private async resolveInvoiceByCustomer(
     tenantId: string,
     reference: string,
     customerId: string,
+    scope?: 'refundable',
   ): Promise<EntityResolverResult> {
+    const refundable = scope === 'refundable';
+    const statuses = refundable
+      ? [...ANCHORED_INVOICE_REFUNDABLE_STATUSES]
+      : [...ANCHORED_INVOICE_OPEN_STATUSES];
+    const order = refundable
+      ? 'i.created_at DESC'
+      : 'i.due_date ASC NULLS LAST, i.created_at DESC';
     const rows = await withTenantConnection(this.pool, tenantId, (client) =>
       client
         .query<{
@@ -1913,17 +1935,18 @@ export class PgEntityResolver implements EntityResolver {
           invoice_number: string;
           status: string | null;
           amount_due_cents: number;
+          amount_paid_cents: number;
         }>(
-          `SELECT i.id, i.invoice_number, i.status, i.amount_due_cents
+          `SELECT i.id, i.invoice_number, i.status, i.amount_due_cents, i.amount_paid_cents
              FROM invoices i
              JOIN jobs j
                ON j.id = i.job_id AND j.tenant_id = i.tenant_id
             WHERE i.tenant_id = $1
               AND j.customer_id = $2
               AND i.status = ANY($3::text[])
-            ORDER BY i.due_date ASC NULLS LAST, i.created_at DESC
+            ORDER BY ${order}
             LIMIT ${MAX_INVOICE_CANDIDATES + 1}`,
-          [tenantId, customerId, [...ANCHORED_INVOICE_OPEN_STATUSES]],
+          [tenantId, customerId, statuses],
         )
         .then((r) => r.rows),
     );
@@ -1933,7 +1956,10 @@ export class PgEntityResolver implements EntityResolver {
         id: row.id,
         kind: 'invoice' as EntityKind,
         label: row.invoice_number,
-        hint: anchoredDocumentHint(row.status, row.amount_due_cents),
+        hint: anchoredDocumentHint(
+          row.status,
+          refundable ? row.amount_paid_cents : row.amount_due_cents,
+        ),
         score: 1.0,
       })),
       reference,

@@ -1303,6 +1303,11 @@ describe('InAppVoiceAdapter', () => {
           extractedEntities: {
             customerName: 'Jordan Lee',
             customerPhone: '480-555-0199',
+            // #1577 — the spoken time as the classifier extracts it. The
+            // ISO keys below are not classifier fields and never reach the
+            // entity bag, so without this the booking had no time, and a
+            // booking with no time is now asked for one instead of drafted.
+            dateTimeDescription: 'next Tuesday morning',
             scheduledStart: '2026-09-08T12:00:00.000Z',
             scheduledEnd: '2026-09-08T13:00:00.000Z',
             jobTitle: 'Furnace diagnostic inspection',

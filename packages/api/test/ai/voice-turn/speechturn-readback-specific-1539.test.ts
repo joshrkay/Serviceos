@@ -129,10 +129,12 @@ describe('#1539 — phone readback names what will be drafted', () => {
       );
     });
 
-    it('a booking with no time says so instead of confirming a time it never heard', async () => {
+    // #1577 — was a readback "…with no day or time yet. Is that right?";
+    // a booking with no time now asks for one instead of confirming it.
+    it('a booking with no time asks for one instead of confirming a time it never heard', async () => {
       expectReadback(
         await readbackFor('create_appointment', { customerName: 'Dana Reyes' }),
-        "Just to confirm — you'd like to schedule an appointment for Dana Reyes, with no day or time yet. Is that right?",
+        'What date and time work for you?',
       );
     });
   });
