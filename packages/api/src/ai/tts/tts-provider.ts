@@ -30,6 +30,11 @@ export interface TtsSynthesizeInput {
    * model, OpenAI tts-1 with es voice). Defaults to 'en' downstream.
    */
   language?: 'en' | 'es';
+  /**
+   * #1331 — caller cancellation (the media-streams adapter aborts a stalled
+   * attempt before retrying). Providers combine it with their own timeout.
+   */
+  signal?: AbortSignal;
 }
 
 export interface TtsSynthesizeResult {
@@ -93,6 +98,12 @@ export interface TtsProvider {
 // Upper bound for one blocking synthesize() call across providers.
 const TTS_SYNTH_TIMEOUT_MS = 30_000;
 
+/** The provider's own upper bound, combined with any caller abort (#1331). */
+function synthSignal(callerSignal: AbortSignal | undefined): AbortSignal {
+  const timeout = AbortSignal.timeout(TTS_SYNTH_TIMEOUT_MS);
+  return callerSignal ? AbortSignal.any([timeout, callerSignal]) : timeout;
+}
+
 export class OpenAiTtsProvider implements TtsProvider {
   constructor(
     private readonly apiKey: string,
@@ -120,7 +131,7 @@ export class OpenAiTtsProvider implements TtsProvider {
       }),
       // fetch has no default timeout — a stalled TTS vendor would hang the
       // voice turn indefinitely (the streaming path threads its own signal).
-      signal: AbortSignal.timeout(TTS_SYNTH_TIMEOUT_MS),
+      signal: synthSignal(input.signal),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -174,7 +185,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
         }),
         // Same bound as OpenAiTtsProvider — never hang a voice turn on a
         // stalled vendor.
-        signal: AbortSignal.timeout(TTS_SYNTH_TIMEOUT_MS),
+        signal: synthSignal(input.signal),
       }
     );
     if (!res.ok) {

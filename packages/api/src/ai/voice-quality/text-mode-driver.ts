@@ -1133,16 +1133,9 @@ export class TextModeDriver implements AgentDriver {
       }
     }
 
-    // Unknown caller attempting to book → needs a human to capture the
-    // lead / verify coverage.
-    if (state?.identityState === 'unknown' && isBooking) {
-      state.identityEscalated = true;
-      return {
-        kind: 'escalate',
-        event: { type: 'caller_identification_failed', reason: 'unknown_caller_booking' },
-        reason: 'max_retries_exceeded',
-      };
-    }
+    // An unknown caller attempting to book is NOT escalated: #1540 §2 owner
+    // decision (2026-10-01) — the caller is identified (found or created by
+    // phone) AND their request is kept, as the live speechTurn path does.
 
     // Resolved caller's record was archived mid-call → cannot serve.
     if (state?.resolvedArchived) {
