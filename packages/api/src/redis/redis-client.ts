@@ -31,6 +31,9 @@ const PROVEN_OPTIONS = {
   // error here lets the fail-open-to-local paths engage promptly.
   commandTimeout: 1000,
   lazyConnect: true,
+  // ioredis 6 defaults to the RESP3 wire protocol; the owner decided to keep
+  // the RESP2 behavior this codebase was built and proven against.
+  protocol: 2,
 } as const;
 
 export interface CreateRedisClientOptions {

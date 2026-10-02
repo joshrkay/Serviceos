@@ -230,6 +230,7 @@ import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { processMessage, type QueueMessage } from './queues/queue';
 import { createProvisionTwilioWorker } from './workers/provision-twilio';
+import { runOrphanedNumberSweep } from './workers/orphaned-number-sweep';
 import {
   createA2pRegistrationWorker,
   createPgA2pIntegrationMirror,
@@ -2396,6 +2397,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // CLERK-META-2026-09-27 — Clerk public_metadata tenant_id reconciliation.
     // DISTINCT key per the collision discipline above (590014 taught us).
     clerkMetadataBackfill: 590028,
+    // #1575 — orphaned Twilio number sweeper (retries releasing
+    // provider_data.orphanedNumberSid after a change-number). DISTINCT key.
+    orphanedNumberSweep: 590031,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -2592,6 +2596,37 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         failureMonitorInFlight = false;
       });
     }, FAILURE_MONITOR_INTERVAL_MS));
+
+    // #1575 — orphaned Twilio number sweeper. A change-number whose release
+    // of the previous number failed leaves the tenant paying for two numbers
+    // (provider_data.orphanedNumberSid). Hourly: retry the release under the
+    // tenant's provisioning lock (never the active number), clear the marker
+    // on success, and page through the SAME alertOperator after
+    // ORPHANED_NUMBER_ALERT_AFTER_FAILURES failures. Pool + encryption-key
+    // gated (no tenant Twilio creds without both).
+    const orphanEncKey = process.env.TENANT_ENCRYPTION_KEY;
+    if (pool && orphanEncKey) {
+      const orphanPool = pool;
+      const orphanLogger = createLogger({
+        service: 'orphaned-number-sweep',
+        environment: process.env.NODE_ENV || 'development',
+      });
+      registerInterval(setInterval(() => {
+        void runAsLeader(SWEEP_LOCK.orphanedNumberSweep, async () => {
+          await runOrphanedNumberSweep({
+            pool: orphanPool,
+            listTenantIds: () => listAllTenantIds(orphanPool),
+            encKey: orphanEncKey,
+            alert: alertOperator,
+            logger: orphanLogger,
+          });
+        }).catch((err) => {
+          orphanLogger.error('Orphaned-number sweep failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }, 60 * 60_000));
+    }
   }
 
   if (pool && shouldRunWorkers && voiceUsageCostRepo) {

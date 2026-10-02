@@ -87,30 +87,46 @@ function withTenantProvisioningLock(
   run: (message: QueueMessage<ProvisionTwilioPayload>, logger: Logger) => Promise<void>,
 ): (message: QueueMessage<ProvisionTwilioPayload>, logger: Logger) => Promise<void> {
   return async (message, logger) => {
-    const lockKey = `provision-twilio:${message.payload.tenantId}`;
-    const client = await pool.connect();
-    let locked = false;
-    try {
-      const { rows } = await client.query<{ locked: boolean }>(
-        'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
-        [lockKey],
+    const ran = await tryWithTenantPhoneLock(pool, message.payload.tenantId, () => run(message, logger));
+    if (!ran) {
+      throw new Error(
+        `Twilio provisioning already running for tenant ${message.payload.tenantId} — will retry`,
       );
-      locked = rows[0]?.locked === true;
-      if (!locked) {
-        throw new Error(
-          `Twilio provisioning already running for tenant ${message.payload.tenantId} — will retry`,
-        );
-      }
-      await run(message, logger);
-    } finally {
-      if (locked) {
-        await client
-          .query('SELECT pg_advisory_unlock(hashtext($1))', [lockKey])
-          .catch(() => undefined);
-      }
-      client.release();
     }
   };
+}
+
+/**
+ * Run `fn` under the tenant's provisioning advisory lock (see above).
+ * Resolves false WITHOUT running `fn` when another holder has it. Shared
+ * with the orphaned-number sweeper (#1575) so a sweep can never interleave
+ * with a change-number mid-repoint.
+ */
+export async function tryWithTenantPhoneLock(
+  pool: Pool,
+  tenantId: string,
+  fn: () => Promise<void>,
+): Promise<boolean> {
+  const lockKey = `provision-twilio:${tenantId}`;
+  const client = await pool.connect();
+  let locked = false;
+  try {
+    const { rows } = await client.query<{ locked: boolean }>(
+      'SELECT pg_try_advisory_lock(hashtext($1)) AS locked',
+      [lockKey],
+    );
+    locked = rows[0]?.locked === true;
+    if (!locked) return false;
+    await fn();
+    return true;
+  } finally {
+    if (locked) {
+      await client
+        .query('SELECT pg_advisory_unlock(hashtext($1))', [lockKey])
+        .catch(() => undefined);
+    }
+    client.release();
+  }
 }
 
 export function createProvisionTwilioWorker(deps: {
@@ -625,7 +641,7 @@ export function createProvisionTwilioWorker(deps: {
                 serverUrlSecret: vapiWebhookSecret,
               });
               const { assistantId } = await vapi.createAssistant(assistantConfig);
-              await vapi.linkPhoneNumber({
+              const { phoneNumberId: vapiPhoneNumberId } = await vapi.linkPhoneNumber({
                 assistantId,
                 phoneE164,
                 ...(phoneNumberSid ? { twilioPhoneNumberSid: phoneNumberSid } : {}),
@@ -644,7 +660,9 @@ export function createProvisionTwilioWorker(deps: {
                 `UPDATE tenant_integrations
                    SET provider_data = provider_data || $1::jsonb, updated_at = NOW()
                  WHERE tenant_id = $2 AND provider = 'twilio'`,
-                [JSON.stringify({ vapiAssistantId: assistantId }), tenantId],
+                // #1575 — vapiPhoneNumberId lets a later change-number delete
+                // this Vapi phone-number resource once it is superseded.
+                [JSON.stringify({ vapiAssistantId: assistantId, vapiPhoneNumberId }), tenantId],
               );
               logger.info('Vapi assistant created and linked', { tenantId, assistantId });
             }
