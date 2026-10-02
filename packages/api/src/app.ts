@@ -230,6 +230,15 @@ import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { processMessage, type QueueMessage } from './queues/queue';
 import { createProvisionTwilioWorker } from './workers/provision-twilio';
+import {
+  createA2pRegistrationWorker,
+  createPgA2pIntegrationMirror,
+  createPgTenantMessagingResolver,
+} from './workers/a2p-10dlc-registration';
+import { createTwilioA2pClient } from './integrations/twilio/a2p-10dlc/twilio-a2p-client';
+import { PgA2pRegistrationStore } from './integrations/twilio/a2p-10dlc/pg-store';
+import { createA2pRegistrationService } from './integrations/twilio/a2p-10dlc/service';
+import { createTextingRegistrationRouter } from './routes/texting-registration';
 import { createDeprovisionTenantWorker } from './workers/deprovision-tenant';
 import { createReleaseTwilioNumberWorker } from './workers/release-twilio-number';
 import { createVerifyAiWorker } from './workers/verify-ai';
@@ -2918,6 +2927,30 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       provisionTwilioWorker.type,
       provisionTwilioWorker as import('./queues/queue').WorkerHandler<unknown>
     );
+
+    // #1564 — US A2P 10DLC registration (Rivet as ISV, fees absorbed).
+    // Advances a tenant's TrustHub profile → Brand → campaign and polls TCR
+    // review on delayed re-enqueues. Needs TENANT_ENCRYPTION_KEY (EIN +
+    // subaccount token decryption); without the ISV env (Primary Business
+    // Profile SID + compliance inbox) jobs wait and re-poll, never fail.
+    const a2pEncKey = process.env.TENANT_ENCRYPTION_KEY;
+    if (a2pEncKey) {
+      const a2pPrimaryProfileSid = process.env.TWILIO_A2P_PRIMARY_PROFILE_SID;
+      const a2pNotificationEmail = process.env.TWILIO_A2P_NOTIFICATION_EMAIL;
+      const a2pWorker = createA2pRegistrationWorker({
+        store: new PgA2pRegistrationStore(pool),
+        queue,
+        client: createTwilioA2pClient(),
+        encryptionKey: a2pEncKey,
+        isv:
+          a2pPrimaryProfileSid && a2pNotificationEmail
+            ? { primaryProfileSid: a2pPrimaryProfileSid, notificationEmail: a2pNotificationEmail }
+            : null,
+        resolveTenantMessaging: createPgTenantMessagingResolver(pool, a2pEncKey),
+        onProgress: createPgA2pIntegrationMirror(pool),
+      });
+      workerRegistry.set(a2pWorker.type, a2pWorker as import('./queues/queue').WorkerHandler<unknown>);
+    }
 
     const deprovisionTenantWorker = createDeprovisionTenantWorker({
       pool,
@@ -5793,6 +5826,25 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/settings/brand-voice',
     createBrandVoiceRouter(brandVoiceRepo, settingsRepo, auditRepo),
   );
+  // #1564 — owner-only A2P 10DLC texting registration (Settings → Phone).
+  // Mounted whenever there is a database; answers 503 without
+  // TENANT_ENCRYPTION_KEY because the EIN must be stored encrypted.
+  if (pool) {
+    const a2pKey = process.env.TENANT_ENCRYPTION_KEY;
+    app.use(
+      '/api/settings/texting-registration',
+      createTextingRegistrationRouter({
+        service: a2pKey
+          ? createA2pRegistrationService({
+              store: new PgA2pRegistrationStore(pool),
+              queue,
+              auditRepo,
+              encryptionKey: a2pKey,
+            })
+          : null,
+      }),
+    );
+  }
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo, settingsRepo));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
