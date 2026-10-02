@@ -236,6 +236,7 @@ import { maskPhone } from '../../telephony/twilio-call-control';
 import type { DispatcherPhoneResolver } from '../skills/escalate-to-human';
 import type { JobRepository } from '../../jobs/job';
 import type { AppointmentRepository } from '../../appointments/appointment';
+import type { InvoiceRepository } from '../../invoices/invoice';
 import type { AgreementRepository } from '../../agreements/agreement';
 import type { Customer, CustomerRepository } from '../../customers/customer';
 import type { ConversationRepository } from '../../conversations/conversation-service';
@@ -271,6 +272,7 @@ import {
   requiresExistingEntity,
   resolveDisambiguationFollowUp,
   resolveSchedulingEntities,
+  invoiceCustomerFrom,
   type PendingEntityAmbiguity,
   type SchedulingEntityResolution,
 } from '../agents/customer-calling/entity-resolution';
@@ -770,6 +772,11 @@ export interface VoiceTurnProcessorDeps {
   businessPhoneFallbackResolver?: (tenantId: string) => Promise<string | null>;
   jobRepo?: JobRepository;
   appointmentRepo?: AppointmentRepository;
+  /**
+   * #1576 — with `jobRepo`, a refund's customer is read off its resolved
+   * invoice (invoice → job → customer) instead of the caller's identity row.
+   */
+  invoiceRepo?: Pick<InvoiceRepository, 'findById'>;
   /**
    * #1045 / PRD 3.12 — shared feasibility composer deps. Wired, every hold the
    * live call places is checked for a back-to-back drive that does not fit,
@@ -1922,7 +1929,7 @@ export function createVoiceTurnProcessor(
         entities,
         // SCH-03 — sticky job anchor for "the appointment for that job".
         session.machine.currentContext.jobId,
-        timezone || pinnedRefs || deps.now
+        timezone || pinnedRefs || deps.now || (deps.invoiceRepo && deps.jobRepo)
           ? {
               ...(timezone ? { timezone } : {}),
               ...(pinnedRefs ? { pinnedRefs } : {}),
@@ -1931,6 +1938,10 @@ export function createVoiceTurnProcessor(
               // resolved appointment's current window.
               ...(deps.appointmentRepo
                 ? { appointmentWindow: appointmentWindowFrom(deps.appointmentRepo, tenantId) }
+                : {}),
+              // #1576 — a refund is drafted for its invoice's customer.
+              ...(deps.invoiceRepo && deps.jobRepo
+                ? { invoiceCustomer: invoiceCustomerFrom(deps.invoiceRepo, deps.jobRepo, tenantId) }
                 : {}),
             }
           : undefined,

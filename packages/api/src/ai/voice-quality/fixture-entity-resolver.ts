@@ -36,6 +36,7 @@ import {
 import {
   ANCHORED_ESTIMATE_OPEN_STATUSES,
   ANCHORED_INVOICE_OPEN_STATUSES,
+  ANCHORED_INVOICE_REFUNDABLE_STATUSES,
   CLOCK_TIME_TOLERANCE_MS,
   hasClockTime,
 } from '../resolution/pg-entity-resolver';
@@ -185,6 +186,8 @@ export class FixtureEntityResolver implements EntityResolver {
      * meaningful with this set (and only here); see the interface's note.
      */
     customerId?: string;
+    /** #1576 — mirrors PgEntityResolver: an anchored refund wants paid invoices. */
+    invoiceScope?: 'refundable';
   }): Promise<EntityResolverResult> {
     const w = this.world();
     if (input.tenantId !== w.tenantId) return { kind: 'not_found', reference: input.reference };
@@ -200,7 +203,7 @@ export class FixtureEntityResolver implements EntityResolver {
           ? this.resolveJobForCustomer(w, reference, input.customerId)
           : this.resolveJob(w, reference);
       case 'invoice':
-        return this.resolveInvoice(w, reference, input.customerId);
+        return this.resolveInvoice(w, reference, input.customerId, input.invoiceScope);
       case 'estimate':
         return this.resolveEstimate(w, reference, input.customerId);
       case 'appointment':
@@ -319,8 +322,11 @@ export class FixtureEntityResolver implements EntityResolver {
     w: FixtureResolverWorld,
     reference: string,
     customerId?: string,
+    scope?: 'refundable',
   ): Promise<EntityResolverResult> {
     const invoices = await w.invoiceRepo.findByTenant(w.tenantId);
+    const anchoredStatuses: readonly string[] =
+      scope === 'refundable' ? ANCHORED_INVOICE_REFUNDABLE_STATUSES : ANCHORED_INVOICE_OPEN_STATUSES;
     const docMatch = reference.match(INV_NUMBER_RE);
     if (docMatch) {
       const number = docMatch[0].toUpperCase();
@@ -330,7 +336,8 @@ export class FixtureEntityResolver implements EntityResolver {
         : { kind: 'not_found', reference };
     }
     // Mirrors PgEntityResolver.resolveInvoiceByCustomer: a verified customer
-    // anchor IS the scope (its open invoices), not the spoken name again.
+    // anchor IS the scope (its open invoices — or, for a refund, its paid
+    // ones), not the spoken name again.
     const byCustomer = customerId
       ? await this.docsForCustomerId(w, customerId)
       : await this.docsForCustomerReference(w, reference);
@@ -338,7 +345,7 @@ export class FixtureEntityResolver implements EntityResolver {
     const owned = invoices.filter(
       (i) =>
         byCustomer.jobIds.has(i.jobId) &&
-        (!customerId || (ANCHORED_INVOICE_OPEN_STATUSES as readonly string[]).includes(i.status)),
+        (!customerId || anchoredStatuses.includes(i.status)),
     );
     const candidates = owned.map((i) => ({
       id: i.id,
