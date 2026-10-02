@@ -205,15 +205,19 @@ export function noPiiLeak(
  * to nothing, so it is not an auto-mutation. Matched on the exact audit shape
  * that skill writes (the actor id is the processor's configured system actor,
  * so it is not part of the match) — any other `customer.created` still needs
- * a proposal.
+ * a proposal. The same holds for D-033's sanctioned inbound LEAD capture
+ * (`skills/find-or-create-lead.ts`: `lead.created`, `via:
+ * 'inbound_call_skill'`, `source: 'phone_call'`) — any other `lead.created`
+ * still needs a proposal.
  */
 function isSanctionedCallerCapture(a: Observation['audit'][number]): boolean {
   const metadata = (a.metadata ?? {}) as Record<string, unknown>;
+  if (a.actorRole !== 'system' || metadata.via !== 'inbound_call_skill') return false;
   return (
-    a.eventType === 'customer.created' &&
-    a.actorRole === 'system' &&
-    metadata.via === 'inbound_call_skill' &&
-    metadata.source === 'inbound_call'
+    (a.eventType === 'customer.created' && metadata.source === 'inbound_call') ||
+    // D-033's second capture write: `skills/find-or-create-lead.ts` keeps an
+    // unknown inbound caller as a lead (#1567: the out-of-area new caller).
+    (a.eventType === 'lead.created' && metadata.source === 'phone_call')
   );
 }
 

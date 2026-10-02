@@ -31,11 +31,11 @@
  *       customer-record convention used elsewhere) so per-customer
  *       gating in P-series compliance code can read it directly.
  *
- * `serviceArea.zipCodes` is NOT consulted by the v1 floor grader — it
- * is documentary for the `out-of-coverage-area` script and exists so a
- * follow-up grader (or the LLM judge in criterion 12) can refuse a
- * proposal when the caller-stated ZIP falls outside the configured
- * coverage list.
+ * `serviceArea.zipCodes` is seeded into the tenant's
+ * `service_area_zips` by the Layer 1 driver factory (#1567), so the
+ * `out-of-coverage-area` script exercises the production service-area
+ * gate: the new caller's out-of-area ZIP gets the decline line, a lead,
+ * and no booking (criterion 11: spokenIncludes + noLiveBooking).
  *
  * Floor scope: `[1, 2, 3, 4, 5, 7]` — emphasis on 7 (compliance).
  *   - 6 (no duplicates) and 8 (hangup) are out of scope for this bucket.

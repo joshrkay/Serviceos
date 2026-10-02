@@ -240,6 +240,15 @@ import type { AgreementRepository } from '../../agreements/agreement';
 import type { Customer, CustomerRepository } from '../../customers/customer';
 import type { ConversationRepository } from '../../conversations/conversation-service';
 import { findOrCreateCustomerByPhone } from '../skills/find-or-create-customer';
+import { findOrCreateLeadByPhone } from '../skills/find-or-create-lead';
+import type { LeadRepository } from '../../leads/lead';
+import { checkServiceArea } from '../../scheduling/service-area';
+import {
+  OUT_OF_SERVICE_AREA_COPY,
+  SERVICE_AREA_BOOKING_INTENTS,
+  SERVICE_AREA_ZIP_QUESTION,
+  spokenZip,
+} from './service-area-gate';
 import { logInboundCallOnCustomerTimeline } from '../../telephony/inbound-call-log';
 import type { CatalogItemRepository } from '../../catalog/catalog-item';
 import {
@@ -778,6 +787,11 @@ export interface VoiceTurnProcessorDeps {
   feasibilityDeps?: FeasibilityDependencies;
   agreementRepo?: AgreementRepository;
   customerRepo?: CustomerRepository;
+  /**
+   * #1567 — when wired, a new caller booking outside the tenant's service
+   * area is kept as a LEAD (find-or-create by phone, note appended).
+   */
+  leadRepo?: LeadRepository;
   /** Customer tags for escalation CRM hydration (handoff context pack). */
   tagRepo?: TagRepository;
   /**
@@ -1141,6 +1155,30 @@ export interface VoiceTurnProcessor {
     utterance: string,
     tenantId: string,
     turnState: string,
+  ): Promise<CallerIdentityCheckOutcome | null>;
+  /**
+   * #1567 — the service-area gate for a NEW caller's booking, shared by both
+   * phone transports and the voice-quality driver (service-area-gate.ts).
+   * Returns null when the booking proceeds (not a booking, known caller, no
+   * service area configured, or an in-area ZIP); otherwise the effects that
+   * consume the turn: the ZIP question (request held) or the out-of-area
+   * line (lead kept, nothing booked).
+   */
+  serviceAreaGate(
+    session: VoiceSession,
+    turn: { intentType: string; utterance: string; entities: Record<string, unknown> },
+    tenantId: string,
+  ): Promise<SideEffect[] | null>;
+  /**
+   * #1567 — the caller's answer to the ZIP question. Null when no question
+   * is pending; `respond` when the turn is consumed (out of area, or the
+   * question re-asked once); `proceed` with the held booking request (in
+   * area, or still no ZIP after the re-ask).
+   */
+  handlePendingServiceAreaCheck(
+    session: VoiceSession,
+    utterance: string,
+    tenantId: string,
   ): Promise<CallerIdentityCheckOutcome | null>;
   /**
    * #1540 §3 — the reply for an existing customer asking to "sign up" on
@@ -4580,6 +4618,142 @@ export function createVoiceTurnProcessor(
     });
   }
 
+  /** #1567 — a caller with no prior customer record (identified by this call, or not at all). */
+  function isNewCaller(session: VoiceSession): boolean {
+    if (session.machine.currentContext.ownerSession === true || session.actorUserId) return false;
+    return !session.customerId || session.callerCreatedThisCall === true;
+  }
+
+  async function tenantServiceAreaZips(tenantId: string): Promise<string[] | null> {
+    if (!deps.settingsRepo) return null;
+    const settings = await deps.settingsRepo.findByTenant(tenantId).catch(() => null);
+    return settings?.serviceAreaZips ?? null;
+  }
+
+  /**
+   * #1567 decision 1 — keep the out-of-area caller as a LEAD: the call's lead
+   * when the transport already captured one, else find-or-create by phone
+   * (D-033's sanctioned lead capture; a new lead carries the ZIP and request
+   * in its notes). The ZIP is audited on the lead either way. Best-effort: a
+   * failure is logged and the caller still hears the out-of-area line.
+   */
+  async function keepOutOfAreaLead(
+    session: VoiceSession,
+    tenantId: string,
+    zip: string,
+    request: string,
+  ): Promise<void> {
+    if (!deps.leadRepo) return;
+    const actorId = deps.systemActorId ?? 'system:inbound-call';
+    try {
+      let leadId = session.leadId;
+      if (!leadId) {
+        const callerPhone = deps.callerPhoneResolver?.(session) ?? session.callerPhone ?? '';
+        const result = await findOrCreateLeadByPhone({
+          tenantId,
+          fromPhone: callerPhone,
+          leadRepo: deps.leadRepo,
+          ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+          systemActorId: actorId,
+          notes: `Outside the service area (ZIP ${zip}) — asked to book by phone: "${request}"`,
+        });
+        leadId = result.leadId;
+        session.leadId = leadId;
+      }
+      if (deps.auditRepo) {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId,
+            actorId,
+            actorRole: 'system',
+            eventType: 'voice.out_of_service_area',
+            entityType: 'lead',
+            entityId: leadId,
+            correlationId: session.id,
+            metadata: { zip, sessionId: session.id },
+          }),
+        );
+      }
+    } catch (err) {
+      logger.error('service area: keeping the out-of-area lead failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
+  /** Check a ZIP; out of area → lead kept + the decline line, in area → null. */
+  async function applyServiceAreaZip(
+    session: VoiceSession,
+    tenantId: string,
+    zips: string[],
+    zip: string,
+    request: string,
+  ): Promise<SideEffect[] | null> {
+    if (checkServiceArea(zips, zip).inArea) {
+      session.serviceAreaVerdict = 'in_area';
+      return null;
+    }
+    session.serviceAreaVerdict = 'out_of_area';
+    await keepOutOfAreaLead(session, tenantId, zip, request);
+    return [{ type: 'tts_play', payload: { text: OUT_OF_SERVICE_AREA_COPY } }];
+  }
+
+  async function serviceAreaGate(
+    session: VoiceSession,
+    turn: { intentType: string; utterance: string; entities: Record<string, unknown> },
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    if (!SERVICE_AREA_BOOKING_INTENTS.has(turn.intentType) || !isNewCaller(session)) return null;
+    if (session.serviceAreaVerdict === 'out_of_area') {
+      return [{ type: 'tts_play', payload: { text: OUT_OF_SERVICE_AREA_COPY } }];
+    }
+    if (session.serviceAreaVerdict) return null;
+    const zips = await tenantServiceAreaZips(tenantId);
+    if (!zips || zips.length === 0) return null;
+    const zip =
+      spokenZip(turn.utterance) ??
+      spokenZip(
+        Object.values(turn.entities)
+          .filter((v): v is string => typeof v === 'string')
+          .join(' '),
+      );
+    if (!zip) {
+      session.serviceAreaCheck = { heldUtterance: turn.utterance, reasks: 0 };
+      return [{ type: 'tts_play', payload: { text: SERVICE_AREA_ZIP_QUESTION } }];
+    }
+    return applyServiceAreaZip(session, tenantId, zips, zip, turn.utterance);
+  }
+
+  async function handlePendingServiceAreaCheck(
+    session: VoiceSession,
+    utterance: string,
+    tenantId: string,
+  ): Promise<CallerIdentityCheckOutcome | null> {
+    const pending = session.serviceAreaCheck;
+    if (!pending) return null;
+    const zip = spokenZip(utterance);
+    if (!zip && pending.reasks < 1) {
+      pending.reasks += 1;
+      return {
+        kind: 'respond',
+        effects: [{ type: 'tts_play', payload: { text: SERVICE_AREA_ZIP_QUESTION } }],
+      };
+    }
+    session.serviceAreaCheck = undefined;
+    if (!zip) {
+      // Still no ZIP: there is no evidence the address is out of area, so the
+      // booking goes ahead for the team to review like any other.
+      session.serviceAreaVerdict = 'unknown';
+      return { kind: 'proceed', utterance: pending.heldUtterance };
+    }
+    const zips = (await tenantServiceAreaZips(tenantId)) ?? [];
+    const declined = await applyServiceAreaZip(session, tenantId, zips, zip, pending.heldUtterance);
+    return declined
+      ? { kind: 'respond', effects: declined }
+      : { kind: 'proceed', utterance: pending.heldUtterance };
+  }
+
   async function handleCallerIdentityCheck(
     session: VoiceSession,
     utterance: string,
@@ -5141,6 +5315,26 @@ export function createVoiceTurnProcessor(
     // capture — classified on the caller's surface like any other turn, so
     // every S1 rule still applies — instead of the generic "How can I help
     // you today?" that made them repeat themselves.
+    // #1567 — the caller is answering the service-address ZIP question.
+    const areaCheck = await handlePendingServiceAreaCheck(session, speechResult, tenantId);
+    if (areaCheck?.kind === 'respond') {
+      sideEffectsAll.push(...areaCheck.effects);
+      await executeSideEffects(session, sideEffectsAll, tenantId);
+      appendAgentTts(deps.store, session.id, sideEffectsAll);
+      return sideEffectsAll;
+    }
+    if (areaCheck?.kind === 'proceed') {
+      // In area (or no ZIP after the re-ask) — handle the held booking
+      // request as this turn.
+      return speechTurn({
+        session,
+        speechResult: areaCheck.utterance,
+        callSid: _callSid,
+        tenantId,
+        transcriptAppended: true,
+      });
+    }
+
     let turnState = currentState;
     if (currentState === 'ask_caller') {
       const askCallerFx = await handleAskCaller(session, tenantId);
@@ -5640,6 +5834,29 @@ export function createVoiceTurnProcessor(
         }
       }
 
+      // #1567 — a new caller's booking is checked against the tenant's
+      // service area before anything is drafted.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        const areaFx = await serviceAreaGate(
+          session,
+          {
+            intentType: classifierEvent.intentType,
+            utterance: speechResult,
+            entities: classifierEvent.entities,
+          },
+          tenantId,
+        );
+        if (areaFx) {
+          sideEffectsAll.push(...areaFx);
+          await executeSideEffects(session, sideEffectsAll, tenantId);
+          appendAgentTts(deps.store, session.id, sideEffectsAll);
+          return sideEffectsAll;
+        }
+      }
+
       sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
 
       if (
@@ -5734,6 +5951,8 @@ export function createVoiceTurnProcessor(
     handleVoiceEditIntent,
     handleAskCaller,
     handleCallerIdentityCheck,
+    serviceAreaGate,
+    handlePendingServiceAreaCheck,
     existingCustomerSignupReplyFor,
     maybeHandleLowSttConfidence,
   };

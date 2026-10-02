@@ -576,14 +576,21 @@ export function makeVoiceQualityDriverFactory(
         ),
       };
     }
+    // #1567 — the tenant's service area (tenant_settings.service_area_zips)
+    // from `fixtures.tenant.serviceArea.zipCodes`.
+    const serviceAreaZips = (tenant.serviceArea as { zipCodes?: unknown } | undefined)?.zipCodes;
+    const zipList = Array.isArray(serviceAreaZips)
+      ? serviceAreaZips.filter((z): z is string => typeof z === 'string')
+      : undefined;
     const settingsRow =
-      businessHours || tenantTz || ownerPhone || escalationSettings
+      businessHours || tenantTz || ownerPhone || escalationSettings || zipList
         ? ({
             tenantId: fctx.tenantId,
             timezone: businessHours?.timezone ?? tenantTz ?? 'America/Los_Angeles',
             businessHoursSchedule: businessHours?.schedule ?? [],
             ...(ownerPhone ? { ownerPhone } : {}),
             ...(escalationSettings ? { escalationSettings } : {}),
+            ...(zipList ? { serviceAreaZips: zipList } : {}),
             // #890 — the tenant's greeting language + supported stack
             // (tenant_settings.default_language / supported_languages), so a
             // Spanish tenant's call is classified as Spanish.

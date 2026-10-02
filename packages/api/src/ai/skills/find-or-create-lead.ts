@@ -21,6 +21,8 @@ export interface FindOrCreateLeadInput {
   channelLabel?: string;
   /** Audit metadata `via` tag. Defaults to 'inbound_call_skill'. */
   auditVia?: string;
+  /** Notes for a NEWLY created lead (#1567: why the call ended as a lead). An existing lead is not changed. */
+  notes?: string;
 }
 
 export type FindOrCreateLeadResult =
@@ -52,6 +54,7 @@ export async function findOrCreateLeadByPhone(
     source = 'phone_call',
     channelLabel = 'call',
     auditVia = 'inbound_call_skill',
+    notes,
   } = input;
 
   const normalized = normalizePhone(fromPhone);
@@ -75,6 +78,7 @@ export async function findOrCreateLeadByPhone(
       source,
       channelLabel,
       auditVia,
+      notes,
     });
   } catch (err) {
     if (isUniqueViolation(err) && normalized.length >= 7) {
@@ -96,6 +100,7 @@ async function createNewLead(opts: {
   source: LeadSource;
   channelLabel: string;
   auditVia: string;
+  notes?: string;
 }): Promise<FindOrCreateLeadResult> {
   const now = new Date();
   const lead: Lead = {
@@ -110,7 +115,7 @@ async function createNewLead(opts: {
     sourceDetail: `Inbound ${opts.channelLabel} from ${maskPhone(opts.rawPhone)}`,
     stage: 'new',
     estimatedValueCents: undefined,
-    notes: undefined,
+    notes: opts.notes,
     assignedUserId: undefined,
     convertedCustomerId: undefined,
     lostReason: undefined,
