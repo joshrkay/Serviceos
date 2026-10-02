@@ -547,8 +547,13 @@ export interface SchedulingResolutionOptions {
  * #1576 — intents whose customer IS the owner of the invoice they act on.
  * The money moves on `invoiceId`, but the approval card names `customerId`;
  * on the owner line that used to be the caller-ID row (the owner).
+ * #1580 — apply_credit is the same class: a credit reduces what the invoice's
+ * customer owes, so its card names that customer.
  */
-const INVOICE_OWNER_CUSTOMER_INTENTS: ReadonlySet<string> = new Set(['record_refund']);
+const INVOICE_OWNER_CUSTOMER_INTENTS: ReadonlySet<string> = new Set([
+  'record_refund',
+  'apply_credit',
+]);
 
 /**
  * #1576 — `invoiceCustomer` over the invoice and job repositories:
@@ -1156,7 +1161,7 @@ export async function resolveSchedulingEntities(
     }
   }
 
-  // #1576 — the refund's customer is the invoice's, whatever identity the
+  // #1576 / #1580 — a refund's or credit's customer is the invoice's, whatever identity the
   // call carried. Only a VERIFIED invoice id is followed; a lookup failure
   // leaves resolution's own answer untouched.
   if (INVOICE_OWNER_CUSTOMER_INTENTS.has(intent) && refs.invoiceId && opts?.invoiceCustomer) {
