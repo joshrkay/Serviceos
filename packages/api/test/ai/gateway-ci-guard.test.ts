@@ -462,7 +462,7 @@ describeSdk('§5 I15 scope caveat (STRUCTURAL) — NO provider SDK, not just Ope
       )
       .map((x) => x.at);
     expectSdk(speechSites.sort()).toEqual([
-      'src/ai/tts/tts-provider.ts:109',
+      'src/ai/tts/tts-provider.ts:120',
       // #1331 — the voice-quality Layer 2 harness's Whisper upload (agent
       // audio → transcript for the graders). Moved here from the Layer 2
       // entry test so its WAV wire format is unit-tested; speech-to-text,
