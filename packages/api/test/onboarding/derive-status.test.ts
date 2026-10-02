@@ -268,6 +268,37 @@ describe('deriveOnboardingStatus', () => {
     expect(r.steps[4].status).toBe('current');
   });
 
+  // #1563 — checkout sets up the subaccount + Messaging Service but buys no
+  // number; the phone step must stay 'current' and tell the UI to show the
+  // picker (not a "claiming…" spinner).
+  it('subaccount ready, no number yet: phone stays current and asks for a pick', () => {
+    const r = deriveOnboardingStatus(facts({
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
+      packActivated: true,
+      subscription: { stripeSubscriptionId: 'sub_1', status: 'trialing' },
+      twilioStatus: 't0_requested',
+      twilioLineState: 'awaiting_pick',
+    }));
+    expect(r.steps[4]).toMatchObject({ id: 'phone', status: 'current', metadata: { lineState: 'awaiting_pick' } });
+    expect(r.currentStep).toBe('phone');
+    expect(r.isComplete).toBe(false);
+  });
+
+  it('a pick in flight: phone stays current and names the number being claimed', () => {
+    const r = deriveOnboardingStatus(facts({
+      identity: { businessName: 'A', businessHours: { mon: null }, jobBufferMinutes: 30, hourlyRateCents: 10000, timezone: 'America/Phoenix' },
+      packActivated: true,
+      subscription: { stripeSubscriptionId: 'sub_1', status: 'trialing' },
+      twilioStatus: 't0_requested',
+      twilioLineState: 'claiming',
+      twilioPendingNumber: '+15125550123',
+    }));
+    expect(r.steps[4]).toMatchObject({
+      status: 'current',
+      metadata: { lineState: 'claiming', pendingNumber: '+15125550123' },
+    });
+  });
+
   it('test call skipped (ai_check passed): test_call=skipped, complete=true', () => {
     const r = deriveOnboardingStatus(billingDoneFacts({
       subscription: { stripeSubscriptionId: 'sub_1', status: 'active' },

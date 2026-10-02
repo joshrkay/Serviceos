@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import type { SettingsRepository } from '../settings/settings';
 import type { OnboardingFacts } from './derive-status';
 import { currentTenantContext } from '../middleware/tenant-context';
+import { toPhoneLineView, type TwilioIntegrationRow } from './phone-line';
 import { effectiveBufferMinutes } from '../scheduling/booking-availability';
 
 const VALID_SUBSCRIPTION_STATUSES = new Set(['trialing', 'active', 'past_due', 'canceled', 'incomplete']);
@@ -27,8 +28,8 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
 
   const [settings, integRes, tenantRes, callsRes, tsRes, packsRes] = await Promise.all([
     settingsRepo.findByTenant(tenantId),
-    db.query<{ status: string; phone_e164: string | null }>(
-      `SELECT status, (provider_data->>'phoneE164') AS phone_e164
+    db.query<TwilioIntegrationRow>(
+      `SELECT status, last_error, provider_data
          FROM tenant_integrations WHERE tenant_id=$1 AND provider='twilio' LIMIT 1`,
       [tenantId]
     ),
@@ -78,6 +79,7 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
   const activePackCount = packsRes.rows[0]?.n ?? 0;
   const settingsPacks = settings?.activeVerticalPacks?.length ?? 0;
 
+  const twilioLine = toPhoneLineView(integRes.rows[0]);
   return {
     tenantId,
     tenantExists: !!tenant,
@@ -97,7 +99,9 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
     },
     packActivated: activePackCount > 0 || settingsPacks > 0,
     twilioStatus: integRes.rows[0]?.status ?? null,
-    twilioPhoneNumber: integRes.rows[0]?.phone_e164 ?? null,
+    twilioPhoneNumber: twilioLine.phoneNumber,
+    twilioLineState: integRes.rows[0] ? twilioLine.state : null,
+    twilioPendingNumber: twilioLine.pendingNumber,
     subscription: {
       stripeSubscriptionId: tenant?.stripe_subscription_id ?? null,
       status: normalizeSubscriptionStatus(tenant?.subscription_status),
