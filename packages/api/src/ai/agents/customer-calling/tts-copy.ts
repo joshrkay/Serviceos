@@ -103,6 +103,13 @@ const TEMPLATE_KEYS = new Set(['intent_confirm', 'greeting', 'confirm_intent', '
  */
 export const SPEECH_TURN_FAILURE_REPROMPT_COPY =
   'My apologies — let me try again. What would you like to do?';
+/**
+ * #1331 — spoken when a phone turn is still working (LLM / lookup leg) at the
+ * media-streams hold deadline, so the caller is told the truth instead of
+ * sitting in silence past the 7 s no-hang floor. Not a filler: it is a status
+ * line, spoken once per slow turn; the real reply still follows.
+ */
+export const TURN_HOLD_COPY = "Sorry for the wait — I'm still working on that.";
 export const SPEECH_TURN_FAILURE_ESCALATION_COPY =
   "I'm having trouble completing that. Let me connect you with a team member.";
 
@@ -266,6 +273,8 @@ export const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Permítame asegurarme de entender — ¿qué le gustaría hacer?',
   [SPEECH_TURN_FAILURE_REPROMPT_COPY]:
     'Mis disculpas — intentemos de nuevo. ¿Qué le gustaría hacer?',
+  // #1331 — media-streams hold line for a slow turn.
+  [TURN_HOLD_COPY]: 'Disculpe la espera — sigo trabajando en eso.',
   // A3 — low acoustic STT confidence reprompt.
   [LOW_STT_CONFIDENCE_REPROMPT_COPY]:
     'No alcancé a escuchar bien eso — ¿podría repetirlo, por favor?',

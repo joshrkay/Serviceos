@@ -37,6 +37,20 @@ describe('router', () => {
     expect(guard, 'settings/e1-script sits under the settings:view guard').toBeDefined();
   });
 
+  // #1563 — Settings → Phone (business number + change number), same guard
+  // and code-splitting as its settings siblings.
+  it('includes the settings/phone route, lazy and behind the settings guard', () => {
+    const allRoutes = flattenRoutes(router.routes as RouteObject[]);
+    const route = allRoutes.find(r => r.path === 'settings/phone');
+    expect(route, 'expected a settings/phone route').toBeDefined();
+    expect(typeof (route as { lazy?: unknown }).lazy).toBe('function');
+    const guard = allRoutes.find(r =>
+      (r.handle as { requires?: string } | undefined)?.requires === 'settings:view' &&
+      (r.children ?? []).includes(route!),
+    );
+    expect(guard, 'settings/phone sits under the settings:view guard').toBeDefined();
+  });
+
   // Code-splitting contract: non-critical pages must load via `lazy` (their own
   // chunk), while the hottest entry paths (`/` home index, `/login`) stay eager
   // so first paint doesn't pay an extra round-trip. A regression that re-adds an

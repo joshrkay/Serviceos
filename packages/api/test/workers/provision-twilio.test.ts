@@ -50,6 +50,8 @@ function makePool(
     settingsRow?: Record<string, unknown>;
     /** subscription_status returned for the trial-checkout billing gate. */
     subscriptionStatus?: string | null;
+    /** #1563 — another provisioning job already holds this tenant's lock. */
+    lockHeld?: boolean;
   } = {},
 ) {
   const calls: Call[] = [];
@@ -60,6 +62,10 @@ function makePool(
           ? sql
           : ((sql as { text?: string })?.text ?? String(sql));
       calls.push({ sql: s, params });
+      // #1563 — per-tenant provisioning serialization (advisory lock).
+      if (/pg_try_advisory_lock/i.test(s)) {
+        return { rows: [{ locked: !opts.lockHeld }] };
+      }
       if (opts.failOnStatusFailed && /status = 'failed'/i.test(s)) {
         throw new Error('db write failed');
       }
@@ -244,7 +250,7 @@ describe('provision-twilio worker — number picker', () => {
     // operator-actionable failure instead of retry-looping.
     await expect(
       worker.handle(
-        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test' }),
+        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', autoPick: true }),
         logger,
       ),
     ).resolves.toBeUndefined();
@@ -252,7 +258,7 @@ describe('provision-twilio worker — number picker', () => {
     // The magic number was never merged into provider_data as the tenant line.
     const persisted = calls.find(
       (c) =>
-        /provider_data = provider_data/i.test(c.sql) &&
+        /provider_data = provider_data \|\|/i.test(c.sql) &&
         JSON.stringify(c.params).includes('+15005550006'),
     );
     expect(persisted).toBeUndefined();
@@ -283,14 +289,14 @@ describe('provision-twilio worker — number picker', () => {
 
     await expect(
       worker.handle(
-        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test' }),
+        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', autoPick: true }),
         logger,
       ),
     ).resolves.toBeUndefined();
 
     const persisted = calls.find(
       (c) =>
-        /provider_data = provider_data/i.test(c.sql) &&
+        /provider_data = provider_data \|\|/i.test(c.sql) &&
         JSON.stringify(c.params).includes('+15005550006'),
     );
     expect(persisted).toBeUndefined();
@@ -766,4 +772,107 @@ describe('provision-twilio worker — trial-checkout billing gate', () => {
       ).toBe(false);
     },
   );
+});
+
+// ─── #1563: checkout = subaccount + Messaging Service only; number on pick ───
+
+describe('provision-twilio worker — #1563 number bought only on pick', () => {
+  const restore: Array<[string, string | undefined]> = [];
+  function setEnv(k: string, v: string | undefined): void {
+    restore.push([k, process.env[k]]);
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    while (restore.length) {
+      const [k, v] = restore.pop()!;
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+  function configureTwilio(): void {
+    setEnv('TWILIO_ACCOUNT_SID', 'ACmaster');
+    setEnv('TWILIO_AUTH_TOKEN', 'mastertoken');
+    setEnv('TENANT_ENCRYPTION_KEY', KEY);
+    setEnv('VAPI_API_KEY', undefined);
+  }
+
+  it('the checkout job (no pick) creates the subaccount + Messaging Service but buys NO number, leaving the tenant awaiting a pick', async () => {
+    configureTwilio();
+    const fetchFn = mockFetch(
+      { body: { sid: 'ACsub', auth_token: 'subtoken' } }, // create subaccount
+      { body: { sid: 'MG123' } }, // messaging service
+    );
+    const { pool, calls } = makePool();
+    const worker = createProvisionTwilioWorker({ pool });
+
+    await worker.handle(
+      buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test' }),
+      logger,
+    );
+
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    // No IncomingPhoneNumbers / AvailablePhoneNumbers traffic at all.
+    expect(
+      fetchFn.mock.calls.some((c) => /PhoneNumbers/.test(String(c[0]))),
+    ).toBe(false);
+    // Recorded as awaiting the owner's pick, never marked active.
+    expect(
+      calls.some((c) =>
+        c.params.some((p) => typeof p === 'string' && p.includes('"awaitingPick":true')),
+      ),
+    ).toBe(true);
+    expect(
+      calls.some((c) => JSON.stringify(c.params).includes('full_readiness')),
+    ).toBe(false);
+  });
+
+  it('serializes per tenant: while another provisioning job holds the tenant lock it throws (queue retries) and touches neither Twilio nor the row', async () => {
+    configureTwilio();
+    const fetchFn = mockFetch(...twilioHappyPath());
+    const { pool, calls } = makePool({ lockHeld: true });
+    const worker = createProvisionTwilioWorker({ pool });
+
+    await expect(
+      worker.handle(
+        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550123' }),
+        logger,
+      ),
+    ).rejects.toThrow(/already running/i);
+
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(
+      calls.some((c) => /tenant_integrations/i.test(c.sql) && /INSERT|UPDATE/i.test(c.sql)),
+    ).toBe(false);
+  });
+
+  it('"Pick one for me" (autoPick) searches the business address\'s state area code first and buys that number', async () => {
+    configureTwilio();
+    const fetchFn = mockFetch(
+      { body: { sid: 'ACsub', auth_token: 'subtoken' } }, // create subaccount
+      { body: { sid: 'MG123' } }, // messaging service
+      { body: { incoming_phone_numbers: [] } }, // list owned (none yet)
+      { body: { available_phone_numbers: [{ phone_number: '+12145550111' }] } }, // area-code search
+      { body: { sid: 'PN214', phone_number: '+12145550111' } }, // purchase
+      { body: {} }, // attach
+    );
+    const { pool, calls } = makePool({
+      settingsRow: { business_address: '100 Congress Ave, Austin, TX 78701' },
+    });
+    const worker = createProvisionTwilioWorker({ pool });
+
+    await worker.handle(
+      buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', autoPick: true }),
+      logger,
+    );
+
+    const search = fetchFn.mock.calls.find((c) => String(c[0]).includes('/AvailablePhoneNumbers/'));
+    expect(search).toBeDefined();
+    // Texas → 214 (STATE_AREA_CODE), not an any-US search.
+    expect(String(search![0])).toContain('AreaCode=214');
+    expect(
+      calls.some((c) => JSON.stringify(c.params).includes('+12145550111')),
+    ).toBe(true);
+  });
 });

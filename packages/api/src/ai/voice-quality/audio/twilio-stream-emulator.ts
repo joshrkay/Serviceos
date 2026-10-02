@@ -329,12 +329,21 @@ export class TwilioStreamEmulator {
     // the REAL reply on the bus (`audio_frame_emitted`), a quiet gap is the
     // agent thinking, not the end of its turn — keep waiting, bounded by the
     // same first-audio timeout.
-    const awaitingRealReply = (): boolean =>
-      this.deps.deliverFinalTranscript !== undefined &&
-      !this.deps.bus
-        .events()
-        .some((e) => e.type === 'audio_frame_emitted' && e.ts >= transcriptDeliveredAtMs) &&
-      performance.now() - transcriptReceivedTs < firstAudioTimeoutMs;
+    //
+    // A slow turn may first speak an honest hold line (`repair_template_fired`
+    // trigger 'turn_hold'), which takes the turn's first mark; the adapter
+    // then marks the real reply with a second `audio_frame_emitted`. Until
+    // that second mark, the quiet gap after the hold is still thinking.
+    const awaitingRealReply = (): boolean => {
+      if (this.deps.deliverFinalTranscript === undefined) return false;
+      if (performance.now() - transcriptReceivedTs >= firstAudioTimeoutMs) return false;
+      const turnEvents = this.deps.bus.events().filter((e) => 'ts' in e && e.ts >= transcriptDeliveredAtMs);
+      const held = turnEvents.some(
+        (e) => e.type === 'repair_template_fired' && e.trigger === 'turn_hold',
+      );
+      const marks = turnEvents.filter((e) => e.type === 'audio_frame_emitted').length;
+      return marks < (held ? 2 : 1);
+    };
     const firstReply = firstReplyFrame();
     if (firstReply) {
       let lastFrameTs = this.receivedFrames[this.receivedFrames.length - 1]!.ts;

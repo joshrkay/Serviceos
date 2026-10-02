@@ -54,6 +54,17 @@ describe('SettingsPage', () => {
     expect(screen.getByText('Emergency safety script')).toBeInTheDocument();
   });
 
+  // #1563 — Settings → Phone entry (owner role, per the mocked useMe).
+  it('#1563: lists the Business phone number page with a 44px row', () => {
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    );
+    const row = screen.getByText('Business phone number').closest('button')!;
+    expectTapTarget(row, 'Business phone number row');
+  });
+
   it('shows tenant-scoped intake link when me is loaded', () => {
     render(
       <MemoryRouter>

@@ -1,3 +1,4 @@
+import type { PhoneLineState } from './phone-line';
 import type {
   OnboardingStatusResponse,
   OnboardingStepId,
@@ -32,6 +33,11 @@ export interface OnboardingFacts {
   twilioStatus: string | null;  // full set of tenant_integrations.status values; only 'full_readiness' and 'failed' have special handling
   /** Provisioned phone number in E.164 (from tenant_integrations.provider_data->>'phoneE164'). null until purchase completes. */
   twilioPhoneNumber?: string | null;
+  /** #1563 — the line's read-model state (onboarding/phone-line.ts); lets the
+   * phone step tell "awaiting your pick" from "claiming your pick". */
+  twilioLineState?: PhoneLineState | null;
+  /** #1563 — the number an in-flight pick is claiming (null for auto-pick). */
+  twilioPendingNumber?: string | null;
   subscription: {
     stripeSubscriptionId: string | null;
     status: 'trialing' | 'active' | 'past_due' | 'canceled' | 'incomplete' | null;
@@ -103,7 +109,12 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
   const order: OnboardingStepId[] = ['signup', 'identity', 'pack', 'billing', 'phone', 'ai_check', 'test_call'];
   const firstNotDone = order.find((id) => !done[id]) ?? null;
 
-  const phoneMetadata = f.twilioPhoneNumber ? { phoneNumber: f.twilioPhoneNumber } : undefined;
+  const phoneMetadataFields = {
+    ...(f.twilioPhoneNumber ? { phoneNumber: f.twilioPhoneNumber } : {}),
+    ...(f.twilioLineState ? { lineState: f.twilioLineState } : {}),
+    ...(f.twilioPendingNumber ? { pendingNumber: f.twilioPendingNumber } : {}),
+  };
+  const phoneMetadata = Object.keys(phoneMetadataFields).length > 0 ? phoneMetadataFields : undefined;
 
   const steps = order.map((id): { id: OnboardingStepId; status: OnboardingStepStatus; blockers?: string[]; metadata?: Record<string, unknown> } => {
     if (id === 'phone' && f.twilioStatus === 'failed') {
