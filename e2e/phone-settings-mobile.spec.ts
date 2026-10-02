@@ -28,6 +28,7 @@ const LINE = {
 
 async function mockPhoneApi(page: Page): Promise<{ changed: () => string | null }> {
   let changedTo: string | null = null;
+  await mockTextingRegistration(page);
   await page.route(
     (url) => url.pathname.startsWith('/api/onboarding/phone'),
     async (route) => {
@@ -66,6 +67,29 @@ async function mockPhoneApi(page: Page): Promise<{ changed: () => string | null 
     },
   );
   return { changed: () => changedTo };
+}
+
+// #1564 — the texting-registration panel mounted on this page. Answered by
+// page.route so the run never submits a real registration.
+async function mockTextingRegistration(page: Page): Promise<void> {
+  await page.route(
+    (url) => url.pathname === '/api/settings/texting-registration',
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: 'not_started',
+          readiness: 'partial_readiness',
+          details: null,
+          failureReasons: [],
+          submittedAt: null,
+          approvedAt: null,
+          updatedAt: null,
+        }),
+      });
+    },
+  );
 }
 
 async function openPage(page: Page): Promise<void> {
@@ -130,6 +154,20 @@ test.describe('Settings → Phone — mobile layout', () => {
       await page.getByRole('button', { name: /Switch to \(737\) 555-0111/ }).click();
       await expect(page.getByText(/Switching to \(737\) 555-0111/)).toBeVisible();
       expect(api.changed()).toBe('+17375550111');
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+    });
+
+    test('#1564 — the texting-registration form fits 320px with ≥44px controls', async ({ page }) => {
+      await mockPhoneApi(page);
+      await openPage(page);
+      await expect(page.getByRole('heading', { name: /texting registration/i })).toBeVisible();
+      for (const label of ['Legal business name', 'EIN (federal tax ID)', 'Business type', 'Street address', 'ZIP code', 'Mobile phone']) {
+        const box = await page.getByLabel(label).boundingBox();
+        expect(box, label).not.toBeNull();
+        expect(Math.round(box!.height), label).toBeGreaterThanOrEqual(44);
+        expect(box!.x + box!.width, label).toBeLessThanOrEqual(320);
+      }
+      await expectGloveTarget(page, /Submit for registration/);
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
     });
   });

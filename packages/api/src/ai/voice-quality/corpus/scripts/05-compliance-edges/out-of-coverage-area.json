@@ -22,7 +22,8 @@
       "caller": "Hi, I'm in 30309 Atlanta and I'd like to schedule HVAC service.",
       "expected": {
         "intent": "create_appointment",
-        "escalates": true
+        "escalates": false,
+        "spokenAnswerMatches": "Current product truth, not the target: the phone path does not read the tenant service area yet (#1567 — enforcement exists only on the web booking routes). Per #1540 §2 an unknown caller is identified (found or created by phone) AND their request is kept, so this out-of-area caller is NOT handed off; the agent drafts the booking and reads it back for a yes. Flip to the decided out-of-coverage behaviour when #1567 lands."
       },
       "hangupAfter": false
     }

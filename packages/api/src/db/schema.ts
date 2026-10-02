@@ -7366,6 +7366,48 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_idempotency_keys ON idempotency_keys
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // #1564 — per-tenant US A2P 10DLC registration (Rivet as ISV). One row per
+  // tenant: the business details collected from the owner (EIN encrypted with
+  // TENANT_ENCRYPTION_KEY — only the last four digits are kept in clear for
+  // display), the Twilio TrustHub / Brand / campaign SIDs the worker has
+  // created so far, and the status it last observed.
+  '303_a2p_registrations': `
+    CREATE TABLE IF NOT EXISTS a2p_registrations (
+      tenant_id UUID PRIMARY KEY REFERENCES tenants(id),
+      legal_business_name TEXT NOT NULL,
+      ein_enc TEXT NOT NULL,
+      ein_last4 TEXT NOT NULL,
+      business_type TEXT NOT NULL,
+      business_industry TEXT NOT NULL,
+      website_url TEXT,
+      street TEXT NOT NULL,
+      street2 TEXT,
+      city TEXT NOT NULL,
+      region TEXT NOT NULL,
+      postal_code TEXT NOT NULL,
+      contact_first_name TEXT NOT NULL,
+      contact_last_name TEXT NOT NULL,
+      contact_email TEXT NOT NULL,
+      contact_phone TEXT NOT NULL,
+      contact_title TEXT NOT NULL,
+      contact_job_position TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'submitted'
+        CHECK (status IN ('submitted', 'brand_pending', 'campaign_pending', 'approved', 'failed')),
+      twilio_refs JSONB NOT NULL DEFAULT '{}'::jsonb,
+      failure_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+      submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      approved_at TIMESTAMPTZ,
+      last_checked_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE a2p_registrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE a2p_registrations FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_a2p_registrations ON a2p_registrations;
+    CREATE POLICY tenant_isolation_a2p_registrations ON a2p_registrations
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
