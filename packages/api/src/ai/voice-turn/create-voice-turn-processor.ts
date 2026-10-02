@@ -156,6 +156,7 @@ import {
 } from '../agents/customer-calling/transitions';
 import {
   confirmTurnSlotFillEvent,
+  bookingAwaitsTime,
   isAffirmation,
   isNegation,
   SLOT_FILL_INTENTS,
@@ -1505,39 +1506,51 @@ export function createVoiceTurnProcessor(
     tenantId: string,
   ): Promise<SideEffect[]> {
     const ctx = session.machine.currentContext;
-    let confirmation: Awaited<ReturnType<typeof confirmIntent>>;
-    try {
-      confirmation = await confirmIntent({
-        intentSummary: ctx.currentIntent ?? 'that',
-        callerResponse: speechResult,
-        tenantId,
-        gateway: deps.gateway,
-      });
-    } catch (err) {
-      logger.error('speechTurn: confirmIntent failed', {
-        error: err instanceof Error ? err.message : String(err),
-        sessionId: session.id,
-      });
-      // #1331 — the yes/no model is unreachable: a plain yes is still a yes
-      // (the shared deterministic rule in-app already decides with), so the
-      // confirmed request is not thrown away on a provider timeout. Anything
-      // else is treated as a correction so the caller is re-prompted, never
-      // auto-queued.
-      if (isAffirmation(speechResult)) {
+    // #1577 — a booking with no day or time was asked "What date and time
+    // work for you?", not "Is that right?": there is nothing to say yes to
+    // yet, so the answer is never judged as a confirmation. It goes straight
+    // to slot-filling (a time merges and is read back; a bare "yes" re-asks,
+    // bounded by MAX_CONFIRM_DETAIL_RETRIES), and a "no" still corrects.
+    const awaitingTime = bookingAwaitsTime(
+      ctx.currentIntent,
+      ctx.extractedEntities as Record<string, unknown> | undefined,
+    );
+    let correction: CallingAgentEvent = { type: 'correction', newTranscript: speechResult };
+    if (!awaitingTime) {
+      let confirmation: Awaited<ReturnType<typeof confirmIntent>>;
+      try {
+        confirmation = await confirmIntent({
+          intentSummary: ctx.currentIntent ?? 'that',
+          callerResponse: speechResult,
+          tenantId,
+          gateway: deps.gateway,
+        });
+      } catch (err) {
+        logger.error('speechTurn: confirmIntent failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+        // #1331 — the yes/no model is unreachable: a plain yes is still a yes
+        // (the shared deterministic rule in-app already decides with), so the
+        // confirmed request is not thrown away on a provider timeout. Anything
+        // else is treated as a correction so the caller is re-prompted, never
+        // auto-queued.
+        if (isAffirmation(speechResult)) {
+          return session.machine.dispatch({ type: 'confirmed' });
+        }
+        return session.machine.dispatch({ type: 'correction', newTranscript: speechResult });
+      }
+      if (recordCost(session, confirmation.tokenUsage)) {
+        return session.machine.dispatch({ type: 'cost_cap_exceeded' });
+      }
+      if (confirmation.confirmed) {
         return session.machine.dispatch({ type: 'confirmed' });
       }
-      return session.machine.dispatch({ type: 'correction', newTranscript: speechResult });
+      correction = {
+        type: 'correction',
+        newTranscript: confirmation.correction ?? speechResult,
+      };
     }
-    if (recordCost(session, confirmation.tokenUsage)) {
-      return session.machine.dispatch({ type: 'cost_cap_exceeded' });
-    }
-    if (confirmation.confirmed) {
-      return session.machine.dispatch({ type: 'confirmed' });
-    }
-    const correction: CallingAgentEvent = {
-      type: 'correction',
-      newTranscript: confirmation.correction ?? speechResult,
-    };
     const pendingIntent = ctx.currentIntent;
     if (isNegation(speechResult) || !pendingIntent || !SLOT_FILL_INTENTS.has(pendingIntent)) {
       return session.machine.dispatch(correction);

@@ -18,7 +18,7 @@
       "expected": {
         "intent": "create_appointment",
         "escalates": false,
-        "spokenAnswerMatches": "#1540 §2 owner decision (2026-10-01): an unknown caller is identified (found or created by phone) AND their request is kept — no hand-off to a person and no 'How can I help you today?'. The agent reads the booking request back for a yes (e.g. 'Just to confirm — you'd like to schedule an appointment, with no day or time yet. Is that right?')"
+        "spokenAnswerMatches": "#1540 §2 owner decision (2026-10-01): an unknown caller is identified (found or created by phone) AND their request is kept — no hand-off to a person and no 'How can I help you today?'. #1577: the request has no day or time yet, so the agent asks for one (e.g. 'What date and time work for you?') rather than reading back a booking with no time"
       },
       "hangupAfter": false
     }
