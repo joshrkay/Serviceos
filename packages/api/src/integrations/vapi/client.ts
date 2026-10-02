@@ -19,6 +19,12 @@ export interface VapiClient {
   updateAssistant(assistantId: string, config: Partial<VapiAssistantConfig>): Promise<void>;
   /** Link a provisioned phone number to an assistant so inbound calls route to it. */
   linkPhoneNumber(input: { assistantId: string; phoneE164: string; twilioPhoneNumberSid?: string }): Promise<{ phoneNumberId: string }>;
+  /**
+   * #1575 — delete a phone-number resource (e.g. the previous number after a
+   * change-number). Idempotent: an already-deleted id (404) resolves.
+   * https://docs.vapi.ai/api-reference/phone-numbers/delete
+   */
+  deletePhoneNumber(phoneNumberId: string): Promise<void>;
 }
 
 interface VapiClientOptions {
@@ -52,7 +58,12 @@ export class HttpVapiClient implements VapiClient {
     this.fetchFn = opts.fetchFn ?? fetch;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    opts: { notFoundOk?: boolean } = {},
+  ): Promise<T> {
     const res = await this.fetchFn(`${this.baseUrl}${path}`, {
       method,
       headers: {
@@ -64,6 +75,7 @@ export class HttpVapiClient implements VapiClient {
       // provisioning worker mid assistant create/update.
       signal: AbortSignal.timeout(20_000),
     });
+    if (opts.notFoundOk && res.status === 404) return undefined as T;
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new Error(`Vapi ${method} ${path} failed: ${res.status} ${text}`.trim());
@@ -89,6 +101,15 @@ export class HttpVapiClient implements VapiClient {
       ...(input.twilioPhoneNumberSid ? { twilioPhoneNumberSid: input.twilioPhoneNumberSid } : {}),
     });
     return { phoneNumberId: data.id };
+  }
+
+  async deletePhoneNumber(phoneNumberId: string): Promise<void> {
+    await this.request<unknown>(
+      'DELETE',
+      `/phone-number/${encodeURIComponent(phoneNumberId)}`,
+      undefined,
+      { notFoundOk: true },
+    );
   }
 }
 

@@ -107,7 +107,8 @@ function makeVapiMock(
   const createAssistant = vi.fn((_config: VapiAssistantConfig) => impl());
   const linkPhoneNumber = vi.fn(async () => ({ phoneNumberId: 'pn_test_1' }));
   const updateAssistant = vi.fn(async () => undefined);
-  const client = { createAssistant, linkPhoneNumber, updateAssistant } as unknown as VapiClient;
+  const deletePhoneNumber = vi.fn(async () => undefined);
+  const client = { createAssistant, linkPhoneNumber, updateAssistant, deletePhoneNumber } as unknown as VapiClient;
   return { client, createAssistant, linkPhoneNumber, updateAssistant };
 }
 
