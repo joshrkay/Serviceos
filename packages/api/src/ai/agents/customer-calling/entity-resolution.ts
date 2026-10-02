@@ -19,6 +19,8 @@ import type {
 } from '../../resolution/entity-resolver';
 import type { ExtractedEntities } from '../../orchestration/intent-classifier';
 import type { AppointmentRepository } from '../../../appointments/appointment';
+import type { InvoiceRepository } from '../../../invoices/invoice';
+import type { JobRepository } from '../../../jobs/job';
 import { resolveDateTime } from '../../scheduling/resolve-datetime';
 import { isRuntimeTimezone } from '../../../shared/timezone';
 
@@ -57,6 +59,10 @@ const CUSTOMER_REF_INTENTS = new Set([
   // requiresExistingEntity() already returned true for this intent via
   // ESTIMATE_DOC_INTENTS, so its VOX-02 escalation posture is unchanged.
   'send_estimate_nudge',
+  // #1576 — "refund the Smiths" names the PERSON: their customer resolves
+  // first, then their refundable invoice is looked up within them
+  // (planCustomerAnchoredDocumentLookup, `invoiceScope: 'refundable'`).
+  'record_refund',
   'update_invoice',
   'update_estimate',
   'issue_invoice',
@@ -485,6 +491,8 @@ export interface VoiceEntityLookup {
    * PERSON but no visit). Never set by `planVoiceEntityLookups`.
    */
   customerId?: string;
+  /** #1576 — an anchored refund looks among PAID invoices, not open ones. */
+  invoiceScope?: 'refundable';
 }
 
 export interface ParsedWindow {
@@ -527,6 +535,37 @@ export interface SchedulingResolutionOptions {
   appointmentWindow?: (
     appointmentId: string,
   ) => Promise<{ startUtc: string; endUtc: string } | undefined>;
+  /**
+   * #1576 — the customer a resolved invoice belongs to (invoice → job →
+   * customer). A refund is drafted for THAT customer, never the caller's own
+   * identity row. Absent ⇒ the customer stays whatever resolution found.
+   */
+  invoiceCustomer?: (invoiceId: string) => Promise<string | undefined>;
+}
+
+/**
+ * #1576 — intents whose customer IS the owner of the invoice they act on.
+ * The money moves on `invoiceId`, but the approval card names `customerId`;
+ * on the owner line that used to be the caller-ID row (the owner).
+ */
+const INVOICE_OWNER_CUSTOMER_INTENTS: ReadonlySet<string> = new Set(['record_refund']);
+
+/**
+ * #1576 — `invoiceCustomer` over the invoice and job repositories:
+ * `invoices` carry no customer, so the hop is invoice → job → customer,
+ * tenant-scoped.
+ */
+export function invoiceCustomerFrom(
+  invoiceRepo: Pick<InvoiceRepository, 'findById'>,
+  jobRepo: Pick<JobRepository, 'findById'>,
+  tenantId: string,
+): NonNullable<SchedulingResolutionOptions['invoiceCustomer']> {
+  return async (invoiceId) => {
+    const invoice = await invoiceRepo.findById(tenantId, invoiceId);
+    if (!invoice?.jobId) return undefined;
+    const job = await jobRepo.findById(tenantId, invoice.jobId);
+    return job?.customerId ?? undefined;
+  };
 }
 
 /**
@@ -820,6 +859,11 @@ export function planCustomerAnchoredDocumentLookup(
     reference: trimReference(entities.customerName) ?? '',
     refKey,
     customerId,
+    // #1576 — a refund gives back money already received: the customer's
+    // paid invoices are the candidates, not the ones still owing.
+    ...(kind === 'invoice' && intent === 'record_refund'
+      ? { invoiceScope: 'refundable' as const }
+      : {}),
   };
 }
 
@@ -943,6 +987,7 @@ async function resolvePlannedLookups(
       kind: lookup.kind,
       ...(lookup.jobId ? { jobId: lookup.jobId } : {}),
       ...(customerId ? { customerId } : {}),
+      ...(lookup.invoiceScope ? { invoiceScope: lookup.invoiceScope } : {}),
     });
     // #1492 P2 — a job reference that names no job may name the CUSTOMER
     // ("draft an estimate for the QA Matrix job" with no customerName
@@ -1109,6 +1154,14 @@ export async function resolveSchedulingEntities(
       const docTerminal = await resolvePlannedLookups(resolver, tenantId, [anchoredDoc], refs);
       if (docTerminal) return docTerminal;
     }
+  }
+
+  // #1576 — the refund's customer is the invoice's, whatever identity the
+  // call carried. Only a VERIFIED invoice id is followed; a lookup failure
+  // leaves resolution's own answer untouched.
+  if (INVOICE_OWNER_CUSTOMER_INTENTS.has(intent) && refs.invoiceId && opts?.invoiceCustomer) {
+    const owner = await opts.invoiceCustomer(refs.invoiceId).catch(() => undefined);
+    if (owner) refs.customerId = owner;
   }
 
   if (intent === 'cancel_appointment' && typeof entities.reason !== 'string') {

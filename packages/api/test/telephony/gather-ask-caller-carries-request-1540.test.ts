@@ -66,7 +66,8 @@ describe('#1540 §2 — Gather: the ask_caller turn carries the request forward'
 
     expect(session.customerId).toBeTruthy();
     expect(session.machine.currentState).toBe('intent_confirm');
-    expect(twiml).toContain('Just to confirm');
+    // #1577 — the held booking has no time yet: the agent asks for one.
+    expect(twiml).toContain('What date and time work for you?');
     expect(twiml).not.toContain('How can I help you today?');
   });
 });

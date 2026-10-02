@@ -386,6 +386,8 @@ describe('Voice Quality Layer 2 — corpus', () => {
               customerRepo: factoryCtx.repos.customerRepo,
               appointmentRepo: factoryCtx.repos.appointmentRepo,
               jobRepo: factoryCtx.repos.jobRepo,
+              // #1576 — a refund is drafted for its invoice's customer.
+              invoiceRepo: factoryCtx.repos.invoiceRepo,
               settingsRepo: world.settingsRepo,
               onCallRepo: world.onCallRepo,
               now: world.now,

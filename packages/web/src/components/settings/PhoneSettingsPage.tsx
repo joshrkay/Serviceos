@@ -3,6 +3,7 @@ import { Phone } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
 import { Button } from '../ui';
 import { NumberPicker, formatPhone } from '../phone/NumberPicker';
+import { TextingRegistrationPanel } from './phone/TextingRegistrationPanel';
 
 /**
  * #1563 — Settings → Phone. Shows the business number and its provisioning
@@ -207,6 +208,11 @@ export function PhoneSettingsPage() {
           </Button>
         )
       )}
+
+      {/* #1564 — US A2P 10DLC texting registration (Rivet as ISV, no fee). */}
+      <div className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5">
+        <TextingRegistrationPanel />
+      </div>
     </section>
   );
 }

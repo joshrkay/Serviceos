@@ -67,6 +67,8 @@ export class AliasFirstEntityResolver implements EntityResolver {
     kind: EntityKind;
     jobId?: string;
     customerId?: string;
+    /** #1576 — forwarded untouched, like the anchors above. */
+    invoiceScope?: 'refundable';
   }): Promise<EntityResolverResult> {
     const aliasResult = await this.resolveViaAlias(input);
     if (aliasResult) return aliasResult;

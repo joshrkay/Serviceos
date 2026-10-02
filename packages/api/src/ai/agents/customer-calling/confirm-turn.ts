@@ -348,6 +348,24 @@ const WHEN_ENTITY_KEYS = ['dateTimeDescription', 'newDateTimeDescription', 'sche
 /** Pending requests whose readback speaks a day/time (intent-readback.ts `scheduleEn`). */
 const TIMED_BOOKING_INTENTS: ReadonlySet<string> = new Set(['create_appointment', 'create_booking']);
 
+/**
+ * #1577 — a booking the caller has not given a day or time for yet. Such a
+ * request is not read back for a yes ("…with no day or time yet. Is that
+ * right?"); the agent asks for the date and time first, and the readback
+ * follows once there is one to read.
+ */
+export function bookingAwaitsTime(
+  intent: string | undefined,
+  entities: Record<string, unknown> | undefined,
+): boolean {
+  if (!TIMED_BOOKING_INTENTS.has(intent ?? '')) return false;
+  const has = (key: string): boolean => {
+    const value = entities?.[key];
+    return typeof value === 'string' ? value.trim().length > 0 : value !== undefined && value !== null;
+  };
+  return !WHEN_ENTITY_KEYS.some(has) && !has('scheduledStart');
+}
+
 export interface ConfirmTurnSlotFillInput {
   /** The request being confirmed (`context.currentIntent`). */
   pendingIntent: string | undefined;

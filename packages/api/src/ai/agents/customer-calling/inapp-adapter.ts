@@ -162,6 +162,7 @@ import {
   isNegation,
   isPlainAffirmation,
   SLOT_FILL_INTENTS,
+  bookingAwaitsTime,
 } from './confirm-turn';
 
 // The yes/no matchers moved to confirm-turn.ts (#1538, shared with the phone
@@ -983,7 +984,10 @@ export class InAppVoiceAdapter {
     }
     const readback = renderTtsText(
       'intent_confirm',
-      { template: 'confirm_intent', intent: context.currentIntent },
+      // The pending request's own details (#1539 parity with the phone
+      // processor) — without them a timed booking reads as one still
+      // awaiting its time (#1577).
+      { template: 'confirm_intent', intent: context.currentIntent, entities },
       session.language ?? 'en',
     );
     return { text: `${answer} ${readback}`, capExceeded };
@@ -1677,7 +1681,13 @@ export class InAppVoiceAdapter {
      */
     const confirmSlotFillTurn =
       stateBeforeTurn === 'intent_confirm' &&
-      !isAffirmation(text) &&
+      // #1577 — a booking with no day or time was asked for one, so even a
+      // "yes" is an answer to fill, never a confirmation of a timeless booking.
+      (!isAffirmation(text) ||
+        bookingAwaitsTime(
+          session.machine.currentContext.currentIntent,
+          session.machine.currentContext.extractedEntities as Record<string, unknown> | undefined,
+        )) &&
       !isNegation(text) &&
       SLOT_FILL_INTENTS.has(session.machine.currentContext.currentIntent ?? '');
 
