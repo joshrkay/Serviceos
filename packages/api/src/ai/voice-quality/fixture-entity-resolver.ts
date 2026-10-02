@@ -196,7 +196,9 @@ export class FixtureEntityResolver implements EntityResolver {
       case 'customer':
         return this.resolveCustomer(w, reference);
       case 'job':
-        return this.resolveJob(w, reference);
+        return input.customerId
+          ? this.resolveJobForCustomer(w, reference, input.customerId)
+          : this.resolveJob(w, reference);
       case 'invoice':
         return this.resolveInvoice(w, reference, input.customerId);
       case 'estimate':
@@ -272,6 +274,44 @@ export class FixtureEntityResolver implements EntityResolver {
     // being the only plausible job. Promote the strict best match when it is
     // unique and beats every rival — the same "one clear winner" rule τ_ent
     // encodes, expressed against a coarser score.
+    return foldWithBestMatch(candidates, reference);
+  }
+
+  /**
+   * #1331 — mirrors `PgEntityResolver.resolveJobForCustomer`: with the
+   * customer already resolved, their name words no longer tell their jobs
+   * apart, so they are dropped and what is left (the JOB words) ranks that
+   * customer's jobs. Only the customer named: their one job, or the
+   * which-job question. Job words naming none of their jobs: not_found.
+   */
+  private async resolveJobForCustomer(
+    w: FixtureResolverWorld,
+    reference: string,
+    customerId: string,
+  ): Promise<EntityResolverResult> {
+    const jobs = await jobsOfCustomer(w, customerId);
+    if (jobs.length === 0) return { kind: 'not_found', reference };
+    const customer = await w.customerRepo.findById(w.tenantId, customerId);
+    const nameWords = new Set(
+      tokenize(`${customer?.displayName ?? ''} ${customer?.firstName ?? ''} ${customer?.lastName ?? ''}`),
+    );
+    const jobWords = contentTokens(reference).filter((t) => !nameWords.has(t));
+    if (jobWords.length === 0) {
+      if (jobs.length === 1) {
+        return resolvedResult({ id: jobs[0].id, kind: 'job', label: jobs[0].summary, hint: jobs[0].status, score: 1 });
+      }
+      return {
+        kind: 'ambiguous',
+        candidates: jobs.map((j) => ({ id: j.id, kind: 'job' as const, label: j.summary, hint: j.status, score: 1 })),
+      };
+    }
+    const candidates: EntityCandidate[] = [];
+    for (const job of jobs) {
+      const hay = new Set(tokenize(`${job.summary} ${job.jobNumber}`));
+      const hits = jobWords.filter((t) => hay.has(t)).length;
+      if (hits === 0) continue;
+      candidates.push({ id: job.id, kind: 'job', label: job.summary, hint: job.status, score: hits / jobWords.length });
+    }
     return foldWithBestMatch(candidates, reference);
   }
 

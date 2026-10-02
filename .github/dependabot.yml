@@ -51,6 +51,16 @@ updates:
         update-types: ['version-update:semver-major']
       - dependency-name: 'react-router'
         update-types: ['version-update:semver-major']
+      # zod 4 changes error shapes and several schema APIs, and zod backs every
+      # proposal contract; it is a planned migration (#1561), not a bot bump.
+      - dependency-name: 'zod'
+        update-types: ['version-update:semver-major']
+      # Express 5 changes route syntax, req.params typing and async error
+      # handling; planned migration (#1555).
+      - dependency-name: 'express'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@types/express'
+        update-types: ['version-update:semver-major']
 
   # packages/mobile is not a root workspace and carries its own lockfile, so
   # the root entry above does not cover it.
@@ -71,6 +81,21 @@ updates:
       - dependency-name: 'expo'
         update-types: ['version-update:semver-major']
       - dependency-name: 'react-native'
+        update-types: ['version-update:semver-major']
+      # Expo SDK 52 pins react 18.3.x and @types/react to match (react-dom
+      # 18.3.1 peer conflict on a bare react bump caused a CI ERESOLVE —
+      # #1449). react, @types/react and react-dom move together with the
+      # Expo SDK upgrade via `npx expo install`, not independently.
+      - dependency-name: 'react'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@types/react'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'react-dom'
+        update-types: ['version-update:semver-major']
+      # Expo SDK 52 pins @react-native-community/netinfo 11.4.x; v12 is
+      # outside the SDK's supported range (#1448). Moves with the Expo SDK
+      # upgrade via `npx expo install`.
+      - dependency-name: '@react-native-community/netinfo'
         update-types: ['version-update:semver-major']
       # The expo-* module set is versioned in lockstep with the SDK train, not
       # independently: expo-file-system 18 -> 57 and expo-notifications 0.29 ->
