@@ -94,12 +94,12 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **60** |
+| Owner-only routes in code | **62** |
 | `cadence: daily` | **2** |
-| `cadence: onboarding` | **6** |
-| `cadence: occasional` | **52** |
+| `cadence: onboarding` | **7** |
+| `cadence: occasional` | **53** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
-| `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **6** |
+| `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **7** |
 
 A PR that raises `ownerRequiredDailyWebActions` has to edit the number in the
 contract test, which is the point: adding an owner-only, non-SMS-reachable
@@ -109,12 +109,12 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 60,
+  "ownerOnlyRoutes": 62,
   "daily": 2,
-  "onboarding": 6,
-  "occasional": 52,
+  "onboarding": 7,
+  "occasional": 53,
   "ownerRequiredDailyWebActions": 1,
-  "ownerRequiredOnboardingWebActions": 6
+  "ownerRequiredOnboardingWebActions": 7
 }
 ```
 
@@ -134,6 +134,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `POST /api/onboarding/billing/checkout-session` | onboarding | Step `billing`: mints the trial subscription checkout. `POST /api/voice/go-live` refuses with `BILLING_REQUIRED` until a subscription is active. | false | none | Reviewed: one-time activation, and the checkout itself is a hosted Stripe redirect that cannot happen over SMS. |
 | `POST /api/billing/connect/onboarding` | onboarding | Stripe Connect onboarding. Until it is done the tenant cannot take card payments, which is half of the time-to-cash metric. | false | none | Reviewed: one-time activation; Stripe's hosted onboarding is a browser flow by construction. |
 | `POST /api/voice/go-live` | onboarding | Flips the tenant's voice agent live. Until it is called the AI answers nothing, so it is the last forced step of activation. | false | none | Reviewed: one-time activation. Deliberately a considered on-screen act — the owner is handing their phone line to an AI. |
+| `PUT /api/settings/texting-registration/` | onboarding | US A2P 10DLC registration (#1564): the owner submits the business's legal name, EIN, address and authorized contact once; Rivet (as ISV) registers the Brand and campaign with the carriers. Until it is approved the tenant's texts are unregistered 10DLC traffic. | false | none | Reviewed: one-time activation. The carriers vet exact legal identity data (legal name must match the EIN record), so this is a deliberate form entry, not a spoken or SMS action; the long carrier review that follows needs no owner action (the worker polls it). |
 | `PUT /api/billing/ai-overage-cap` | occasional | Sets or removes the monthly AI-minute overage cap (default: one plan price) after which calls ring the owner instead of the AI. A spending limit, changed rarely. | false | none | |
 | `DELETE /api/billing/connect` | occasional | Disconnects Stripe payouts — teardown, never part of a working day. | false | none | |
 | `DELETE /api/catalog/items/:id` | occasional | Price-book cleanup; the day's work adds items, it does not delete them. | false | none | |
@@ -146,6 +147,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `PATCH /api/entity-aliases/:id/deactivate` | occasional | Revokes a learned tenant alias — a correction to what the AI inferred, not a step in a normal day. Owner-only per the router's own header ("Owner-only revoke path for learned tenant aliases"). **Gated inside the handler, not by a middleware guard**, so the executed-guard derivation cannot see it; declared in `IN_HANDLER_OWNER_ROUTES` and cross-checked against the mounted app and the source. | false | none | |
 | `GET /api/evaluation/shadow-comparisons` | occasional | Internal AI-evaluation surface; not part of running the business. | false | none | |
 | `GET /api/settings/packs/` | occasional | Configuration read. | false | none | |
+| `GET /api/settings/texting-registration/` | occasional | Reads the texting-registration status and any carrier rejection reasons (#1564). Owner-only because it returns the submitted business identity. No normal day forces it. | false | none | |
 | `PATCH /api/job-forms/templates/:id` | occasional | Job-form template configuration. | false | none | |
 | `PATCH /api/settings/language` | occasional | One-time language preference. | false | none | |
 | `PATCH /api/standing-instructions/:id/deactivate` | occasional | Retires a standing instruction — a change of policy, not a day's work. | false | none | |
