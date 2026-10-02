@@ -316,6 +316,8 @@ export default defineConfig<DevAuthFixtures>({
               'chat-proposal-card-mobile.spec.ts',
               'assistant-header-mobile.spec.ts',
               'e1-script-mobile.spec.ts',
+              // #1563 — Settings → Phone change-number flow at 320px.
+              'phone-settings-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],

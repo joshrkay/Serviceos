@@ -89,7 +89,7 @@ describe('VQ2-016 — Layer 2 pre-deploy CI workflow', () => {
 
   it('VQ2-016 — workflow uploads the layer2-report artifact', () => {
     const src = readWorkflow();
-    expect(src).toMatch(/actions\/upload-artifact@[0-9a-f]{40} # v4/);
+    expect(src).toMatch(/actions\/upload-artifact@[0-9a-f]{40} # v7\.0\.1/);
     expect(src).toMatch(/name:\s*voice-quality-layer2-report/);
     expect(src).toMatch(/voice-quality-layer2-report\.json/);
   });
