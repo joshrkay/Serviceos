@@ -31,7 +31,7 @@ import type {
   StreamingSession,
   StreamingTranscriptionProvider,
 } from '../../voice/transcription-providers';
-import type { TtsProvider } from '../../ai/tts/tts-provider';
+import type { TtsProvider, TtsSynthesizeInput, TtsSynthesizeResult } from '../../ai/tts/tts-provider';
 import type { VoiceSession, VoiceSessionStore } from '../../ai/agents/customer-calling/voice-session-store';
 import { extractPriorTurns } from '../../ai/agents/customer-calling/transcript-turns';
 import type { SideEffect } from '../../ai/agents/customer-calling/types';
@@ -71,6 +71,7 @@ import {
   LANGUAGE_SWITCH_ACK,
   SPEECH_TURN_FAILURE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  TURN_HOLD_COPY,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   MAX_CALL_DURATION_WRAP_UP_COPY,
   type SessionLanguage,
@@ -296,6 +297,18 @@ export interface MediaStreamAdapterDeps {
   };
   /** Override for the 250ms filler threshold (ms). Default 250. */
   fillerDelayMs?: number;
+  /**
+   * #1331 — per-attempt bound on a buffered `synthesize()` call (ms). A
+   * stalled attempt is abandoned at this bound and retried ONCE. Default
+   * {@link DEFAULT_TTS_ATTEMPT_TIMEOUT_MS}.
+   */
+  ttsAttemptTimeoutMs?: number;
+  /**
+   * #1331 — ms after a caller's final transcript at which a turn that is
+   * STILL thinking (speechTurn unresolved) speaks {@link TURN_HOLD_COPY}.
+   * Default {@link DEFAULT_TURN_HOLD_DEADLINE_MS}.
+   */
+  turnHoldDeadlineMs?: number;
   /**
    * Section 7 — escalate_with_context fan-out deps.
    * When present, handleEscalateWithContext stores whisper TwiML so the
@@ -975,6 +988,34 @@ export const MAX_CALL_DURATION_WRAP_UP_LEAD_MS = 30_000;
  * never feels dead. Dep-injectable via `deps.silenceRepromptTimeoutMs`.
  */
 export const DEFAULT_SILENCE_REPROMPT_MS = 8_000;
+
+/**
+ * #1331 — per-attempt bound on a buffered (REST) TTS synth. The provider's
+ * own fetch timeout is 30 s; one stalled request (Layer 2 run 36938493716)
+ * therefore cost the caller the whole reply — filler, then silence, past the
+ * 7 s no-hang floor. A healthy buffered synth of a spoken reply returns in
+ * ~1-2 s, so 3 s abandons only a stall, and the single retry (also 3 s)
+ * keeps the TTS leg of a turn under ~6 s even in the worst case.
+ */
+export const DEFAULT_TTS_ATTEMPT_TIMEOUT_MS = 3_000;
+
+/**
+ * #1331 — hold deadline. A turn's thinking leg (classify + lookup/proposal)
+ * normally answers in ~1-3 s, but one stalled LLM attempt can consume the
+ * whole classify deadline (12 s in production) because the gateway retries
+ * only after an attempt fails. At 4.5 s the caller hears an honest holding
+ * line (synth ~1 s), keeping the first spoken words of every turn inside the
+ * 7 s floor; the real reply follows when the turn resolves.
+ */
+export const DEFAULT_TURN_HOLD_DEADLINE_MS = 4_500;
+const TTS_SYNTH_MAX_ATTEMPTS = 2;
+
+class TtsAttemptTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`TTS synth attempt exceeded ${ms}ms`);
+    this.name = 'TtsAttemptTimeoutError';
+  }
+}
 
 export class TwilioMediaStreamAdapter {
   private readonly state: RuntimeState;
@@ -1763,6 +1804,9 @@ export class TwilioMediaStreamAdapter {
     // U1 — arm filler at STT-final so callers hear audio during the LLM gap,
     // not only during TTS TTFB after speechTurn returns.
     this.armEarlyFiller();
+    // #1331 — a turn still thinking at the hold deadline speaks an honest
+    // holding line rather than leaving the caller in silence.
+    const hold = this.armTurnHold(session);
 
     let sideEffects: SideEffect[] = [];
     try {
@@ -1774,7 +1818,12 @@ export class TwilioMediaStreamAdapter {
           tenantId,
         }),
       );
+      clearTimeout(hold.timer);
+      // The hold line took this turn's first-audio mark; re-arm it so the
+      // real reply's first frame is marked too (the answer has arrived).
+      if (hold.fired()) this.state.awaitingFirstAudioFrame = true;
     } catch (err) {
+      clearTimeout(hold.timer);
       logger.warn('mediastream: speechTurn failed', {
         error: err instanceof Error ? err.message : String(err),
         sessionId: session.id,
@@ -2739,6 +2788,39 @@ export class TwilioMediaStreamAdapter {
     this.state.earlyFillerTimer = timer;
   }
 
+  /**
+   * #1331 — arm the slow-turn hold. Fires only while the turn's speechTurn is
+   * still unresolved (the caller clears it on settle) and no real reply audio
+   * has started; never during the greeting/disclosure turn.
+   */
+  private armTurnHold(session: VoiceSession): { timer: NodeJS.Timeout; fired: () => boolean } {
+    const delayMs = this.deps.turnHoldDeadlineMs ?? DEFAULT_TURN_HOLD_DEADLINE_MS;
+    let fired = false;
+    const timer = setTimeout(() => {
+      if (
+        this.state.closed ||
+        !this.state.awaitingFirstAudioFrame ||
+        this.state.awaitingDisclosureTurn
+      ) {
+        return;
+      }
+      logger.warn('mediastream: turn still thinking at hold deadline, speaking hold line', {
+        holdDeadlineMs: delayMs,
+        callSid: this.state.callSid,
+      });
+      fired = true;
+      session.events.emit(
+        VOICE_EVENT_CHANNEL,
+        repairTemplateFiredEvent({ trigger: 'turn_hold', text: TURN_HOLD_COPY }),
+      );
+      // The thinking-gap filler (if any) yields to the status line.
+      this.cancelEarlyFiller();
+      void this.speakRecoveryLine(session, TURN_HOLD_COPY).catch(() => undefined);
+    }, delayMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    return { timer, fired: () => fired };
+  }
+
   /** Clear the early-filler timer without touching an already-streaming clip. */
   private clearEarlyFillerTimerOnly(): void {
     if (this.state.earlyFillerTimer) {
@@ -2936,7 +3018,7 @@ export class TwilioMediaStreamAdapter {
           }
         }
       } else {
-        const result = await ttsProvider.synthesize({
+        const result = await this.synthesizeBounded(ttsProvider, {
           text,
           tenantId: this.state.tenantId ?? undefined,
           language: lang,
@@ -3000,6 +3082,50 @@ export class TwilioMediaStreamAdapter {
    * All writes are re-guarded on turn ownership because `synthesize()` can
    * take time and the caller may barge in during the fallback.
    */
+  /**
+   * #1331 — buffered `synthesize()` with a per-attempt deadline and ONE fast
+   * retry. Each attempt gets its own AbortSignal (providers that honor it
+   * cancel the stalled request); the race against the timer bounds the wait
+   * even for a provider that ignores the signal. A non-timeout error is not
+   * retried here — it is a provider rejection, not a stall.
+   */
+  private async synthesizeBounded(
+    ttsProvider: TtsProvider,
+    input: TtsSynthesizeInput,
+  ): Promise<TtsSynthesizeResult> {
+    const attemptMs = this.deps.ttsAttemptTimeoutMs ?? DEFAULT_TTS_ATTEMPT_TIMEOUT_MS;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= TTS_SYNTH_MAX_ATTEMPTS; attempt++) {
+      if (this.state.closed) break;
+      const controller = new AbortController();
+      let timer: NodeJS.Timeout | undefined;
+      const timedOut = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const err = new TtsAttemptTimeoutError(attemptMs);
+          controller.abort(err);
+          reject(err);
+        }, attemptMs);
+      });
+      const synth = ttsProvider.synthesize({ ...input, signal: controller.signal });
+      try {
+        return await Promise.race([synth, timedOut]);
+      } catch (err) {
+        lastErr = err;
+        // The abandoned attempt may still settle later — never unhandled.
+        synth.catch(() => undefined);
+        if (!(err instanceof TtsAttemptTimeoutError)) throw err;
+        logger.warn('mediastream: buffered TTS attempt stalled', {
+          attempt,
+          attemptTimeoutMs: attemptMs,
+          callSid: this.state.callSid,
+        });
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    throw lastErr ?? new Error('TTS synth abandoned: call closed');
+  }
+
   private async recoverTurnAfterStreamFailure(
     ttsProvider: TtsProvider,
     text: string,
@@ -3008,7 +3134,7 @@ export class TwilioMediaStreamAdapter {
   ): Promise<void> {
     let result: Awaited<ReturnType<TtsProvider['synthesize']>> | null = null;
     try {
-      result = await ttsProvider.synthesize({
+      result = await this.synthesizeBounded(ttsProvider, {
         text,
         tenantId: this.state.tenantId ?? undefined,
         language: lang,

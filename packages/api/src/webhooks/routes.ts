@@ -2507,11 +2507,14 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           // Idempotent: the worker skips if already passed and the COALESCE
           // never clobbers a model already chosen for the tenant.
           //
-          // Trial-checkout is also the trigger for Twilio provisioning: the
-          // number is a real, recurring cost, so it is bought only now that
-          // the tenant has a card on file — never at signup. Idempotent: the
-          // worker skips when the integration is already 'full_readiness',
-          // and the stable per-tenant key collapses duplicate enqueues.
+          // Trial-checkout is also the trigger for Twilio SETUP: now that the
+          // tenant has a card on file the worker creates the subaccount +
+          // Messaging Service (both free). It buys NO number (#1563, D-037):
+          // the number is bought only when the owner picks one (/phone/claim)
+          // or taps "Pick one for me" (/phone/retry), each on its own key so
+          // a pick never collapses into this job. Idempotent: the worker skips
+          // when the integration is already 'full_readiness', and the stable
+          // per-tenant key collapses duplicate enqueues of this setup job.
           if ((sub.status === 'trialing' || sub.status === 'active') && deps.pool && deps.queue) {
             const tenantRes = await deps.pool.query<{ id: string }>(
               `SELECT id FROM tenants WHERE stripe_customer_id = $1 LIMIT 1`,
