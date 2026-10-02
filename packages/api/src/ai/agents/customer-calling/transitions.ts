@@ -919,6 +919,20 @@ function transitionAskCaller(
     };
   }
 
+  // #1582 — a new caller whose record is held until the service-area check
+  // passes: on to intent capture with no customer bound yet.
+  if (event.type === 'caller_held') {
+    const updatedContext: CallingAgentContext = { ...context, retryCount: 0 };
+    return {
+      nextState: 'intent_capture',
+      sideEffects: [
+        auditLog(updatedContext, 'ask_caller', 'intent_capture', 'caller_held'),
+        ttsPlay('How can I help you today?'),
+      ],
+      updatedContext,
+    };
+  }
+
   // unknown_caller again → retry or escalate
   if (event.type === 'unknown_caller') {
     const newRetryCount = context.retryCount + 1;
@@ -986,6 +1000,20 @@ function transitionIntentCapture(
 ): TransitionResult {
   if (event.type === 'caller_identity_rejected') {
     return callerIdentityRejected('intent_capture', context);
+  }
+  // #1582 — the held new caller's record was created (service area passed,
+  // or a non-booking request): bind it before the request is dispatched.
+  if (event.type === 'caller_bound') {
+    const updatedContext: CallingAgentContext = { ...context, customerId: event.customerId };
+    return {
+      nextState: 'intent_capture',
+      sideEffects: [
+        auditLog(updatedContext, 'intent_capture', 'intent_capture', 'caller_bound', {
+          customerId: event.customerId,
+        }),
+      ],
+      updatedContext,
+    };
   }
   if (event.type === 'intent_classified') {
     // emergency_dispatch → fast-path directly to escalating (skip entity_resolution and intent_confirm)
