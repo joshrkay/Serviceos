@@ -196,6 +196,13 @@ export interface VoiceSession {
    */
   callerCreatedThisCall?: boolean;
   /**
+   * #1582 (owner decision 2026-10-02) — this new caller's customer record is
+   * HELD: the tenant has a service area, so the record is created only once
+   * the request is known not to be an out-of-area booking (#1567). An
+   * out-of-area caller is kept as a lead only and this stays unset.
+   */
+  callerCreateHeld?: { callerPhone: string };
+  /**
    * #1331 (owner decision 2026-10-01) — the caller-ID-identified caller said
    * a name that does not confidently match the account, and was asked "is
    * this <name on the account>?". Holds the request they made until they

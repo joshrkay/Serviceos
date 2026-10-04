@@ -165,6 +165,15 @@ export type CallingAgentEvent =
   | { type: 'greeted_ok' }
   | { type: 'caller_known'; customerId: string }
   /**
+   * #1582 — an ask_caller caller with no customer record, on a tenant with a
+   * service area: their record is HELD (not yet created) until the
+   * service-area check passes, so the call moves on to intent capture with no
+   * customer bound. `caller_bound` binds it once created.
+   */
+  | { type: 'caller_held' }
+  /** #1582 — the held caller's record was created mid-call; bind it. */
+  | { type: 'caller_bound'; customerId: string }
+  /**
    * #1331 — the caller answered "no" to the caller-name identity check ("is
    * this <name on the account>?"): the caller-ID account is unbound for the
    * rest of the call and the agent asks who it is speaking with.

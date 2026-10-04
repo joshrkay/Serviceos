@@ -2702,6 +2702,20 @@ export class TwilioGatherAdapter {
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
       }
 
+      // #1582 — a held new caller's non-booking request creates their record
+      // now (shared processor rule, as speechTurn), before any branch below
+      // reads session.customerId; a booking waits for the service-area gate.
+      if (
+        classifierEvent?.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        await this.processor.releaseHeldCallerForRequest(
+          session,
+          classifierEvent.intentType,
+          opts.tenantId,
+        );
+      }
+
       // P11-001 / #866: lookup intents bypass the proposal-draft path. Route
       // through the shared dispatch (phone surface adapter), push the line into the
       // tts_play stream, and DO NOT dispatch `intent_classified` —
