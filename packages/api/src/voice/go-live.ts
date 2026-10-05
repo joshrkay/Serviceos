@@ -25,24 +25,38 @@ export async function enableVoiceAgentLive(
   deps: { pool: Pool; auditRepo: AuditRepository },
   input: { tenantId: string; actorId: string; source: GoLiveSource },
 ): Promise<{ voiceAgentLive: boolean; voiceAgentLiveAt: string | null }> {
-  await deps.pool.query(
+  // Check-and-set on the WHERE clause (same pattern as activation.ts's
+  // once-only guard): the stored value was already idempotent via COALESCE,
+  // but the audit emission below was not — it fired unconditionally even
+  // when the tenant was already live. #1605 makes the auto-go-live path
+  // (maybeAutoGoLiveOnInboundEnd) reachable for the first time, so a manual
+  // "Turn on AI answering" click racing — or simply following — that auto
+  // flip must not emit a second, conflicting `tenant.voice_agent_live` row
+  // for the one real transition.
+  const updateRes = await deps.pool.query<{ voice_agent_live_at: Date }>(
     `UPDATE tenant_settings
-        SET voice_agent_live_at = COALESCE(voice_agent_live_at, NOW()), updated_at = NOW()
-      WHERE tenant_id = $1`,
+        SET voice_agent_live_at = NOW(), updated_at = NOW()
+      WHERE tenant_id = $1 AND voice_agent_live_at IS NULL
+      RETURNING voice_agent_live_at`,
     [input.tenantId],
   );
-  const liveAt = await loadVoiceAgentLiveAt(deps.pool, input.tenantId);
-  await deps.auditRepo.create(
-    createAuditEvent({
-      tenantId: input.tenantId,
-      actorId: input.actorId,
-      actorRole: input.source === 'manual' ? 'owner' : 'system',
-      eventType: 'tenant.voice_agent_live',
-      entityType: 'tenant_settings',
-      entityId: input.tenantId,
-      metadata: { source: input.source },
-    }),
-  );
+  const newlyWentLive = (updateRes.rowCount ?? 0) > 0;
+  const liveAt = newlyWentLive
+    ? updateRes.rows[0]!.voice_agent_live_at
+    : await loadVoiceAgentLiveAt(deps.pool, input.tenantId);
+  if (newlyWentLive) {
+    await deps.auditRepo.create(
+      createAuditEvent({
+        tenantId: input.tenantId,
+        actorId: input.actorId,
+        actorRole: input.source === 'manual' ? 'owner' : 'system',
+        eventType: 'tenant.voice_agent_live',
+        entityType: 'tenant_settings',
+        entityId: input.tenantId,
+        metadata: { source: input.source },
+      }),
+    );
+  }
   return {
     voiceAgentLive: liveAt != null,
     voiceAgentLiveAt: liveAt?.toISOString() ?? null,
