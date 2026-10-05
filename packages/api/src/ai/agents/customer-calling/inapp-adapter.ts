@@ -118,6 +118,8 @@ import type { CatalogItemRepository } from '../../../catalog/catalog-item';
 import {
   detectLanguage,
   renderTtsText,
+  ttsCopy,
+  TTS_COPY,
   LANGUAGE_SWITCH_ACK,
   LANGUAGE_SWITCH_CAP_LINE,
   LANGUAGE_UNSUPPORTED_LINE,
@@ -412,7 +414,7 @@ export interface HandleInputResult {
   trace: TurnTrace;
 }
 
-const DEFAULT_GREETING_INAPP = 'Hi, this is your assistant. How can I help today?';
+const DEFAULT_GREETING_INAPP = TTS_COPY.inapp_default_greeting.en;
 
 /**
  * R2 — how recently the SAME normalized utterance must have arrived for this
@@ -438,7 +440,7 @@ const MAX_CONSECUTIVE_NOISE_REPROMPTS = 3;
  * one (same copy the FSM's own reprompt uses), so a noise turn and a
  * low-confidence turn sound like the same assistant.
  */
-const NOISE_REPROMPT_LINE = "I didn't catch that — what would you like to do?";
+const NOISE_REPROMPT_LINE = TTS_COPY.noise_reprompt.en;
 
 type ClassifierFailureClass =
   | 'parse_failed'
@@ -541,7 +543,7 @@ function classifierFailureAuditEffect(
 
 export function buildInappGreeting(persona?: VoicePersona | null): string {
   if (persona?.greeting) return persona.greeting;
-  if (persona?.agentName) return `Hi, I'm ${persona.agentName}. How can I help today?`;
+  if (persona?.agentName) return ttsCopy('inapp_named_greeting', 'en', { agent: persona.agentName });
   return DEFAULT_GREETING_INAPP;
 }
 
@@ -980,7 +982,7 @@ export class InAppVoiceAdapter {
         looked = lookup.text;
         capExceeded = lookup.capExceeded;
       }
-      answer = detail ?? looked ?? "I don't have that detail on this one yet.";
+      answer = detail ?? looked ?? TTS_COPY.no_detail_yet.en;
     }
     const readback = renderTtsText(
       'intent_confirm',
@@ -1230,7 +1232,7 @@ export class InAppVoiceAdapter {
    * This one WORKS rather than refusing, because the in-app session really
    * does render in the session language: every spoken line goes through
    * `renderTtsText(..., session.language)`, which localizes the FSM's
-   * template keys and its fixed sentences via `SENTENCE_CATALOG_ES`. The
+   * template keys and its fixed sentences via the `TTS_COPY` catalog. The
    * surface already flips to Spanish on its own when the operator's words are
    * Spanish (the sticky `detectLanguage` gate in `_handleInputLocked`), so
    * honoring an EXPLICIT request is not new capability — it is the same
@@ -2114,7 +2116,7 @@ export class InAppVoiceAdapter {
         type: 'proposal_queued',
         proposalId: lastProposalId,
         ...(executabilityAsk
-          ? { utterance: `I've drafted that. ${executabilityAsk}` }
+          ? { utterance: ttsCopy('drafted_with_gaps', 'en', { ask: executabilityAsk }) }
           : incomplete
             ? { utterance: INAPP_INCOMPLETE_DRAFT_COPY }
             : executed

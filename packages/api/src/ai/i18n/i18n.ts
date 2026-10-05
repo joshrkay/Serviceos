@@ -50,13 +50,24 @@ export function makeTranslator<EN extends Record<string, string>>(catalogs: {
   ): string {
     const catalog = byLang[lang] ?? byLang.en;
     const template = catalog[key] ?? byLang.en[key] ?? '';
-    if (!vars) return template;
-    return template.replace(/\{\{(\w+)\}\}/g, (_match, name: string) => {
-      const value = vars[name];
-      if (value === undefined || value === null) return '';
-      return String(value);
-    });
+    return interpolate(template, vars);
   };
+}
+
+/**
+ * The ONE `{{name}}` interpolation for every copy catalog (voice `t()`,
+ * notifications, and the spoken-copy catalog in
+ * `agents/customer-calling/tts-copy.ts` — #1601). Numbers are coerced with
+ * `String()`; a missing / null var renders '' rather than leaking its
+ * placeholder.
+ */
+export function interpolate(template: string, vars?: Record<string, unknown>): string {
+  if (!vars) return template;
+  return template.replace(/\{\{(\w+)\}\}/g, (_match, name: string) => {
+    const value = vars[name];
+    if (value === undefined || value === null) return '';
+    return String(value);
+  });
 }
 
 /** Source-of-truth key set: anything the EN catalog defines. */

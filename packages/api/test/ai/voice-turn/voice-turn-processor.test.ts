@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
+import { TTS_COPY } from '../../../src/ai/agents/customer-calling/tts-copy';
 import {
   createVoiceTurnProcessor,
   type VoiceTurnProcessor,
@@ -886,7 +887,7 @@ describe('createVoiceTurnProcessor — #1204 token cap crossed between turns', (
     extractedEntities: { customerName: 'Acme' },
   });
   const CONFIRM_YES = JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' });
-  const CAP_WRAP_UP = "I'm connecting you with a team member who can assist you further.";
+  const CAP_WRAP_UP = TTS_COPY.escalation_transfer.en;
 
   /** One gateway completion per step, each with its own output-token count. */
   function makeGatewayScript(steps: Array<{ content: string; output: number }>): LLMGateway {
@@ -1161,8 +1162,7 @@ describe('createVoiceTurnProcessor — #1204 token cap crossed between turns', (
       reasoning: 'active scalding-water release, needs someone now',
       extractedEntities: {},
     });
-    const EMERGENCY_HANDOFF_LINE =
-      "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.";
+    const EMERGENCY_HANDOFF_LINE = TTS_COPY.emergency_dispatch_transfer.en;
 
     /** What the caller hears and every row the call left, minus the cap-event count. */
     async function emergencyOutcome(
@@ -2016,8 +2016,7 @@ describe('createVoiceTurnProcessor — create_appointment missing-customer gap (
 // ─── #1272 — closing copy must not claim completion for an unapprovable draft ─
 
 describe('createVoiceTurnProcessor — closing copy for a missingFields-gated draft (#1272)', () => {
-  const GENERIC_CLOSING_LINE =
-    "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?";
+  const GENERIC_CLOSING_LINE = TTS_COPY.generic_proposal_confirmation.en;
 
   it('a caller estimate request with no line items does not promise a confirmation', async () => {
     const gateway = makeGatewayWithSequence([
@@ -2831,8 +2830,7 @@ describe('createVoiceTurnProcessor.speechTurn — B2B account context wiring (2.
 // is announced as drafted, never "taken care of … confirmation shortly".
 
 describe('createVoiceTurnProcessor — owner-line close for a card awaiting approval (#1497)', () => {
-  const GENERIC_CLOSING_LINE =
-    "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?";
+  const GENERIC_CLOSING_LINE = TTS_COPY.generic_proposal_confirmation.en;
 
   async function confirmCreateCustomer(ownerSession: boolean) {
     const gateway = makeGatewayWithSequence([
