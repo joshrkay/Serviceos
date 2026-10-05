@@ -412,8 +412,14 @@ async function seedFixtures(
   // next-job readback speaks (address, access notes, latest note) and what a
   // technician's caller-ID resolves against (a registered mobile).
   if (script.fixtures.users) {
+    // `create` is optional on the repository interface; a bundle whose user
+    // repo cannot seed must fail the script loudly, never run it with an empty
+    // roster (that would read as "no actor" rather than "fixture dropped").
+    if (!repos.userRepo.create) {
+      throw new Error(`seedFixtures: ${script.id} declares fixtures.users but the user repository cannot create rows`);
+    }
     for (const u of script.fixtures.users as Array<Omit<User, 'createdAt' | 'updatedAt'>>) {
-      await repos.userRepo.create?.(u);
+      await repos.userRepo.create(u);
     }
   }
   if (script.fixtures.locations) {

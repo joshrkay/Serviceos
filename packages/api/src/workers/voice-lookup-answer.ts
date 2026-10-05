@@ -99,7 +99,8 @@ import { lookupMaterials } from '../ai/skills/lookup-materials';
 import { lookupCrewSchedule } from '../ai/skills/lookup-crew-schedule';
 import { lookupTimesheets } from '../ai/skills/lookup-timesheets';
 import { lookupMyDay } from '../ai/skills/lookup-my-day';
-import { lookupNextJob, type NextJobData } from '../ai/skills/lookup-next-job';
+import { lookupNextJob, streetLine, type NextJobData } from '../ai/skills/lookup-next-job';
+import type { ScheduleScope } from '../ai/skills/lookup-my-day';
 import { formatHours } from '../ai/skills/spoken-format';
 import { resolveSpokenDay } from '../ai/scheduling/resolve-datetime';
 import type { LocationRepository } from '../locations/location';
@@ -429,8 +430,7 @@ const NO_TECHNICIAN_ERROR = 'could not match you to a technician';
 
 /** The street line of a card address: "88 Mill Lane, Tarrytown, NY 10591". */
 function cardAddress(address: NonNullable<NextJobData['address']>): string {
-  const street = [address.street1, address.street2].filter(Boolean).join(' ');
-  return `${street}, ${address.city}, ${address.state} ${address.postalCode}`;
+  return `${streetLine(address)}, ${address.city}, ${address.state} ${address.postalCode}`;
 }
 
 /**
@@ -449,7 +449,7 @@ async function resolveScheduleScope(
   shared: SharedLookupRepos,
   tenantId: string,
   actorId: string | undefined,
-): Promise<{ wholeTenant: true } | { technicianId: string } | LookupExecution> {
+): Promise<ScheduleScope | LookupExecution> {
   if (await actorHolds(deps, tenantId, actorId, 'dispatch:view')) return { wholeTenant: true };
   if (!shared.userRepo) return { kind: 'unsupported' };
   if (!actorId) return { kind: 'failed', error: NO_TECHNICIAN_ERROR };
@@ -782,7 +782,7 @@ export async function executeLookupAnswer(
         }
         if (!input.jobId) {
           const summary = input.jobReference
-            ? `I couldn't find a job matching "${input.jobReference}".`
+            ? ttsCopy('lookup_job_reference_not_found', 'en', { reference: input.jobReference })
             : 'Say which job you mean — for example, "Did I make money on the Miller job?"';
           return { kind: 'answer', answer: buildAnswer(intent, 'none', summary) };
         }
@@ -853,7 +853,11 @@ export async function executeLookupAnswer(
         if (!input.jobId && input.jobReference) {
           return {
             kind: 'answer',
-            answer: buildAnswer(intent, 'none', `I couldn't find a job matching "${input.jobReference}".`),
+            answer: buildAnswer(
+              intent,
+              'none',
+              ttsCopy('lookup_job_reference_not_found', 'en', { reference: input.jobReference }),
+            ),
           };
         }
         const r = await lookupMaterials(
@@ -1034,6 +1038,10 @@ export async function executeLookupAnswer(
         if (!shared.appointmentRepo || !shared.jobRepo || !shared.customerRepo || !deps.locationRepo) {
           return { kind: 'unsupported' };
         }
+        // WHO is asking comes first: an unresolvable speaker fails the turn
+        // before any reference is judged, the same outcome whatever they named.
+        const scope = await resolveScheduleScope(deps, shared, tenantId, input.actorId);
+        if ('kind' in scope) return scope;
         // A job WAS named but the resolver matched nothing: say so by name —
         // never silently answer with the next job instead (the same posture
         // lookup_materials / lookup_job_profit take above).
@@ -1049,8 +1057,6 @@ export async function executeLookupAnswer(
             ),
           };
         }
-        const scope = await resolveScheduleScope(deps, shared, tenantId, input.actorId);
-        if ('kind' in scope) return scope;
         const r = await lookupNextJob(
           {
             tenantId,

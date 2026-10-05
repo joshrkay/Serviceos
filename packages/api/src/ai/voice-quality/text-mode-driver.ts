@@ -256,7 +256,8 @@ export function vqResolveMemberRoleFor(
   userRepo: Pick<UserRepository, 'findByTenant'>,
 ): (tenantId: string, userId: string) => Promise<string | null> {
   return async (tenantId, userId) => {
-    if (userId.startsWith(VQ_OWNER_ACTOR_PREFIX)) return 'owner';
+    const synthetic = await vqResolveMemberRole(tenantId, userId);
+    if (synthetic) return synthetic;
     const users = await userRepo.findByTenant(tenantId);
     return users.find((u) => u.clerkUserId === userId || u.id === userId)?.role ?? null;
   };

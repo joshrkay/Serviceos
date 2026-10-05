@@ -89,6 +89,32 @@ describe('dispatchAssistantLookup — lookup_next_job (#1604)', () => {
     );
   });
 
+  it("the signed-in OWNER hears the business's next visit, with its technician", async () => {
+    const d = await deps();
+    d.answers.resolveMemberRole = async (_t, userId) => (userId === 'clerk-1604-inapp-owner' ? 'owner' : null);
+
+    const reply = await dispatchAssistantLookup(
+      { tenantId: TENANT, userId: 'clerk-1604-inapp-owner', intent: 'lookup_next_job', extractedEntities: {}, message: 'read me the next job' },
+      d,
+    );
+
+    expect(reply?.outcome).toBe('answered');
+    expect(reply?.message.content).toBe(
+      'The next job is today at 9 AM — Priya Patel, AC tune-up, at 88 Mill Lane, Tarrytown, with Carlos Ruiz.',
+    );
+  });
+
+  it('an es in-app voice session hears the Spanish readback', async () => {
+    const reply = await dispatchAssistantLookup(
+      { tenantId: TENANT, userId: MIKE_CLERK, intent: 'lookup_next_job', extractedEntities: {}, message: 'léeme el próximo trabajo', language: 'es' },
+      await deps(),
+    );
+
+    expect(reply?.message.content).toBe(
+      'Su próximo trabajo es hoy a las 2 p.m. — Dana Keller, Water heater replacement, en 4120 East Oakhurst Boulevard, Yonkers.',
+    );
+  });
+
   it("a technician naming a coworker's job through the resolver is refused by name", async () => {
     const reply = await dispatchAssistantLookup(
       {

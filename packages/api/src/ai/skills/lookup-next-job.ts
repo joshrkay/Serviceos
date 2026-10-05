@@ -34,7 +34,7 @@
 import type { Appointment, AppointmentRepository } from '../../appointments/appointment';
 import type { JobRepository } from '../../jobs/job';
 import type { CustomerRepository } from '../../customers/customer';
-import type { LocationRepository } from '../../locations/location';
+import type { LocationRepository, ServiceLocation } from '../../locations/location';
 import type { NoteRepository } from '../../notes/note';
 import type { UserRepository } from '../../users/user';
 import type { LookupEventService } from '../../lookup-events/lookup-event-service';
@@ -42,7 +42,8 @@ import { resolveDayWindow } from '../../reports/money-dashboard';
 import { localDateString, nextDateString } from '../../digest/digest-service';
 import { maskPhone } from '../../telephony/twilio-call-control';
 import { ttsCopy, type SessionLanguage } from '../agents/customer-calling/tts-copy';
-import { technicianDisplayName } from './spoken-format';
+import { formatTime, spokenLocale, technicianDisplayName } from './spoken-format';
+import type { ScheduleScope } from './lookup-my-day';
 
 export type LookupNextJobInput = {
   tenantId: string;
@@ -57,14 +58,7 @@ export type LookupNextJobInput = {
    * refused — the name alone never widens what they hear.
    */
   jobId?: string;
-} & (
-  | {
-      /** The SPEAKER's own canonical technician id, already resolved by the caller. */
-      technicianId: string;
-      wholeTenant?: never;
-    }
-  | { wholeTenant: true; technicianId?: never }
-);
+} & ScheduleScope;
 
 export interface LookupNextJobDeps {
   appointmentRepo: Pick<AppointmentRepository, 'findByDateRange'>;
@@ -83,7 +77,6 @@ export interface NextJobData {
   jobId: string;
   jobSummary: string;
   scheduledStart: Date;
-  scheduledEnd: Date;
   customerName?: string;
   /** Masked (`maskPhone`) — the full number never leaves the skill. */
   customerPhoneMasked?: string;
@@ -103,25 +96,13 @@ const DEFAULT_TIMEZONE = 'America/New_York';
 /** How far ahead "next" looks, in days from the start of today. */
 const LOOKAHEAD_DAYS = 14;
 
-/** "2 PM" / "9:30 AM" in the tenant zone, in the session language's locale. */
-function clockTime(d: Date, timezone: string, lang: SessionLanguage): string {
-  return new Intl.DateTimeFormat(lang === 'es' ? 'es-US' : 'en-US', {
-    hour: 'numeric',
-    minute: 'numeric',
-    hour12: true,
-    timeZone: timezone,
-  })
-    .format(d)
-    .replace(':00', '');
-}
-
 /** "today at 2 PM" / "tomorrow at 9 AM" / "on Friday, June 12 at 9 AM", localized. */
 function whenPhrase(start: Date, today: string, timezone: string, lang: SessionLanguage): string {
   const day = localDateString(start, timezone);
-  const time = clockTime(start, timezone, lang);
+  const time = formatTime(start, timezone, lang);
   if (day === today) return ttsCopy('next_job_when_today', lang, { time });
   if (day === nextDateString(today)) return ttsCopy('next_job_when_tomorrow', lang, { time });
-  const dayName = new Intl.DateTimeFormat(lang === 'es' ? 'es-US' : 'en-US', {
+  const dayName = new Intl.DateTimeFormat(spokenLocale(lang), {
     weekday: 'long',
     month: 'long',
     day: 'numeric',
@@ -136,10 +117,14 @@ function asSentence(text: string): string {
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
+/** "4120 East Oakhurst Boulevard" — street1 + street2 as one line. Shared with the answer card. */
+export function streetLine(address: Pick<ServiceLocation, 'street1' | 'street2'>): string {
+  return [address.street1, address.street2].filter(Boolean).join(' ');
+}
+
+/** What the truck needs to hear: the street and the town. State + ZIP ride the card only. */
 function spokenAddress(address: NextJobData['address']): string {
-  if (!address) return '';
-  const street = [address.street1, address.street2].filter(Boolean).join(' ');
-  return `${street}, ${address.city}`;
+  return address ? `${streetLine(address)}, ${address.city}` : '';
 }
 
 export async function lookupNextJob(
@@ -261,7 +246,6 @@ async function readNextJob(
     jobId: job.id,
     jobSummary: job.summary,
     scheduledStart: next.scheduledStart,
-    scheduledEnd: next.scheduledEnd,
     ...(customer ? { customerName: customer.displayName } : {}),
     ...(customer?.primaryPhone ? { customerPhoneMasked: maskPhone(customer.primaryPhone) } : {}),
     ...(location

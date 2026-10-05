@@ -146,6 +146,8 @@ export async function answerInAppLookup(
         intent,
         ...(Object.keys(entities).length > 0 ? { extractedEntities: entities } : {}),
         ...(input.transcript ? { message: input.transcript } : {}),
+        // #1604 — the session language, so a catalog-rendered answer speaks it.
+        ...(session.language ? { language: session.language } : {}),
       },
       deps,
     );
