@@ -71,7 +71,7 @@
       "expected": {
         "intent": "create_change_order",
         "proposalType": "create_change_order",
-        "spokenAnswerMatches": "Got it — I've drafted a create change order for review. Anything else I can help you with?",
+        "spokenAnswerMatches": "I've drafted that — it's in your approvals waiting for you to review. Is there anything else I can help you with?",
         "escalates": false
       },
       "hangupAfter": false

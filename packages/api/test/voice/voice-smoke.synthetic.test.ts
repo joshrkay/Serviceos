@@ -7,13 +7,13 @@
  *      the documented upgrade path is exported and stable, and the upgrade
  *      handler is registered.
  *   2. Full intent→proposal — a canned "book Tuesday at 2" transcript is
- *      driven through the REAL voice-turn orchestration (classify → action
- *      router → create_appointment task) via the same `TextModeDriver` the
- *      Layer-1 voice-quality harness uses, and we assert a `create_appointment`
- *      proposal is drafted (never auto-executed). The LLM is a canned
- *      gateway (no API keys); the clock is pinned so the booking date is
- *      deterministic. This replaces the former `.todo()` scaffold — a broken
- *      booking pipeline now reddens the smoke gate.
+ *      driven through the REAL voice-turn processor (classify → readback →
+ *      the caller's yes → handleCreateProposal, #1587) via the same
+ *      `TextModeDriver` the Layer-1 voice-quality harness uses, and we assert
+ *      a `create_appointment` proposal is drafted (never auto-executed). The
+ *      LLM is a canned gateway (no API keys); the clock is pinned so the
+ *      booking date is deterministic. This replaces the former `.todo()`
+ *      scaffold — a broken booking pipeline now reddens the smoke gate.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import http from 'http';
@@ -56,8 +56,10 @@ function absolutePhraseFromIso(iso: string, timezone: string): string {
 
 /**
  * Canned LLM gateway: classifies the smoke transcript as `create_appointment`
- * and returns a fixed appointment extraction whose date phrase resolves to the
- * pinned target instant. No network, no API keys — deterministic.
+ * carrying the spoken time (the classifier's `dateTimeDescription`, which the
+ * processor resolves in the tenant zone), and answers the readback's yes/no
+ * model (`confirmIntent`, same task type) with a yes. No network, no API keys
+ * — deterministic.
  */
 class CannedBookingGateway extends LLMGateway {
   constructor(private readonly dateTimePhrase: string) {
@@ -72,18 +74,16 @@ class CannedBookingGateway extends LLMGateway {
       latencyMs: 1,
       tokenUsage: { input: 10, output: 10, total: 20 },
     });
+    const user = request.messages.find((m) => m.role === 'user')?.content ?? '';
+    if (user.includes("Classify the caller's response as YES or NO")) {
+      return wrap(JSON.stringify({ answer: 'yes', reasoning: 'canned' }));
+    }
     if (request.taskType === 'classify_intent') {
       return wrap(
-        JSON.stringify({ intentType: 'create_appointment', confidence: 0.95, extractedEntities: {} }),
-      );
-    }
-    if (request.taskType === 'create_appointment') {
-      return wrap(
         JSON.stringify({
-          summary: 'Service appointment',
-          confidence_score: 0.95,
-          dateTimePhrase: this.dateTimePhrase,
-          durationMinutes: 120,
+          intentType: 'create_appointment',
+          confidence: 0.95,
+          extractedEntities: { dateTimeDescription: this.dateTimePhrase },
         }),
       );
     }
@@ -215,7 +215,9 @@ describe('voice smoke (synthetic) — §11 H2 Layer A', () => {
       callerId,
       callerIdBlocked: false,
     });
+    // The phone reads a write back and drafts on the caller's yes.
     await driver.speak(sessionId, 'I need to book an appointment Tuesday at 2 PM.');
+    await driver.speak(sessionId, "Yes, that's right.");
     const elapsedMs = Date.now() - startedAt;
     await driver.endSession(sessionId);
     store.dispose();
@@ -229,7 +231,7 @@ describe('voice smoke (synthetic) — §11 H2 Layer A', () => {
       proposals.map((p) => p.proposalType),
     )}`).toBeDefined();
     expect(booking!.status).not.toBe('executed');
-    // Smoke latency budget (§11 H2): the whole canned turn well under 5s.
+    // Smoke latency budget (§11 H2): both canned turns well under 5s.
     expect(elapsedMs).toBeLessThan(5000);
   });
 });

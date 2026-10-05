@@ -74,6 +74,19 @@ const ZERO_LLM_CALL_SCRIPT_IDS = new Set<string>([
   'es-e1-cables-quemandose',
   'es-e1-lesion-caida',
   'es-e2-tuberia-rota',
+  // #1587 — identity turns the production engine resolves before any model
+  // call: a blocked or ambiguous caller-ID is asked for name + address and
+  // then handed off (ask_caller retry/escalate), and a caller claiming to be
+  // an existing customer from another number is handed off at ask_caller.
+  // No turn in these scripts reaches the classifier.
+  'caller-id-blocked',
+  'caller-id-matches-multiple-customers',
+  'caller-id-mismatched-but-claims-existing',
+  // #1587 — "I'd like to schedule service for my home" is classified by the
+  // classifier's deterministic booking rule (intent-classifier.ts) before
+  // any model call; the unknown caller is identified by phone at ask_caller
+  // and asked for a day and time (#1577). No model call on this script.
+  'find-or-create-lead-unknown-caller',
   // #1595 / D-040 — AI answering is the after-hours default: a 10pm gas-leak
   // call on a closed tenant is still answered and the tier classifier closes
   // it on the E1 evacuation script before any classify call.

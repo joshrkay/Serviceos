@@ -1,104 +1,66 @@
 /**
- * VQ-007 — TextModeDriver: drives the voice agent through its real
- * orchestration pipeline (classifier → action-router → skills) without
- * Twilio I/O. Used by the Voice Quality Layer 1 corpus runner: each
- * scripted call constructs a TextModeDriver, calls `speak()` per turn,
- * and inspects the resulting proposals + bus events.
+ * VQ-007 / #1587 — TextModeDriver: drives the voice agent's PRODUCTION turn
+ * processor without Twilio I/O. Used by the Voice Quality Layer 1 corpus
+ * runner: each scripted call constructs a TextModeDriver, calls `speak()` per
+ * turn, and inspects the resulting proposals + bus events.
  *
- * # Why a driver (not a direct adapter call)
- * The Layer 1 architecture is "same orchestration, different transport".
- * We don't want to render TwiML and we don't want a state machine that
- * gates on `<Gather>` callbacks — but we DO want every turn to flow
- * through the same `classifyIntent` and the same handler dispatch the
- * Twilio adapter uses. Otherwise the harness only catches bugs that
- * survive Twilio's `<Gather>` quirks, defeating the point.
+ * # What this driver is
+ * The text twin of a phone transport. A transport owns the leg (TwiML / media
+ * frames), establishes the session, appends the caller's words, runs the
+ * deterministic life-safety scan, and hands every utterance to ONE place:
+ * `createVoiceTurnProcessor().speechTurn` — the shared turn engine both phone
+ * transports dispatch into (media-streams finals today; Gather at the #962
+ * cutover, which is the surface this driver declares). The driver does the
+ * transport's part and nothing more:
  *
- * # AgentDriver contract (Layer 2 will implement the same interface)
- * ```ts
- * interface AgentDriver {
- *   startSession(opts): Promise<{ sessionId }>;
- *   speak(sessionId, callerTranscript): Promise<{ agentResponse, latencyMs }>;
- *   hangup(sessionId): Promise<void>;
- *   endSession(sessionId): Promise<void>;
- * }
- * ```
+ *   - session establishment, as `TwilioGatherAdapter.bootstrapCallEstablishment`
+ *     does it — owner-line recognition from caller-ID, the FSM's
+ *     incoming_call → greeted_ok → caller_known / unknown_caller bootstrap,
+ *     caller-ID identity (exactly one customer on the number, `identifyCaller`'s
+ *     rule), and D-033's lead capture for an unknown number;
+ *   - the adapter-side emergency scan (`runEmergencyScan`): the production
+ *     tier classifier decides, the FSM's `emergency_detected` guard produces
+ *     the effects, the processor executes them;
+ *   - rendering: every `tts_play` the processor returns is spoken through the
+ *     same `renderTtsText` catalog the Gather `<Say>` path uses;
+ *   - telemetry for the graders: `speech_outbound` per turn, `proposal_created`
+ *     for every proposal the turn persisted, `session_terminated` when the
+ *     call closed.
  *
- * # Mutation dispatch (per spec §5.3.2)
- * Mutations MUST land as proposals; never as direct DB writes. We
- * mirror the production code path used by `voice-action-router`:
- * the same `INTENT_TO_PROPOSAL_TYPE` map, the same handler set, the
- * same `entitiesForProposal` translation. Rather than re-instantiate
- * those internals from scratch we route through
- * `voice-action-router`'s public worker by hand-feeding a synthetic
- * `QueueMessage` — that exercises the exact code path a queued voice
- * job would. This keeps the driver behavior in lock-step with the
- * worker without copy-pasting business logic.
+ * # What this driver is NOT (#1587)
+ * It carries no turn decision of its own — no identity, spam, after-hours or
+ * stale-appointment gate, no mutation path around `speechTurn`, and no spoken
+ * copy. Before #1587 it did, and five corpus scripts passed against code no
+ * caller could reach (that is how #1552 broke Deploy). A structural test
+ * (`test/voice-quality/text-mode-driver.structural.test.ts`) fails the build
+ * if any of that grows back. A behaviour the corpus needs therefore has to
+ * exist in production, where every phone reaches it.
  *
- * # Lookup dispatch — the FOURTH caller of the shared dispatch (#869)
- * Lookup intents are read-only and never produce a proposal. This harness
- * carries NO lookup switch. The `lookup` branch of the turn plan calls
- * `ai/voice-turn/phone-lookup-surface.ts#answerPhoneLookup` — the SAME
- * transport-neutral surface adapter the live phone's Gather adapter calls —
- * which dispatches into the one shared implementation,
- * `workers/voice-lookup-answer.ts#executeLookupAnswer`. The harness adds
- * nothing on top: the five #866 intents, the DB-authoritative RBAC gate, the
- * phone's default-deny allowlist, shared reference resolution, the production
- * refusal / unavailable copy and `lookup_executed` on EVERY outcome are all
- * inherited. (Until #869 this file carried a 15-case copy of the phone's
- * pre-#866 switch; a lookup regression on the phone could not move the Layer 1
- * score, and three corpus scripts asserted the leak #866 closed.)
+ * # Hand-off
+ * Once the FSM has handed the caller to a person (`escalating`) or closed the
+ * call (`terminated`, the cost cap, the life-safety close), a phone transport
+ * dispatches no further turns — the leg is bridged or hung up. A scripted
+ * turn arriving after that point makes no model call and speaks nothing; the
+ * turn marker is still recorded so the graders' per-turn windows line up.
  *
- * IDENTITY. The phone resolves its ACTOR once, at session establishment, from
- * caller-ID (`telephony/phone-actor.ts`); it is never derived from anything the
- * caller says. This harness has no users substrate, so it mirrors that shape
- * with a SYNTHETIC actor: a recognized owner line (the `callerIsOwner` fixture
- * or a caller-ID match against `tenant_settings.owner_phone`) stamps
- * `session.actorUserId = vqOwnerActorId(tenantId)`, and the harness-owned
- * `lookups.answers.resolveMemberRole` — the same seam production resolves
- * roles through — maps that subject to `owner`. A non-owner caller gets NO
- * actor, exactly like a customer on the phone, so the allowlist and the
- * refusal copy are what a corpus script observes.
- *
- * WHAT A LAYER 1 LOOKUP SCORE THEREFORE MEANS. It measures the shipped lookup
- * surface: a regression in `phone-lookup-surface.ts` or in the shared dispatch
- * turns the corpus red. It does NOT measure classification (see the criterion-9
- * note in the corpus driver factory), and it does not measure Twilio.
- *
- * FIXTURES MUST BE PRODUCTION-SHAPED. Because the harness now runs the shipped
- * dispatch, a corpus script's entity ids are held to the shipped contract: the
- * answer's `entityRef.id` is a UUID, and `executeLookupAnswer` PARSES the answer
- * rather than casting it, so a readable id like `cust_01_…` makes a lookup that
- * actually succeeded report `failed` and speak the unavailable line. Seed
- * customer / job / invoice / estimate ids as UUIDs.
- *
- * The classifier side is untouched: the driver does not set `extendedIntents`,
- * so no script's prompt gains the owner-extended section (D-026 — the tenant
- * flag gates what the classifier OFFERS; the actor + allowlist gate what the
- * dispatch ANSWERS).
+ * # Identity (unchanged, #869)
+ * The phone resolves its ACTOR once, at establishment, from caller-ID
+ * (`telephony/phone-actor.ts`). This harness has no users substrate, so a
+ * recognized owner line (the `callerIsOwner` fixture or a caller-ID match
+ * against `tenant_settings.owner_phone`) stamps a SYNTHETIC actor the
+ * harness-owned `lookups.answers.resolveMemberRole` maps to `owner`; everyone
+ * else gets no actor, exactly like a customer on the phone.
  *
  * # Synthetic CallSid
- * `VoiceSessionStore.create()` accepts an optional `callSid` (used by
- * the Twilio inbound replay-protection index). For text-mode sessions
- * we mint `TEXT_MODE_<sessionId>` so a future test that needs to
- * resolve a session by CallSid still works end-to-end. Production
- * Twilio CallSids start with `CA`, so this prefix is unambiguous.
+ * `TEXT_MODE_<uuid>` — unambiguous against real Twilio CallSids (`CA…`).
  *
  * # Latency
- * `speak()` returns `latencyMs` measured from "start of classify" to
- * "agent response synthesized". The runner accumulates these for the
- * floor-3 (`noHang`) check.
+ * `speak()` returns `latencyMs` from the start of the turn to the rendered
+ * reply, for the floor-3 (`noHang`) check.
  */
 import { performance } from 'node:perf_hooks';
 import { v4 as uuidv4 } from 'uuid';
 import { LLMGateway } from '../gateway/gateway';
-import { TAU_INT } from '../agents/customer-calling/transitions';
-import {
-  classifyIntent,
-  isLookupIntent,
-  isVoiceApprovalIntent,
-  isVoiceEditIntent,
-  type IntentType,
-} from '../orchestration/intent-classifier';
 import { isApproverPhone } from '../../proposals/approver-identity';
 import {
   createVoiceTurnProcessor,
@@ -106,7 +68,6 @@ import {
 } from '../voice-turn/create-voice-turn-processor';
 import { callerTranscriptText } from '../voice-turn/transcript-append';
 import {
-  intentClassifiedEvent,
   lookupExecutedEvent,
   sessionTerminatedEvent,
   speechOutboundEvent,
@@ -116,31 +77,14 @@ import {
   type VoiceSession,
 } from '../agents/customer-calling/voice-session-store';
 import { AgentEventBus } from './event-bus';
-import { EMERGENCY_SAFETY_LINE } from '../agents/customer-calling/emergency-detector';
-import {
-  classifyCallerSafety,
-  type SafetyClassification,
-} from '../agents/customer-calling/emergency-tier';
-import { detectLanguage, renderTtsText } from '../agents/customer-calling/tts-copy';
-import type { CallingAgentEvent, SideEffect } from '../agents/customer-calling/types';
-import { enforceCompliance } from '../skills/enforce-compliance';
-import { escalateToHuman } from '../skills/escalate-to-human';
-import { toEscalationReason } from '../agents/customer-calling/inapp-adapter';
-import { createAuditEvent } from '../../audit/audit';
-import { normalizePhone, type DncRepository } from '../../compliance/dnc';
+import { classifyCallerSafety } from '../agents/customer-calling/emergency-tier';
+import { renderTtsText } from '../agents/customer-calling/tts-copy';
+import type { SideEffect } from '../agents/customer-calling/types';
 import { liveE1Script, type SettingsRepository } from '../../settings/settings';
+import { isNanpKey, normalizePhone } from '../../shared/phone';
+import { findOrCreateLeadByPhone } from '../skills/find-or-create-lead';
+import { CALLER_ID_IDENTITY_LOOKUP_SKILL } from './layer2-world';
 import type { OnCallRepository } from '../../oncall/rotation';
-import type { Customer } from '../../customers/customer';
-
-// Lookups: the shared surface adapter the live phone calls. No skill imports
-// here on purpose — a lookup switch in this file is exactly the drift #869
-// deleted (see the "Lookup dispatch" section of the module doc comment).
-import {
-  answerPhoneLookup,
-  type PhoneLookupDeps,
-} from '../voice-turn/phone-lookup-surface';
-
-// Repos (mutation handlers + the driver's own identity / compliance paths).
 import type { CustomerRepository } from '../../customers/customer';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { InvoiceRepository } from '../../invoices/invoice';
@@ -150,32 +94,8 @@ import type { LeadRepository } from '../../leads/lead';
 import type { AuditRepository } from '../../audit/audit';
 import type { CatalogItemRepository } from '../../catalog/catalog-item';
 import type { EntityResolver } from '../resolution/entity-resolver';
-import { createProposal, type ProposalRepository } from '../../proposals/proposal';
-
-// Mutation worker (production code path for proposal creation).
-import {
-  createVoiceActionRouterWorker,
-  type VoiceActionRouterPayload,
-} from '../../workers/voice-action-router';
-import type { QueueMessage } from '../../queues/queue';
-import type { Logger } from '../../logging/logger';
-
-/**
- * Silent logger used by the synthesized voice-action-router worker
- * dispatch. The router logs at info/warn for ops visibility — those
- * lines aren't useful in the harness and would noise up test output.
- */
-function silentLogger(): Logger {
-  const noop = (): void => undefined;
-  const log: Logger = {
-    debug: noop,
-    info: noop,
-    warn: noop,
-    error: noop,
-    child: () => log,
-  };
-  return log;
-}
+import type { ProposalRepository } from '../../proposals/proposal';
+import type { PhoneLookupDeps } from '../voice-turn/phone-lookup-surface';
 
 // ─── Public interface ────────────────────────────────────────────────────────
 
@@ -201,7 +121,7 @@ export interface AgentDriverSpeakResult {
 /**
  * Layer-1 + Layer-2 share this contract. The text-mode implementation
  * here drives the orchestration synchronously; the Layer-2
- * implementation will wrap real audio + TTS but expose the same shape
+ * implementation wraps real audio + TTS but exposes the same shape
  * so the corpus + graders are reused.
  */
 export interface AgentDriver {
@@ -233,8 +153,8 @@ export interface TextModeDriverDeps {
   catalogRepo?: CatalogItemRepository;
   /**
    * #869 — the shared lookup bundle, IDENTICAL in shape to the one the live
-   * phone's Gather adapter takes (`app.ts` builds one and hands it to every
-   * surface). Omit it and every lookup speaks the unavailable line and emits
+   * phone takes (`app.ts` builds one and hands it to every surface). Omit it
+   * and every lookup speaks the unavailable line and emits
    * `lookup_executed{success:false, error:'unsupported'}`, exactly as an
    * unwired deployment does on the phone.
    *
@@ -245,10 +165,10 @@ export interface TextModeDriverDeps {
   lookups?: PhoneLookupDeps;
   /**
    * P0 voice-safety — tenant-scoped entity resolver threaded into the
-   * production voice-turn processor below, so a corpus script that says
-   * "move my Tuesday appointment" exercises real resolution. Optional: the
-   * offline/mock-backed harness runs without one and resolution degrades to
-   * the deterministic parts (datetime phrases, already-UUID ids).
+   * production voice-turn processor, so a corpus script that says "move my
+   * Tuesday appointment" exercises real resolution. Optional: without one,
+   * resolution degrades to the deterministic parts (datetime phrases,
+   * already-UUID ids), as on an unwired deployment.
    */
   entityResolver?: EntityResolver;
   /**
@@ -259,75 +179,24 @@ export interface TextModeDriverDeps {
    * deployment.
    */
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
-  /**
-   * #888/#897 — the classifier surface PROFILE is production's by default
-   * (`classifierProfileForSession`: a customer's line gets the S1 'caller'
-   * taxonomy, ~4x fewer tokens than the operator prompt). A corpus script
-   * that asks operator-only actions from a customer's line (log an expense,
-   * record a refund, update a customer…) — which the caller profile rightly
-   * refuses — declares `fixtures.tenant.harnessOperatorTaxonomy`, and the
-   * factory sets this to classify on the full operator taxonomy instead.
-   * A visible, per-script divergence; re-personaing those scripts is the
-   * D-028 follow-up.
-   */
-  operatorTaxonomyOverride?: boolean;
   callerPlanResolver?: (tenantId: string, customerId: string) => Promise<string | undefined>;
-  /** Used as `userId` on synthesized voice-action-router messages. */
+  /** The processor's system actor (audit rows, D-033 capture writes). */
   systemActorId?: string;
   /**
-   * On-call rotation — required for escalation. `escalateToHuman` only
-   * emits `escalation_triggered` when it finds a dispatcher, so the
-   * factory must seed at least one rotation entry per tenant.
+   * On-call rotation — required for escalation. The processor's
+   * `notify_oncall` handler only reaches `escalateToHuman` (which emits
+   * `escalation_triggered`) with BOTH an on-call repo and an audit repo
+   * wired, so the factory seeds at least one rotation entry per tenant.
    */
   onCallRepo?: OnCallRepository;
-  /** Compliance deps — DNC + business-hours gating at session start. */
+  /** Tenant settings — language, owner phone, service area, business hours, PIN. */
   settingsRepo?: SettingsRepository;
-  dncRepo?: DncRepository;
   /**
-   * Clock used for the business-hours compliance check. Defaults to the
-   * wall clock; the corpus pins it to a script's `callMomentLocal` so
-   * after-hours scenarios are deterministic.
+   * Clock for spoken-time resolution. Defaults to the wall clock; the corpus
+   * pins it to its authored world so booking dates are deterministic.
    */
   now?: () => Date;
 }
-
-/**
- * Per-session control state the driver tracks across turns: the caller's
- * resolved identity, compliance flags, and per-intent counters used for
- * the abuse/spam guard.
- */
-interface TurnState {
-  identityState: 'resolved' | 'unknown' | 'ambiguous' | 'blocked';
-  resolvedCustomerId?: string;
-  resolvedArchived: boolean;
-  /** Non-archived tenant customers, for caller-name-claim detection. */
-  customers: Customer[];
-  dncBlocked: boolean;
-  afterHours: boolean;
-  /** Count of each classified intent so far this session (spam guard). */
-  intentCounts: Map<string, number>;
-  /**
-   * Set once the caller's identity could not be verified (ambiguous /
-   * blocked / mismatch / archived). Subsequent account-scoped turns keep
-   * escalating — the caller stays unverified for the rest of the call.
-   */
-  identityEscalated: boolean;
-  /**
-   * Set once a prior caller turn contained an adversarial payload (SQL/
-   * markup injection). The caller is no longer trusted, so subsequent
-   * turns escalate to a human rather than acting on their input.
-   */
-  tainted: boolean;
-}
-
-/** Adversarial payload patterns (SQL / markup injection) in caller text. */
-const ADVERSARIAL_INPUT_RE = /drop\s+table|union\s+select|;\s*--|'\)\s*;|<\s*script|--\s*$/i;
-
-/** #898 — spoken on a scripted turn that arrives after the call already ended. */
-const CALL_ENDED_LINE = 'This call has ended.';
-
-/** Repeated identical mutation intents beyond this count escalate as abuse. */
-const SPAM_INTENT_THRESHOLD = 5;
 
 // ─── Implementation ──────────────────────────────────────────────────────────
 
@@ -375,200 +244,146 @@ export const vqResolveMemberRole = (
  */
 export const OWNER_IDENTITY_LOOKUP_SKILL = 'verify_owner_identity';
 
-/**
- * Build a one-line spoken confirmation for a freshly-created proposal.
- * Mirrors the "intent_confirm" flavor the Twilio adapter would speak
- * after the FSM lands a proposal — short, operator-friendly, never
- * implies the action has already executed (it's awaiting approval).
- */
-function buildProposalConfirmation(proposalType: string): string {
-  const human = proposalType.replace(/_/g, ' ');
-  return `Got it — I've drafted a ${human} for review. Anything else I can help you with?`;
-}
-
-/**
- * WS21b — pull the first spoken line out of a voice-turn processor result.
- * The approval/edit handlers return a `tts_play` side effect carrying the
- * dialogue's spoken text (readback / challenge prompt / confirmation); the
- * driver surfaces that as the turn's `agentResponse`.
- */
-function firstTtsText(sideEffects: SideEffect[]): string | undefined {
-  for (const fx of sideEffects) {
-    if (fx.type === 'tts_play' && typeof fx.payload.text === 'string' && fx.payload.text.length > 0) {
-      return fx.payload.text;
-    }
-  }
-  return undefined;
-}
+/** FSM states in which a phone transport dispatches no further caller turns. */
+const HANDED_OFF_STATES: ReadonlySet<string> = new Set(['escalating', 'terminated']);
 
 export class TextModeDriver implements AgentDriver {
   private readonly deps: TextModeDriverDeps;
   /**
-   * Cache the wired voice-action-router worker. We rebuild it once per
-   * driver instance — its `proposalRepo` and `gateway` deps are stable
-   * for the lifetime of the driver, and the worker's only state is
-   * the handler map.
-   */
-  private readonly voiceActionRouter: ReturnType<typeof createVoiceActionRouterWorker>;
-  /**
-   * WS21b — the SAME production agent loop the Gather / media-streams
-   * transports use. The voice-action-router worker deliberately REFUSES
-   * approval intents (they mutate approval state, not create proposals), so
-   * approve/reject/edit turns — and pending-dialogue continuations (confirm /
-   * challenge / batch) — route here instead, reusing `handleVoiceApprovalIntent`
-   * / `handleVoiceEditIntent` / `handlePendingVoiceApproval` verbatim. Built
-   * once per driver; its deps are stable for the driver's lifetime.
+   * The SAME production turn engine the phone transports dispatch into, built
+   * once per driver (its deps are stable for the driver's lifetime). Declared
+   * for the Gather surface: the coverage table's `gather` cells are the
+   * fullest set of processor-served families (lookups, en_route, language
+   * switch, owner approval/edit, the one-turn create_customer flow, the
+   * silence ladder), anchored to the live Gather loop's behaviour by
+   * `test/ai/voice-turn/speechturn-absorbs-gather-delta.test.ts`, and the
+   * surface the #962 cutover hands to this engine.
    */
   private readonly voiceProcessor: VoiceTurnProcessor;
   /**
-   * VQ2-followup: per-session zero-indexed turn counter. The driver
-   * does not constrain itself to a single session at a time (the
-   * harness creates one driver and runs many scripts through it), so
-   * we key on `sessionId` rather than carrying a single integer like
-   * `AudioModeDriver`. Cleared in `endSession`.
+   * Per-session zero-indexed turn counter for the `speech_outbound` marker
+   * the graders window turns by. Keyed by `sessionId` because one driver may
+   * carry many sessions. Cleared in `endSession`.
    */
   private readonly turnIndexBySession = new Map<string, number>();
-  /** Per-session control state (identity, compliance, intent counters). */
-  private readonly stateBySession = new Map<string, TurnState>();
 
   constructor(deps: TextModeDriverDeps) {
     this.deps = deps;
-    this.voiceActionRouter = createVoiceActionRouterWorker({
-      gateway: deps.gateway,
-      proposalRepo: deps.proposalRepo,
-      ...(deps.appointmentRepo ? { appointmentRepo: deps.appointmentRepo } : {}),
-      // P22 — catalog grounding so corpus scripts can assert that drafted
-      // invoice/estimate lines carry catalog prices, not LLM-invented ones.
-      ...(deps.catalogRepo ? { catalogRepo: deps.catalogRepo } : {}),
-      // B8.10 — threads through to buildTaskHandlers' send_estimate_nudge /
-      // send_estimate / update_estimate wiring, so a corpus script that
-      // seeds `fixtures.estimates` (runner.ts's seedFixtures) can exercise
-      // real reference resolution instead of always gating. No existing
-      // script seeds estimates today, so this is a no-op for the rest of
-      // the corpus.
-      ...(deps.estimateRepo ? { estimateRepo: deps.estimateRepo } : {}),
-      // Thread the fixture's tenant timezone so spoken times resolve in the
-      // tenant zone, and pin the scheduling clock to the fixture's call
-      // moment so relative/absolute booking dates are deterministic.
-      ...(deps.settingsRepo
-        ? {
-            tenantSchedulingResolver: async (t: string) => {
-              const s = await deps.settingsRepo!.findByTenant(t);
-              return { timezone: s?.timezone };
-            },
-          }
-        : {}),
-      now: () => (deps.now ? deps.now() : new Date()),
-    });
-    // WS21b — construct the production voice-turn processor once. Only the
-    // approval/edit surface is exercised from the driver (the FSM-driven
-    // speechTurn stays owned by the driver's own classify loop), so we wire
-    // the deps that surface needs: proposalRepo (targets), settingsRepo (the
-    // money-class PIN challenge — WS21a interplay), catalogRepo (grounded
-    // quoting), plus audit/appointment/edit-interpreter (via gateway).
     this.voiceProcessor = createVoiceTurnProcessor({
       store: deps.voiceSessionStore,
       gateway: deps.gateway,
       businessName: 'VQ Harness',
+      coverageSurface: 'gather',
       proposalRepo: deps.proposalRepo,
       ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
       ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+      ...(deps.onCallRepo ? { onCallRepo: deps.onCallRepo } : {}),
       ...(deps.appointmentRepo ? { appointmentRepo: deps.appointmentRepo } : {}),
       ...(deps.catalogRepo ? { catalogRepo: deps.catalogRepo } : {}),
       ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
       ...(deps.customerRepo ? { customerRepo: deps.customerRepo } : {}),
-      // #1567 — an out-of-area new caller is kept as a lead.
       ...(deps.leadRepo ? { leadRepo: deps.leadRepo } : {}),
-      // P0 voice-safety — the harness resolves spoken references through the
-      // same resolver the driver already hands the voice-action-router, so a
-      // corpus script exercises real resolution rather than a free-text echo.
+      ...(deps.invoiceRepo ? { invoiceRepo: deps.invoiceRepo } : {}),
+      ...(deps.lookups ? { lookups: deps.lookups } : {}),
       ...(deps.entityResolver ? { entityResolver: deps.entityResolver } : {}),
-      // #897 — the prompt-section resolvers behind buildPhoneClassifyContext.
       ...(deps.verticalPromptResolver ? { verticalPromptResolver: deps.verticalPromptResolver } : {}),
       ...(deps.callerPlanResolver ? { callerPlanResolver: deps.callerPlanResolver } : {}),
+      ...(deps.systemActorId ? { systemActorId: deps.systemActorId } : {}),
+      ...(deps.now ? { now: deps.now } : {}),
+      // The caller-id as the Gather adapter records it per session (Twilio
+      // `From`, or '' when blocked/withheld) — read by the one-turn
+      // create_customer flow and the ask_caller find-or-create.
+      callerPhoneResolver: (session) => session.callerPhone ?? '',
     });
-  }
-
-  private now(): Date {
-    return this.deps.now ? this.deps.now() : new Date();
   }
 
   async startSession(opts: AgentDriverStartOpts): Promise<{ sessionId: string }> {
-    // Synthetic CallSid: lets `findByCallSid` still resolve to the
-    // session if a future test wants to. Prefix is unambiguous against
-    // real Twilio CallSids (which start with 'CA').
     const synthetic = `${TEXT_MODE_CALLSID_PREFIX}${uuidv4()}`;
-    // WS21b — RV-070 owner-line recognition at session establishment (mirrors
+    const tenantId = opts.tenantId;
+    // RV-070 owner-line recognition at session establishment (mirrors
     // TwilioGatherAdapter.resolveOwnerSession): an explicit fixture flag OR a
-    // caller-ID match against tenant_settings.owner_phone stamps ownerSession,
-    // unlocking the owner-only approve/reject/edit dialogue. Fail-closed.
+    // caller-ID match against tenant_settings.owner_phone. Fail-closed.
     const ownerSession = await this.resolveOwnerSession(opts);
-    const session = this.deps.voiceSessionStore.create(opts.tenantId, 'telephony', {
+    const session = this.deps.voiceSessionStore.create(tenantId, 'telephony', {
       callSid: synthetic,
       ...(ownerSession ? { ownerSession: true } : {}),
-      // #897 — telephony always opts every caller into the customer-protection
-      // intents (twilio-adapter establishment); the harness did not, so
-      // complaint / negotiation classification was never exercised.
+      // Telephony always opts every caller into the customer-protection
+      // intents (establishInboundSession).
       customerProtectionIntents: true,
     });
-    // #890 — pin the call language the way the Gather establishment does
-    // (resolveTenantLanguage): the tenant's default_language, else English.
     await this.pinTenantLanguage(session);
     if (this.deps.bus) {
       this.deps.bus.subscribe(session);
     }
 
     // #869 — ACTOR, stamped ONCE at establishment and never from utterance
-    // content, mirroring `telephony/phone-actor.ts`. The harness has no users
-    // substrate, so the owner line resolves to a deterministic SYNTHETIC
-    // subject the harness's own `resolveMemberRole` maps to `owner`. A
-    // non-owner caller gets no actor, exactly as a customer on the phone does,
-    // and the shared dispatch's allowlist decides what they may hear.
+    // content (telephony/phone-actor.ts). See the module doc on identity.
     if (ownerSession) {
-      session.actorUserId = vqOwnerActorId(opts.tenantId);
-    }
-    // The caller's number, as the inbound adapter stamps it (Twilio `From`);
-    // a blocked caller-ID has none. Read by the shared service-area gate's
-    // lead capture (#1567).
-    if (opts.callerId && !opts.callerIdBlocked) {
-      session.callerPhone = opts.callerId;
-    }
-
-    // WS21b — a recognized owner line is identity-resolved the instant the
-    // session is established: the caller-ID matched tenant_settings.owner_phone
-    // (or an explicit fixture flag), which is the verification. Production has
-    // no lookup skill for this (it's a session-establishment fact, not a read),
-    // so we stamp a dedicated identity-resolving `lookup_executed` here — before
-    // any turn speaks — so the floor PII grader treats owner-only readbacks
-    // (e.g. an approval readback naming a customer + amount) as post-identity.
-    // The PIN challenge remains the money-movement gate; this is identity only.
-    if (ownerSession) {
+      session.actorUserId = vqOwnerActorId(tenantId);
+      // The owner line is identity-resolved the instant the session is
+      // established (the caller-ID matched the owner phone). Production has
+      // no lookup skill for this, so the identity stamp is recorded here for
+      // the floor PII grader. The PIN challenge remains the money gate.
       session.events.emit(
         'voice-event',
         lookupExecutedEvent(OWNER_IDENTITY_LOOKUP_SKILL, 0, true),
       );
     }
 
-    const state = await this.resolveStartState(session, opts);
-    this.stateBySession.set(session.id, state);
+    // The caller's number as Twilio sends it; '' when blocked/withheld
+    // (establishInboundSession pins it for both transports).
+    const from = opts.callerId && !opts.callerIdBlocked ? opts.callerId : '';
+    if (from) session.callerPhone = from;
 
-    // Advance the FSM out of `idle` so caller turns land in
-    // intent_capture and the global escalation guards (operator_request,
-    // cost_cap_exceeded, caller_identification_failed) apply. Mirrors
-    // InAppVoiceAdapter.startSession.
-    session.machine.dispatch({
-      type: 'session_started',
-      userId: this.deps.systemActorId ?? 'system:text-mode',
-      tenantId: session.tenantId,
-      conversationId: session.conversationId ?? session.id,
-    });
-    session.machine.dispatch({ type: 'greeted_ok' });
-    if (state.identityState === 'resolved' && state.resolvedCustomerId) {
-      session.customerId = state.resolvedCustomerId;
-      session.machine.dispatch({ type: 'caller_known', customerId: state.resolvedCustomerId });
+    // bootstrapCallEstablishment: greeting, then identity, then the FSM's
+    // known / unknown branch; the processor executes the audit effects.
+    const effects: SideEffect[] = [];
+    effects.push(
+      ...session.machine.dispatch({
+        type: 'incoming_call',
+        callSid: synthetic,
+        from,
+        to: '',
+        tenantId,
+      }),
+    );
+    effects.push(...session.machine.dispatch({ type: 'greeted_ok' }));
+
+    const callerKnownId = from ? await this.identifyCallerByPhone(tenantId, from) : null;
+    if (callerKnownId) {
+      session.customerId = callerKnownId;
+      // Caller-ID identified exactly one customer — the identity the phone
+      // lookup surface answers a customer's own-records question for. Stamped
+      // for the floor PII grader (same stamp as the Layer 2 harness).
+      session.events.emit(
+        'voice-event',
+        lookupExecutedEvent(CALLER_ID_IDENTITY_LOOKUP_SKILL, 0, true),
+      );
+      effects.push(
+        ...session.machine.dispatch({ type: 'caller_known', customerId: callerKnownId }),
+      );
     } else {
-      session.machine.dispatch({ type: 'unknown_caller' });
+      // Unknown caller: D-033's sanctioned lead capture (find-or-create by
+      // phone) so the call lands in the kanban, exactly as the adapter does;
+      // a failure never fails the call. A blocked/empty From has no phone to
+      // key a lead on.
+      if (this.deps.leadRepo && from) {
+        try {
+          const result = await findOrCreateLeadByPhone({
+            tenantId,
+            fromPhone: from,
+            leadRepo: this.deps.leadRepo,
+            ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+            systemActorId: this.deps.systemActorId ?? 'system:inbound-call',
+          });
+          session.leadId = result.leadId;
+        } catch {
+          // Fall through to the FSM's unknown_caller path either way.
+        }
+      }
+      effects.push(...session.machine.dispatch({ type: 'unknown_caller' }));
     }
+    await this.voiceProcessor.executeSideEffects(session, effects, tenantId);
 
     return { sessionId: session.id };
   }
@@ -592,85 +407,22 @@ export class TextModeDriver implements AgentDriver {
   }
 
   /**
-   * Resolve caller identity (by caller-ID phone match) and run the
-   * compliance gate (DNC + business hours) at session start. Faithful to
-   * production: identity comes from `customerRepo.findByPhoneNormalized`
-   * and compliance from the real `enforceCompliance` skill.
+   * Caller-ID identity with `identifyCaller`'s rule (ai/skills/identify-caller.ts),
+   * over the customer repository instead of its SQL: a NANP number that
+   * matches exactly ONE customer identifies the caller; none or several
+   * (`multiple`) is an unknown caller, whom the ask_caller turn resolves.
    */
-  private async resolveStartState(
-    session: VoiceSession,
-    opts: AgentDriverStartOpts,
-  ): Promise<TurnState> {
-    const tenantId = session.tenantId;
-
-    // Compliance gate (DNC hard-block + after-hours soft flag).
-    let dncBlocked = false;
-    let afterHours = false;
-    if (this.deps.settingsRepo && this.deps.dncRepo) {
-      try {
-        const result = await enforceCompliance({
-          tenantId,
-          ...(opts.callerId ? { callerPhone: opts.callerId } : {}),
-          channel: 'telephony',
-          currentTime: this.now(),
-          settingsRepo: this.deps.settingsRepo,
-          dncRepo: this.deps.dncRepo,
-        });
-        dncBlocked = !result.allowed && result.reasons.includes('dnc_blocked');
-        afterHours = result.isAfterHours;
-      } catch {
-        // Fail open — compliance lookup failure must not block the call.
-      }
+  private async identifyCallerByPhone(tenantId: string, from: string): Promise<string | null> {
+    const repo = this.deps.customerRepo;
+    if (!repo?.findByPhoneNormalized) return null;
+    const normalized = normalizePhone(from);
+    if (!isNanpKey(normalized)) return null;
+    try {
+      const matches = await repo.findByPhoneNormalized(tenantId, normalized);
+      return matches.length === 1 ? matches[0]!.id : null;
+    } catch {
+      return null;
     }
-
-    // Identity resolution by caller-ID.
-    let identityState: TurnState['identityState'] = 'unknown';
-    let resolvedCustomerId: string | undefined;
-    let resolvedArchived = false;
-    const blocked = opts.callerIdBlocked || !opts.callerId;
-    if (blocked) {
-      identityState = 'blocked';
-    } else if (this.deps.customerRepo?.findByPhoneNormalized) {
-      try {
-        const matches = await this.deps.customerRepo.findByPhoneNormalized(
-          tenantId,
-          normalizePhone(opts.callerId as string),
-        );
-        if (matches.length === 1) {
-          identityState = 'resolved';
-          resolvedCustomerId = matches[0].id;
-          resolvedArchived = matches[0].isArchived === true;
-        } else if (matches.length > 1) {
-          identityState = 'ambiguous';
-        } else {
-          identityState = 'unknown';
-        }
-      } catch {
-        identityState = 'unknown';
-      }
-    }
-
-    // Non-archived tenant customers for caller-name-claim detection.
-    let customers: Customer[] = [];
-    if (this.deps.customerRepo) {
-      try {
-        customers = await this.deps.customerRepo.findByTenant(tenantId);
-      } catch {
-        customers = [];
-      }
-    }
-
-    return {
-      identityState,
-      ...(resolvedCustomerId ? { resolvedCustomerId } : {}),
-      resolvedArchived,
-      customers,
-      dncBlocked,
-      afterHours,
-      intentCounts: new Map<string, number>(),
-      identityEscalated: false,
-      tainted: false,
-    };
   }
 
   /**
@@ -701,325 +453,122 @@ export class TextModeDriver implements AgentDriver {
   ): Promise<AgentDriverSpeakResult> {
     const session = this.deps.voiceSessionStore.get(sessionId);
     if (!session) {
-      throw new Error(`TextModeDriver.speak: unknown session ${sessionId}`);
+      throw new Error(`text-mode driver: unknown session ${sessionId}`);
+    }
+    const tenantId = session.tenantId;
+    // `performance.now()` for sub-millisecond resolution: on fast hardware a
+    // whole turn completes inside one ms and `Date.now()` deltas round to 0.
+    const startedAt = performance.now();
+
+    // Hand-off: see the module doc. No model call, nothing spoken.
+    if (session.ended || HANDED_OFF_STATES.has(session.machine.currentState)) {
+      this.emitTurn(session, sessionId, '');
+      return { agentResponse: '', latencyMs: performance.now() - startedAt };
     }
 
-    // 1. Append caller utterance to the session transcript so
-    //    summarizeSession (and any future grader that walks the
-    //    transcript) sees what was said.
+    // The caller's words go on the transcript before anything reads them
+    // (the Gather loop appends, then scans, then dispatches).
     this.deps.voiceSessionStore.appendTranscript(sessionId, {
       speaker: 'caller',
       text: callerTranscriptText(session, callerTranscript),
       ts: Date.now(),
     });
 
-    // Use `performance.now()` for sub-millisecond resolution: on fast
-    // hardware the entire speak() pipeline can complete inside a single
-    // ms, which would make `Date.now()` deltas round to 0 and break
-    // strict `latencyMs > 0` assertions in the test suite (see VQ-007).
-    const startedAt = performance.now();
-
-    const state = this.stateBySession.get(sessionId);
-
-    let agentResponse: string;
-
-    // #898 — a call the session cost cap ended is over: production never
-    // classifies again (the FSM is escalating / the call is torn down), so a
-    // scripted turn arriving after it makes no model call and moves nothing.
-    if (session.machine.currentContext.escalationReason === 'cost_cap_exceeded') {
-      agentResponse = CALL_ENDED_LINE;
-      this.appendAgentAndEmit(session, sessionId, agentResponse);
-      return { agentResponse, latencyMs: performance.now() - startedAt };
-    }
-
-    // RV-140/RV-142 — deterministic emergency-keyword interrupt, mirroring the
-    // telephony transports (twilio-adapter.runEmergencyScan /
-    // mediastream scanInterimForEmergency): a life-safety phrase in the caller
-    // transcript short-circuits the turn BEFORE any classify/LLM call. The 911
-    // safety line is spoken FIRST (localized to the call's language), then the
-    // call escalates to the on-call dispatcher (reason=emergency_dispatch). The
-    // Layer-1 driver never wired this, so a Spanish "fuga de gas" fell through
-    // to the classifier and never escalated.
-    //
-    // #1222 — the SAME tier classification the Gather and Media Streams
-    // transports run before any model call (twilio-adapter.runEmergencyScan):
-    // E1 (life safety: gas / CO / fire / electrical burning / injury) closes
-    // the call on the evacuation script and never bridges to the dispatcher;
-    // E2 keeps the dispatcher escalation. The driver used to treat every
-    // emergency as E2, so the corpus could not see an E1 regression.
-    const safety = classifyCallerSafety(callerTranscript, {});
-    if (safety.tier === 'E1') {
-      const lifeSafetyResponse = await this.handleLifeSafetyE1(session, callerTranscript, safety);
-      const latencyMsE1 = performance.now() - startedAt;
-      this.appendAgentAndEmit(session, sessionId, lifeSafetyResponse);
-      return { agentResponse: lifeSafetyResponse, latencyMs: latencyMsE1 };
-    }
-    if (safety.tier === 'E2') {
-      const emergencyResponse = await this.handleEmergency(session, callerTranscript, safety.language);
-      const latencyMsEmergency = performance.now() - startedAt;
-      this.appendAgentAndEmit(session, sessionId, emergencyResponse);
-      return { agentResponse: emergencyResponse, latencyMs: latencyMsEmergency };
-    }
-
-    // WS21b — an in-flight owner approval dialogue (confirm / disambiguate /
-    // challenge / batch continuation) consumes the turn BEFORE classify,
-    // exactly as the production speechTurn does: a challenge PIN like "four two
-    // seven one" must never be re-classified as a fresh intent. The processor
-    // mutates session.pendingVoiceApproval / voiceApprovalState in place, so
-    // the next turn continues the dialogue.
-    const pendingApprovalFx = await this.voiceProcessor.handlePendingVoiceApproval(
-      session,
-      callerTranscript,
-      session.tenantId,
-    );
-    if (pendingApprovalFx) {
-      agentResponse = firstTtsText(pendingApprovalFx) ?? 'Got it.';
-      const latencyMsPending = performance.now() - startedAt;
-      this.appendAgentAndEmit(session, sessionId, agentResponse);
-      return { agentResponse, latencyMs: latencyMsPending };
-    }
-
-    // #1567 — the caller is answering the service-address ZIP question,
-    // through the SAME processor rule both phone transports run: out of area
-    // (or a re-ask) consumes the turn; in area hands back the held booking
-    // request, handled below as this turn.
-    const areaCheck = await this.voiceProcessor.handlePendingServiceAreaCheck(
-      session,
-      callerTranscript,
-      session.tenantId,
-    );
-    if (areaCheck?.kind === 'respond') {
-      agentResponse = firstTtsText(areaCheck.effects) ?? 'Got it.';
-      const latencyMsArea = performance.now() - startedAt;
-      this.appendAgentAndEmit(session, sessionId, agentResponse);
-      return { agentResponse, latencyMs: latencyMsArea };
-    }
-    if (areaCheck?.kind === 'proceed') {
-      callerTranscript = areaCheck.utterance;
-    }
-
-    try {
-      // #897 — the SAME context assembly the Gather adapter and speechTurn
-      // call, so the corpus sees the production prompt (vertical + plan
-      // sections, surface profile, owner / protection flags, call language).
-      const classifyContext = await this.voiceProcessor.buildPhoneClassifyContext(
+    const proposalsBefore = session.proposalIds.length;
+    let effects = await this.runEmergencyScan(session, callerTranscript, tenantId);
+    if (effects === null) {
+      effects = await this.voiceProcessor.speechTurn({
         session,
-        session.tenantId,
-      );
-      const classification = await classifyIntent(
-        callerTranscript,
-        {
-          ...classifyContext,
-          // The one declared divergence (see `operatorTaxonomyOverride`).
-          ...(this.deps.operatorTaxonomyOverride ? { classifierProfile: 'operator' as const } : {}),
-          // Harness-only (not prompt-bearing): suppresses the deterministic
-          // sign-up override for a caller-ID-resolved customer.
-          callerIsExistingCustomer: state?.identityState === 'resolved',
-        },
-        this.deps.gateway,
-      );
-
-      // #898 — cost accounting through the SAME seam the phone transports
-      // use (`processor.recordCost`): records the usage, emits
-      // cost_incurred, and on the turn the session cap is crossed emits the
-      // one `session_terminated{cap_exceeded}` and returns true. The FSM's
-      // cost_cap_exceeded escalation below then hands the caller off, and the
-      // call is over (see the ended-session guard at the top of speak()).
-      const capExceeded = this.voiceProcessor.recordCost(session, classification.tokenUsage);
-
-      const intent = classification.intentType;
-      if (state) {
-        state.intentCounts.set(intent, (state.intentCounts.get(intent) ?? 0) + 1);
-      }
-
-      // Emit `intent_classified` AFTER any escalation decision so its log
-      // index is at-or-after any escalation_triggered fired this turn.
-      // The disposition grader attributes escalations by append-only log
-      // index (not timestamp): turn i owns events in (intent[i-1], intent[i]].
-      // Emitting intent last keeps each turn's escalation inside its window.
-      const emitIntentClassified = (): void => {
-        session.events.emit(
-          'voice-event',
-          intentClassifiedEvent({
-            intentType: classification.intentType,
-            confidence: classification.confidence,
-            tokenUsage: classification.tokenUsage,
-          }),
-        );
-      };
-
-      // WS21b — owner approve/reject/edit route through the SAME production
-      // dialogue the telephony transports use (the voice-action-router
-      // deliberately refuses these intents). The processor hard-gates on the
-      // session's RV-070 ownerSession flag, so a non-owner "approve …" falls
-      // through the processor's own reprompt path — never starts an approval.
-      const entities = (classification.extractedEntities ?? {}) as Record<
-        string,
-        unknown
-      >;
-      if (isVoiceApprovalIntent(intent)) {
-        const approvalFx = await this.voiceProcessor.handleVoiceApprovalIntent(
-          session,
-          { intentType: intent, entities, utterance: callerTranscript, tenantId: session.tenantId },
-        );
-        agentResponse = firstTtsText(approvalFx) ?? 'Got it.';
-        emitIntentClassified();
-        const latencyMsApproval = performance.now() - startedAt;
-        this.appendAgentAndEmit(session, sessionId, agentResponse);
-        return { agentResponse, latencyMs: latencyMsApproval };
-      }
-      if (isVoiceEditIntent(intent)) {
-        const editFx = await this.voiceProcessor.handleVoiceEditIntent(session, {
-          entities,
-          utterance: callerTranscript,
-          tenantId: session.tenantId,
-        });
-        agentResponse = firstTtsText(editFx) ?? 'Got it.';
-        emitIntentClassified();
-        const latencyMsEdit = performance.now() - startedAt;
-        this.appendAgentAndEmit(session, sessionId, agentResponse);
-        return { agentResponse, latencyMs: latencyMsEdit };
-      }
-
-      const decision = await this.evaluateTurn(
-        state,
-        session,
-        intent,
-        callerTranscript,
-        capExceeded,
-      );
-
-      // Mark the caller as tainted for subsequent turns if this turn
-      // carried an adversarial payload. This turn's decision already
-      // used the prior taint state, so a first adversarial turn is
-      // handled as opaque text (no escalation) while later turns escalate.
-      if (state && ADVERSARIAL_INPUT_RE.test(callerTranscript)) {
-        state.tainted = true;
-      }
-
-      switch (decision.kind) {
-        case 'terminate_dnc': {
-          const tts = await this.fireEscalation(
-            session,
-            { type: 'caller_identification_failed', reason: 'dnc_blocked' },
-            'abuse_detected',
-          );
-          session.events.emit('voice-event', sessionTerminatedEvent('compliance_blocked'));
-          session.ended = true;
-          agentResponse =
-            tts ?? "I'm not able to continue this call. Goodbye.";
-          break;
-        }
-        case 'escalate': {
-          const tts = await this.fireEscalation(
-            session,
-            decision.event,
-            decision.reason,
-          );
-          agentResponse =
-            tts ?? "Let me connect you with a team member who can help.";
-          break;
-        }
-        case 'after_hours_callback': {
-          await this.createCallbackProposal(session, callerTranscript);
-          await this.fireEscalation(
-            session,
-            { type: 'caller_identification_failed', reason: 'after_hours' },
-            'caller_requested',
-          );
-          agentResponse =
-            "We're closed right now — I've logged a callback request and a team member will reach out to schedule your visit.";
-          break;
-        }
-        case 'noop':
-          agentResponse = 'Got it.';
-          break;
-        case 'lookup':
-          // #869 — the SAME call the Gather adapter makes. The adapter owns
-          // identity, the allowlist, reference resolution, the spoken copy and
-          // `lookup_executed` on every outcome; the driver adds nothing.
-          agentResponse = await answerPhoneLookup(this.deps.lookups, {
-            session,
-            tenantId: session.tenantId,
-            intent: intent as IntentType,
-            entities,
-          });
-          break;
-        case 'reprompt': {
-          const tts = await this.fireEscalation(
-            session,
-            { type: 'confidence_low', threshold: 0.6, score: classification.confidence },
-            'low_confidence',
-          );
-          agentResponse =
-            tts ??
-            "I didn't quite catch that — could you say it again? I can help with appointments, invoices, estimates, customer info, and more.";
-          break;
-        }
-        case 'mutation':
-        default: {
-          // #1540 §3 — the phone transports' shared rule: an existing
-          // customer asking to "sign up" is told so and asked what they
-          // need; no duplicate create_customer draft. Checked here so the
-          // harness's escalation / abuse decisions above keep precedence.
-          const signupReply =
-            classification.confidence >= TAU_INT
-              ? this.voiceProcessor.existingCustomerSignupReplyFor(
-                  session,
-                  intent,
-                  this.deps.operatorTaxonomyOverride
-                    ? 'operator'
-                    : (classifyContext.classifierProfile ?? 'operator'),
-                )
-              : null;
-          // #1567 — the phone transports' shared service-area gate: a new
-          // caller's booking is checked against the tenant's ZIPs before
-          // anything is drafted.
-          const areaFx =
-            signupReply === null && classification.confidence >= TAU_INT
-              ? await this.voiceProcessor.serviceAreaGate(
-                  session,
-                  { intentType: intent, utterance: callerTranscript, entities },
-                  session.tenantId,
-                )
-              : null;
-          agentResponse =
-            signupReply ??
-            (areaFx ? (firstTtsText(areaFx) ?? 'Got it.') : null) ??
-            (await this.runMutation(session, callerTranscript, state));
-          break;
-        }
-      }
-
-      emitIntentClassified();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      agentResponse = `I had trouble processing that — ${message}`;
+        speechResult: callerTranscript,
+        callSid: session.callSid ?? '',
+        tenantId,
+        transcriptAppended: true,
+      });
     }
 
-    const latencyMs = performance.now() - startedAt;
-    this.appendAgentAndEmit(session, sessionId, agentResponse);
-    return { agentResponse, latencyMs };
+    const agentResponse = this.renderSpoken(session, effects);
+    if (effects.some((fx) => fx.type === 'end_session')) {
+      session.ended = true;
+    }
+    for (const proposalId of session.proposalIds.slice(proposalsBefore)) {
+      session.events.emit('voice-event', { type: 'proposal_created', proposalId });
+    }
+    this.emitTurn(session, sessionId, agentResponse);
+    return { agentResponse, latencyMs: performance.now() - startedAt };
   }
 
   /**
-   * Shared turn tail: capture the agent's reply on the transcript (so
-   * summarizeSession sees both sides, mirroring
-   * twilio-adapter.processCallerUtterance) and emit `speech_outbound` for the
-   * per-turn graders (perceived-completion, reprompt) with the zero-indexed
-   * turn position. Extracted so the WS21b approval/edit early-returns and the
-   * normal FSM path finalize the turn identically.
+   * The adapter-side life-safety scan, as `TwilioGatherAdapter.runEmergencyScan`
+   * runs it before any model call on both phone transports: the production
+   * tier classifier decides (E1 life safety closes the call on the evacuation
+   * script; E2 hands off to the on-call dispatcher; E3 is not an emergency),
+   * the FSM's `emergency_detected` guard produces the effects, and the
+   * processor executes them. Returns null when the turn proceeds normally.
    */
-  private appendAgentAndEmit(
+  private async runEmergencyScan(
     session: VoiceSession,
-    sessionId: string,
-    agentResponse: string,
-  ): void {
-    this.deps.voiceSessionStore.appendTranscript(sessionId, {
-      speaker: 'agent',
-      text: agentResponse,
-      ts: Date.now(),
+    callerTranscript: string,
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    const safety = classifyCallerSafety(callerTranscript, {});
+    if (safety.tier === 'E3') return null;
+
+    let responseScript = safety.responseScript;
+    let scriptSource: 'reviewed' | 'placeholder' = 'placeholder';
+    if (safety.tier === 'E1' && this.deps.settingsRepo) {
+      try {
+        // #1389 / O-2 — the tenant's reviewed script, live only with both sign-offs.
+        const reviewed = liveE1Script(await this.deps.settingsRepo.findByTenant(tenantId));
+        if (reviewed) {
+          responseScript = reviewed;
+          scriptSource = 'reviewed';
+        }
+      } catch {
+        // Placeholder script, as production falls back.
+      }
+    }
+    const effects = session.machine.dispatch({
+      type: 'emergency_detected',
+      keyword: safety.keyword,
+      utterance: callerTranscript,
+      tier: safety.tier,
+      ...(responseScript ? { responseScript } : {}),
+      ...(safety.tier === 'E1' ? { scriptSource } : {}),
+      ...(safety.language ? { language: safety.language } : {}),
+      ...(session.language === 'es' || session.language === 'en'
+        ? { sessionLanguage: session.language }
+        : {}),
     });
+    if (effects.length === 0) return null;
+    await this.voiceProcessor.executeSideEffects(session, effects, tenantId);
+    if (safety.tier === 'E1' && session.machine.currentState === 'terminated') {
+      session.events.emit('voice-event', sessionTerminatedEvent('life_safety_e1'));
+      session.ended = true;
+    }
+    return effects;
+  }
+
+  /**
+   * What the caller hears: every `tts_play` the turn produced, rendered
+   * through the same catalog the Gather `<Say>` path renders with (templates
+   * expanded, Spanish sessions localized), in order.
+   */
+  private renderSpoken(session: VoiceSession, effects: SideEffect[]): string {
+    const lang = session.language === 'es' ? 'es' : 'en';
+    return effects
+      .filter(
+        (fx) => fx.type === 'tts_play' && typeof fx.payload.text === 'string' && fx.payload.text.length > 0,
+      )
+      .map((fx) => renderTtsText(fx.payload.text as string, fx.payload, lang))
+      .join(' ');
+  }
+
+  /**
+   * Turn marker for the graders: one `speech_outbound` per scripted turn
+   * carrying the zero-indexed turn position (the agent's spoken text may be
+   * empty after hand-off).
+   */
+  private emitTurn(session: VoiceSession, sessionId: string, agentResponse: string): void {
     const turnIndex = this.turnIndexBySession.get(sessionId) ?? 0;
     this.turnIndexBySession.set(sessionId, turnIndex + 1);
     session.events.emit(
@@ -1041,462 +590,17 @@ export class TextModeDriver implements AgentDriver {
   async endSession(sessionId: string): Promise<void> {
     const session = this.deps.voiceSessionStore.peek(sessionId);
     this.turnIndexBySession.delete(sessionId);
-    this.stateBySession.delete(sessionId);
     if (!session) return;
     if (this.deps.bus) {
       this.deps.bus.unsubscribe(session);
     }
     this.deps.voiceSessionStore.delete(sessionId);
   }
-
-  // ─── Internals ─────────────────────────────────────────────────────────────
-
-  // ─── Per-turn decision ───────────────────────────────────────────────────────
-
-  /**
-   * Decide what to do with a classified turn. Escalation conditions use
-   * real signals resolved at session start (identity by caller-ID,
-   * compliance gate) plus per-turn signals (cost cap, repeated-intent
-   * abuse, caller-name claims, entity state). The order is significant:
-   * harder gates (DNC, abuse, identity) take precedence over the normal
-   * lookup/mutation path.
-   */
-  private async evaluateTurn(
-    state: TurnState | undefined,
-    session: VoiceSession,
-    intent: string,
-    transcript: string,
-    capExceeded: boolean,
-  ): Promise<
-    | { kind: 'terminate_dnc' }
-    | { kind: 'escalate'; event: CallingAgentEvent; reason: string }
-    | { kind: 'after_hours_callback' }
-    | { kind: 'lookup' }
-    | { kind: 'mutation' }
-    | { kind: 'noop' }
-    | { kind: 'reprompt' }
-  > {
-    const isLookup = isLookupIntent(intent as IntentType);
-    const isBooking = intent === 'create_appointment' || intent === 'create_job';
-
-    // DNC hard block: still classify the turn (criterion 9) but escalate
-    // and terminate without performing the action.
-    if (state?.dncBlocked) {
-      return { kind: 'terminate_dnc' };
-    }
-
-    // Caller explicitly asked for a human / unsupported request.
-    if (intent === 'operator_request') {
-      return {
-        kind: 'escalate',
-        event: { type: 'intent_classified', intentType: 'operator_request', entities: {}, confidence: 1 },
-        reason: 'caller_requested',
-      };
-    }
-
-    // A prior turn was adversarial → caller no longer trusted; escalate.
-    if (state?.tainted) {
-      return {
-        kind: 'escalate',
-        event: { type: 'caller_identification_failed', reason: 'adversarial_input' },
-        reason: 'abuse_detected',
-      };
-    }
-
-    // Cost cap exceeded → escalate (sticky: stays exceeded for the rest
-    // of the call, so every subsequent turn re-escalates).
-    if (capExceeded) {
-      return { kind: 'escalate', event: { type: 'cost_cap_exceeded' }, reason: 'cost_cap_exceeded' };
-    }
-
-    // Repeated-intent abuse guard (spam): the same mutation intent past
-    // the threshold escalates.
-    if (state && !isLookup) {
-      const count = state.intentCounts.get(intent) ?? 0;
-      if (count > SPAM_INTENT_THRESHOLD) {
-        return {
-          kind: 'escalate',
-          event: { type: 'caller_identification_failed', reason: 'abuse_repeated_intent' },
-          reason: 'abuse_detected',
-        };
-      }
-    }
-
-    // Once the caller's identity is unverified, every later account-
-    // scoped turn keeps escalating.
-    if (state?.identityEscalated && (isLookup || isBooking)) {
-      return {
-        kind: 'escalate',
-        event: { type: 'caller_identification_failed', reason: 'identity_unverified' },
-        reason: 'max_retries_exceeded',
-      };
-    }
-
-    // After-hours booking → can't book live; capture a callback request
-    // and escalate for a human to follow up.
-    if (state?.afterHours && isBooking) {
-      return { kind: 'after_hours_callback' };
-    }
-
-    // Ambiguous caller-ID (matches >1 customer) → can't safely act.
-    if (state?.identityState === 'ambiguous') {
-      state.identityEscalated = true;
-      return {
-        kind: 'escalate',
-        event: { type: 'caller_identification_failed', reason: 'ambiguous_caller_id' },
-        reason: 'max_retries_exceeded',
-      };
-    }
-
-    // Caller-ID blocked + an account-scoped request → can't auto-resolve.
-    if (state?.identityState === 'blocked' && isLookup) {
-      state.identityEscalated = true;
-      return {
-        kind: 'escalate',
-        event: { type: 'caller_identification_failed', reason: 'caller_id_blocked' },
-        reason: 'max_retries_exceeded',
-      };
-    }
-
-    // Caller names a customer that is NOT their resolved identity
-    // (cross-customer access) OR claims to be a customer the caller-ID
-    // doesn't match (identity mismatch) → escalate for verification.
-    if (state) {
-      const named = this.namedOtherCustomer(state, transcript);
-      if (named) {
-        state.identityEscalated = true;
-        return {
-          kind: 'escalate',
-          event: { type: 'caller_identification_failed', reason: 'identity_unverified' },
-          reason: 'max_retries_exceeded',
-        };
-      }
-    }
-
-    // An unknown caller attempting to book is NOT escalated: #1540 §2 owner
-    // decision (2026-10-01) — the caller is identified (found or created by
-    // phone) AND their request is kept, as the live speechTurn path does.
-
-    // Resolved caller's record was archived mid-call → cannot serve.
-    if (state?.resolvedArchived) {
-      state.identityEscalated = true;
-      return {
-        kind: 'escalate',
-        event: { type: 'caller_identification_failed', reason: 'customer_archived' },
-        reason: 'max_retries_exceeded',
-      };
-    }
-
-    // Reschedule / cancel with no active appointment (e.g. it was just
-    // cancelled by another channel) → nothing to act on; escalate.
-    if (
-      (intent === 'reschedule_appointment' || intent === 'cancel_appointment') &&
-      this.deps.appointmentRepo
-    ) {
-      const hasActive = await this.hasActiveAppointment(session.tenantId);
-      if (!hasActive) {
-        return {
-          kind: 'escalate',
-          event: { type: 'caller_identification_failed', reason: 'stale_appointment' },
-          reason: 'max_retries_exceeded',
-        };
-      }
-    }
-
-    if (intent === 'unknown') return { kind: 'reprompt' };
-    // Conversational acknowledgments carry no action.
-    if (intent === 'confirm' || intent === 'language_switch') return { kind: 'noop' };
-    if (isLookup) return { kind: 'lookup' };
-    return { kind: 'mutation' };
-  }
-
-  /** True when the tenant has at least one non-cancelled appointment. */
-  private async hasActiveAppointment(tenantId: string): Promise<boolean> {
-    const repo = this.deps.appointmentRepo;
-    if (!repo) return true;
-    try {
-      // listWithMeta is tenant-scoped without a date filter; corpus
-      // fixtures store scheduledStart as ISO strings, which breaks
-      // findByDateRange's Date comparison.
-      const all = repo.listWithMeta
-        ? (await repo.listWithMeta(tenantId)).data
-        : await repo.findByDateRange(tenantId, new Date(0), new Date('9999-12-31T00:00:00.000Z'));
-      return all.some((a) => a.status !== 'canceled' && (a.status as string) !== 'cancelled');
-    } catch {
-      return true;
-    }
-  }
-
-  /**
-   * RV-142 — emergency handling for the text-mode driver. Speaks the 911
-   * safety line FIRST (localized to the call's language via the same
-   * `renderTtsText` catalog the FSM transports use — the Spanish translation
-   * lives in tts-copy.ts SENTENCE_CATALOG_ES), then escalates to the on-call
-   * dispatcher with reason `emergency_dispatch` so `escalation_triggered`
-   * fires for the disposition grader. Language is detected from the caller's
-   * own utterance (the driver has no live STT language gate); an accented /
-   * marker-heavy Spanish emergency therefore gets the Spanish safety line.
-   */
-  private async handleEmergency(
-    session: VoiceSession,
-    callerTranscript: string,
-    keywordLanguage?: 'en' | 'es',
-  ): Promise<string> {
-    // Prefer the matched emergency keyword's language (strongest per-call
-    // signal — a Spanish "fuga de gas" means the caller speaks Spanish even
-    // when the sentence carries no accents the generic detector keys on);
-    // fall back to the transcript heuristic.
-    const lang = keywordLanguage ?? detectLanguage(callerTranscript);
-    const safetyLine = renderTtsText(EMERGENCY_SAFETY_LINE, {}, lang);
-    await this.escalate(session, 'emergency_dispatch');
-    return safetyLine;
-  }
-
-  /**
-   * #1222 — E1 life safety, exactly as twilio-adapter.runEmergencyScan: the
-   * tenant's reviewed script wins over the embedded placeholder, the FSM's
-   * `emergency_detected{tier:'E1'}` guard produces the effects (audit "logged
-   * as E1", the Spanish 911 line for a Spanish caller, the evacuation script,
-   * revoke any booking drafted this call, alert the tenant, end the session),
-   * and the shared voice-turn processor executes them — the same executor the
-   * live transports use. No dispatcher bridge, no escalation.
-   */
-  private async handleLifeSafetyE1(
-    session: VoiceSession,
-    callerTranscript: string,
-    safety: SafetyClassification,
-  ): Promise<string> {
-    let responseScript = safety.responseScript;
-    let scriptSource: 'reviewed' | 'placeholder' = 'placeholder';
-    if (this.deps.settingsRepo) {
-      try {
-        // #1389 / O-2 — the same liveness rule as the Twilio adapter.
-        const reviewed = liveE1Script(await this.deps.settingsRepo.findByTenant(session.tenantId));
-        if (reviewed) {
-          responseScript = reviewed;
-          scriptSource = 'reviewed';
-        }
-      } catch {
-        // Placeholder script, as production falls back.
-      }
-    }
-    const effects = session.machine.dispatch({
-      type: 'emergency_detected',
-      keyword: safety.keyword,
-      utterance: callerTranscript,
-      tier: 'E1',
-      ...(responseScript ? { responseScript } : {}),
-      scriptSource,
-      ...(safety.language ? { language: safety.language } : {}),
-      ...(session.language === 'es' || session.language === 'en'
-        ? { sessionLanguage: session.language }
-        : {}),
-    });
-    await this.voiceProcessor.executeSideEffects(session, effects, session.tenantId);
-    if (session.machine.currentState === 'terminated') {
-      session.events.emit('voice-event', sessionTerminatedEvent('life_safety_e1'));
-      session.ended = true;
-    }
-    const spoken = effects
-      .filter((fx) => fx.type === 'tts_play' && typeof fx.payload.text === 'string')
-      .map((fx) => fx.payload.text as string);
-    return spoken.length > 0 ? spoken.join(' ') : renderTtsText(EMERGENCY_SAFETY_LINE, {}, 'en');
-  }
-
-  /**
-   * Dispatch a control event into the FSM and execute the resulting
-   * side effects relevant to escalation (audit, notify_oncall →
-   * escalateToHuman, tts capture, end_session). Returns the spoken text
-   * the FSM produced, if any.
-   */
-  private async fireEscalation(
-    session: VoiceSession,
-    event: CallingAgentEvent,
-    fallbackReason: string,
-  ): Promise<string | undefined> {
-    const effects = session.machine.dispatch(event);
-    let notified = false;
-    let tts: string | undefined;
-    for (const e of effects) {
-      if (e.type === 'audit_log') {
-        await this.handleAuditLog(session, e);
-      } else if (e.type === 'notify_oncall') {
-        await this.handleNotifyOncall(session, e);
-        notified = true;
-      } else if (e.type === 'tts_play' && typeof e.payload.text === 'string') {
-        tts = e.payload.text;
-      } else if (e.type === 'end_session') {
-        session.ended = true;
-      }
-    }
-    // The FSM may not emit notify_oncall (e.g. operator_request when
-    // already escalating, or a reprompt that hasn't hit the retry cap).
-    // For genuine escalations we still need escalation_triggered to fire,
-    // so call escalateToHuman directly when the FSM did not.
-    if (!notified && this.shouldForceEscalate(event)) {
-      await this.escalate(session, fallbackReason);
-    }
-    return tts;
-  }
-
-  /** True for events whose intent is always to hand off to a human. */
-  private shouldForceEscalate(event: CallingAgentEvent): boolean {
-    return (
-      event.type === 'caller_identification_failed' ||
-      event.type === 'cost_cap_exceeded' ||
-      (event.type === 'intent_classified' && event.intentType === 'operator_request')
-    );
-  }
-
-  private async handleNotifyOncall(session: VoiceSession, effect: SideEffect): Promise<void> {
-    const reasonRaw = typeof effect.payload.reason === 'string' ? effect.payload.reason : 'low_confidence';
-    await this.escalate(session, reasonRaw);
-  }
-
-  /** Invoke the real escalate-to-human skill (emits escalation_triggered). */
-  private async escalate(session: VoiceSession, reasonRaw: string): Promise<void> {
-    if (!this.deps.onCallRepo) return;
-    try {
-      await escalateToHuman({
-        tenantId: session.tenantId,
-        sessionId: session.id,
-        reason: toEscalationReason(reasonRaw),
-        channel: 'telephony',
-        onCallRepo: this.deps.onCallRepo,
-        ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
-        session,
-      });
-    } catch {
-      // Escalation failures surface via audit; never break the flow.
-    }
-  }
-
-  private async handleAuditLog(session: VoiceSession, effect: SideEffect): Promise<void> {
-    if (!this.deps.auditRepo) return;
-    const payload = effect.payload;
-    const eventType = typeof payload.eventType === 'string' ? payload.eventType : 'agent.calling.unknown';
-    try {
-      await this.deps.auditRepo.create(
-        createAuditEvent({
-          tenantId: session.tenantId,
-          actorId: this.deps.systemActorId ?? 'calling-agent',
-          actorRole: 'system',
-          eventType,
-          entityType: 'voice_session',
-          entityId: session.id,
-          correlationId: session.id,
-          metadata: payload,
-        }),
-      );
-    } catch {
-      // Audit failures must never break the call flow.
-    }
-  }
-
-  /**
-   * Find a tenant customer named in the transcript who is NOT the
-   * resolved caller — signals cross-customer access or an unverified
-   * identity claim.
-   */
-  private namedOtherCustomer(state: TurnState, transcript: string): Customer | undefined {
-    const lower = transcript.toLowerCase();
-    for (const c of state.customers) {
-      const name = (c.displayName ?? '').trim();
-      if (name.length < 3) continue;
-      if (lower.includes(name.toLowerCase()) && c.id !== state.resolvedCustomerId) {
-        return c;
-      }
-    }
-    return undefined;
-  }
-
-  /**
-   * Capture an after-hours callback request as a `callback` proposal so
-   * an operator follows up — never a live booking. Emits proposal_created.
-   */
-  private async createCallbackProposal(session: VoiceSession, transcript: string): Promise<void> {
-    try {
-      const proposal = createProposal({
-        tenantId: session.tenantId,
-        proposalType: 'callback',
-        payload: {
-          reason: 'after_hours',
-          transcript,
-          ...(session.conversationId ? { conversationId: session.conversationId } : {}),
-        },
-        summary: 'After-hours callback request',
-        createdBy: this.deps.systemActorId ?? 'system:text-mode',
-      });
-      const stored = await this.deps.proposalRepo.create(proposal);
-      session.proposalIds.push(stored.id);
-      session.events.emit('voice-event', { type: 'proposal_created', proposalId: stored.id });
-    } catch {
-      // Never break the call on a proposal-creation hiccup.
-    }
-  }
-
-  /**
-   * Route a mutation intent through voice-action-router (same handler
-   * set + entity translation production uses), threading the resolved
-   * caller identity. Emits proposal_created for any new proposal and
-   * returns a spoken confirmation.
-   */
-  private async runMutation(
-    session: VoiceSession,
-    transcript: string,
-    state: TurnState | undefined,
-  ): Promise<string> {
-    const beforeIds = new Set(
-      (await this.deps.proposalRepo.findByTenant(session.tenantId)).map((p) => p.id),
-    );
-    await this.dispatchToActionRouter(session, transcript, state?.resolvedCustomerId);
-    const after = await this.deps.proposalRepo.findByTenant(session.tenantId);
-    const fresh = after.filter((p) => !beforeIds.has(p.id));
-    if (fresh.length === 0) return 'Could you say that again?';
-    for (const proposal of fresh) {
-      session.proposalIds.push(proposal.id);
-      session.events.emit('voice-event', { type: 'proposal_created', proposalId: proposal.id });
-    }
-    const latest = fresh[fresh.length - 1];
-    return latest.proposalType === 'voice_clarification'
-      ? "I heard you, but I'm not sure what to do — could you say that another way?"
-      : buildProposalConfirmation(latest.proposalType);
-  }
-
-  /**
-   * Drive the voice-action-router worker with a synthetic queue
-   * message. This is the production code path for proposal creation
-   * — same handlers, same clarification fallback, same entity
-   * translation — without spinning up a real queue.
-   */
-  private async dispatchToActionRouter(
-    session: VoiceSession,
-    transcript: string,
-    customerId?: string,
-  ): Promise<void> {
-    const message: QueueMessage<VoiceActionRouterPayload> = {
-      id: `text-mode-${uuidv4()}`,
-      type: 'voice_action_router',
-      payload: {
-        tenantId: session.tenantId,
-        userId: this.deps.systemActorId ?? 'system:text-mode',
-        transcript,
-        ...(session.conversationId ? { conversationId: session.conversationId } : {}),
-        ...(customerId ? { customerId } : {}),
-      },
-      attempts: 0,
-      maxAttempts: 1,
-      idempotencyKey: `text-mode:${session.id}:${session.transcript.length}`,
-      createdAt: new Date().toISOString(),
-    };
-    await this.voiceActionRouter.handle(message, silentLogger());
-  }
 }
 
 /**
  * Convenience factory: lets call-sites wire a TextModeDriver from a
- * deps bundle without manually `new`-ing through the class. Useful in
- * the runner where construction shape may evolve.
+ * deps bundle without manually `new`-ing through the class.
  */
 export function createTextModeDriver(deps: TextModeDriverDeps): TextModeDriver {
   return new TextModeDriver(deps);

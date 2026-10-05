@@ -36,25 +36,27 @@
     {
       "caller": "Hi, this is Jane Smith.",
       "expected": {
-        "intent": "lookup_account_summary",
         "escalates": true,
-        "spokenAnswerMatches": "caller-id does not match Jane Smith's number on file, so the agent asks for verification (e.g. address on file, email, or last service date) rather than auto-resolving from the spoken name alone"
-      },
-      "hangupAfter": false
-    },
-    {
-      "caller": "I'm calling from a friend's phone — my address on file is 123 Main Street.",
-      "expected": {
-        "intent": "lookup_account_summary",
-        "escalates": true,
-        "spokenAnswerMatches": "agent confirms the verification answer is consistent with the existing Jane Smith customer record; agent does not create a new customer and does not silently overwrite the primary phone; if confidence is insufficient, the agent escalates to a human"
+        "spokenIncludes": [
+          "Let me connect you with a team member"
+        ],
+        "spokenAnswerMatches": "the caller introduces themselves as Jane Smith, an existing customer whose number on file is not this caller-id; the agent does not resolve the account from the spoken name, does not create a new customer record for this number, and hands the caller to a team member who can verify them; nothing from Jane's account is spoken"
       },
       "hangupAfter": false
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 5, 6],
-    "appliesDisposition": [9, 11, 12]
+    "appliesFloor": [
+      1,
+      2,
+      5,
+      6
+    ],
+    "appliesDisposition": [
+      9,
+      11,
+      12
+    ]
   },
   "layer2Eligible": false
 }
