@@ -433,6 +433,10 @@ const SNAPSHOT: Record<string, Pinned> = {
     en: "I'm having trouble pulling up your next job right now.",
     es: 'Tengo dificultades para consultar su próximo trabajo en este momento.',
   },
+  no_actor_next_job: {
+    en: "I couldn't match your number to a team member, so I can't read your next job. Let me get a person to help.",
+    es: 'No pude vincular su número con un miembro del equipo, así que no puedo leerle su próximo trabajo. Le paso con una persona para que le ayude.',
+  },
   lookup_job_reference_not_found: {
     en: 'I couldn\'t find a job matching "{{reference}}".',
     es: 'No encontré ningún trabajo que coincida con "{{reference}}".',

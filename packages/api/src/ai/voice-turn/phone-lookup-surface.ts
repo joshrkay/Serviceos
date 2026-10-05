@@ -70,9 +70,11 @@ import {
   executeLookupAnswer,
   LOOKUP_UNAVAILABLE_LINE,
   refusalSummary,
+  SELF_SCOPED_LOOKUP_INTENTS,
   type SharedLookupRepos,
   type VoiceLookupAnswerDeps,
 } from '../../workers/voice-lookup-answer';
+import { TTS_COPY } from '../agents/customer-calling/tts-copy';
 
 /** Same shape as the chat adapter's bundle — app.ts builds ONE and hands it to every surface. */
 export interface PhoneLookupDeps {
@@ -120,6 +122,13 @@ const PHONE_PUBLIC_LOOKUP_INTENTS: ReadonlySet<IntentType> = new Set<IntentType>
  */
 export const NO_ACTOR_MY_DAY_LINE =
   "I couldn't match your number to a team member, so I can't read your day. Let me get a person to help.";
+/** #1604 — the same IDENTITY outcome for `lookup_next_job` (catalog entry; the transport localizes it). */
+export const NO_ACTOR_NEXT_JOB_LINE = TTS_COPY.no_actor_next_job.en;
+
+/** The identity line for a self-scoped lookup asked with no resolved actor. */
+function noActorLine(intent: IntentType): string {
+  return intent === 'lookup_next_job' ? NO_ACTOR_NEXT_JOB_LINE : NO_ACTOR_MY_DAY_LINE;
+}
 
 const logger = createLogger({
   service: 'voice.phone-lookup-surface',
@@ -173,7 +182,7 @@ export async function answerPhoneLookup(
       !PHONE_PUBLIC_LOOKUP_INTENTS.has(intent)
     ) {
       emit(false, 'refused');
-      return intent === 'lookup_my_day' ? NO_ACTOR_MY_DAY_LINE : refusalSummary(intent);
+      return SELF_SCOPED_LOOKUP_INTENTS.has(intent) ? noActorLine(intent) : refusalSummary(intent);
     }
 
     const jobReference = str(entities, 'jobReference');
@@ -220,6 +229,10 @@ export async function answerPhoneLookup(
         ...(technicianReference ? { technicianReference } : {}),
         ...(dateTimeDescription ? { dateTimeDescription } : {}),
         ...(timezone ? { timezone } : {}),
+        // #1604 — the call language, for skills that render their answer from
+        // the id-keyed copy catalog (a dynamic sentence cannot be localized
+        // at speak time by the transport's exact-match pass).
+        ...(session.language ? { language: session.language } : {}),
         now: deps.now ? deps.now() : new Date(),
       },
       deps.answers,

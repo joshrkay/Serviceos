@@ -533,6 +533,13 @@ export const TTS_COPY = {
     en: "I'm having trouble pulling up your next job right now.",
     es: 'Tengo dificultades para consultar su próximo trabajo en este momento.', // es: new 1604
   },
+  // ai/voice-turn/phone-lookup-surface.ts — a self-scoped lookup asked with
+  // no resolved actor is an IDENTITY outcome, not an authorization one (the
+  // lookup_my_day twin is NO_ACTOR_MY_DAY_LINE).
+  no_actor_next_job: {
+    en: "I couldn't match your number to a team member, so I can't read your next job. Let me get a person to help.",
+    es: 'No pude vincular su número con un miembro del equipo, así que no puedo leerle su próximo trabajo. Le paso con una persona para que le ayude.', // es: new 1604
+  },
   // workers/voice-lookup-answer.ts — a spoken job name the resolver matched
   // nothing for (the same sentence lookup_materials / lookup_job_profit speak
   // inline today; #1601 step 2 will point them at this entry).
