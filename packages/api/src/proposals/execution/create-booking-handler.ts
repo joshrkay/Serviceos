@@ -49,7 +49,7 @@ export class CreateBookingExecutionHandler implements ExecutionHandler {
 
     const appointmentId = payload.appointmentId;
     // Defensive narrowing of the loosely-typed payload. `createBookingPayloadSchema`
-    // (Zod contract in proposals/contracts.ts) validates `appointmentId: z.string().uuid()`
+    // (Zod contract in proposals/contracts.ts) validates `appointmentId: z.guid()`
     // at proposal-creation time, but the execution boundary receives `payload` as
     // `Record<string, unknown>`, so we must re-narrow here. This is intentional — do NOT
     // remove this guard assuming the Zod schema makes it redundant.

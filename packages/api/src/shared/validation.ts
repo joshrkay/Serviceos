@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ValidationError } from './errors';
 
-export function validate<T>(schema: z.ZodSchema<T>, data: unknown): T {
+export function validate<T>(schema: z.ZodType<T>, data: unknown): T {
   const result = schema.safeParse(data);
   if (!result.success) {
     const issues = result.error.issues.map((i) => ({
@@ -13,7 +13,7 @@ export function validate<T>(schema: z.ZodSchema<T>, data: unknown): T {
   return result.data;
 }
 
-export const uuidSchema = z.string().uuid();
+export const uuidSchema = z.guid();
 export const emailSchema = z.string().email();
 export const nonEmptyString = z.string().min(1);
 

@@ -29,7 +29,7 @@ export const RECORD_REFUND_METHODS = ['cash', 'check', 'card_external', 'other']
 export type RecordRefundMethod = (typeof RECORD_REFUND_METHODS)[number];
 
 export const recordRefundPayloadSchema = z.object({
-  invoiceId: z.string().uuid(),
+  invoiceId: z.guid(),
   amountCents: z.number().int().positive(),
   method: z.enum(RECORD_REFUND_METHODS),
   reason: z.string().max(1000).optional(),

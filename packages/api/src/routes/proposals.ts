@@ -46,7 +46,7 @@ import type { EstimateRepository } from '../estimates/estimate';
 // plenty of headroom for the realistic batch sizes without letting a
 // scripted caller flood approval audit rows.
 const approveBatchBodySchema = z.object({
-  proposalIds: z.array(z.string().uuid()).min(1).max(50),
+  proposalIds: z.array(z.guid()).min(1).max(50),
 });
 
 // #1139 (row 9.9) — POST /:id/undo body. Absent scope keeps the approval-undo

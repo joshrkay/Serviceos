@@ -25,7 +25,7 @@ export const adoptEntityAliasPayloadSchema = sharedAdoptEntityAliasPayloadSchema
     for (const key of Object.keys(value)) {
       if (!ADOPT_ENTITY_ALIAS_KEYS.has(key)) {
         ctx.addIssue({
-          code: z.ZodIssueCode.unrecognized_keys,
+          code: 'unrecognized_keys',
           keys: [key],
           path: [],
           message: `Unrecognized key: "${key}"`,

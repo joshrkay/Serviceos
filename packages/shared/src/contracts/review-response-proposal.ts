@@ -56,21 +56,21 @@ export const reviewResponsePublicComponentSchema = z.object({
 });
 
 export const reviewResponsePrivateComponentSchema = z.object({
-  customerId: z.string().uuid(),
+  customerId: z.guid(),
   channel: z.enum(PRIVATE_FOLLOWUP_CHANNELS),
   body: z.string().min(1).max(PRIVATE_FOLLOWUP_MAX_CHARS),
   approved: z.boolean(),
 });
 
 export const reviewResponseCreditComponentSchema = z.object({
-  customerId: z.string().uuid(),
+  customerId: z.guid(),
   // Integer cents; > 0 (`null` outer field encodes "no credit").
   amountCents: z.number().int().positive(),
   approved: z.boolean(),
 });
 
 export const reviewResponseProposalPayloadSchema = z.object({
-  reviewId: z.string().uuid(),
+  reviewId: z.guid(),
   classification: z.enum(REVIEW_CLASSIFICATIONS),
   publicResponse: reviewResponsePublicComponentSchema,
   privateFollowUp: reviewResponsePrivateComponentSchema.nullable(),

@@ -27,7 +27,7 @@ export const INTERACTION_TOOL_HOOKS = [
 ] as const;
 export type InteractionToolHook = (typeof INTERACTION_TOOL_HOOKS)[number];
 
-export const proposalTypeSchema = z.nativeEnum(ProposalType);
+export const proposalTypeSchema = z.enum(ProposalType);
 
 export const voiceAssistantContractSchema = z.object({
   id: z.string().min(1),

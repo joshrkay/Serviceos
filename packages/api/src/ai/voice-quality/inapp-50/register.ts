@@ -41,7 +41,7 @@ const llmTurnSchema = z
   .object({
     intentType: z.string().min(1),
     confidence: z.number().min(0).max(1),
-    extractedEntities: z.record(z.unknown()).default({}),
+    extractedEntities: z.record(z.string(), z.unknown()).default({}),
     /**
      * KEYED SCRIPTING — the operator turn this entry answers, matched
      * case-insensitively as a substring of the classify call's user message.
@@ -77,7 +77,7 @@ const expectSchema = z
      * fixture key ("customer.garcia") is resolved through the world's
      * `fixtureIds` before comparison; anything else compares literally.
      */
-    payloadContains: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
+    payloadContains: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
     /** Payload keys that must merely be present and non-empty. */
     payloadHas: z.array(z.string().min(1)).optional(),
     missingFieldsContains: z.array(z.string().min(1)).optional(),
@@ -90,7 +90,7 @@ const expectSchema = z
     forbidSideEffects: z.array(z.string().min(1)).optional(),
     allowedStates: z.array(z.string().min(1)).optional(),
     /** 1-based turn index → the state the adapter must report after it. */
-    stateAfterTurn: z.record(z.string().min(1)).optional(),
+    stateAfterTurn: z.record(z.string(), z.string().min(1)).optional(),
     /** ISO weekday (1=Mon … 7=Sun) of payload.scheduledStart in tenant tz. */
     scheduledStartWeekday: z.number().int().min(1).max(7).optional(),
     requireClarificationTurn: z.boolean().optional(),
@@ -224,7 +224,7 @@ const harnessSeedsSchema = z
   .object({
     tenantTimezone: z.string().min(1),
     catalogItems: z.array(catalogItemSeedSchema),
-    extraCustomers: z.array(z.record(z.unknown())).default([]),
+    extraCustomers: z.array(z.record(z.string(), z.unknown())).default([]),
     todayAppointment: todayAppointmentSeedSchema.optional(),
     notes: z.string().optional(),
   })
@@ -238,7 +238,7 @@ const registerSchema = z
     description: z.string().min(1),
     fixtureCatalog: z.string().min(1),
     harnessSeeds: harnessSeedsSchema,
-    severityRubric: z.record(z.string()),
+    severityRubric: z.record(z.string(), z.string()),
     clusters: z.array(z.string().min(1)).min(1),
     cases: z.array(caseSchema).length(50),
   })

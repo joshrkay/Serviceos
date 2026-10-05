@@ -33,7 +33,7 @@ const availabilityQuerySchema = z.object({
   from: z.string().regex(DATE_RE, 'from must be YYYY-MM-DD'),
   to: z.string().regex(DATE_RE, 'to must be YYYY-MM-DD'),
   durationMin: z.coerce.number().int().min(15).max(480).default(60),
-  technicianId: z.string().uuid().optional(),
+  technicianId: z.guid().optional(),
 });
 
 /** Fallback tz when the tenant has no settings row yet — matches public-booking. */

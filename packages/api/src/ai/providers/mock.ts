@@ -470,7 +470,7 @@ export function scriptHermeticResponse(request: LLMRequest): string {
     // `validVisionJson` in mms-estimate-task.test.ts): it is ONLY ever
     // attached later by `groundLineItemPricing` on a catalog match. A
     // hardcoded `catalogItemId: null` broke `draft_estimate`'s Zod contract
-    // (`catalogItemId: z.string().uuid().optional()` rejects an explicit
+    // (`catalogItemId: z.guid().optional()` rejects an explicit
     // `null`) for any tenant with no matching catalog item, independent of
     // the description text (#1154 item 1).
     return JSON.stringify({

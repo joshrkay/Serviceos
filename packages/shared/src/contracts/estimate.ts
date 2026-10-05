@@ -11,9 +11,9 @@ import { customerSummarySchema } from './customer.js';
  * ./money.ts. Over-the-wire dates are ISO strings.
  */
 export const estimateSchema = z.object({
-  id: z.string().uuid(),
-  tenantId: z.string().uuid(),
-  jobId: z.string().uuid(),
+  id: z.guid(),
+  tenantId: z.guid(),
+  jobId: z.guid(),
   estimateNumber: z.string(),
   status: estimateStatusSchema,
   lineItems: z.array(lineItemSchema),

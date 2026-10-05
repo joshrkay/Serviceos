@@ -752,16 +752,16 @@ const prodEnvSchema = z
   .object({
     ...baseEnvShape,
     DATABASE_URL: z
-      .string({ required_error: 'Required' })
+      .string({ error: (iss) => (iss.input === undefined ? 'Required' : undefined) })
       .url({ message: 'must be a valid URL (e.g. postgres://user:pass@host/db)' }),
     CLERK_SECRET_KEY: z
-      .string({ required_error: 'Required' })
+      .string({ error: (iss) => (iss.input === undefined ? 'Required' : undefined) })
       .min(1, { message: 'Required' }),
     CLERK_PUBLISHABLE_KEY: z
-      .string({ required_error: 'Required' })
+      .string({ error: (iss) => (iss.input === undefined ? 'Required' : undefined) })
       .min(1, { message: 'Required' }),
     CORS_ORIGIN: z
-      .string({ required_error: 'Required' })
+      .string({ error: (iss) => (iss.input === undefined ? 'Required' : undefined) })
       .min(1, { message: 'Required' })
       .refine((v) => v !== 'true', {
         message: "Cannot be 'true' in production. Set a specific origin.",

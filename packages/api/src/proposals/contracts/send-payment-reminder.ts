@@ -34,7 +34,7 @@ import { z } from 'zod';
  * loop can resolve-or-ask on it.
  */
 export const sendPaymentReminderPayloadSchema = z.object({
-  invoiceId: z.string().uuid(),
+  invoiceId: z.guid(),
   invoiceReference: z.string().optional(),
   /** Stable dunning-step key (`reminderStepKey`), e.g. "3:sms". */
   stepKey: z.string().min(1),

@@ -1,4 +1,6 @@
 import { z } from 'zod';
+// #1561 — zod-3 issue wording for every contract message (side effect).
+import './zod-messages';
 import { accountTypeSchema, catalogUnitSchema } from '@ai-service-os/shared';
 import { CUSTOMER_SOURCES } from '../customers/customer';
 
@@ -10,7 +12,7 @@ export const healthResponseSchema = z.object({
   version: z.string(),
   environment: z.string(),
   timestamp: z.string(),
-  checks: z.record(z.object({
+  checks: z.record(z.string(), z.object({
     status: z.enum(['ok', 'degraded', 'down']),
     message: z.string().optional(),
   })).optional(),
@@ -21,7 +23,7 @@ export type HealthResponse = z.infer<typeof healthResponseSchema>;
 export const errorResponseSchema = z.object({
   error: z.string(),
   message: z.string(),
-  details: z.record(z.unknown()).optional(),
+  details: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type ErrorResponse = z.infer<typeof errorResponseSchema>;
@@ -45,12 +47,12 @@ export const createConversationSchema = z.object({
 });
 
 export const createMessageSchema = z.object({
-  conversationId: z.string().uuid(),
+  conversationId: z.guid(),
   messageType: z.enum(['text', 'transcript', 'system_event', 'note', 'clarification', 'proposal']),
   content: z.string().optional(),
-  fileId: z.string().uuid().optional(),
+  fileId: z.guid().optional(),
   source: z.string().optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const uploadFileSchema = z.object({
@@ -64,31 +66,31 @@ export const uploadFileSchema = z.object({
 export const createAiRunSchema = z.object({
   taskType: z.string().min(1),
   model: z.string().min(1),
-  promptVersionId: z.string().uuid().optional(),
-  inputSnapshot: z.record(z.unknown()),
+  promptVersionId: z.guid().optional(),
+  inputSnapshot: z.record(z.string(), z.unknown()),
 });
 
 export const createPromptVersionSchema = z.object({
   taskType: z.string().min(1),
   template: z.string().min(1),
   model: z.string().min(1),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const createDocumentRevisionSchema = z.object({
   documentType: z.enum(['estimate', 'invoice', 'proposal']),
   documentId: z.string().min(1),
-  snapshot: z.record(z.unknown()),
+  snapshot: z.record(z.string(), z.unknown()),
   source: z.enum(['manual', 'ai_generated', 'ai_revised']),
-  aiRunId: z.string().uuid().optional(),
-  metadata: z.record(z.unknown()).optional(),
+  aiRunId: z.guid().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const createDiffAnalysisSchema = z.object({
   documentType: z.string().min(1),
   documentId: z.string().min(1),
-  fromRevisionId: z.string().uuid(),
-  toRevisionId: z.string().uuid(),
+  fromRevisionId: z.guid(),
+  toRevisionId: z.guid(),
 });
 
 export const triggerEvaluationSchema = z.object({
@@ -99,10 +101,10 @@ export const triggerEvaluationSchema = z.object({
 });
 
 export const estimateLinkInputSchema = z.object({
-  conversationId: z.string().uuid(),
-  messageId: z.string().uuid().optional(),
-  proposalRevisionId: z.string().uuid(),
-  estimateId: z.string().uuid(),
+  conversationId: z.guid(),
+  messageId: z.guid().optional(),
+  proposalRevisionId: z.guid(),
+  estimateId: z.guid(),
 });
 
 
@@ -240,7 +242,7 @@ export const createJobSchema = z.object({
    * originally created from (e.g., a returning customer who came in via
    * a new ad campaign).
    */
-  originatingLeadId: z.string().uuid().optional(),
+  originatingLeadId: z.guid().optional(),
   /**
    * Optional direct scheduling. When `scheduledStart` is present the job is
    * scheduled in the same request: a linked appointment (+ optional primary
@@ -250,7 +252,7 @@ export const createJobSchema = z.object({
    * only (times persist UTC).
    */
   scheduledStart: z.string().datetime().optional(),
-  technicianId: z.string().uuid().optional(),
+  technicianId: z.guid().optional(),
   durationMin: z.number().int().positive().optional(),
   timezone: z.string().min(1).optional(),
 });
@@ -262,7 +264,7 @@ export const createJobSchema = z.object({
 export const scheduleJobSchema = z
   .object({
     scheduledStart: z.string().datetime(),
-    technicianId: z.string().uuid().optional(),
+    technicianId: z.guid().optional(),
     durationMin: z.number().int().positive().optional(),
     timezone: z.string().min(1).optional(),
   })
@@ -275,7 +277,7 @@ export const scheduleJobSchema = z
  */
 export const reassignJobSchema = z
   .object({
-    technicianId: z.string().uuid().nullable(),
+    technicianId: z.guid().nullable(),
   })
   .strict();
 
@@ -375,7 +377,7 @@ export const createAppointmentSchema = z.object({
    * appointment_assignments path (double-booking refused with 409) in the
    * same request; the job's assignedTechnicianId is derived from it.
    */
-  technicianId: z.string().uuid().optional(),
+  technicianId: z.guid().optional(),
 });
 
 /**
@@ -386,7 +388,7 @@ export const createAppointmentSchema = z.object({
  */
 export const setAppointmentTechnicianSchema = z
   .object({
-    technicianId: z.string().uuid().nullable(),
+    technicianId: z.guid().nullable(),
   })
   .strict();
 
@@ -405,7 +407,7 @@ export const delayAcknowledgmentSchema = z.object({
 }).superRefine((value, ctx) => {
   if (value.isRunningBehind && value.delayMinutes === undefined) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: 'custom',
       path: ['delayMinutes'],
       message: 'delayMinutes is required when isRunningBehind is true',
     });
@@ -413,7 +415,7 @@ export const delayAcknowledgmentSchema = z.object({
 
   if (!value.isRunningBehind && value.delayMinutes !== undefined) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: 'custom',
       path: ['delayMinutes'],
       message: 'delayMinutes is not allowed when isRunningBehind is false',
     });
@@ -436,7 +438,7 @@ export const createCatalogItemSchema = z.object({
   unit: z.enum(['each', 'hour', 'sq ft', 'per lb', 'per gal']),
   unitPriceCents: z.number().int().nonnegative(),
   // EE-4 — hero photo, a file id from the upload flow. `null` clears it.
-  imageFileId: z.string().uuid().nullish(),
+  imageFileId: z.guid().nullish(),
 });
 
 export const updateCatalogItemSchema = createCatalogItemSchema.partial();
@@ -532,10 +534,10 @@ export const updateSettingsSchema = z.object({
   defaultPaymentTermDays: z.number().int().min(0).max(365).optional(),
   // #1288 — tenant default tax rate (basis points; 825 = 8.25%).
   defaultTaxRateBps: z.number().int().min(0).max(10000).optional(),
-  terminologyPreferences: z.record(z.string()).optional(),
+  terminologyPreferences: z.record(z.string(), z.string()).optional(),
   // Phase 12 — supervisor backup + unsupervised proposal routing.
   // `backupSupervisorUserId: null` explicitly clears the backup.
-  backupSupervisorUserId: z.string().uuid().nullable().optional(),
+  backupSupervisorUserId: z.guid().nullable().optional(),
   unsupervisedProposalRouting: z
     .enum(['queue_and_sms', 'queue_only', 'escalate_to_oncall'])
     .optional(),
@@ -628,7 +630,7 @@ export const updateSettingsSchema = z.object({
   autoDetectLanguage: z.boolean().optional(),
   ttsVoiceEn: ttsVoiceField,
   ttsVoiceEs: ttsVoiceField,
-  spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
+  spanishDispatcherUserIds: z.array(z.guid()).optional(),
   // Voice-parity (migration 152) — E.164 warm-transfer line. Normalized to
   // E.164 (or null to clear) at the route boundary, mirroring ownerPhone.
   transferNumber: z.string().max(40).nullable().optional(),
@@ -677,7 +679,7 @@ export const updateSettingsSchema = z.object({
   if (val.depositStrategy === 'percentage') {
     if (val.depositPercentageBps == null) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: 'custom',
         message: 'depositPercentageBps is required when depositStrategy is "percentage"',
         path: ['depositPercentageBps'],
       });
@@ -685,7 +687,7 @@ export const updateSettingsSchema = z.object({
   } else if (val.depositStrategy === 'fixed') {
     if (val.depositFixedCents == null) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: 'custom',
         message: 'depositFixedCents is required when depositStrategy is "fixed"',
         path: ['depositFixedCents'],
       });
@@ -699,7 +701,7 @@ export const updateSettingsSchema = z.object({
   // Clearing the cap on its own is still allowed (it is a separate act).
   if (val.autonomousCloseEnabled === true && val.autonomousCloseMaxCents === null) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: 'custom',
       message:
         'autonomousCloseMaxCents cannot be cleared in the same request that enables autonomousCloseEnabled',
       path: ['autonomousCloseMaxCents'],
@@ -845,7 +847,7 @@ export const createCampaignSchema = z
     bodyText: z.string().min(1).max(20000),
     bodyHtml: z.string().max(50000).nullable().optional(),
     segmentTag: z.string().min(1).max(50).nullable().optional(),
-    segmentGroupId: z.string().uuid().nullable().optional(),
+    segmentGroupId: z.guid().nullable().optional(),
   })
   .refine((v) => !(v.segmentTag && v.segmentGroupId), {
     message: 'target a tag or a group, not both',

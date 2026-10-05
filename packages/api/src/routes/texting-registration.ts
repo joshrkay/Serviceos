@@ -33,7 +33,7 @@ const usPhone = z.string().transform((value, ctx) => {
   try {
     return normalizeMobileE164(value);
   } catch {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Enter a valid US phone number' });
+    ctx.addIssue({ code: 'custom', message: 'Enter a valid US phone number' });
     return z.NEVER;
   }
 });

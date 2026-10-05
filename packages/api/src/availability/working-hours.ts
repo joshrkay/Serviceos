@@ -25,8 +25,8 @@ export interface CreateWorkingHoursInput {
 const TIME_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export const workingHoursSchema = z.object({
-  tenantId: z.string().uuid(),
-  technicianId: z.string().uuid(),
+  tenantId: z.guid(),
+  technicianId: z.guid(),
   dayOfWeek: z.number().int().min(0).max(6),
   startTime: z.string().regex(TIME_REGEX, 'Must be in HH:mm format'),
   endTime: z.string().regex(TIME_REGEX, 'Must be in HH:mm format'),

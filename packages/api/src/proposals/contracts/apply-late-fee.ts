@@ -33,7 +33,7 @@ import { z } from 'zod';
  * can resolve-or-ask on it.
  */
 export const applyLateFeePayloadSchema = z.object({
-  invoiceId: z.string().uuid(),
+  invoiceId: z.guid(),
   invoiceReference: z.string().optional(),
   /** Late fee to apply, in integer cents. */
   feeCents: z.number().int().positive(),

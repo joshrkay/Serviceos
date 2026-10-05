@@ -22,8 +22,8 @@ export interface CreateUnavailableBlockInput {
 }
 
 export const unavailableBlockSchema = z.object({
-  tenantId: z.string().uuid(),
-  technicianId: z.string().uuid(),
+  tenantId: z.guid(),
+  technicianId: z.guid(),
   startTime: z.date(),
   endTime: z.date(),
   reason: z.string().optional(),

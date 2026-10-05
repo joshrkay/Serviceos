@@ -13,7 +13,7 @@ import { z } from 'zod';
 export const addNotePayloadSchema = z
   .object({
     targetKind: z.enum(['job', 'customer', 'invoice', 'estimate', 'appointment']),
-    targetId: z.string().uuid().optional(),
+    targetId: z.guid().optional(),
     targetReference: z.string().optional(),
     body: z.string().min(1),
   })

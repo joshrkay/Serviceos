@@ -48,7 +48,7 @@ interface CreateVoiceRecordingBody {
 const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 
 const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
-const JOB_ID_SCHEMA = z.string().uuid();
+const JOB_ID_SCHEMA = z.guid();
 
 const ALLOWED_MIME_TYPES = new Set([
   'audio/webm', 'audio/ogg', 'audio/wav', 'audio/mpeg',

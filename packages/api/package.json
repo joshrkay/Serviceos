@@ -70,7 +70,7 @@
     "twilio": "^6.1.2",
     "uuid": "^14.0.2",
     "ws": "^8.21.3",
-    "zod": "^3.22.0"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@testcontainers/postgresql": "^11.13.0",

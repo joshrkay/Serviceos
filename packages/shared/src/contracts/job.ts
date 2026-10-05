@@ -24,10 +24,10 @@ export const jobPrioritySchema = z.enum(['low', 'normal', 'high', 'urgent']);
 export type JobPriorityValue = z.infer<typeof jobPrioritySchema>;
 
 export const jobSchema = z.object({
-  id: z.string().uuid(),
-  tenantId: z.string().uuid(),
-  customerId: z.string().uuid(),
-  locationId: z.string().uuid(),
+  id: z.guid(),
+  tenantId: z.guid(),
+  customerId: z.guid(),
+  locationId: z.guid(),
   jobNumber: z.string(),
   summary: z.string(),
   problemDescription: z.string().optional(),

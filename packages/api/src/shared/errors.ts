@@ -1,4 +1,6 @@
-import { ZodError } from 'zod';
+import { ZodError, flattenError } from 'zod';
+// #1561 — installs the zod-3-wording global error map (side effect).
+import './zod-messages';
 
 export class AppError extends Error {
   constructor(
@@ -65,7 +67,7 @@ export function toErrorResponse(err: unknown): { statusCode: number; body: Recor
       body: {
         error: 'VALIDATION_ERROR',
         message: 'Invalid request data',
-        details: { fields: err.flatten().fieldErrors },
+        details: { fields: flattenError(err).fieldErrors },
       },
     };
   }

@@ -39,7 +39,7 @@ const conditionExpressionSchema = z.string().min(1).superRefine((value, ctx) => 
   const unknown = findUnknownAtoms(value);
   if (unknown.length === 0) return;
   ctx.addIssue({
-    code: z.ZodIssueCode.custom,
+    code: 'custom',
     message:
       `Unknown atom(s) in condition: ${unknown.join(', ')}. ` +
       describeAtomGrammar(),
@@ -95,7 +95,7 @@ export const triageRulesSchema = z.object({
       urgency_tiers: z.array(z.string()).optional(),
     })
     .optional(),
-  trigger_words: z.record(tierKeyEnum, triggerWordTierSchema),
+  trigger_words: z.partialRecord(tierKeyEnum, triggerWordTierSchema),
   multi_fixture_rule: multiFixtureRuleSchema.optional(),
   seasonal_adjustments: z.array(seasonalAdjustmentSchema).optional(),
   // The remaining sections (`triage_questions`, `job_type_intake_questions`)

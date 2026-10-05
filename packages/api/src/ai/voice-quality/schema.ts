@@ -38,7 +38,7 @@ export const VoiceQualityScriptSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/),
   bucket: z.enum(VOICE_QUALITY_BUCKETS),
   fixtures: z.object({
-    tenant: z.record(z.unknown()),
+    tenant: z.record(z.string(), z.unknown()),
     customers: z.array(z.unknown()),
     appointments: z.array(z.unknown()).optional(),
     invoices: z.array(z.unknown()).optional(),
@@ -97,7 +97,7 @@ export const VoiceQualityScriptSchema = z.object({
          * one the Layer 1 mock replays, so cassettes are unaffected.
          */
         alsoAcceptedIntents: z.array(z.string()).optional(),
-        slots: z.record(z.unknown()).optional(),
+        slots: z.record(z.string(), z.unknown()).optional(),
         proposalType: z.string().optional(),
         escalates: z.boolean().optional(),
         spokenAnswerMatches: z.string().optional(),

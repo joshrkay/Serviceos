@@ -53,7 +53,7 @@ export type SendCustomerMessageChannel = (typeof SEND_CUSTOMER_MESSAGE_CHANNELS)
 export const SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH = 1000;
 
 export const sendCustomerMessagePayloadSchema = z.object({
-  customerId: z.string().uuid(),
+  customerId: z.guid(),
   channel: z.enum(SEND_CUSTOMER_MESSAGE_CHANNELS),
   body: z.string().trim().min(1).max(SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH),
   subject: z.string().trim().min(1).max(200).optional(),

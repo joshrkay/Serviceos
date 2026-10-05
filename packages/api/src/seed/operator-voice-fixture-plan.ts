@@ -135,7 +135,7 @@ const operatorVoiceFixtureCatalogSchema = z
       ].map((name) => name.toLocaleLowerCase());
       if (names.some((name) => forbiddenCustomers.has(name))) {
         context.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           path: ['customers', index, 'displayName'],
           message: `${customer.displayName} must not be pre-seeded because the corpus tests creation`,
         });
@@ -144,7 +144,7 @@ const operatorVoiceFixtureCatalogSchema = z
       const computedDisplayName = `${customer.firstName} ${customer.lastName}`.trim();
       if (computedDisplayName !== customer.displayName) {
         context.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           path: ['customers', index, 'displayName'],
           message: 'displayName must match the production customer name calculation',
         });
@@ -166,7 +166,7 @@ const operatorVoiceFixtureCatalogSchema = z
       for (const fixture of group) {
         if (seenKeys.has(fixture.key)) {
           context.addIssue({
-            code: z.ZodIssueCode.custom,
+            code: 'custom',
             message: `duplicate fixture key ${fixture.key}`,
           });
         }
@@ -182,7 +182,7 @@ const operatorVoiceFixtureCatalogSchema = z
     for (const location of catalog.locations) {
       if (!customerKeys.has(location.customerKey)) {
         context.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: `${location.key} references unknown customer ${location.customerKey}`,
         });
       }
@@ -191,13 +191,13 @@ const operatorVoiceFixtureCatalogSchema = z
       const location = locations.get(job.locationKey);
       if (!customerKeys.has(job.customerKey)) {
         context.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: `${job.key} references unknown customer ${job.customerKey}`,
         });
       }
       if (!location || location.customerKey !== job.customerKey) {
         context.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: `${job.key} must reference a location owned by ${job.customerKey}`,
         });
       }
@@ -205,7 +205,7 @@ const operatorVoiceFixtureCatalogSchema = z
     for (const estimate of catalog.estimates) {
       if (!jobs.has(estimate.jobKey)) {
         context.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: `${estimate.key} references unknown job ${estimate.jobKey}`,
         });
       }
@@ -213,7 +213,7 @@ const operatorVoiceFixtureCatalogSchema = z
     for (const invoice of catalog.invoices) {
       if (!jobs.has(invoice.jobKey)) {
         context.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: `${invoice.key} references unknown job ${invoice.jobKey}`,
         });
       }
@@ -221,7 +221,7 @@ const operatorVoiceFixtureCatalogSchema = z
         const estimate = estimates.get(invoice.estimateKey);
         if (!estimate || estimate.jobKey !== invoice.jobKey) {
           context.addIssue({
-            code: z.ZodIssueCode.custom,
+            code: 'custom',
             message: `${invoice.key} must reference an estimate on ${invoice.jobKey}`,
           });
         }
@@ -230,13 +230,13 @@ const operatorVoiceFixtureCatalogSchema = z
     for (const appointment of catalog.appointments) {
       if (!jobs.has(appointment.jobKey)) {
         context.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: `${appointment.key} references unknown job ${appointment.jobKey}`,
         });
       }
       if (Date.parse(appointment.scheduledEnd) <= Date.parse(appointment.scheduledStart)) {
         context.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: `${appointment.key} scheduledEnd must be after scheduledStart`,
         });
       }
@@ -248,7 +248,7 @@ const operatorVoiceFixtureCatalogSchema = z
     ] as const) {
       if (new Set(numbers).size !== numbers.length) {
         context.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: `${kind} numbers must be unique within the QA tenant`,
         });
       }
