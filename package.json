@@ -101,7 +101,7 @@
   },
   "devDependencies": {
     "@clerk/testing": "^2.2.42",
-    "@eslint/js": "^9.39.5",
+    "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.63.0",
     "@testcontainers/postgresql": "^11.13.0",
     "@testing-library/dom": "^10.4.0",
