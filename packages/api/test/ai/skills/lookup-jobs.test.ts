@@ -226,3 +226,21 @@ describe('P11-001 — lookupJobs skill', () => {
     });
   });
 });
+
+// #1613 — Layer 2 run 37323734649 (lookup-jobs-known-customer): the record's
+// status is `new`; the reply said "just opened" and the judge heard a
+// different status. The reply speaks the status word the record has.
+describe('#1613 — a job status is spoken as the record has it', () => {
+  it('a new job is "new", not "just opened"', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    await createJob(
+      { tenantId: 'tenant-1', customerId: 'cust-1', locationId: 'loc-1', summary: 'Annual maintenance', createdBy: 'u-1' },
+      jobRepo,
+    );
+
+    const result = await lookupJobs({ tenantId: 'tenant-1', customerId: 'cust-1' }, { jobRepo });
+
+    expect(result.summary).toMatch(/Annual maintenance, currently new\.$/);
+    expect(result.summary).not.toContain('just opened');
+  });
+});

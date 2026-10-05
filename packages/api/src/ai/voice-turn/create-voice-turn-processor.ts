@@ -364,12 +364,13 @@ function mapNotifyReasonToSkillReason(
     return 'caller_requested';
   }
   if (reason === 'max_retries_exceeded') return 'max_retries_exceeded';
-  // #1600 (4) — an identity hand-off (identify_caller_threw, #1587's
+  // #1600 (4) / #1616 — an identity hand-off (identify_caller_threw, #1587's
   // claims_existing_customer / customer_archived) is an unresolved caller
-  // identity, the category the in-app adapter already files it under
-  // (`toEscalationReason('caller_identity_unresolved')`), not "the AI had
-  // low confidence".
-  if (reason === 'caller_identification_failed') return 'max_retries_exceeded';
+  // identity, not "the AI had low confidence". The skill records it under
+  // D-042 (4)'s category (`max_retries_exceeded`, the one in-app files
+  // `caller_identity_unresolved` under) and names the identity problem to
+  // the dispatcher.
+  if (reason === 'caller_identification_failed') return 'identity_unverified';
   return 'low_confidence';
 }
 
@@ -2143,6 +2144,48 @@ export function createVoiceTurnProcessor(
   }
 
   /**
+   * #1613 — a caller the line identified by caller-ID IS a customer record;
+   * the name the recogniser heard for them is not (Layer 2 run 37323734649
+   * read Jane Smith's booking back "for James Smith"). When such a caller
+   * names a customer on the customer line, that is themselves (D-036 (1).3:
+   * identity outranks words — an S1 caller only ever hears their own
+   * account; naming another customer is refused upstream, #1600): the
+   * resolver is pinned to their record so the heard name is never looked up
+   * against the tenant's other customers, and the record's display name is
+   * what the readback speaks and the draft carries. Customer line only: the
+   * owner and a trusted operator name OTHER customers, and a record this
+   * call's ask_caller turn just created is only as good as what was heard.
+   * The heard name never touches the record. Returns the record name, or
+   * undefined when the turn is not an identified caller naming a customer.
+   */
+  const identifiedCallerNameByRecord = new WeakMap<VoiceSession, { customerId: string; name: string | undefined }>();
+  async function identifiedCallerRecordName(
+    session: VoiceSession,
+    tenantId: string,
+    entities: Record<string, unknown>,
+  ): Promise<string | undefined> {
+    if (classifierProfileForSession(session) !== 'caller') return undefined;
+    const customerId = session.customerId;
+    if (!customerId || session.callerCreatedThisCall === true) return undefined;
+    const heard = typeof entities.customerName === 'string' ? entities.customerName.trim() : '';
+    if (!heard || !deps.customerRepo) return undefined;
+    const cached = identifiedCallerNameByRecord.get(session);
+    let name = cached && cached.customerId === customerId ? cached.name : undefined;
+    if (!cached || cached.customerId !== customerId) {
+      const record = await deps.customerRepo.findById(tenantId, customerId).catch(() => null);
+      name = record?.displayName.trim() || undefined;
+      identifiedCallerNameByRecord.set(session, { customerId, name });
+    }
+    if (name && name !== heard) {
+      logger.info('speechTurn: identified caller heard under another name; reading back the record', {
+        sessionId: session.id,
+        customerId,
+      });
+    }
+    return name;
+  }
+
+  /**
    * #1118 — map a classified turn's resolution to its FSM event. Only the
    * AMBIGUOUS outcome changes: it becomes `entity_ambiguous` (the FSM asks
    * and parks the candidates) instead of being folded into `entity_resolved`
@@ -2157,7 +2200,14 @@ export function createVoiceTurnProcessor(
     entities: Record<string, unknown>,
     pinnedRefs?: Record<string, string>,
   ): Promise<CallingAgentEvent> {
-    const resolution = await runTurnResolution(session, tenantId, intent, entities, pinnedRefs);
+    // #1613 — an identified caller's record is pinned for the resolver (no
+    // lookup of the heard name) and named in the refs; `pinnedRefs` below
+    // keeps its own meaning (a disambiguation pick) for the not-found rule.
+    const recordName = await identifiedCallerRecordName(session, tenantId, entities);
+    const resolverPins =
+      recordName && session.customerId ? { ...(pinnedRefs ?? {}), customerId: session.customerId } : pinnedRefs;
+    const resolution = await runTurnResolution(session, tenantId, intent, entities, resolverPins);
+    if (recordName) resolution.refs.customerName = recordName;
     const pending = pendingAmbiguityFrom(resolution);
     if (pending) {
       return {
