@@ -7409,7 +7409,7 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
-  // #1595 / D-039 (owner decision 2026-10-04) — AI answering becomes the
+  // #1595 / D-040 (owner decision 2026-10-04) — AI answering becomes the
   // after-hours default; voicemail is the explicit opt-out.
   //
   // `after_hours_voice_mode` rides the escalation_settings JSONB. The OLD

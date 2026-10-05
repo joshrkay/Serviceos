@@ -1471,7 +1471,55 @@ row. Sole-proprietor (no-EIN) brands are out of scope.
   onboarding phone step for every tenant, make the claim/retry routes refuse, and re-trigger
   provisioning — a regression in voice onboarding to express a texting status.
 
-## D-039 — AI answering is the after-hours default; voicemail is the opt-out
+## D-039 — The voice capability flags ship default-ON; the tenant's override is the opt-out
+
+**Date:** 2026-10-04
+**Status:** Accepted (issue #1588's own recommended option; the 2026-10-04 functional audit)
+**Resolves:** #1588
+
+**Context.** Two built voice features were dormant in production. `voice_extended_intents` gates
+whether the classifier *offers* the owner-extended lookups (`lookup_day_overview`, `lookup_digest`,
+`lookup_pending_items`, `lookup_crew_schedule`, `lookup_timesheets`) and the complaint/negotiation
+sections; `app.ts` read it default-false through `isFlagEnabledForTenant` and nothing ever seeded
+it, so no live owner line, in-app voice session or recorded memo ever heard them — while chat set
+`extendedIntents: true` unconditionally. Multi-action decomposition (`decomposeTranscript` →
+`processChain`, #883) was accepted by the memo router as `multiActionEnabled` and never passed from
+`app.ts`, so "add 2 hours labor and a capacitor to the Rivera invoice and send it" silently kept one
+action. `git log -S multiActionEnabled` and this log record no decision to leave either off.
+
+**Decision.**
+1. Both flags resolve through one resolver, `flags/voice-flags.ts#createVoiceFlagResolver`, with
+   the repo's default-ON order (U3, `isEnabledForTenantWithDefault`): a `tenant_feature_flags`
+   override row decides first (`enabled=false` is the owner's opt-out); else a platform
+   `_feature_flags` row decides (the kill switch, environments/tenantIds honoured); else ON.
+   Tenant-override-wins keeps the shipped precedent recorded in `docs/audit/blocked-on-josh.md`
+   (#1011 §E3). Without a pool (dev, in-memory tests) only platform → ON apply.
+2. No migration and no seeding. A seeded `tenant_feature_flags` row would read on the owner's
+   Capabilities surface as "you turned this on" (#1011's `getTenantOverride` distinguishes the
+   owner's decision from the platform default) and would still leave every new tenant off.
+3. The memo router receives `multiActionEnabled` (`voice_multi_action`, new key). The owner line
+   and in-app voice keep their existing `extendedIntentsEnabled` wiring, now default-on. Multi-action
+   stays a memo-surface capability: the live-call FSM and the in-app adapter have no decomposition
+   path, and adding one is a separate change.
+4. The Layer 1 harness is unchanged on the classifier side (D-026: the flag gates what is offered,
+   the actor + allowlist gate what is answered); the new owner-line script
+   `lookup-day-overview-owner-line` measures the shipped phone lookup dispatch.
+
+**Consequences.** Every tenant hears the owner-extended lookups on the owner line, in in-app voice
+and on the memo, and a two-action memo mints a linked chain whose head is supervisor-reviewed
+(PRD-v5 §5 as amended). Turning either off is one `tenant_feature_flags` row (`enabled=false`) or
+one platform `_feature_flags` row. Cost: the memo router now pays one `decompose_transcript` call
+per message on every tenant that has not opted out.
+
+**Alternatives rejected.**
+- *Seed `tenant_feature_flags` for existing tenants by migration + insert on tenant creation.*
+  Rejected (point 2): misreports the owner's decision on the Capabilities surface and duplicates a
+  default the repo already knows how to express.
+- *Flip the Layer 1 text-mode driver to stamp `extendedIntents` on owner-line scripts, mirroring
+  production.* Deferred: it would change the classifier prompt (and every cassette hash) for every
+  owner-line script, and #1587 owns that file this week.
+
+## D-040 — AI answering is the after-hours default; voicemail is the opt-out
 
 **Date:** 2026-10-04
 **Status:** Accepted (owner decision 2026-10-04, issue #1595)

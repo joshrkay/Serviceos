@@ -329,7 +329,9 @@ export interface VoiceActionRouterDeps {
    */
   now?: () => Date;
   /**
-   * Multi-action chaining feature gate. When this resolves truthy for a
+   * Multi-action chaining feature gate (#1588 — production passes the
+   * tenant flag `voice_multi_action`, default-ON; before that this dep had
+   * no call site in app.ts). When this resolves truthy for a
    * tenant, the router first runs `decomposeTranscript`; a multi-action
    * utterance produces an ORDERED chain of linked proposals instead of a
    * single one. When absent or falsy, the router uses the existing
@@ -392,9 +394,11 @@ export interface VoiceActionRouterDeps {
     'findById' | 'findByTenant'
   >;
   /**
-   * Phase-2 Track A — per-tenant opt-in for the extended operator intents
+   * Phase-2 Track A — per-tenant flag for the extended operator intents
    * (lookup_day_overview / lookup_digest / lookup_pending_items /
-   * complaint). Threaded as `ClassifyContext.extendedIntents` so the
+   * complaint). #1588: `voice_extended_intents` is default-ON and the
+   * tenant's override row is the opt-out (`flags/voice-flags.ts`).
+   * Threaded as `ClassifyContext.extendedIntents` so the
    * classifier appends the extra prompt section as a SEPARATE system
    * message and enables the deterministic phrase short-circuits. When
    * absent or falsy the classifier prompt stays byte-identical to the

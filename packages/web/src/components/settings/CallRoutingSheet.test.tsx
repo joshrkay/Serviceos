@@ -1,5 +1,5 @@
 /**
- * CallRoutingSheet — after-hours control (#1595 / D-039).
+ * CallRoutingSheet — after-hours control (#1595 / D-040).
  *
  * AI answering is the after-hours default; voicemail is the explicit opt-out.
  * A tenant whose settings never set the mode must see AI answering selected,

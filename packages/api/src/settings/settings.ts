@@ -52,7 +52,7 @@ export interface EscalationSettings {
   /**
    * B6 — inbound behavior when outside business hours.
    *
-   * #1595 / D-039 (owner decision 2026-10-04): `'ai_answering'` is the
+   * #1595 / D-040 (owner decision 2026-10-04): `'ai_answering'` is the
    * default — the AI answers after hours, runs the E1/E2 emergency path and
    * books a callback for the morning. `'voicemail'` is the explicit opt-out.
    * An ABSENT key means "use the default"; migration 304 stripped the
@@ -113,7 +113,7 @@ export const DEFAULT_ESCALATION_SETTINGS: EscalationSettings = {
   trigger_keyword_frustration: true,
   trigger_llm_sentiment: false,
   llm_sentiment_threshold: 0.7,
-  // #1595 / D-039 — AI answering after hours by default; voicemail is opt-out.
+  // #1595 / D-040 — AI answering after hours by default; voicemail is opt-out.
   after_hours_voice_mode: 'ai_answering',
 };
 

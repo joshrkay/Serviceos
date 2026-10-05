@@ -542,7 +542,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         const settings = await settingsRepo.findByTenant(tenantId);
         res.json({
           businessHours: row.rows[0]?.business_hours ?? {},
-          // #1595 / D-039 — report the mode the phone will actually use: the
+          // #1595 / D-040 — report the mode the phone will actually use: the
           // same resolved default (ai_answering) the /voice webhook applies,
           // never a hardcoded fallback that can drift from it.
           afterHoursVoiceMode: resolveEscalationSettings(settings).after_hours_voice_mode,

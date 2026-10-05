@@ -148,6 +148,21 @@ its declaration opts out, with a reason.
 | `edit_proposal` | chat | D-025 scopes voice approval to a transport-identified owner LINE; in-app answers "Tap the card to approve — I don't take approvals by voice here yet." |
 <!-- END generated: surface-opt-outs -->
 
+### Multi-action sentences on the recorded memo (#1588, D-039)
+
+One memo can carry several actions: "add 2 hours labor and a capacitor to the Rivera
+invoice and send it" is decomposed (`ai/orchestration/transcript-decomposer.ts`, one
+extra LLM call per message) into an ORDERED chain of linked proposals
+(`workers/voice-action-router.ts#processChain`): here an `update_invoice` at chain index 0
+and a `send_invoice` whose `payload.invoiceId` is the symbolic ref `$ref:chain[0].invoiceId`,
+resolved to the parent's result entity at execution. Dependents land as `draft` so they can
+never run ahead of their parent; the chain head is supervisor-reviewed (PRD-v5 §5 as
+amended). The gate is the tenant flag `voice_multi_action`, **ON by default** through
+`createVoiceFlagResolver` (tenant override → platform row → ON) — it had been built in #883
+and never passed from `app.ts`, so every live memo silently kept one action. Chat splits
+compound asks the same way (#1499/#1506, `routes/assistant.ts`); the live phone and in-app
+voice have no decomposition path (one action per turn).
+
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
 > name via the entity resolver (`kind: 'technician'`, pg_trgm over the `users`
@@ -1323,7 +1338,7 @@ Notes per type (prose — the list above is the generated fact):
 - `create_booking` — deferred (customer-call FSM path). Expected phrasing: "Book this caller for Thursday".
 - `adopt_entity_alias` — U4: alias-learning lifecycle mints this when an operator resolves an ambiguous reference; owner-only approval, never voice-reachable.
 - `onboarding_tenant_settings`, `onboarding_service_category`, `onboarding_estimate_template`, `onboarding_team_member`, `onboarding_schedule` — B1.19: emitted by the onboarding FSM (`ai/orchestration/onboarding-conversation.ts`), a separate conversation surface from the voice intent classifier — never mapped through `INTENT_TO_PROPOSAL_TYPE`, so by design there is no spoken on-ramp for these. Execution handlers registered in `proposals/execution/onboarding-handlers.ts`; `onboarding_team_member` always reports `handler_not_wired` (no persistence target — see that file's doc comment).
-- `callback` — Task 14 (2026-08-07 tradesperson plan): `CallbackExecutionHandler` (`proposals/execution/callback-handler.ts`) — deliberately dep-free, registered unconditionally, always `isFullyWired()`. Fixes the pre-existing bug where an approved `callback` proposal had NO execution handler at all and threw `HANDLER_NOT_FOUND`, retrying into terminal `execution_failed`. A no-op-plus-audit is the correct semantic, not a gap: `callback` mutates nothing (surface.ts), its payload is already durably captured on the proposal row at DRAFT time — 4 production files / 5 `createProposal`/`buildProposal` call sites / 7 total content branches resolving to `proposalType: 'callback'` (see `proposals/execution/callback-handler.ts`'s class doc for the counting rule): negotiation-task.ts (2 direct calls, ALLOW branch + the enriched/default branch), complaint-task.ts (1 direct call, companion owner-followup), create-voice-turn-processor.ts (1 call, live-call negotiation FSM path, 2 of 3 evaluation-outcome branches), and sms/negotiation/inbound-negotiation-handler.ts (1 call, inbound-SMS negotiation guardrail, 2 of 3 branches — the only site stamping `callerPhone`); text-mode-driver.ts's after-hours branch also mints one but is the VQ-007 voice-quality harness, excluded from every count above (production after-hours is routes/telephony.ts's `afterHours` branch: since D-039 / #1595 it hands the call to the AI by default — so the live turn pipeline's after-hours callback path is what runs — and sends the caller to voicemail TwiML, drafting no `callback` proposal, only for a tenant that opted into `after_hours_voice_mode = 'voicemail'`) — and the separate `call_me_back_tasks` operational-task system (voice/call-me-back/call-me-back.ts) is created directly by its own independent call sites (warm-transfer failure, E1 safety follow-up, patched-through voicemail) — none of which is gated on a `callback` proposal's approval. `callback` IS S1-reachable (the after-hours caller path, surface.ts's allowlist) even though it has no `INTENT_TO_PROPOSAL_TYPE` on-ramp.
+- `callback` — Task 14 (2026-08-07 tradesperson plan): `CallbackExecutionHandler` (`proposals/execution/callback-handler.ts`) — deliberately dep-free, registered unconditionally, always `isFullyWired()`. Fixes the pre-existing bug where an approved `callback` proposal had NO execution handler at all and threw `HANDLER_NOT_FOUND`, retrying into terminal `execution_failed`. A no-op-plus-audit is the correct semantic, not a gap: `callback` mutates nothing (surface.ts), its payload is already durably captured on the proposal row at DRAFT time — 4 production files / 5 `createProposal`/`buildProposal` call sites / 7 total content branches resolving to `proposalType: 'callback'` (see `proposals/execution/callback-handler.ts`'s class doc for the counting rule): negotiation-task.ts (2 direct calls, ALLOW branch + the enriched/default branch), complaint-task.ts (1 direct call, companion owner-followup), create-voice-turn-processor.ts (1 call, live-call negotiation FSM path, 2 of 3 evaluation-outcome branches), and sms/negotiation/inbound-negotiation-handler.ts (1 call, inbound-SMS negotiation guardrail, 2 of 3 branches — the only site stamping `callerPhone`); text-mode-driver.ts's after-hours branch also mints one but is the VQ-007 voice-quality harness, excluded from every count above (production after-hours is routes/telephony.ts's `afterHours` branch: since D-040 / #1595 it hands the call to the AI by default — so the live turn pipeline's after-hours callback path is what runs — and sends the caller to voicemail TwiML, drafting no `callback` proposal, only for a tenant that opted into `after_hours_voice_mode = 'voicemail'`) — and the separate `call_me_back_tasks` operational-task system (voice/call-me-back/call-me-back.ts) is created directly by its own independent call sites (warm-transfer failure, E1 safety follow-up, patched-through voicemail) — none of which is gated on a `callback` proposal's approval. `callback` IS S1-reachable (the after-hours caller path, surface.ts's allowlist) even though it has no `INTENT_TO_PROPOSAL_TYPE` on-ramp.
 
 (`create_invoice_schedule` and `review_response_proposal` graduated to
 section A in taxonomy 1.2.0 — U2/U3 of the agent build wave. `update_catalog_item`
@@ -1360,6 +1375,18 @@ approves by screen/SMS tap).
 <!-- END generated: lookups -->
 
 Each is routed to a read-only skill, never to a proposal (correct by design).
+
+> **Owner-extended lookups are ON by default (#1588, D-039).** `lookup_day_overview`,
+> `lookup_digest`, `lookup_pending_items`, `lookup_crew_schedule` and `lookup_timesheets`
+> (plus the complaint/negotiation sections) are *offered* to the classifier only when the
+> session carries `extendedIntents`, which the phone (`establishInboundSession`), in-app voice
+> (`startSession`) and the memo router derive from `ownerSession && voice_extended_intents`.
+> Until 2026-10-04 that tenant flag was read default-false and never seeded, so no live
+> tenant ever heard these by voice while chat set them unconditionally. It now resolves
+> through `flags/voice-flags.ts#createVoiceFlagResolver`: tenant override → platform
+> `_feature_flags` row → **ON**. Opt a tenant out with a `tenant_feature_flags` row
+> (`voice_extended_intents`, `enabled=false`); a platform row with `enabled=false` is the
+> kill switch. Layer 1 corpus: `01-happy-lookups/lookup-day-overview-owner-line`.
 
 > **Dispatch is ONE switch behind THREE surface adapters (#866), with FOUR
 > callers (#869).** Classification

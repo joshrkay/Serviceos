@@ -1,6 +1,6 @@
 /**
  * Postgres integration — migration 304 after-hours voice-mode backfill
- * (#1595 / D-039: AI answering becomes the after-hours default).
+ * (#1595 / D-040: AI answering becomes the after-hours default).
  *
  * `after_hours_voice_mode` lives in the `tenant_settings.escalation_settings`
  * JSONB. The OLD default ('voicemail') was never written on its own — it was

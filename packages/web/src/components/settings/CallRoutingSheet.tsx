@@ -23,7 +23,7 @@ const DEFAULTS: EscalationSettings = {
   trigger_keyword_frustration: true,
   trigger_llm_sentiment: false,
   llm_sentiment_threshold: 0.7,
-  // #1595 / D-039 — AI answering after hours by default; voicemail is opt-out.
+  // #1595 / D-040 — AI answering after hours by default; voicemail is opt-out.
   // Mirrors DEFAULT_ESCALATION_SETTINGS in packages/api/src/settings/settings.ts.
   after_hours_voice_mode: 'ai_answering',
 };

@@ -97,7 +97,7 @@ describe('#1223 — after-hours voicemail carries StirVerstat onto the signed ca
         publicBaseUrl: PUBLIC_BASE_URL,
         resolveTenantId: () => 'tenant-1',
         pool: pool as never,
-        // #1595 / D-039 — AI answering is now the after-hours default, so the
+        // #1595 / D-040 — AI answering is now the after-hours default, so the
         // voicemail branch this test exercises needs the explicit opt-out.
         settingsRepo: {
           findByTenant: async () => ({ escalationSettings: { after_hours_voice_mode: 'voicemail' } }),

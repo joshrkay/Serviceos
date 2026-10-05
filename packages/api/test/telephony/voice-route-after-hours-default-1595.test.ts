@@ -1,7 +1,7 @@
 /**
  * #1595 — AI answering is the after-hours default; voicemail is opt-out.
  *
- * Owner decision 2026-10-04 (D-039): a tradesperson's after-hours emergency
+ * Owner decision 2026-10-04 (D-040): a tradesperson's after-hours emergency
  * must never land in a dead voicemail. The /voice webhook used to answer
  * every after-hours call with plain voicemail TwiML unless the tenant had
  * opted INTO `after_hours_voice_mode = 'ai_answering'`. These tests pin the

@@ -1,5 +1,5 @@
 /**
- * IdentityStep — business-hours helper copy (#1595 / D-039).
+ * IdentityStep — business-hours helper copy (#1595 / D-040).
  *
  * AI answering is the after-hours default, so the onboarding copy must not
  * tell a new owner that off-hours calls go to voicemail.

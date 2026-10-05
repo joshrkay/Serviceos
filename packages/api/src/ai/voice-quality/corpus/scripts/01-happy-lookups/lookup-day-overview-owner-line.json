@@ -1,0 +1,50 @@
+{
+  "id": "lookup-day-overview-owner-line",
+  "bucket": "01-happy-lookups",
+  "callerId": "+15555550505",
+  "callerIdBlocked": false,
+  "callerIsOwner": true,
+  "fixtures": {
+    "tenant": {
+      "id": "t_01_lookup_day_overview",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_01_day_overview_owner",
+        "tenantId": "t_01_lookup_day_overview",
+        "firstName": "Sam",
+        "lastName": "Owner",
+        "displayName": "Sam Owner",
+        "companyName": null,
+        "primaryPhone": "+15555550505",
+        "secondaryPhone": null,
+        "email": "sam.overview@testhvac.example",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "What's my day look like?",
+      "expected": {
+        "intent": "lookup_day_overview",
+        "spokenAnswerMatches": "Your day is clear — no appointments today and nothing is waiting on you.",
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": false
+}

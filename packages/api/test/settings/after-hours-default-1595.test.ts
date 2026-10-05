@@ -1,5 +1,5 @@
 /**
- * #1595 / D-039 — the settings service resolves `after_hours_voice_mode` to
+ * #1595 / D-040 — the settings service resolves `after_hours_voice_mode` to
  * 'ai_answering' whenever a tenant has not chosen otherwise. This is the one
  * read every caller of the after-hours fork goes through
  * (`resolveEscalationSettings`), so the default is pinned here at the

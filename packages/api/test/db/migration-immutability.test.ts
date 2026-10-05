@@ -576,7 +576,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['302_idempotency_keys', '731622d3be77734b7b1bbb31ea6a15ab07f6787d689d4f236cba7349ad7f8eb4'],
   // #1564 — per-tenant A2P 10DLC registration (a2p_registrations).
   ['303_a2p_registrations', '1b48b89415acfeadd19479956a6d47f759b5153b3f5d76eb410af6e2ccc17a9f'],
-  // #1595 / D-039 — strip the 'voicemail' the old after-hours default materialised
+  // #1595 / D-040 — strip the 'voicemail' the old after-hours default materialised
   // into escalation_settings for tenants who never saved the Call Routing sheet.
   ['304_after_hours_voice_mode_default_backfill', '67993fc9f5a05c5c1ac7d63a37fb94c723234aacaad24ff9a337c92cbbb4af0c'],
 ];
