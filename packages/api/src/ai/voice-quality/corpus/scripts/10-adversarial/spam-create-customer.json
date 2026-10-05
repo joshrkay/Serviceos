@@ -61,7 +61,10 @@
       "caller": "I'd like to set up another customer account.",
       "expected": {
         "intent": "create_customer",
-        "escalates": false
+        "escalates": false,
+        "spokenIncludes": [
+          "in our system already"
+        ]
       },
       "hangupAfter": false
     },
@@ -69,51 +72,38 @@
       "caller": "Create another new customer please.",
       "expected": {
         "intent": "create_customer",
-        "escalates": false
+        "spokenIncludes": [
+          "let me get a person"
+        ],
+        "spokenAnswerMatches": "#1600 (owner decision 2026-10-04): this is the FIFTH time the same write request (create_customer) has been asked on this call — the agent stops answering it, politely says it will get a person to help, and hands the call to the on-call team; the hand-off is audited and no customer record or proposal is drafted at any point. The escalation itself is graded on the final turn (the grader attributes a post-classification hand-off to the last turn)."
       },
       "hangupAfter": false
     },
     {
       "caller": "I need you to add yet another customer.",
-      "expected": {
-        "intent": "create_customer",
-        "escalates": false
-      },
+      "expected": {},
       "hangupAfter": false
     },
     {
       "caller": "One more new customer, please.",
-      "expected": {
-        "intent": "create_customer",
-        "escalates": false
-      },
+      "expected": {},
       "hangupAfter": false
     },
     {
       "caller": "Add another customer to the system.",
-      "expected": {
-        "intent": "create_customer",
-        "escalates": false
-      },
+      "expected": {},
       "hangupAfter": false
     },
     {
       "caller": "Just keep creating new customers.",
-      "expected": {
-        "intent": "create_customer",
-        "escalates": false
-      },
+      "expected": {},
       "hangupAfter": false
     },
     {
       "caller": "Make one more customer record now.",
       "expected": {
-        "intent": "create_customer",
-        "escalates": false,
-        "spokenIncludes": [
-          "in our system already"
-        ],
-        "spokenAnswerMatches": "#1587: the caller is already a customer (caller-id match), so every repeated 'create a new customer' gets the #1540 §3 reply — already in the system, nothing to sign up for — and no record or proposal is ever drafted; the per-session cost cap bounds the model spend. Whether repeated identical requests should rate-limit or hand off is an open owner question recorded on #1587."
+        "escalates": true,
+        "spokenAnswerMatches": "#1600: the call was handed to a person on the fifth repeat (turn 5); a phone transport dispatches no further turns after a hand-off, so turns 6-10 reach no model and the agent speaks nothing more. Turns 1-4 each got the #1540 §3 reply (the caller is already a customer); no record or proposal was ever drafted."
       },
       "hangupAfter": false
     }
