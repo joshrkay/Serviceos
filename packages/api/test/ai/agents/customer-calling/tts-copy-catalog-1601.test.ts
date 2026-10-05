@@ -433,6 +433,11 @@ const SNAPSHOT: Record<string, Pinned> = {
     en: "I'm having trouble pulling up your next job right now.",
     es: 'Tengo dificultades para consultar su próximo trabajo en este momento.',
   },
+  lookup_job_reference_not_found: {
+    en: 'I couldn\'t find a job matching "{{reference}}".',
+    es: 'No encontré ningún trabajo que coincida con "{{reference}}".',
+    sample: { vars: { reference: 'the Nguyen job' }, en: 'I couldn\'t find a job matching "the Nguyen job".' },
+  },
   next_job_latest_note: {
     en: 'Latest note: {{note}}',
     es: 'Última nota: {{note}}',

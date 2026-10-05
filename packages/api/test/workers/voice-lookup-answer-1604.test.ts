@@ -227,6 +227,22 @@ describe('executeLookupAnswer — lookup_next_job (#1604)', () => {
     expect(execution).toEqual({ kind: 'failed', error: 'could not match you to a technician' });
   });
 
+  it('a spoken job name the resolver could NOT match is refused by name — never silently answered with the next job', async () => {
+    const w = await world();
+
+    const execution = await executeLookupAnswer(
+      { ...base, actorId: MIKE_CLERK, jobReference: 'the Nguyen job' },
+      w.deps,
+      w.shared,
+    );
+
+    expect(execution.kind).toBe('answer');
+    if (execution.kind !== 'answer') throw new Error('unreachable');
+    expect(execution.answer.result).toBe('none');
+    expect(execution.answer.summary).toBe('I couldn\'t find a job matching "the Nguyen job".');
+    expect(JSON.stringify(execution)).not.toContain('Keller');
+  });
+
   it('the session language reaches the skill: an es caller hears the Spanish readback', async () => {
     const w = await world();
 

@@ -533,6 +533,13 @@ export const TTS_COPY = {
     en: "I'm having trouble pulling up your next job right now.",
     es: 'Tengo dificultades para consultar su próximo trabajo en este momento.', // es: new 1604
   },
+  // workers/voice-lookup-answer.ts — a spoken job name the resolver matched
+  // nothing for (the same sentence lookup_materials / lookup_job_profit speak
+  // inline today; #1601 step 2 will point them at this entry).
+  lookup_job_reference_not_found: {
+    en: 'I couldn\'t find a job matching "{{reference}}".',
+    es: 'No encontré ningún trabajo que coincida con "{{reference}}".', // es: new 1604
+  },
   next_job_latest_note: {
     en: 'Latest note: {{note}}',
     es: 'Última nota: {{note}}', // es: new 1604

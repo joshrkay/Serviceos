@@ -104,7 +104,7 @@ import { formatHours } from '../ai/skills/spoken-format';
 import { resolveSpokenDay } from '../ai/scheduling/resolve-datetime';
 import type { LocationRepository } from '../locations/location';
 import type { NoteRepository } from '../notes/note';
-import type { SessionLanguage } from '../ai/agents/customer-calling/tts-copy';
+import { ttsCopy, type SessionLanguage } from '../ai/agents/customer-calling/tts-copy';
 
 /**
  * Permission-gated lookups: the DB-authoritative permission the ASKING
@@ -1033,6 +1033,21 @@ export async function executeLookupAnswer(
       case 'lookup_next_job': {
         if (!shared.appointmentRepo || !shared.jobRepo || !shared.customerRepo || !deps.locationRepo) {
           return { kind: 'unsupported' };
+        }
+        // A job WAS named but the resolver matched nothing: say so by name —
+        // never silently answer with the next job instead (the same posture
+        // lookup_materials / lookup_job_profit take above).
+        if (!input.jobId && input.jobReference) {
+          return {
+            kind: 'answer',
+            answer: buildAnswer(
+              intent,
+              'none',
+              ttsCopy('lookup_job_reference_not_found', input.language ?? 'en', {
+                reference: input.jobReference,
+              }),
+            ),
+          };
         }
         const scope = await resolveScheduleScope(deps, shared, tenantId, input.actorId);
         if ('kind' in scope) return scope;
