@@ -221,7 +221,13 @@ export function promptBuildersNamingCallerText(roots: readonly string[]): string
 // is a pure pass-through decorator — it forwards the classifier's request to
 // the production gateway unchanged and only reads token usage off the
 // response. It assembles no prompt and adds no caller text.
-const PINNED_GATEWAY_SENDER_COUNT = 49;
+// 49 → 50 (#1602): voice/quality/grade-voice-session.ts wraps the production
+// gateway in a tenant-stamping / cost-counting decorator and hands it to the
+// EXISTING Layer 2 graders (ai/voice-quality/graders/perceived-completion.ts,
+// disposition-llm.ts), which own the judge prompts. It assembles no prompt of
+// its own; the caller transcript it reads from voice_sessions reaches the
+// model only through those graders' already-reviewed prompt builders.
+const PINNED_GATEWAY_SENDER_COUNT = 50;
 
 type Classification =
   | 'fenced'

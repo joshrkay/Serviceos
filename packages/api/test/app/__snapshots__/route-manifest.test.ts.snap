@@ -3,15 +3,15 @@
 exports[`createApp route manifest > matches the committed layer counts 1`] = `
 {
   "byExposure": {
-    "authenticated": 87,
+    "authenticated": 88,
     "open": 23,
     "public-token": 12,
     "webhook": 10,
   },
   "middleware": 32,
-  "routers": 86,
+  "routers": 87,
   "routes": 14,
-  "total": 132,
+  "total": 133,
 }
 `;
 
@@ -447,7 +447,10 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /stream-token
          └─ POST /transcribe
          └─ POST /tts
-108  authenticated use    /api/onboarding    [router: router]
+108  authenticated use    /api/voice/quality    [router: router]
+         └─ GET /
+         └─ POST /grade
+109  authenticated use    /api/onboarding    [router: router]
          └─ GET /billing/plans
          └─ GET /operator-hours
          └─ GET /phone
@@ -467,26 +470,26 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ PUT /identity
          └─ PUT /operator-hours
          └─ PUT /voice
-109  authenticated use    /api/onboarding/conversation    [router: router]
+110  authenticated use    /api/onboarding/conversation    [router: router]
          └─ POST /turn
-110  authenticated use    /api/technician-location    [router: router]
+111  authenticated use    /api/technician-location    [router: router]
          └─ POST /
-111  authenticated use    /api/catalog/items    [router: router]
+112  authenticated use    /api/catalog/items    [router: router]
          └─ DELETE /:id
          └─ GET /
          └─ POST /
          └─ PUT /:id
-112  authenticated use    /api/files    [router: router]
+113  authenticated use    /api/files    [router: router]
          └─ GET /:id
          └─ POST /:id/verify
          └─ POST /upload
          └─ POST /upload-url
-113  authenticated use    /api/assistant    [router: router]
+114  authenticated use    /api/assistant    [router: router]
          └─ POST /chat
-114  authenticated use    /api/dispatch    [router: router]
+115  authenticated use    /api/dispatch    [router: router]
          └─ GET /availability
          └─ POST /check-feasibility
-115  authenticated use    /api/proposals    [router: router]
+116  authenticated use    /api/proposals    [router: router]
          └─ GET /
          └─ GET /:id
          └─ GET /inbox
@@ -499,7 +502,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /:id/undo
          └─ POST /approve-batch
          └─ PUT /:id
-116  authenticated use    /api/agreements    [router: router]
+117  authenticated use    /api/agreements    [router: router]
          └─ GET /
          └─ GET /:id
          └─ PATCH /:id
@@ -508,33 +511,33 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /:id/pause
          └─ POST /:id/resume
          └─ POST /:id/run-now
-117  authenticated use    /api/maintenance-contracts    [router: router]
+118  authenticated use    /api/maintenance-contracts    [router: router]
          └─ GET /
          └─ GET /:id
          └─ POST /
-118  authenticated use    /api/voice/sessions    [router: router]
+119  authenticated use    /api/voice/sessions    [router: router]
          └─ DELETE /:id
          └─ GET /:id/events
          └─ GET /active
          └─ POST /
          └─ POST /:id/input
-119  authenticated use    /api/escalations    [router: router]
-         └─ POST /:escalationId/outcome
 120  authenticated use    /api/escalations    [router: router]
+         └─ POST /:escalationId/outcome
+121  authenticated use    /api/escalations    [router: router]
          └─ GET /events
-121  authenticated use    /api/admin/feature-flags    [router: router]
+122  authenticated use    /api/admin/feature-flags    [router: router]
          └─ DELETE /:name
          └─ GET /
          └─ GET /:name
          └─ PUT /:name
-122  open          use    /    [middleware: <anonymous>]
 123  open          use    /    [middleware: <anonymous>]
-124  open          GET    /features    [route: handle]
-125  open          GET    /pricing    [route: handle]
-126  open          GET    /about    [route: handle]
-127  open          GET    /download    [route: handle]
-128  open          GET    /privacy    [route: handle]
-129  open          GET    /terms    [route: handle]
-130  open          use    /api|/public|/webhooks    [middleware: <anonymous>]
-131  open          GET    /{*splat}    [route: handle]"
+124  open          use    /    [middleware: <anonymous>]
+125  open          GET    /features    [route: handle]
+126  open          GET    /pricing    [route: handle]
+127  open          GET    /about    [route: handle]
+128  open          GET    /download    [route: handle]
+129  open          GET    /privacy    [route: handle]
+130  open          GET    /terms    [route: handle]
+131  open          use    /api|/public|/webhooks    [middleware: <anonymous>]
+132  open          GET    /{*splat}    [route: handle]"
 `;

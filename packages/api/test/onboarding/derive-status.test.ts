@@ -299,6 +299,22 @@ describe('deriveOnboardingStatus', () => {
     });
   });
 
+  // #1605 — the owner's test call (now let through the not_live gate) ends,
+  // which both records the inbound call (test_call → done) AND auto-flips
+  // voice_agent_live_at (maybeAutoGoLiveOnInboundEnd). Pin that the derived
+  // status reports both facts together, not just the step.
+  it('owner test call ended: test_call done AND voiceAgentLive true', () => {
+    const r = deriveOnboardingStatus(billingDoneFacts({
+      aiConfigPresent: true,
+      aiVerificationStatus: 'passed',
+      inboundCallCount: 1,
+      voiceAgentLiveAt: new Date('2026-10-04T12:00:00.000Z'),
+    }));
+    expect(r.steps[6]).toEqual({ id: 'test_call', status: 'done' });
+    expect(r.voiceAgentLive).toBe(true);
+    expect(r.isComplete).toBe(true);
+  });
+
   it('test call skipped (ai_check passed): test_call=skipped, complete=true', () => {
     const r = deriveOnboardingStatus(billingDoneFacts({
       subscription: { stripeSubscriptionId: 'sub_1', status: 'active' },

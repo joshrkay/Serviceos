@@ -61,6 +61,33 @@ test.describe('settings — mobile viewport', () => {
     }
   });
 
+  test('the call-quality card fits 320px and its grading trigger clears 44px (#1602)', async ({
+    page,
+  }) => {
+    await page.goto('/settings');
+    if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+    await dismissWhatsNewModal(page);
+
+    // Owner-only card (GET /api/voice/quality is tenant:manage). On a fresh
+    // stack nothing has been graded, so the empty headline is what renders;
+    // a seeded stack shows the pass-rate line instead — either way the card
+    // must be there for the owner the dev-auth project signs in as.
+    const headline = page.getByText(/No calls graded yet|graded calls passed in the last 7 days/);
+    await expect(headline.first()).toBeVisible();
+
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    await expectNoHorizontalOverflow(scrollWidth, clientWidth);
+
+    const trigger = page.getByRole('button', { name: /grade a sample now/i });
+    await expect(trigger).toBeVisible();
+    const box = await trigger.boundingBox();
+    expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(clientWidth + 1);
+  });
+
   test('the Service-area sheet opens, fits 320px, and its inputs clear 44px (#874)', async ({
     page,
   }) => {

@@ -128,6 +128,7 @@ import { createBundleRouter } from './routes/bundles';
 import { createQualityRouter } from './routes/quality';
 import { createPackActivationRouter } from './routes/pack-activation';
 import { createVoiceRouter } from './routes/voice';
+import { createVoiceQualityRouter } from './routes/voice-quality';
 import { createVoiceGate } from './voice/voice-gate';
 import { checkAndFireUpgradeNudge } from './voice/check-upgrade-nudge';
 import { checkUsageAlerts } from './billing/usage-alerts';
@@ -188,6 +189,14 @@ import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitorin
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
 import { recordSweepSuccess, sweepLastSuccessMs } from './monitoring/sweep-heartbeats';
 import { PgPlatformSloRepository } from './monitoring/pg-platform-slo';
+// #1602 — production call-quality grading (nightly sampler + owner surface).
+import { createVoiceSessionGrader } from './voice/quality/grade-voice-session';
+import { InMemoryVoiceSessionGradeStore } from './voice/quality/voice-session-grade-store';
+import { PgVoiceSessionGradeStore } from './voice/quality/pg-voice-session-grade-store';
+import {
+  createVoiceQualityGradingWorker,
+  VOICE_QUALITY_GRADING_INTERVAL_MS,
+} from './workers/voice-quality-grading-worker';
 import {
   runSloMonitor,
   SLO_MONITOR_INTERVAL_MS,
@@ -2423,6 +2432,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // #1575 — orphaned Twilio number sweeper (retries releasing
     // provider_data.orphanedNumberSid after a change-number). DISTINCT key.
     orphanedNumberSweep: 590031,
+    // #1602 — nightly production call-quality grading sampler. DISTINCT key.
+    voiceQualityGrading: 590032,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -2537,6 +2548,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
               return null;
             }
           },
+          // #1602 — 7-day production graded pass rate (voice_session_grades,
+          // cross-tenant). In-memory dev: zero counts, below the sample floor.
+          getGradedPassRate: (windowStart) =>
+            platformSloRepo
+              ? platformSloRepo.gradedPassRate(windowStart)
+              : Promise.resolve({ total: 0, passed: 0 }),
           alert: alertOperator,
           thresholds: {
             callCompletionMin: config.SLO_CALL_COMPLETION_MIN,
@@ -2545,6 +2562,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             sweepLagMin: config.SLO_SWEEP_LAG_MIN,
             turnLatencyP95Ms: config.SLO_TURN_LATENCY_P95_MS,
             turnLatencyMinSample: config.SLO_TURN_LATENCY_MIN_SAMPLE,
+            gradedPassRateMin: config.SLO_VOICE_GRADED_PASS_MIN,
+            gradedPassRateMinSample: config.SLO_VOICE_GRADED_MIN_SAMPLE,
           },
           logger: sloLogger,
         });
@@ -5957,6 +5976,62 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       ...(inAppTtsProvider ? { tts: inAppTtsProvider } : {}),
     }),
   );
+
+  // #1602 — production call quality. A nightly, leader-locked sampler grades
+  // a bounded share of each tenant's ended inbound calls with the EXISTING
+  // Layer 2 graders (transcripts only; consent-gated on the recording
+  // disclosure; owner / test calls skipped via the call_usage_events billable
+  // rule; per-tenant sample rate + hard daily cap from tenant_settings). The
+  // owner reads 7/30-day pass rates + the last graded calls at
+  // GET /api/voice/quality and can trigger a pass with POST …/grade. The
+  // platform SLO monitor (above) pages when the 7-day graded pass rate drops
+  // under the Layer 2 gate. In-memory dev: empty store, nothing to grade.
+  const voiceQualityStore = pool
+    ? new PgVoiceSessionGradeStore(pool)
+    : new InMemoryVoiceSessionGradeStore();
+  const voiceSessionGrader = createVoiceSessionGrader({
+    store: voiceQualityStore,
+    gateway: llmGateway,
+  });
+  const voiceQualityLogger = createLogger({
+    service: 'voice-quality-grading',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  const voiceQualityWorker = createVoiceQualityGradingWorker({
+    store: voiceQualityStore,
+    grader: voiceSessionGrader,
+    listTenantIds: () => listAllTenantIds(pool),
+    logger: voiceQualityLogger,
+    nightlyHourUtc: config.VOICE_QUALITY_NIGHTLY_HOUR_UTC,
+  });
+  app.use(
+    '/api/voice/quality',
+    createVoiceQualityRouter({
+      store: voiceQualityStore,
+      grader: voiceSessionGrader,
+      worker: voiceQualityWorker,
+      auditRepo,
+      logger: voiceQualityLogger,
+      passRateMin: config.SLO_VOICE_GRADED_PASS_MIN,
+    }),
+  );
+  if (shouldRunWorkers) {
+    let voiceQualityInFlight = false;
+    registerInterval(setInterval(() => {
+      if (voiceQualityInFlight) return;
+      voiceQualityInFlight = true;
+      void runAsLeader(SWEEP_LOCK.voiceQualityGrading, async () => {
+        await voiceQualityWorker.handle();
+      }).catch((err) => {
+        voiceQualityLogger.error('voice-quality grading sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }).finally(() => {
+        voiceQualityInFlight = false;
+      });
+    }, VOICE_QUALITY_GRADING_INTERVAL_MS));
+  }
+
   app.use(
     '/api/onboarding',
     createOnboardingRouter({

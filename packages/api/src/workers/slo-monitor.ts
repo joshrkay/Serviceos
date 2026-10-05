@@ -35,6 +35,14 @@
  *      exported buckets — see docs/runbooks/slo-alerts.md. The in-process value
  *      is also cumulative-since-boot (histograms never reset), so this guard is
  *      a coarse backstop, not a trailing-window signal.
+ *   5. voice_graded_pass_rate_7d (#1602) — share of PRODUCTION calls graded
+ *      by the nightly voice-quality worker (voice_session_grades, cross-
+ *      tenant) in the trailing 7 days that passed every graded criterion.
+ *      Breach below SLO_VOICE_GRADED_PASS_MIN (default 0.85 — the Layer 2
+ *      launch gate) once at least SLO_VOICE_GRADED_MIN_SAMPLE (default 10)
+ *      calls were graded in the window. Warning severity: a quality drop is
+ *      not an outage, but it is the only production signal that calls are
+ *      going well, so it pages the same way the others do.
  *
  * Evaluators are exported pure functions so unit tests need no DB.
  */
@@ -58,6 +66,10 @@ export interface SloThresholds {
   turnLatencyP95Ms: number;
   /** WS26 — minimum recorded turns before the turn-latency rule can breach. Default 30. */
   turnLatencyMinSample: number;
+  /** #1602 — minimum 7-day graded pass rate (0..1). Default 0.85 (the Layer 2 gate). */
+  gradedPassRateMin: number;
+  /** #1602 — minimum graded calls in the window before the rule can breach. Default 10. */
+  gradedPassRateMinSample: number;
 }
 
 export interface SloRuleResult {
@@ -228,6 +240,30 @@ export function evaluateTurnLatency(
   };
 }
 
+/**
+ * Rule 5 (#1602) — 7-day production graded pass rate against the Layer 2 gate.
+ * `null` below the sample floor: a handful of graded calls says nothing yet.
+ */
+export function evaluateGradedPassRate(
+  counts: { total: number; passed: number },
+  thresholds: Pick<SloThresholds, 'gradedPassRateMin' | 'gradedPassRateMinSample'>,
+): SloRuleResult | null {
+  if (counts.total < thresholds.gradedPassRateMinSample) return null;
+  const rate = counts.passed / counts.total;
+  return {
+    rule: 'voice_graded_pass_rate_7d',
+    breached: rate < thresholds.gradedPassRateMin,
+    value: rate,
+    summary: `voice graded pass rate ${(rate * 100).toFixed(1)}% over last 7d (${counts.passed}/${counts.total} graded calls; gate ${(thresholds.gradedPassRateMin * 100).toFixed(0)}%)`,
+    details: {
+      passed: counts.passed,
+      total: counts.total,
+      threshold: thresholds.gradedPassRateMin,
+    },
+    severity: 'warning',
+  };
+}
+
 export interface SloMonitorDeps {
   /** Cross-tenant terminal call-outcome counts since `windowStart`. */
   getCallOutcomeCounts(windowStart: Date): Promise<{ total: number; completedish: number }>;
@@ -246,6 +282,8 @@ export interface SloMonitorDeps {
    * `null` when unavailable. Only invoked when `processRole === 'all'`.
    */
   getTurnLatencySnapshot(): Promise<TurnLatencySnapshot | null>;
+  /** #1602 — cross-tenant graded-call counts for grades recorded at/after `windowStart`. */
+  getGradedPassRate(windowStart: Date): Promise<{ total: number; passed: number }>;
   alert(alert: OperatorAlert): Promise<void>;
   thresholds: SloThresholds;
   logger: Logger;
@@ -258,6 +296,8 @@ export interface SloMonitorRunResult {
 }
 
 const COMPLETION_WINDOW_MS = 60 * 60 * 1000;
+/** #1602 — the graded pass rate is a 7-day trailing window (nightly grading is sparse). */
+const GRADED_PASS_RATE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * One evaluation tick. Each rule is independently failure-soft: a rule whose
@@ -314,6 +354,18 @@ export async function runSloMonitor(deps: SloMonitorDeps): Promise<SloMonitorRun
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // Rule 5 (#1602) — 7-day production graded pass rate vs the Layer 2 gate.
+  try {
+    const counts = await deps.getGradedPassRate(new Date(nowMs - GRADED_PASS_RATE_WINDOW_MS));
+    const r = evaluateGradedPassRate(counts, deps.thresholds);
+    if (r) results.push(r);
+    evaluated.push('voice_graded_pass_rate_7d');
+  } catch (err) {
+    deps.logger.error('SLO monitor: graded pass-rate read failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   const breached: string[] = [];
