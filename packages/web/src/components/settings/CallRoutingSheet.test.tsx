@@ -66,4 +66,19 @@ describe('CallRoutingSheet — when closed (after hours)', () => {
 
     await waitFor(() => expect(afterHoursSelect().value).toBe('voicemail'));
   });
+
+  it('the panel shrinks to the viewport instead of a fixed 384px, so the control is reachable at 320px', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}));
+
+    render(<CallRoutingSheet open onOpenChange={() => {}} />);
+    await waitFor(() => expect(apiFetchMock).toHaveBeenCalledWith('/api/settings'));
+
+    const panel = afterHoursSelect().closest('.shadow-2xl') as HTMLElement;
+    expect(panel).not.toBeNull();
+    expect(panel.className).toContain('w-full');
+    expect(panel.className).toContain('max-w-sm');
+    expect(panel.className).not.toMatch(/\bw-96\b/);
+    // Mobile tap bar (CLAUDE.md): the control itself clears 44px.
+    expect(afterHoursSelect().className).toContain('min-h-11');
+  });
 });

@@ -112,7 +112,7 @@ export function CallRoutingSheet({ open, onOpenChange }: Props) {
   return (
     <div className="fixed inset-0 z-40 bg-black/50" onClick={() => onOpenChange(false)}>
       <div
-        className="absolute right-0 top-0 h-full w-96 bg-white shadow-2xl p-6 overflow-y-auto"
+        className="absolute right-0 top-0 h-full w-full max-w-sm bg-white shadow-2xl p-6 overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-semibold mb-4">Call Routing &amp; Handoff</h2>
@@ -194,7 +194,7 @@ export function CallRoutingSheet({ open, onOpenChange }: Props) {
                 after_hours_voice_mode: e.target.value as 'voicemail' | 'ai_answering',
               })
             }
-            className="w-full border border-slate-200 rounded px-2 py-2 text-sm"
+            className="w-full min-h-11 border border-slate-200 rounded px-2 py-2 text-sm"
           >
             <option value="ai_answering">AI answering (default)</option>
             <option value="voicemail">Voicemail — opt out of AI answering after hours</option>
