@@ -656,11 +656,15 @@ const REFUSAL_COPY: Partial<Record<string, string>> = {
   lookup_catalog: 'office-level view',
   lookup_leads: 'couldn&apos;t verify your access',
   lookup_my_day: 'couldn&apos;t match your number',
+  // #1604 — the self-scoped twin of lookup_my_day: an IDENTITY line, never data.
+  lookup_next_job: 'couldn&apos;t match your number',
 };
 
 describe('phone lookups — with no actor, default-deny across the whole taxonomy', () => {
-  it('the taxonomy this net covers is exactly 20 intents (intent 21 must fail here)', () => {
-    expect(ALL_LOOKUP_INTENTS).toHaveLength(20);
+  it('the taxonomy this net covers is exactly 21 intents (intent 22 must fail here)', () => {
+    // #1604 added lookup_next_job (the 21st): refused without an actor with
+    // the identity line, reading no repo — pinned by the table below.
+    expect(ALL_LOOKUP_INTENTS).toHaveLength(21);
   });
 
   it('lookup_availability IS answered with no actor — the one tenant-public lookup', async () => {
