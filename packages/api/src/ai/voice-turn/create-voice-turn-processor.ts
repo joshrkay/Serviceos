@@ -126,6 +126,8 @@ import {
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   CALLER_INCOMPLETE_REQUEST_COPY,
   CALLER_REQUEST_QUEUED_COPY,
+  CROSS_CUSTOMER_REFUSAL_COPY,
+  REBOOK_DECLINED_COPY,
   OPERATOR_DRAFTED_FOR_REVIEW_COPY,
   INAPP_INCOMPLETE_DRAFT_COPY,
   type SessionLanguage,
@@ -165,6 +167,7 @@ import {
   callerIdentityCheckLine,
   withConfirmedSelfName,
   callerNameMatchesAccount,
+  callerNameMatchScore,
   spokenSelfName,
 } from '../agents/customer-calling/caller-identity-check';
 import { normalizePhone } from '../../shared/phone';
@@ -188,7 +191,12 @@ import {
   type HoldFeasibility,
 } from '../scheduling/place-hold';
 import type { FeasibilityDependencies } from '../../scheduling/feasibility-types';
-import { DEFAULT_TENANT_TIMEZONE, formatForReadback } from '../scheduling/resolve-datetime';
+import {
+  DEFAULT_TENANT_TIMEZONE,
+  formatForReadback,
+  resolveDateTime,
+  resolveSpokenDay,
+} from '../scheduling/resolve-datetime';
 import { checkBusinessHours } from '../../compliance/business-hours';
 import { parseOnboardingBusinessHours } from '../../telephony/business-hours-loader';
 import { updateAppointment } from '../../appointments/appointment';
@@ -237,7 +245,7 @@ import type { TwilioCallControl } from '../../telephony/twilio-call-control';
 import { maskPhone } from '../../telephony/twilio-call-control';
 import type { DispatcherPhoneResolver } from '../skills/escalate-to-human';
 import type { JobRepository } from '../../jobs/job';
-import type { AppointmentRepository } from '../../appointments/appointment';
+import type { Appointment, AppointmentRepository } from '../../appointments/appointment';
 import type { InvoiceRepository } from '../../invoices/invoice';
 import type { AgreementRepository } from '../../agreements/agreement';
 import type { Customer, CustomerRepository } from '../../customers/customer';
@@ -264,11 +272,16 @@ import type { ProposalConfidenceMeta } from '../../proposals/contracts';
 import { buildVoiceProposalPayload } from '../../proposals/voice-payload';
 import { extractBrandVoiceProposalFields } from '../tasks/brand-voice-task';
 import {
+  INTENT_TO_PROPOSAL_TYPE,
   intentToProposalType,
   voiceProposalSummary,
 } from '../../proposals/voice-intent-map';
 import { buildVoiceClarificationPayload } from '../../proposals/voice-clarification';
-import type { EntityResolver, EntityResolverResult } from '../resolution/entity-resolver';
+import {
+  TAU_ENT_CONFIRM_LOW,
+  type EntityResolver,
+  type EntityResolverResult,
+} from '../resolution/entity-resolver';
 import { withCustomerAddressHints } from '../resolution/customer-address-hint';
 import type { LocationRepository } from '../../locations/location';
 import {
@@ -337,6 +350,12 @@ function mapNotifyReasonToSkillReason(
     return 'caller_requested';
   }
   if (reason === 'max_retries_exceeded') return 'max_retries_exceeded';
+  // #1600 (4) — an identity hand-off (identify_caller_threw, #1587's
+  // claims_existing_customer / customer_archived) is an unresolved caller
+  // identity, the category the in-app adapter already files it under
+  // (`toEscalationReason('caller_identity_unresolved')`), not "the AI had
+  // low confidence".
+  if (reason === 'caller_identification_failed') return 'max_retries_exceeded';
   return 'low_confidence';
 }
 
@@ -1216,6 +1235,51 @@ export interface VoiceTurnProcessor {
     intentType: string,
     profile: ClassifierProfile,
   ): string | null;
+  /**
+   * #1600 (1) — an S1 caller identified by caller-ID naming a DIFFERENT
+   * customer's account hears "I can only help with the account on this
+   * line." (nothing of either account, no draft, no hand-off). Shared by
+   * both phone transports; run after classification, before any lookup or
+   * FSM dispatch. Null when it does not apply.
+   */
+  crossCustomerRefusal(
+    session: VoiceSession,
+    intentType: string,
+    entities: Record<string, unknown>,
+    tenantId: string,
+  ): Promise<SideEffect[] | null>;
+  /**
+   * #1600 (2) — counts this classified WRITE intent on the S1 session; on the
+   * fifth repeat of one intent returns the FSM's hand-off effects
+   * (`repeated_write_intent` → escalating), else null. Shared by both phone
+   * transports; run right after classification, before any reply branch.
+   */
+  repeatedWriteIntentHandoff(session: VoiceSession, intentType: string): SideEffect[] | null;
+  /**
+   * #1600 (3) — an S1 caller's reschedule/cancel/confirm that refers to a
+   * CANCELLED appointment of theirs: speaks the cancellation (with its date)
+   * and offers a new booking, holding the offer on the session; nothing is
+   * drafted. Shared by both phone transports; run after `serviceAreaGate`,
+   * before the FSM dispatch. Null when it does not apply.
+   */
+  staleAppointmentGate(
+    session: VoiceSession,
+    turn: { intentType: string; utterance: string; entities: Record<string, unknown> },
+    tenantId: string,
+  ): Promise<SideEffect[] | null>;
+  /**
+   * #1600 (3) — the caller's answer to the rebook offer. Null when none is
+   * pending or the answer is a new request (classify it as usual); `respond`
+   * when consumed: a yes starts the normal booking flow (readback effects,
+   * no model call), a no is acknowledged. Shared by both phone transports;
+   * run at the top of the intent-capture branch.
+   */
+  handlePendingRebookOffer(
+    session: VoiceSession,
+    utterance: string,
+    tenantId: string,
+    turnState: string,
+  ): Promise<CallerIdentityCheckOutcome | null>;
   /**
    * #962 (PR-B) — the transport-side entry of the ported Gather
    * silence/low-STT ladder for a NON-empty turn: the acoustic confidence
@@ -4679,6 +4743,270 @@ export function createVoiceTurnProcessor(
     return archived;
   }
 
+  /**
+   * #1600 (1) (owner decision 2026-10-04) — an S1 caller identified by
+   * caller-ID who names a DIFFERENT customer's account. D-036 (1).3 already
+   * keeps the account on the line in charge of what is looked up or drafted;
+   * this decides what the caller HEARS: a plain refusal — never a
+   * confirmation or denial that the named customer exists, nothing read from
+   * either account, no draft, no hand-off; the call stays open. A name that
+   * plausibly IS the caller (their own, a household surname, a spelling the
+   * resolver would ask to confirm — at or above τ_ent_confirm_low against the
+   * account, the #1331 matcher) is not refused: the identity check and
+   * D-036 keep handling it. Never on the owner line, for a resolved actor,
+   * or for a record minted on this call (no name to compare). Shared by both
+   * phone transports. Returns the turn's effects, or null when it does not
+   * apply.
+   */
+  async function crossCustomerRefusal(
+    session: VoiceSession,
+    intentType: string,
+    entities: Record<string, unknown>,
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    if (!isUntrustedS1Session(session) || session.actorUserId) return null;
+    if (!session.customerId || session.callerCreatedThisCall || !deps.customerRepo) return null;
+    const spokenName = typeof entities.customerName === 'string' ? entities.customerName.trim() : '';
+    if (spokenName.length === 0) return null;
+    const account = await deps.customerRepo.findById(tenantId, session.customerId).catch(() => null);
+    if (!account) return null;
+    if (callerNameMatchScore(spokenName, account) >= TAU_ENT_CONFIRM_LOW) return null;
+    return [
+      {
+        type: 'audit_log',
+        payload: {
+          eventType: `agent.calling.${session.machine.currentState}.cross_customer_refused`,
+          sessionId: session.id,
+          tenantId,
+          intentType,
+          ts: Date.now(),
+        },
+      },
+      { type: 'tts_play', payload: { text: CROSS_CUSTOMER_REFUSAL_COPY } },
+      { type: 'tts_play', payload: { text: 'Anything else I can help you with?' } },
+    ];
+  }
+
+  /**
+   * #1600 (2) (owner decision 2026-10-04) — the same WRITE request (an intent
+   * that drafts a proposal: a key of INTENT_TO_PROPOSAL_TYPE) classified for
+   * the fifth time on one S1 call is not answered again — the FSM's
+   * `repeated_write_intent` guard hands the call to a person. Counted per
+   * intent on the session, so rephrasing does not reset it; lookups,
+   * confirmations, corrections, operator requests and emergencies are not
+   * writes and are never counted. The owner line, a resolved actor and in-app
+   * sessions are not subject to it — an operator repeating a request is not
+   * spam. Shared by both phone transports. Returns the hand-off effects on
+   * the fifth repeat, else null.
+   */
+  const REPEATED_WRITE_INTENT_LIMIT = 5;
+  function repeatedWriteIntentHandoff(session: VoiceSession, intentType: string): SideEffect[] | null {
+    if (!isUntrustedS1Session(session) || session.actorUserId) return null;
+    if (!Object.prototype.hasOwnProperty.call(INTENT_TO_PROPOSAL_TYPE, intentType)) return null;
+    const counts = (session.writeIntentRepeats ??= {});
+    const count = (counts[intentType] ?? 0) + 1;
+    counts[intentType] = count;
+    if (count < REPEATED_WRITE_INTENT_LIMIT) return null;
+    return session.machine.dispatch({ type: 'repeated_write_intent', intentType, count });
+  }
+
+  /** #1600 (3) — the intents an S1 caller uses about an existing appointment of theirs. */
+  const STALE_APPOINTMENT_INTENTS: ReadonlySet<string> = new Set([
+    'reschedule_appointment',
+    'cancel_appointment',
+    'confirm_appointment',
+  ]);
+
+  /** The caller's own appointments, reached through their jobs (#1540 §1). */
+  async function callerAppointments(tenantId: string, customerId: string): Promise<Appointment[]> {
+    const jobRepo = deps.jobRepo;
+    const appointmentRepo = deps.appointmentRepo;
+    if (!jobRepo || !appointmentRepo) return [];
+    const jobs = jobRepo.findByCustomer
+      ? await jobRepo.findByCustomer(tenantId, customerId, { includeArchived: true })
+      : (await jobRepo.findByTenant(tenantId)).filter((j) => j.customerId === customerId);
+    const lists = await Promise.all(jobs.map((j) => appointmentRepo.findByJob(tenantId, j.id)));
+    return lists.flat();
+  }
+
+  /** The tenant-local calendar day of an instant, as YYYY-MM-DD. */
+  function localDayOf(at: Date, timezone: string): string {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(at);
+  }
+
+  /**
+   * #1600 (3) (owner decision 2026-10-04) — an S1 caller identified by
+   * caller-ID refers to an appointment of theirs that is CANCELLED: the
+   * reference resolves to no live appointment of theirs but matches one of
+   * their own `canceled` visits (the named day; or their only cancelled visit
+   * when they have no live ones). Instead of reading back a move of a visit
+   * that no longer exists, the agent discloses the cancellation with its date
+   * and offers a new booking; nothing is drafted on this turn, nobody is
+   * paged, the FSM stays in intent capture. The offer is HELD on the session
+   * with the booking details the caller already gave — "Wednesday at the same
+   * time" is anchored to the cancelled visit's clock time (#1540 §1's rule) —
+   * so a yes starts the normal booking flow (`handlePendingRebookOffer`).
+   * Never on the owner line or for a resolved actor (SCH-D3's honest
+   * not-found serves operators). Shared by both phone transports. Returns
+   * the turn's effects, or null when it does not apply.
+   */
+  async function staleAppointmentGate(
+    session: VoiceSession,
+    turn: { intentType: string; utterance: string; entities: Record<string, unknown> },
+    tenantId: string,
+  ): Promise<SideEffect[] | null> {
+    if (!STALE_APPOINTMENT_INTENTS.has(turn.intentType)) return null;
+    if (!isUntrustedS1Session(session) || session.actorUserId) return null;
+    const customerId = session.customerId;
+    if (!customerId || session.callerCreatedThisCall) return null;
+    const own = await callerAppointments(tenantId, customerId).catch(() => [] as Appointment[]);
+    const cancelled = own.filter((a) => a.status === 'canceled');
+    if (cancelled.length === 0) return null;
+    const live = own.filter((a) => a.status !== 'canceled');
+
+    // A reference that resolves to a LIVE appointment of the caller's is the
+    // ordinary path — nothing stale about it.
+    const resolution = await runTurnResolution(session, tenantId, turn.intentType, turn.entities);
+    const resolvedId = resolution.refs.appointmentId;
+    if (resolvedId && live.some((a) => a.id === resolvedId)) return null;
+
+    const timezone = await resolveSessionTimezone(session, tenantId);
+    const now = deps.now ? deps.now() : new Date();
+    const spokenRef =
+      typeof turn.entities.appointmentReference === 'string'
+        ? turn.entities.appointmentReference
+        : typeof turn.entities.dateTimeDescription === 'string'
+          ? turn.entities.dateTimeDescription
+          : '';
+    const namedDay = timezone && spokenRef ? resolveSpokenDay(spokenRef, { timezone, now }) : null;
+    let stale: Appointment | undefined;
+    if (namedDay && timezone) {
+      const onDay = cancelled.filter((a) => localDayOf(a.scheduledStart, timezone) === namedDay);
+      if (onDay.length === 1) stale = onDay[0];
+    } else if (live.length === 0) {
+      // No day named and nothing live: "my appointment" can only be a
+      // cancelled one — the most recently cancelled.
+      stale = [...cancelled].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
+    }
+    if (!stale) return null;
+
+    // The booking the caller already described, carried into the offer. A
+    // reschedule's new day keeps the cancelled visit's clock time.
+    const newDt =
+      turn.intentType === 'reschedule_appointment' &&
+      typeof turn.entities.newDateTimeDescription === 'string'
+        ? turn.entities.newDateTimeDescription.trim()
+        : '';
+    let bookingEntities: Record<string, unknown> = {};
+    if (newDt) {
+      const anchored = timezone
+        ? resolveDateTime(newDt, {
+            timezone,
+            now,
+            sameTimeAs: {
+              startUtc: stale.scheduledStart.toISOString(),
+              endUtc: stale.scheduledEnd.toISOString(),
+            },
+          })
+        : undefined;
+      bookingEntities =
+        anchored && anchored.ok && timezone
+          ? {
+              dateTimeDescription: formatForReadback(anchored.startUtc, timezone),
+              scheduledStart: anchored.startUtc,
+              scheduledEnd: anchored.endUtc,
+            }
+          : { dateTimeDescription: newDt };
+    }
+    session.rebookOffer = {
+      heldUtterance: turn.utterance,
+      cancelledAppointmentId: stale.id,
+      entities: bookingEntities,
+      reasks: 0,
+    };
+    const offerPayload = {
+      template: 'rebook_offer',
+      cancelledOn: stale.updatedAt.toISOString(),
+      timezone: timezone ?? stale.timezone,
+    };
+    return [
+      {
+        type: 'audit_log',
+        payload: {
+          eventType: `agent.calling.${session.machine.currentState}.stale_appointment_offer`,
+          sessionId: session.id,
+          tenantId,
+          intentType: turn.intentType,
+          appointmentId: stale.id,
+          ts: Date.now(),
+        },
+      },
+      {
+        type: 'tts_play',
+        payload: {
+          ...offerPayload,
+          text: renderTtsText('rebook_offer', offerPayload, sessionLanguage(session)),
+        },
+      },
+    ];
+  }
+
+  /**
+   * #1600 (3) — the caller's answer to "would you like to book a new one?".
+   * Null when no offer is pending (the offer is dropped if the FSM has moved
+   * on, or the answer is a new request — classified as usual); `respond`
+   * when the turn is consumed:
+   *   - a yes starts the NORMAL booking flow, deterministically (no model
+   *     call): `intent_classified{create_appointment}` carrying the details
+   *     the caller already gave, resolved and read back by the FSM exactly
+   *     as any booking is (#1577 asks for a day/time when none was given),
+   *     and drafted only on the readback's yes;
+   *   - a no is acknowledged and the call stays open.
+   */
+  async function handlePendingRebookOffer(
+    session: VoiceSession,
+    utterance: string,
+    tenantId: string,
+    turnState: string,
+  ): Promise<CallerIdentityCheckOutcome | null> {
+    const pending = session.rebookOffer;
+    if (!pending) return null;
+    session.rebookOffer = undefined;
+    if (turnState !== 'intent_capture' && turnState !== 'closing') return null;
+    if (isAffirmation(utterance)) {
+      const effects: SideEffect[] = [];
+      const booking: CallingAgentEvent = {
+        type: 'intent_classified',
+        intentType: 'create_appointment',
+        entities: { ...pending.entities },
+        confidence: 1,
+        utterance: pending.heldUtterance,
+      };
+      effects.push(...session.machine.dispatch(booking));
+      if (session.machine.currentState === 'entity_resolution') {
+        const resolutionFx = session.machine.dispatch(
+          await resolveTurnEntityEvent(session, tenantId, 'create_appointment', { ...pending.entities }),
+        );
+        expandDisambiguationTemplate(session, resolutionFx);
+        effects.push(...resolutionFx);
+        expandIntentConfirmTemplate(effects, 'create_appointment', sessionLanguage(session));
+      }
+      return { kind: 'respond', effects };
+    }
+    if (isNegation(utterance)) {
+      return {
+        kind: 'respond',
+        effects: [{ type: 'tts_play', payload: { text: REBOOK_DECLINED_COPY } }],
+      };
+    }
+    return null;
+  }
+
   /** #1567 — a caller with no prior customer record (identified by this call, or not at all). */
   function isNewCaller(session: VoiceSession): boolean {
     if (session.machine.currentContext.ownerSession === true || session.actorUserId) return false;
@@ -5597,6 +5925,16 @@ export function createVoiceTurnProcessor(
       // #1538 — the shared confirm-turn rule (also the Gather adapter's).
       sideEffectsAll.push(...(await handleIntentConfirmTurn(session, speechResult, tenantId)));
     } else if (turnState === 'intent_capture' || turnState === 'closing') {
+      // #1600 (3) — the caller is answering the offer to book a new
+      // appointment in place of a cancelled one.
+      const rebook = await handlePendingRebookOffer(session, speechResult, tenantId, turnState);
+      if (rebook?.kind === 'respond') {
+        sideEffectsAll.push(...rebook.effects);
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
+      }
+
       // WS18 — deterministic post-quote pre-check. Runs ONLY in `closing` with a
       // live pendingQuote, BEFORE the classifier (the classifier prompt/schema
       // stay byte-stable). Closes the discard bug: "yes, book it" and "make it
@@ -5791,6 +6129,22 @@ export function createVoiceTurnProcessor(
         await releaseHeldCallerForRequest(session, classifierEvent.intentType, tenantId);
       }
 
+      // #1600 (2) — the same write request asked for the fifth time on this
+      // call: a person takes it. Runs BEFORE the #1540 §3 reply so an existing
+      // customer's repeated "sign me up" counts like any other write.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        const repeatFx = repeatedWriteIntentHandoff(session, classifierEvent.intentType);
+        if (repeatFx) {
+          sideEffectsAll.push(...repeatFx);
+          await executeSideEffects(session, sideEffectsAll, tenantId);
+          appendAgentTts(deps.store, session.id, sideEffectsAll);
+          return sideEffectsAll;
+        }
+      }
+
       // #1540 §3 — an existing customer asking to "sign up": say so and ask
       // what they need; never read back / draft a duplicate create_customer.
       if (
@@ -5828,6 +6182,28 @@ export function createVoiceTurnProcessor(
         await executeSideEffects(session, sideEffectsAll, tenantId);
         appendAgentTts(deps.store, session.id, sideEffectsAll);
         return sideEffectsAll;
+      }
+
+      // #1600 (1) — an S1 caller naming another customer's account hears the
+      // refusal before anything is looked up (the branch below) or drafted
+      // (the FSM path). Emergencies keep their own path.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT &&
+        !EMERGENCY_INTENTS.has(classifierEvent.intentType)
+      ) {
+        const refusalFx = await crossCustomerRefusal(
+          session,
+          classifierEvent.intentType,
+          classifierEvent.entities,
+          tenantId,
+        );
+        if (refusalFx) {
+          sideEffectsAll.push(...refusalFx);
+          await executeSideEffects(session, sideEffectsAll, tenantId);
+          appendAgentTts(deps.store, session.id, sideEffectsAll);
+          return sideEffectsAll;
+        }
       }
 
       // #962 (PR-B) / P11-001 / #866 — lookup intents bypass the
@@ -6091,6 +6467,30 @@ export function createVoiceTurnProcessor(
         }
       }
 
+      // #1600 (3) — the caller refers to a CANCELLED appointment of theirs:
+      // disclose it and offer a new booking instead of reading back a move
+      // of a visit that no longer exists.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        const staleFx = await staleAppointmentGate(
+          session,
+          {
+            intentType: classifierEvent.intentType,
+            utterance: speechResult,
+            entities: classifierEvent.entities,
+          },
+          tenantId,
+        );
+        if (staleFx) {
+          sideEffectsAll.push(...staleFx);
+          await executeSideEffects(session, sideEffectsAll, tenantId);
+          appendAgentTts(deps.store, session.id, sideEffectsAll);
+          return sideEffectsAll;
+        }
+      }
+
       sideEffectsAll.push(...session.machine.dispatch(classifierEvent));
 
       if (
@@ -6189,6 +6589,10 @@ export function createVoiceTurnProcessor(
     handlePendingServiceAreaCheck,
     releaseHeldCallerForRequest,
     existingCustomerSignupReplyFor,
+    crossCustomerRefusal,
+    repeatedWriteIntentHandoff,
+    staleAppointmentGate,
+    handlePendingRebookOffer,
     maybeHandleLowSttConfidence,
   };
 }

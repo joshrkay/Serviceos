@@ -109,10 +109,11 @@ describe('VQ-018 — Bucket 09 concurrency edges', () => {
       { intent: string; escalates: boolean }
     > = {
       // Stale state: appointment was cancelled 30s before the call. #1587:
-      // the production engine resolves the reference to no appointment,
-      // reads the request back and drafts it gated for the team (no id to
-      // act on) — it never acts on the cancelled visit, and it does not
-      // announce the cancellation or hand off (an open owner question).
+      // the production engine resolves the reference to no appointment.
+      // #1600 (owner decision 2026-10-04): the engine now finds the caller's
+      // own cancelled visit, discloses the cancellation with its date and
+      // offers a new booking (a yes starts the normal booking flow) — never
+      // acting on the cancelled visit, never handing off.
       'stale-appointment-just-cancelled': {
         intent: 'reschedule_appointment',
         escalates: false,

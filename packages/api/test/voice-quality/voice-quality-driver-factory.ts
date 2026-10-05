@@ -379,6 +379,15 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   if (intent === 'send_estimate_nudge') {
     entities.customerName = typeof slots.customerReference === 'string' ? slots.customerReference : 'Khan';
   }
+  // #1600 — the live classifier extracts a customer the caller names in the
+  // possessive ("what's Jane Doe's balance?") as `customerName`; the first
+  // "First Last's" in the utterance stands in for that extraction. Only
+  // `cross-customer-extraction` says one today — every other script's
+  // entities are untouched.
+  if (entities.customerName === undefined) {
+    const possessive = turn.caller.match(/\b([A-Z][a-z]+ [A-Z][a-z]+)'s\b/);
+    if (possessive) entities.customerName = possessive[1];
+  }
   return JSON.stringify({
     intentType: intent,
     confidence: 0.95,
