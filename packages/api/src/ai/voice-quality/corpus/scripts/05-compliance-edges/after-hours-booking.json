@@ -1,5 +1,5 @@
 {
-  "id": "after-hours-callback",
+  "id": "after-hours-booking",
   "bucket": "05-compliance-edges",
   "fixtures": {
     "tenant": {
@@ -51,12 +51,11 @@
       "caller": "Hi, I'd like to book a service appointment for my AC.",
       "expected": {
         "intent": "create_appointment",
-        "proposalType": "callback",
         "escalates": false,
         "spokenIncludes": [
-          "We're closed right now, so I've logged a callback request"
+          "What date and time work for you?"
         ],
-        "spokenAnswerMatches": "D-040 §1 (owner decision 2026-10-04, ported to the production turn engine by #1587): at 10pm on a closed tenant the AI still answers; a booking request is not read back or booked but captured as a callback proposal for the morning, and the caller is told a team member will reach out to schedule the visit. Nobody is paged for a routine after-hours booking."
+        "spokenAnswerMatches": "Owner decision 2026-10-05 (amends D-040 §1): on an AI-answering tenant an after-hours booking request books NORMALLY, exactly as during the day — no callback proposal, nobody paged. This request names no day or time, so the agent asks for one (#1577) and drafts nothing yet; a time would be read back and drafted for approval as usual. (The /voice webhook sends an after-hours call to voicemail only for a tenant that opted into after_hours_voice_mode 'voicemail'.)"
       },
       "hangupAfter": false
     }

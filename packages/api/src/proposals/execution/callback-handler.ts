@@ -31,7 +31,7 @@ import { AuditRepository, createAuditEvent } from '../../audit/audit';
  *
  * ── Production creation-site inventory (counting rule stated explicitly,
  * since this got miscounted twice before) ─────────────────────────────────
- * 4 production FILES; 6 `createProposal`/`buildProposal` CALL SITES; 8 total
+ * 4 production FILES; 5 `createProposal`/`buildProposal` CALL SITES; 7 total
  * CONTENT BRANCHES that resolve to `proposalType: 'callback'` (two of the
  * files share one call site across three evaluation-outcome branches, two of
  * which are 'callback' — the third is 'voice_clarification'):
@@ -39,21 +39,18 @@ import { AuditRepository, createAuditEvent } from '../../audit/audit';
  *     the enriched/default branch), both unconditionally 'callback'.
  *   - `complaint-task.ts` — 1 direct `createProposal` call (the companion
  *     owner-followup callback), unconditionally 'callback'.
- *   - `create-voice-turn-processor.ts` — 2 `buildProposal` calls: one fed by
- *     inline branching (the live-call negotiation branch, FSM path; 2 of its
- *     3 possible outcomes — ALLOW, enriched/default — are 'callback', the
- *     third (CLARIFY) is 'voice_clarification'), and the #1587 / D-040 §1
- *     after-hours branch (`mintAfterHoursCallback`: a caller's after-hours
- *     booking request, unconditionally 'callback').
+ *   - `create-voice-turn-processor.ts` — 1 `buildProposal` call fed by
+ *     inline branching (the live-call negotiation branch, FSM path); 2 of
+ *     its 3 possible outcomes (ALLOW, enriched/default) are 'callback', the
+ *     third (CLARIFY) is 'voice_clarification'.
  *   - `sms/negotiation/inbound-negotiation-handler.ts` — 1 `createProposal`
  *     call fed by `buildNegotiationProposalContent`; same 2-of-3 shape as
  *     above. The ONLY site that stamps `callerPhone` into the payload.
- * The VQ-007 voice-quality text-mode driver (`text-mode-driver.ts`) used to
- * construct this `callback` itself; since #1587 it drives `speechTurn` and
- * mints nothing, so it stays excluded from every count above. The `/voice`
- * webhook's after-hours fork (`routes/telephony.ts`) only chooses voicemail
- * for a tenant that opted into `after_hours_voice_mode = 'voicemail'`
- * (D-040); it drafts no `callback` proposal itself.
+ * `text-mode-driver.ts`'s after-hours branch ALSO constructs a `callback`
+ * proposal, but that file is the VQ-007 voice-quality corpus harness, not
+ * production — excluded from every count above. The real production
+ * after-hours path (`routes/telephony.ts`'s `afterHours` branch) sends the
+ * caller to voicemail TwiML and drafts no `callback` proposal at all.
  *
  * The SEPARATE `call_me_back_tasks` operational-task system
  * (voice/call-me-back/call-me-back.ts, its own CSR-notification worker) is

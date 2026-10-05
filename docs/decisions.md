@@ -1539,6 +1539,12 @@ in a dead voicemail.
    on the evacuation script, and a booking request becomes an after-hours `callback` proposal
    (corpus `05-compliance-edges/after-hours-callback`). `'voicemail'` is the explicit opt-out in
    Settings → Call routing & handoff.
+   > **Amended 2026-10-05 (owner):** after-hours booking requests book normally — the same
+   > turn pipeline as during the day (a time is asked for per #1577, the request is read back,
+   > the appointment is drafted for approval); the callback clause above is withdrawn. No
+   > callback proposal is minted and nobody is paged. The corpus script is now
+   > `05-compliance-edges/after-hours-booking` (#1587). The callback behaviour this clause
+   > described had only ever existed in the Layer 1 text-mode driver, never in production.
 2. **An absent key means "use the default".** The value is materialised into a row only as a side
    effect of a whole-blob write (the Call Routing sheet, or the voice-approval PIN routes). Migration
    `304_after_hours_voice_mode_default_backfill` removes a stored `'voicemail'` from rows whose tenant

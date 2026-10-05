@@ -1,18 +1,16 @@
 /**
- * #1587 / D-040 §1 — after hours, a caller's booking request becomes a
- * `callback` proposal for the morning instead of a live draft.
+ * #1587 — owner decision 2026-10-05 (amending D-040 §1): on an AI-answering
+ * tenant an after-hours booking request BOOKS NORMALLY, exactly as during the
+ * day. No after-hours `callback` proposal, nobody paged.
  *
- * D-040 (owner decision 2026-10-04) ratified this as the AI line's after-hours
- * behaviour and cited the Layer 1 script `05-compliance-edges/after-hours-
- * callback` as its evidence — but the rule lived only in the Layer 1 text-mode
- * driver, which minted the callback itself. This ports it into the production
- * turn engine so every transport that dispatches `speechTurn` reaches it.
- *
- * Seam: `createVoiceTurnProcessor().speechTurn` with a session established
- * the way the Twilio adapter establishes it. Expected values come from the
- * decision (a `callback` proposal, nothing booked), the payload contract
- * (`reason`, `transcript`) and `tts-copy.ts` — never from the engine's
- * internals.
+ * The Layer 1 text-mode driver used to mint an after-hours callback itself (a
+ * rule production never had), and D-040 §1 cited that corpus script as if it
+ * described production. This pins the decided truth at the production seam:
+ * `createVoiceTurnProcessor().speechTurn`, with a session established the way
+ * the Twilio adapter establishes it and the tenant's clock at 10 pm on a
+ * closed day. Expected values come from the decision, the #1577 rule (a
+ * booking with no time asks for one) and `tts-copy.ts` — never from the
+ * engine's internals.
  */
 import { describe, it, expect } from 'vitest';
 import { createVoiceTurnProcessor } from '../../../src/ai/voice-turn/create-voice-turn-processor';
@@ -22,8 +20,8 @@ import { InMemoryCustomerRepository, type Customer } from '../../../src/customer
 import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { InMemoryAppointmentRepository } from '../../../src/appointments/in-memory-appointment';
+import { InMemoryOnCallRepository } from '../../../src/oncall/rotation';
 import type { SettingsRepository, TenantSettings } from '../../../src/settings/settings';
-import { AFTER_HOURS_CALLBACK_COPY } from '../../../src/ai/agents/customer-calling/tts-copy';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
 
 const TENANT = 't-1587-after-hours';
@@ -31,16 +29,36 @@ const JANE_ID = '00000000-0000-4000-8000-000000001588';
 const JANE_PHONE = '+15555550501';
 /** Monday 2026-05-04, 22:00 America/Los_Angeles — the corpus script's call moment. */
 const TEN_PM_LOCAL = new Date('2026-05-04T22:00:00-07:00');
-/** The same Monday at 14:00 local — inside the 09:00–17:00 schedule. */
-const TWO_PM_LOCAL = new Date('2026-05-04T14:00:00-07:00');
 
-class ClassifyGateway extends LLMGateway {
-  constructor(private readonly content: Record<string, unknown>) {
+/**
+ * Offline stand-in for the model calls a booking makes: the classifier (the
+ * request, then the bare time the caller supplies to the readback) and the
+ * readback's yes/no model (`confirmIntent`, same task type, its own prompt).
+ */
+class BookingGateway extends LLMGateway {
+  constructor() {
     super({ defaultProvider: 'mock' }, new Map());
   }
-  override async complete(_request: LLMRequest): Promise<LLMResponse> {
+  override async complete(request: LLMRequest): Promise<LLMResponse> {
+    const user = request.messages.find((m) => m.role === 'user')?.content ?? '';
+    let content: string;
+    if (user.includes("Classify the caller's response as YES or NO")) {
+      content = JSON.stringify({ answer: 'yes', reasoning: 'affirmative' });
+    } else if (user.includes('Tuesday at 2pm')) {
+      content = JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.95,
+        extractedEntities: { dateTimeDescription: 'Tuesday at 2pm' },
+      });
+    } else {
+      content = JSON.stringify({
+        intentType: 'create_appointment',
+        confidence: 0.95,
+        extractedEntities: { jobTitle: 'AC service' },
+      });
+    }
     return {
-      content: JSON.stringify(this.content),
+      content,
       model: 'mock',
       provider: 'mock',
       latencyMs: 1,
@@ -67,7 +85,7 @@ function jane(): Customer {
   };
 }
 
-/** Mon–Fri 09:00–17:00 Pacific, as the onboarding Call Routing sheet stores it. */
+/** Mon–Fri 09:00–17:00 Pacific — the tenant is closed at the call moment. */
 function settingsRepo(): SettingsRepository {
   const row = {
     tenantId: TENANT,
@@ -83,18 +101,14 @@ function settingsRepo(): SettingsRepository {
   } as unknown as SettingsRepository;
 }
 
-async function makeHarness(now: Date) {
+async function makeHarness() {
   const store = new VoiceSessionStore({ startInterval: false });
   const customerRepo = new InMemoryCustomerRepository();
   await customerRepo.create(jane());
   const proposalRepo = new InMemoryProposalRepository();
   const processor = createVoiceTurnProcessor({
     store,
-    gateway: new ClassifyGateway({
-      intentType: 'create_appointment',
-      confidence: 0.95,
-      extractedEntities: { jobTitle: 'AC service' },
-    }),
+    gateway: new BookingGateway(),
     businessName: 'Acme HVAC',
     coverageSurface: 'gather',
     systemActorId: 'system:test',
@@ -102,8 +116,11 @@ async function makeHarness(now: Date) {
     proposalRepo,
     auditRepo: new InMemoryAuditRepository(),
     appointmentRepo: new InMemoryAppointmentRepository(),
+    onCallRepo: new InMemoryOnCallRepository(
+      new Map([[TENANT, [{ id: 'oncall_1', userId: 'dispatcher_1', orderIndex: 0 }]]]),
+    ),
     settingsRepo: settingsRepo(),
-    now: () => now,
+    now: () => TEN_PM_LOCAL,
     callerPhoneResolver: (s) => s.callerPhone ?? '',
   });
   const callSid = 'CA-1587-ah';
@@ -125,32 +142,26 @@ async function makeHarness(now: Date) {
   return { session, proposalRepo, events, turn, spoken };
 }
 
-describe('#1587 / D-040 — an after-hours booking request on the AI line', () => {
-  it('becomes a callback proposal for the morning: nothing is read back or booked, nobody is paged', async () => {
-    const h = await makeHarness(TEN_PM_LOCAL);
+describe('#1587 — an after-hours booking request on an AI-answering tenant books normally', () => {
+  it('asks for a time (#1577), reads the request back, and drafts the appointment for approval — no callback, nobody paged', async () => {
+    const h = await makeHarness();
 
-    const fx = await h.turn("Hi, I'd like to book a service appointment for my AC.");
+    const ask = await h.turn("Hi, I'd like to book a service appointment for my AC.");
+    // No time was given: the agent asks for one, exactly as during the day.
+    expect(h.spoken(ask)).toContain('What date and time work for you?');
+    expect(await h.proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+
+    const readback = await h.turn('Tuesday at 2pm.');
+    expect(h.spoken(readback)).toContain('Is that right?');
+    expect(await h.proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+
+    await h.turn("Yes, that's right.");
 
     const proposals = await h.proposalRepo.findByTenant(TENANT);
-    expect(proposals.map((p) => p.proposalType)).toEqual(['callback']);
-    expect(proposals[0]!.payload).toMatchObject({
-      reason: 'after_hours',
-      transcript: "Hi, I'd like to book a service appointment for my AC.",
-    });
+    expect(proposals.map((p) => p.proposalType)).toEqual(['create_appointment']);
     expect(proposals[0]!.status).not.toBe('executed');
-    expect(h.spoken(fx)).toBe(AFTER_HOURS_CALLBACK_COPY);
-    // Minted on the request turn — no readback, and the next turn can be a new request.
-    expect(h.session.machine.currentState).toBe('intent_capture');
+    // The withdrawn D-040 §1 clause: no after-hours callback, and no page.
+    expect(proposals.some((p) => p.proposalType === 'callback')).toBe(false);
     expect(h.events.filter((e) => e.type === 'escalation_triggered')).toHaveLength(0);
-  });
-
-  it('during business hours the same request takes the normal readback path', async () => {
-    const h = await makeHarness(TWO_PM_LOCAL);
-
-    const fx = await h.turn("Hi, I'd like to book a service appointment for my AC.");
-
-    expect(await h.proposalRepo.findByTenant(TENANT)).toHaveLength(0);
-    expect(h.spoken(fx)).not.toBe(AFTER_HOURS_CALLBACK_COPY);
-    expect(h.session.machine.currentState).toBe('intent_confirm');
   });
 });

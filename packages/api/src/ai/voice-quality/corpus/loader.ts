@@ -230,11 +230,9 @@ function answerPhoneReadback(
 ): VoiceQualityScript['turns'] {
   if (turn.expected.proposalType === undefined) return [turn];
   // Raised without a readback: a clarification the engine mints itself (an
-  // ambiguous caller-ID), the after-hours booking callback (D-040 §1, minted
-  // on the request turn), and the Gather transport's one-turn create_customer
+  // ambiguous caller-ID), and the Gather transport's one-turn create_customer
   // flow (coverage-table.ts: P18-001; media streams takes the readback).
   if (turn.expected.proposalType === 'voice_clarification') return [turn];
-  if (turn.expected.proposalType === 'callback') return [turn];
   if (turn.expected.proposalType === 'create_customer' && surface === 'gather') return [turn];
   // The script already answers the readback itself.
   if (next && isAffirmation(next.caller)) return [turn];
