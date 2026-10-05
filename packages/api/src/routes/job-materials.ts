@@ -23,6 +23,7 @@ import { listJobMaterials, saveJobMaterials } from '../materials/job-materials';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { asyncRoute } from '../middleware/async-route';
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
+import { routeParam } from '../shared/route-params';
 
 export interface JobMaterialsRouterDeps {
   materialItemRepo: MaterialItemRepository;
@@ -69,12 +70,12 @@ export function createJobMaterialsRouter(deps: JobMaterialsRouterDeps): Router {
     notFoundOnMalformedId('Job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
-      const job = await deps.jobRepo.findById(tenantId, req.params.id);
+      const job = await deps.jobRepo.findById(tenantId, routeParam(req, 'id'));
       if (!job) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
         return;
       }
-      const items = await listJobMaterials(tenantId, req.params.id, deps);
+      const items = await listJobMaterials(tenantId, routeParam(req, 'id'), deps);
       res.json({ data: items.map(toResponse) });
     }),
   );
@@ -88,14 +89,14 @@ export function createJobMaterialsRouter(deps: JobMaterialsRouterDeps): Router {
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
       const parsed = saveSchema.parse(req.body ?? {});
-      const job = await deps.jobRepo.findById(tenantId, req.params.id);
+      const job = await deps.jobRepo.findById(tenantId, routeParam(req, 'id'));
       if (!job) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
         return;
       }
       const items = await saveJobMaterials(
         { tenantId, actorId: req.auth!.userId, actorRole: req.auth!.role },
-        req.params.id,
+        routeParam(req, 'id'),
         parsed.items,
         deps,
       );

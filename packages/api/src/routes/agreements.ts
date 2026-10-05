@@ -28,6 +28,7 @@ import {
   updateAgreementSchema,
 } from '../agreements/enums';
 import { AuditRepository } from '../audit/audit';
+import { routeParam } from '../shared/route-params';
 
 export interface AgreementsRouterDeps {
   agreementRepo: AgreementRepository;
@@ -90,7 +91,7 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     notFoundOnMalformedId('Agreement not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
-      const agreement = await agreementRepo.findById(tenantId, req.params.id);
+      const agreement = await agreementRepo.findById(tenantId, routeParam(req, 'id'));
       if (!agreement) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
         return;
@@ -110,7 +111,7 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
       const parsed = updateAgreementSchema.parse(req.body);
       const result = await updateAgreement(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         parsed,
         agreementRepo,
       );
@@ -129,7 +130,7 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requirePermission('customers:update'),
     notFoundOnMalformedId('Agreement not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const result = await pauseAgreement(req.auth!.tenantId, req.params.id, agreementRepo);
+      const result = await pauseAgreement(req.auth!.tenantId, routeParam(req, 'id'), agreementRepo);
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
         return;
@@ -145,7 +146,7 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requirePermission('customers:update'),
     notFoundOnMalformedId('Agreement not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const result = await resumeAgreement(req.auth!.tenantId, req.params.id, agreementRepo);
+      const result = await resumeAgreement(req.auth!.tenantId, routeParam(req, 'id'), agreementRepo);
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
         return;
@@ -161,7 +162,7 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     requirePermission('customers:delete'),
     notFoundOnMalformedId('Agreement not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const result = await cancelAgreement(req.auth!.tenantId, req.params.id, agreementRepo);
+      const result = await cancelAgreement(req.auth!.tenantId, routeParam(req, 'id'), agreementRepo);
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
         return;
@@ -180,7 +181,7 @@ export function createAgreementsRouter(deps: AgreementsRouterDeps): Router {
     notFoundOnMalformedId('Agreement not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
-      const agreement = await agreementRepo.findById(tenantId, req.params.id);
+      const agreement = await agreementRepo.findById(tenantId, routeParam(req, 'id'));
       if (!agreement) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Agreement not found' });
         return;

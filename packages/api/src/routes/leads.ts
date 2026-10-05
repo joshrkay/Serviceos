@@ -31,6 +31,7 @@ import {
 import { LocationRepository } from '../locations/location';
 import { UserRepository } from '../users/user';
 import { requireActiveTenantMember } from '../users/tenant-member';
+import { routeParam } from '../shared/route-params';
 
 export function createLeadsRouter(
   leadRepo: LeadRepository,
@@ -148,7 +149,7 @@ export function createLeadsRouter(
     requirePermission('customers:view'),
     notFoundOnMalformedId('Lead not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const lead = await leadRepo.findById(req.auth!.tenantId, req.params.id);
+      const lead = await leadRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!lead) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Lead not found' });
         return;
@@ -175,7 +176,7 @@ export function createLeadsRouter(
       }
       const updated = await updateLead(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         parsed,
         leadRepo,
         req.auth!.userId,
@@ -204,7 +205,7 @@ export function createLeadsRouter(
           : undefined;
       const result = await convertToCustomer(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         leadRepo,
         customerRepo,
         req.auth!.userId,
@@ -231,7 +232,7 @@ export function createLeadsRouter(
       const parsed = loseLeadSchema.parse(req.body);
       const updated = await loseLead(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         parsed.reason,
         leadRepo,
         req.auth!.userId,

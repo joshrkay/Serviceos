@@ -12,6 +12,7 @@ import {
   setJobCustomFieldValue,
 } from '../jobs/job-custom-field';
 import { createCustomFieldDefSchema, setCustomFieldValueSchema } from '../shared/contracts';
+import { routeParam } from '../shared/route-params';
 
 /**
  * J-CF (Jobber parity) — job custom fields.
@@ -67,7 +68,7 @@ export function createJobCustomFieldRouter(
     requirePermission('settings:update'),
     notFoundOnMalformedId('Job custom field not found', 'fieldDefId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const archived = await repo.archiveDef(req.auth!.tenantId, req.params.fieldDefId);
+      const archived = await repo.archiveDef(req.auth!.tenantId, routeParam(req, 'fieldDefId'));
       if (!archived) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Job custom field not found' });
         return;
@@ -83,7 +84,7 @@ export function createJobCustomFieldRouter(
     requirePermission('jobs:view'),
     notFoundOnMalformedId('Job not found', 'jobId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      res.json(await listResolvedJobCustomFields(req.auth!.tenantId, req.params.jobId, repo));
+      res.json(await listResolvedJobCustomFields(req.auth!.tenantId, routeParam(req, 'jobId'), repo));
     })
   );
 
@@ -98,22 +99,22 @@ export function createJobCustomFieldRouter(
       const parsed = setCustomFieldValueSchema.parse(req.body);
       // Confirm the job belongs to this tenant before writing a value — the
       // job_id FK isn't tenant-scoped, so guard against cross-tenant writes.
-      const job = await jobRepo.findById(req.auth!.tenantId, req.params.jobId);
+      const job = await jobRepo.findById(req.auth!.tenantId, routeParam(req, 'jobId'));
       if (!job) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
         return;
       }
       await setJobCustomFieldValue(
         req.auth!.tenantId,
-        req.params.jobId,
-        req.params.fieldDefId,
+        routeParam(req, 'jobId'),
+        routeParam(req, 'fieldDefId'),
         parsed.value,
         repo,
         req.auth!.userId,
         auditRepo,
         req.auth!.role
       );
-      res.json(await listResolvedJobCustomFields(req.auth!.tenantId, req.params.jobId, repo));
+      res.json(await listResolvedJobCustomFields(req.auth!.tenantId, routeParam(req, 'jobId'), repo));
     })
   );
 

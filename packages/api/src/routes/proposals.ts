@@ -38,6 +38,7 @@ import { createSchedulingProposal } from '../proposals/create-scheduling';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import type { CorrectionRepository } from '../proposals/corrections/correction';
 import type { EstimateRepository } from '../estimates/estimate';
+import { routeParam } from '../shared/route-params';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
 // proposal-contracts.ts so this story stays within its allowed-files
@@ -309,7 +310,7 @@ export function createProposalsRouter(
       const result = await getProposalDetail(
         proposalRepo,
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         req.auth!.role as Role
       );
       res.json(result);
@@ -348,7 +349,7 @@ export function createProposalsRouter(
       const result = await approveProposal(
         proposalRepo,
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         req.auth!.userId,
         req.auth!.role as Role,
         auditRepo,
@@ -385,7 +386,7 @@ export function createProposalsRouter(
       const result = await resolveProposalLine(
         {
           tenantId: req.auth!.tenantId,
-          proposalId: req.params.id,
+          proposalId: routeParam(req, 'id'),
           lineIndex: parsed.lineIndex,
           catalogItemId: parsed.catalogItemId,
           actorId: req.auth!.userId,
@@ -407,7 +408,7 @@ export function createProposalsRouter(
       const result = await resolveProposalEntity(
         {
           tenantId: req.auth!.tenantId,
-          proposalId: req.params.id,
+          proposalId: routeParam(req, 'id'),
           candidateId: parsed.candidateId,
           actorId: req.auth!.userId,
           actorRole: req.auth!.role as Role,
@@ -433,7 +434,7 @@ export function createProposalsRouter(
       const result = await rejectProposal(
         proposalRepo,
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         req.auth!.userId,
         req.auth!.role as Role,
         parsed.reason,
@@ -458,7 +459,7 @@ export function createProposalsRouter(
       const result = await undoProposal(
         proposalRepo,
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         req.auth!.userId,
         req.auth!.role as Role,
         auditRepo,
@@ -481,7 +482,7 @@ export function createProposalsRouter(
         const result = await reproposeProposal(
           proposalRepo,
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           req.auth!.userId,
           req.auth!.role as Role,
           auditRepo,
@@ -505,7 +506,7 @@ export function createProposalsRouter(
         const result = await editProposal(
           proposalRepo,
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           req.auth!.userId,
           req.auth!.role as Role,
           parsed.edits,

@@ -20,6 +20,7 @@ import {
   renderMessageTemplate,
   updateMessageTemplate,
 } from './message-template';
+import { routeParam } from '../shared/route-params';
 
 const channelSchema = z.enum(['sms', 'email']);
 const categorySchema = z.enum([
@@ -109,7 +110,7 @@ export function createMessageTemplateRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const template = await templateRepo.findById(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
       );
       if (!template) {
         res
@@ -169,7 +170,7 @@ export function createMessageTemplateRouter(
       const updated = await updateMessageTemplate(
         templateRepo,
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         parsed.data,
         { userId: req.auth!.userId, role: req.auth!.role },
         auditRepo,
@@ -193,7 +194,7 @@ export function createMessageTemplateRouter(
       const deleted = await deleteMessageTemplate(
         templateRepo,
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         { userId: req.auth!.userId, role: req.auth!.role },
         auditRepo,
       );
@@ -225,7 +226,7 @@ export function createMessageTemplateRouter(
       }
       const template = await templateRepo.findById(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
       );
       if (!template) {
         res
@@ -242,7 +243,7 @@ export function createMessageTemplateRouter(
         parsed.data.variables,
         settings?.terminologyPreferences,
       );
-      await templateRepo.incrementUsage(req.auth!.tenantId, req.params.id);
+      await templateRepo.incrementUsage(req.auth!.tenantId, routeParam(req, 'id'));
       res.json(rendered);
     }),
   );

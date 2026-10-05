@@ -12,7 +12,7 @@ function makeApp() {
   registerMarketingRedirects(app);
   // Stand-in for the real SPA catch-all so we can prove the redirects win
   // over index.html for the retired marketing paths.
-  app.get('*', (_req, res) => res.status(200).send('SPA_INDEX'));
+  app.get('/{*splat}', (_req, res) => res.status(200).send('SPA_INDEX'));
   return app;
 }
 

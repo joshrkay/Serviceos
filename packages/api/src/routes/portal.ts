@@ -24,6 +24,7 @@ import {
   createPortalSession,
   revokePortalSession,
 } from '../portal/portal-service';
+import { routeParam } from '../shared/route-params';
 
 const createSchema = z.object({
   customerId: z.string().uuid(),
@@ -266,7 +267,7 @@ export function createPortalRouter(deps: PortalRouterDeps): Router {
     const auth = (req as AuthenticatedRequest).auth!;
     const session = await revokePortalSession(
       auth.tenantId,
-      req.params.id,
+      routeParam(req, 'id'),
       deps.portalRepo,
       deps.auditRepo,
       {

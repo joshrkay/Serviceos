@@ -58,6 +58,7 @@ import { AgreementRepository } from '../agreements/agreement';
 import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
 import { Customer, CustomerRepository } from '../customers/customer';
 import { createLogger } from '../logging/logger';
+import { routeParam } from '../shared/route-params';
 
 const logger = createLogger({
   service: 'estimates-route',
@@ -432,7 +433,7 @@ export function createEstimateRouter(
     notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const result = await getEstimate(req.auth!.tenantId, req.params.id, estimateRepo);
+        const result = await getEstimate(req.auth!.tenantId, routeParam(req, 'id'), estimateRepo);
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
           return;
@@ -465,14 +466,14 @@ export function createEstimateRouter(
         }
         // Tenant-ownership check: only surface history for an estimate the
         // caller can actually see.
-        const estimate = await getEstimate(req.auth!.tenantId, req.params.id, estimateRepo);
+        const estimate = await getEstimate(req.auth!.tenantId, routeParam(req, 'id'), estimateRepo);
         if (!estimate) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
           return;
         }
         const history = await revisionDeps.editDeltaRepo.findByEstimate(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
         );
         res.json(history);
       } catch (err) {
@@ -505,7 +506,7 @@ export function createEstimateRouter(
         }
         // Tenant-ownership check: only surface revisions for an estimate the
         // caller can actually see (cross-tenant ids 404, never leak).
-        const estimate = await getEstimate(req.auth!.tenantId, req.params.id, estimateRepo);
+        const estimate = await getEstimate(req.auth!.tenantId, routeParam(req, 'id'), estimateRepo);
         if (!estimate) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
           return;
@@ -513,7 +514,7 @@ export function createEstimateRouter(
         const revisions = await revisionDeps.docRevisionRepo.findByDocument(
           req.auth!.tenantId,
           'estimate',
-          req.params.id,
+          routeParam(req, 'id'),
         );
         // Join the diff summary: an edit delta's toRevisionId is the revision
         // that edit produced, and its summary describes what changed.
@@ -521,7 +522,7 @@ export function createEstimateRouter(
         if (revisionDeps.editDeltaRepo) {
           const deltas = await revisionDeps.editDeltaRepo.findByEstimate(
             req.auth!.tenantId,
-            req.params.id,
+            routeParam(req, 'id'),
           );
           for (const delta of deltas) {
             summaryByRevisionId.set(delta.toRevisionId, delta.summary);
@@ -545,11 +546,11 @@ export function createEstimateRouter(
 
   const updateHandler = async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
+      const mutationDeps = await buildMutationDeps(req.auth!.tenantId, routeParam(req, 'id'), req);
       const input = updateEstimateSchema.parse(req.body);
       const result = await updateEstimate(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         { ...input, expectedVersion: parseExpectedVersion(req) },
         estimateRepo,
         mutationDeps,
@@ -596,11 +597,11 @@ export function createEstimateRouter(
     notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
+        const mutationDeps = await buildMutationDeps(req.auth!.tenantId, routeParam(req, 'id'), req);
         const input = updateEstimateSchema.parse(req.body);
         const result = await reviseEstimate(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           { ...input, expectedVersion: parseExpectedVersion(req) },
           estimateRepo,
           mutationDeps,
@@ -627,10 +628,10 @@ export function createEstimateRouter(
     notFoundOnMalformedId('Estimate not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const mutationDeps = await buildMutationDeps(req.auth!.tenantId, req.params.id, req);
+        const mutationDeps = await buildMutationDeps(req.auth!.tenantId, routeParam(req, 'id'), req);
         const result = await softDeleteEstimate(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           estimateRepo,
           mutationDeps,
           refreshDeps,
@@ -660,7 +661,7 @@ export function createEstimateRouter(
         const estimateNumber = await getNextEstimateNumber(req.auth!.tenantId, settingsRepo);
         const result = await cloneEstimate(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           estimateNumber,
           req.auth!.userId,
           estimateRepo,
@@ -707,7 +708,7 @@ export function createEstimateRouter(
           return;
         }
         const parsed = saveAsTemplateSchema.parse(req.body ?? {});
-        const estimate = await getEstimate(req.auth!.tenantId, req.params.id, estimateRepo);
+        const estimate = await getEstimate(req.auth!.tenantId, routeParam(req, 'id'), estimateRepo);
         if (!estimate) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Estimate not found' });
           return;
@@ -753,7 +754,7 @@ export function createEstimateRouter(
           });
           return;
         }
-        const invoice = await convertEstimateToInvoice(req.auth!.tenantId, req.params.id, {
+        const invoice = await convertEstimateToInvoice(req.auth!.tenantId, routeParam(req, 'id'), {
           estimateRepo,
           invoiceRepo: moneyStateDeps.invoiceRepo,
           jobRepo,
@@ -809,7 +810,7 @@ export function createEstimateRouter(
           }
         } catch (siblingErr) {
           logger.warn('estimate convert: sibling auto-expire failed', {
-            estimateId: req.params.id,
+            estimateId: routeParam(req, 'id'),
             error: siblingErr instanceof Error ? siblingErr.message : String(siblingErr),
           });
         }
@@ -836,7 +837,7 @@ export function createEstimateRouter(
         }
         const result = await transitionEstimateStatus(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           status,
           estimateRepo,
           refreshDeps,
@@ -968,7 +969,7 @@ export function createEstimateRouter(
         }
         const result = await sendService.sendEstimate({
           tenantId: req.auth!.tenantId,
-          estimateId: req.params.id,
+          estimateId: routeParam(req, 'id'),
           ...parsed.data,
           // #1145 — distinguishes this owner-triggered manual send from an
           // unrelated automatic reminder (estimate-nudge.ts) or proposal-
@@ -986,7 +987,7 @@ export function createEstimateRouter(
           actorRole: req.auth!.role ?? 'unknown',
           eventType: 'estimate.sent',
           entityType: 'estimate',
-          entityId: req.params.id,
+          entityId: routeParam(req, 'id'),
           metadata: {
             channels: result.channelsSent.map((c) => c.channel),
             dispatchIds: result.channelsSent.map((c) => c.dispatchId),
@@ -996,7 +997,7 @@ export function createEstimateRouter(
         // 'sent' inside SendService (not via transitionEstimateStatus),
         // so the rollup is triggered explicitly here. Best-effort.
         if (refreshDeps) {
-          const sent = await estimateRepo.findById(req.auth!.tenantId, req.params.id);
+          const sent = await estimateRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
           if (sent) {
             await refreshJobMoneyStateSafe(
               req.auth!.tenantId,

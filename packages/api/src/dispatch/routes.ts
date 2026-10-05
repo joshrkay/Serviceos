@@ -17,6 +17,7 @@ import { toErrorResponse } from '../shared/errors';
 import { createBoardEventsRouter, BoardEventsRouteDeps } from './board-events-route';
 import { createPresenceRouter } from './presence-routes';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { routeParam } from '../shared/route-params';
 
 export interface EnRouteEnqueuer {
   enqueueEnRouteNotice(input: {
@@ -266,7 +267,7 @@ export function createDispatchRoutes(deps: DispatchRouteDeps): Router {
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const tenantId = req.auth!.tenantId;
-        const technicianId = req.params.id;
+        const technicianId = routeParam(req, 'id');
         // Guard before the query: a non-UUID id (e.g. a stale client's
         // hardcoded 'tech-1') previously reached Postgres and 500'd on the
         // uuid cast (QA 2026-07-02). Bad input is the caller's error.
@@ -368,7 +369,7 @@ export function createDispatchRoutes(deps: DispatchRouteDeps): Router {
             .json({ error: 'UNAVAILABLE', message: 'En-route notifications are not configured' });
         }
         const tenantId = req.auth!.tenantId;
-        const appointmentId = req.params.id;
+        const appointmentId = routeParam(req, 'id');
 
         const appointment = await deps.appointmentRepo.findById(tenantId, appointmentId);
         if (!appointment) {

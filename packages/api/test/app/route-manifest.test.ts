@@ -18,11 +18,12 @@
  * changed.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import express from 'express';
 import {
   GUARD_MIDDLEWARE,
   buildRouteManifest,
   classifyExposure,
-  decodeLayerPath,
+  layerMountPath,
   formatManifest,
   mountCovers,
   type RouteManifest,
@@ -30,30 +31,42 @@ import {
 import { createApp, type AppWithLifecycle } from '../../src/app';
 import { resetConfig } from '../../src/shared/config';
 
-describe('decodeLayerPath', () => {
-  it('decodes a path-less app.use as /', () => {
-    const re = Object.assign(/^\/?(?=\/|$)/i, { fast_slash: true });
-    expect(decodeLayerPath(re)).toBe('/');
+// #1555 — Express 5's router no longer keeps a decodable regexp on each
+// layer (path-to-regexp v8 matchers are closures), so the mount path is
+// stamped at registration and read back through layerMountPath().
+describe('layerMountPath', () => {
+  function onlyLayer(register: (r: express.Router) => void) {
+    const r = express.Router();
+    register(r);
+    expect(r.stack).toHaveLength(1);
+    return r.stack[0];
+  }
+  const noop: express.RequestHandler = (_req, _res, next) => next();
+
+  it('reads a path-less use() as /', () => {
+    expect(layerMountPath(onlyLayer((r) => r.use(noop)))).toBe('/');
   });
 
-  it('decodes a single-segment mount', () => {
-    expect(decodeLayerPath(/^\/api\/?(?=\/|$)/i)).toBe('/api');
+  it('reads a single-segment mount', () => {
+    expect(layerMountPath(onlyLayer((r) => r.use('/api', noop)))).toBe('/api');
   });
 
-  it('decodes a multi-segment mount', () => {
-    expect(decodeLayerPath(/^\/webhooks\/stripe\/?(?=\/|$)/i)).toBe(
+  it('reads a multi-segment mount', () => {
+    expect(layerMountPath(onlyLayer((r) => r.use('/webhooks/stripe', noop)))).toBe(
       '/webhooks/stripe',
     );
   });
 
-  it('decodes an exact-match route regexp', () => {
-    expect(decodeLayerPath(/^\/health\/?$/i)).toBe('/health');
+  it('reads every path of an array mount', () => {
+    expect(
+      layerMountPath(onlyLayer((r) => r.use(['/api', '/public', '/webhooks'], noop))),
+    ).toBe('/api|/public|/webhooks');
   });
 
-  // Better to report a regexp than to guess a path that is not really there.
-  it('reports a parameterised mount as dynamic rather than guessing', () => {
-    const decoded = decodeLayerPath(/^\/api\/jobs\/(?:([^\/]+?))\/?(?=\/|$)/i);
-    expect(decoded).toContain('dynamic');
+  it('reads a parameterised mount literally', () => {
+    expect(layerMountPath(onlyLayer((r) => r.use('/api/jobs/:id', noop)))).toBe(
+      '/api/jobs/:id',
+    );
   });
 });
 

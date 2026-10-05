@@ -44,6 +44,7 @@ import {
   MIN_PIN_DIGITS,
   MAX_PIN_DIGITS,
 } from '../settings/voice-approval-pin';
+import { routeParam } from '../shared/route-params';
 
 type Language = 'en' | 'es';
 
@@ -946,7 +947,7 @@ export function createSettingsRouter(
         // The allowlist is checked BEFORE anything else touches the request:
         // an unlisted key must never reach a write, an audit row, or a
         // platform lookup.
-        const key = capabilityKeySchema.safeParse(req.params.key);
+        const key = capabilityKeySchema.safeParse(routeParam(req, 'key'));
         if (!key.success) {
           res.status(400).json({
             error: 'UNKNOWN_CAPABILITY',

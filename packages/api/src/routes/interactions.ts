@@ -5,6 +5,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import type { DispatchRepository } from '../notifications/dispatch-repository';
+import { routeParam } from '../shared/route-params';
 
 export interface InteractionsRouterDeps {
   pool: Pool;
@@ -152,7 +153,7 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
   }));
 
   router.get('/:id', requireAuth, requireTenant, asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-    const { id } = req.params;
+    const id = routeParam(req, 'id');
 
     // The query below casts `id` straight into a `uuid` column comparison.
     // Postgres raises "invalid input syntax for type uuid" for anything

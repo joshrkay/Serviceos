@@ -2,6 +2,7 @@ import { Response, NextFunction } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { Role, hasPermission, isValidRole } from '../auth/rbac';
 import { Conversation } from './conversation-service';
+import { routeParam } from '../shared/route-params';
 
 export interface ConversationAccessContext {
   userId: string;
@@ -81,7 +82,7 @@ export function requireConversationAccess({ getConversationById }: ConversationA
       return;
     }
 
-    const conversationId = req.params.conversationId;
+    const conversationId = routeParam(req, 'conversationId');
     if (!conversationId) {
       res.status(400).json({ error: 'VALIDATION_ERROR', message: 'conversationId is required' });
       return;

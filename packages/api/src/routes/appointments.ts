@@ -43,6 +43,7 @@ import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
 import { runAfterCommit } from '../middleware/tenant-context';
 import type { SettingsRepository } from '../settings/settings';
 import { appointmentHoursWarnings } from '../appointments/business-hours-warning';
+import { routeParam } from '../shared/route-params';
 export interface DelayNotificationEnqueuer {
   enqueueDelayNotice(input: {
     tenantId: string;
@@ -205,7 +206,7 @@ export function createAppointmentRouter(
     res: Response,
     delayMinutes: number,
   ): Promise<void> {
-    const appointment = await getAppointment(req.auth!.tenantId, req.params.id, appointmentRepo);
+    const appointment = await getAppointment(req.auth!.tenantId, routeParam(req, 'id'), appointmentRepo);
     if (!appointment) {
       res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
       return;
@@ -436,7 +437,7 @@ export function createAppointmentRouter(
     requirePermission('appointments:view'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const result = await getAppointment(req.auth!.tenantId, req.params.id, appointmentRepo);
+        const result = await getAppointment(req.auth!.tenantId, routeParam(req, 'id'), appointmentRepo);
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
           return;
@@ -478,7 +479,7 @@ export function createAppointmentRouter(
 
         const result = await updateAppointment(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           updates,
           appointmentRepo,
           { rejectPastStart: true },
@@ -531,8 +532,8 @@ export function createAppointmentRouter(
         }
         const body = setAppointmentTechnicianSchema.parse(req.body ?? {});
         const tenantId = req.auth!.tenantId;
-        const appointment = await getAppointment(tenantId, req.params.id, appointmentRepo);
-        if (!appointment) throw new NotFoundError('Appointment', req.params.id);
+        const appointment = await getAppointment(tenantId, routeParam(req, 'id'), appointmentRepo);
+        if (!appointment) throw new NotFoundError('Appointment', routeParam(req, 'id'));
 
         await ensurePrimaryTechnician(
           { ...assignmentDeps, appointmentRepo, auditRepo },
@@ -588,12 +589,12 @@ export function createAppointmentRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = delayAcknowledgmentSchema.parse(req.body);
-        if (parsed.appointmentId !== req.params.id) {
+        if (parsed.appointmentId !== routeParam(req, 'id')) {
           res.status(400).json({ error: 'VALIDATION_ERROR', message: 'appointmentId must match route id' });
           return;
         }
 
-        const appointment = await getAppointment(req.auth!.tenantId, req.params.id, appointmentRepo);
+        const appointment = await getAppointment(req.auth!.tenantId, routeParam(req, 'id'), appointmentRepo);
         if (!appointment) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Appointment not found' });
           return;

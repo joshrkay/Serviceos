@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { PublicInvoiceService } from '../invoices/public-invoice-service';
 import { asyncRoute } from '../middleware/async-route';
+import { routeParam } from '../shared/route-params';
 
 const MIN_TOKEN_LENGTH = 16;
 
@@ -21,8 +22,8 @@ export function createPublicInvoicesRouter(service: PublicInvoiceService): Route
    * Returns the public invoice view for the given view token.
    */
   router.get('/:token', asyncRoute(async (req: Request, res: Response) => {
-    if (!tokenGuard(req.params.token, res)) return;
-    const view = await service.getByToken(req.params.token);
+    if (!tokenGuard(routeParam(req, 'token'), res)) return;
+    const view = await service.getByToken(routeParam(req, 'token'));
     res.json(view);
   }));
 
@@ -31,8 +32,8 @@ export function createPublicInvoicesRouter(service: PublicInvoiceService): Route
    * Records a page view (increments viewCount, sets firstViewedAt).
    */
   router.post('/:token/view', asyncRoute(async (req: Request, res: Response) => {
-    if (!tokenGuard(req.params.token, res)) return;
-    const result = await service.recordView(req.params.token);
+    if (!tokenGuard(routeParam(req, 'token'), res)) return;
+    const result = await service.recordView(routeParam(req, 'token'));
     res.json(result);
   }));
 
@@ -45,9 +46,9 @@ export function createPublicInvoicesRouter(service: PublicInvoiceService): Route
   const checkoutSchema = z.object({}).passthrough();
 
   router.post('/:token/checkout', asyncRoute(async (req: Request, res: Response) => {
-    if (!tokenGuard(req.params.token, res)) return;
+    if (!tokenGuard(routeParam(req, 'token'), res)) return;
     checkoutSchema.parse(req.body);
-    const result = await service.getOrCreateCheckoutUrl(req.params.token);
+    const result = await service.getOrCreateCheckoutUrl(routeParam(req, 'token'));
     res.json(result);
   }));
 

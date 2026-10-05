@@ -55,12 +55,6 @@ updates:
       # proposal contract; it is a planned migration (#1561), not a bot bump.
       - dependency-name: 'zod'
         update-types: ['version-update:semver-major']
-      # Express 5 changes route syntax, req.params typing and async error
-      # handling; planned migration (#1555).
-      - dependency-name: 'express'
-        update-types: ['version-update:semver-major']
-      - dependency-name: '@types/express'
-        update-types: ['version-update:semver-major']
 
   # packages/mobile is not a root workspace and carries its own lockfile, so
   # the root entry above does not cover it.

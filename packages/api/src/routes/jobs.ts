@@ -47,6 +47,7 @@ import { AutoInvoiceOnCompletionDeps } from '../invoices/auto-invoice-on-complet
 import { runJobCompletionEffects } from '../jobs/completion-effects';
 import { InvoiceScheduleRepository } from '../invoices/invoice-schedule';
 import { createLogger } from '../logging/logger';
+import { routeParam } from '../shared/route-params';
 
 const logger = createLogger({
   service: 'jobs-route',
@@ -285,7 +286,7 @@ export function createJobRouter(
         const body = fromEstimateBodySchema.parse(req.body ?? {});
         const result = await convertEstimateToScheduledJob(fromEstimateDeps, {
           tenantId: req.auth!.tenantId,
-          estimateId: req.params.estimateId,
+          estimateId: routeParam(req, 'estimateId'),
           actorId: req.auth!.userId,
           actorRole: req.auth!.role,
           durationMin: body.durationMin,
@@ -346,7 +347,7 @@ export function createJobRouter(
         const result = await syncJobSchedule(syncDeps, {
           operation: 'schedule',
           tenantId: req.auth!.tenantId,
-          jobId: req.params.id,
+          jobId: routeParam(req, 'id'),
           actorId: req.auth!.userId,
           actorRole: req.auth!.role,
           scheduledStart: new Date(body.scheduledStart),
@@ -367,7 +368,7 @@ export function createJobRouter(
           const prev = result.previousScheduledStart;
           runAfterCommit(res, () => notifyDispatchBoardChanged(req.auth!.tenantId, prev, tz));
         }
-        const job = await getJob(req.auth!.tenantId, req.params.id, jobRepo);
+        const job = await getJob(req.auth!.tenantId, routeParam(req, 'id'), jobRepo);
         res.status(200).json(job);
       } catch (err) {
         handleScheduleError(res, err);
@@ -394,7 +395,7 @@ export function createJobRouter(
         const result = await syncJobSchedule(syncDeps, {
           operation: 'reassign',
           tenantId: req.auth!.tenantId,
-          jobId: req.params.id,
+          jobId: routeParam(req, 'id'),
           actorId: req.auth!.userId,
           actorRole: req.auth!.role,
           technicianId: body.technicianId,
@@ -406,7 +407,7 @@ export function createJobRouter(
             notifyDispatchBoardChanged(req.auth!.tenantId, appt.scheduledStart, tz),
           );
         }
-        const job = await getJob(req.auth!.tenantId, req.params.id, jobRepo);
+        const job = await getJob(req.auth!.tenantId, routeParam(req, 'id'), jobRepo);
         res.status(200).json(job);
       } catch (err) {
         handleScheduleError(res, err);
@@ -433,7 +434,7 @@ export function createJobRouter(
         const result = await syncJobSchedule(syncDeps, {
           operation: 'unschedule',
           tenantId: req.auth!.tenantId,
-          jobId: req.params.id,
+          jobId: routeParam(req, 'id'),
           actorId: req.auth!.userId,
           actorRole: req.auth!.role,
           reason: body.reason,
@@ -443,7 +444,7 @@ export function createJobRouter(
           const tz = result.timezone;
           runAfterCommit(res, () => notifyDispatchBoardChanged(req.auth!.tenantId, prev, tz));
         }
-        const job = await getJob(req.auth!.tenantId, req.params.id, jobRepo);
+        const job = await getJob(req.auth!.tenantId, routeParam(req, 'id'), jobRepo);
         res.status(200).json(job);
       } catch (err) {
         handleScheduleError(res, err);
@@ -537,7 +538,7 @@ export function createJobRouter(
     notFoundOnMalformedId('Job not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const result = await getJob(req.auth!.tenantId, req.params.id, jobRepo);
+        const result = await getJob(req.auth!.tenantId, routeParam(req, 'id'), jobRepo);
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
           return;
@@ -618,7 +619,7 @@ export function createJobRouter(
         }
         const result = await updateJob(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           req.body,
           jobRepo,
           req.auth!.userId,
@@ -652,7 +653,7 @@ export function createJobRouter(
         }
         const result = await transitionJobStatus(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           status,
           req.auth!.userId,
           req.auth!.role,
@@ -690,7 +691,7 @@ export function createJobRouter(
             const sync = await syncJobSchedule(syncDeps, {
               operation: 'cancelForJob',
               tenantId: req.auth!.tenantId,
-              jobId: req.params.id,
+              jobId: routeParam(req, 'id'),
               actorId: req.auth!.userId,
               actorRole: req.auth!.role,
             });

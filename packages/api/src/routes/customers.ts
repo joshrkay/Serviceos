@@ -52,6 +52,7 @@ import {
   addCustomerTagSchema,
   setCustomFieldValueSchema,
 } from '../shared/contracts';
+import { routeParam } from '../shared/route-params';
 
 /**
  * P9-002 — Optional dependencies for the customer timeline endpoint.
@@ -138,7 +139,7 @@ export function createCustomerRouter(
     req: AuthenticatedRequest,
     res: Response
   ): Promise<boolean> => {
-    const customer = await getCustomer(req.auth!.tenantId, req.params.id, customerRepo);
+    const customer = await getCustomer(req.auth!.tenantId, routeParam(req, 'id'), customerRepo);
     if (!customer) {
       res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
       return false;
@@ -282,7 +283,7 @@ export function createCustomerRouter(
     requirePermission('customers:view'),
     customerNotFoundOnMalformedId,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const result = await getCustomer(req.auth!.tenantId, req.params.id, customerRepo);
+      const result = await getCustomer(req.auth!.tenantId, routeParam(req, 'id'), customerRepo);
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
         return;
@@ -304,7 +305,7 @@ export function createCustomerRouter(
       updateCustomerAccountTypeSchema.parse(req.body ?? {});
       const result = await updateCustomer(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         normalizeCustomerPhones(req.body ?? {}),
         customerRepo,
         req.auth!.userId,
@@ -329,7 +330,7 @@ export function createCustomerRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const result = await archiveCustomer(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         customerRepo,
         req.auth!.userId,
         auditRepo,
@@ -355,7 +356,7 @@ export function createCustomerRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const result = await restoreCustomer(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         customerRepo,
         req.auth!.userId,
         auditRepo,
@@ -393,7 +394,7 @@ export function createCustomerRouter(
         const result = await mergeCustomers(
           req.auth!.tenantId,
           {
-            survivingId: req.params.id,
+            survivingId: routeParam(req, 'id'),
             losingId,
             actorId: req.auth!.userId,
             actorRole: req.auth!.role,
@@ -419,7 +420,7 @@ export function createCustomerRouter(
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         const customer = await getCustomer(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           customerRepo
         );
         if (!customer) {
@@ -429,7 +430,7 @@ export function createCustomerRouter(
         const parsed = timelineQuerySchema.parse(req.query);
         const result = await getCustomerTimeline(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           timelineDeps,
           {
             before: parsed.before,
@@ -458,7 +459,7 @@ export function createCustomerRouter(
         const includeArchived = req.query.includeArchived === 'true';
         const contacts = await listContacts(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           contactRepo,
           includeArchived
         );
@@ -479,7 +480,7 @@ export function createCustomerRouter(
           {
             ...parsed,
             tenantId: req.auth!.tenantId,
-            customerId: req.params.id,
+            customerId: routeParam(req, 'id'),
             createdBy: req.auth!.userId,
             actorRole: req.auth!.role,
           },
@@ -499,14 +500,14 @@ export function createCustomerRouter(
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         if (!(await loadCustomerOr404(req, res))) return;
         const parsed = updateCustomerContactSchema.parse(req.body);
-        const existing = await contactRepo.findById(req.auth!.tenantId, req.params.contactId);
-        if (!existing || existing.customerId !== req.params.id) {
+        const existing = await contactRepo.findById(req.auth!.tenantId, routeParam(req, 'contactId'));
+        if (!existing || existing.customerId !== routeParam(req, 'id')) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Contact not found' });
           return;
         }
         const updated = await updateContact(
           req.auth!.tenantId,
-          req.params.contactId,
+          routeParam(req, 'contactId'),
           parsed,
           contactRepo,
           req.auth!.userId,
@@ -525,14 +526,14 @@ export function createCustomerRouter(
       customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         if (!(await loadCustomerOr404(req, res))) return;
-        const existing = await contactRepo.findById(req.auth!.tenantId, req.params.contactId);
-        if (!existing || existing.customerId !== req.params.id) {
+        const existing = await contactRepo.findById(req.auth!.tenantId, routeParam(req, 'contactId'));
+        if (!existing || existing.customerId !== routeParam(req, 'id')) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Contact not found' });
           return;
         }
         const archived = await archiveContact(
           req.auth!.tenantId,
-          req.params.contactId,
+          routeParam(req, 'contactId'),
           contactRepo,
           req.auth!.userId,
           auditRepo,
@@ -553,7 +554,7 @@ export function createCustomerRouter(
       customerNotFoundOnMalformedId,
       asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
         if (!(await loadCustomerOr404(req, res))) return;
-        const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
+        const tags = await listCustomerTags(req.auth!.tenantId, routeParam(req, 'id'), tagRepo);
         res.json(tags);
       })
     );
@@ -569,14 +570,14 @@ export function createCustomerRouter(
         const { tag } = addCustomerTagSchema.parse(req.body);
         await addCustomerTag(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           tag,
           tagRepo,
           req.auth!.userId,
           auditRepo,
           req.auth!.role
         );
-        const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
+        const tags = await listCustomerTags(req.auth!.tenantId, routeParam(req, 'id'), tagRepo);
         res.status(201).json(tags);
       })
     );
@@ -591,14 +592,14 @@ export function createCustomerRouter(
         if (!(await loadCustomerOr404(req, res))) return;
         await removeCustomerTag(
           req.auth!.tenantId,
-          req.params.id,
-          decodeURIComponent(req.params.tag),
+          routeParam(req, 'id'),
+          decodeURIComponent(routeParam(req, 'tag')),
           tagRepo,
           req.auth!.userId,
           auditRepo,
           req.auth!.role
         );
-        const tags = await listCustomerTags(req.auth!.tenantId, req.params.id, tagRepo);
+        const tags = await listCustomerTags(req.auth!.tenantId, routeParam(req, 'id'), tagRepo);
         res.json(tags);
       })
     );
@@ -617,7 +618,7 @@ export function createCustomerRouter(
         if (!(await loadCustomerOr404(req, res))) return;
         const fields = await listResolvedCustomFields(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           customFieldRepo
         );
         res.json(fields);
@@ -635,8 +636,8 @@ export function createCustomerRouter(
         const { value } = setCustomFieldValueSchema.parse(req.body);
         await setCustomFieldValue(
           req.auth!.tenantId,
-          req.params.id,
-          req.params.fieldDefId,
+          routeParam(req, 'id'),
+          routeParam(req, 'fieldDefId'),
           value,
           customFieldRepo,
           req.auth!.userId,
@@ -645,7 +646,7 @@ export function createCustomerRouter(
         );
         const fields = await listResolvedCustomFields(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           customFieldRepo
         );
         res.json(fields);

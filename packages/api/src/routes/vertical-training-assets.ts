@@ -7,6 +7,7 @@ import { ValidationError } from '../shared/errors';
 import type { KnownEntities } from '../ai/training/scrub';
 import { trainingAssetInputSchema } from '../verticals/training-assets';
 import type { TrainingAssetService } from '../verticals/training-asset-service';
+import { routeParam } from '../shared/route-params';
 
 const knownEntitiesSchema = z.object({
   phones: z.array(z.string()).optional(),
@@ -101,7 +102,7 @@ export function createVerticalTrainingAssetsRouter(service: TrainingAssetService
       const asset = await service.approve({
         tenantId: req.auth!.tenantId,
         actorId: req.auth!.userId,
-        assetId: parseAssetId(req.params.id),
+        assetId: parseAssetId(routeParam(req, 'id')),
       });
       res.json(serializeAsset(asset));
     }),
@@ -114,7 +115,7 @@ export function createVerticalTrainingAssetsRouter(service: TrainingAssetService
       const asset = await service.activate({
         tenantId: req.auth!.tenantId,
         actorId: req.auth!.userId,
-        assetId: parseAssetId(req.params.id),
+        assetId: parseAssetId(routeParam(req, 'id')),
       });
       res.json(serializeAsset(asset));
     }),
@@ -127,7 +128,7 @@ export function createVerticalTrainingAssetsRouter(service: TrainingAssetService
       const asset = await service.archive({
         tenantId: req.auth!.tenantId,
         actorId: req.auth!.userId,
-        assetId: parseAssetId(req.params.id),
+        assetId: parseAssetId(routeParam(req, 'id')),
       });
       res.json(serializeAsset(asset));
     }),

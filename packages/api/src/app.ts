@@ -1,3 +1,5 @@
+// Must precede every .use() call — see the module comment (#1555).
+import './bootstrap/stamp-mount-paths';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -658,6 +660,16 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // JSON into the process, and the limit is visible here rather than
   // buried in body-parser defaults.
   app.use(express.json({ limit: '1mb' }));
+
+  // #1555 — Express 5's body-parser 2 leaves req.body UNDEFINED when no
+  // parser populated it (no body / unhandled content-type); Express 4 always
+  // initialised it to {}. Handlers across the API destructure req.body and
+  // answer a missing field with a 400, so keep the Express 4 contract here
+  // rather than letting a bodiless request become a TypeError → 500.
+  app.use((req, _res, next) => {
+    if (req.body === undefined) req.body = {};
+    next();
+  });
 
   // Serve static frontend files from the built React app.
   // resolveWebDistDir anchors on the packages/api boundary so it points at
@@ -7588,7 +7600,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // This route sits AFTER the global error handler, so sendFile's next(err)
   // would fall through to Express's default handler (stack trace in dev) —
   // handle the error in the callback instead.
-  app.get('*', (req, res) => {
+  // Express 5 / path-to-regexp v8 (#1555): wildcards must be named, and
+  // `/{*splat}` (braces = optional) also matches the bare root `/`, as
+  // Express 4's `'*'` did.
+  app.get('/{*splat}', (req, res) => {
     const frontendPath = resolveWebDistDir(__dirname);
     const indexPath = require('path').join(frontendPath, 'index.html');
     res.sendFile(indexPath, (err) => {
