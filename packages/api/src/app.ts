@@ -5951,6 +5951,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     environment: process.env.NODE_ENV || 'development',
     level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info',
   });
+  // #1603 — the in-app surfaces' TtsProvider: the memo screen's
+  // POST /api/voice/tts (below) and the in-app Assistant adapter (further
+  // down) share this instance, so the device hears one configuration
+  // whichever path answered. The telephony leg (`sharedTtsProvider`) and the
+  // health probe build their own from the same env — three instances, one
+  // configuration. undefined when no key is configured → /tts answers 501
+  // and the adapter skips readback, as before.
+  const inAppTtsProvider = createTtsProvider({
+    TTS_PROVIDER: process.env.TTS_PROVIDER,
+    ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
+    ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
+    AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+  });
   app.use(
     '/api/voice',
     createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, {
@@ -5960,6 +5973,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       fileRepo,
       storage: storageProvider,
       jobRepo,
+      ...(inAppTtsProvider ? { tts: inAppTtsProvider } : {}),
     }),
   );
 
@@ -7319,16 +7333,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.
   // The voiceSessionStore is shared with the Twilio adapter (created above).
-  const ttsProvider = createTtsProvider({
-    TTS_PROVIDER: process.env.TTS_PROVIDER,
-    ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
-    ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
-    AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
-  });
+  // #1603 — the SAME provider instance POST /api/voice/tts speaks through.
   const inAppVoiceAdapter = new InAppVoiceAdapter({
     store: voiceSessionStore,
     gateway: llmGateway,
-    ...(ttsProvider ? { ttsProvider } : {}),
+    ...(inAppTtsProvider ? { ttsProvider: inAppTtsProvider } : {}),
     proposalRepo,
     auditRepo,
     onCallRepo: sharedOnCallRepo,

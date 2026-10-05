@@ -108,12 +108,14 @@ describe('VQ-018 — Bucket 09 concurrency edges', () => {
       (typeof SCRIPT_IDS)[number],
       { intent: string; escalates: boolean }
     > = {
-      // Stale state: appointment was cancelled 30s before the call;
-      // agent should detect cancellation, not silently propose a
-      // reschedule. Today: agent doesn't re-check status mid-call.
+      // Stale state: appointment was cancelled 30s before the call. #1587:
+      // the production engine resolves the reference to no appointment,
+      // reads the request back and drafts it gated for the team (no id to
+      // act on) — it never acts on the cancelled visit, and it does not
+      // announce the cancellation or hand off (an open owner question).
       'stale-appointment-just-cancelled': {
         intent: 'reschedule_appointment',
-        escalates: true,
+        escalates: false,
       },
       // Concurrent write: slot Tuesday-2pm was just taken by another
       // call; agent should detect conflict and propose alternative.
@@ -124,9 +126,9 @@ describe('VQ-018 — Bucket 09 concurrency edges', () => {
         intent: 'create_appointment',
         escalates: false,
       },
-      // Cached state: customer was archived 10s before the call;
-      // agent should refuse or escalate. Today: cached state isn't
-      // re-checked — agent serves the archived customer.
+      // Cached state: customer was archived 10s before the call. #1587 ported
+      // the gate into the production engine: a caller-ID caller whose record
+      // is archived is handed to a person before anything is read or drafted.
       'customer-just-archived-mid-call': {
         intent: 'lookup_account_summary',
         escalates: true,

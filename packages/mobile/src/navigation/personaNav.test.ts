@@ -11,7 +11,9 @@ describe('navModelFor', () => {
 
     expect(nav.persona).toBe('tech');
     expect(nav.landingTab).toBe('today');
-    expect(nav.visibleTabs).toEqual(['today', 'customers', 'jobs']);
+    // #1603 — technicians get the Voice entry in their tab set (the memo
+    // screen that now speaks its answers), still no Home/Settings.
+    expect(nav.visibleTabs).toEqual(['today', 'voice', 'customers', 'jobs']);
     expect(nav.showModeToggle).toBe(false);
     expect(nav.home).toMatchObject({
       showToday: true,
@@ -21,8 +23,11 @@ describe('navModelFor', () => {
     });
     expect(nav.quickLinks.map((link) => link.route)).not.toContain('/invoices');
     expect(nav.visibleTabs).not.toContain('settings');
-    // U13 — the assistant is ai:run-gated; technicians never see the entry.
-    expect(nav.quickLinks.map((link) => link.route)).not.toContain('/assistant');
+    // #1603 — technicians hold `ai:run` (auth/rbac.ts, owner decision
+    // 2026-07-27), so the Assistant entry rides with them; the server's own
+    // permissions scope what it answers (own day; no proposals:approve on
+    // this role, and no in-app voice-approval path exists).
+    expect(nav.quickLinks).toContainEqual({ label: 'Assistant', route: '/assistant' });
   });
 
   it('emphasizes voice, approvals, and money in supervisor mode', () => {

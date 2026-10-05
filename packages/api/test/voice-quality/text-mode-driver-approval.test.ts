@@ -22,6 +22,7 @@ import {
   type Proposal,
 } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryCustomerRepository } from '../../src/customers/customer';
 import type { SettingsRepository } from '../../src/settings/settings';
 import { hashVoiceApprovalPin, normalizeEnrollmentPin } from '../../src/settings/voice-approval-pin';
 import { REDACTED_CHALLENGE_TEXT } from '../../src/ai/voice-turn/transcript-append';
@@ -76,6 +77,10 @@ function build(opts: { withPin?: boolean } = {}) {
     gateway,
     proposalRepo,
     auditRepo,
+    // #1587 — the production ask_caller turn identifies (or records) the
+    // caller by phone before any request is handled; an owner line whose
+    // number is not a customer row goes through it like any caller.
+    customerRepo: new InMemoryCustomerRepository(),
     settingsRepo: settingsStub(opts.withPin ?? true),
     systemActorId: 'system:vq-test',
   });

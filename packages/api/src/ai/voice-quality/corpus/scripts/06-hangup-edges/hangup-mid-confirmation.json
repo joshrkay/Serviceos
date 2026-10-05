@@ -35,24 +35,34 @@
       "caller": "Hi, this is Jane Smith. I'd like to schedule a service appointment for next Tuesday at 2pm.",
       "expected": {
         "intent": "create_appointment",
-        "proposalType": "create_appointment",
-        "slots": {
-          "customerId": "cust_06_mid_confirm_jane",
-          "scheduledStart": "2026-05-12T21:00:00.000Z"
-        },
-        "escalates": false
+        "escalates": false,
+        "spokenIncludes": [
+          "Is that right?"
+        ]
       },
       "hangupAfter": false
     },
     {
       "caller": "Actually, hold on—",
-      "expected": {},
+      "expected": {
+        "noLiveBooking": true
+      },
       "hangupAfter": true
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 3, 4, 5, 8],
-    "appliesDisposition": [9, 11]
+    "appliesFloor": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      8
+    ],
+    "appliesDisposition": [
+      9,
+      11
+    ]
   },
   "layer2Eligible": false
 }

@@ -16,13 +16,18 @@ import { makeVoiceQualityDriverFactory } from './voice-quality-driver-factory';
 const TENANT = 't_ws21b_catalog';
 const CATALOG_PRICE_CENTS = 185000;
 
-/** Two-taskType gateway: classify → draft_estimate, extraction → one line. */
+/** Gateway for the drafting turn: classify → draft_estimate; the readback's yes/no → yes. */
 class EstimateMockGateway extends LLMGateway {
   constructor() {
     super({ defaultProvider: 'mock' }, new Map());
   }
   override async complete(request: LLMRequest): Promise<LLMResponse> {
     const base = { model: 'mock', provider: 'mock', latencyMs: 1, tokenUsage: { input: 10, output: 10, total: 20 } };
+    // #1587 — the readback's yes/no model (`confirmIntent`, same task type).
+    const user = request.messages.find((m) => m.role === 'user')?.content ?? '';
+    if (user.includes("Classify the caller's response as YES or NO")) {
+      return { ...base, content: JSON.stringify({ answer: 'yes', reasoning: 'mock' }) };
+    }
     if (request.taskType === 'classify_intent') {
       return {
         ...base,
@@ -126,7 +131,9 @@ describe('WS21b — driver factory seeds fixtures.catalog for grounded quoting',
       callerId: script.callerId,
       callerIdBlocked: false,
     });
+    // #1587 — the production engine reads the request back and drafts on the yes.
     await driver.speak(sessionId, script.turns[0].caller);
+    await driver.speak(sessionId, "Yes, that's right.");
     await driver.endSession(sessionId);
 
     const proposals = await repos.proposalRepo.findByTenant(TENANT);

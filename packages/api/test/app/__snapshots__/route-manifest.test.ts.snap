@@ -446,6 +446,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /recordings/:id/retry
          └─ POST /stream-token
          └─ POST /transcribe
+         └─ POST /tts
 108  authenticated use    /api/voice/quality    [router: router]
          └─ GET /
          └─ POST /grade

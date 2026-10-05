@@ -33,6 +33,7 @@ import {
 } from '../../src/ai/voice-quality/runner';
 import type { Proposal } from '../../src/proposals/proposal';
 import { loadCorpus, loadScript, loadLayer2Corpus } from '../../src/ai/voice-quality/corpus/loader';
+import { OPERATOR_DRAFTED_FOR_REVIEW_COPY } from '../../src/ai/agents/customer-calling/tts-copy';
 import type { VoiceQualityScript } from '../../src/ai/voice-quality/schema';
 import type { AgentDriver } from '../../src/ai/voice-quality/text-mode-driver';
 import type { Customer } from '../../src/customers/customer';
@@ -90,25 +91,15 @@ function syntheticHangupScript(): VoiceQualityScript {
 }
 
 /**
- * Build a driver factory that returns a fresh `TextModeDriver` per
- * call. Each driver gets its own `VoiceSessionStore` + `AgentEventBus`
- * so cross-call state is impossible.
- *
- * `customerId` is bound onto the freshly-created session inside
- * `driver.startSession`'s wrapper so customer-scoped lookups resolve.
- * Without this binding, the lookup_customer skill returns the
- * "couldn't identify you" fallback string and `lookup_executed` never
- * fires — defeating the test's purpose.
- */
-/**
  * Build a driver-factory closure compatible with `RunScriptContext.driverFactory`.
  *
- * The runner owns the repo bundle + event bus and passes them into
- * this factory; the factory wires them into a fresh
- * `TextModeDriver`. Each `runScript` call instantiates one driver.
+ * The runner owns the repo bundle + event bus and passes them into this
+ * factory; the factory wires them into a fresh `TextModeDriver`. Each
+ * `runScript` call instantiates one driver. #1587 — identity is production's:
+ * the driver resolves the seeded customer by caller-ID at establishment, so
+ * customer-scoped lookups answer on that record (no hand binding).
  */
 function makeDriverFactory(
-  scriptCustomerId: string | undefined,
   classifierResponse: string,
 ): (fctx: DriverFactoryContext) => AgentDriver {
   return (fctx) => {
@@ -143,19 +134,8 @@ function makeDriverFactory(
       systemActorId: 'system:vq-test',
     });
 
-    // Wrap startSession so the test can bind a customerId without
-    // changing the driver contract. Production binds via caller-id
-    // resolution; for synthetic scripts we attach it after
-    // startSession resolves.
-    const wrapped: AgentDriver = {
-      startSession: async (opts) => {
-        const r = await driver.startSession(opts);
-        if (scriptCustomerId) {
-          const session = store.get(r.sessionId);
-          if (session) session.customerId = scriptCustomerId;
-        }
-        return r;
-      },
+    return {
+      startSession: (opts) => driver.startSession(opts),
       speak: (sid, t) => driver.speak(sid, t),
       hangup: (sid) => driver.hangup(sid),
       endSession: async (sid) => {
@@ -163,7 +143,6 @@ function makeDriverFactory(
         store.dispose();
       },
     };
-    return wrapped;
   };
 }
 
@@ -171,7 +150,6 @@ describe('VQ-008 — runner', () => {
   it('VQ-008 — runScript with a synthetic single-turn lookup script returns Observation with non-empty events and lookup_executed', async () => {
     const script = syntheticLookupScript();
     const factory = makeDriverFactory(
-      '00000000-0000-4000-8000-0000000000a1',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
 
@@ -179,8 +157,10 @@ describe('VQ-008 — runner', () => {
 
     expect(result.observation.scriptId).toBe(script.id);
     expect(result.observation.events.length).toBeGreaterThan(0);
+    // #1587 — caller-ID identity is stamped as its own lookup_executed
+    // (`identify_caller_by_caller_id`); the answered lookup follows it.
     const lookupEvents = result.observation.events.filter(
-      (e) => e.type === 'lookup_executed',
+      (e) => e.type === 'lookup_executed' && e.skillName === 'lookup_customer',
     );
     expect(lookupEvents).toHaveLength(1);
     // #869 — an ANSWERED lookup, not merely an emitted event: an unwired
@@ -197,7 +177,6 @@ describe('VQ-008 — runner', () => {
   it('VQ-008 — runScript with a hangup turn marks Observation.sessionEndedAs=terminated and hangupOccurred=true', async () => {
     const script = syntheticHangupScript();
     const factory = makeDriverFactory(
-      '00000000-0000-4000-8000-0000000000a1',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
 
@@ -210,7 +189,6 @@ describe('VQ-008 — runner', () => {
   it('VQ-008 — runScript seeds fixtures: customer count delta is 0 when no creations expected', async () => {
     const script = syntheticLookupScript();
     const factory = makeDriverFactory(
-      '00000000-0000-4000-8000-0000000000a1',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
 
@@ -241,11 +219,9 @@ describe('VQ-008 — runner', () => {
     };
 
     const factoryA = makeDriverFactory(
-      '00000000-0000-4000-8000-0000000000a1',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
     const factoryB = makeDriverFactory(
-      'cust-vq-2',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
 
@@ -256,8 +232,12 @@ describe('VQ-008 — runner', () => {
     expect(b.observation.tenantId).toBe('t-vq-008-b');
     // Each runner gets a fresh event bus → events from A do not appear
     // in B's observation.
-    const aLookups = a.observation.events.filter((e) => e.type === 'lookup_executed');
-    const bLookups = b.observation.events.filter((e) => e.type === 'lookup_executed');
+    const aLookups = a.observation.events.filter(
+      (e) => e.type === 'lookup_executed' && e.skillName === 'lookup_customer',
+    );
+    const bLookups = b.observation.events.filter(
+      (e) => e.type === 'lookup_executed' && e.skillName === 'lookup_customer',
+    );
     expect(aLookups).toHaveLength(1);
     expect(bLookups).toHaveLength(1);
   });
@@ -304,7 +284,6 @@ describe('VQ-008 — runner', () => {
   it('PR#265 review — runScript on a happy-path script emits session_terminated{completed} so observation.sessionEndedAs === completed', async () => {
     const script = syntheticLookupScript();
     const factory = makeDriverFactory(
-      '00000000-0000-4000-8000-0000000000a1',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
 
@@ -324,7 +303,6 @@ describe('VQ-008 — runner', () => {
   it('PR#265 review — runScript on a hangup script still ends as terminated and does NOT add a competing completed event', async () => {
     const script = syntheticHangupScript();
     const factory = makeDriverFactory(
-      '00000000-0000-4000-8000-0000000000a1',
       JSON.stringify({ intentType: 'lookup_customer', confidence: 0.95 }),
     );
 
@@ -443,32 +421,31 @@ describe('VQ2-014 — loadLayer2Corpus', () => {
   });
 });
 
-// #1331 / D-028 follow-up — a script that asks operator-only actions
+// #1331 / D-028 follow-up / #1587 — a script that asks operator-only actions
 // (add material, log an expense, apply a credit …) declares
-// `harnessOperatorTaxonomy`. Layer 1 honours it by classifying on the full
-// operator taxonomy; Layer 2 drives the production processor, which (rightly)
-// refuses those actions on a customer's line. Owner decision 2026-10-01: on
-// Layer 2 those scripts run as the OWNER line — the real surface where an
-// owner asks for these actions by phone.
-describe('#1331 — Layer 2 owner-line persona', () => {
-  it('loadLayer2Corpus runs operator-taxonomy scripts as the owner line; others and Layer 1 are unchanged', () => {
+// `harnessOperatorTaxonomy`. Both lanes drive the production processor, which
+// (rightly) refuses those actions on a customer's line, so on BOTH lanes the
+// script runs as the OWNER line — the real surface where an owner asks for
+// these actions by phone (owner decision 2026-10-01).
+describe('#1331 / #1587 — the phone persona, on both lanes', () => {
+  it('runs operator-taxonomy scripts as the owner line on Layer 1 and Layer 2 alike', () => {
     const layer2 = new Map(loadLayer2Corpus().map((s) => [s.id, s]));
     expect(layer2.get('add-material-known-customer')?.callerIsOwner).toBe(true);
     expect(layer2.get('apply-credit-known-customer')?.callerIsOwner).toBe(true);
     expect(layer2.get('create-appointment-known-customer')?.callerIsOwner).toBe(false);
 
     const layer1 = new Map(loadCorpus().map((s) => [s.id, s]));
-    expect(layer1.get('add-material-known-customer')?.callerIsOwner).toBe(false);
+    expect(layer1.get('add-material-known-customer')?.callerIsOwner).toBe(true);
+    expect(layer1.get('create-appointment-known-customer')?.callerIsOwner).toBe(false);
   });
 
-  // #1331 — the phone turn engine never drafts a write on the request turn:
-  // it reads the request back ("Just to confirm — add material. Is that
-  // right?") and drafts only on the caller's yes. The corpus encodes the
-  // Layer 1 text-mode contract (draft on the request turn), so on Layer 2 the
-  // caller answers the readback; the drafted-reply expectation moves to that
-  // answer turn. Layer 1 keeps the one-turn script.
-  it('loadLayer2Corpus answers the phone readback with a yes after every write turn', () => {
-    const script = loadLayer2Corpus().find((s) => s.id === 'add-material-known-customer')!;
+  // #1331 / #1587 — the phone turn engine never drafts a write on the request
+  // turn: it reads the request back ("Just to confirm — … Is that right?")
+  // and drafts only on the caller's yes. The corpus authors a write as one
+  // request turn, so both lanes answer the readback; the drafted-reply
+  // expectation (production's own closer) moves to that answer turn.
+  it('answers the phone readback with a yes after every write turn', () => {
+    const script = loadCorpus().find((s) => s.id === 'add-material-known-customer')!;
     expect(script.turns).toHaveLength(2);
     expect(script.turns[0]!.caller).toBe('Add three boxes of half-inch PEX to the shopping list.');
     expect(script.turns[0]!.expected).toEqual({
@@ -480,17 +457,28 @@ describe('#1331 — Layer 2 owner-line persona', () => {
     expect(script.turns[0]!.hangupAfter).toBe(false);
     expect(script.turns[1]).toEqual({
       caller: "Yes, that's right.",
-      expected: {
-        spokenAnswerMatches:
-          "Got it — I've drafted an add material for review. Anything else I can help you with?",
-      },
+      expected: { spokenAnswerMatches: OPERATOR_DRAFTED_FOR_REVIEW_COPY },
       hangupAfter: false,
     });
 
-    const lookup = loadLayer2Corpus().find((s) => s.id === 'lookup-jobs-known-customer')!;
+    const lookup = loadCorpus().find((s) => s.id === 'lookup-jobs-known-customer')!;
     expect(lookup.turns).toHaveLength(1);
-    const layer1 = loadCorpus().find((s) => s.id === 'add-material-known-customer')!;
-    expect(layer1.turns).toHaveLength(1);
+  });
+
+  // #1587 — where production has no readback, no yes is added: a clarification
+  // the engine raises itself, a script whose next turn already answers the
+  // readback, and Gather's one-turn create_customer flow (media streams takes
+  // the readback — coverage-table.ts).
+  it('adds no yes where the surface drafts without a readback', () => {
+    const layer1 = new Map(loadCorpus().map((s) => [s.id, s]));
+    expect(layer1.get('caller-id-matches-multiple-customers')!.turns.map((t) => t.caller)).toEqual([
+      'Hi, I\'d like to check on my account please.',
+      'This is Jane Doe.',
+    ]);
+    expect(layer1.get('hangup-post-proposal')!.turns).toHaveLength(2);
+    expect(layer1.get('create-customer-new-signup')!.turns).toHaveLength(1);
+    const layer2 = new Map(loadLayer2Corpus().map((s) => [s.id, s]));
+    expect(layer2.get('create-customer-new-signup')!.turns).toHaveLength(2);
   });
 });
 
@@ -578,10 +566,10 @@ describe('#1331 — runScript seeds appointment and invoice dates as Dates', () 
 // every write proposal was gated on a bad customerId and lookup_balance
 // failed outright (run 36829085635 log). The Layer 2 persona maps each
 // readable fixture id to a stable UUID everywhere it appears.
-describe('#1331 — loadLayer2Corpus fixture ids', () => {
+describe('#1331 / #1587 — corpus fixture ids', () => {
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-  it('gives every Layer 2 fixture record a UUID id, and keeps references and expected slots pointing at it', () => {
+  it('gives every fixture record a UUID id, and keeps references and expected slots pointing at it', () => {
     const layer2 = loadLayer2Corpus();
     const create = layer2.find((s) => s.id === 'create-appointment-known-customer')!;
     const customer = (create.fixtures.customers as Array<{ id: string; tenantId: string }>)[0]!;
@@ -602,8 +590,8 @@ describe('#1331 — loadLayer2Corpus fixture ids', () => {
         .expected.slots?.customerId,
     ).toBe(customer.id);
 
-    // Layer 1 is untouched.
+    // #1587 — Layer 1 drives the same production contracts and reads the same ids.
     const layer1 = loadCorpus().find((s) => s.id === 'create-appointment-known-customer')!;
-    expect((layer1.fixtures.customers as Array<{ id: string }>)[0]!.id).toBe('cust_02_create_appt_jane');
+    expect((layer1.fixtures.customers as Array<{ id: string }>)[0]!.id).toBe(customer.id);
   });
 });

@@ -15,7 +15,8 @@ tags:
     permissions:
       all: allow
 - runFlow: subflows/signed-in.yaml
-- tapOn: "Assistant"
+# The memo tab (labelled "Voice" since #1603).
+- tapOn: "Voice"
 - setAirplaneMode: enabled
 - extendedWaitUntil:
     visible: "You're offline.*"

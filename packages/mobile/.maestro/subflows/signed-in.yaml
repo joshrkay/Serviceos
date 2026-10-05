@@ -15,6 +15,9 @@ appId: com.serviceos.app
     timeout: 120000
 - assertNotVisible: "Check your email"
 - tapOn: "Skip for now"
+# The tab bar: "Voice" is the memo tab (labelled "Assistant" until #1603,
+# which renamed it because technicians then also got an "Assistant" quick
+# link to the conversational screen).
 - extendedWaitUntil:
-    visible: "Assistant"
+    visible: "Voice"
     timeout: 30000

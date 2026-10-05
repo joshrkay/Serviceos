@@ -1,0 +1,49 @@
+{
+  "id": "dnc-caller-answered",
+  "bucket": "05-compliance-edges",
+  "fixtures": {
+    "tenant": {
+      "id": "00000000-0000-0000-0000-0000000c0502",
+      "name": "VQ Bucket 05 — DNC Tenant",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [],
+    "appointments": [],
+    "invoices": []
+  },
+  "callerId": "+15555550502",
+  "callerIdBlocked": false,
+  "turns": [
+    {
+      "caller": "Hi, I'd like to ask about your pricing for furnace repair.",
+      "expected": {
+        "intent": "draft_estimate",
+        "proposalType": "draft_estimate",
+        "slots": {
+          "lineItemDescriptions": [
+            "furnace repair"
+          ]
+        },
+        "escalates": false,
+        "spokenAnswerMatches": "#1587: the tenant's do-not-call list governs OUTBOUND contact (calls, texts); production answers an inbound call from a listed number like any other. The unknown caller is identified by phone (#1540 §2) and their pricing question is drafted as an estimate for the team to review. Whether an inbound DNC caller should instead be declined is an open owner question recorded on #1587."
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      7
+    ],
+    "appliesDisposition": [
+      9,
+      11,
+      12
+    ]
+  },
+  "layer2Eligible": false
+}
