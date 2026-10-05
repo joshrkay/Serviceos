@@ -36,16 +36,38 @@
     {
       "caller": "Hi, I'd like to look up my account.",
       "expected": {
-        "intent": "lookup_account_summary",
+        "escalates": false,
+        "spokenIncludes": [
+          "full name and service address"
+        ],
+        "spokenAnswerMatches": "caller-id is blocked so the agent cannot identify the caller by phone; the identity turn asks for their full name and service address before anything account-related, auto-resolves nobody, creates no customer, and classifies no request yet"
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "My name is Jane Smith, I'm at 123 Main Street.",
+      "expected": {
         "escalates": true,
-        "spokenAnswerMatches": "caller-id is blocked so the agent cannot auto-resolve; agent explicitly asks for a callback number (or full name + address) before doing any account lookup; no customer is auto-resolved and no duplicate customer is created"
+        "spokenIncludes": [
+          "Let me connect you with a team member"
+        ],
+        "spokenAnswerMatches": "the caller names an existing customer (Jane Smith) but calls from a number the agent cannot see, so identity cannot be verified by phone: no customer record is created and the caller is handed to a team member; nothing from Jane's account is spoken"
       },
       "hangupAfter": false
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 5, 6],
-    "appliesDisposition": [9, 11, 12]
+    "appliesFloor": [
+      1,
+      2,
+      5,
+      6
+    ],
+    "appliesDisposition": [
+      9,
+      11,
+      12
+    ]
   },
   "layer2Eligible": false
 }

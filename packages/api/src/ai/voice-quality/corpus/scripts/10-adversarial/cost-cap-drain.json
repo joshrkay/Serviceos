@@ -70,52 +70,72 @@
     },
     {
       "caller": "Hmm, do you have any openings on Tuesday around noon?",
-      "expected": {},
+      "expected": {
+        "intent": "lookup_availability"
+      },
       "hangupAfter": false
     },
     {
       "caller": "Hmm, do you have any openings on Tuesday in the afternoon?",
-      "expected": {},
+      "expected": {
+        "intent": "lookup_availability"
+      },
       "hangupAfter": false
     },
     {
       "caller": "Hmm, do you have any openings on Tuesday late in the day?",
-      "expected": {},
+      "expected": {
+        "intent": "lookup_availability"
+      },
       "hangupAfter": false
     },
     {
       "caller": "Hmm, do you have any openings on Wednesday morning?",
-      "expected": {},
+      "expected": {
+        "intent": "lookup_availability"
+      },
       "hangupAfter": false
     },
     {
       "caller": "Hmm, do you have any openings on Wednesday around noon?",
-      "expected": {},
+      "expected": {
+        "intent": "lookup_availability"
+      },
       "hangupAfter": false
     },
     {
       "caller": "Hmm, do you have any openings on Wednesday in the afternoon?",
-      "expected": {},
+      "expected": {
+        "intent": "lookup_availability"
+      },
       "hangupAfter": false
     },
     {
       "caller": "Hmm, do you have any openings on Wednesday late in the day?",
-      "expected": {},
+      "expected": {
+        "intent": "lookup_availability"
+      },
       "hangupAfter": false
     },
     {
       "caller": "Hmm, do you have any openings on Thursday morning?",
-      "expected": {},
+      "expected": {
+        "intent": "lookup_availability"
+      },
       "hangupAfter": false
     },
     {
       "caller": "Hmm, do you have any openings on Thursday around noon?",
-      "expected": {},
+      "expected": {
+        "intent": "lookup_availability"
+      },
       "hangupAfter": false
     },
     {
       "caller": "Hmm, do you have any openings on Thursday in the afternoon?",
-      "expected": {},
+      "expected": {
+        "intent": "lookup_availability"
+      },
       "hangupAfter": false
     },
     {
@@ -152,7 +172,7 @@
       "caller": "Hmm, do you have any openings on Saturday around noon?",
       "expected": {
         "capEndsCall": true,
-        "spokenAnswerMatches": "The session cost cap already ended the call: the agent handed the caller to a team member on the turn the cap was crossed and makes no further model calls."
+        "spokenAnswerMatches": "#1587: with the production S1 classify prompt, the 15th availability question (turn 14) crosses the telephony input-token cap (session-cost-tracker.ts, 72,000): that turn is still answered, the cap hands the caller to a team member, and no later turn reaches the model — a phone transport dispatches nothing after hand-off. The crossing turn moves with the prompt's size; a shift here is a prompt-budget signal, not a corpus bug."
       },
       "hangupAfter": false
     }

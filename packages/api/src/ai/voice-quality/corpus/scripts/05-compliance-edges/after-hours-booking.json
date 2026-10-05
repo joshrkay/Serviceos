@@ -1,0 +1,79 @@
+{
+  "id": "after-hours-booking",
+  "bucket": "05-compliance-edges",
+  "fixtures": {
+    "tenant": {
+      "id": "00000000-0000-0000-0000-0000000c0501",
+      "name": "VQ Bucket 05 — After-Hours Tenant",
+      "timezone": "America/Los_Angeles",
+      "businessHours": {
+        "afterHours": true,
+        "timezone": "America/Los_Angeles",
+        "schedule": [
+          {
+            "dayOfWeek": 1,
+            "openTime": "09:00",
+            "closeTime": "17:00"
+          },
+          {
+            "dayOfWeek": 2,
+            "openTime": "09:00",
+            "closeTime": "17:00"
+          },
+          {
+            "dayOfWeek": 3,
+            "openTime": "09:00",
+            "closeTime": "17:00"
+          },
+          {
+            "dayOfWeek": 4,
+            "openTime": "09:00",
+            "closeTime": "17:00"
+          },
+          {
+            "dayOfWeek": 5,
+            "openTime": "09:00",
+            "closeTime": "17:00"
+          }
+        ],
+        "currentTime": "22:00:00",
+        "callMomentLocal": "2026-05-04T22:00:00-07:00"
+      }
+    },
+    "customers": [],
+    "appointments": [],
+    "invoices": []
+  },
+  "callerId": "+15555550501",
+  "callerIdBlocked": false,
+  "turns": [
+    {
+      "caller": "Hi, I'd like to book a service appointment for my AC.",
+      "expected": {
+        "intent": "create_appointment",
+        "escalates": false,
+        "spokenIncludes": [
+          "What date and time work for you?"
+        ],
+        "spokenAnswerMatches": "Owner decision 2026-10-05 (amends D-040 §1): on an AI-answering tenant an after-hours booking request books NORMALLY, exactly as during the day — no callback proposal, nobody paged. This request names no day or time, so the agent asks for one (#1577) and drafts nothing yet; a time would be read back and drafted for approval as usual. (The /voice webhook sends an after-hours call to voicemail only for a tenant that opted into after_hours_voice_mode 'voicemail'.)"
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      7
+    ],
+    "appliesDisposition": [
+      9,
+      11,
+      12
+    ]
+  },
+  "layer2Eligible": false
+}

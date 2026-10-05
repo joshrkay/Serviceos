@@ -115,10 +115,23 @@ run_flow() {
 # so the phase-B relaunch could not load the bundle.) Maestro's clearState
 # would wipe this pref too, which is why no flow uses it.
 PREFS_B64="$(printf '%s' '<?xml version="1.0" encoding="utf-8" standalone="yes" ?><map><string name="debug_http_host">localhost:8081</string></map>' | base64 | tr -d '\n')"
+# #1603 — the dev-auth shim (src/dev/clerk-expo-dev-shim.tsx) reads
+# files/dev-auth.json at token time, so ONE Metro bundle can sign in as the
+# owner (default) or, when this file is present, as a technician. A distinct
+# sub lands in its own technician-owned dev tenant on the API's
+# DEV_AUTH_BYPASS (auth/dev-auth-bypass.ts) — owner flows are untouched.
+TECH_IDENTITY_B64="$(printf '%s' '{"sub":"dev_tech","role":"technician"}' | base64 | tr -d '\n')"
+# reset_app [technician] — fresh app state; the optional identity signs the
+# next launch in as a technician. `pm clear` wipes files/, so the owner flows'
+# bare reset also removes any identity file left by the technician flow.
 reset_app() {
+  local identity="${1:-owner}"
   adb shell am force-stop com.serviceos.app
   adb shell pm clear com.serviceos.app >/dev/null
   adb shell "run-as com.serviceos.app sh -c 'mkdir -p shared_prefs && echo $PREFS_B64 | base64 -d > shared_prefs/com.serviceos.app_preferences.xml'"
+  if [ "$identity" = "technician" ]; then
+    adb shell "run-as com.serviceos.app sh -c 'mkdir -p files && echo $TECH_IDENTITY_B64 | base64 -d > files/dev-auth.json'"
+  fi
   adb shell pm grant com.serviceos.app android.permission.RECORD_AUDIO || true
 }
 
@@ -179,4 +192,12 @@ check_offline_queued "B"
 run_flow prd-5.4-reconnect.yaml
 check_flushed
 
-log "PASS — 3.3 notice reached signed in; 5.4 offline → crash → reconnect proven on device"
+# --- #1603 technician Assistant ---------------------------------------------
+# Signed in as a technician (identity file), the conversational Assistant
+# answers "what's my next job" with the self-scoped empty-day line; the
+# screenshot 1603-tech-assistant is the device proof (CI is keyless, so the
+# spoken half needs a TTS key and is not asserted here).
+reset_app technician
+run_flow tech-assistant-next-job.yaml
+
+log "PASS — 3.3 notice reached signed in; 5.4 offline → crash → reconnect proven on device; #1603 technician saw the Assistant's answer"

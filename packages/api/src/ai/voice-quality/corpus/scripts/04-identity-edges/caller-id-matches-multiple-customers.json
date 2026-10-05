@@ -54,16 +54,39 @@
     {
       "caller": "Hi, I'd like to check on my account please.",
       "expected": {
-        "intent": "lookup_account_summary",
+        "proposalType": "voice_clarification",
+        "escalates": false,
+        "spokenIncludes": [
+          "full name and service address"
+        ],
+        "spokenAnswerMatches": "the caller-id matches two customers (Jane Doe and John Doe); the agent never picks one — it raises a clarification card for the operator naming both candidates and asks the caller for their full name and service address; no duplicate customer is created and no account detail is spoken"
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "This is Jane Doe.",
+      "expected": {
         "escalates": true,
-        "spokenAnswerMatches": "agent recognizes that the caller-id matches more than one customer (Jane Doe and John Doe) and asks the caller to clarify which account they mean, or escalates; no duplicate customer is created"
+        "spokenIncludes": [
+          "Let me connect you with a team member"
+        ],
+        "spokenAnswerMatches": "the number still matches two accounts, so the second failed identification hands the caller to a team member rather than guessing which Doe is calling; no customer is created"
       },
       "hangupAfter": false
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 5, 6],
-    "appliesDisposition": [9, 11, 12]
+    "appliesFloor": [
+      1,
+      2,
+      5,
+      6
+    ],
+    "appliesDisposition": [
+      9,
+      11,
+      12
+    ]
   },
   "layer2Eligible": false
 }

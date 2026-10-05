@@ -2519,7 +2519,11 @@ export class TwilioGatherAdapter {
 
     let turnState: string = currentState;
     if (currentState === 'ask_caller') {
-      const askCallerFx = await this.processor.handleAskCaller(session, opts.tenantId);
+      const askCallerFx = await this.processor.handleAskCaller(
+        session,
+        opts.tenantId,
+        opts.speechResult,
+      );
       // Identity only (no request to carry) → no classify call: identify and
       // ask how to help, exactly as before (ask-caller-request.ts).
       if (

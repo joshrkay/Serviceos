@@ -1,0 +1,44 @@
+# #1603 (hands-free step 1) — a TECHNICIAN reaches the Assistant and asks for
+# the next job. The harness (scripts/maestro-device-run.sh) first writes the
+# technician identity into the app sandbox so the dev-auth shim signs in as
+# {"sub":"dev_tech","role":"technician"}; the API's DEV_AUTH_BYPASS lands that
+# in a technician-owned dev tenant with no visits. The keyless CI gateway
+# scripts "what's my next job" as `lookup_my_day` (self-scoped for a
+# technician), so the honest answer is the empty-day line from
+# ai/skills/lookup-my-day.ts. With a TTS key configured the same turn is also
+# spoken; CI is keyless, so the screenshot is the device proof.
+appId: com.serviceos.app
+name: "#1603 — technician asks the Assistant for the next job"
+tags:
+  - issue-1603
+---
+# App state is reset by the harness (reset_app technician), not clearState —
+# see scripts/maestro-device-run.sh.
+- launchApp:
+    clearState: false
+    permissions:
+      all: allow
+- runFlow: subflows/signed-in.yaml
+# The technician lands on Today, which carries their quick links (no Home tab)
+# — "Assistant" is the only element with that label now that the memo tab is
+# "Voice", so this tap proves the in-UI entry, not just the route.
+- extendedWaitUntil:
+    visible: "Quick links"
+    timeout: 30000
+- tapOn: "Assistant"
+- extendedWaitUntil:
+    visible: "Start"
+    timeout: 30000
+- tapOn: "Start"
+# Session live: the greeting turn landed and the composer is up.
+- extendedWaitUntil:
+    visible: "Hold to talk"
+    timeout: 60000
+- tapOn: "Type a message"
+- inputText: "what's my next job"
+- tapOn: "Send"
+- extendedWaitUntil:
+    visible: "You have nothing on the schedule today\\."
+    timeout: 60000
+- assertVisible: "what's my next job"
+- takeScreenshot: 1603-tech-assistant

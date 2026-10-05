@@ -19,8 +19,9 @@ export interface PersonaQuickLink {
     | '/agreements'
     | '/approvals'
     | '/jobs'
-    // U13 — the conversational assistant. ai:run-gated, so it rides only with
-    // personas that hold that permission (supervisor / both), never tech.
+    // U13 — the conversational assistant. ai:run-gated; every role holds
+    // `ai:run` (auth/rbac.ts, owner decision 2026-07-27), so since #1603 it
+    // rides with every persona — the server's permissions scope the answers.
     | '/assistant';
 }
 
@@ -64,6 +65,12 @@ const TECH_LINKS: readonly PersonaQuickLink[] = [
   { label: 'Messages', route: '/messages' },
   // Schedule deep-links redirect technicians to Today (see app/schedule.tsx).
   { label: 'Schedule', route: '/schedule' },
+  // #1603 — hands-free step 1: technicians reach the Assistant too. What it
+  // answers is scoped server-side (own day via lookup_my_day; owner-grade
+  // lookups refuse). In-app there is no voice-approval path (D-025 ratifies
+  // owner voice approval on the PHONE line only), and this role holds no
+  // proposals:approve at all.
+  { label: 'Assistant', route: '/assistant' },
 ];
 
 function isTechnicianRole(role: string): boolean {
@@ -80,7 +87,9 @@ export function navModelFor(input: PersonaNavInput): PersonaNavModel {
     return {
       persona,
       landingTab: 'today',
-      visibleTabs: ['today', 'customers', 'jobs'],
+      // #1603 — the Voice tab (memo capture; answers spoken back) joins the
+      // technician's tab set. Home/Settings stay owner surfaces.
+      visibleTabs: ['today', 'voice', 'customers', 'jobs'],
       showModeToggle,
       home: {
         showToday: true,

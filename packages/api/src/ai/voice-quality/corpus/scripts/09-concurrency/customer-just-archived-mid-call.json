@@ -36,15 +36,30 @@
       "caller": "Hi, this is Jane Smith. Can I get a summary of my account?",
       "expected": {
         "intent": "lookup_account_summary",
-        "spokenAnswerMatches": "I can't share account details right now — let me hand you to an operator who can help.",
-        "escalates": true
+        "escalates": true,
+        "spokenIncludes": [
+          "Let me connect you with a team member"
+        ],
+        "spokenAnswerMatches": "caller-id resolves to Jane Smith, but her record is archived: the agent does not read anything from the archived account and hands the caller to a team member"
       },
       "hangupAfter": false
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 3, 4, 5, 6],
-    "appliesDisposition": [9, 10, 11, 12]
+    "appliesFloor": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "appliesDisposition": [
+      9,
+      10,
+      11,
+      12
+    ]
   },
   "layer2Eligible": false
 }

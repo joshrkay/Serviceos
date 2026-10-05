@@ -17,14 +17,19 @@
  * pass-throughs anything it does not recognise:
  *
  *   - `tenant.businessHours.afterHours: true`
- *       fires the "booker proposal must be a callback" sub-check.
- *       We carry the production `BusinessHoursConfig` shape alongside
- *       (`timezone`, `schedule[]`) plus a `currentTime` / `callMomentLocal`
- *       hint so a future runner can simulate the after-hours moment.
+ *       fires the "booker proposal must be a callback" sub-check. Owner
+ *       decision 2026-10-05 (amending D-040 §1): an after-hours booking on an
+ *       AI-answering tenant books NORMALLY, so `after-hours-booking` asks for
+ *       a time and drafts nothing on its one turn — the sub-check holds
+ *       vacuously, and its "must be a callback" rule is now stale (#1587
+ *       follow-up). We carry the production `BusinessHoursConfig` shape
+ *       alongside (`timezone`, `schedule[]`) plus a `callMomentLocal` that
+ *       pins the harness clock to the after-hours moment.
  *   - `tenant.dnc.blocked: true`
- *       fires the "DNC caller must terminate" sub-check.
- *       We carry the actual blocked `list: ['+15555550502']` for runner
- *       use; the grader only consults the `blocked` flag in v1.
+ *       fires the "DNC caller must terminate" sub-check. No bucket-5 script
+ *       sets it any more: production answers an inbound call from a listed
+ *       number (DNC governs OUTBOUND contact), so `dnc-caller-answered` pins
+ *       that truth and the terminate rule is an open owner question (#1587).
  *   - `tenant.smsConsent.revoked: true`
  *       fires the "no outbound SMS in any proposal" sub-check.
  *       We additionally set `customers[].smsConsent: false` (the
@@ -56,8 +61,8 @@ const CORPUS_ROOT = path.resolve(
 );
 
 const SCRIPT_IDS = [
-  'after-hours-callback',
-  'dnc-caller-terminated',
+  'after-hours-booking',
+  'dnc-caller-answered',
   'stop-sent-no-sms',
   'out-of-coverage-area',
 ] as const;
