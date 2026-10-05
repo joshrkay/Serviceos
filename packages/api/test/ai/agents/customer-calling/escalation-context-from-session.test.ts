@@ -29,12 +29,21 @@ function sessionWithCallerTurns(lines: ReadonlyArray<string>) {
 }
 
 describe('#1616 — buildCallerContextFromSession for an identity hand-off', () => {
-  it('maps caller_identification_failed to the identity_unverified builder reason, not low_confidence_intent', () => {
-    const session = sessionWithCallerTurns(['Hi, this is Jane Smith.']);
+  it("a caller with a record bound to this line (the archived case) carries no claimedName — a self-introduction is not a claim about another record", () => {
+    const session = sessionWithCallerTurns(["Hi, this is Jane Smith, when's my appointment?"]);
+    session.customerId = '00000000-0000-4000-8000-000000001616';
 
-    const bundle = buildCallerContextFromSession(session, '+15555550404', 'caller_identification_failed');
+    const bundle = buildCallerContextFromSession(session, '+15555550494', 'caller_identification_failed');
 
-    expect(bundle.builderReason).toBe('identity_unverified');
+    expect(bundle.caller.claimedName).toBeUndefined();
+  });
+
+  it('a non-identity hand-off never carries a claimedName, even after a self-introduction', () => {
+    const session = sessionWithCallerTurns(['Hi, this is Jane Smith.', 'Let me talk to a person.']);
+
+    const bundle = buildCallerContextFromSession(session, '+15555550404', 'operator_request');
+
+    expect(bundle.caller.claimedName).toBeUndefined();
   });
 
   it("carries the name the caller gave in their last turn as caller.claimedName — a claim, never caller.name", () => {

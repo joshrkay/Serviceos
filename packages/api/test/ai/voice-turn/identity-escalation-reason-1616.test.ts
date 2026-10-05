@@ -181,10 +181,10 @@ describe('#1616 — identity hand-offs reach the dispatcher as identity problems
       "Caller says they're Jane Smith but the number doesn't match their record",
     );
     expect(h.whisperCache.get(started?.escalationId ?? '')?.text).toContain(
-      "Reason: caller says they're Jane Smith but the number doesn't match their record.",
+      "Reason: says they're Jane Smith, number doesn't match their record.",
     );
     expect(h.smsBodies).toHaveLength(1);
-    expect(h.smsBodies[0]).toContain("Reason: says they're Jane Smith");
+    expect(h.smsBodies[0]).toContain("Reason: says they're Jane Smith (unverified).");
     expect(h.smsBodies[0]).not.toMatch(/low confidence/i);
     // D-042 (4) / #1614's pin: what is RECORDED does not change.
     expect(h.events.find((e) => e.type === 'escalation_triggered')?.reason).toBe('max_retries_exceeded');

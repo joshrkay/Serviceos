@@ -115,27 +115,36 @@ export interface EscalationSummary {
  */
 const identityCopy = makeTranslator({
   en: {
+    // `sentence` is the in-app panel's full sentence; `whisper` is the spoken
+    // form after "Reason:" (compact, so the 25-word whisper keeps its
+    // suggested action); `sms` is the one-segment form.
     'identity.claims.sentence':
       "Caller says they're {{name}} but the number doesn't match their record",
-    // SMS forms are compact: the segment budget leaves ~30 chars after
-    // "Reason:", so the claim leads and the qualifier is what a cut takes.
+    'identity.claims.whisper': "says they're {{name}}, number doesn't match their record",
     'identity.claims.sms': "says they're {{name}} (unverified)",
     'identity.archived.sentence': "Caller's record is archived",
+    'identity.archived.whisper': "caller's record is archived",
     'identity.archived.sms': 'record archived',
     'identity.unverified.sentence': "Caller's identity couldn't be verified",
+    'identity.unverified.whisper': "caller's identity couldn't be verified",
     'identity.unverified.sms': 'identity unverified',
   },
   es: {
     'identity.claims.sentence':
       'La persona que llama dice ser {{name}}, pero el número no coincide con su registro',
+    'identity.claims.whisper': 'dice ser {{name}}, el número no coincide con su registro',
     'identity.claims.sms': 'dice ser {{name}} (sin verificar)',
     'identity.archived.sentence': 'El registro de la persona que llama está archivado',
+    'identity.archived.whisper': 'su registro está archivado',
     'identity.archived.sms': 'registro archivado',
     'identity.unverified.sentence':
       'No se pudo verificar la identidad de la persona que llama',
+    'identity.unverified.whisper': 'no se pudo verificar su identidad',
     'identity.unverified.sms': 'identidad sin verificar',
   },
 });
+
+type IdentityForm = 'sentence' | 'whisper' | 'sms';
 
 /**
  * Which identity problem to name for an `identity_unverified` hand-off. An
@@ -148,8 +157,7 @@ function identityCase(ctx: EscalationContext): 'archived' | 'claims' | 'unverifi
   return 'unverified';
 }
 
-/** The plain sentence (panel + whisper) or the compact SMS form. */
-function identityReason(ctx: EscalationContext, form: 'sentence' | 'sms'): string {
+function identityReason(ctx: EscalationContext, form: IdentityForm): string {
   const lang: Language = ctx.language ?? 'en';
   const vars = ctx.caller.claimedName ? { name: ctx.caller.claimedName } : undefined;
   return identityCopy(`identity.${identityCase(ctx)}.${form}`, lang, vars);
@@ -185,9 +193,7 @@ function reasonShort(ctx: EscalationContext, channel: 'whisper' | 'sms'): string
     case 'low_confidence_intent': return 'low confidence';
     case 'emergency_dispatch': return 'emergency';
     case 'identity_unverified':
-      return channel === 'sms'
-        ? identityReason(ctx, 'sms')
-        : lowerFirst(identityReason(ctx, 'sentence'));
+      return identityReason(ctx, channel);
   }
 }
 
@@ -339,7 +345,11 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
     }
   }
 
-  // SMS: target ≤160 chars. Always reserve space for the link; truncate core at word boundary.
+  // SMS: one segment (≤160 chars), link always reserved. Whole clauses are
+  // dropped — the next action, then the intent, then membership — before the
+  // reason is touched; an identity claim that still does not fit becomes the
+  // generic identity form (never a cut name); only then is the text cut at a
+  // word boundary.
   const baseUrl = (ctx.publicWebBaseUrl ?? 'app.rivet.ai')
     .replace(/^https?:\/\//, '')
     .replace(/\/$/, '');
@@ -347,7 +357,24 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
   const linkBudget = linkPlaceholder.length + 1; // space before link
   const coreBudget = 160 - linkBudget;
 
-  let smsCore = `${ctx.shopName}: Incoming call from ${callerName} (${phoneReadable}). Re: ${intent}.${member ? ' ' + member : ''} Reason: ${smsReasonText}. Next: ${nextAction}.`;
+  const smsHead = `${ctx.shopName}: Incoming call from ${callerName} (${phoneReadable}).`;
+  const smsRe = `Re: ${intent}.`;
+  const smsReason = `Reason: ${smsReasonText}.`;
+  const smsNext = `Next: ${nextAction}.`;
+  const smsVariants: string[][] = [
+    [smsHead, smsRe, member, smsReason, smsNext],
+    [smsHead, smsRe, member, smsReason],
+    [smsHead, member, smsReason],
+    [smsHead, smsReason],
+  ];
+  if (ctx.reason === 'identity_unverified' && identityCase(ctx) === 'claims') {
+    smsVariants.push([
+      smsHead,
+      `Reason: ${identityCopy('identity.unverified.sms', ctx.language ?? 'en')}.`,
+    ]);
+  }
+  const smsCandidates = smsVariants.map((parts) => parts.filter(Boolean).join(' '));
+  let smsCore = smsCandidates.find((s) => s.length <= coreBudget) ?? smsCandidates[smsCandidates.length - 1];
 
   if (smsCore.length > coreBudget) {
     // Truncate at last word boundary within budget, append ellipsis.
@@ -385,8 +412,4 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
 
 function capitalizeFirst(s: string): string {
   return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
-}
-
-function lowerFirst(s: string): string {
-  return s.length === 0 ? s : s[0].toLowerCase() + s.slice(1);
 }

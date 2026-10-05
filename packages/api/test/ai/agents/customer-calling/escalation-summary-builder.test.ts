@@ -155,8 +155,10 @@ describe('#1616 — identity hand-offs name the identity problem', () => {
     expect(result.panel.reason.humanReadable).toBe(
       "Caller says they're Jane Smith but the number doesn't match their record",
     );
+    // Spoken form is compact so the whisper keeps its suggested action inside
+    // the 25-word budget; the panel carries the full sentence.
     expect(result.whisper).toContain(
-      "Reason: caller says they're Jane Smith but the number doesn't match their record.",
+      "Reason: says they're Jane Smith, number doesn't match their record. Suggested: help the caller.",
     );
     expect(result.whisper.split(/\s+/).length).toBeLessThanOrEqual(25);
     expect(result.whisper).not.toMatch(/low confidence/i);
@@ -185,11 +187,25 @@ describe('#1616 — identity hand-offs name the identity problem', () => {
       }),
     );
     expect(result.sms.length).toBeLessThanOrEqual(160);
-    // The one-segment budget leaves ~32 chars after "Reason:" here, so the
-    // claim leads and the "(unverified)" qualifier is what the cut takes.
-    expect(result.sms).toContain("Reason: says they're Jane Smith");
+    // Whole clauses are dropped (next action, then "Re:") before the reason
+    // is touched, so the claim and its qualifier arrive intact.
+    expect(result.sms).toContain("Reason: says they're Jane Smith (unverified).");
     expect(result.sms).not.toMatch(/low confidence/i);
     expect(result.sms).toContain('app.rivet.ai/c/<escalationId>');
+  });
+
+  it('SMS: when even the compact claim cannot fit, the reason falls back to the generic identity form — never a cut name', () => {
+    const result = buildEscalationSummary(
+      baseCtx({
+        shopName: 'Johnson Brothers Plumbing & Heating',
+        caller: { phone: '+15125550142', claimedName: 'Mary Ann Smith' },
+        intent: { type: 'cancel_appointment', entities: {}, confidence: 1 },
+        reason: 'identity_unverified',
+      }),
+    );
+    expect(result.sms.length).toBeLessThanOrEqual(160);
+    expect(result.sms).toContain('Reason: identity unverified.');
+    expect(result.sms).not.toMatch(/Mary Ann/);
   });
 
   it('Spanish: the identity sentence is rendered from the ES copy when language is es', () => {
@@ -204,7 +220,12 @@ describe('#1616 — identity hand-offs name the identity problem', () => {
     expect(result.panel.reason.humanReadable).toBe(
       'La persona que llama dice ser Jane Smith, pero el número no coincide con su registro',
     );
-    expect(result.sms).toContain('Reason: dice ser Jane Smith');
+    expect(result.sms).toContain('Reason: dice ser Jane Smith (sin verificar).');
+    // The spoken ES form fits the 25-word whisper whole — never cut mid-clause.
+    expect(result.whisper).toContain(
+      'Reason: dice ser Jane Smith, el número no coincide con su registro.',
+    );
+    expect(result.whisper.split(/\s+/).length).toBeLessThanOrEqual(25);
   });
 
   it('identification failed with no claim and no record (identifyCaller threw): a generic identity sentence, still never "low confidence"', () => {

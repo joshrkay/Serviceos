@@ -386,6 +386,9 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     publicWebBaseUrl,
   } = input;
   const lang: Language = input.language ?? 'en';
+  // #1616 — computed once: every emit of `escalation_triggered` below carries
+  // the recorded category, never the dispatcher-facing reason.
+  const recordedReason = recordedEscalationReason(reason);
   const transferringText = t('escalate.transferring', lang);
   const transferNumber = input.transferNumber?.trim();
 
@@ -469,7 +472,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     }
 
     if (session) {
-      session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedEscalationReason(reason)));
+      session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedReason));
     }
 
     return {
@@ -576,7 +579,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
           );
         }
         if (session) {
-          session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedEscalationReason(reason)));
+          session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedReason));
         }
         let fallbackMessage = transferringText;
         if (reason === 'emergency_dispatch') {
@@ -720,7 +723,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     }
 
     if (session) {
-      session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedEscalationReason(reason)));
+      session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedReason));
     }
 
     return {
@@ -797,7 +800,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
   };
 
   if (session) {
-    session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedEscalationReason(reason)));
+    session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedReason));
   }
 
   return result;
