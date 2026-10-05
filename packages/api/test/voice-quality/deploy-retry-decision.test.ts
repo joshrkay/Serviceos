@@ -14,6 +14,8 @@ describe('#1631 — shouldRetryDeploy', () => {
         { name: 'deploy-railway-prod', conclusion: 'cancelled' },
       ],
       runAttempt: 1,
+      runSha: 'aaa111',
+      mainSha: 'aaa111',
     });
 
     expect(decision).toBe(true);
@@ -26,6 +28,8 @@ describe('#1631 — shouldRetryDeploy', () => {
         { name: 'deploy-railway-prod', conclusion: 'cancelled' },
       ],
       runAttempt: 1,
+      runSha: 'aaa111',
+      mainSha: 'aaa111',
     });
 
     expect(decision).toBe(false);
@@ -35,6 +39,8 @@ describe('#1631 — shouldRetryDeploy', () => {
     const decision = shouldRetryDeploy({
       jobs: [{ name: 'test', conclusion: 'success' }],
       runAttempt: 1,
+      runSha: 'aaa111',
+      mainSha: 'aaa111',
     });
 
     expect(decision).toBe(false);
@@ -44,6 +50,8 @@ describe('#1631 — shouldRetryDeploy', () => {
     const decision = shouldRetryDeploy({
       jobs: [{ name: 'deploy-railway-prod', conclusion: 'cancelled' }],
       runAttempt: 3,
+      runSha: 'aaa111',
+      mainSha: 'aaa111',
     });
 
     expect(decision).toBe(false);
@@ -53,9 +61,24 @@ describe('#1631 — shouldRetryDeploy', () => {
     const decision = shouldRetryDeploy({
       jobs: [{ name: 'deploy-railway-prod', conclusion: 'cancelled' }],
       runAttempt: 2,
+      runSha: 'aaa111',
+      mainSha: 'aaa111',
     });
 
     expect(decision).toBe(true);
+  });
+});
+
+describe('#1631 review — never redeploy a stale commit over a newer one', () => {
+  it('does NOT retry when main has moved past the cancelled run commit', () => {
+    const decision = shouldRetryDeploy({
+      jobs: [{ name: 'deploy-railway-prod', conclusion: 'cancelled' }],
+      runAttempt: 1,
+      runSha: 'aaa111',
+      mainSha: 'bbb222',
+    });
+
+    expect(decision).toBe(false);
   });
 });
 
@@ -64,6 +87,8 @@ describe('#1631 — buildRetryComment', () => {
     const comment = buildRetryComment({
       runUrl: 'https://github.com/joshrkay/Serviceos/actions/runs/999',
       runAttempt: 1,
+      runSha: 'aaa111',
+      mainSha: 'aaa111',
     });
 
     expect(comment).toContain('https://github.com/joshrkay/Serviceos/actions/runs/999');
@@ -92,13 +117,15 @@ describe('#1631 — run (CLI entry point)', () => {
     expect(code).toBe(1);
     expect(errors.join('\n')).toMatch(/JOBS_JSON/);
     expect(errors.join('\n')).toMatch(/RUN_ATTEMPT/);
+    expect(errors.join('\n')).toMatch(/RUN_SHA/);
+    expect(errors.join('\n')).toMatch(/MAIN_SHA/);
   });
 
   it('exits 1 when JOBS_JSON is not valid JSON', () => {
     const { log, error, errors } = collect();
 
     const code = run({
-      env: { JOBS_JSON: 'not-json', RUN_ATTEMPT: '1', RUN_URL: 'https://x/runs/1' },
+      env: { JOBS_JSON: 'not-json', RUN_ATTEMPT: '1', RUN_URL: 'https://x/runs/1', RUN_SHA: 'a', MAIN_SHA: 'a' },
       log,
       error,
     });
@@ -111,7 +138,7 @@ describe('#1631 — run (CLI entry point)', () => {
     const { log, error, errors } = collect();
 
     const code = run({
-      env: { JOBS_JSON: '[]', RUN_ATTEMPT: 'nope', RUN_URL: 'https://x/runs/1' },
+      env: { JOBS_JSON: '[]', RUN_ATTEMPT: 'nope', RUN_URL: 'https://x/runs/1', RUN_SHA: 'a', MAIN_SHA: 'a' },
       log,
       error,
     });
@@ -127,6 +154,8 @@ describe('#1631 — run (CLI entry point)', () => {
       env: {
         JOBS_JSON: JSON.stringify([{ name: 'deploy-railway-prod', conclusion: 'cancelled' }]),
         RUN_ATTEMPT: '1',
+        RUN_SHA: 'a',
+        MAIN_SHA: 'a',
         RUN_URL: 'https://github.com/joshrkay/Serviceos/actions/runs/555',
       },
       log,
@@ -146,6 +175,27 @@ describe('#1631 — run (CLI entry point)', () => {
       env: {
         JOBS_JSON: JSON.stringify([{ name: 'test', conclusion: 'failure' }]),
         RUN_ATTEMPT: '1',
+        RUN_SHA: 'a',
+        MAIN_SHA: 'a',
+        RUN_URL: 'https://github.com/joshrkay/Serviceos/actions/runs/555',
+      },
+      log,
+      error,
+    });
+
+    expect(code).toBe(0);
+    expect(JSON.parse(logs[0])).toEqual({ retry: false, comment: '' });
+  });
+
+  it('prints retry:false when main has advanced past the run commit (stale deploy guard)', () => {
+    const { log, logs, error } = collect();
+
+    const code = run({
+      env: {
+        JOBS_JSON: JSON.stringify([{ name: 'deploy-railway-prod', conclusion: 'cancelled' }]),
+        RUN_ATTEMPT: '1',
+        RUN_SHA: 'aaa111',
+        MAIN_SHA: 'bbb222',
         RUN_URL: 'https://github.com/joshrkay/Serviceos/actions/runs/555',
       },
       log,

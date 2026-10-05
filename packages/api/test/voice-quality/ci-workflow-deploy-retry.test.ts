@@ -68,6 +68,19 @@ describe('#1631 — deploy-retry.yml', () => {
     expect(src).toMatch(/head_sha/);
   });
 
+  it('never retries a commit that is no longer the tip of main', () => {
+    const src = readWorkflow();
+    expect(src).toMatch(/git\/ref\/heads\/main/);
+    expect(src).toMatch(/RUN_SHA:\s*\$\{\{\s*github\.event\.workflow_run\.head_sha/);
+    expect(src).toMatch(/MAIN_SHA:\s*\$\{\{\s*steps\.tip\.outputs\.sha/);
+  });
+
+  it('passes the comment body via env, never interpolated into the shell script', () => {
+    const src = readWorkflow();
+    expect(src).toMatch(/COMMENT_BODY:\s*\$\{\{\s*steps\.decide\.outputs\.comment/);
+    expect(src).not.toMatch(/body="\$\{\{/);
+  });
+
   it('every `uses:` action is SHA-pinned (40 hex chars) with a version comment', () => {
     const src = readWorkflow();
     const usesLines = src.split('\n').filter((l) => /^\s*-?\s*uses:/.test(l));

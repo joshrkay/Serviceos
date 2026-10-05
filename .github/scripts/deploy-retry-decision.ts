@@ -20,7 +20,9 @@
  *   - `runAttempt < MAX_RUN_ATTEMPT` (cap at 2 automatic retries per
  *     run: attempt 1 cancelled -> retry to attempt 2; attempt 2
  *     cancelled -> retry to attempt 3; attempt 3 cancelled -> no further
- *     retry).
+ *     retry), AND
+ *   - the run's commit is still the tip of main (a rerun redeploys that
+ *     exact commit; never roll production back to an older one).
  *
  * Safety (deploy.yml header): `gh run rerun --failed` never resumes a
  * cancelled job's own process — a cancelled job never reached a
@@ -34,7 +36,8 @@
  *
  * with JOBS_JSON (the `jobs` array from
  * `gh api repos/{owner}/{repo}/actions/runs/{run_id}/jobs`, as a raw
- * JSON string), RUN_ATTEMPT (the run's `run_attempt`, as a string) and
+ * JSON string), RUN_SHA / MAIN_SHA (the run's head sha and current main
+ * tip), RUN_ATTEMPT (the run's `run_attempt`, as a string) and
  * RUN_URL (the run's `html_url`) in env. Prints a single-line JSON
  * object `{"retry":<bool>,"comment":<string>}` to stdout and exits 0;
  * exits 1 with a stderr message if the inputs are missing or malformed
@@ -54,13 +57,21 @@ export interface WorkflowJobConclusion {
 export interface DeployRetryDecisionInput {
   readonly jobs: readonly WorkflowJobConclusion[];
   readonly runAttempt: number;
+  /** The commit the completed Deploy run was for. */
+  readonly runSha: string;
+  /** The current tip of main. */
+  readonly mainSha: string;
 }
 
 /** True when the run should be retried — see the header for the rule. */
 export function shouldRetryDeploy(input: DeployRetryDecisionInput): boolean {
   const hasCancelled = input.jobs.some((j) => j.conclusion === 'cancelled');
   const hasFailure = input.jobs.some((j) => j.conclusion === 'failure');
-  return hasCancelled && !hasFailure && input.runAttempt < MAX_RUN_ATTEMPT;
+  // A rerun redeploys the run's own commit. If main has moved on, a rerun
+  // could land an OLDER commit on top of a newer deploy; skip it (the
+  // newer commit's own Deploy run is responsible for production).
+  const isTip = input.runSha === input.mainSha;
+  return hasCancelled && !hasFailure && isTip && input.runAttempt < MAX_RUN_ATTEMPT;
 }
 
 /** The commit-comment body posted when an automatic retry is triggered. */
@@ -97,7 +108,7 @@ export function run(opts: RunOptions = {}): number {
   const log = opts.log ?? ((msg: string) => console.log(msg)); // eslint-disable-line no-console
   const error = opts.error ?? ((msg: string) => console.error(msg)); // eslint-disable-line no-console
 
-  const required = ['JOBS_JSON', 'RUN_ATTEMPT', 'RUN_URL'] as const;
+  const required = ['JOBS_JSON', 'RUN_ATTEMPT', 'RUN_URL', 'RUN_SHA', 'MAIN_SHA'] as const;
   const missing = required.filter((k) => !env[k]);
   if (missing.length > 0) {
     error(`${LOG_PREFIX} missing required env: ${missing.join(', ')}`);
@@ -122,7 +133,7 @@ export function run(opts: RunOptions = {}): number {
     return 1;
   }
 
-  const retry = shouldRetryDeploy({ jobs, runAttempt });
+  const retry = shouldRetryDeploy({ jobs, runAttempt, runSha: env.RUN_SHA!, mainSha: env.MAIN_SHA! });
   const comment = retry ? buildRetryComment({ runUrl: env.RUN_URL!, runAttempt }) : '';
   log(JSON.stringify({ retry, comment }));
   return 0;

@@ -144,7 +144,11 @@ until a human ran `gh run rerun --failed` by hand.
    whether to retry: **yes** only when at least one job concluded
    `cancelled`, **none** concluded `failure`, and the run's `run_attempt` is
    still below the cap (`MAX_RUN_ATTEMPT = 3`, i.e. at most 2 automatic
-   retries per run — attempt 1 → 2 → 3, then stop). A genuine `failure` is
+   retries per run — attempt 1 → 2 → 3, then stop), and the run's commit is
+   still the tip of `main` (a rerun redeploys that exact commit, so a stale
+   one is never retried over a newer deploy). A human manually cancelling a
+   Deploy run on the tip is indistinguishable from a runner-pool cancel and
+   will also be retried. A genuine `failure` is
    never auto-retried; that would mask a real break.
 3. On **yes**, the workflow runs `gh run rerun <id> --failed` and leaves a
    comment on the triggering commit (built by `buildRetryComment()`) with
