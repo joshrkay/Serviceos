@@ -7408,6 +7408,42 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_a2p_registrations ON a2p_registrations
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // #1595 / D-039 (owner decision 2026-10-04) — AI answering becomes the
+  // after-hours default; voicemail is the explicit opt-out.
+  //
+  // `after_hours_voice_mode` rides the escalation_settings JSONB. The OLD
+  // default ('voicemail') was never written on its own: it was materialised
+  // into a row only as a side effect of a whole-blob write — the Call Routing
+  // sheet (PUT /api/settings, audited as `settings.tenant.updated` with
+  // changedKeys ['escalationSettings']) or the voice-approval PIN routes (which
+  // re-write the blob with the PIN hash merged in). The sheet is the ONLY
+  // surface where an owner could have chosen voicemail, so:
+  //
+  //   - a stored 'voicemail' on a tenant with NO Call Routing save in the
+  //     audit trail can only have been written by the old default → the key
+  //     is removed, and the tenant resolves to the new default;
+  //   - a stored 'voicemail' on a tenant WITH such a save may be the owner's
+  //     choice → kept;
+  //   - 'ai_answering' and absent keys are never touched.
+  //
+  // Data-only (no DROP). Idempotent: a stripped row no longer matches, and a
+  // voicemail chosen through the new sheet is protected by its own audit row,
+  // so re-running on every deploy (the runner has no ledger) never undoes an
+  // owner's choice. Reads bypass RLS exactly as 249's cross-table backfill does
+  // (the migration principal is the connection superuser).
+  '304_after_hours_voice_mode_default_backfill': `
+    UPDATE tenant_settings ts
+       SET escalation_settings = ts.escalation_settings - 'after_hours_voice_mode'
+     WHERE ts.escalation_settings->>'after_hours_voice_mode' = 'voicemail'
+       AND NOT EXISTS (
+         SELECT 1
+           FROM audit_events ae
+          WHERE ae.tenant_id = ts.tenant_id
+            AND ae.event_type = 'settings.tenant.updated'
+            AND ae.metadata->'changedKeys' ? 'escalationSettings'
+       );
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

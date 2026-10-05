@@ -40,7 +40,11 @@ import {
   type SeedPackDefaultsDeps,
 } from '../packs/seed-pack-defaults';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
-import { isValidIanaTimezone, resolveBootstrapAiModel } from '../settings/settings';
+import {
+  isValidIanaTimezone,
+  resolveBootstrapAiModel,
+  resolveEscalationSettings,
+} from '../settings/settings';
 import { isBillingLiveStatus } from '../billing/tenant-billing-state';
 
 /**
@@ -538,8 +542,10 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         const settings = await settingsRepo.findByTenant(tenantId);
         res.json({
           businessHours: row.rows[0]?.business_hours ?? {},
-          afterHoursVoiceMode:
-            settings?.escalationSettings?.after_hours_voice_mode ?? 'voicemail',
+          // #1595 / D-039 — report the mode the phone will actually use: the
+          // same resolved default (ai_answering) the /voice webhook applies,
+          // never a hardcoded fallback that can drift from it.
+          afterHoursVoiceMode: resolveEscalationSettings(settings).after_hours_voice_mode,
         });
       } catch (error: unknown) {
         res.status(500).json({

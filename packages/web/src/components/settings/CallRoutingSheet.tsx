@@ -23,7 +23,9 @@ const DEFAULTS: EscalationSettings = {
   trigger_keyword_frustration: true,
   trigger_llm_sentiment: false,
   llm_sentiment_threshold: 0.7,
-  after_hours_voice_mode: 'voicemail',
+  // #1595 / D-039 — AI answering after hours by default; voicemail is opt-out.
+  // Mirrors DEFAULT_ESCALATION_SETTINGS in packages/api/src/settings/settings.ts.
+  after_hours_voice_mode: 'ai_answering',
 };
 
 interface Props {
@@ -181,8 +183,11 @@ export function CallRoutingSheet({ open, onOpenChange }: Props) {
 
         <section className="mb-6">
           <h3 className="text-sm font-medium mb-2">When closed (after hours)</h3>
-          <label className="block text-sm text-slate-600 mb-1">Inbound call behavior</label>
+          <label htmlFor="after-hours-voice-mode" className="block text-sm text-slate-600 mb-1">
+            Inbound call behavior
+          </label>
           <select
+            id="after-hours-voice-mode"
             value={settings.after_hours_voice_mode}
             onChange={(e) =>
               void update({
@@ -191,9 +196,14 @@ export function CallRoutingSheet({ open, onOpenChange }: Props) {
             }
             className="w-full border border-slate-200 rounded px-2 py-2 text-sm"
           >
-            <option value="voicemail">Voicemail (recommended)</option>
-            <option value="ai_answering">AI answering</option>
+            <option value="ai_answering">AI answering (default)</option>
+            <option value="voicemail">Voicemail — opt out of AI answering after hours</option>
           </select>
+          <p className="text-xs text-gray-500 mt-1">
+            {settings.after_hours_voice_mode === 'voicemail'
+              ? 'After-hours callers hear a voicemail greeting and leave a message. Emergencies are not triaged until someone listens to it.'
+              : 'After hours the AI still answers: emergencies get the safety script, everyone else gets a callback booked for when you open.'}
+          </p>
         </section>
 
         {settings.trigger_llm_sentiment && (

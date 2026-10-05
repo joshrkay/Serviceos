@@ -74,6 +74,10 @@ const ZERO_LLM_CALL_SCRIPT_IDS = new Set<string>([
   'es-e1-cables-quemandose',
   'es-e1-lesion-caida',
   'es-e2-tuberia-rota',
+  // #1595 / D-039 — AI answering is the after-hours default: a 10pm gas-leak
+  // call on a closed tenant is still answered and the tier classifier closes
+  // it on the E1 evacuation script before any classify call.
+  'e1-gas-leak-after-hours',
 ]);
 
 interface CassetteFile {

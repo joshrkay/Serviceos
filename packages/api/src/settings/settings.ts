@@ -49,7 +49,17 @@ export interface EscalationSettings {
   trigger_llm_sentiment: boolean;
   /** Frustration score (0..1) above which `frustration_detected` is dispatched. */
   llm_sentiment_threshold: number;
-  /** B6 — inbound behavior when outside business hours. */
+  /**
+   * B6 — inbound behavior when outside business hours.
+   *
+   * #1595 / D-039 (owner decision 2026-10-04): `'ai_answering'` is the
+   * default — the AI answers after hours, runs the E1/E2 emergency path and
+   * books a callback for the morning. `'voicemail'` is the explicit opt-out.
+   * An ABSENT key means "use the default"; migration 304 stripped the
+   * `'voicemail'` values the old default had materialised into rows whose
+   * tenant never saved the Call Routing sheet, so only an owner's own choice
+   * survives as a stored value.
+   */
   after_hours_voice_mode?: 'voicemail' | 'ai_answering';
   /**
    * RV-071 — spoken challenge (e.g. a PIN like "4271") required before a
@@ -103,7 +113,8 @@ export const DEFAULT_ESCALATION_SETTINGS: EscalationSettings = {
   trigger_keyword_frustration: true,
   trigger_llm_sentiment: false,
   llm_sentiment_threshold: 0.7,
-  after_hours_voice_mode: 'voicemail',
+  // #1595 / D-039 — AI answering after hours by default; voicemail is opt-out.
+  after_hours_voice_mode: 'ai_answering',
 };
 
 /**
