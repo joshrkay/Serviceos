@@ -2,8 +2,7 @@ import { expect, matrixTest, test, type RowHarness } from './helpers/matrix-test
 import { startVoiceSession } from './helpers/voice-flow';
 import { rwAvailable, rwExec } from './helpers/rw-db';
 import {
-  LANGUAGE_SWITCH_ACK,
-  SENTENCE_CATALOG_ES,
+  TTS_COPY,
   renderTtsText,
 } from '../../packages/api/src/ai/agents/customer-calling/tts-copy';
 
@@ -13,13 +12,14 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
  * VOX-02 language oracle — derived from the SHIPPED es copy, not a word list.
  *
  * `ttsText` is always `renderTtsText(lastTtsPlay)` (inapp-adapter.ts), so a
- * correct Spanish turn is either an exact sentence from SENTENCE_CATALOG_ES /
- * LANGUAGE_SWITCH_ACK, or one of the interpolating templates rendered in es.
+ * correct Spanish turn is either an exact Spanish sentence from the TTS_COPY
+ * catalog (#1601 — one id-keyed source, EN + ES, which also holds the
+ * language-switch lines), or one of the interpolating templates rendered in es.
  * The old hand-rolled `spanishMarkers` list failed fluent, correct Spanish
  * that simply used different words (e.g. the escalation line "No pude
  * encontrar el registro al que se refiere…" — no marker, no accent).
  */
-const ES_SENTENCES = [...Object.values(SENTENCE_CATALOG_ES), LANGUAGE_SWITCH_ACK.es].map(norm);
+const ES_SENTENCES = Object.values(TTS_COPY).map((entry) => norm(entry.es));
 
 /**
  * Templates interpolate an intent label / entity summary / candidate names,

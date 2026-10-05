@@ -34,7 +34,7 @@ interface Pinned {
   sample?: { vars: Record<string, string>; en: string };
 }
 
-export const SNAPSHOT: Record<string, Pinned> = {
+const SNAPSHOT: Record<string, Pinned> = {
   // ── already named in tts-copy.ts before #1601 ─────────────────────────────
   speech_turn_failure_reprompt: {
     en: 'My apologies — let me try again. What would you like to do?',
@@ -395,6 +395,16 @@ describe('#1601 — TTS_COPY characterisation: every id renders the pre-move tex
 
   it('the catalog carries exactly the pinned ids — no unpinned copy, no stale pin', () => {
     expect(Object.keys(TTS_COPY).sort()).toEqual(Object.keys(SNAPSHOT).sort());
+  });
+
+  it('no two ids share an English sentence — the FSM path resolves English back to ONE entry', () => {
+    const byEnglish = new Map<string, string[]>();
+    for (const [id, entry] of Object.entries(TTS_COPY)) {
+      if (LANGUAGE_PAIRS.has(id)) continue;
+      byEnglish.set(entry.en, [...(byEnglish.get(entry.en) ?? []), id]);
+    }
+    const shared = [...byEnglish.entries()].filter(([, ids]) => ids.length > 1);
+    expect(shared, 'ids sharing one English sentence').toEqual([]);
   });
 });
 

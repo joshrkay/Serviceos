@@ -22,6 +22,9 @@
  * an allowlisted line and a stale allowlist entry into a temp copy and shows
  * the guard reporting each).
  */
+/* eslint-disable no-template-curly-in-string -- the allowlist and the negative
+   control name template-literal BODIES verbatim (`${…}` included), because the
+   guard matches the raw text the file writes between its quotes. */
 import { describe, it, expect } from 'vitest';
 import path from 'path';
 import { readFileSync } from 'fs';
@@ -44,7 +47,7 @@ interface Allowed {
 }
 
 /** The files whose spoken copy lives in tts-copy.ts, with their non-spoken sentences. */
-export const GUARDED_FILES: Record<string, Allowed[]> = {
+const GUARDED_FILES: Record<string, Allowed[]> = {
   "ai/voice-turn/create-voice-turn-processor.ts": [
     { why: "proposal_summary", literal: "Review response drafting isn't available on this call yet." },
     { why: "operator_note", literal: "Caller asked for '${intent ?? 'unknown'}' — an operator-only action." },
@@ -84,14 +87,14 @@ export const GUARDED_FILES: Record<string, Allowed[]> = {
   "ai/voice-turn/quote-readback.ts": [],
 };
 
-export interface SpokenCopyReport {
+interface SpokenCopyReport {
   /** Sentence literals in the file that are neither catalog copy nor allowlisted. */
   inline: string[];
   /** Allowlisted literals the file no longer contains (the list rotted). */
   staleAllowlist: string[];
 }
 
-export function scanGuardedSource(source: string, allowed: readonly Allowed[]): SpokenCopyReport {
+function scanGuardedSource(source: string, allowed: readonly Allowed[]): SpokenCopyReport {
   const found = sentenceLiterals(source);
   const allowedSet = new Set(allowed.map((a) => a.literal));
   const foundSet = new Set(found);

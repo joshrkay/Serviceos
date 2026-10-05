@@ -3327,6 +3327,10 @@ export function createVoiceTurnProcessor(
           resolveThresholdOverride,
         );
         const safeName = xmlEscape(deps.businessName);
+        // Spoken in English on purpose (#1601 step 1 is text-identical): this
+        // <Say> has always used the English Polly voice. The Spanish twin is
+        // catalogued; a later step switches both the line and the voice on
+        // `session.language`.
         const voicemailLine = ttsCopy('voicemail_no_one_available', 'en', { business: safeName });
         pendingTransferTwiml.set(
           session.id,

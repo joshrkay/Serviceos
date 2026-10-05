@@ -22,6 +22,7 @@ import { bookingAwaitsTime } from './confirm-turn';
 import { EMERGENCY_SAFETY_LINE } from './emergency-detector';
 import { en as I18N_EN } from '../../i18n/en';
 import { es as I18N_ES } from '../../i18n/es';
+import { interpolate } from '../../i18n/i18n';
 
 export type SessionLanguage = 'en' | 'es';
 
@@ -127,7 +128,7 @@ const TEMPLATE_KEYS = new Set(['intent_confirm', 'greeting', 'confirm_intent', '
 // The rationale comments for the previously named lines (VOX-35c, A3, U5,
 // RV-071, #1272, #1497, #1331, #1600 …) stay on their alias constants below.
 
-export interface TtsCopyEntry {
+interface TtsCopyEntry {
   readonly en: string;
   readonly es: string;
 }
@@ -487,37 +488,26 @@ export const TTS_COPY = {
 
 export type TtsCopyId = keyof typeof TTS_COPY;
 
-export const TTS_COPY_IDS = Object.keys(TTS_COPY) as readonly TtsCopyId[];
+const TTS_COPY_IDS = Object.keys(TTS_COPY) as readonly TtsCopyId[];
 
-export function isTtsCopyId(value: string): value is TtsCopyId {
+function isTtsCopyId(value: string): value is TtsCopyId {
   return Object.prototype.hasOwnProperty.call(TTS_COPY, value);
 }
 
-const PLACEHOLDER = /\{\{(\w+)\}\}/g;
-
-function hasPlaceholders(text: string): boolean {
-  PLACEHOLDER.lastIndex = 0;
-  return PLACEHOLDER.test(text);
-}
+const HAS_PLACEHOLDER = /\{\{\w+\}\}/;
 
 /**
  * Render a catalog entry in the session language, interpolating `{{var}}`
- * placeholders from `vars` (numbers coerced with `String()`; a missing var
- * renders empty rather than leaking its placeholder — the same contract as
- * `ai/i18n`'s `t()`).
+ * placeholders from `vars` with the same `interpolate` the `ai/i18n` `t()`
+ * and the notifications catalog use (numbers coerced with `String()`; a
+ * missing var renders empty rather than leaking its placeholder).
  */
 export function ttsCopy(
   id: TtsCopyId,
   lang: SessionLanguage,
   vars?: Record<string, unknown>,
 ): string {
-  const text: string = TTS_COPY[id][lang];
-  if (!vars) return text;
-  return text.replace(PLACEHOLDER, (_m, name: string) => {
-    const value = vars[name];
-    if (value === undefined || value === null) return '';
-    return String(value);
-  });
+  return interpolate(TTS_COPY[id][lang], vars);
 }
 
 /**
@@ -538,14 +528,9 @@ const NOT_REVERSE_INDEXED: ReadonlySet<TtsCopyId> = new Set<TtsCopyId>([
  */
 const EN_SENTENCE_TO_ID: ReadonlyMap<string, TtsCopyId> = new Map(
   TTS_COPY_IDS.filter(
-    (id) => !NOT_REVERSE_INDEXED.has(id) && !hasPlaceholders(TTS_COPY[id].en),
+    (id) => !NOT_REVERSE_INDEXED.has(id) && !HAS_PLACEHOLDER.test(TTS_COPY[id].en),
   ).map((id) => [TTS_COPY[id].en, id] as const),
 );
-
-/** The id whose English sentence this is, if any (fixed entries only). */
-export function ttsCopyIdForSentence(sentence: string): TtsCopyId | undefined {
-  return EN_SENTENCE_TO_ID.get(sentence);
-}
 
 /**
  * VOX-35c — spoken copy for the media-stream/Gather adapters' speechTurn-

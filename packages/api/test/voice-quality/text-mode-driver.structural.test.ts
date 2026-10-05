@@ -27,8 +27,6 @@ import { readFileSync } from 'fs';
 // extends this guard to the voice files whose copy lives in tts-copy.ts.
 import { stripComments, stringLiterals, isSpokenCopy } from './spoken-copy-scan';
 
-export { isSpokenCopy };
-
 const DRIVER_PATH = path.resolve(
   __dirname,
   '../../src/ai/voice-quality/text-mode-driver.ts',

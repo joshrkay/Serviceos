@@ -7,14 +7,59 @@
  * string literal of three or more words carrying sentence punctuation — ids,
  * event names and prefixes are one or two tokens and never end in a period.
  *
+ * Comments are blanked by a small state machine that knows it is inside a
+ * string, so a `//` or `/*` INSIDE a literal ("see docs // then speak") does
+ * not truncate it and desync the rest of the line. Regex literals are not
+ * recognised (a quote inside `/'/g` can still open a phantom string); the
+ * guarded files are probed clean of that today.
+ *
  * Template literals are scanned with their `${…}` expressions blanked first,
  * so a template made only of expressions (`${opener} ${cta}`) is not read as
  * copy while `Thank you for calling ${business}. How can I help?` still is.
  */
 
-/** Strip block + line comments so documentation prose is not read as copy. */
+/**
+ * Blank block + line comments (keeping newlines so line numbers hold) without
+ * touching comment-like sequences inside string or template literals.
+ */
 export function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:\\])\/\/[^\n]*/g, '$1');
+  let out = '';
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const ch = source[i]!;
+    const next = source[i + 1];
+    if (ch === '/' && next === '*') {
+      const end = source.indexOf('*/', i + 2);
+      const stop = end === -1 ? n : end + 2;
+      out += source.slice(i, stop).replace(/[^\n]/g, ' ');
+      i = stop;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      const end = source.indexOf('\n', i);
+      const stop = end === -1 ? n : end;
+      out += ' '.repeat(stop - i);
+      i = stop;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      // Copy the whole literal through, honouring backslash escapes.
+      let j = i + 1;
+      while (j < n && source[j] !== ch) {
+        if (source[j] === '\\') j += 1;
+        if (ch !== '`' && source[j] === '\n') break; // unterminated plain string: stop at EOL
+        j += 1;
+      }
+      const stop = Math.min(j + 1, n);
+      out += source.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
 }
 
 export interface SourceLiteral {
