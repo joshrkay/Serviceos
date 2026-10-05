@@ -167,6 +167,7 @@ import {
   callerNameMatchesAccount,
   spokenSelfName,
 } from '../agents/customer-calling/caller-identity-check';
+import { normalizePhone } from '../../shared/phone';
 import {
   classifyPostQuoteUtterance,
   type PostQuoteEdit,
@@ -267,7 +268,7 @@ import {
   voiceProposalSummary,
 } from '../../proposals/voice-intent-map';
 import { buildVoiceClarificationPayload } from '../../proposals/voice-clarification';
-import type { EntityResolver } from '../resolution/entity-resolver';
+import type { EntityResolver, EntityResolverResult } from '../resolution/entity-resolver';
 import { withCustomerAddressHints } from '../resolution/customer-address-hint';
 import type { LocationRepository } from '../../locations/location';
 import {
@@ -1150,6 +1151,13 @@ export interface VoiceTurnProcessor {
   handleAskCaller(
     session: VoiceSession,
     tenantId: string,
+    /**
+     * #1587 — the caller's words on this turn. An unknown caller who names an
+     * EXISTING customer whose number on file is not this line is handed to a
+     * person (never resolved from the spoken name, never minted a record for
+     * this number). Omitted → the phone-only find-or-create.
+     */
+    utterance?: string,
   ): Promise<SideEffect[]>;
   /**
    * #1331 (owner decision 2026-10-01) — the caller-name identity check,
@@ -4653,6 +4661,24 @@ export function createVoiceTurnProcessor(
     });
   }
 
+  /**
+   * #1587 — is the identified caller's customer record archived? Read once
+   * per bound record (a session can be re-bound by ask_caller). The owner
+   * line and a resolved actor are not a served account and are never gated.
+   */
+  const archivedCallerByRecord = new WeakMap<VoiceSession, { customerId: string; archived: boolean }>();
+  async function callerRecordIsArchived(session: VoiceSession, tenantId: string): Promise<boolean> {
+    const customerId = session.customerId;
+    if (!customerId || !deps.customerRepo) return false;
+    if (session.machine.currentContext.ownerSession === true || session.actorUserId) return false;
+    const cached = archivedCallerByRecord.get(session);
+    if (cached && cached.customerId === customerId) return cached.archived;
+    const customer = await deps.customerRepo.findById(tenantId, customerId).catch(() => null);
+    const archived = customer?.isArchived === true;
+    archivedCallerByRecord.set(session, { customerId, archived });
+    return archived;
+  }
+
   /** #1567 — a caller with no prior customer record (identified by this call, or not at all). */
   function isNewCaller(session: VoiceSession): boolean {
     if (session.machine.currentContext.ownerSession === true || session.actorUserId) return false;
@@ -4945,12 +4971,68 @@ export function createVoiceTurnProcessor(
     await releaseHeldCaller(session, tenantId);
   }
 
+  /**
+   * #1587 — does the caller's self-introduction name an EXISTING customer
+   * whose number on file is not this line? The spoken name goes through the
+   * shared entity resolver (the SAME τ_ent bar the #1331 identity check
+   * applies); a confident match — or several — that none of this line's
+   * numbers belongs to is a claim the phone cannot verify. A candidate ON
+   * this line is simply the caller (find-or-create binds them), and a name
+   * below the bar is a new caller who happens to sound like someone.
+   * Without a resolver the check cannot run and the turn proceeds as before.
+   */
+  async function callerClaimsExistingCustomer(
+    tenantId: string,
+    utterance: string,
+    callerPhone: string | undefined,
+  ): Promise<boolean> {
+    const spokenName = spokenSelfName(utterance);
+    if (!spokenName || !turnEntityResolver) return false;
+    let result: EntityResolverResult;
+    try {
+      result = await turnEntityResolver.resolve({ tenantId, reference: spokenName, kind: 'customer' });
+    } catch {
+      return false;
+    }
+    const candidates =
+      result.kind === 'resolved'
+        ? [result.candidate]
+        : result.kind === 'ambiguous'
+          ? result.candidates
+          : [];
+    if (candidates.length === 0) return false;
+    if (!callerPhone || !deps.customerRepo) return true;
+    const line = normalizePhone(callerPhone);
+    for (const candidate of candidates) {
+      const customer = await deps.customerRepo.findById(tenantId, candidate.id).catch(() => null);
+      const numbers = [customer?.primaryPhone, customer?.secondaryPhone].filter(
+        (n): n is string => typeof n === 'string' && n.length > 0,
+      );
+      if (numbers.some((n) => normalizePhone(n) === line)) return false;
+    }
+    return true;
+  }
+
   async function handleAskCaller(
     session: VoiceSession,
     tenantId: string,
+    utterance?: string,
   ): Promise<SideEffect[]> {
     const out: SideEffect[] = [];
     const callerPhone = deps.callerPhoneResolver?.(session) ?? session.callerPhone;
+    // #1587 — a caller claiming to be an existing customer from another
+    // number: identity cannot be verified by phone, so a person takes the
+    // call. D-033's capture write is for the caller's OWN record; minting
+    // one here would file an impersonation attempt as a new customer.
+    if (utterance && (await callerClaimsExistingCustomer(tenantId, utterance, callerPhone || undefined))) {
+      out.push(
+        ...session.machine.dispatch({
+          type: 'caller_identification_failed',
+          reason: 'claims_existing_customer',
+        }),
+      );
+      return out;
+    }
     if (deps.customerRepo && callerPhone) {
       try {
         // #1582 — on a tenant with a service area, a caller with no record is
@@ -5459,7 +5541,7 @@ export function createVoiceTurnProcessor(
 
     let turnState = currentState;
     if (currentState === 'ask_caller') {
-      const askCallerFx = await handleAskCaller(session, tenantId);
+      const askCallerFx = await handleAskCaller(session, tenantId, speechResult);
       // Identity only (no request to carry) → no classify call: identify and
       // ask how to help, exactly as before (ask-caller-request.ts).
       if (
@@ -5726,6 +5808,26 @@ export function createVoiceTurnProcessor(
           appendAgentTts(deps.store, session.id, sideEffectsAll);
           return sideEffectsAll;
         }
+      }
+
+      // #1587 — the caller-ID caller's record is ARCHIVED: the account is
+      // closed, so nothing is read from it or drafted on it; a person takes
+      // the call. A classified emergency keeps its own path below.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT &&
+        !EMERGENCY_INTENTS.has(classifierEvent.intentType) &&
+        (await callerRecordIsArchived(session, tenantId))
+      ) {
+        sideEffectsAll.push(
+          ...session.machine.dispatch({
+            type: 'caller_identification_failed',
+            reason: 'customer_archived',
+          }),
+        );
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
       }
 
       // #962 (PR-B) / P11-001 / #866 — lookup intents bypass the

@@ -18,7 +18,7 @@
  * be recorded (Phase 2) before expecting Layer 1 `launchGate.pass`.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import * as path from 'path';
 import { loadScript } from '../../../src/ai/voice-quality/corpus/loader';
 import { loadGoldenForScript } from '../../../src/ai/voice-quality/graders/disposition-structured';
@@ -33,6 +33,11 @@ const SCRIPT_IDS = [
   'create-customer-new-signup',
   'create-customer-with-address',
   'known-customer-no-signup',
+] as const;
+
+/** #1587 — scripts the production engine answers before any model call; see the dedicated assertion below. */
+const ZERO_LLM_CALL_SCRIPT_IDS = [
+  'find-or-create-lead-unknown-caller',
 ] as const;
 
 describe('VQ-012 — Bucket 03 lead capture', () => {
@@ -61,7 +66,7 @@ describe('VQ-012 — Bucket 03 lead capture', () => {
     },
   );
 
-  it.each(SCRIPT_IDS)(
+  it.each(SCRIPT_IDS.filter((id) => !(ZERO_LLM_CALL_SCRIPT_IDS as readonly string[]).includes(id)))(
     'VQ-012 — cassette file for %s is valid JSON (entries filled after seed/record)',
     (scriptId) => {
       const cassettePath = path.join(
@@ -96,5 +101,17 @@ describe('VQ-012 — Bucket 03 lead capture', () => {
 
     const golden = loadGoldenForScript(script.id, CORPUS_ROOT);
     expect(golden).toEqual([{ phone: '+15555550302' }]);
+  });
+
+  // #1587 — "I'd like to schedule service for my home" is classified by the
+  // classifier's deterministic new-booking rule (no model call); the unknown
+  // caller is identified by phone at ask_caller and asked for a day and time.
+  // The right artifact for a zero-call script is NO cassette file (an empty
+  // one fails `npm run voice-quality:check-cassettes`); the ids are declared
+  // in ZERO_LLM_CALL_SCRIPT_IDS in scripts/check-voice-quality-cassettes.ts,
+  // which fails the moment one of them records a call again.
+  it.each(ZERO_LLM_CALL_SCRIPT_IDS)('VQ-012 — %s has NO cassette (it issues zero LLM calls)', (scriptId) => {
+    const cassettePath = path.join(CORPUS_ROOT, 'cassettes', `${scriptId}.json`);
+    expect(existsSync(cassettePath)).toBe(false);
   });
 });

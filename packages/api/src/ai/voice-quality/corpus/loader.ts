@@ -18,6 +18,7 @@ import {
   VoiceQualityScriptSchema,
   type VoiceQualityScript,
 } from '../schema';
+import { isAffirmation } from '../../agents/customer-calling/confirm-turn';
 
 /**
  * Default scripts directory. Co-located so importing `loadCorpus()`
@@ -28,16 +29,26 @@ export function defaultCorpusRoot(): string {
 }
 
 /**
+ * The Layer 1 corpus: every authored script, read through the phone persona
+ * for the Gather surface (`asPhonePersona`) — the transport the text-mode
+ * driver is the twin of. Throws, as `loadRawCorpus` does, when any file is
+ * malformed.
+ */
+export function loadCorpus(corpusRoot?: string): VoiceQualityScript[] {
+  return loadRawCorpus(corpusRoot).map((s) => asPhonePersona(s, 'gather'));
+}
+
+/**
  * Walk every bucket subdirectory under `corpusRoot`, parse every
- * `*.json` file in each, and return the validated scripts sorted by
- * id.
+ * `*.json` file in each, and return the validated scripts exactly as
+ * authored (ids and turns untouched), sorted by id.
  *
  * If any file fails to parse (either invalid JSON or schema
  * mismatch), we collect every failure and throw a single aggregated
  * error containing all of them. Authors fixing a corpus see every
  * problem in one pass.
  */
-export function loadCorpus(corpusRoot?: string): VoiceQualityScript[] {
+function loadRawCorpus(corpusRoot?: string): VoiceQualityScript[] {
   const root = corpusRoot ?? defaultCorpusRoot();
   if (!fs.existsSync(root)) {
     return [];
@@ -86,36 +97,48 @@ export function loadCorpus(corpusRoot?: string): VoiceQualityScript[] {
 }
 
 /**
- * VQ2-014 — Layer 2 corpus loader. Returns the subset of `loadCorpus()`
- * where `layer2Eligible === true`. Layer-2-only scripts (those with
- * `layer2Only: true`) are included here even though Layer 1 skips them,
- * so the Layer 2 runner exercises the full audio-only corpus.
+ * VQ2-014 — Layer 2 corpus loader. Returns the subset of the corpus where
+ * `layer2Eligible === true`, as the media-streams surface runs it.
+ * Layer-2-only scripts (those with `layer2Only: true`) are included here
+ * even though Layer 1 skips them, so the Layer 2 runner exercises the full
+ * audio-only corpus.
  */
 export function loadLayer2Corpus(corpusRoot?: string): VoiceQualityScript[] {
-  return loadCorpus(corpusRoot).filter((s) => s.layer2Eligible).map(asLayer2Persona);
+  return loadRawCorpus(corpusRoot)
+    .filter((s) => s.layer2Eligible)
+    .map((s) => asPhonePersona(s, 'media_streams'));
 }
 
 /**
- * #1331 — Layer 2's view of a corpus script: the production phone surface.
+ * #1331 / #1587 — a corpus script as the production phone surface runs it.
+ * Both lanes drive `createVoiceTurnProcessor().speechTurn` (Layer 2 through
+ * media streams, Layer 1 through the text-mode driver), so both read the
+ * corpus through this one view; `loadCorpus` applies it once.
  * (1) Owner line (D-028 follow-up, owner decision 2026-10-01) — a script that asks
  * operator-only actions declares `fixtures.tenant.harnessOperatorTaxonomy`.
- * Layer 1 classifies it on the operator taxonomy; Layer 2 drives the
- * production processor, which correctly refuses operator actions on a
- * customer's line (S1). On Layer 2 the script therefore runs as the OWNER
- * line (`callerIsOwner` → RV-070 ownerSession, S2 surface) — the real
- * production surface for an owner asking these actions by phone. Drafting
- * needs no voice PIN; the PIN gates owner APPROVAL of money movement.
- * (2) Every write turn answers the phone readback — see `answerPhoneReadback`.
- * Layer 1 (`loadCorpus`) is unchanged.
+ * The production processor correctly refuses operator actions on a
+ * customer's line (S1), so the script runs as the OWNER line
+ * (`callerIsOwner` → RV-070 ownerSession, S2 surface) — the real production
+ * surface for an owner asking these actions by phone. Drafting needs no
+ * voice PIN; the PIN gates owner APPROVAL of money movement.
+ * (2) Record ids become UUIDs — see `withUuidRecordIds`.
+ * (3) Every write turn answers the phone readback — see `answerPhoneReadback`.
  */
-function asLayer2Persona(script: VoiceQualityScript): VoiceQualityScript {
+export type PhoneSurface = 'gather' | 'media_streams';
+
+export function asPhonePersona(
+  script: VoiceQualityScript,
+  surface: PhoneSurface,
+): VoiceQualityScript {
   const tenant = (script.fixtures.tenant ?? {}) as Record<string, unknown>;
   const owner = tenant.harnessOperatorTaxonomy === true;
   const withUuids = withUuidRecordIds(script);
   return {
     ...withUuids,
     ...(owner ? { callerIsOwner: true } : {}),
-    turns: withUuids.turns.flatMap(answerPhoneReadback),
+    turns: withUuids.turns.flatMap((turn, i, all) =>
+      answerPhoneReadback(turn, all[i + 1], surface),
+    ),
   };
 }
 
@@ -137,12 +160,13 @@ function stableUuid(readable: string): string {
 
 /**
  * #1331 — production payload contracts and lookups validate record ids as
- * UUIDs; Layer 1 fixtures use readable ids ("cust_02_add_material_owner")
- * that its mocks tolerate. On Layer 2 those ids failed every write proposal's
- * contract (`customerId: Invalid uuid`, so the draft was gated) and broke
- * lookup_balance outright. Every readable record id found in a fixture row is
- * mapped to a stable UUID, and every string equal to it — in the fixtures and
- * in the turns' expected slots — is rewritten, so references stay intact.
+ * UUIDs; corpus fixtures are authored with readable ids
+ * ("cust_02_add_material_owner"). Against the production engine those ids
+ * failed every write proposal's contract (`customerId: Invalid uuid`, so the
+ * draft was gated) and broke lookup_balance outright. Every readable record id
+ * found in a fixture row is mapped to a stable UUID, and every string equal to
+ * it — in the fixtures and in the turns' expected slots — is rewritten, so
+ * references stay intact.
  */
 function withUuidRecordIds(script: VoiceQualityScript): VoiceQualityScript {
   const mapping = new Map<string, string>();
@@ -191,18 +215,27 @@ function withUuidRecordIds(script: VoiceQualityScript): VoiceQualityScript {
 const READBACK_YES = "Yes, that's right.";
 
 /**
- * #1331 — the phone turn engine (media streams → voice-turn processor) never
- * drafts a write on the request turn: it reads the request back ("Just to
- * confirm — … Is that right?") and drafts only on the caller's yes. The
- * corpus encodes Layer 1's text-mode contract (drafted on the request turn),
- * so on Layer 2 the caller answers the readback. The request turn keeps the
- * intent / proposal / slot expectations (the drafted proposal is still that
- * turn's proposal); the drafted-reply copy and any hangup move to the answer.
+ * #1331 — the phone turn engine (the voice-turn processor) never drafts a
+ * write on the request turn: it reads the request back ("Just to confirm — …
+ * Is that right?") and drafts only on the caller's yes. The corpus authors a
+ * write as one request turn, so the caller answers the readback here. The
+ * request turn keeps the intent / proposal / slot expectations (the drafted
+ * proposal is still that turn's proposal); the drafted-reply copy and any
+ * hangup move to the answer.
  */
 function answerPhoneReadback(
   turn: VoiceQualityScript['turns'][number],
+  next: VoiceQualityScript['turns'][number] | undefined,
+  surface: PhoneSurface,
 ): VoiceQualityScript['turns'] {
   if (turn.expected.proposalType === undefined) return [turn];
+  // Raised without a readback: a clarification the engine mints itself (an
+  // ambiguous caller-ID), and the Gather transport's one-turn create_customer
+  // flow (coverage-table.ts: P18-001; media streams takes the readback).
+  if (turn.expected.proposalType === 'voice_clarification') return [turn];
+  if (turn.expected.proposalType === 'create_customer' && surface === 'gather') return [turn];
+  // The script already answers the readback itself.
+  if (next && isAffirmation(next.caller)) return [turn];
   const { spokenAnswerMatches, ...requestExpected } = turn.expected;
   return [
     { ...turn, expected: requestExpected, hangupAfter: false },

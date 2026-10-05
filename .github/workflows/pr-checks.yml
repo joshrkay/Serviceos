@@ -358,7 +358,9 @@ jobs:
       # ADDING OR REMOVING A LAYER 1 CORPUS SCRIPT? Update EXPECTED_SEEDED
       # here in the same commit. That is the intended cost. (73 → 85: #1377
       # added the 12-script 12-life-safety bucket; 85 → 87: #1596 added
-      # lookup-day-overview-owner-line, #1598 added e1-gas-leak-after-hours.)
+      # lookup-day-overview-owner-line, #1598 added e1-gas-leak-after-hours.
+      # #1587 renamed dnc-caller-terminated → dnc-caller-answered and
+      # after-hours-callback → after-hours-booking, net 0.)
       - name: Cassette seed script executes end to end (blocking)
         run: |
           set -o pipefail
