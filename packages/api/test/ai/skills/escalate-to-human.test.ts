@@ -478,3 +478,40 @@ describe('#1616 — identity_unverified names identity to the dispatcher but is 
     expect(events.find((e) => e.type === 'escalation_triggered')?.reason).toBe('max_retries_exceeded');
   });
 });
+
+describe('#1630 — the dispatcher language is separate from the caller-facing language', () => {
+  it('dispatcherLanguage=es renders the Spanish summary while the caller-facing message stays English', async () => {
+    const onCallRepo = {
+      listRotation: vi.fn(async () => [{ id: 'rot-1', userId: 'user-disp-1', cursorIndex: 0 }]),
+    };
+    const store = new VoiceSessionStore({ startInterval: false });
+    const session = store.create('tenant-1', 'telephony', { callSid: 'CA-1630' });
+
+    const result = await escalateToHuman({
+      tenantId: 'tenant-1',
+      sessionId: session.id,
+      reason: 'identity_unverified',
+      channel: 'telephony',
+      callSid: 'CA-1630',
+      onCallRepo: onCallRepo as never,
+      auditRepo: new InMemoryAuditRepository(),
+      dispatcherPhoneResolver: async () => '+15125550999',
+      session,
+      dispatcherLanguage: 'es',
+      buildSummary: buildEscalationSummary,
+      shopName: "Joe's HVAC",
+      callerContext: {
+        caller: { phone: '+15555550404', claimedName: 'Jane Smith' },
+        identityCase: 'claims',
+        intent: { type: 'unknown', entities: {}, confidence: 1 },
+        transcriptSnapshot: [],
+      },
+    });
+    store.dispose();
+
+    expect(result.transfer?.summary?.panel.reason.humanReadable).toBe(
+      'La persona que llama dice ser Jane Smith, pero el número no coincide con su registro',
+    );
+    expect(result.message).toMatch(/someone on the line/i);
+  });
+});

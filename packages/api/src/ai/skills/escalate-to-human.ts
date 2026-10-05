@@ -231,6 +231,12 @@ export interface EscalateToHumanInput {
   /** P11-002: spoken-message language. Defaults to 'en'. */
   language?: Language;
   /**
+   * #1630 — language of the DISPATCHER-facing summary (whisper / SMS / panel),
+   * the tenant's default_language. Separate from `language`, which is what the
+   * caller hears.
+   */
+  dispatcherLanguage?: Language;
+  /**
    * VQ-003: optional live session reference. When supplied, the skill
    * emits an `escalation_triggered` event on the session's emitter
    * once the escalation is committed (telephony transfer initiated OR
@@ -413,7 +419,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         intent: callerContext.intent,
         reason: mapSkillReasonToBuilderReason(reason),
         transcriptSnapshot: callerContext.transcriptSnapshot,
-        language: lang,
+        ...(input.dispatcherLanguage ? { language: input.dispatcherLanguage } : {}),
         ...(callerContext.identityCase ? { identityCase: callerContext.identityCase } : {}),
         ...(publicWebBaseUrl !== undefined ? { publicWebBaseUrl } : {}),
       };
@@ -653,7 +659,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         intent: callerContext.intent,
         reason: mapSkillReasonToBuilderReason(reason),
         transcriptSnapshot: callerContext.transcriptSnapshot,
-        language: lang,
+        ...(input.dispatcherLanguage ? { language: input.dispatcherLanguage } : {}),
         ...(callerContext.identityCase ? { identityCase: callerContext.identityCase } : {}),
         ...(publicWebBaseUrl !== undefined ? { publicWebBaseUrl } : {}),
       };

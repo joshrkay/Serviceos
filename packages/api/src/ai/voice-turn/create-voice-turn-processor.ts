@@ -3300,7 +3300,7 @@ export function createVoiceTurnProcessor(
         ...(session.callSid ? { callSid: session.callSid } : {}),
         dialActionUrl: dialResultUrl(session.id),
         channelPreferences,
-        language: dispatcherLanguage,
+        dispatcherLanguage,
         buildSummary: buildEscalationSummary,
         callerContext: {
           caller: enrichedCaller.caller,
