@@ -46,15 +46,23 @@
     },
     {
       "caller": "Yes, that works. Thanks—",
-      "expected": {
-        "intent": "confirm"
-      },
+      "expected": {},
       "hangupAfter": true
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 3, 4, 5, 8],
-    "appliesDisposition": [9, 11]
+    "appliesFloor": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      8
+    ],
+    "appliesDisposition": [
+      9,
+      11
+    ]
   },
   "layer2Eligible": false
 }

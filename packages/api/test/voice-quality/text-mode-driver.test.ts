@@ -2,8 +2,8 @@
  * VQ-007 — TextModeDriver tests.
  *
  * Drives the `AgentDriver` interface implementation that sits in front
- * of the existing classifier → action-router → skill orchestration
- * without going through Twilio. Each test exercises one slice:
+ * of the production voice-turn processor (`speechTurn`, #1587) without
+ * going through Twilio. Each test exercises one slice:
  *   - session lifecycle (start / end)
  *   - lookup intents → return spoken summary
  *   - mutation intents → proposal created (no direct DB write)
@@ -217,10 +217,12 @@ describe('VQ-007 — TextModeDriver', () => {
 
   it('VQ-007 — speak() emits intent_classified + proposal_created on the bus for a mutation', async () => {
     const tenantId = 't-2';
+    // An unknown (but visible) number: the ask_caller turn records the caller
+    // by phone and carries the request on to classification (#1540 §2).
     const { sessionId } = await h.driver.startSession({
       tenantId,
-      callerId: null,
-      callerIdBlocked: true,
+      callerId: '+15555550102',
+      callerIdBlocked: false,
     });
 
     h.provider.setDefaultResponse(
@@ -261,7 +263,8 @@ describe('VQ-007 — TextModeDriver', () => {
     await h.driver.speak(sessionId, 'What contact info do you have for me?');
 
     expect(h.bus.filterByType('intent_classified')).toHaveLength(1);
-    const lookups = h.bus.filterByType('lookup_executed');
+    // Caller-ID identity is stamped as its own lookup_executed first.
+    const lookups = h.bus.filterByType('lookup_executed').filter((e) => e.skillName !== 'identify_caller_by_caller_id');
     expect(lookups).toHaveLength(1);
     expect(lookups[0].skillName).toBe('lookup_customer');
     expect(lookups[0].success).toBe(true);
@@ -287,7 +290,7 @@ describe('VQ-007 — TextModeDriver', () => {
       JSON.stringify({ intentType: 'lookup_digest', confidence: 0.95 }),
     );
 
-    const { agentResponse } = await h.driver.speak(sessionId, 'read me my day');
+    const { agentResponse } = await h.driver.speak(sessionId, 'Can you read me my day?');
 
     expect(agentResponse).not.toBe(LOOKUP_UNAVAILABLE_LINE);
     expect(agentResponse).not.toContain('owner-level report');
@@ -311,7 +314,7 @@ describe('VQ-007 — TextModeDriver', () => {
       JSON.stringify({ intentType: 'lookup_digest', confidence: 0.95 }),
     );
 
-    const { agentResponse } = await h.driver.speak(sessionId, 'read me my day');
+    const { agentResponse } = await h.driver.speak(sessionId, 'Can you read me my day?');
 
     expect(agentResponse).toContain('owner-level report');
     expect(findLatest).not.toHaveBeenCalled();
@@ -476,8 +479,10 @@ describe('VQ-007 — TextModeDriver', () => {
   });
 
   it('WS1 — a Spanish emergency keyword speaks the localized 911 line FIRST and escalates', async () => {
-    // Emergency handling short-circuits BEFORE classify (no LLM), so we wire an
-    // on-call rotation so escalateToHuman can emit escalation_triggered.
+    // Emergency handling short-circuits BEFORE classify (no LLM). The FSM's
+    // E2 path hands off through notify_oncall, which reaches escalateToHuman
+    // (escalation_triggered) only with BOTH an on-call rotation and an audit
+    // repo wired, as production wires them.
     const onCallRepo = new InMemoryOnCallRepository(
       new Map([['t-emergency', [{ id: 'oncall_1', userId: 'dispatcher_1', orderIndex: 0 }]]]),
     );
@@ -487,7 +492,14 @@ describe('VQ-007 — TextModeDriver', () => {
       gateway: createMockLLMGateway().gateway,
       proposalRepo: h.proposalRepo,
       customerRepo: h.customerRepo,
+      auditRepo: new InMemoryAuditRepository(),
       onCallRepo,
+      // A Spanish-speaking tenant: the call is pinned to Spanish at
+      // establishment (tenant_settings.default_language), as the Gather
+      // adapter pins it, so the FSM's safety lines render in Spanish.
+      settingsRepo: {
+        findByTenant: async () => ({ tenantId: 't-emergency', defaultLanguage: 'es', supportedLanguages: ['en', 'es'] }),
+      } as never,
       systemActorId: 'system:vq-test',
     });
 
@@ -506,8 +518,8 @@ describe('VQ-007 — TextModeDriver', () => {
       '¡Se rompió una tubería y hay agua por todas partes!',
     );
 
-    // Localized Spanish 911 safety line, not the English source.
-    expect(agentResponse).toBe('Si alguien está en peligro inmediato, cuelgue y llame al 911.');
+    // Localized Spanish 911 safety line FIRST, not the English source.
+    expect(agentResponse.startsWith('Si alguien está en peligro inmediato, cuelgue y llame al 911.')).toBe(true);
     expect(h.bus.filterByType('escalation_triggered').length).toBeGreaterThan(0);
     // No classifier ran — the emergency interrupt consumed the turn.
     expect(h.bus.filterByType('intent_classified')).toHaveLength(0);
@@ -612,6 +624,7 @@ describe('VQ-007 — TextModeDriver', () => {
       gateway,
       proposalRepo: h.proposalRepo,
       customerRepo: h.customerRepo,
+      auditRepo: new InMemoryAuditRepository(),
       onCallRepo,
       systemActorId: 'system:vq-test',
     });

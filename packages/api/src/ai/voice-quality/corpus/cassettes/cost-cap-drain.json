@@ -26,7 +26,7 @@
         "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.130Z"
+      "recordedAt": "2026-10-05T02:51:32.080Z"
     },
     {
       "requestHash": "sha256:9a508b583bdae7742f3b61b8751159aa8332b26ce64da8c6d5e8ec59b58479e5",
@@ -51,7 +51,7 @@
         "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.140Z"
+      "recordedAt": "2026-10-05T02:51:32.108Z"
     },
     {
       "requestHash": "sha256:e460c1adaf292b91fc45212e7d78d73f64579a3311ae30041196cc6dc0c6e0b3",
@@ -76,7 +76,7 @@
         "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.148Z"
+      "recordedAt": "2026-10-05T02:51:32.113Z"
     },
     {
       "requestHash": "sha256:991e37a894773299a2643a8ddeaf04b2d2b96a927a819e353aaeb30be3f233e2",
@@ -101,7 +101,7 @@
         "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.163Z"
+      "recordedAt": "2026-10-05T02:51:32.118Z"
     },
     {
       "requestHash": "sha256:288e73cee4b502f86efee05efae711f2189dcf20c0026ee2fe87dd7d2dc5a18f",
@@ -126,7 +126,7 @@
         "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.170Z"
+      "recordedAt": "2026-10-05T02:51:32.123Z"
     },
     {
       "requestHash": "sha256:a12574e1d5a0b915e6c6bbad45eb5f6ea7da5310755e39d29efca2a5eb336918",
@@ -136,22 +136,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_availability\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 4926,
-          "output": 22,
-          "total": 4948
+          "output": 25,
+          "total": 4951
         }
       },
       "tokenUsage": {
         "inputTokens": 4926,
-        "outputTokens": 22,
+        "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.182Z"
+      "recordedAt": "2026-10-05T02:51:32.127Z"
     },
     {
       "requestHash": "sha256:1c4be3a4750d9af24ab818db3af58fbadf76c442bd430ac9960ed6003a8c472d",
@@ -161,22 +161,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_availability\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 4927,
-          "output": 22,
-          "total": 4949
+          "output": 25,
+          "total": 4952
         }
       },
       "tokenUsage": {
         "inputTokens": 4927,
-        "outputTokens": 22,
+        "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.187Z"
+      "recordedAt": "2026-10-05T02:51:32.132Z"
     },
     {
       "requestHash": "sha256:0821b0841a04357cc56e4aff18d517a8587c7af5cae855e338440815fb613994",
@@ -186,22 +186,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_availability\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 4927,
-          "output": 22,
-          "total": 4949
+          "output": 25,
+          "total": 4952
         }
       },
       "tokenUsage": {
         "inputTokens": 4927,
-        "outputTokens": 22,
+        "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.193Z"
+      "recordedAt": "2026-10-05T02:51:32.142Z"
     },
     {
       "requestHash": "sha256:bb14299cbec3854a6c1dd52ad7c0eb18b0b2bd48addc790a41eb29421a8d9cf4",
@@ -211,22 +211,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_availability\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 4925,
-          "output": 22,
-          "total": 4947
+          "output": 25,
+          "total": 4950
         }
       },
       "tokenUsage": {
         "inputTokens": 4925,
-        "outputTokens": 22,
+        "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.198Z"
+      "recordedAt": "2026-10-05T02:51:32.155Z"
     },
     {
       "requestHash": "sha256:769b4f0a3e7b4d94bed35daedadb0824cede05f001a32ecb2bf20cce2b64a0bb",
@@ -236,22 +236,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_availability\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 4926,
-          "output": 22,
-          "total": 4948
+          "output": 25,
+          "total": 4951
         }
       },
       "tokenUsage": {
         "inputTokens": 4926,
-        "outputTokens": 22,
+        "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.203Z"
+      "recordedAt": "2026-10-05T02:51:32.178Z"
     },
     {
       "requestHash": "sha256:a3a7d3e801d55d9fb7924332ddcb11dbe66c983e6ce0a1a08b7612645a4a8b26",
@@ -261,22 +261,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_availability\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 4928,
-          "output": 22,
-          "total": 4950
+          "output": 25,
+          "total": 4953
         }
       },
       "tokenUsage": {
         "inputTokens": 4928,
-        "outputTokens": 22,
+        "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.208Z"
+      "recordedAt": "2026-10-05T02:51:32.184Z"
     },
     {
       "requestHash": "sha256:986d8ce6c8f0be291b990718d336e5c66bde306786e2099add1ca6978b22014c",
@@ -286,22 +286,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_availability\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 4927,
-          "output": 22,
-          "total": 4949
+          "output": 25,
+          "total": 4952
         }
       },
       "tokenUsage": {
         "inputTokens": 4927,
-        "outputTokens": 22,
+        "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.213Z"
+      "recordedAt": "2026-10-05T02:51:32.188Z"
     },
     {
       "requestHash": "sha256:77c5f5afaf0066c5648144263cafa7ae3a323b495489a03015e1bcb15619f3a7",
@@ -311,22 +311,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_availability\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 4925,
-          "output": 22,
-          "total": 4947
+          "output": 25,
+          "total": 4950
         }
       },
       "tokenUsage": {
         "inputTokens": 4925,
-        "outputTokens": 22,
+        "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.219Z"
+      "recordedAt": "2026-10-05T02:51:32.193Z"
     },
     {
       "requestHash": "sha256:f305c5d28c24e372d6598fb23532a6ab97cb8716da348216943d63ef347e1b92",
@@ -336,22 +336,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_availability\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 4926,
-          "output": 22,
-          "total": 4948
+          "output": 25,
+          "total": 4951
         }
       },
       "tokenUsage": {
         "inputTokens": 4926,
-        "outputTokens": 22,
+        "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.224Z"
+      "recordedAt": "2026-10-05T02:51:32.198Z"
     },
     {
       "requestHash": "sha256:803f58cc4864582aa7fed6b149660bc1b2dc21d02b6d39c30ff24dc802f98608",
@@ -361,22 +361,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"unknown\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_availability\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 4927,
-          "output": 22,
-          "total": 4949
+          "output": 25,
+          "total": 4952
         }
       },
       "tokenUsage": {
         "inputTokens": 4927,
-        "outputTokens": 22,
+        "outputTokens": 25,
         "costCents": 0
       },
-      "recordedAt": "2026-09-30T15:32:12.229Z"
+      "recordedAt": "2026-10-05T02:51:32.205Z"
     }
   ]
 }

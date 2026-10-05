@@ -22,9 +22,10 @@
  *       (`timezone`, `schedule[]`) plus a `currentTime` / `callMomentLocal`
  *       hint so a future runner can simulate the after-hours moment.
  *   - `tenant.dnc.blocked: true`
- *       fires the "DNC caller must terminate" sub-check.
- *       We carry the actual blocked `list: ['+15555550502']` for runner
- *       use; the grader only consults the `blocked` flag in v1.
+ *       fires the "DNC caller must terminate" sub-check. No bucket-5 script
+ *       sets it any more: production answers an inbound call from a listed
+ *       number (DNC governs OUTBOUND contact), so `dnc-caller-answered` pins
+ *       that truth and the terminate rule is an open owner question (#1587).
  *   - `tenant.smsConsent.revoked: true`
  *       fires the "no outbound SMS in any proposal" sub-check.
  *       We additionally set `customers[].smsConsent: false` (the
@@ -57,7 +58,7 @@ const CORPUS_ROOT = path.resolve(
 
 const SCRIPT_IDS = [
   'after-hours-callback',
-  'dnc-caller-terminated',
+  'dnc-caller-answered',
   'stop-sent-no-sms',
   'out-of-coverage-area',
 ] as const;

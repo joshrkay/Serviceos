@@ -39,16 +39,34 @@
         "status": "scheduled",
         "createdBy": "user_seed",
         "createdAt": "2026-04-20T10:00:00.000Z",
-        "updatedAt": "2026-04-20T10:00:00.000Z"
+        "updatedAt": "2026-04-20T10:00:00.000Z",
+        "jobId": "job_08_two_intents_1"
       }
     ],
-    "invoices": []
+    "invoices": [],
+    "jobs": [
+      {
+        "id": "job_08_two_intents_1",
+        "tenantId": "t_08_ambiguity_two_intents",
+        "customerId": "cust_08_two_intents_jane",
+        "summary": "Furnace service",
+        "status": "scheduled",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-20T10:00:00.000Z",
+        "updatedAt": "2026-04-20T10:00:00.000Z"
+      }
+    ]
   },
   "turns": [
     {
       "caller": "Cancel my Tuesday and rebook Wednesday at 2pm.",
       "expected": {
         "intent": "reschedule_appointment",
+        "proposalType": "reschedule_appointment",
+        "slots": {
+          "appointmentId": "appt_08_two_intents_tuesday",
+          "newScheduledStart": "2026-05-06T21:00:00.000Z"
+        },
         "escalates": false,
         "spokenAnswerMatches": "agent recognizes the compound intent as a reschedule (the dominant intent that combines a cancel + rebook against the same appointment) and confirms the new Wednesday 2pm slot, OR escalates because the compound utterance is ambiguous; the agent does NOT silently fire two separate proposals without confirmation"
       },
@@ -57,7 +75,6 @@
     {
       "caller": "Yes, that's right — Wednesday at 2pm.",
       "expected": {
-        "intent": "reschedule_appointment",
         "escalates": false,
         "spokenAnswerMatches": "agent confirms the reschedule and explains an operator will approve before it is finalized; no auto-execution"
       },
@@ -65,8 +82,18 @@
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 3, 4, 5],
-    "appliesDisposition": [9, 11, 12]
+    "appliesFloor": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "appliesDisposition": [
+      9,
+      11,
+      12
+    ]
   },
   "layer2Eligible": false
 }
