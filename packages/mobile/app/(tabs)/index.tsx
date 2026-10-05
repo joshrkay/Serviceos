@@ -8,6 +8,7 @@ import { greetingForDate } from '../../src/lib/greeting';
 import { EmergencyBanner } from '../../src/components/EmergencyBanner';
 import { ErrorState } from '../../src/components/ErrorState';
 import { PushDeniedNotice } from '../../src/components/PushDeniedNotice';
+import { QuickLinks } from '../../src/components/QuickLinks';
 import { useToast } from '../../src/components/Toast';
 import { useListQuery } from '../../src/hooks/useListQuery';
 import { formatRelativeTime } from '../../src/lib/format';
@@ -262,23 +263,7 @@ export default function Home() {
 
       <PushDeniedNotice className="mt-6" />
 
-      <Text className="mb-2 mt-7 text-xs font-medium uppercase tracking-wide text-mutedForeground">
-        Quick links
-      </Text>
-      <View className="w-full max-w-full flex-row flex-wrap justify-between">
-        {nav.quickLinks.map((link) => (
-          <Pressable
-            key={link.label}
-            accessibilityRole="button"
-            accessibilityLabel={link.label}
-            onPress={() => router.push(link.route)}
-            className="mb-3 min-h-11 min-w-0 items-center justify-center rounded-md border border-border bg-card px-3 py-3"
-            style={{ width: '47%' }}
-          >
-            <Text className="text-base text-foreground">{link.label}</Text>
-          </Pressable>
-        ))}
-      </View>
+      <QuickLinks links={nav.quickLinks} />
     </ScrollView>
   );
 }

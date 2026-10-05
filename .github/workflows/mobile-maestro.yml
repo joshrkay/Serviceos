@@ -1,9 +1,10 @@
 name: Mobile Maestro (device)
 
-# PRD 3.3 (#1015) + 5.4 (#1018) device proofs, per research #1002: Maestro on
-# the Android emulator (no macOS runner). Runs the flows in
-# packages/mobile/.maestro/ through packages/mobile/scripts/maestro-device-run.sh
-# against a real API (DEV_AUTH_BYPASS, NODE_ENV=dev) on real Postgres.
+# PRD 3.3 (#1015) + 5.4 (#1018) device proofs, per research #1002, plus the
+# #1603 technician-Assistant proof: Maestro on the Android emulator (no macOS
+# runner). Runs the flows in packages/mobile/.maestro/ through
+# packages/mobile/scripts/maestro-device-run.sh against a real API
+# (DEV_AUTH_BYPASS, NODE_ENV=dev) on real Postgres.
 #
 # Deliberately NOT a pull_request check: an emulator run is ~5–8 min plus the
 # Android build and carries emulator flakiness. Manual dispatch + nightly only.
