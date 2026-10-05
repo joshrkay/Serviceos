@@ -130,7 +130,7 @@ export async function redraftInvoiceOnEstimatePick(
 }
 
 /**
- * Zod's `z.string().uuid()` regex, mirrored so a value this module accepts is
+ * Zod's `z.guid()` regex, mirrored so a value this module accepts is
  * one `draftInvoicePayloadSchema` also accepts. Deliberately NOT a "does it
  * look like an id" heuristic — see `authorCustomerId`.
  */

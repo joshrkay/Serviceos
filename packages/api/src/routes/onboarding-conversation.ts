@@ -18,7 +18,7 @@ import { OnboardingConversationOrchestrator } from '../ai/orchestration/onboardi
 const TurnRequestSchema = z.object({
   /** Omit to start a new session. The first turn with no sessionId and
    *  no userMessage surfaces the opening prompt without consuming a turn. */
-  sessionId: z.string().uuid().optional(),
+  sessionId: z.guid().optional(),
   /** User utterance. Required after the opening prompt; optional on the
    *  very first call so the UI can render the assistant's greeting. */
   userMessage: z.string().min(1).max(2000).optional(),

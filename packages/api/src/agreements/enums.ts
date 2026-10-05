@@ -72,8 +72,8 @@ export const memberDiscountBpsSchema = z
   .max(10000);
 
 export const createAgreementSchema = z.object({
-  customerId: z.string().uuid(),
-  locationId: z.string().uuid().optional(),
+  customerId: z.guid(),
+  locationId: z.guid().optional(),
   name: z.string().min(1).max(200),
   description: z.string().max(2000).optional(),
   recurrenceRule: recurrenceRuleSchema,

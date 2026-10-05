@@ -136,7 +136,7 @@ const bookSchema = z.object({
   slotStart: z.string().datetime(),
   slotEnd: z.string().datetime(),
   summary: z.string().trim().min(1).max(2000),
-  locationId: z.string().uuid().optional(),
+  locationId: z.guid().optional(),
 });
 
 /** A self-service hold survives 24h before the finder treats the slot as free. */

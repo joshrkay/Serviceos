@@ -71,7 +71,7 @@ import { z } from 'zod';
  */
 export const updateCatalogItemPayloadSchema = z.object({
   /** Catalog item whose unit price the proposal would update. */
-  catalogItemId: z.string().uuid(),
+  catalogItemId: z.guid(),
   /**
    * #909 — the spoken/typed catalog item reference, preserved when
    * `catalogItemId` did NOT resolve (mirrors `jobReference` on the

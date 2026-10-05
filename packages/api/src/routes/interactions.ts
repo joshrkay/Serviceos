@@ -161,7 +161,7 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
     // a 500. Reject malformed ids up front instead (same convention as
     // users.ts resolvePhoneTarget: 400 BAD_REQUEST for a malformed id,
     // 404 NOT_FOUND reserved for a well-formed id that doesn't match a row).
-    if (!z.string().uuid().safeParse(id).success) {
+    if (!z.guid().safeParse(id).success) {
       res.status(400).json({ error: 'BAD_REQUEST', message: 'Invalid interaction id.' });
       return;
     }

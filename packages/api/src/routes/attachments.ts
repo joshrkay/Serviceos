@@ -44,16 +44,16 @@ const PRESIGN_ENTITY_TYPES = ['job', 'invoice', 'estimate'] as const;
 
 const presignSchema = z.object({
   entityType: z.enum(PRESIGN_ENTITY_TYPES),
-  entityId: z.string().uuid(),
+  entityId: z.guid(),
   filename: z.string().min(1),
   contentType: z.string().min(1),
   sizeBytes: z.number().int().positive(),
 });
 
 const attachSchema = z.object({
-  fileId: z.string().uuid(),
+  fileId: z.guid(),
   entityType: z.enum(ATTACHMENT_ENTITY_TYPES),
-  entityId: z.string().uuid(),
+  entityId: z.guid(),
   kind: z.enum(ATTACHMENT_KINDS),
   caption: z.string().optional(),
   category: z.enum(ATTACHMENT_CATEGORIES).optional(),
@@ -62,7 +62,7 @@ const attachSchema = z.object({
 
 const listQuerySchema = z.object({
   entityType: z.enum(ATTACHMENT_ENTITY_TYPES),
-  entityId: z.string().uuid(),
+  entityId: z.guid(),
   // NOT z.coerce.boolean(): query params arrive as strings and
   // Boolean('false') === true. Accept the two literal strings instead
   // (compared against 'true' in the handler).
@@ -74,7 +74,7 @@ const visibilitySchema = z.object({
 });
 
 const pairSchema = z.object({
-  otherId: z.string().uuid(),
+  otherId: z.guid(),
   role: z.enum(ATTACHMENT_PAIR_ROLES),
 });
 

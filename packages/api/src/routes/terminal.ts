@@ -26,7 +26,7 @@ import { asyncRoute } from '../middleware/async-route';
 const PAYABLE = new Set(['open', 'partially_paid']);
 
 const paymentIntentBodySchema = z.object({
-  invoiceId: z.string().uuid(),
+  invoiceId: z.guid(),
 });
 
 export interface TerminalLocationStore {

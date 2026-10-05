@@ -173,7 +173,7 @@ export async function createStandingInstruction(
   const scopeResult = standingInstructionScopeSchema.safeParse(input.scope ?? {});
   if (!scopeResult.success) {
     throw new ValidationError('Invalid scope', {
-      fields: scopeResult.error.flatten().fieldErrors,
+      fields: z.flattenError(scopeResult.error).fieldErrors,
     });
   }
 

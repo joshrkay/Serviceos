@@ -99,7 +99,7 @@ export function createUsersRouter(
   > {
     const tenantId = req.auth!.tenantId;
     const clerkUserId = req.auth!.userId;
-    if (routeParam(req, 'id') !== 'me' && !z.string().uuid().safeParse(routeParam(req, 'id')).success) {
+    if (routeParam(req, 'id') !== 'me' && !z.guid().safeParse(routeParam(req, 'id')).success) {
       return { ok: false, status: 400, error: 'BAD_REQUEST', message: 'Invalid user id.' };
     }
     const users = await userRepo.findByTenant(tenantId);

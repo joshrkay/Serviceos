@@ -114,7 +114,7 @@ export function createLlmEditInterpreter(
  *
  * Pre-existing fail-closed note: for uuid-typed contract fields (e.g.
  * draft_estimate.customerId / create_job.customerId are
- * `z.string().uuid()`), ANY edit to a token-bearing proposal already
+ * `z.guid()`), ANY edit to a token-bearing proposal already
  * failed closed — editProposal Zod-validates the MERGED payload, and the
  * still-present token is not a uuid — landing in the recorded-note path
  * with a generic message. This guard adds the truthful copy for

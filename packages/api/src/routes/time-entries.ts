@@ -24,7 +24,7 @@ const entryTypeSchema = z.enum(['job', 'drive', 'break', 'admin']);
 
 const clockInSchema = z.object({
   userId: z.string().min(1).optional(),
-  jobId: z.string().uuid().optional(),
+  jobId: z.guid().optional(),
   entryType: entryTypeSchema,
   notes: z.string().max(2000).optional(),
   clockedInAt: z.string().datetime().optional(),

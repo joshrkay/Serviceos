@@ -156,7 +156,7 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
     // templates and close with "Ensure customerId and jobId are present", so it
     // invented ids — including the RFC 4122 EXAMPLE uuid
     // 123e4567-e89b-12d3-a456-426614174000, which sails through
-    // `z.string().uuid()`. Unchecked, `customerId` auto-opens a JOB from a
+    // `z.guid()`. Unchecked, `customerId` auto-opens a JOB from a
     // customer that doesn't exist and `jobId` is written straight onto the
     // invoice as its job container (bypassing the auto-open path entirely) —
     // either violating a foreign key deep inside createJob/createInvoice or

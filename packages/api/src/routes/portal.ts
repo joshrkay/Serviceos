@@ -27,13 +27,13 @@ import {
 import { routeParam } from '../shared/route-params';
 
 const createSchema = z.object({
-  customerId: z.string().uuid(),
+  customerId: z.guid(),
   /**
    * C2/I14 — bind the session to a specific customer contact. The
    * contact's role determines the portal entitlement at read time
    * (site/other → service surface only, no billing).
    */
-  contactId: z.string().uuid().optional(),
+  contactId: z.guid().optional(),
   /** Optional override; clamps to 1..365 to avoid pathological values. */
   ttlDays: z.number().int().positive().max(365).optional(),
 });

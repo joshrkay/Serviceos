@@ -32,8 +32,8 @@ export const accountTypeSchema = z.enum(['residential', 'b2b', 'property_manager
 export type AccountTypeValue = z.infer<typeof accountTypeSchema>;
 
 export const customerSchema = z.object({
-  id: z.string().uuid(),
-  tenantId: z.string().uuid(),
+  id: z.guid(),
+  tenantId: z.guid(),
   firstName: z.string(),
   lastName: z.string(),
   displayName: z.string(),
@@ -70,9 +70,9 @@ export const customerContactRoleSchema = z.enum(['primary', 'billing', 'site', '
 export type CustomerContactRole = z.infer<typeof customerContactRoleSchema>;
 
 export const customerContactSchema = z.object({
-  id: z.string().uuid(),
-  tenantId: z.string().uuid(),
-  customerId: z.string().uuid(),
+  id: z.guid(),
+  tenantId: z.guid(),
+  customerId: z.guid(),
   name: z.string(),
   role: customerContactRoleSchema,
   phone: z.string().optional(),
@@ -98,8 +98,8 @@ export const customerCustomFieldTypeSchema = z.enum(['text', 'number', 'date', '
 export type CustomerCustomFieldType = z.infer<typeof customerCustomFieldTypeSchema>;
 
 export const customerCustomFieldDefSchema = z.object({
-  id: z.string().uuid(),
-  tenantId: z.string().uuid(),
+  id: z.guid(),
+  tenantId: z.guid(),
   key: z.string(),
   label: z.string(),
   fieldType: customerCustomFieldTypeSchema,
@@ -113,7 +113,7 @@ export type CustomerCustomFieldDef = z.infer<typeof customerCustomFieldDefSchema
 
 /** A single field value resolved against its definition, for the editor UI. */
 export const customerCustomFieldValueSchema = z.object({
-  fieldDefId: z.string().uuid(),
+  fieldDefId: z.guid(),
   key: z.string(),
   label: z.string(),
   fieldType: customerCustomFieldTypeSchema,

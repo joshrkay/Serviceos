@@ -18,7 +18,7 @@ export const logExpensePayloadSchema = z.object({
   category: z.enum([...EXPENSE_CATEGORIES] as [string, ...string[]]),
   vendor: z.string().max(200).optional(),
   spentAt: z.string().min(1).max(64),
-  jobId: z.string().uuid().optional(),
+  jobId: z.guid().optional(),
 });
 
 export type LogExpensePayload = z.infer<typeof logExpensePayloadSchema>;

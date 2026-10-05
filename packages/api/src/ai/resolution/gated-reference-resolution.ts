@@ -95,7 +95,7 @@ export const GATED_REFERENCE_SOURCES: Readonly<Record<string, GatedReferenceSour
     entityFields: ['jobReference', 'jobTitle'],
   },
   // #1067 — `create_appointment`'s chained-booking job reference
-  // (`linkedJobId: z.string().uuid().optional()`, proposals/contracts.ts). A
+  // (`linkedJobId: z.guid().optional()`, proposals/contracts.ts). A
   // malformed value becomes a `linkedJobId` gate via the contract gap path;
   // it names a job, so it lifts from the same free text `jobId` does.
   linkedJobId: {

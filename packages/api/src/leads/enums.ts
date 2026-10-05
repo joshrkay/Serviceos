@@ -98,7 +98,7 @@ export const createLeadSchema = z
     attribution: attributionSchema.optional(),
     estimatedValueCents: estimatedValueCentsSchema.optional(),
     notes: z.string().max(5000).optional(),
-    assignedUserId: z.string().uuid().optional(),
+    assignedUserId: z.guid().optional(),
     ...leadAddressFields,
     // stage defaults to 'new' on create — callers may not set it.
   })
@@ -125,7 +125,7 @@ export const updateLeadSchema = z
     stage: leadStageSchema.optional(),
     estimatedValueCents: estimatedValueCentsSchema.nullable().optional(),
     notes: z.string().max(5000).optional(),
-    assignedUserId: z.string().uuid().nullable().optional(),
+    assignedUserId: z.guid().nullable().optional(),
     preferredLanguage: z.enum(['en', 'es']).nullable().optional(),
     street1: z.string().trim().min(1).max(200).nullable().optional(),
     street2: z.string().trim().max(200).nullable().optional(),

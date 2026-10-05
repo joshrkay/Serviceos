@@ -67,7 +67,7 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
     // is "not found" too (the Pg lookup would otherwise raise on the uuid cast).
     if (uploadRequest.entityType === 'job' && uploadRequest.entityId !== undefined) {
       const jobId = uploadRequest.entityId;
-      const job = z.string().uuid().safeParse(jobId).success
+      const job = z.guid().safeParse(jobId).success
         ? await jobRepo.findById(uploadRequest.tenantId, jobId)
         : null;
       if (!job) {

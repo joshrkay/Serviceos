@@ -21,8 +21,8 @@ const milestoneSchema = z.object({
 
 export const createInvoiceSchedulePayloadSchema = z
   .object({
-    jobId: z.string().uuid(),
-    estimateId: z.string().uuid().optional(),
+    jobId: z.guid(),
+    estimateId: z.guid().optional(),
     /** Optional explicit total; when omitted the executor derives it from the estimate. */
     totalAmountCents: z.number().int().min(0).optional(),
     milestones: z.array(milestoneSchema).min(1),

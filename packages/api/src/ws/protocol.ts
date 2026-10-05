@@ -71,7 +71,7 @@ export const wsServerVoiceEventSchema = z.object({
   sessionId: z.string(),
   event: z.string(),
   state: z.string().optional(),
-  payload: z.record(z.unknown()).optional(),
+  payload: z.record(z.string(), z.unknown()).optional(),
 });
 
 /** UC-3 — dispatch presence read. Pushed to connections subscribed to the

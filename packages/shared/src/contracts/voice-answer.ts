@@ -86,7 +86,7 @@ export type VoiceAnswerEntityKind = (typeof VOICE_ANSWER_ENTITY_KINDS)[number];
 
 export const voiceAnswerEntityRefSchema = z.object({
   kind: z.enum(VOICE_ANSWER_ENTITY_KINDS),
-  id: z.string().uuid().optional(),
+  id: z.guid().optional(),
 });
 export type VoiceAnswerEntityRef = z.infer<typeof voiceAnswerEntityRefSchema>;
 

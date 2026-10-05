@@ -52,7 +52,7 @@ const updateSchema = z
   });
 
 const renderSchema = z.object({
-  variables: z.record(z.string()).default({}),
+  variables: z.record(z.string(), z.string()).default({}),
 });
 
 /**

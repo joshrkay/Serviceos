@@ -987,7 +987,7 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
     // the estimate prompt used to hand the model a `"customerId": "<uuid>"`
     // template, and it invented ids — including the RFC 4122 EXAMPLE uuid
     // 123e4567-e89b-12d3-a456-426614174000, which sails through
-    // `z.string().uuid()`. Left unchecked it either violates a foreign key
+    // `z.guid()`. Left unchecked it either violates a foreign key
     // deep inside createJob/createEstimate or, worse, resolves to nothing at
     // all. So confirm the id names a real customer IN THIS TENANT before any
     // write, and fail the proposal with a reason the operator can act on.

@@ -11,8 +11,8 @@ import {
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 const pingSchema = z.object({
-  clientPingId: z.string().uuid(),
-  appointmentId: z.string().uuid().optional(),
+  clientPingId: z.guid(),
+  appointmentId: z.guid().optional(),
   lat: z.number(),
   lng: z.number(),
   accuracyMeters: z.number().optional(),

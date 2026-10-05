@@ -109,7 +109,7 @@ const languagePatchSchema = z.object({
   ttsVoiceEn: ttsVoicePatchField,
   ttsVoiceEs: ttsVoicePatchField,
   autoDetectLanguage: z.boolean().optional(),
-  spanishDispatcherUserIds: z.array(z.string().uuid()).optional(),
+  spanishDispatcherUserIds: z.array(z.guid()).optional(),
   // Voice-parity — opt-in language stack. 'en' is always force-included on
   // persist so the agent can never be left without a fallback language.
   supportedLanguages: z.array(z.enum(['en', 'es'])).optional(),

@@ -25,7 +25,7 @@ import { z } from 'zod';
  * omitted entirely when unstated (never a fabricated blank).
  */
 export const applyCreditPayloadSchema = z.object({
-  invoiceId: z.string().uuid(),
+  invoiceId: z.guid(),
   /** Credit to apply, in integer cents. Must be positive — floor-guarded against the invoice's amount due at execution time. */
   amountCents: z.number().int().positive(),
   /** Why the credit was given (goodwill / warranty labor / price match), folded into the appended line's description. */

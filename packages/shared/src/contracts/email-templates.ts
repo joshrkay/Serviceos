@@ -24,7 +24,7 @@ const emailTemplateContractSchema = z.object({
   description: z.string().min(1),
   requiredToolsHooks: z.array(z.enum(INTERACTION_TOOL_HOOKS)).nonempty(),
   jurisdictionFlags: z.array(z.enum(JURISDICTION_FLAGS)),
-  proposalTypes: z.array(z.nativeEnum(ProposalType)),
+  proposalTypes: z.array(z.enum(ProposalType)),
 });
 
 export const EMAIL_TEMPLATES = [
