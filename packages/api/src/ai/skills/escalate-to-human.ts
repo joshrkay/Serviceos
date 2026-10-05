@@ -87,7 +87,14 @@ export type EscalationReason =
   // P8-016 — vulnerability-aware emergency patch to the OWNER's cell (a
   // separate path from the dispatcher rotation). Additive; existing reasons
   // are unchanged.
-  | 'vulnerability_patch';
+  | 'vulnerability_patch'
+  // #1616 — the caller's identity could not be verified on this line
+  // (#1587's claims-existing-customer / archived-record hand-offs, or
+  // identifyCaller throwing). Recorded on the `escalation.requested` audit
+  // event and the `escalation_triggered` event under D-042 (4)'s category
+  // (`max_retries_exceeded`, see `recordedEscalationReason`); the
+  // dispatcher-facing summary names the identity problem instead.
+  | 'identity_unverified';
 
 /**
  * Maps the skill-layer EscalationReason (internal system categorisation)
@@ -109,6 +116,8 @@ export function mapSkillReasonToBuilderReason(
       return 'emergency_dispatch';
     case 'caller_requested':
       return 'operator_request';
+    case 'identity_unverified':
+      return 'identity_unverified';
     case 'low_confidence':
     case 'max_retries_exceeded':
       return 'low_confidence_intent';
@@ -120,6 +129,20 @@ export function mapSkillReasonToBuilderReason(
       // gave up rather than the caller demanding a human.
       return 'low_confidence_intent';
   }
+}
+
+/**
+ * #1616 — the reason RECORDED for an escalation: the `escalation.requested`
+ * audit metadata and the `escalation_triggered` event the Layer 1 graders
+ * read. D-042 (4) categorises an identity hand-off as `max_retries_exceeded`
+ * (the category in-app files an unresolved caller identity under), and that
+ * record is unchanged: `identity_unverified` is finer vocabulary for the
+ * dispatcher summary only. Every other reason is recorded as itself.
+ */
+function recordedEscalationReason(
+  reason: EscalationReason,
+): Exclude<EscalationReason, 'identity_unverified'> {
+  return reason === 'identity_unverified' ? 'max_retries_exceeded' : reason;
 }
 
 /**
@@ -334,7 +357,7 @@ function buildEscalationAudit(opts: {
     entityId: opts.sessionId,
     correlationId: uuidv4(),
     metadata: {
-      reason: opts.reason,
+      reason: recordedEscalationReason(opts.reason),
       assignedUserId: opts.assignedUserId,
       outcome: opts.outcome,
       ...(opts.rotationIndex !== undefined ? { rotationIndex: opts.rotationIndex } : {}),
@@ -446,7 +469,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     }
 
     if (session) {
-      session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(reason));
+      session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedEscalationReason(reason)));
     }
 
     return {
@@ -553,7 +576,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
           );
         }
         if (session) {
-          session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(reason));
+          session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedEscalationReason(reason)));
         }
         let fallbackMessage = transferringText;
         if (reason === 'emergency_dispatch') {
@@ -697,7 +720,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     }
 
     if (session) {
-      session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(reason));
+      session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedEscalationReason(reason)));
     }
 
     return {
@@ -774,7 +797,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
   };
 
   if (session) {
-    session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(reason));
+    session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedEscalationReason(reason)));
   }
 
   return result;

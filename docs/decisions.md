@@ -1707,6 +1707,15 @@ summary vocabulary (`EscalationContext['reason']`) still folds both categories i
 `low_confidence_intent`, exactly as it does for in-app today; a dedicated identity reason there is
 a separate follow-up, not part of this decision.
 
+*(4), as amended by #1616 (2026-10-05).* That follow-up is built: the skill `EscalationReason` and
+the builder `EscalationContext['reason']` carry `identity_unverified`, and the dispatcher's whisper,
+SMS and in-app panel say "Caller says they're <name> but the number doesn't match their record" /
+"Caller's record is archived" / "Caller's identity couldn't be verified" (EN + ES copy beside its
+sibling reason phrases in `escalation-summary-builder.ts`). The RECORDED category is unchanged:
+`escalateToHuman` folds `identity_unverified` to `max_retries_exceeded` on the `escalation.requested`
+audit metadata and the `escalation_triggered` event (`recordedEscalationReason`), so this decision's
+categorisation, the Layer 1 graders and #1614's pin all hold.
+
 **Consequences.** The Layer 1 scripts `cross-customer-extraction`, `spam-create-customer` and
 `stale-appointment-just-cancelled` are the specification of (1)–(3) and pass against production
 code; their cassettes were re-recorded with the offline mock. The simulator still carries no gate

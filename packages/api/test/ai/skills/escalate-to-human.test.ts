@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { escalateToHuman, mapSkillReasonToBuilderReason } from '../../../src/ai/skills/escalate-to-human';
 import { InMemoryOnCallRepository } from '../../../src/oncall/rotation';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
+import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
+import { buildEscalationSummary } from '../../../src/ai/agents/customer-calling/escalation-summary-builder';
 import type { OnCallEntry } from '../../../src/oncall/rotation';
 import type { EscalateToHumanInput } from '../../../src/ai/skills/escalate-to-human';
 
@@ -427,5 +429,51 @@ describe('mapSkillReasonToBuilderReason', () => {
   });
   it('maps provider_failure → low_confidence_intent', () => {
     expect(mapSkillReasonToBuilderReason('provider_failure')).toBe('low_confidence_intent');
+  });
+  it('#1616 — maps identity_unverified → identity_unverified (an identity hand-off is not "low confidence")', () => {
+    expect(mapSkillReasonToBuilderReason('identity_unverified')).toBe('identity_unverified');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1616 — identity_unverified: what the dispatcher sees vs. what is recorded
+// ---------------------------------------------------------------------------
+
+describe('#1616 — identity_unverified names identity to the dispatcher but is recorded under its D-042 category', () => {
+  it('summary panel says identity_unverified; the escalation.requested audit and escalation_triggered say max_retries_exceeded', async () => {
+    const onCallRepo = {
+      listRotation: vi.fn(async () => [{ id: 'rot-1', userId: 'user-disp-1', cursorIndex: 0 }]),
+    };
+    const auditRepo = new InMemoryAuditRepository();
+    const store = new VoiceSessionStore({ startInterval: false });
+    const session = store.create('tenant-1', 'telephony', { callSid: 'CA-1616' });
+    const events: Array<Record<string, unknown>> = [];
+    session.events.on('voice-event', (e: Record<string, unknown>) => events.push(e));
+
+    const result = await escalateToHuman({
+      tenantId: 'tenant-1',
+      sessionId: session.id,
+      reason: 'identity_unverified',
+      channel: 'telephony',
+      callSid: 'CA-1616',
+      onCallRepo: onCallRepo as never,
+      auditRepo,
+      dispatcherPhoneResolver: async () => '+15125550999',
+      session,
+      buildSummary: buildEscalationSummary,
+      shopName: "Joe's HVAC",
+      callerContext: {
+        caller: { phone: '+15555550404', claimedName: 'Jane Smith' },
+        intent: { type: 'unknown', entities: {}, confidence: 1 },
+        transcriptSnapshot: [],
+      },
+    });
+    store.dispose();
+
+    expect(result.transfer?.summary?.panel.reason.code).toBe('identity_unverified');
+    // D-042 (4): the recorded category — audit metadata and the Layer 1
+    // event — is what #1614 pinned; #1616 changes only what the dispatcher sees.
+    expect(auditRepo.getAll().map((e) => e.metadata?.reason)).toEqual(['max_retries_exceeded']);
+    expect(events.find((e) => e.type === 'escalation_triggered')?.reason).toBe('max_retries_exceeded');
   });
 });

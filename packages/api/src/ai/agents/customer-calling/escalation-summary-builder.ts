@@ -8,13 +8,20 @@
  * latency and add fabrication risk on critical fields (caller name,
  * address). Spoken phrasing is composed from structured fields.
  */
+import { makeTranslator, type Language } from '../../i18n/i18n';
 
 export type EscalationReason =
   | 'low_confidence_intent'
   | 'operator_request'
   | 'keyword_frustration'
   | 'llm_sentiment'
-  | 'emergency_dispatch';
+  | 'emergency_dispatch'
+  /**
+   * #1616 — the caller's identity could not be verified on this line: they
+   * claim to be a customer whose number on file is not this one, their
+   * record is archived, or caller identification itself failed.
+   */
+  | 'identity_unverified';
 
 export interface TranscriptTurn {
   role: 'caller' | 'ai';
@@ -31,6 +38,13 @@ export interface EscalationContext {
     phone: string;
     customerId?: string;
     tags?: ReadonlyArray<string>;
+    /**
+     * #1616 — the name the caller gave for themselves when the line could
+     * not be matched to a record (an `identity_unverified` hand-off). An
+     * unverified CLAIM, never the caller's resolved name: it is only ever
+     * rendered as "says they're …".
+     */
+    claimedName?: string;
   };
   customer?: {
     lastService?: { date: Date; type: string; amountCents?: number };
@@ -38,6 +52,12 @@ export interface EscalationContext {
     memberTier?: string;
     /** Free-form CRM notes (e.g. "prefers mornings") — panel only. */
     communicationNotes?: string;
+    /**
+     * #1616 — the caller's record is archived (#1587: the account is closed,
+     * so the AI hands the call off). Names the identity problem for an
+     * `identity_unverified` hand-off.
+     */
+    isArchived?: boolean;
   };
   intent: {
     type: string;
@@ -47,6 +67,13 @@ export interface EscalationContext {
   reason: EscalationReason;
   /** Free-form detail: matched keyword, sentiment score, etc. */
   reasonDetail?: string;
+  /**
+   * #1616 — language of the dispatcher-facing identity copy (EN + ES).
+   * Defaults to 'en'. This is the DISPATCHER's language, not the caller's:
+   * no tenant setting carries it yet, so every production caller leaves it
+   * unset. The rest of the summary (frame, intent, next action) is EN-only.
+   */
+  language?: Language;
   /** Last 4-6 turns before escalation fires. Caller-first ordering. */
   transcriptSnapshot: ReadonlyArray<TranscriptTurn>;
   /**
@@ -79,8 +106,58 @@ export interface EscalationSummary {
   panel: PanelData;
 }
 
-function reasonHuman(reason: EscalationReason, detail?: string): string {
-  switch (reason) {
+/**
+ * #1616 — dispatcher-facing copy for an identity hand-off, EN + ES. It lives
+ * here with its sibling reason phrases (`reasonHuman` / `reasonShort`), not
+ * in tts-copy.ts, which holds CALLER-facing speech: the dispatcher hears and
+ * reads these lines, the caller never does. `{{name}}` is the name the caller
+ * gave for themselves (`caller.claimedName`).
+ */
+const identityCopy = makeTranslator({
+  en: {
+    'identity.claims.sentence':
+      "Caller says they're {{name}} but the number doesn't match their record",
+    // SMS forms are compact: the segment budget leaves ~30 chars after
+    // "Reason:", so the claim leads and the qualifier is what a cut takes.
+    'identity.claims.sms': "says they're {{name}} (unverified)",
+    'identity.archived.sentence': "Caller's record is archived",
+    'identity.archived.sms': 'record archived',
+    'identity.unverified.sentence': "Caller's identity couldn't be verified",
+    'identity.unverified.sms': 'identity unverified',
+  },
+  es: {
+    'identity.claims.sentence':
+      'La persona que llama dice ser {{name}}, pero el número no coincide con su registro',
+    'identity.claims.sms': 'dice ser {{name}} (sin verificar)',
+    'identity.archived.sentence': 'El registro de la persona que llama está archivado',
+    'identity.archived.sms': 'registro archivado',
+    'identity.unverified.sentence':
+      'No se pudo verificar la identidad de la persona que llama',
+    'identity.unverified.sms': 'identidad sin verificar',
+  },
+});
+
+/**
+ * Which identity problem to name for an `identity_unverified` hand-off. An
+ * archived record outranks a claimed name: a record bound to this line is
+ * known, a claim is not.
+ */
+function identityCase(ctx: EscalationContext): 'archived' | 'claims' | 'unverified' {
+  if (ctx.customer?.isArchived) return 'archived';
+  if (ctx.caller.claimedName) return 'claims';
+  return 'unverified';
+}
+
+/** The plain sentence (panel + whisper) or the compact SMS form. */
+function identityReason(ctx: EscalationContext, form: 'sentence' | 'sms'): string {
+  const lang: Language = ctx.language ?? 'en';
+  const vars = ctx.caller.claimedName ? { name: ctx.caller.claimedName } : undefined;
+  return identityCopy(`identity.${identityCase(ctx)}.${form}`, lang, vars);
+}
+
+function reasonHuman(ctx: EscalationContext): string {
+  const detail = ctx.reasonDetail;
+  switch (ctx.reason) {
     case 'operator_request':
       return 'Caller asked for a person';
     case 'keyword_frustration':
@@ -91,16 +168,26 @@ function reasonHuman(reason: EscalationReason, detail?: string): string {
       return "AI didn't catch what they wanted after retries";
     case 'emergency_dispatch':
       return 'Emergency dispatch';
+    case 'identity_unverified':
+      return identityReason(ctx, 'sentence');
   }
 }
 
-function reasonShort(reason: EscalationReason): string {
-  switch (reason) {
+/**
+ * The reason after "Reason:" in the whisper (spoken, ≤25 words overall) or
+ * the SMS (one segment, so the identity forms are compact there).
+ */
+function reasonShort(ctx: EscalationContext, channel: 'whisper' | 'sms'): string {
+  switch (ctx.reason) {
     case 'operator_request': return 'operator request';
     case 'keyword_frustration': return 'frustration';
     case 'llm_sentiment': return 'frustration';
     case 'low_confidence_intent': return 'low confidence';
     case 'emergency_dispatch': return 'emergency';
+    case 'identity_unverified':
+      return channel === 'sms'
+        ? identityReason(ctx, 'sms')
+        : lowerFirst(identityReason(ctx, 'sentence'));
   }
 }
 
@@ -233,7 +320,8 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
   const phoneReadable = formatPhone(ctx.caller.phone);
   const intent = intentShort(ctx.intent);
   const member = membershipPhrase(ctx.customer);
-  const reasonText = reasonShort(ctx.reason);
+  const reasonText = reasonShort(ctx, 'whisper');
+  const smsReasonText = reasonShort(ctx, 'sms');
   const nextAction = nextActionShort(ctx.intent);
 
   // Whisper: target ≤25 words. Drop membership phrase if needed, then smart-truncate.
@@ -259,7 +347,7 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
   const linkBudget = linkPlaceholder.length + 1; // space before link
   const coreBudget = 160 - linkBudget;
 
-  let smsCore = `${ctx.shopName}: Incoming call from ${callerName} (${phoneReadable}). Re: ${intent}.${member ? ' ' + member : ''} Reason: ${reasonText}. Next: ${nextAction}.`;
+  let smsCore = `${ctx.shopName}: Incoming call from ${callerName} (${phoneReadable}). Re: ${intent}.${member ? ' ' + member : ''} Reason: ${smsReasonText}. Next: ${nextAction}.`;
 
   if (smsCore.length > coreBudget) {
     // Truncate at last word boundary within budget, append ellipsis.
@@ -287,7 +375,7 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
     },
     reason: {
       code: ctx.reason,
-      humanReadable: reasonHuman(ctx.reason, ctx.reasonDetail),
+      humanReadable: reasonHuman(ctx),
     },
     transcriptSnapshot: ctx.transcriptSnapshot,
   };
@@ -297,4 +385,8 @@ export function buildEscalationSummary(ctx: EscalationContext): EscalationSummar
 
 function capitalizeFirst(s: string): string {
   return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
+}
+
+function lowerFirst(s: string): string {
+  return s.length === 0 ? s : s[0].toLowerCase() + s.slice(1);
 }
