@@ -8,13 +8,20 @@
  * "972 dollars and 50 cents" instead, so every engine says the same words.
  *
  * English only: a Spanish session's amounts pass through unchanged (no
- * Spanish number wording is defined yet).
+ * Spanish number wording is defined yet). Email addresses are spelled in both
+ * languages (#1613).
  */
+import { spellEmailsForSpeech } from '../agents/customer-calling/spoken-email';
+
 const DOLLAR_AMOUNT = /\$(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{2}))?(?!\d)/g;
 
 export function speakableText(text: string, language?: string): string {
-  if (language === 'es') return text;
-  return text.replace(DOLLAR_AMOUNT, (_match, whole: string, cents?: string) => {
+  // #1613 — an email address is spelled ("o-p-s at acme dot com"; es
+  // "arroba"/"punto") so a misheard letter is audible at the readback; the
+  // text surfaces keep the address (ai/agents/customer-calling/spoken-email.ts).
+  const spelled = spellEmailsForSpeech(text, language === 'es' ? 'es' : 'en');
+  if (language === 'es') return spelled;
+  return spelled.replace(DOLLAR_AMOUNT, (_match, whole: string, cents?: string) => {
     const dollars = Number(whole.replace(/,/g, ''));
     const c = cents ? Number(cents) : 0;
     const dollarPart = `${whole} ${dollars === 1 ? 'dollar' : 'dollars'}`;

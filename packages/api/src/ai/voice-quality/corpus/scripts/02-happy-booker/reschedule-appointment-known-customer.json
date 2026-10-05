@@ -73,7 +73,7 @@
           "newScheduledStart": "2026-05-06T21:00:00.000Z",
           "newScheduledEnd": "2026-05-06T23:00:00.000Z"
         },
-        "spokenAnswerMatches": "I've drafted a reschedule of your Tuesday appointment to Wednesday at the same time; an operator will confirm before it's applied.",
+        "spokenAnswerMatches": "I've passed that along to our team, and someone will confirm it with you shortly. The move to Wednesday at the same time is queued for the team to confirm; nothing is applied on the call.",
         "escalates": false
       },
       "hangupAfter": false
