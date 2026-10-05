@@ -10,6 +10,9 @@ import { createAgreement } from '../../src/agreements/agreement-service';
  * A new estimate for a customer with an active discounting membership has that
  * discount folded into the estimate's discount, additive to any manual one.
  * Resolved server-side from the job's customer (never trusts the client).
+ *
+ * #1589 — KNOWN FLAKY under the full parallel suite; passes reliably alone.
+ * See docs/testing/flaky-tests.md.
  */
 const LINE_ITEMS = [
   { id: 'li-1', description: 'AC tune-up', quantity: 1, unitPriceCents: 20_000, totalCents: 20_000, sortOrder: 0, taxable: true },

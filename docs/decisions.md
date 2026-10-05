@@ -1470,3 +1470,105 @@ row. Sole-proprietor (no-EIN) brands are out of scope.
 - *Write `partial_readiness` into `tenant_integrations.status`.* Rejected: it would un-complete the
   onboarding phone step for every tenant, make the claim/retry routes refuse, and re-trigger
   provisioning — a regression in voice onboarding to express a texting status.
+
+## D-039 — The voice capability flags ship default-ON; the tenant's override is the opt-out
+
+**Date:** 2026-10-04
+**Status:** Accepted (issue #1588's own recommended option; the 2026-10-04 functional audit)
+**Resolves:** #1588
+
+**Context.** Two built voice features were dormant in production. `voice_extended_intents` gates
+whether the classifier *offers* the owner-extended lookups (`lookup_day_overview`, `lookup_digest`,
+`lookup_pending_items`, `lookup_crew_schedule`, `lookup_timesheets`) and the complaint/negotiation
+sections; `app.ts` read it default-false through `isFlagEnabledForTenant` and nothing ever seeded
+it, so no live owner line, in-app voice session or recorded memo ever heard them — while chat set
+`extendedIntents: true` unconditionally. Multi-action decomposition (`decomposeTranscript` →
+`processChain`, #883) was accepted by the memo router as `multiActionEnabled` and never passed from
+`app.ts`, so "add 2 hours labor and a capacitor to the Rivera invoice and send it" silently kept one
+action. `git log -S multiActionEnabled` and this log record no decision to leave either off.
+
+**Decision.**
+1. Both flags resolve through one resolver, `flags/voice-flags.ts#createVoiceFlagResolver`, with
+   the repo's default-ON order (U3, `isEnabledForTenantWithDefault`): a `tenant_feature_flags`
+   override row decides first (`enabled=false` is the owner's opt-out); else a platform
+   `_feature_flags` row decides (the kill switch, environments/tenantIds honoured); else ON.
+   Tenant-override-wins keeps the shipped precedent recorded in `docs/audit/blocked-on-josh.md`
+   (#1011 §E3). Without a pool (dev, in-memory tests) only platform → ON apply.
+2. No migration and no seeding. A seeded `tenant_feature_flags` row would read on the owner's
+   Capabilities surface as "you turned this on" (#1011's `getTenantOverride` distinguishes the
+   owner's decision from the platform default) and would still leave every new tenant off.
+3. The memo router receives `multiActionEnabled` (`voice_multi_action`, new key). The owner line
+   and in-app voice keep their existing `extendedIntentsEnabled` wiring, now default-on. Multi-action
+   stays a memo-surface capability: the live-call FSM and the in-app adapter have no decomposition
+   path, and adding one is a separate change.
+4. The Layer 1 harness is unchanged on the classifier side (D-026: the flag gates what is offered,
+   the actor + allowlist gate what is answered); the new owner-line script
+   `lookup-day-overview-owner-line` measures the shipped phone lookup dispatch.
+
+**Consequences.** Every tenant hears the owner-extended lookups on the owner line, in in-app voice
+and on the memo, and a two-action memo mints a linked chain whose head is supervisor-reviewed
+(PRD-v5 §5 as amended). Turning either off is one `tenant_feature_flags` row (`enabled=false`) or
+one platform `_feature_flags` row. Cost: the memo router now pays one `decompose_transcript` call
+per message on every tenant that has not opted out.
+
+**Alternatives rejected.**
+- *Seed `tenant_feature_flags` for existing tenants by migration + insert on tenant creation.*
+  Rejected (point 2): misreports the owner's decision on the Capabilities surface and duplicates a
+  default the repo already knows how to express.
+- *Flip the Layer 1 text-mode driver to stamp `extendedIntents` on owner-line scripts, mirroring
+  production.* Deferred: it would change the classifier prompt (and every cassette hash) for every
+  owner-line script, and #1587 owns that file this week.
+
+## D-040 — AI answering is the after-hours default; voicemail is the opt-out
+
+**Date:** 2026-10-04
+**Status:** Accepted (owner decision 2026-10-04, issue #1595)
+**Resolves:** #1595
+
+**Context.** `after_hours_voice_mode` defaulted to `'voicemail'`
+(`settings/settings.ts` `DEFAULT_ESCALATION_SETTINGS`), and the `/voice` webhook answered every
+after-hours call on a tenant that had not opted into `'ai_answering'` with the plain voicemail TwiML
+in `telephony/voicemail-fallback.ts` ("We're not available right now…") — no emergency option, no
+triage, before any AI or E1/E2 logic ran. A customer's after-hours voicemail produced only a lead
+and an audit row. A tradesperson's after-hours emergency (gas, CO, fire, burst pipe) must never land
+in a dead voicemail.
+
+**Decision.**
+1. **`'ai_answering'` is the default** for new and existing tenants. After hours the AI answers and
+   runs the same turn pipeline as during the day: the E1/E2 safety tiering closes a life-safety call
+   on the evacuation script, and a booking request becomes an after-hours `callback` proposal
+   (corpus `05-compliance-edges/after-hours-callback`). `'voicemail'` is the explicit opt-out in
+   Settings → Call routing & handoff.
+2. **An absent key means "use the default".** The value is materialised into a row only as a side
+   effect of a whole-blob write (the Call Routing sheet, or the voice-approval PIN routes). Migration
+   `304_after_hours_voice_mode_default_backfill` removes a stored `'voicemail'` from rows whose tenant
+   has **no** `settings.tenant.updated` audit event touching `escalationSettings` — those values can
+   only have been written by the old default. A tenant with at least one such save may have chosen
+   voicemail, so the value is kept. `'ai_answering'` and absent keys are untouched; nothing is
+   dropped. The migration is idempotent and safe to re-run on every deploy (the runner has no
+   ledger): a voicemail chosen through the new sheet is protected by its own audit row.
+3. **Go-live gating is unchanged.** The §10 voice gate (subscription, go-live, usage caps) still runs
+   before the after-hours fork, so a tenant that is not live still gets the gate's voicemail after
+   hours; AI answering after hours requires the tenant to be live.
+4. **Copy follows the default.** The after-hours control shows "AI answering (default)" with
+   voicemail as the opt-out; onboarding no longer says off-hours calls go to voicemail;
+   `GET /api/onboarding/operator-hours` reports the resolved default rather than a hardcoded
+   `'voicemail'`.
+
+**Consequences.** Launch still requires the E1 script sign-off (blocked-on-josh O-2); the
+placeholder script stays hard-flagged, and the after-hours AI path speaks whatever E1 script is
+active. A tenant who saved the Call Routing sheet before this change without ever touching the
+after-hours dropdown keeps `'voicemail'` until they change it (the sheet now shows it as the opt-out,
+so the state is visible). Layer 1 gains `12-life-safety/e1-gas-leak-after-hours`: a 10 pm gas-leak
+call on a closed tenant reaches E1.
+
+**Alternatives rejected.**
+- *Strip every stored `'voicemail'`.* Simplest, and the UI never offered an explicit voicemail
+  distinct from the pre-selected default, but it would discard the one shape an explicit choice can
+  take (AI → voicemail round trip), which the audit trail cannot distinguish from a checkbox toggle.
+  Rejected in favour of a rule that only touches rows provably written by the default; the owner can
+  widen it.
+- *Keep every stored `'voicemail'`.* Leaves every tenant whose PIN enrolment or sheet save
+  materialised the old default on dead voicemail — the outcome this decision exists to end.
+- *Set `'ai_answering'` instead of removing the key.* Would re-materialise a default as if chosen,
+  so a future default change could not reach those rows.

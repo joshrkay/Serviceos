@@ -87,6 +87,10 @@ const ZERO_LLM_CALL_SCRIPT_IDS = new Set<string>([
   // any model call; the unknown caller is identified by phone at ask_caller
   // and asked for a day and time (#1577). No model call on this script.
   'find-or-create-lead-unknown-caller',
+  // #1595 / D-040 — AI answering is the after-hours default: a 10pm gas-leak
+  // call on a closed tenant is still answered and the tier classifier closes
+  // it on the E1 evacuation script before any classify call.
+  'e1-gas-leak-after-hours',
 ]);
 
 interface CassetteFile {

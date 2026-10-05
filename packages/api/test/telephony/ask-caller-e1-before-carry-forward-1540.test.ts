@@ -10,6 +10,9 @@
  * TwilioGatherAdapter.processCallerUtterance (the media-streams entry that
  * delegates to the processor's speechTurn), each with a scripted gateway that
  * would happily classify a booking if it were ever asked.
+ *
+ * #1589 — KNOWN FLAKY under the full parallel suite; passes reliably alone.
+ * See docs/testing/flaky-tests.md.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
