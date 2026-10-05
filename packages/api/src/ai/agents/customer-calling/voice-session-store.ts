@@ -226,6 +226,27 @@ export interface VoiceSession {
    */
   serviceAreaVerdict?: 'in_area' | 'out_of_area' | 'unknown';
   /**
+   * #1600 (2) — how many times each WRITE intent (one that drafts a proposal)
+   * has been classified on this S1 call, keyed by intent type. The fifth
+   * repeat of one intent hands the call to a person
+   * (create-voice-turn-processor.ts `repeatedWriteIntentHandoff`).
+   */
+  writeIntentRepeats?: Record<string, number>;
+  /**
+   * #1600 (3) — the caller referred to a CANCELLED appointment of theirs and
+   * was offered a new booking ("would you like to book a new one?"). Holds
+   * the request's words, the booking details already given (the new day
+   * anchored to the cancelled visit's time) and the classifier's confidence
+   * for that request until they answer
+   * (create-voice-turn-processor.ts `handlePendingRebookOffer`).
+   */
+  rebookOffer?: {
+    heldUtterance: string;
+    cancelledAppointmentId: string;
+    entities: Record<string, unknown>;
+    confidence: number;
+  };
+  /**
    * #1223 — Twilio's STIR/SHAKEN verdict (`StirVerstat`) from the inbound
    * webhook, verbatim; absent when Twilio sent none. Owner-line authority
    * requires full A-attestation (`telephony/stir-attestation.ts`).

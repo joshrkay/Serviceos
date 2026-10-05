@@ -51,6 +51,18 @@ updates:
         update-types: ['version-update:semver-major']
       - dependency-name: 'react-router'
         update-types: ['version-update:semver-major']
+      # vitest 5 is a planned migration (#1611): @vitest/* siblings must move
+      # together and the voice-quality reporter tooling is pinned to the shape.
+      - dependency-name: 'vitest'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@vitest/*'
+        update-types: ['version-update:semver-major']
+      # testcontainers 12 requires undici features missing on Node 20.20.2
+      # (dispatch-presence-redis integration test fails at module load, #1591).
+      - dependency-name: 'testcontainers'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@testcontainers/*'
+        update-types: ['version-update:semver-major']
 
   # packages/mobile is not a root workspace and carries its own lockfile, so
   # the root entry above does not cover it.

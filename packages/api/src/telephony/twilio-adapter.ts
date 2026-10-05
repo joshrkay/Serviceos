@@ -2581,6 +2581,21 @@ export class TwilioGatherAdapter {
         )),
       );
     } else if (turnState === 'intent_capture' || turnState === 'closing') {
+      // #1600 (3) — the caller is answering the processor's offer to book a
+      // new appointment in place of a cancelled one (same rule as speechTurn):
+      // a yes starts the normal booking flow with no model call, a no is
+      // acknowledged, anything else is classified below as a new request.
+      const rebook = await this.processor.handlePendingRebookOffer(
+        session,
+        opts.speechResult,
+        opts.tenantId,
+      );
+      if (rebook?.kind === 'respond') {
+        sideEffectsAll.push(...rebook.effects);
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+
       // 3. Classify intent. Failure → confidence_low so the bounded
       //    reprompt path triggers instead of bubbling 5xx out to Twilio
       //    (which would hang the caller mid-call).
@@ -2718,6 +2733,47 @@ export class TwilioGatherAdapter {
           classifierEvent.intentType,
           opts.tenantId,
         );
+      }
+
+      // #1600 (2) — the processor's shared repeated-request count (same rule
+      // as speechTurn): the fifth repeat of one write request hands the call
+      // to a person before any reply branch runs.
+      if (
+        classifierEvent?.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        const repeatFx = this.processor.repeatedWriteIntentHandoff(
+          session,
+          classifierEvent.intentType,
+        );
+        if (repeatFx) {
+          sideEffectsAll.push(...repeatFx);
+          await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+          return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+        }
+      }
+
+      // #1600 (1) — the processor's shared cross-customer refusal (same rule
+      // as speechTurn): an S1 caller naming another customer's account hears
+      // the refusal before any lookup or FSM dispatch. Emergencies keep
+      // their own path.
+      if (
+        classifierEvent?.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT &&
+        !EMERGENCY_INTENTS.has(classifierEvent.intentType)
+      ) {
+        const refusalFx = await this.processor.crossCustomerRefusal(
+          session,
+          classifierEvent.intentType,
+          classifierEvent.entities,
+          opts.speechResult,
+          opts.tenantId,
+        );
+        if (refusalFx) {
+          sideEffectsAll.push(...refusalFx);
+          await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+          return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+        }
       }
 
       // P11-001 / #866: lookup intents bypass the proposal-draft path. Route
@@ -2869,6 +2925,30 @@ export class TwilioGatherAdapter {
         );
         if (areaFx) {
           sideEffectsAll.push(...areaFx);
+          await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+          return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+        }
+      }
+
+      // #1600 (3) — the processor's shared cancelled-appointment gate (same
+      // rule as speechTurn): a caller referring to a CANCELLED appointment of
+      // theirs is told so and offered a new booking; nothing is drafted.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        const staleFx = await this.processor.staleAppointmentGate(
+          session,
+          {
+            intentType: classifierEvent.intentType,
+            utterance: opts.speechResult,
+            entities: classifierEvent.entities,
+            confidence: classifierEvent.confidence,
+          },
+          opts.tenantId,
+        );
+        if (staleFx) {
+          sideEffectsAll.push(...staleFx);
           await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
           return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
         }
