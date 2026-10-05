@@ -32,6 +32,17 @@ live-LLM access.
 > ("cassette drift" throw) instead of silently serving the old recording.
 
 ## Guidance
+
+> **Update (#1587, 2026-10-05).** The Layer 1 text-mode driver now drives the
+> production turn engine (`createVoiceTurnProcessor().speechTurn`) instead of
+> the `voice-action-router` worker, so the appointment-extractor prompt below is
+> no longer on the corpus path: the classifier's own `dateTimeDescription` is
+> resolved deterministically by `resolveTurnEntityEvent`, and a write is
+> drafted on the caller's yes to the readback. The SECOND cassette-covered
+> prompt on that path is now the readback's yes/no model (`confirmIntent`,
+> same `classify_intent` task type, its own prompt). The two-prompt guidance
+> that follows describes the pre-#1587 path and is kept for the record.
+
 **Two LLM prompts on the create-appointment path are cassette-covered, not one.**
 The corpus runner (`voice-quality/text-mode-driver.ts` → the `voice-action-router`
 worker) dispatches each classified intent to its `TaskHandler`

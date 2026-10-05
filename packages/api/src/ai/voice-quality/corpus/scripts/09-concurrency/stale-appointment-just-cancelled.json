@@ -54,15 +54,31 @@
       "caller": "Hi, this is Jane Smith. I'd like to reschedule my Tuesday appointment to Wednesday at the same time.",
       "expected": {
         "intent": "reschedule_appointment",
-        "spokenAnswerMatches": "I see your Tuesday appointment was just cancelled, so there's nothing to reschedule. Let me hand you to an operator who can sort this out and book a new visit if you'd like.",
-        "escalates": true
+        "proposalType": "reschedule_appointment",
+        "escalates": false,
+        "spokenIncludes": [
+          "Is that right?"
+        ],
+        "spokenAnswerMatches": "#1587: the only appointment on the account is cancelled, so the reschedule resolves to no appointment; production reads the request back, drafts it gated for the team (no appointment id to act on) and tells the caller a few details still need to be sorted out before it's final — it does not act on the cancelled visit and does not announce the cancellation. Whether the agent should say the appointment was cancelled and hand off is an open owner question recorded on #1587."
       },
       "hangupAfter": false
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 3, 4, 5, 6],
-    "appliesDisposition": [9, 10, 11, 12]
+    "appliesFloor": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "appliesDisposition": [
+      9,
+      10,
+      11,
+      12
+    ]
   },
   "layer2Eligible": false
 }

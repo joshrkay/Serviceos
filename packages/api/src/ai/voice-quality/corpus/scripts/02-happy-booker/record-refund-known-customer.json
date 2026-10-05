@@ -105,7 +105,7 @@
         "slots": {
           "amountCents": 10000
         },
-        "spokenAnswerMatches": "Got it — I've drafted a record refund for review. Anything else I can help you with?",
+        "spokenAnswerMatches": "I've drafted that — it's in your approvals waiting for you to review. Is there anything else I can help you with?",
         "escalates": false
       },
       "hangupAfter": false

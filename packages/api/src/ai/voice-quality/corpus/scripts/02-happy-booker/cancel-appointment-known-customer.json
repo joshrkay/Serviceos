@@ -35,14 +35,11 @@
         "id": "job_02_cancel_1",
         "tenantId": "t_02_cancel_appointment",
         "customerId": "cust_02_cancel_jane",
-        "locationId": "loc_02_cancel_home",
-        "jobNumber": "JOB-0203",
         "summary": "AC service",
         "status": "scheduled",
-        "priority": "normal",
         "createdBy": "user_seed",
-        "createdAt": "2026-04-15T10:00:00.000Z",
-        "updatedAt": "2026-04-15T10:00:00.000Z"
+        "createdAt": "2026-04-20T10:00:00.000Z",
+        "updatedAt": "2026-04-20T10:00:00.000Z"
       }
     ],
     "appointments": [
@@ -80,8 +77,22 @@
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
-    "appliesDisposition": [9, 10, 11, 12]
+    "appliesFloor": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "appliesDisposition": [
+      9,
+      10,
+      11,
+      12
+    ]
   },
   "layer2Eligible": true
 }

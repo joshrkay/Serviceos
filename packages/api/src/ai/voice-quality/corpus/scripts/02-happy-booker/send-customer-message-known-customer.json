@@ -40,15 +40,29 @@
         "slots": {
           "channel": "sms"
         },
-        "spokenAnswerMatches": "Got it — I've drafted a send customer message for review. Anything else I can help you with?",
+        "spokenAnswerMatches": "I've drafted that — it's in your approvals waiting for you to review. Is there anything else I can help you with?",
         "escalates": false
       },
       "hangupAfter": false
     }
   ],
   "grading": {
-    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
-    "appliesDisposition": [9, 10, 11, 12]
+    "appliesFloor": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "appliesDisposition": [
+      9,
+      10,
+      11,
+      12
+    ]
   },
   "layer2Eligible": true
 }

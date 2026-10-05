@@ -15,6 +15,7 @@ import { makeRepoBundle } from '../../src/ai/voice-quality/runner';
 import { VoiceQualityScriptSchema } from '../../src/ai/voice-quality/schema';
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 import { makeVoiceQualityDriverFactory, ScriptAwareMockGateway } from './voice-quality-driver-factory';
+import { asPhonePersona } from '../../src/ai/voice-quality/corpus/loader';
 
 const TENANT = 't_897_parity';
 
@@ -108,12 +109,19 @@ describe('#897 — corpus driver factory prompt parity', () => {
     expect(classified[0].tokenUsage.outputTokens).toBeGreaterThan(0);
   });
 
-  it('a script that declares the operator taxonomy (D-028 follow-up) keeps the operator prompt', async () => {
+  it('a script that declares the operator taxonomy (D-028 follow-up) runs as the owner line and classifies on the operator prompt', async () => {
     const gateway = new RecordingGateway();
-    const operatorScript = VoiceQualityScriptSchema.parse({
-      ...script,
-      fixtures: { ...script.fixtures, tenant: { ...script.fixtures.tenant, harnessOperatorTaxonomy: true } },
-    });
+    // #1587 — the loader's phone persona turns the declaration into an owner
+    // line (RV-070 ownerSession), the surface production classifies on the
+    // operator taxonomy for.
+    const operatorScript = asPhonePersona(
+      VoiceQualityScriptSchema.parse({
+        ...script,
+        fixtures: { ...script.fixtures, tenant: { ...script.fixtures.tenant, harnessOperatorTaxonomy: true } },
+      }),
+      'gather',
+    );
+    expect(operatorScript.callerIsOwner).toBe(true);
     const driver = makeVoiceQualityDriverFactory(operatorScript)({
       repos: makeRepoBundle('memory'),
       bus: new AgentEventBus(),
@@ -125,6 +133,7 @@ describe('#897 — corpus driver factory prompt parity', () => {
       tenantId: TENANT,
       callerId: operatorScript.callerId,
       callerIdBlocked: false,
+      callerIsOwner: operatorScript.callerIsOwner,
     });
     await driver.speak(sessionId, operatorScript.turns[0].caller);
     await driver.endSession(sessionId);
