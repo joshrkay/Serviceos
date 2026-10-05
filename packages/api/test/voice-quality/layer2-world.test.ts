@@ -10,7 +10,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { buildLayer2ProcessorWorld, establishLayer2Caller } from '../../src/ai/voice-quality/layer2-world';
+import { buildLayer2ProcessorWorld, describeCorpusCall, establishLayer2Caller } from '../../src/ai/voice-quality/layer2-world';
 import { VoiceSessionStore, type VoiceSessionEvent } from '../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryCustomerRepository, type Customer } from '../../src/customers/customer';
 import { loadLayer2Corpus } from '../../src/ai/voice-quality/corpus/loader';
@@ -133,5 +133,49 @@ describe('#1331 — establishLayer2Caller (session establishment, as twilio-adap
       expect(r.session.customerId).toBeUndefined();
       expect(r.identityStamps).toHaveLength(0);
     }
+  });
+});
+
+// #1613 — Layer 2 run 37323734649: the perceived-completion judge rated
+// known-customer-no-signup "poor" on every run ("incorrectly stated there's
+// nothing to sign up for") and the criterion-12 judge failed Jane Smith's
+// readback over a sound-alike of her name. Neither judge was told what the
+// agent knew from the first second of the call: caller-ID identified the
+// caller as an existing customer record, by name.
+describe('#1613 — describeCorpusCall names the customer the line identified', () => {
+  it('a caller-ID matching exactly one fixture customer is described as that existing record', () => {
+    const script = loadLayer2Corpus().find((s) => s.id === 'known-customer-no-signup')!;
+
+    expect(describeCorpusCall(script)).toContain(
+      'Caller: a customer of the business, identified by caller ID as Maria Alvarez (an existing customer record).',
+    );
+  });
+
+  it('matches the way the line does: last ten digits, primary or secondary phone', () => {
+    const base = loadLayer2Corpus().find((s) => s.id === 'known-customer-no-signup')!;
+    const customers = base.fixtures.customers as Array<Record<string, unknown>>;
+    const script = {
+      ...base,
+      callerId: '+15555550777',
+      fixtures: {
+        ...base.fixtures,
+        customers: [{ ...customers[0], primaryPhone: '5555550303', secondaryPhone: '(555) 555-0777' }],
+      },
+    };
+
+    expect(describeCorpusCall(script)).toContain('identified by caller ID as Maria Alvarez');
+  });
+
+  it('an unknown caller-ID stays a customer of the business with no name', () => {
+    const script = loadLayer2Corpus().find((s) => s.id === 'find-or-create-lead-unknown-caller')!;
+
+    expect(describeCorpusCall(script)).toContain('Caller: a customer of the business.\n');
+  });
+
+  it('the owner line is described as the owner, whatever their caller-ID matches', () => {
+    const script = loadLayer2Corpus().find((s) => s.id === 'update-customer-email-known-customer')!;
+
+    expect(script.callerIsOwner).toBe(true);
+    expect(describeCorpusCall(script)).toContain('Caller: the business owner, calling their own business line.\n');
   });
 });

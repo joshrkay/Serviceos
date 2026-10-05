@@ -17,6 +17,7 @@
  * never auto-execute.
  */
 
+import { normalizeSpokenEmail } from '../agents/customer-calling/spoken-email';
 import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
 import { createProposal } from '../../proposals/proposal';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
@@ -1742,7 +1743,9 @@ export class UpdateCustomerTaskHandler implements TaskHandler {
     }
 
     if (ee.updatedName) payload.name = ee.updatedName;
-    if (ee.updatedEmail) payload.email = ee.updatedEmail;
+    // #1613 — a spoken address is drafted as the address (same normalisation
+    // the live-turn leg and the readback use).
+    if (ee.updatedEmail) payload.email = normalizeSpokenEmail(ee.updatedEmail);
     if (ee.updatedPhone) payload.phone = ee.updatedPhone;
     if (ee.updatedAddress) payload.address = ee.updatedAddress;
 
