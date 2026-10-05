@@ -124,3 +124,53 @@ return `unsupported` by design.)
 - [ ] Final Rivet mark assets (optional before internal TestFlight; required before public screenshots)
 - [ ] Dual-persona TestFlight / Play internal verification
 - [ ] First external App Review / Play production promotion
+
+## Background audio & spoken answers (#1603) — store-review notes
+
+Hands-free step 1 makes the app PLAY audio: memo answers on the Voice tab are
+read back through `POST /api/voice/tts` (same unified TTS provider as the
+in-app Assistant), per-device toggle "Speak answers aloud" (default on,
+`expo-secure-store` key `voice.speakAnswers`; the text answer always stays on
+screen). What changed in the native config, and what a reviewer will ask:
+
+### iOS — `UIBackgroundModes: ["audio"]` (app.json → Info.plist)
+- Lets a clip keep playing when the screen locks or the app backgrounds.
+  expo-audio selects the `.playback` AVAudioSession category when
+  `allowsRecording: false`, and `nativeAssistantDeps.play` sets
+  `shouldPlayInBackground: true` + `playsInSilentMode: true` before playing.
+- **App Review guideline 2.5.4** (background modes only for their stated
+  purpose): the audio background mode is justified ONLY by user-initiated
+  audible playback — the spoken answer / Assistant reply. Do not add silent or
+  looping audio to "keep the app alive"; that is the classic rejection. In the
+  review notes, describe it as "reads the assistant's answer aloud so a
+  technician can keep working hands-free; playback ends with the clip."
+- No new permission prompt: playback needs none. `NSMicrophoneUsageDescription`
+  (recording) is unchanged.
+
+### Android — `shouldPlayInBackground` only on Expo SDK 52 (expo-audio 0.3.5)
+- `shouldPlayInBackground: true` stops expo-audio 0.3.5 from pausing players
+  when the activity goes to the background, so a short answer finishes with the
+  screen off. That is the whole of what this SDK exposes.
+- A **media-playback foreground service** (survives Doze / process trimming
+  for LONG playback, lock-screen controls) does NOT exist in expo-audio 0.3.5.
+  Upstream ships `AudioControlsService` + a config plugin that adds/removes the
+  service and its `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_MEDIA_PLAYBACK`
+  permissions only in the SDK-numbered expo-audio releases (SDK 54+). We did
+  NOT pre-declare those permissions: Google Play requires a Play Console
+  foreground-service declaration (type + use case + demo video) for every
+  declared FGS type on Android 14 targets, and declaring them with no backing
+  service invites a policy flag for nothing. Follow-up: on the Expo SDK
+  upgrade, enable expo-audio's plugin for the media-playback service and file
+  the Play Console FGS declaration ("Media playback — reads assistant answers
+  aloud") at the same time.
+- Technicians now hold the Voice tab + Assistant screen; no new Android
+  permission is requested for either.
+
+### Review-ready wording (both stores)
+"Rivet reads the assistant's answers aloud (text-to-speech from our server) so
+field technicians can keep their hands on the job. Playback is started by the
+user, finishes with the clip, and can be turned off per device under Speak
+answers aloud. In the app, approvals are never taken by voice — proposals are
+reviewed and approved on screen." (D-025 in docs/decisions.md ratifies owner
+voice approval on the phone line with readback + challenge; that is a separate
+surface and is not part of the mobile app.)

@@ -65,12 +65,15 @@ export default function TabLayout() {
             tabBarIcon: () => <TabIcon label="Home" badge={count} />,
           }}
         />
+        {/* #1603 — labelled "Voice" (was "Assistant"): this is the memo
+            capture tab; the conversational /assistant screen is reached from
+            the "Assistant" quick link, and technicians now see both. */}
         <Tabs.Screen
           name="voice"
           options={{
             ...tabOptions('voice'),
-            title: 'Assistant',
-            tabBarIcon: () => <TabIcon label="Assistant" />,
+            title: 'Voice',
+            tabBarIcon: () => <TabIcon label="Voice" />,
           }}
         />
         <Tabs.Screen

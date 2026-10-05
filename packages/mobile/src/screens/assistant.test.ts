@@ -90,11 +90,30 @@ describe('Assistant screen', () => {
     expect(getByText('Hold to talk')).toBeTruthy();
   });
 
-  it('redirects the technician persona to Today and renders nothing', () => {
+  it('renders the assistant for a technician too — no redirect — with field-scoped copy', () => {
+    // #1603 — technicians hold `ai:run` (auth/rbac.ts); the server scopes
+    // what the assistant answers (own day) and there is no in-app
+    // voice-approval path (D-025 concerns the owner phone line), so the
+    // client-side redirect was the only thing in the way.
     h.me = { ...TECH_ME };
-    const { container } = render(createElement(AssistantScreen));
-    expect(h.replace).toHaveBeenCalledWith('/(tabs)/today');
-    expect(container.firstChild).toBeNull();
+    const { getByText } = render(createElement(AssistantScreen));
+    expect(h.replace).not.toHaveBeenCalled();
+    expect(getByText('Assistant')).toBeTruthy();
+    expect(getByText('Hold to talk')).toBeTruthy();
+    // A technician is told where money/messages go — not "your approval".
+    expect(getByText(/goes to your office for approval/)).toBeTruthy();
+  });
+
+  it("labels a technician's drafted cards as sent to the office, with a View (not Review) chip", () => {
+    h.me = { ...TECH_ME };
+    h.session = baseSession({ proposalIds: ['prop-42'] });
+    const { getByText, queryByText, getAllByText } = render(createElement(AssistantScreen));
+    expect(getByText('Sent to your office for approval')).toBeTruthy();
+    expect(queryByText('For your approval')).toBeNull();
+    expect(queryByText('Review proposal')).toBeNull();
+    // Still deep-links into the existing read-only review screen.
+    fireEvent.click(getAllByText('View proposal')[0].closest('button')!);
+    expect(h.push).toHaveBeenCalledWith('/proposals/prop-42');
   });
 
   it('renders the conversation turns', () => {

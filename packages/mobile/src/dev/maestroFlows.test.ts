@@ -75,7 +75,9 @@ describe('Maestro device flows — static contract', () => {
       .filter((w) => w.v !== undefined);
     const skipWait = waits.find((w) => w.v === 'Skip for now');
     const skipTap = commands.findIndex((c) => typeof c === 'object' && c.tapOn === 'Skip for now');
-    const tabsWait = waits.find((w) => w.v === 'Assistant');
+    // #1603 — the memo tab is labelled "Voice" (it was "Assistant", colliding
+    // with the conversational /assistant quick link once technicians got both).
+    const tabsWait = waits.find((w) => w.v === 'Voice');
     expect(skipWait).toBeDefined();
     expect(skipTap).toBeGreaterThan(skipWait!.i);
     expect(tabsWait?.i).toBeGreaterThan(skipTap);
@@ -100,6 +102,42 @@ describe('Maestro device flows — static contract', () => {
     expect(slotStepAt).toBeGreaterThan(-1);
     expect(noticeAt).toBeGreaterThan(slotStepAt);
     expect(keys.slice(noticeAt)).toContain('takeScreenshot');
+  });
+
+  it('#1603: a technician signs in, opens the Assistant, asks for the next job, and the self-scoped answer is on screen before the screenshot', () => {
+    expect(allFlowFiles()).toContain('tech-assistant-next-job.yaml');
+    const { config, commands } = loadFlow('tech-assistant-next-job.yaml');
+    expect(config.appId).toBe('com.serviceos.app');
+    const at = (pred: (c: Record<string, unknown>) => boolean) =>
+      commands.findIndex((c) => typeof c === 'object' && pred(c));
+    // Same dev-auth sign-in as every flow (the harness pre-writes the
+    // technician identity into the sandbox — see the harness test below), then
+    // the conversational Assistant through the Today quick link — the in-UI
+    // entry technicians actually get (the memo tab is "Voice", so the label
+    // is unambiguous).
+    expect(commands).toContainEqual({ runFlow: 'subflows/signed-in.yaml' });
+    const linksAt = at((c) => (c.extendedWaitUntil as { visible?: string } | undefined)?.visible === 'Quick links');
+    const openAt = at((c) => c.tapOn === 'Assistant');
+    expect(linksAt).toBeGreaterThan(-1);
+    expect(openAt).toBeGreaterThan(linksAt);
+    const startAt = at((c) => c.tapOn === 'Start');
+    const askAt = at((c) => c.inputText === "what's my next job");
+    const sendAt = at((c) => c.tapOn === 'Send');
+    // The keyless CI gateway scripts this as lookup_my_day; a fresh technician
+    // tenant has no visits, so the honest answer is the empty-day line from
+    // ai/skills/lookup-my-day.ts.
+    const answerAt = at((c) =>
+      /You have nothing on the schedule today/.test(
+        String((c.extendedWaitUntil as { visible?: string } | undefined)?.visible ?? ''),
+      ),
+    );
+    const shotAt = at((c) => c.takeScreenshot === '1603-tech-assistant');
+    expect(openAt).toBeGreaterThan(-1);
+    expect(startAt).toBeGreaterThan(openAt);
+    expect(askAt).toBeGreaterThan(startAt);
+    expect(sendAt).toBeGreaterThan(askAt);
+    expect(answerAt).toBeGreaterThan(sendAt);
+    expect(shotAt).toBeGreaterThan(answerAt);
   });
 
   it('5.4: captures with airplane mode ON, survives a real process kill, and flushes only after airplane mode OFF', () => {
@@ -189,6 +227,27 @@ describe('scripts/maestro-device-run.sh — the CI device harness', () => {
     expect(src).toContain('run-as com.serviceos.app ls files/offline-audio/');
     // "one row" is read from the real Postgres the API wrote to.
     expect(src).toMatch(/FROM voice_recordings WHERE idempotency_key/);
+  });
+
+  it('#1603: runs the technician Assistant flow last, signed in as a technician through the sandbox identity file — never the owner flows', () => {
+    const src = readFileSync(SCRIPT, 'utf8');
+    const pos = (line: string) => {
+      const i = src.indexOf(`\n${line}`);
+      expect(i, `script must invoke: ${line}`).toBeGreaterThan(-1);
+      return i;
+    };
+    const flushed = pos('check_flushed\n');
+    const techReset = pos('reset_app technician');
+    const techFlow = pos('run_flow tech-assistant-next-job.yaml');
+    expect(techReset).toBeGreaterThan(flushed);
+    expect(techFlow).toBeGreaterThan(techReset);
+    // The identity the shim reads (src/dev/clerk-expo-dev-shim.tsx): a
+    // distinct sub lands in a technician-owned dev tenant on the API's bypass.
+    expect(src).toContain('files/dev-auth.json');
+    expect(src).toContain('"sub":"dev_tech"');
+    expect(src).toContain('"role":"technician"');
+    // Owner flows keep the bare reset (no identity file).
+    expect([...src.matchAll(/\nreset_app\n/g)]).toHaveLength(2);
   });
 
   it('fails fast on a broken Metro bundle and leaves debug evidence for any failure', () => {

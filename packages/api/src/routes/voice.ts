@@ -29,6 +29,7 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { Logger } from '../logging/logger';
 import type { FileRepository, StorageProvider } from '../files/file-service';
 import type { JobRepository } from '../jobs/job';
+import type { TtsProvider } from '../ai/tts/tts-provider';
 import { routeParam } from '../shared/route-params';
 
 interface CreateVoiceRecordingBody {
@@ -50,6 +51,8 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 
 const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
 const JOB_ID_SCHEMA = z.guid();
+/** #1603 — one spoken clip's text; same ceiling as a voice-session turn. */
+const TTS_BODY_SCHEMA = z.object({ text: z.string().trim().min(1).max(2000) });
 
 const ALLOWED_MIME_TYPES = new Set([
   'audio/webm', 'audio/ogg', 'audio/wav', 'audio/mpeg',
@@ -75,6 +78,13 @@ export interface VoiceRouterOpts {
   storage?: StorageProvider;
   /** Tenant-scoped job lookup for optional mobile job-context verification. */
   jobRepo?: Pick<JobRepository, 'findById'>;
+  /**
+   * #1603 — the unified TtsProvider (the same instance the in-app Assistant
+   * speaks through) for POST /tts, which lets the mobile memo screen speak a
+   * lookup answer back. Optional: absent → the route answers 501 and the
+   * device keeps the answer on screen only.
+   */
+  tts?: TtsProvider;
 }
 
 export function createVoiceRouter(
@@ -221,6 +231,101 @@ export function createVoiceRouter(
         res.status(502).json({
           error: 'TOKEN_MINT_FAILED',
           message: 'Could not start live transcription. Please try again.',
+        });
+      }
+    }),
+  );
+
+  // #1603 — dedicated per-USER clip limiter for POST /tts. Every role holds
+  // `ai:run`, and each clip bills the tenant's TTS key, so one account must
+  // not be able to turn the route into a free-text TTS proxy under the much
+  // looser global per-tenant /api limiter. A memo answer every 3 s is plenty.
+  const ttsLimitPerMin = Math.max(1, Number(process.env.VOICE_TTS_PER_MIN) || 20);
+  const ttsLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: ttsLimitPerMin,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+      const auth = (req as AuthenticatedRequest).auth;
+      return auth ? `${auth.tenantId}:${auth.userId}` : ipKeyGenerator(req.ip ?? '');
+    },
+    handler: (_req, res) => {
+      res.status(429).json({
+        error: 'RATE_LIMITED',
+        message: 'Too many spoken answers in a row. The answer is still on screen.',
+      });
+    },
+    store: createRateLimitStore(process.env.REDIS_URL, 'voice-tts:'),
+  });
+
+  /**
+   * POST /tts — #1603: synthesize one spoken clip for the device.
+   *
+   * The mobile memo path receives a lookup answer as text (voice-answer
+   * contract) and, when the per-device "speak answers" toggle is on, asks
+   * here for the audio. Same provider and same `ai:run` gate as the in-app
+   * Assistant's session routes, so a technician is authorised exactly like
+   * everyone else who reaches the Assistant. Nothing is persisted; the clip
+   * is billable, so every success is audited to the actor (chars, provider).
+   * Absent provider → 501 (mirrors /transcribe).
+   */
+  router.post(
+    '/tts',
+    requireAuth,
+    requireTenant,
+    requirePermission('ai:run'),
+    ttsLimiter,
+    asyncRoute(async (req: Request, res: Response) => {
+      // Validate first: a client bug is a 400 even in a keyless environment,
+      // not a misleading "not configured".
+      const { text } = TTS_BODY_SCHEMA.parse(req.body ?? {});
+      const tts = opts?.tts;
+      if (!tts) {
+        res.status(501).json({ error: 'NOT_CONFIGURED', message: 'Speech synthesis is not configured' });
+        return;
+      }
+      const authReq = req as AuthenticatedRequest;
+      try {
+        const result = await tts.synthesize({ text, tenantId: authReq.auth!.tenantId });
+        res.json({ audio: result.audio.toString('base64'), contentType: result.contentType });
+        // Cost attribution: who had how many characters spoken by which
+        // provider. Failure-soft like /transcribe's audit — never blocks the
+        // clip, but a broken sink is logged rather than swallowed.
+        if (auditRepo) {
+          try {
+            await auditRepo.create(createAuditEvent({
+              tenantId: authReq.auth!.tenantId,
+              actorId: authReq.auth!.userId,
+              actorRole: 'user',
+              eventType: 'voice.tts.synthesized',
+              entityType: 'voice_tts',
+              entityId: `tts-${Date.now()}`,
+              metadata: {
+                chars: text.length,
+                provider: result.provider,
+                ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
+              },
+            }));
+          } catch (auditErr) {
+            logger?.warn('voice.tts: audit write failed', {
+              route: 'POST /api/voice/tts',
+              tenantId: authReq.auth!.tenantId,
+              error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+            });
+          }
+        }
+      } catch (err) {
+        // The raw provider text (quota/request ids) is logged, never sent —
+        // same posture as /transcribe's honest failures (#1497).
+        logger?.error('voice.tts: synthesis failed', {
+          route: 'POST /api/voice/tts',
+          tenantId: authReq.auth!.tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        res.status(502).json({
+          error: 'TTS_FAILED',
+          message: "Couldn't speak that answer right now — it's still on screen.",
         });
       }
     }),
