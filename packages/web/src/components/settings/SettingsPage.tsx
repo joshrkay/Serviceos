@@ -15,6 +15,7 @@ import { fetchIntegrations, type AccountingIntegrationSummary } from '../../api/
 import { SuppliersSheet } from '../jobs/SuppliersSheet';
 import { apiFetch } from '../../utils/api-fetch';
 import { AiMinutesCard } from './AiMinutesCard';
+import { CallQualityCard } from './CallQualityCard';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
@@ -1559,6 +1560,12 @@ export function SettingsPage() {
             owner's overage cap (the API enforces owner-only too). */}
         <div className="mb-4">
           <AiMinutesCard canManage={me?.role === 'owner'} />
+        </div>
+
+        {/* #1602 — production call quality: nightly-graded sample of real
+            answered calls against the 85% gate (owner-only API). */}
+        <div className="mb-4">
+          <CallQualityCard canManage={me?.role === 'owner'} />
         </div>
 
         {/* Settings sections */}

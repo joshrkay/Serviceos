@@ -1518,3 +1518,55 @@ per message on every tenant that has not opted out.
 - *Flip the Layer 1 text-mode driver to stamp `extendedIntents` on owner-line scripts, mirroring
   production.* Deferred: it would change the classifier prompt (and every cassette hash) for every
   owner-line script, and #1587 owns that file this week.
+
+---
+## D-040 — Production call quality is a consent-gated, cost-capped sample graded by the harness judges
+
+**Date:** 2026-10-04
+**Status:** Accepted (issue #1602's pre-agreed build; the 2026-10-04 assessment, gap #9)
+**Resolves:** #1602
+
+**Context.** Quality grading existed only in CI: `ai/voice-quality/graders/*` judged synthetic
+corpus calls and the Layer 1/Layer 2 gates held PRs to it. Production stored every call's transcript
+(`voice_sessions.transcript`), outcome and cost, but nothing read them back as a quality signal, so
+no row of the PRD could be stamped at rung 6 — "we can tell whether real calls go well".
+
+**Decision.**
+1. **Same judges, no new rubric.** `voice/quality/grade-voice-session.ts` adapts a stored call into
+   the `Observation` + `VoiceQualityScript` shapes the existing graders consume
+   (`transcript-observation.ts`: one script turn per caller utterance, the agent's reply as a
+   `speech_outbound` event) and imports `gradePerceivedCompletion`, `gradeDispositionLlm` and
+   `noHang` unchanged. Transcripts only — audio is never read. Criteria 12 (both judges), 10, and 3
+   (only when `call_transcript_turns` timing markers exist) are stored per call with the judge's
+   rationale, the model and the summed `costMicroCents` (`voice_session_grades`, migration 305).
+2. **Consent gate = the disclosure ledger row.** A call is gradable only when `consent_events` holds
+   `{ kind: 'recording', state: 'implicit', source: 'voice', voice_session_id = session }` — the row
+   each transport commits once the disclosure PLAYED (`DisclosureResult.commitConsentLedger`) — and
+   no later `recording/revoked` for that session. In-memory `recordingDisclosed` is not persisted and
+   was rejected as the gate for that reason.
+3. **Cost bound.** Owner / business-phone test calls are skipped via the existing
+   `call_usage_events.billable` classification (`classifyCall`), never a second phone-matching rule.
+   Per tenant: `tenant_settings.voice_quality_sample_rate_pct` (default 20%, at least one call a
+   night when any is eligible) and `voice_quality_daily_cap` (default 20) bound the nightly sampler;
+   the disposition judge is further bounded to the first 12 caller turns. Judge calls are attributed
+   to the real tenant (the harness graders stamp the system bucket) by wrapping the gateway, not by
+   editing the graders.
+4. **Surfaces.** Nightly leader-locked worker (`SWEEP_LOCK.voiceQualityGrading`, hour
+   `VOICE_QUALITY_NIGHTLY_HOUR_UTC`) + owner trigger `POST /api/voice/quality/grade`; owner read
+   `GET /api/voice/quality` (7/30-day pass rates windowed on when the CALL ended, last 10 grades);
+   a Settings card beside AI minutes; SLO rule `voice_graded_pass_rate_7d` (warning) at the 85%
+   Layer 2 gate with a 10-call sample floor.
+
+**Consequences.** Every tenant's real calls are sampled nightly at a bounded LLM spend (worst case
+`daily_cap × (1 + min(turns, 12))` Haiku-class judge calls per tenant per night). A pass-rate drop
+pages the operator and is visible to the owner. The grade is advisory — it never changes a proposal,
+a call outcome or billing. Calls with no disclosure row (in-app voice, pre-disclosure degrades,
+sessions that revoked recording) are never judged.
+
+**Alternatives rejected.**
+- *A production-specific rubric / prompt.* Rejected: two rubrics would drift, and the point is that
+  the production number is comparable to the CI gate.
+- *Grade every call.* Rejected on cost; a sampled rate with a floor of one per night is enough for a
+  7-day trailing signal at ICP call volumes, and the owner can grade more on demand.
+- *Gate on the in-memory `recordingDisclosed` flag.* Rejected: it is process-scoped and lost at
+  reap; the ledger row is the durable evidence the transports already write.
