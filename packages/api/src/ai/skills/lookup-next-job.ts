@@ -51,6 +51,12 @@ export type LookupNextJobInput = {
   now?: Date;
   /** Session language — the readback renders in it. Defaults to English. */
   language?: SessionLanguage;
+  /**
+   * A NAMED job (resolver-verified id): read that job's next visit instead of
+   * the earliest one. Under technician scope a job that is not theirs is
+   * refused — the name alone never widens what they hear.
+   */
+  jobId?: string;
 } & (
   | {
       /** The SPEAKER's own canonical technician id, already resolved by the caller. */
@@ -177,18 +183,27 @@ export async function lookupNextJob(
       a.status !== 'completed' &&
       a.scheduledEnd.getTime() >= now.getTime(),
   );
-  const jobIds = Array.from(new Set(live.map((a) => a.jobId)));
+  const jobIds = Array.from(new Set([...live.map((a) => a.jobId), ...(input.jobId ? [input.jobId] : [])]));
   const jobs = jobIds.length > 0 ? await deps.jobRepo.findByIds(input.tenantId, jobIds) : [];
   const jobById = new Map(jobs.map((j) => [j.id, j] as const));
+
+  const ownsJob = (jobId: string): boolean => {
+    const job = jobById.get(jobId);
+    if (!job) return false;
+    return input.wholeTenant === true || job.assignedTechnicianId === input.technicianId;
+  };
+
+  // A named job that is not the technician's: refuse by name, read nothing.
+  if (input.jobId && jobById.has(input.jobId) && !ownsJob(input.jobId)) {
+    const summary = ttsCopy('next_job_not_yours', lang);
+    await record('none', 0, summary);
+    return { status: 'none', summary, data: {} };
+  }
 
   // Strictly the technician's own assignments when scoped to one — never a
   // coworker's visit on a job this fetch happened to load.
   const candidates = live
-    .filter((a) => {
-      const job = jobById.get(a.jobId);
-      if (!job) return false;
-      return input.wholeTenant || job.assignedTechnicianId === input.technicianId;
-    })
+    .filter((a) => (input.jobId ? a.jobId === input.jobId : true) && ownsJob(a.jobId))
     .sort((a, b) => a.scheduledStart.getTime() - b.scheduledStart.getTime());
   const next = candidates[0];
   if (!next) {

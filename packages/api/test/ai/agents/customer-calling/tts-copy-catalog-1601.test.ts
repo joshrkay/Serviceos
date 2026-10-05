@@ -421,6 +421,10 @@ const SNAPSHOT: Record<string, Pinned> = {
     en: 'Nothing is coming up on the schedule in the next two weeks.',
     es: 'No hay nada programado en las próximas dos semanas.',
   },
+  next_job_not_yours: {
+    en: "That job isn't on your schedule, so I can't read it out.",
+    es: 'Ese trabajo no está en su agenda, así que no puedo leerlo.',
+  },
   next_job_latest_note: {
     en: 'Latest note: {{note}}',
     es: 'Última nota: {{note}}',

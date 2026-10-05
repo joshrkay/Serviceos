@@ -282,4 +282,23 @@ describe('lookupNextJob skill', () => {
       expect.objectContaining({ intent: 'lookup_next_job', resultStatus: 'none', resultCount: 0 }),
     );
   });
+
+  it("a technician NAMING a coworker's job is refused honestly — the job is never read out", async () => {
+    const deps = await fixtures({
+      customers: [makeCustomer({}), PATEL.customer],
+      locations: [makeLocation({}), PATEL.location],
+      jobs: [makeJob({}), PATEL.job],
+      appointments: [makeAppointment({}), PATEL.appointment],
+    });
+
+    const res = await lookupNextJob(
+      { tenantId: TENANT, technicianId: ME, jobId: 'job-patel', timezone: TZ, now: NOW },
+      deps,
+    );
+
+    expect(res.status).toBe('none');
+    expect(res.summary).toBe("That job isn't on your schedule, so I can't read it out.");
+    expect(JSON.stringify(res)).not.toContain('Priya');
+    expect(JSON.stringify(res)).not.toContain('Mill Lane');
+  });
 });
