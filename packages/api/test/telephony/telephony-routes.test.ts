@@ -121,6 +121,33 @@ describe('POST /api/telephony/voice', () => {
     });
     expect(res.status).toBe(400);
   });
+
+  it('#1589 — does not leak the raw caller phone number in the missing-field warning log', async () => {
+    const { app } = buildHarness();
+    const CALLER_NUMBER = '+15125550100';
+
+    const output: string[] = [];
+    const originalWrite = process.stdout.write;
+    process.stdout.write = ((chunk: string) => {
+      output.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+
+    try {
+      // From present, To missing — hits the logger.warn at
+      // routes/telephony.ts:440, which logs `{ callSid, from, to }`.
+      await signedRequest(app, '/api/telephony/voice', {
+        CallSid: 'CA-pii-1',
+        From: CALLER_NUMBER,
+      });
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+
+    const logged = output.join('');
+    expect(logged).toContain('telephony/voice: missing required fields');
+    expect(logged).not.toContain(CALLER_NUMBER);
+  });
 });
 
 describe('POST /api/telephony/gather', () => {
