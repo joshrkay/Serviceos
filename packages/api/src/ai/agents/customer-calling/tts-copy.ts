@@ -484,6 +484,36 @@ export const TTS_COPY = {
     en: "That usually comes to about {{total}} all together. I'll send the full quote to confirm.",
     es: 'Normalmente suma unos {{total}} en total. Le enviaré el presupuesto completo para confirmarlo.', // es: new 1601
   },
+
+  // ── ai/skills/lookup-next-job.ts (#1604) ─────────────────────────────────
+  // "Read me the next job": the skill renders these by id in the session
+  // language — the one lookup that speaks an address and notes. `{{when}}` is
+  // one of the three when-phrases below; the access-notes / latest-note lines
+  // are appended only when the record has them.
+  next_job_when_today: {
+    en: 'today at {{time}}',
+    es: 'hoy a las {{time}}', // es: new 1604
+  },
+  next_job_when_tomorrow: {
+    en: 'tomorrow at {{time}}',
+    es: 'mañana a las {{time}}', // es: new 1604
+  },
+  next_job_when_on_day: {
+    en: 'on {{day}} at {{time}}',
+    es: 'el {{day}} a las {{time}}', // es: new 1604
+  },
+  next_job_readback: {
+    en: 'Your next job is {{when}} — {{customer}}, {{job}}, at {{address}}.',
+    es: 'Su próximo trabajo es {{when}} — {{customer}}, {{job}}, en {{address}}.', // es: new 1604
+  },
+  next_job_access_notes: {
+    en: 'Access notes: {{notes}}',
+    es: 'Notas de acceso: {{notes}}', // es: new 1604
+  },
+  next_job_latest_note: {
+    en: 'Latest note: {{note}}',
+    es: 'Última nota: {{note}}', // es: new 1604
+  },
 } as const satisfies Record<string, TtsCopyEntry>;
 
 export type TtsCopyId = keyof typeof TTS_COPY;

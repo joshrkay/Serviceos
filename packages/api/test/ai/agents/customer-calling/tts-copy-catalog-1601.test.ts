@@ -369,6 +369,48 @@ const SNAPSHOT: Record<string, Pinned> = {
       en: "That usually comes to about $4,120 all together. I'll send the full quote to confirm.",
     },
   },
+  // ── #1604 — ai/skills/lookup-next-job.ts ──────────────────────────────────
+  next_job_when_today: {
+    en: 'today at {{time}}',
+    es: 'hoy a las {{time}}',
+    sample: { vars: { time: '2 PM' }, en: 'today at 2 PM' },
+  },
+  next_job_when_tomorrow: {
+    en: 'tomorrow at {{time}}',
+    es: 'mañana a las {{time}}',
+    sample: { vars: { time: '9 AM' }, en: 'tomorrow at 9 AM' },
+  },
+  next_job_when_on_day: {
+    en: 'on {{day}} at {{time}}',
+    es: 'el {{day}} a las {{time}}',
+    sample: { vars: { day: 'Friday, June 12', time: '9 AM' }, en: 'on Friday, June 12 at 9 AM' },
+  },
+  next_job_readback: {
+    en: 'Your next job is {{when}} — {{customer}}, {{job}}, at {{address}}.',
+    es: 'Su próximo trabajo es {{when}} — {{customer}}, {{job}}, en {{address}}.',
+    sample: {
+      vars: {
+        when: 'today at 2 PM',
+        customer: 'Dana Keller',
+        job: 'Water heater replacement',
+        address: '4120 East Oakhurst Boulevard, Yonkers',
+      },
+      en: 'Your next job is today at 2 PM — Dana Keller, Water heater replacement, at 4120 East Oakhurst Boulevard, Yonkers.',
+    },
+  },
+  next_job_access_notes: {
+    en: 'Access notes: {{notes}}',
+    es: 'Notas de acceso: {{notes}}',
+    sample: { vars: { notes: 'Gate code 4421, dog in the yard.' }, en: 'Access notes: Gate code 4421, dog in the yard.' },
+  },
+  next_job_latest_note: {
+    en: 'Latest note: {{note}}',
+    es: 'Última nota: {{note}}',
+    sample: {
+      vars: { note: 'Customer prefers a text before arrival.' },
+      en: 'Latest note: Customer prefers a text before arrival.',
+    },
+  },
 };
 
 const isParameterised = (s: string): boolean => /\{\{\w+\}\}/.test(s);
