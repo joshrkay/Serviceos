@@ -10,7 +10,6 @@ import {
   CROSS_CUSTOMER_REFUSAL_COPY,
   REBOOK_DECLINED_COPY,
   REPEATED_REQUEST_HANDOFF_COPY,
-  SENTENCE_CATALOG_ES,
   rebookOfferLine,
   renderTtsText,
 } from '../../../../src/ai/agents/customer-calling/tts-copy';
@@ -60,7 +59,6 @@ describe('#1600 — the fixed sentences are catalogued in Spanish', () => {
     ],
     [REBOOK_DECLINED_COPY, 'No hay problema. ¿Hay algo más en lo que pueda ayudarle?'],
   ])('%s → es', (en, es) => {
-    expect(SENTENCE_CATALOG_ES[en]).toBe(es);
     expect(renderTtsText(en, {}, 'es')).toBe(es);
     expect(renderTtsText(en, {}, 'en')).toBe(en);
   });

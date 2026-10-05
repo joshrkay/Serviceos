@@ -119,6 +119,8 @@ import {
 } from '../orchestration/language-detector';
 import {
   renderTtsText,
+  ttsCopy,
+  TTS_COPY,
   LANGUAGE_SWITCH_ACK,
   LANGUAGE_UNSUPPORTED_LINE,
   LANGUAGE_SWITCH_CAP_LINE,
@@ -389,7 +391,7 @@ const SMS_BEFORE_BRIDGE_TIMEOUT_MS = 4000;
  * make NO booking claim — nothing is confirmed until the owner taps approve.
  */
 const POST_QUOTE_AFFIRMATIVE_INTERIM =
-  "Perfect — I'll have the owner finalize that and send you the full quote and booking link by text.";
+  TTS_COPY.post_quote_affirmative_interim.en;
 
 /**
  * WS18 — spoken to ASK for SMS consent before texting the quote + booking link.
@@ -397,14 +399,14 @@ const POST_QUOTE_AFFIRMATIVE_INTERIM =
  * caller's next turn is the answer, evaluated by strict confirmIntent.
  */
 export const SMS_CONSENT_ASK =
-  'Great — I can text the full quote and a link to lock in your booking. Is it okay to send that to the number you\'re calling from?';
+  TTS_COPY.sms_consent_ask.en;
 
 /** Plain-capture ack after a GRANT (non-close captures only — the close flow speaks its own outcome). */
-const SMS_CONSENT_GRANT_ACK = "Perfect — you'll get that text shortly.";
+const SMS_CONSENT_GRANT_ACK = TTS_COPY.sms_consent_grant_ack.en;
 
 /** WS18 — decline / ambiguous → hand the send to the owner. Design-exact copy. */
 export const SMS_CONSENT_DECLINE_FALLBACK =
-  "No problem — I'll have the owner send that over, and you'll get a text shortly.";
+  TTS_COPY.sms_consent_decline_fallback.en;
 
 /**
  * WS2 — honest line spoken once the close is STAGED for owner approval (consent
@@ -413,7 +415,7 @@ export const SMS_CONSENT_DECLINE_FALLBACK =
  * this never claims the caller is booked.
  */
 export const CLOSE_FALLBACK_LINE =
-  "Great — I'll have the owner confirm your booking, and you'll get the quote by text shortly.";
+  TTS_COPY.close_fallback.en;
 
 // `intentToProposalType` + `voiceProposalSummary` are imported from
 // `proposals/voice-intent-map.ts` — this file used to carry a private
@@ -460,7 +462,7 @@ function buildContractFailureClarification(
  * (transitions.ts). Dropped when the same turn goes on to classify the
  * caller's request, which answers instead.
  */
-export const ASK_CALLER_HELP_PROMPT = 'How can I help you today?';
+export const ASK_CALLER_HELP_PROMPT = TTS_COPY.how_can_i_help.en;
 
 export function isAskCallerHelpPrompt(fx: SideEffect): boolean {
   return fx.type === 'tts_play' && fx.payload.text === ASK_CALLER_HELP_PROMPT;
@@ -1558,7 +1560,7 @@ export function createVoiceTurnProcessor(
         if (lookup.capExceeded) return session.machine.dispatch({ type: 'cost_cap_exceeded' });
         looked = lookup.text;
       }
-      answer = detail ?? looked ?? "I don't have that detail on this one yet.";
+      answer = detail ?? looked ?? TTS_COPY.no_detail_yet.en;
     }
     const effects: SideEffect[] = [
       {
@@ -3114,7 +3116,9 @@ export function createVoiceTurnProcessor(
         surfaceAllowed && held.gaps.length > 0
           ? surface === 'S1'
             ? CALLER_INCOMPLETE_REQUEST_COPY
-            : `I've drafted that. ${askForExecutabilityGaps(held.gaps, held.proposal.payload)}`
+            : ttsCopy('drafted_with_gaps', 'en', {
+                ask: askForExecutabilityGaps(held.gaps, held.proposal.payload),
+              })
           : undefined;
       // #1272 — a draft persisted with unfilled missingFields (approve refuses
       // it), or one degraded to a clarification because the details were
@@ -3373,11 +3377,16 @@ export function createVoiceTurnProcessor(
           resolveThresholdOverride,
         );
         const safeName = xmlEscape(deps.businessName);
+        // Spoken in English on purpose (#1601 step 1 is text-identical): this
+        // <Say> has always used the English Polly voice. The Spanish twin is
+        // catalogued; a later step switches both the line and the voice on
+        // `session.language`.
+        const voicemailLine = ttsCopy('voicemail_no_one_available', 'en', { business: safeName });
         pendingTransferTwiml.set(
           session.id,
           `<?xml version="1.0" encoding="UTF-8"?>` +
             `<Response>` +
-            `<Say voice="Polly.Joanna">I'm sorry, no one is available right now. ${safeName} will call you back as soon as possible. Thank you for calling.</Say>` +
+            `<Say voice="Polly.Joanna">${voicemailLine}</Say>` +
             `<Hangup/>` +
             `</Response>`,
         );
@@ -4876,7 +4885,7 @@ export function createVoiceTurnProcessor(
         },
       },
       { type: 'tts_play', payload: { text: CROSS_CUSTOMER_REFUSAL_COPY } },
-      { type: 'tts_play', payload: { text: 'Anything else I can help you with?' } },
+      { type: 'tts_play', payload: { text: TTS_COPY.anything_else.en } },
     ];
   }
 
@@ -5749,7 +5758,7 @@ export function createVoiceTurnProcessor(
       sideEffectsAll.push({
         type: 'tts_play',
         payload: {
-          text: "Of course — could I get your name to get you set up?",
+          text: TTS_COPY.signup_ask_name.en,
         },
       });
       return true;
@@ -5760,7 +5769,7 @@ export function createVoiceTurnProcessor(
         type: 'tts_play',
         payload: {
           text:
-            "I'm sorry, I couldn't see your number. What's the best phone number to reach you on?",
+            TTS_COPY.signup_ask_callback.en,
         },
       });
       return true;
@@ -5828,7 +5837,7 @@ export function createVoiceTurnProcessor(
         type: 'tts_play',
         payload: {
           text:
-            "I'm having trouble saving that. Let me get a person to help you finish signing up.",
+            TTS_COPY.signup_persist_failed.en,
         },
       });
       return true;
@@ -5853,7 +5862,7 @@ export function createVoiceTurnProcessor(
         {
           type: 'tts_play',
           payload: {
-            text: "I'm sorry, your session has ended. Please call again.",
+            text: TTS_COPY.session_ended_call_again.en,
           },
         },
         { type: 'end_session', payload: { reason: 'session_not_found' } },
@@ -6349,7 +6358,7 @@ export function createVoiceTurnProcessor(
         });
         sideEffectsAll.push({
           type: 'tts_play',
-          payload: { text: 'Anything else I can help you with?' },
+          payload: { text: TTS_COPY.anything_else.en },
         });
         await executeSideEffects(session, sideEffectsAll, tenantId);
         appendAgentTts(deps.store, session.id, sideEffectsAll);
@@ -6388,7 +6397,7 @@ export function createVoiceTurnProcessor(
         });
         sideEffectsAll.push({
           type: 'tts_play',
-          payload: { text: 'Anything else I can help you with?' },
+          payload: { text: TTS_COPY.anything_else.en },
         });
         await executeSideEffects(session, sideEffectsAll, tenantId);
         appendAgentTts(deps.store, session.id, sideEffectsAll);

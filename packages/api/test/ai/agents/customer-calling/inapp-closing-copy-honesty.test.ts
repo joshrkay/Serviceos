@@ -16,11 +16,11 @@ import { InMemoryProposalRepository, missingFieldsFor } from '../../../../src/pr
 import { InMemoryAuditRepository } from '../../../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../../../src/oncall/rotation';
 import type { LLMGateway, LLMResponse } from '../../../../src/ai/gateway/gateway';
+import { TTS_COPY } from '../../../../src/ai/agents/customer-calling/tts-copy';
 
 const TENANT = 'tenant-closing';
 const USER = 'user-closing';
-const GENERIC_CLOSING_LINE =
-  "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?";
+const GENERIC_CLOSING_LINE = TTS_COPY.generic_proposal_confirmation.en;
 
 function classifierJson(intentType: string, extractedEntities: Record<string, unknown> = {}): string {
   return JSON.stringify({ intentType, confidence: 0.95, reasoning: 'test', extractedEntities });

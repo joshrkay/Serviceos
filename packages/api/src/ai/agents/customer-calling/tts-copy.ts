@@ -19,6 +19,10 @@
 import { intentReadbackPhrase } from './intent-readback';
 import { OUT_OF_SERVICE_AREA_COPY, SERVICE_AREA_ZIP_QUESTION } from '../../voice-turn/service-area-gate';
 import { bookingAwaitsTime } from './confirm-turn';
+import { EMERGENCY_SAFETY_LINE } from './emergency-detector';
+import { en as I18N_EN } from '../../i18n/en';
+import { es as I18N_ES } from '../../i18n/es';
+import { interpolate } from '../../i18n/i18n';
 
 export type SessionLanguage = 'en' | 'es';
 
@@ -93,6 +97,441 @@ const TEMPLATE_KEYS = new Set(['intent_confirm', 'greeting', 'confirm_intent', '
  * and localized; anything else passes through unchanged.
  */
 
+
+// ─── #1601 step 1 — the ONE spoken-copy source ────────────────────────────────
+//
+// Every fixed line a voice surface speaks lives here, keyed by id, with its
+// English and Spanish side by side. Before #1601 the English sat inline in the
+// turn processor, the Gather adapter, the in-app adapter, the FSM transition
+// table and the quote read-back, and Spanish was keyed on the exact English
+// sentence — so a one-word English edit silently dropped the Spanish, and the
+// same line drifted between files (the 2026-10-04 code-health review).
+//
+// Rules:
+//   - `{{var}}` placeholders (the `ai/i18n` syntax) for dynamic parts;
+//     `ttsCopy(id, lang, vars)` interpolates them. A parameterised entry cannot
+//     be looked up by its English sentence, so its call site renders by id.
+//   - The FSM (transitions.ts) keeps emitting the ENGLISH sentence as
+//     `payload.text` (`ttsPlay(TTS_COPY.x.en)`): transcripts, `lastSpoken`
+//     comparisons and the graders see the same payload they always did, and an
+//     id can never reach a caller un-rendered. The transports localize at
+//     speak time through `renderTtsText`, which resolves the English sentence
+//     back to its entry (`EN_SENTENCE_TO_ID`).
+//   - Entries whose Spanish was written for #1601 (no shipped translation
+//     existed) carry `// es: new 1601` for review. Lines that already had a
+//     named constant keep it below as an alias, so existing imports are
+//     unchanged.
+//   - Sentences the `ai/i18n` catalog already holds are REFERENCED, not
+//     retyped, so the two catalogs cannot drift until they are merged
+//     (#1601 step 2/6).
+//
+// The rationale comments for the previously named lines (VOX-35c, A3, U5,
+// RV-071, #1272, #1497, #1331, #1600 …) stay on their alias constants below.
+
+interface TtsCopyEntry {
+  readonly en: string;
+  readonly es: string;
+}
+
+export const TTS_COPY = {
+  // ── named before #1601 (aliases below keep the old import names) ─────────
+  speech_turn_failure_reprompt: {
+    en: 'My apologies — let me try again. What would you like to do?',
+    es: 'Mis disculpas — intentemos de nuevo. ¿Qué le gustaría hacer?',
+  },
+  turn_hold: {
+    en: "Sorry for the wait — I'm still working on that.",
+    es: 'Disculpe la espera — sigo trabajando en eso.',
+  },
+  speech_turn_failure_escalation: {
+    en: "I'm having trouble completing that. Let me connect you with a team member.",
+    es: 'Tengo dificultades para completar eso. Le comunico con un miembro del equipo.',
+  },
+  low_stt_confidence_reprompt: {
+    en: "I didn't quite catch that — could you say that again?",
+    es: 'No alcancé a escuchar bien eso — ¿podría repetirlo, por favor?',
+  },
+  max_call_duration_wrap_up: {
+    en: "We're almost out of time for this call, so I'll need to wrap up now. If you need anything else, please call back and we'll pick up where we left off.",
+    es: 'Estamos por llegar al límite de tiempo de esta llamada, así que tendré que terminar ahora. Si necesita algo más, por favor llame de nuevo y continuaremos donde lo dejamos.',
+  },
+  voice_approval_refusal: {
+    en: "Tap the card to approve — I don't take approvals by voice here yet.",
+    es: 'Toque la tarjeta para aprobar — aquí todavía no acepto aprobaciones por voz.',
+  },
+  inapp_incomplete_draft: {
+    en: "I've drafted that, but it still needs a few details before it can be approved — open the card to fill them in. Is there anything else I can help you with?",
+    es: 'Lo dejé como borrador, pero le faltan algunos datos antes de poder aprobarlo — abra la tarjeta para completarlos. ¿Hay algo más en lo que pueda ayudarle?',
+  },
+  operator_drafted_for_review: {
+    en: "I've drafted that — it's in your approvals waiting for you to review. Is there anything else I can help you with?",
+    es: 'Lo dejé como borrador — está en sus aprobaciones esperando su revisión. ¿Hay algo más en lo que pueda ayudarle?',
+  },
+  which_appointment_reschedule: {
+    en: "Which appointment would you like to reschedule? You can tell me the customer's name.",
+    es: '¿Qué cita quiere reprogramar? Puede decirme el nombre del cliente.',
+  },
+  which_appointment_cancel: {
+    en: "Which appointment would you like to cancel? You can tell me the customer's name.",
+    es: '¿Qué cita quiere cancelar? Puede decirme el nombre del cliente.',
+  },
+  which_appointment_default: {
+    en: "Which appointment is this about? You can tell me the customer's name.",
+    es: '¿De qué cita se trata? Puede decirme el nombre del cliente.',
+  },
+  caller_request_queued: {
+    en: "I've passed that along to our team, and someone will confirm it with you shortly. Is there anything else I can help you with?",
+    es: 'Ya le pasé su solicitud a nuestro equipo, y alguien se la confirmará en breve. ¿Hay algo más en lo que pueda ayudarle?',
+  },
+  caller_incomplete_request: {
+    en: "I've passed that along, but a few details still need to be sorted out before it's final — someone from our team will follow up with you. Is there anything else I can help you with?",
+    es: 'Ya pasé su solicitud, pero faltan algunos detalles antes de que quede lista — alguien de nuestro equipo se comunicará con usted. ¿Hay algo más en lo que pueda ayudarle?',
+  },
+  cross_customer_refusal: {
+    en: 'I can only help with the account on this line.',
+    es: 'Solo puedo ayudarle con la cuenta de esta línea.',
+  },
+  repeated_request_handoff: {
+    en: 'I want to make sure this gets handled properly — let me get a person to help you with it.',
+    es: 'Quiero asegurarme de que esto se atienda bien — déjeme comunicarle con una persona que pueda ayudarle.',
+  },
+  rebook_declined: {
+    en: 'No problem. Is there anything else I can help you with?',
+    es: 'No hay problema. ¿Hay algo más en lo que pueda ayudarle?',
+  },
+  // #1567 — the service-area gate's two lines; English owned by
+  // voice-turn/service-area-gate.ts (outside step 1's files), Spanish here.
+  out_of_service_area: {
+    en: OUT_OF_SERVICE_AREA_COPY,
+    es: 'Normalmente no damos servicio en esa zona, pero le pasaré sus datos al equipo.',
+  },
+  service_area_zip_question: {
+    en: SERVICE_AREA_ZIP_QUESTION,
+    es: 'Claro — ¿cuál es el código postal de la dirección donde necesita el servicio?',
+  },
+  // RV-142 — the 911 line; English owned by emergency-detector.ts.
+  emergency_safety_line: {
+    en: EMERGENCY_SAFETY_LINE,
+    es: 'Si alguien está en peligro inmediato, cuelgue y llame al 911.',
+  },
+  // UB-C1 / #846 — language-switch lines. NOT translations of each other:
+  // each is spoken in the language the call is in (or switching to), so they
+  // are kept out of the English→Spanish reverse index.
+  language_switch_ack: {
+    en: "Okay, let's continue in English. How can I help you?",
+    es: 'De acuerdo, continuemos en español. ¿En qué puedo ayudarle?',
+  },
+  language_unsupported: {
+    en: "I'm sorry — I can only help in English on this line. What can I help you with?",
+    es: 'Lo siento — en esta línea solo puedo ayudarle en español. ¿En qué puedo ayudarle?',
+  },
+  language_switch_cap: {
+    en: "Let's keep going in English so I don't lose you — what can I help you with?",
+    es: 'Sigamos en español para no perderle — ¿en qué puedo ayudarle?',
+  },
+  // Template renders that used to be inline in renderTtsText.
+  greeting_plain: {
+    en: 'Hi! How can I help you today?',
+    es: '¡Hola! ¿En qué puedo ayudarle hoy?',
+  },
+  greeting_with_disclosure: {
+    en: "Hi, I'm a virtual assistant. How can I help you today?",
+    es: 'Hola, soy un asistente virtual. ¿En qué puedo ayudarle hoy?',
+  },
+  // #1577 — a booking with no day or time asks for one before any readback.
+  booking_awaits_time: {
+    en: 'What date and time work for you?',
+    es: '¿Qué fecha y hora le convienen?',
+  },
+  // VOX-52 — the "two Bobs" branch of the disambiguation prompt.
+  disambiguation_same_name: {
+    en: 'I found more than one record under that name. Could you give me the service address so I can pick the right one?',
+    es: 'Encontré más de un registro con ese nombre. ¿Me puede dar la dirección de servicio para elegir el correcto?',
+  },
+
+  // ── transitions.ts (the FSM) ─────────────────────────────────────────────
+  entity_not_found_escalation: {
+    en: "I wasn't able to find the record you're referring to. Let me connect you with a team member.",
+    es: 'No pude encontrar el registro al que se refiere. Le comunico con un miembro del equipo.',
+  },
+  abuse_terminated: {
+    en: 'This call has been terminated due to policy violations.',
+    es: 'Esta llamada ha sido terminada por violaciones a nuestras políticas.',
+  },
+  account_lookup_failed_escalation: {
+    en: "I'm having trouble pulling up your account. Let me connect you with a team member.",
+    es: 'Tengo dificultades para acceder a su cuenta. Le comunico con un miembro del equipo.',
+  },
+  escalation_transfer: {
+    en: "I'm connecting you with a team member who can assist you further.",
+    es: 'Le comunico con un miembro del equipo que podrá ayudarle.',
+  },
+  scheduling_help_redirect: {
+    en: 'I can help with scheduling and service questions. What do you need help with today?',
+    es: 'Puedo ayudarle con citas y preguntas de servicio. ¿En qué necesita ayuda hoy?',
+  },
+  operator_request_transfer: {
+    en: 'Of course — let me connect you with a person right now.',
+    es: 'Por supuesto — le comunico con una persona ahora mismo.',
+  },
+  emergency_dispatch_transfer: {
+    en: "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.",
+    es: 'Esto parece una emergencia. Le comunico de inmediato con nuestro despachador de guardia.',
+  },
+  frustration_transfer: {
+    en: 'I understand. Let me get a person on the line for you right away.',
+    es: 'Entiendo. Enseguida le paso con una persona.',
+  },
+  // Also the processor's ASK_CALLER_HELP_PROMPT and the Gather greeting's CTA
+  // (ai/i18n `greeting.cta`) — one sentence, referenced from i18n.
+  how_can_i_help: {
+    en: I18N_EN['greeting.cta'],
+    es: I18N_ES['greeting.cta'],
+  },
+  ask_caller_name_address: {
+    en: "What's your name and the address you're calling about?",
+    es: '¿Me puede dar su nombre y la dirección por la que llama?',
+  },
+  identity_verification_failed_escalation: {
+    en: "I'm having trouble verifying your identity. Let me connect you with a team member.",
+    es: 'Tengo dificultades para verificar su identidad. Le comunico con un miembro del equipo.',
+  },
+  account_not_found_ask_details: {
+    en: "I'm sorry, I couldn't find your account. Can you please provide your full name and service address?",
+    es: 'Lo siento, no pude encontrar su cuenta. ¿Me puede dar su nombre completo y la dirección de servicio?',
+  },
+  still_trouble_understanding_reprompt: {
+    en: "I'm still having trouble understanding. Could you describe what you need in a few words?",
+    es: 'Sigo teniendo dificultades para entenderle. ¿Podría describir en pocas palabras lo que necesita?',
+  },
+  understanding_failed_escalation: {
+    en: "I'm having trouble understanding your request. Let me connect you with a team member.",
+    es: 'Tengo dificultades para entender su solicitud. Le comunico con un miembro del equipo.',
+  },
+  clarify_intent_reprompt: {
+    en: 'Let me make sure I understand — what would you like to do?',
+    es: 'Permítame asegurarme de entender — ¿qué le gustaría hacer?',
+  },
+  // The pre-WS5 fixed confirmation (also quote-readback's
+  // GENERIC_PROPOSAL_CONFIRMATION): spoken only for a proposal that executed.
+  generic_proposal_confirmation: {
+    en: "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+    es: 'Perfecto, ya quedó registrado. Recibirá una confirmación en breve. ¿Hay algo más en lo que pueda ayudarle?',
+  },
+  goodbye_thanks: {
+    en: 'Thank you for calling. Have a great day!',
+    es: '¡Gracias por llamar. Que tenga un excelente día!',
+  },
+  anything_else_of_course: {
+    en: 'Of course! What else can I help you with?',
+    es: '¡Por supuesto! ¿En qué más puedo ayudarle?',
+  },
+  // WS18 — refinement cap: the agent stops editing the live quote and hands it
+  // to the owner. Deliberately makes NO booking claim.
+  refinement_cap: {
+    en: 'Let me have the owner finalize the details and send you the full quote by text.',
+    es: 'Permítame que el propietario finalice los detalles y le envíe el presupuesto completo por mensaje de texto.', // es: new 1601
+  },
+  // WS18 — bounded reprompt in `closing` on a low-confidence reply to a quote.
+  post_quote_reprompt: {
+    en: 'Sorry — did you want me to lock that in, or is there something to change?',
+    es: 'Disculpe — ¿quiere que lo deje confirmado, o hay algo que cambiar?', // es: new 1601
+  },
+  // N-003 (P2-036) — holding line when the caller pushes on price/scope/terms;
+  // the agent never negotiates. The processor may swap it for the brand-voiced
+  // composer (`source: 'negotiation_holding'`).
+  negotiation_holding: {
+    en: "That's a good question — I'll need to check with the owner on that, and we'll get right back to you. Is there anything else I can help with in the meantime?",
+    es: 'Es una buena pregunta — tendré que consultarlo con el propietario y le responderemos enseguida. ¿Hay algo más en lo que pueda ayudarle mientras tanto?', // es: new 1601
+  },
+  // #846 / D-027 — complaint acknowledgment; the agent never argues or
+  // promises a remedy, it hands the caller to a human.
+  complaint_escalation: {
+    en: "I'm sorry to hear that — let me get a person on the line to help you right away.",
+    es: 'Lamento escuchar eso — enseguida le paso con una persona para que le ayude.', // es: new 1601
+  },
+  // #846 — a bare "yes" with nothing pending to confirm.
+  confirm_nothing_pending: {
+    en: "I don't have anything waiting on a yes from you just yet — what would you like to do?",
+    es: 'Por ahora no tengo nada pendiente de su confirmación — ¿qué le gustaría hacer?', // es: new 1601
+  },
+  // #1406 D10 — a farewell is a clean close.
+  farewell_close: {
+    en: 'Okay — talk soon. Goodbye!',
+    es: 'De acuerdo — hasta pronto. ¡Adiós!', // es: new 1601
+  },
+  technical_issue_escalation: {
+    en: "One moment — I'm having a brief technical issue. Let me connect you with a team member.",
+    es: 'Un momento — tengo un breve problema técnico. Le comunico con un miembro del equipo.', // es: new 1601
+  },
+  caller_id_mismatch_reask: {
+    en: 'Sorry about that. Who am I speaking with, and how can I help you today?',
+    es: 'Disculpe. ¿Con quién hablo, y en qué puedo ayudarle hoy?', // es: new 1601
+  },
+  confirm_repeat_reprompt: {
+    en: 'I want to make sure I got that right — can you say that again?',
+    es: 'Quiero asegurarme de haberlo entendido bien — ¿podría repetirlo?', // es: new 1601
+  },
+
+  // ── ai/voice-turn/create-voice-turn-processor.ts ─────────────────────────
+  // WS2/WS18 close flow — every line below stages the quote for OWNER
+  // approval and makes NO booking claim; nothing is confirmed until the owner
+  // taps approve.
+  post_quote_affirmative_interim: {
+    en: "Perfect — I'll have the owner finalize that and send you the full quote and booking link by text.",
+    es: 'Perfecto — haré que el propietario lo finalice y le envíe el presupuesto completo y el enlace de reserva por mensaje de texto.', // es: new 1601
+  },
+  // WS18c — asks for SMS consent before texting the quote + booking link; the
+  // caller's next turn is the answer, evaluated by strict confirmIntent.
+  sms_consent_ask: {
+    en: "Great — I can text the full quote and a link to lock in your booking. Is it okay to send that to the number you're calling from?",
+    es: 'Muy bien — puedo enviarle por mensaje de texto el presupuesto completo y un enlace para confirmar su reserva. ¿Le parece bien que lo envíe al número desde el que llama?', // es: new 1601
+  },
+  sms_consent_grant_ack: {
+    en: "Perfect — you'll get that text shortly.",
+    es: 'Perfecto — recibirá ese mensaje de texto en breve.', // es: new 1601
+  },
+  // WS18 — decline / ambiguous → the owner sends it. Design-exact copy.
+  sms_consent_decline_fallback: {
+    en: "No problem — I'll have the owner send that over, and you'll get a text shortly.",
+    es: 'No hay problema — haré que el propietario se lo envíe, y recibirá un mensaje de texto en breve.', // es: new 1601
+  },
+  close_fallback: {
+    en: "Great — I'll have the owner confirm your booking, and you'll get the quote by text shortly.",
+    es: 'Muy bien — haré que el propietario confirme su reserva, y recibirá el presupuesto por mensaje de texto en breve.', // es: new 1601
+  },
+  // #1476 — a question at the readback the agent cannot answer from the
+  // pending request or a lookup (processor + in-app adapter).
+  no_detail_yet: {
+    en: "I don't have that detail on this one yet.",
+    es: 'Todavía no tengo ese dato para esta solicitud.', // es: new 1601
+  },
+  // #1485 — a draft persisted with nameable executability gaps; `{{ask}}` is
+  // the gap question (`askForExecutabilityGaps`).
+  drafted_with_gaps: {
+    en: "I've drafted that. {{ask}}",
+    es: 'Lo dejé como borrador. {{ask}}', // es: new 1601
+  },
+  // escalateToHuman with an empty on-call rotation: the TwiML <Say> before
+  // <Hangup/>. Same sentence as ai/i18n `escalate.no_dispatcher`.
+  voicemail_no_one_available: {
+    en: I18N_EN['escalate.no_dispatcher'],
+    es: I18N_ES['escalate.no_dispatcher'],
+  },
+  // D-033 find-or-create sign-up (processor + Gather adapter).
+  signup_ask_name: {
+    en: 'Of course — could I get your name to get you set up?',
+    es: 'Por supuesto — ¿me puede dar su nombre para registrarle?', // es: new 1601
+  },
+  signup_ask_callback: {
+    en: "I'm sorry, I couldn't see your number. What's the best phone number to reach you on?",
+    es: 'Lo siento, no pude ver su número. ¿Cuál es el mejor número de teléfono para comunicarnos con usted?', // es: new 1601
+  },
+  signup_persist_failed: {
+    en: "I'm having trouble saving that. Let me get a person to help you finish signing up.",
+    es: 'Tengo dificultades para guardar eso. Le paso con una persona para que le ayude a terminar el registro.', // es: new 1601
+  },
+  // Unknown / stale session fallback (processor + Gather adapter).
+  session_ended_call_again: {
+    en: "I'm sorry, your session has ended. Please call again.",
+    es: 'Lo siento, su sesión ha terminado. Por favor, llame de nuevo.', // es: new 1601
+  },
+  // Spoken after a lookup / en_route / cross-customer refusal answer.
+  anything_else: {
+    en: 'Anything else I can help you with?',
+    es: '¿Hay algo más en lo que pueda ayudarle?', // es: new 1601
+  },
+
+  // ── telephony/twilio-adapter.ts ──────────────────────────────────────────
+  // Divergence #10 — canned greeting when the WS `start` names a CallSid the
+  // store no longer knows. Composed from the i18n greeting pieces.
+  missing_session_greeting: {
+    en: `${I18N_EN['greeting.opener_default']} ${I18N_EN['greeting.cta']}`,
+    es: `${I18N_ES['greeting.opener_default']} ${I18N_ES['greeting.cta']}`,
+  },
+
+  // ── ai/agents/customer-calling/inapp-adapter.ts ──────────────────────────
+  inapp_default_greeting: {
+    en: 'Hi, this is your assistant. How can I help today?',
+    es: 'Hola, soy su asistente. ¿En qué puedo ayudarle hoy?', // es: new 1601
+  },
+  inapp_named_greeting: {
+    en: "Hi, I'm {{agent}}. How can I help today?",
+    es: 'Hola, soy {{agent}}. ¿En qué puedo ayudarle hoy?', // es: new 1601
+  },
+  // R2 — a turn that carried no request at all.
+  noise_reprompt: {
+    en: "I didn't catch that — what would you like to do?",
+    es: 'No alcancé a escuchar eso — ¿qué le gustaría hacer?', // es: new 1601
+  },
+
+  // ── ai/voice-turn/quote-readback.ts (WS5 / WS17) ─────────────────────────
+  // The builder is English-only today (no language reaches it), so the Spanish
+  // is catalogued but unreachable until the read-back takes a session language.
+  uncatalogued_quote_readback: {
+    en: "I've got the details — the owner will confirm pricing and you'll get the full quote by text.",
+    es: 'Ya tengo los detalles — el propietario confirmará el precio y recibirá el presupuesto completo por mensaje de texto.', // es: new 1601
+  },
+  quote_readback_single: {
+    en: "For the {{description}}, that's typically {{price}}. I'll send the full quote to confirm.",
+    es: 'Para {{description}}, normalmente son {{price}}. Le enviaré el presupuesto completo para confirmarlo.', // es: new 1601
+  },
+  quote_readback_lines_total: {
+    en: "{{lines}} — that's {{total}} all together. I'll send the full quote to confirm.",
+    es: '{{lines}} — en total son {{total}}. Le enviaré el presupuesto completo para confirmarlo.', // es: new 1601
+  },
+  quote_readback_total_only: {
+    en: "That usually comes to about {{total}} all together. I'll send the full quote to confirm.",
+    es: 'Normalmente suma unos {{total}} en total. Le enviaré el presupuesto completo para confirmarlo.', // es: new 1601
+  },
+} as const satisfies Record<string, TtsCopyEntry>;
+
+export type TtsCopyId = keyof typeof TTS_COPY;
+
+const TTS_COPY_IDS = Object.keys(TTS_COPY) as readonly TtsCopyId[];
+
+function isTtsCopyId(value: string): value is TtsCopyId {
+  return Object.prototype.hasOwnProperty.call(TTS_COPY, value);
+}
+
+const HAS_PLACEHOLDER = /\{\{\w+\}\}/;
+
+/**
+ * Render a catalog entry in the session language, interpolating `{{var}}`
+ * placeholders from `vars` with the same `interpolate` the `ai/i18n` `t()`
+ * and the notifications catalog use (numbers coerced with `String()`; a
+ * missing var renders empty rather than leaking its placeholder).
+ */
+export function ttsCopy(
+  id: TtsCopyId,
+  lang: SessionLanguage,
+  vars?: Record<string, unknown>,
+): string {
+  return interpolate(TTS_COPY[id][lang], vars);
+}
+
+/**
+ * Language-pair entries that are NOT translations of one sentence: each side
+ * is spoken in the language the call is in (or switching to). Resolving their
+ * English through the reverse index would be wrong, so they are excluded.
+ */
+const NOT_REVERSE_INDEXED: ReadonlySet<TtsCopyId> = new Set<TtsCopyId>([
+  'language_switch_ack',
+  'language_unsupported',
+  'language_switch_cap',
+]);
+
+/**
+ * English sentence → id, for every fixed (non-parameterised) entry. This is
+ * the FSM path: transitions.ts emits the English sentence as `payload.text`
+ * and the transports resolve it here at speak time.
+ */
+const EN_SENTENCE_TO_ID: ReadonlyMap<string, TtsCopyId> = new Map(
+  TTS_COPY_IDS.filter(
+    (id) => !NOT_REVERSE_INDEXED.has(id) && !HAS_PLACEHOLDER.test(TTS_COPY[id].en),
+  ).map((id) => [TTS_COPY[id].en, id] as const),
+);
+
 /**
  * VOX-35c — spoken copy for the media-stream/Gather adapters' speechTurn-
  * failure recovery. The reprompt is spoken after a single transient
@@ -103,17 +542,15 @@ const TEMPLATE_KEYS = new Set(['intent_confirm', 'greeting', 'confirm_intent', '
  * the exact-match keys in the es catalog below, so the English and Spanish
  * forms can never drift.
  */
-export const SPEECH_TURN_FAILURE_REPROMPT_COPY =
-  'My apologies — let me try again. What would you like to do?';
+export const SPEECH_TURN_FAILURE_REPROMPT_COPY = TTS_COPY.speech_turn_failure_reprompt.en;
 /**
  * #1331 — spoken when a phone turn is still working (LLM / lookup leg) at the
  * media-streams hold deadline, so the caller is told the truth instead of
  * sitting in silence past the 7 s no-hang floor. Not a filler: it is a status
  * line, spoken once per slow turn; the real reply still follows.
  */
-export const TURN_HOLD_COPY = "Sorry for the wait — I'm still working on that.";
-export const SPEECH_TURN_FAILURE_ESCALATION_COPY =
-  "I'm having trouble completing that. Let me connect you with a team member.";
+export const TURN_HOLD_COPY = TTS_COPY.turn_hold.en;
+export const SPEECH_TURN_FAILURE_ESCALATION_COPY = TTS_COPY.speech_turn_failure_escalation.en;
 
 /**
  * A3 — spoken when a FINAL transcript's STT acoustic confidence (Deepgram
@@ -130,8 +567,7 @@ export const SPEECH_TURN_FAILURE_ESCALATION_COPY =
  * too, and keeping one escalation line avoids a second string to translate
  * and keep in sync.
  */
-export const LOW_STT_CONFIDENCE_REPROMPT_COPY =
-  "I didn't quite catch that — could you say that again?";
+export const LOW_STT_CONFIDENCE_REPROMPT_COPY = TTS_COPY.low_stt_confidence_reprompt.en;
 
 /**
  * U5 — spoken when a call reaches the absolute per-call duration cap
@@ -139,10 +575,9 @@ export const LOW_STT_CONFIDENCE_REPROMPT_COPY =
  * limit and then end the leg at the limit; Gather speaks it on the first
  * turn that arrives past the limit, immediately before `<Hangup/>`. One
  * line serves both transports so they can never drift; it is the
- * exact-match key of its es translation in {@link SENTENCE_CATALOG_ES}.
+ * the `max_call_duration_wrap_up` entry of {@link TTS_COPY} (EN + ES).
  */
-export const MAX_CALL_DURATION_WRAP_UP_COPY =
-  "We're almost out of time for this call, so I'll need to wrap up now. If you need anything else, please call back and we'll pick up where we left off.";
+export const MAX_CALL_DURATION_WRAP_UP_COPY = TTS_COPY.max_call_duration_wrap_up.en;
 
 /**
  * RV-071 / RV-225 — spoken when a proposal approve/reject/edit is asked for
@@ -165,8 +600,7 @@ export const MAX_CALL_DURATION_WRAP_UP_COPY =
  * honest in the strict sense the honesty guard demands: it states that
  * nothing was approved, and names the one action that does work.
  */
-export const VOICE_APPROVAL_REFUSAL =
-  "Tap the card to approve — I don't take approvals by voice here yet.";
+export const VOICE_APPROVAL_REFUSAL = TTS_COPY.voice_approval_refusal.en;
 
 /**
  * #1272 — closing line for a proposal that was persisted WITH unfilled
@@ -180,8 +614,7 @@ export const VOICE_APPROVAL_REFUSAL =
  * spoken on the OWNER phone line (#1331) — the owner owns the card too; only
  * an S1 caller hears {@link CALLER_INCOMPLETE_REQUEST_COPY}.
  */
-export const INAPP_INCOMPLETE_DRAFT_COPY =
-  "I've drafted that, but it still needs a few details before it can be approved — open the card to fill them in. Is there anything else I can help you with?";
+export const INAPP_INCOMPLETE_DRAFT_COPY = TTS_COPY.inapp_incomplete_draft.en;
 
 /**
  * #1497 — closing line for an OPERATOR (in-app, or the owner on the phone
@@ -192,8 +625,7 @@ export const INAPP_INCOMPLETE_DRAFT_COPY =
  * promises a confirmation nobody sends. Only a proposal that has actually
  * executed may be announced as done.
  */
-export const OPERATOR_DRAFTED_FOR_REVIEW_COPY =
-  "I've drafted that — it's in your approvals waiting for you to review. Is there anything else I can help you with?";
+export const OPERATOR_DRAFTED_FOR_REVIEW_COPY = TTS_COPY.operator_drafted_for_review.en;
 
 /**
  * #1272 — phone (S1/owner line) twin of {@link INAPP_INCOMPLETE_DRAFT_COPY}.
@@ -206,11 +638,9 @@ export const OPERATOR_DRAFTED_FOR_REVIEW_COPY =
  * through the entity resolver; nothing is read back until it is.
  */
 export const WHICH_APPOINTMENT_COPY = {
-  reschedule_appointment:
-    "Which appointment would you like to reschedule? You can tell me the customer's name.",
-  cancel_appointment:
-    "Which appointment would you like to cancel? You can tell me the customer's name.",
-  default: "Which appointment is this about? You can tell me the customer's name.",
+  reschedule_appointment: TTS_COPY.which_appointment_reschedule.en,
+  cancel_appointment: TTS_COPY.which_appointment_cancel.en,
+  default: TTS_COPY.which_appointment_default.en,
 } as const;
 
 /**
@@ -222,11 +652,9 @@ export const WHICH_APPOINTMENT_COPY = {
  * is true — it was passed to the team, who will confirm. Operator twin:
  * {@link OPERATOR_DRAFTED_FOR_REVIEW_COPY}.
  */
-export const CALLER_REQUEST_QUEUED_COPY =
-  "I've passed that along to our team, and someone will confirm it with you shortly. Is there anything else I can help you with?";
+export const CALLER_REQUEST_QUEUED_COPY = TTS_COPY.caller_request_queued.en;
 
-export const CALLER_INCOMPLETE_REQUEST_COPY =
-  "I've passed that along, but a few details still need to be sorted out before it's final — someone from our team will follow up with you. Is there anything else I can help you with?";
+export const CALLER_INCOMPLETE_REQUEST_COPY = TTS_COPY.caller_incomplete_request.en;
 
 /**
  * #1600 (1) (owner decision 2026-10-04) — spoken to an S1 caller identified
@@ -236,7 +664,7 @@ export const CALLER_INCOMPLETE_REQUEST_COPY =
  * D-036 (1).3 (identity outranks words) is unchanged — this is only what
  * the caller hears instead of their own account being read in Jane's place.
  */
-export const CROSS_CUSTOMER_REFUSAL_COPY = 'I can only help with the account on this line.';
+export const CROSS_CUSTOMER_REFUSAL_COPY = TTS_COPY.cross_customer_refusal.en;
 
 /**
  * #1600 (2) (owner decision 2026-10-04) — spoken when the same write request
@@ -244,14 +672,13 @@ export const CROSS_CUSTOMER_REFUSAL_COPY = 'I can only help with the account on 
  * it and hands the call to a person (transitions.ts `repeated_write_intent`).
  * Polite by design — a repeated request is not an accusation.
  */
-export const REPEATED_REQUEST_HANDOFF_COPY =
-  'I want to make sure this gets handled properly — let me get a person to help you with it.';
+export const REPEATED_REQUEST_HANDOFF_COPY = TTS_COPY.repeated_request_handoff.en;
 
 /**
  * #1600 (3) — the caller declined the offer to book a new appointment; the
  * call stays open for whatever else they need.
  */
-export const REBOOK_DECLINED_COPY = 'No problem. Is there anything else I can help you with?';
+export const REBOOK_DECLINED_COPY = TTS_COPY.rebook_declined.en;
 
 /**
  * #1600 (3) (owner decision 2026-10-04) — spoken when an S1 caller refers to
@@ -295,131 +722,28 @@ function formatCancelledOn(
 }
 
 /**
- * es translations for the FSM's hardcoded sentences (exact-match). Kept
- * small and literal — anything not listed passes through in English rather
- * than risking a bad machine paraphrase.
- *
- * Exported so the QA matrix's VOX-02 language oracle can assert against the
- * SHIPPED Spanish copy instead of a hand-rolled marker word list (which went
- * stale the moment a new sentence was added and failed correct responses).
- */
-export const SENTENCE_CATALOG_ES: Record<string, string> = {
-  // #1567 — the service-area gate (voice-turn/service-area-gate.ts).
-  [OUT_OF_SERVICE_AREA_COPY]:
-    'Normalmente no damos servicio en esa zona, pero le pasaré sus datos al equipo.',
-  [SERVICE_AREA_ZIP_QUESTION]:
-    'Claro — ¿cuál es el código postal de la dirección donde necesita el servicio?',
-  [CALLER_REQUEST_QUEUED_COPY]:
-    'Ya le pasé su solicitud a nuestro equipo, y alguien se la confirmará en breve. ¿Hay algo más en lo que pueda ayudarle?',
-  "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?":
-    'Perfecto, ya quedó registrado. Recibirá una confirmación en breve. ¿Hay algo más en lo que pueda ayudarle?',
-  'How can I help you today?': '¿En qué puedo ayudarle hoy?',
-  'Thank you for calling. Have a great day!': '¡Gracias por llamar. Que tenga un excelente día!',
-  "What's your name and the address you're calling about?":
-    '¿Me puede dar su nombre y la dirección por la que llama?',
-  "I'm connecting you with a team member who can assist you further.":
-    'Le comunico con un miembro del equipo que podrá ayudarle.',
-  'Of course — let me connect you with a person right now.':
-    'Por supuesto — le comunico con una persona ahora mismo.',
-  'I understand. Let me get a person on the line for you right away.':
-    'Entiendo. Enseguida le paso con una persona.',
-  [SPEECH_TURN_FAILURE_ESCALATION_COPY]:
-    'Tengo dificultades para completar eso. Le comunico con un miembro del equipo.',
-  "I'm having trouble pulling up your account. Let me connect you with a team member.":
-    'Tengo dificultades para acceder a su cuenta. Le comunico con un miembro del equipo.',
-  // RV-142 — emergency safety script + transfer line.
-  'If anyone is in immediate danger, hang up and call 911.':
-    'Si alguien está en peligro inmediato, cuelgue y llame al 911.',
-  "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.":
-    'Esto parece una emergencia. Le comunico de inmediato con nuestro despachador de guardia.',
-  // UB-C2 — remaining fixed FSM sentences (audit against transitions.ts's
-  // ttsPlay literals; a Spanish call must never flip to English mid-flow).
-  "I wasn't able to find the record you're referring to. Let me connect you with a team member.":
-    'No pude encontrar el registro al que se refiere. Le comunico con un miembro del equipo.',
-  "I'm having trouble understanding your request. Let me connect you with a team member.":
-    'Tengo dificultades para entender su solicitud. Le comunico con un miembro del equipo.',
-  "I'm having trouble verifying your identity. Let me connect you with a team member.":
-    'Tengo dificultades para verificar su identidad. Le comunico con un miembro del equipo.',
-  "I'm sorry, I couldn't find your account. Can you please provide your full name and service address?":
-    'Lo siento, no pude encontrar su cuenta. ¿Me puede dar su nombre completo y la dirección de servicio?',
-  'Let me make sure I understand — what would you like to do?':
-    'Permítame asegurarme de entender — ¿qué le gustaría hacer?',
-  [SPEECH_TURN_FAILURE_REPROMPT_COPY]:
-    'Mis disculpas — intentemos de nuevo. ¿Qué le gustaría hacer?',
-  // #1331 — media-streams hold line for a slow turn.
-  [TURN_HOLD_COPY]: 'Disculpe la espera — sigo trabajando en eso.',
-  // A3 — low acoustic STT confidence reprompt.
-  [LOW_STT_CONFIDENCE_REPROMPT_COPY]:
-    'No alcancé a escuchar bien eso — ¿podría repetirlo, por favor?',
-  // U5 — absolute per-call duration cap wrap-up.
-  [MAX_CALL_DURATION_WRAP_UP_COPY]:
-    'Estamos por llegar al límite de tiempo de esta llamada, así que tendré que terminar ahora. Si necesita algo más, por favor llame de nuevo y continuaremos donde lo dejamos.',
-  'Of course! What else can I help you with?':
-    '¡Por supuesto! ¿En qué más puedo ayudarle?',
-  'This call has been terminated due to policy violations.':
-    'Esta llamada ha sido terminada por violaciones a nuestras políticas.',
-  "I'm still having trouble understanding. Could you describe what you need in a few words?":
-    'Sigo teniendo dificultades para entenderle. ¿Podría describir en pocas palabras lo que necesita?',
-  'I can help with scheduling and service questions. What do you need help with today?':
-    'Puedo ayudarle con citas y preguntas de servicio. ¿En qué necesita ayuda hoy?',
-  // RV-071/RV-225 — the in-app voice approval refusal. Listed for the same
-  // reason as the UB-C2 block above: a Spanish session must not flip to
-  // English mid-flow just because the operator asked to approve by voice.
-  [VOICE_APPROVAL_REFUSAL]:
-    'Toque la tarjeta para aprobar — aquí todavía no acepto aprobaciones por voz.',
-  // #1497 — operator close for a card awaiting their approval.
-  [OPERATOR_DRAFTED_FOR_REVIEW_COPY]:
-    'Lo dejé como borrador — está en sus aprobaciones esperando su revisión. ¿Hay algo más en lo que pueda ayudarle?',
-  // #1272 — honest closing lines for a draft that still has missingFields.
-  [INAPP_INCOMPLETE_DRAFT_COPY]:
-    'Lo dejé como borrador, pero le faltan algunos datos antes de poder aprobarlo — abra la tarjeta para completarlos. ¿Hay algo más en lo que pueda ayudarle?',
-  [CALLER_INCOMPLETE_REQUEST_COPY]:
-    'Ya pasé su solicitud, pero faltan algunos detalles antes de que quede lista — alguien de nuestro equipo se comunicará con usted. ¿Hay algo más en lo que pueda ayudarle?',
-  // #1600 (1) — the cross-customer refusal.
-  [CROSS_CUSTOMER_REFUSAL_COPY]: 'Solo puedo ayudarle con la cuenta de esta línea.',
-  // #1600 (2) — the repeated-request hand-off.
-  [REPEATED_REQUEST_HANDOFF_COPY]:
-    'Quiero asegurarme de que esto se atienda bien — déjeme comunicarle con una persona que pueda ayudarle.',
-  // #1600 (3) — the rebook offer declined.
-  [REBOOK_DECLINED_COPY]: 'No hay problema. ¿Hay algo más en lo que pueda ayudarle?',
-  [WHICH_APPOINTMENT_COPY.reschedule_appointment]:
-    '¿Qué cita quiere reprogramar? Puede decirme el nombre del cliente.',
-  [WHICH_APPOINTMENT_COPY.cancel_appointment]:
-    '¿Qué cita quiere cancelar? Puede decirme el nombre del cliente.',
-  [WHICH_APPOINTMENT_COPY.default]:
-    '¿De qué cita se trata? Puede decirme el nombre del cliente.',
-};
-
-/**
  * UB-C1 — spoken acknowledgment after the media-stream adapter flips the
  * live call language on an explicit caller request ("hablo español" /
  * "switch to english"). Always spoken in the language being switched TO —
  * the caller just told us that's the one they understand.
  */
-export const LANGUAGE_SWITCH_ACK: Record<SessionLanguage, string> = {
-  en: "Okay, let's continue in English. How can I help you?",
-  es: 'De acuerdo, continuemos en español. ¿En qué puedo ayudarle?',
-};
+export const LANGUAGE_SWITCH_ACK: Record<SessionLanguage, string> = TTS_COPY.language_switch_ack;
 
 /**
  * #846 — spoken when the caller asks for a language the tenant hasn't opted
  * into (`supported_languages` gate). Keyed by the language the call STAYS in
  * — the requested one is exactly what we can't speak.
  */
-export const LANGUAGE_UNSUPPORTED_LINE: Record<SessionLanguage, string> = {
-  en: "I'm sorry — I can only help in English on this line. What can I help you with?",
-  es: 'Lo siento — en esta línea solo puedo ayudarle en español. ¿En qué puedo ayudarle?',
-};
+export const LANGUAGE_UNSUPPORTED_LINE: Record<SessionLanguage, string> =
+  TTS_COPY.language_unsupported;
 
 /**
  * #846 — spoken when the per-call language-switch cap
  * (MAX_LANGUAGE_SWITCHES_PER_CALL) is exhausted: the call keeps its current
  * language rather than flapping. Keyed by the language the call stays in.
  */
-export const LANGUAGE_SWITCH_CAP_LINE: Record<SessionLanguage, string> = {
-  en: "Let's keep going in English so I don't lose you — what can I help you with?",
-  es: 'Sigamos en español para no perderle — ¿en qué puedo ayudarle?',
-};
+export const LANGUAGE_SWITCH_CAP_LINE: Record<SessionLanguage, string> =
+  TTS_COPY.language_switch_cap;
 
 /**
  * VOX-52 — voice a disambiguation prompt for an ambiguous entity reference.
@@ -443,11 +767,7 @@ function renderDisambiguation(candidates: unknown, lang: SessionLanguage): strin
 
   // Identical or missing names → ask for a distinguishing detail rather than
   // reading the same name back.
-  if (distinct.length < 2) {
-    return lang === 'es'
-      ? 'Encontré más de un registro con ese nombre. ¿Me puede dar la dirección de servicio para elegir el correcto?'
-      : 'I found more than one record under that name. Could you give me the service address so I can pick the right one?';
-  }
+  if (distinct.length < 2) return ttsCopy('disambiguation_same_name', lang);
 
   const list =
     lang === 'es'
@@ -466,12 +786,21 @@ export function renderTtsText(
   const template = typeof payload.template === 'string' ? payload.template : undefined;
   const key = template ?? (TEMPLATE_KEYS.has(rawText) ? rawText : undefined);
   if (!key) {
-    // Exact-match catalog for the FSM's fixed customer-facing sentences —
-    // they aren't templated, but a Spanish-language session must not flip
-    // back to English mid-call for the closing/ack lines.
+    // #1601 — a catalog id renders its entry, interpolating `{{vars}}` from
+    // `payload.vars` (else from the payload itself).
+    if (isTtsCopyId(rawText)) {
+      const vars =
+        typeof payload.vars === 'object' && payload.vars !== null
+          ? (payload.vars as Record<string, unknown>)
+          : payload;
+      return ttsCopy(rawText, lang, vars);
+    }
+    // The FSM path: transitions.ts emits the fixed ENGLISH sentence as
+    // `payload.text`; it resolves back to its catalog entry here so a
+    // Spanish-language session never flips to English mid-call.
     if (lang === 'es') {
-      const es = SENTENCE_CATALOG_ES[rawText];
-      if (es) return es;
+      const id = EN_SENTENCE_TO_ID.get(rawText);
+      if (id) return TTS_COPY[id].es;
     }
     return rawText;
   }
@@ -487,11 +816,7 @@ export function renderTtsText(
           : undefined;
       // #1577 — a booking with no day or time asks for one first; the
       // readback comes once there is a time to read back.
-      if (bookingAwaitsTime(intent, entities)) {
-        return lang === 'es'
-          ? '¿Qué fecha y hora le convienen?'
-          : 'What date and time work for you?';
-      }
+      if (bookingAwaitsTime(intent, entities)) return ttsCopy('booking_awaits_time', lang);
       return lang === 'es'
         ? `Para confirmar: usted desea ${intentReadbackPhrase(intent, entities, 'es')}. ¿Es correcto?`
         : `Just to confirm — you'd like to ${intentReadbackPhrase(intent, entities, 'en')}. Is that right?`;
@@ -517,7 +842,7 @@ export function renderTtsText(
       // from the caller-facing escalation line ("Let me connect you with a
       // team member"): an operator IS the team member, so the line names
       // what was searched for and offers the two real ways forward.
-      // Templated rather than a SENTENCE_CATALOG_ES entry because the
+      // Templated rather than a fixed TTS_COPY entry because the
       // reference is dynamic — an exact-match catalog cannot localize it.
       const entityKind = typeof payload.entityKind === 'string' ? payload.entityKind : undefined;
       const reference = typeof payload.reference === 'string' ? payload.reference.trim() : '';
@@ -538,13 +863,9 @@ export function renderTtsText(
         lang,
       );
     case 'greeting':
-      return lang === 'es'
-        ? '¡Hola! ¿En qué puedo ayudarle hoy?'
-        : 'Hi! How can I help you today?';
+      return ttsCopy('greeting_plain', lang);
     case 'greeting_with_disclosure':
-      return lang === 'es'
-        ? 'Hola, soy un asistente virtual. ¿En qué puedo ayudarle hoy?'
-        : "Hi, I'm a virtual assistant. How can I help you today?";
+      return ttsCopy('greeting_with_disclosure', lang);
     default:
       return rawText;
   }
