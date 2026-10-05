@@ -373,7 +373,7 @@ describe('VQ-022 — gradeDispositionLlm', () => {
 // June 12, 2026, not June 12, 2025" and "May 15" as "not a valid due date for
 // the current year" — the agent never spoke a year; the judge supplied one.
 // The prompt says so, and says how a year-less date is to be read.
-describe('#1613 — the criterion-12 judge is told the agent never speaks a year', () => {
+describe('#1613 — the criterion-12 judge is told how to read a date the agent says without a year', () => {
   it('states it in the system prompt and pins the call date beside the agent line', async () => {
     resetJudgeCache();
     const { gateway, provider } = createMockLLMGateway(PASS_RESPONSE);
@@ -386,8 +386,8 @@ describe('#1613 — the criterion-12 judge is told the agent never speaks a year
     const [call] = provider.getCalls();
     const system = call.messages.find((m) => m.role === 'system')!.content;
     const user = call.messages.find((m) => m.role === 'user')!.content;
-    expect(system).toMatch(/never speaks a year/i);
+    expect(system).toMatch(/says a year only when a date falls outside the call's year/i);
     expect(system).toMatch(/do not infer a year/i);
-    expect(user).toMatch(/Call date: Friday, May 1, 2026 \(the agent speaks no year/);
+    expect(user).toMatch(/Call date: Friday, May 1, 2026 \(a date the agent says without a year is read against this date\)/);
   });
 });

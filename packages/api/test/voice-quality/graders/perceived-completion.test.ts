@@ -450,6 +450,6 @@ describe('#1613 — the judge grades against the scripted outcome, not the liter
       'Turn 1: the request is classified as create_customer (also accepted: lookup_account_summary); escalates: false; the right reply matches: "I\'ve got you in our system already, so there\'s nothing to sign up for."',
     );
     expect(system).toMatch(/specification of the right outcome/i);
-    expect(system).toMatch(/never speaks a year/i);
+    expect(system).toMatch(/says a year only when a date falls outside the call's year/i);
   });
 });

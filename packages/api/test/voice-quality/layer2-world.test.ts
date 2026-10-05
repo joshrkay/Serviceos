@@ -151,6 +151,21 @@ describe('#1613 — describeCorpusCall names the customer the line identified', 
     );
   });
 
+  it('matches the way the line does: last ten digits, primary or secondary phone', () => {
+    const base = loadLayer2Corpus().find((s) => s.id === 'known-customer-no-signup')!;
+    const customers = base.fixtures.customers as Array<Record<string, unknown>>;
+    const script = {
+      ...base,
+      callerId: '+15555550777',
+      fixtures: {
+        ...base.fixtures,
+        customers: [{ ...customers[0], primaryPhone: '5555550303', secondaryPhone: '(555) 555-0777' }],
+      },
+    };
+
+    expect(describeCorpusCall(script)).toContain('identified by caller ID as Maria Alvarez');
+  });
+
   it('an unknown caller-ID stays a customer of the business with no name', () => {
     const script = loadLayer2Corpus().find((s) => s.id === 'find-or-create-lead-unknown-caller')!;
 

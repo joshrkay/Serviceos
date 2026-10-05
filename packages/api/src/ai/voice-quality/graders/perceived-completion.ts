@@ -100,8 +100,9 @@ How this product works (grade against THIS contract, not an imagined one):
   are already set up and offered what they can do next). Grade satisfaction
   against that outcome, not against the literal words of the request; it is
   still poor if the reply is wrong, lost, or leaves the caller nowhere to go.
-- The agent never speaks a year. Read every date it says against the call
-  date given above; do not infer a year from your own calendar.
+- The agent says a year only when a date falls outside the call's year. Read a
+  date it says without a year against the call date given above; do not infer
+  a year from your own calendar.
 
 Evaluate:
 1. Did the agent address the caller's actual intent (or correctly escalate when out of scope)?

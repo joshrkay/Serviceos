@@ -138,16 +138,22 @@ export function corpusCallMoment(script: VoiceQualityScript): Date {
 function identifiedCallerName(script: VoiceQualityScript): string | undefined {
   if (script.callerIdBlocked || !script.callerId) return undefined;
   const callerId = normalizePhone(script.callerId);
-  const customers = (script.fixtures.customers ?? []) as Array<Record<string, unknown>>;
-  const matches = customers.filter(
-    (c) => typeof c.primaryPhone === 'string' && normalizePhone(c.primaryPhone) === callerId,
-  );
+  if (callerId.length < 7) return undefined;
+  // InMemoryCustomerRepository.findByPhoneNormalized's rule: the last ten
+  // digits, tolerant of a missing country code, on either phone.
+  const target = callerId.slice(-10);
+  const tolerantMatch = (raw: unknown): boolean => {
+    if (typeof raw !== 'string') return false;
+    const stored = normalizePhone(raw);
+    return stored.length >= 7 && (stored.endsWith(target) || target.endsWith(stored));
+  };
+  const customers = script.fixtures.customers as Array<Record<string, unknown>>;
+  const matches = customers.filter((c) => tolerantMatch(c.primaryPhone) || tolerantMatch(c.secondaryPhone));
   if (matches.length !== 1) return undefined;
   const match = matches[0]!;
+  const text = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
   const displayName =
-    typeof match.displayName === 'string' && match.displayName.trim()
-      ? match.displayName.trim()
-      : [match.firstName, match.lastName].filter((p) => typeof p === 'string' && p).join(' ').trim();
+    text(match.displayName) || [text(match.firstName), text(match.lastName)].filter(Boolean).join(' ') || text(match.companyName);
   return displayName || undefined;
 }
 
@@ -171,7 +177,7 @@ export function describeCorpusCall(script: VoiceQualityScript): string {
     day: 'numeric',
     year: 'numeric',
   }).format(corpusCallMoment(script));
-  return `${caller}\nCall date: ${date} (the agent speaks no year; read every date it says against this date).`;
+  return `${caller}\nCall date: ${date} (a date the agent says without a year is read against this date).`;
 }
 
 export function buildLayer2ProcessorWorld(

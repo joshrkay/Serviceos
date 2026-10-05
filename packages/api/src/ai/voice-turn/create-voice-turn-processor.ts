@@ -2060,34 +2060,43 @@ export function createVoiceTurnProcessor(
   /**
    * #1613 — a caller the line identified by caller-ID IS a customer record;
    * the name the recogniser heard for them is not (Layer 2 run 37323734649
-   * read Jane Smith's booking back "for James Smith"). For that caller the
-   * record's display name is what the readback speaks and what the draft
-   * carries — it overrides the transcribed `customerName` in the resolved
-   * refs the FSM merges over the classifier's entities. Customer line only:
-   * the owner and a trusted operator name OTHER customers, and a record this
+   * read Jane Smith's booking back "for James Smith"). When such a caller
+   * names a customer on the customer line, that is themselves (D-036 (1).3:
+   * identity outranks words — an S1 caller only ever hears their own
+   * account; naming another customer is refused upstream, #1600): the
+   * resolver is pinned to their record so the heard name is never looked up
+   * against the tenant's other customers, and the record's display name is
+   * what the readback speaks and the draft carries. Customer line only: the
+   * owner and a trusted operator name OTHER customers, and a record this
    * call's ask_caller turn just created is only as good as what was heard.
-   * The heard name never touches the record.
+   * The heard name never touches the record. Returns the record name, or
+   * undefined when the turn is not an identified caller naming a customer.
    */
-  async function bindIdentifiedCallerRecordName(
+  const identifiedCallerNameByRecord = new WeakMap<VoiceSession, { customerId: string; name: string | undefined }>();
+  async function identifiedCallerRecordName(
     session: VoiceSession,
     tenantId: string,
     entities: Record<string, unknown>,
-    refs: Record<string, string>,
-  ): Promise<void> {
-    if (classifierProfileForSession(session) !== 'caller') return;
-    if (!session.customerId || session.callerCreatedThisCall === true) return;
+  ): Promise<string | undefined> {
+    if (classifierProfileForSession(session) !== 'caller') return undefined;
+    const customerId = session.customerId;
+    if (!customerId || session.callerCreatedThisCall === true) return undefined;
     const heard = typeof entities.customerName === 'string' ? entities.customerName.trim() : '';
-    if (!heard || !deps.customerRepo) return;
-    const record = await deps.customerRepo.findById(tenantId, session.customerId).catch(() => null);
-    const name = record?.displayName.trim();
-    if (!name) return;
-    if (name !== heard) {
+    if (!heard || !deps.customerRepo) return undefined;
+    const cached = identifiedCallerNameByRecord.get(session);
+    let name = cached && cached.customerId === customerId ? cached.name : undefined;
+    if (!cached || cached.customerId !== customerId) {
+      const record = await deps.customerRepo.findById(tenantId, customerId).catch(() => null);
+      name = record?.displayName.trim() || undefined;
+      identifiedCallerNameByRecord.set(session, { customerId, name });
+    }
+    if (name && name !== heard) {
       logger.info('speechTurn: identified caller heard under another name; reading back the record', {
         sessionId: session.id,
-        customerId: session.customerId,
+        customerId,
       });
     }
-    refs.customerName = name;
+    return name;
   }
 
   /**
@@ -2105,8 +2114,14 @@ export function createVoiceTurnProcessor(
     entities: Record<string, unknown>,
     pinnedRefs?: Record<string, string>,
   ): Promise<CallingAgentEvent> {
-    const resolution = await runTurnResolution(session, tenantId, intent, entities, pinnedRefs);
-    await bindIdentifiedCallerRecordName(session, tenantId, entities, resolution.refs);
+    // #1613 — an identified caller's record is pinned for the resolver (no
+    // lookup of the heard name) and named in the refs; `pinnedRefs` below
+    // keeps its own meaning (a disambiguation pick) for the not-found rule.
+    const recordName = await identifiedCallerRecordName(session, tenantId, entities);
+    const resolverPins =
+      recordName && session.customerId ? { ...(pinnedRefs ?? {}), customerId: session.customerId } : pinnedRefs;
+    const resolution = await runTurnResolution(session, tenantId, intent, entities, resolverPins);
+    if (recordName) resolution.refs.customerName = recordName;
     const pending = pendingAmbiguityFrom(resolution);
     if (pending) {
       return {

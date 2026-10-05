@@ -18,5 +18,8 @@ describe('#1613 — S1 queued-request close in the corpus', () => {
 
     expect(close).toContain("I've passed that along to our team, and someone will confirm it with you shortly.");
     expect(close).not.toMatch(/I've drafted/);
+    // The field is graded as the agent's line (caller-experience fallback,
+    // "the right reply matches: …"): a plain spoken line, never meta-prose.
+    expect(close).not.toMatch(/[#"]/);
   });
 });

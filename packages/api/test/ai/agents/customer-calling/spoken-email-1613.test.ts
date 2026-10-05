@@ -31,13 +31,25 @@ describe('#1613 — normalizeSpokenEmail', () => {
     expect(normalizeSpokenEmail('  oppeaceatacme.com ')).toBe('oppeaceatacme.com');
     expect(normalizeSpokenEmail('the usual one')).toBe('the usual one');
   });
+
+  it('never glues surrounding words into an address — a spoken address is word, symbol, word, …', () => {
+    expect(normalizeSpokenEmail('the new one is ops at acme dot com')).toBe('the new one is ops at acme dot com');
+    expect(normalizeSpokenEmail('jane dot smith at example dot com please')).toBe(
+      'jane dot smith at example dot com please',
+    );
+  });
+
+  it('understands the two-word Spanish underscore it spells with', () => {
+    expect(normalizeSpokenEmail('ops guion bajo team arroba acme punto com')).toBe('ops_team@acme.com');
+  });
 });
 
 describe('#1613 — spokenEmail spells the address for the caller', () => {
   it.each([
     ['ops@acme.com', 'en', 'o-p-s at acme dot com'],
     ['jane.smith@example.com', 'en', 'j-a-n-e dot s-m-i-t-h at example dot com'],
-    ['ops_team2@acme-hvac.co.uk', 'en', 'o-p-s underscore t-e-a-m-2 at acme-hvac dot co dot uk'],
+    ['ops_team2@acme-hvac.co.uk', 'en', 'o-p-s underscore t-e-a-m-2 at acme dash hvac dot co dot uk'],
+    ['ops_team@acme.com', 'es', 'o-p-s guion bajo t-e-a-m arroba acme punto com'],
     ['ops@acme.com', 'es', 'o-p-s arroba acme punto com'],
   ] as const)('"%s" (%s) → "%s"', (address, lang, spelled) => {
     expect(spokenEmail(address, lang)).toBe(spelled);

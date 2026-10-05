@@ -480,7 +480,8 @@ export async function buildVoiceProposalPayload(
   for (const [key, value] of Object.entries(entities)) {
     if (RESERVED_ENVELOPE_KEYS.has(key)) continue;
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-      flat[key] = value;
+      // #1613 — a spoken address ("ops at acme dot com") is drafted as the address.
+      flat[key] = key === 'email' && typeof value === 'string' ? normalizeSpokenEmail(value) : value;
     }
   }
 

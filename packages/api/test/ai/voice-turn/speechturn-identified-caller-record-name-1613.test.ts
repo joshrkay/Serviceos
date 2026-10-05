@@ -24,6 +24,7 @@ import { InMemorySettingsRepository, type TenantSettings } from '../../../src/se
 import { renderTtsText } from '../../../src/ai/agents/customer-calling/tts-copy';
 import type { LLMGateway, LLMRequest } from '../../../src/ai/gateway/gateway';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
+import type { EntityResolver } from '../../../src/ai/resolution/entity-resolver';
 
 const TENANT = 'tenant-1613-record-name';
 const CALL_SID = 'CA-1613-record-name';
@@ -65,7 +66,7 @@ afterEach(() => {
   for (const s of stores.splice(0)) s.dispose();
 });
 
-async function callFrom(opts: { ownerLine?: boolean }) {
+async function callFrom(opts: { ownerLine?: boolean; alsoJames?: boolean }) {
   const store = new VoiceSessionStore({ startInterval: false });
   stores.push(store);
   const customerRepo = new InMemoryCustomerRepository();
@@ -80,6 +81,22 @@ async function callFrom(opts: { ownerLine?: boolean }) {
     { tenantId: TENANT, firstName: 'Jane', lastName: 'Smith', primaryPhone: JANE_PHONE, createdBy: 'seed' },
     customerRepo,
   );
+  // A tenant that also has a James Smith, and a resolver (as app.ts wires
+  // PgEntityResolver) that finds him by name — the heard name must never be
+  // looked up against other customers for an identified caller.
+  let entityResolver: EntityResolver | undefined;
+  if (opts.alsoJames) {
+    const james = await createCustomer(
+      { tenantId: TENANT, firstName: 'James', lastName: 'Smith', primaryPhone: '+15555550999', createdBy: 'seed' },
+      customerRepo,
+    );
+    entityResolver = {
+      resolve: async ({ kind, reference }) =>
+        kind === 'customer' && /james/i.test(reference)
+          ? { kind: 'resolved', candidate: { id: james.id, kind: 'customer', label: 'James Smith', score: 1 } }
+          : { kind: 'not_found', reference },
+    } as EntityResolver;
+  }
   const session = store.create(TENANT, 'telephony', {
     callSid: CALL_SID,
     ...(opts.ownerLine ? { ownerSession: true } : {}),
@@ -99,6 +116,7 @@ async function callFrom(opts: { ownerLine?: boolean }) {
     proposalRepo,
     customerRepo,
     settingsRepo,
+    ...(entityResolver ? { entityResolver } : {}),
     now: () => new Date('2026-05-01T12:00:00.000Z'),
   });
   const turn = (speechResult: string) =>
@@ -131,6 +149,16 @@ describe('#1613 — an identified caller is read back and drafted by their recor
     expect(proposal?.proposalType).toBe('create_appointment');
     expect(proposal?.payload).toMatchObject({ customerId: jane.id, customerName: 'Jane Smith' });
     expect((await customerRepo.findById(TENANT, jane.id))?.displayName).toBe('Jane Smith');
+  });
+
+  it('binds the draft to the caller even when the heard name is another real customer', async () => {
+    const { turn, proposalRepo, jane } = await callFrom({ alsoJames: true });
+    await turn("Hi, this is Jane Smith. I'd like to schedule a service appointment for next Tuesday at 2pm.");
+
+    await turn("Yes, that's right.");
+
+    const [proposal] = await proposalRepo.findByTenant(TENANT);
+    expect(proposal?.payload).toMatchObject({ customerId: jane.id, customerName: 'Jane Smith' });
   });
 
   it('the owner line keeps the spoken name — there the owner names someone else', async () => {

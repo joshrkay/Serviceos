@@ -16,7 +16,7 @@
  * The phrase completes "you'd like to …" / "usted desea …".
  */
 import type { SessionLanguage } from './tts-copy';
-import { normalizeSpokenEmail, spokenEmail } from './spoken-email';
+import { normalizeSpokenEmail } from './spoken-email';
 
 type Entities = Record<string, unknown>;
 type Phrase = (e: Entities) => string;
@@ -107,7 +107,7 @@ const EN: Record<string, Phrase> = {
     const changes = list(
       CUSTOMER_FIELDS_EN.flatMap(([key, label]) => {
         const v = text(e, key);
-        return v ? [`${label} to ${customerFieldValue(key, v, 'en')}`] : [];
+        return v ? [`${label} to ${customerFieldValue(key, v)}`] : [];
       }),
       'and',
     );
@@ -256,12 +256,13 @@ function durationEn(minutes: number): string {
 }
 
 /**
- * #1613 — a new email address is spelled for the caller ("o-p-s at acme dot
- * com"), after normalising a spoken form, so a misheard letter is audible at
- * the readback; every other customer field is spoken as given.
+ * #1613 — a new email address is carried as the ADDRESS ("ops at acme dot
+ * com" → ops@acme.com), so chat text, transcript and card agree with the
+ * draft; the speech layer spells it for the caller (ai/tts/speakable-text.ts).
+ * Every other customer field is spoken as given.
  */
-function customerFieldValue(key: string, value: string, lang: SessionLanguage): string {
-  return key === 'updatedEmail' ? spokenEmail(normalizeSpokenEmail(value), lang) : value;
+function customerFieldValue(key: string, value: string): string {
+  return key === 'updatedEmail' ? normalizeSpokenEmail(value) : value;
 }
 
 const CUSTOMER_FIELDS_EN: ReadonlyArray<[string, string]> = [
@@ -428,7 +429,7 @@ const ES: Record<string, Phrase> = {
     const changes = list(
       CUSTOMER_FIELDS_ES.flatMap(([key, label]) => {
         const v = text(e, key);
-        return v ? [`${label}${who ? ` de ${who}` : ''} a ${customerFieldValue(key, v, 'es')}`] : [];
+        return v ? [`${label}${who ? ` de ${who}` : ''} a ${customerFieldValue(key, v)}`] : [];
       }),
       'y',
     );

@@ -31,6 +31,20 @@ describe('#1613 — update_customer drafts the normalised email', () => {
     expect(result.payload).toMatchObject({ customerId: CUSTOMER_ID, email: 'ops@acme.com' });
   });
 
+  it("create_customer's `email` entity is normalised the same way", async () => {
+    const result = await buildVoiceProposalPayload(
+      {
+        intent: 'create_customer' as const,
+        proposalType: 'create_customer' as const,
+        entities: { displayName: 'Acme Corp', email: 'ops at acme dot com', phone: '+15555550312' },
+        envelope: { sessionId: 'sess-1' },
+      },
+      deps,
+    );
+
+    expect(result.payload).toMatchObject({ name: 'Acme Corp', email: 'ops@acme.com' });
+  });
+
   it('a written address keeps its form, lower-cased', async () => {
     const result = await buildVoiceProposalPayload(input({ updatedEmail: 'Ops@Acme.com' }), deps);
 
