@@ -524,6 +524,11 @@ export const TTS_COPY = {
     en: "That job isn't on your schedule, so I can't read it out.",
     es: 'Ese trabajo no está en su agenda, así que no puedo leerlo.', // es: new 1604
   },
+  // A named job with no live visit in the window (completed, canceled, none booked).
+  next_job_no_visit: {
+    en: 'That job has no upcoming visit on the schedule.',
+    es: 'Ese trabajo no tiene ninguna visita programada.', // es: new 1604
+  },
   next_job_latest_note: {
     en: 'Latest note: {{note}}',
     es: 'Última nota: {{note}}', // es: new 1604

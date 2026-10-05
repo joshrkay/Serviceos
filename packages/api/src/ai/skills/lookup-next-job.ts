@@ -207,7 +207,7 @@ export async function lookupNextJob(
     .sort((a, b) => a.scheduledStart.getTime() - b.scheduledStart.getTime());
   const next = candidates[0];
   if (!next) {
-    const summary = ttsCopy('next_job_none', lang);
+    const summary = ttsCopy(input.jobId ? 'next_job_no_visit' : 'next_job_none', lang);
     await record('none', 0, summary);
     return { status: 'none', summary, data: {} };
   }

@@ -301,4 +301,19 @@ describe('lookupNextJob skill', () => {
     expect(JSON.stringify(res)).not.toContain('Priya');
     expect(JSON.stringify(res)).not.toContain('Mill Lane');
   });
+
+  it('a technician naming their OWN job whose only visit is completed hears that it has no upcoming visit', async () => {
+    const deps = await fixtures({
+      jobs: [makeJob({}), PATEL.job],
+      appointments: [makeAppointment({ status: 'completed' }), PATEL.appointment],
+    });
+
+    const res = await lookupNextJob(
+      { tenantId: TENANT, technicianId: ME, jobId: 'job-keller', timezone: TZ, now: NOW },
+      deps,
+    );
+
+    expect(res.status).toBe('none');
+    expect(res.summary).toBe('That job has no upcoming visit on the schedule.');
+  });
 });
