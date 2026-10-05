@@ -15,6 +15,7 @@ import { fetchIntegrations, type AccountingIntegrationSummary } from '../../api/
 import { SuppliersSheet } from '../jobs/SuppliersSheet';
 import { apiFetch } from '../../utils/api-fetch';
 import { AiMinutesCard } from './AiMinutesCard';
+import { CallQualityCard } from './CallQualityCard';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
@@ -1560,6 +1561,16 @@ export function SettingsPage() {
         <div className="mb-4">
           <AiMinutesCard canManage={me?.role === 'owner'} />
         </div>
+
+        {/* #1602 — production call quality: nightly-graded sample of real
+            answered calls against the 85% gate. The API is owner-only
+            (tenant:manage), so only owners mount it — no guaranteed-403
+            fetch for dispatchers and technicians. */}
+        {me?.role === 'owner' && (
+          <div className="mb-4">
+            <CallQualityCard />
+          </div>
+        )}
 
         {/* Settings sections */}
         {SECTIONS.map(section => (

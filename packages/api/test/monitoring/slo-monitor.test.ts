@@ -9,6 +9,7 @@ import {
   evaluateQueueStaleness,
   evaluateSweepLag,
   evaluateTurnLatency,
+  evaluateGradedPassRate,
   estimateTurnLatencyP95,
   runSloMonitor,
   type SloThresholds,
@@ -24,6 +25,8 @@ const thresholds: SloThresholds = {
   sweepLagMin: 15,
   turnLatencyP95Ms: 3500,
   turnLatencyMinSample: 30,
+  gradedPassRateMin: 0.85,
+  gradedPassRateMinSample: 10,
 };
 
 const noopLogger: Logger = {
@@ -186,6 +189,28 @@ describe('evaluateTurnLatency', () => {
   });
 });
 
+describe('evaluateGradedPassRate (#1602 — 7-day production graded pass rate vs the Layer 2 gate)', () => {
+  it('breaches when fewer than 85% of graded calls passed, with enough graded calls', () => {
+    const r = evaluateGradedPassRate({ total: 20, passed: 16 }, thresholds);
+    expect(r).not.toBeNull();
+    expect(r!.rule).toBe('voice_graded_pass_rate_7d');
+    expect(r!.breached).toBe(true);
+    expect(r!.value).toBeCloseTo(0.8);
+    expect(r!.severity).toBe('warning');
+    expect(r!.details).toEqual({ passed: 16, total: 20, threshold: 0.85 });
+  });
+
+  it('does not breach at the gate (85% passes the gate)', () => {
+    const r = evaluateGradedPassRate({ total: 20, passed: 17 }, thresholds);
+    expect(r!.breached).toBe(false);
+  });
+
+  it('sample floor: fewer than 10 graded calls in the window is not judged', () => {
+    expect(evaluateGradedPassRate({ total: 9, passed: 0 }, thresholds)).toBeNull();
+    expect(evaluateGradedPassRate({ total: 0, passed: 0 }, thresholds)).toBeNull();
+  });
+});
+
 describe('runSloMonitor', () => {
   const buildDeps = (overrides: Partial<SloMonitorDeps> = {}): SloMonitorDeps & {
     alert: ReturnType<typeof vi.fn>;
@@ -197,6 +222,7 @@ describe('runSloMonitor', () => {
       getSweepLastSuccessMs: () => Date.now() - 15_000,
       processRole: 'worker',
       getTurnLatencySnapshot: vi.fn().mockResolvedValue(null),
+      getGradedPassRate: vi.fn().mockResolvedValue({ total: 0, passed: 0 }),
       alert,
       thresholds,
       logger: noopLogger,
@@ -205,10 +231,15 @@ describe('runSloMonitor', () => {
     } as SloMonitorDeps & { alert: ReturnType<typeof vi.fn> };
   };
 
-  it('healthy tick: evaluates all three rules and alerts nobody', async () => {
+  it('healthy tick: evaluates every always-on rule and alerts nobody', async () => {
     const deps = buildDeps();
     const result = await runSloMonitor(deps);
-    expect(result.evaluated).toEqual(['call_completion_rate', 'queue_staleness', 'sweep_lag']);
+    expect(result.evaluated).toEqual([
+      'call_completion_rate',
+      'queue_staleness',
+      'sweep_lag',
+      'voice_graded_pass_rate_7d',
+    ]);
     expect(result.breached).toEqual([]);
     expect(deps.alert).not.toHaveBeenCalled();
   });
@@ -246,9 +277,30 @@ describe('runSloMonitor', () => {
     });
     const result = await runSloMonitor(deps);
     // Completion rule skipped, staleness still evaluated + breached.
-    expect(result.evaluated).toEqual(['queue_staleness', 'sweep_lag']);
+    expect(result.evaluated).toEqual(['queue_staleness', 'sweep_lag', 'voice_graded_pass_rate_7d']);
     expect(result.breached).toEqual(['queue_staleness']);
     expect(deps.alert).toHaveBeenCalledTimes(1);
+  });
+
+  it('#1602: a 7-day graded pass rate under the gate pages the operator, read over a 7-day window', async () => {
+    const nowDate = new Date('2026-10-05T08:00:00Z');
+    const getGradedPassRate = vi.fn().mockResolvedValue({ total: 12, passed: 9 });
+    const deps = buildDeps({
+      getGradedPassRate,
+      now: () => nowDate,
+      // Keep the sweep heartbeat fresh relative to the injected clock.
+      getSweepLastSuccessMs: () => nowDate.getTime() - 15_000,
+    });
+    const result = await runSloMonitor(deps);
+    expect(getGradedPassRate).toHaveBeenCalledWith(new Date('2026-09-28T08:00:00Z'));
+    expect(result.breached).toEqual(['voice_graded_pass_rate_7d']);
+    expect(deps.alert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rule: 'voice_graded_pass_rate_7d',
+        severity: 'warning',
+        details: expect.objectContaining({ passed: 9, total: 12 }),
+      }),
+    );
   });
 
   it('sample-floor completion result (null) is simply not evaluated as a breach', async () => {

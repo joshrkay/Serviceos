@@ -203,6 +203,13 @@ export function readProviderAttemptTrail(err: unknown): ProviderAttemptTrail | u
  * guard doesn't demand a tenantId that genuinely doesn't exist for these.
  * If a real per-tenant call site for one of these is ever added, remove it
  * from this set (the guard should track it like every other taskType).
+ *
+ * #1602 — the production grader (`voice/quality/grade-voice-session.ts`)
+ * now runs `voice_quality_judge` / `voice_quality_perceived_completion` on
+ * real tenants' calls, but it wraps the gateway and stamps the real tenantId
+ * on every request before it gets here, so that path never relies on this
+ * exemption; the offline harness still calls these with no tenant (see
+ * test/ai/gateway/layer2-gateway.test.ts), so they stay listed.
  */
 const HARNESS_ONLY_TASK_TYPES: ReadonlySet<string> = new Set([
   'voice_quality_judge',
