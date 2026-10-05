@@ -2814,6 +2814,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // memo + chat from the SAME materialItemRepo add_material writes
     // through (see the execution-handler registry call above).
     materialItemRepo,
+    // #1604 — lookup_next_job reads the visit's service address + access
+    // notes and the job's latest internal note, on every surface.
+    locationRepo,
+    noteRepo,
     // Mirrors the telephony adapter wiring: every surface writes the same
     // lookup_events analytics rows.
     lookupEvents: lookupEventService,
