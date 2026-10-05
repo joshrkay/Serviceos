@@ -61,8 +61,12 @@ import { resetConfig } from '../../src/shared/config';
  * day-of/+3d/+7d payment-failed emails) and the overage-settlement
  * reconciliation sweep (retries stale settlements, backfills gap periods).
  * Both register once per worker-role boot; web/voice stay at zero.
+ * 24 → 25 (#1602): the nightly voice-quality grading sweep
+ * (`SWEEP_LOCK.voiceQualityGrading`, `createVoiceQualityGradingWorker().handle()`
+ * every 30 min, gated to the nightly hour inside the worker) — one more
+ * leader-gated, `shouldRunWorkers`-only interval; web/voice stay at zero.
  */
-const EXPECTED_WORKER_INTERVALS_HERMETIC = 24;
+const EXPECTED_WORKER_INTERVALS_HERMETIC = 25;
 
 describe('characterization — background interval registration', () => {
   const originalDatabaseUrl = process.env.DATABASE_URL;

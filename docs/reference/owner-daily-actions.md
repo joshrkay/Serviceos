@@ -94,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **63** |
+| Owner-only routes in code | **65** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **7** |
-| `cadence: occasional` | **54** |
+| `cadence: occasional` | **56** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **7** |
 
@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 63,
+  "ownerOnlyRoutes": 65,
   "daily": 2,
   "onboarding": 7,
-  "occasional": 54,
+  "occasional": 56,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 7
 }
@@ -147,6 +147,8 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `PATCH /api/entity-aliases/:id/deactivate` | occasional | Revokes a learned tenant alias — a correction to what the AI inferred, not a step in a normal day. Owner-only per the router's own header ("Owner-only revoke path for learned tenant aliases"). **Gated inside the handler, not by a middleware guard**, so the executed-guard derivation cannot see it; declared in `IN_HANDLER_OWNER_ROUTES` and cross-checked against the mounted app and the source. | false | none | |
 | `GET /api/evaluation/shadow-comparisons` | occasional | Internal AI-evaluation surface; not part of running the business. | false | none | |
 | `GET /api/settings/packs/` | occasional | Configuration read. | false | none | |
+| `GET /api/voice/quality/` | occasional | Reads the production call-quality score (#1602): 7/30-day graded pass rates against the 85% gate and the last graded calls with the judge's reason. A read-only check on how the AI is doing — nothing in a normal day forces it; the SLO monitor pages the operator when the rate drops. | false | none | |
+| `POST /api/voice/quality/grade` | occasional | On-demand run of the nightly call-quality grading sampler for this tenant (#1602), bounded by the same daily cap. Discretionary — the nightly pass does this unprompted. | false | none | |
 | `GET /api/settings/texting-registration/` | occasional | Reads the texting-registration status and any carrier rejection reasons (#1564). Owner-only because it returns the submitted business identity. No normal day forces it. | false | none | |
 | `PATCH /api/job-forms/templates/:id` | occasional | Job-form template configuration. | false | none | |
 | `PATCH /api/settings/language` | occasional | One-time language preference. | false | none | |

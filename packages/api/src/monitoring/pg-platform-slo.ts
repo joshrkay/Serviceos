@@ -24,7 +24,34 @@ export interface CallOutcomeCounts {
   completedish: number;
 }
 
+export interface GradedPassCounts {
+  /** Production calls graded (voice_session_grades) at/after the window start. */
+  total: number;
+  /** …of which every graded criterion passed. */
+  passed: number;
+}
+
 export class PgPlatformSloRepository extends PgBaseRepository {
+  /**
+   * #1602 — cross-tenant graded-call counts for the voice_graded_pass_rate_7d
+   * rule. Windowed on `graded_at` (when the nightly worker judged the call),
+   * so a run that grades a backlog shows up in the window it ran in.
+   */
+  async gradedPassRate(windowStart: Date): Promise<GradedPassCounts> {
+    return this.withCrossTenantSweep(async (client) => {
+      const res = await client.query<{ total: string; passed: string }>(
+        `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE passed) AS passed
+           FROM voice_session_grades
+          WHERE graded_at >= $1`,
+        [windowStart],
+      );
+      return {
+        total: Number(res.rows[0]?.total ?? 0),
+        passed: Number(res.rows[0]?.passed ?? 0),
+      };
+    });
+  }
+
   /**
    * Terminal call-outcome counts across ALL tenants for sessions that ended
    * at/after `windowStart`. Sessions with `outcome IS NULL` (still open, or

@@ -8,10 +8,29 @@ import { PgCallUsageRepository } from '../billing/call-usage-events';
 import { PgOverageCapStore } from '../billing/overage-cap';
 import { isOverageCapReached } from '../billing/call-usage-pricing';
 import { readTenantBillingState } from '../billing/tenant-billing-state';
+import { samePhone } from './activation';
+import { isOwnerLineAttested } from '../telephony/stir-attestation';
 
 export interface VoiceGateInput {
   tenantId: string;
   callSid: string;
+  /**
+   * #1605 — the caller's E.164 number. Used only to recognize the owner's
+   * own test call while the tenant is not_live (see the not_live branch
+   * below); every other gate decision is unaffected by it. Optional so
+   * existing callers that predate #1605 keep compiling.
+   */
+  from?: string | null;
+  /**
+   * #1605 / #1223 — Twilio's `StirVerstat` for this call. Caller-ID is
+   * spoofable (that's the whole reason #1223 requires full attestation
+   * before granting owner-line authority elsewhere), and
+   * tenant_settings.business_phone defaults to the tenant's own DID at
+   * provisioning — so without this check, spoofing From=To would satisfy
+   * the owner/business-number match with no secret at all. The not_live
+   * bypass below requires `isOwnerLineAttested` on top of the phone match.
+   */
+  stirVerstat?: string | null;
 }
 
 export interface VoiceGateResult {
@@ -33,14 +52,16 @@ export interface VoiceGateDeps {
 }
 
 /**
- * Composes Gate A (subscription), go-live gate, and Gate B (usage caps) for
- * the telephony /voice webhook. Setup blocks return voicemail TwiML upstream;
- * usage caps forward to the owner (see VoiceGateResult.forwardTo).
+ * Composes Gate A (subscription), the go-live gate — which carries its own
+ * narrow, fully-attested owner-test-call bypass (#1605, see the `!liveAt`
+ * branch below) — and Gate B (usage caps) for the telephony /voice webhook.
+ * Setup blocks return voicemail TwiML upstream; usage caps forward to the
+ * owner (see VoiceGateResult.forwardTo).
  */
 export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
   const ledger = new PgCallUsageRepository(deps.pool);
   const overageCaps = new PgOverageCapStore(deps.pool);
-  return async ({ tenantId, callSid }) => {
+  return async ({ tenantId, callSid, from, stirVerstat }) => {
     const tenant = await readTenantBillingState(deps.pool, tenantId);
     const rawStatus = tenant?.status ?? null;
     const status = normalizeStatus(rawStatus);
@@ -67,6 +88,30 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
 
     const liveAt = await loadVoiceAgentLiveAt(deps.pool, tenantId);
     if (!liveAt) {
+      // #1605 — the onboarding test-call step can only complete when a
+      // voice_inbound session actually ends (deriveOnboardingStatus /
+      // isTestCallDone), and go-live only auto-fires on a session end
+      // (maybeAutoGoLiveOnInboundEnd) — but every call is blocked right
+      // here until go-live, including the owner's own test call. That's a
+      // deadlock the owner could only break by Skip-ping the step and
+      // manually flipping "Turn on AI answering" blind. So: recognize the
+      // owner's own verified caller-ID (their cell or the tenant's business
+      // number — same two columns activation.ts already treats as
+      // "verified, not a real customer") and let THAT call through as an
+      // AI-answered test session. Every other caller still goes to
+      // voicemail until go-live, exactly as before.
+      //
+      // Requires full STIR/SHAKEN attestation (#1223's own bar for
+      // owner-line authority) on top of the phone match — caller-ID alone
+      // is spoofable, and business_phone defaults to the tenant's own DID
+      // at provisioning, so phone-match alone would let anyone spoofing
+      // From=To through with no secret at all. A genuine owner on a
+      // SHAKEN-capable carrier gets A-attestation automatically; a missing
+      // or partial attestation fails closed to the pre-#1605 behavior
+      // (voicemail) rather than granting the bypass.
+      if (isOwnerLineAttested(stirVerstat) && (await isOwnersOwnNumber(deps.pool, tenantId, from))) {
+        return { allowed: true };
+      }
       return block(deps, {
         tenantId,
         callSid,
@@ -181,6 +226,27 @@ async function block(
   return input.forwardTo === undefined
     ? { allowed: false, reason: input.reason }
     : { allowed: false, reason: input.reason, forwardTo: input.forwardTo };
+}
+
+/**
+ * #1605 — true when `from` is the tenant owner's verified cell or their own
+ * business number (tenant_settings.owner_phone / business_phone — the same
+ * two columns `activation.ts` treats as "verified, not a real customer").
+ * `from` absent/empty never matches (no caller-ID → no bypass).
+ */
+async function isOwnersOwnNumber(
+  pool: Pool,
+  tenantId: string,
+  from: string | null | undefined,
+): Promise<boolean> {
+  if (!from) return false;
+  const res = await pool.query<{ owner_phone: string | null; business_phone: string | null }>(
+    `SELECT owner_phone, business_phone FROM tenant_settings WHERE tenant_id = $1`,
+    [tenantId],
+  );
+  const row = res.rows[0];
+  if (!row) return false;
+  return samePhone(from, row.owner_phone) || samePhone(from, row.business_phone);
 }
 
 const VALID_STATUSES = new Set(['trialing', 'active', 'past_due', 'canceled', 'incomplete']);

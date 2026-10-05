@@ -7444,6 +7444,64 @@ export const MIGRATIONS = {
             AND ae.metadata->'changedKeys' ? 'escalationSettings'
        );
   `,
+
+  // #1602 — production voice-quality grades. One row per graded production
+  // call: per-criterion pass/fail + the judge's rationale (criteria JSONB),
+  // the model that judged it and what it cost. Written by the nightly
+  // grading worker / the owner's on-demand trigger, read by
+  // GET /api/voice/quality and the platform SLO monitor's 7-day graded pass
+  // rate. tenant_settings gains the per-tenant cost bounds the sampler
+  // honours (NULL = defaults 20% / 20 per day, see
+  // voice/quality/voice-session-grade-store.ts). 304 is #1598's.
+  '305_voice_session_grades': `
+    CREATE TABLE IF NOT EXISTS voice_session_grades (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      session_id UUID NOT NULL REFERENCES voice_sessions(id) ON DELETE CASCADE,
+      graded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      passed BOOLEAN NOT NULL,
+      criteria JSONB NOT NULL,
+      rubric_version TEXT NOT NULL DEFAULT 'v1',
+      model TEXT NOT NULL,
+      judge_calls INTEGER NOT NULL CHECK (judge_calls >= 0),
+      cost_micro_cents BIGINT NOT NULL DEFAULT 0 CHECK (cost_micro_cents >= 0),
+      trigger_kind TEXT NOT NULL CHECK (trigger_kind IN ('nightly', 'manual')),
+      call_ended_at TIMESTAMPTZ NOT NULL,
+      outcome TEXT,
+      UNIQUE (tenant_id, session_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_voice_session_grades_tenant_graded
+      ON voice_session_grades (tenant_id, graded_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_voice_session_grades_tenant_call_ended
+      ON voice_session_grades (tenant_id, call_ended_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_voice_session_grades_graded_at
+      ON voice_session_grades (graded_at);
+    -- The eligibility read correlates each ended call to its disclosure row
+    -- and its timing markers by session id; neither table had that path.
+    CREATE INDEX IF NOT EXISTS idx_consent_events_tenant_session
+      ON consent_events (tenant_id, voice_session_id) WHERE voice_session_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_tenant_session
+      ON call_transcript_turns (tenant_id, session_id) WHERE session_id IS NOT NULL;
+    ALTER TABLE voice_session_grades ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE voice_session_grades FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_voice_session_grades ON voice_session_grades;
+    CREATE POLICY tenant_isolation_voice_session_grades ON voice_session_grades
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS voice_quality_sample_rate_pct INTEGER;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS voice_quality_daily_cap INTEGER;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_voice_quality_sample_rate_pct_range,
+      ADD CONSTRAINT tenant_settings_voice_quality_sample_rate_pct_range
+        CHECK (voice_quality_sample_rate_pct IS NULL
+               OR voice_quality_sample_rate_pct BETWEEN 0 AND 100) NOT VALID;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_voice_quality_daily_cap_nonneg,
+      ADD CONSTRAINT tenant_settings_voice_quality_daily_cap_nonneg
+        CHECK (voice_quality_daily_cap IS NULL OR voice_quality_daily_cap >= 0) NOT VALID;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -61,6 +61,9 @@ Sentry→Slack/DM rules in `docs/runbooks/alerting.md`) and, optionally,
 | `SLO_CALL_COMPLETION_MIN_SAMPLE` | `5` | Sample floor before completion rule can breach |
 | `SLO_QUEUE_STALE_MIN` | `15` | Pending job age (min) that counts as a stuck queue |
 | `SLO_SWEEP_LAG_MIN` | `15` | Sweep-heartbeat age (min) treated as a wedged worker loop |
+| `SLO_VOICE_GRADED_PASS_MIN` | `0.85` | Min 7-day production graded call pass rate (#1602; the Layer 2 gate) |
+| `SLO_VOICE_GRADED_MIN_SAMPLE` | `10` | Graded-call sample floor before the pass-rate rule can breach |
+| `VOICE_QUALITY_NIGHTLY_HOUR_UTC` | `8` | UTC hour of the nightly call-quality grading pass |
 | `SLO_ALERT_COOLDOWN_MIN` | `60` | Per-rule re-page cooldown |
 
 ## Web service (build / runtime)
