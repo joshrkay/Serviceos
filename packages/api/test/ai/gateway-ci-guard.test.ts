@@ -5,6 +5,9 @@
  *   - exits 0 when no direct calls exist
  *   - exits non-zero when a direct `new OpenAI(` or
  *     `client.chat.completions.create` call is planted
+ *
+ * #1589 — KNOWN FLAKY under the full parallel suite (slow execSync shell-outs
+ * under CI contention); passes reliably alone. See docs/testing/flaky-tests.md.
  */
 
 import { execSync } from 'child_process';
