@@ -411,3 +411,45 @@ describe('VQ2-010 — gradePerceivedCompletion', () => {
     ).rejects.toThrow(/perceived-completion|schema|invalid/i);
   });
 });
+
+// #1613 — Layer 2 run 37323734649: known-customer-no-signup was "poor" on all
+// three runs ("incorrectly stated there's nothing to sign up for, failing to
+// address the caller's intent"). The judge HAD the script's expected answer,
+// rendered as "Turn 1: intent=create_customer, …, answer matches "…"", and
+// read the classification label as the outcome owed to the caller. The
+// expectation now names the classification as a label and the expected reply
+// as the right outcome, and the system prompt says the spec is what to grade
+// against. The year rule the criterion-12 judge gets is stated here too.
+describe('#1613 — the judge grades against the scripted outcome, not the literal request', () => {
+  it('describes the expectation as classified intent + the right reply, and says the spec is the outcome', async () => {
+    const { gateway, provider } = createMockLLMGateway(verdict('good', 0));
+    const script = makeScript({
+      turns: [
+        {
+          caller: 'Hi, can I sign up?',
+          expected: {
+            intent: 'create_customer',
+            alsoAcceptedIntents: ['lookup_account_summary'],
+            escalates: false,
+            spokenAnswerMatches: "I've got you in our system already, so there's nothing to sign up for.",
+          },
+          hangupAfter: false,
+        },
+      ],
+    });
+
+    await gradePerceivedCompletion({ observation: makeObservation(), script, gateway });
+
+    const [call] = provider.getCalls();
+    const system = call.messages.find((m) => m.role === 'system')!.content;
+    const user = call.messages.find((m) => m.role === 'user')!.content;
+    expect(user).toContain(
+      "Expected outcome (the product's specification for this call; a reply matching it is the caller getting what they came for):",
+    );
+    expect(user).toContain(
+      'Turn 1: the request is classified as create_customer (also accepted: lookup_account_summary); escalates: false; the right reply matches: "I\'ve got you in our system already, so there\'s nothing to sign up for."',
+    );
+    expect(system).toMatch(/specification of the right outcome/i);
+    expect(system).toMatch(/says a year only when a date falls outside the call's year/i);
+  });
+});

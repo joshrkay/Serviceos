@@ -281,3 +281,46 @@ describe('P11-001 — lookupBalance skill', () => {
     });
   });
 });
+
+// #1613 — Layer 2 run 37323734649 (lookup-invoices-balance): "Your current
+// balance is $972, due May 15" was judged short of the expected answer twice
+// in three runs for naming neither the invoice nor its number. With one open
+// invoice the balance IS that invoice, so the reply names it.
+describe('#1613 — a single open invoice is named in the balance reply', () => {
+  it('speaks the invoice number with the amount and due date', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    await seedOpenInvoice(jobRepo, invoiceRepo, {
+      tenantId: 'tenant-1',
+      customerId: 'cust-1',
+      amountCents: 97200,
+      invoiceNumber: 'INV-3001',
+    });
+
+    const result = await lookupBalance(
+      { tenantId: 'tenant-1', customerId: 'cust-1' },
+      { jobRepo: jobRepo as JobRepository, invoiceRepo },
+    );
+
+    expect(result.status).toBe('found');
+    expect(result.summary).toMatch(/^Your current balance is \$972\.00 on invoice INV-3001, due [A-Z][a-z]+ \d{1,2}\.$/);
+  });
+
+  it('en español, nombra la factura', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    await seedOpenInvoice(jobRepo, invoiceRepo, {
+      tenantId: 'tenant-1',
+      customerId: 'cust-1',
+      amountCents: 97200,
+      invoiceNumber: 'INV-3001',
+    });
+
+    const result = await lookupBalance(
+      { tenantId: 'tenant-1', customerId: 'cust-1', language: 'es' },
+      { jobRepo: jobRepo as JobRepository, invoiceRepo },
+    );
+
+    expect(result.summary).toContain('La factura es INV-3001.');
+  });
+});
