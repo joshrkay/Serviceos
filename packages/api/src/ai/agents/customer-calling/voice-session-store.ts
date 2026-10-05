@@ -235,15 +235,16 @@ export interface VoiceSession {
   /**
    * #1600 (3) — the caller referred to a CANCELLED appointment of theirs and
    * was offered a new booking ("would you like to book a new one?"). Holds
-   * the request's words and the booking details already given (the new day
-   * anchored to the cancelled visit's time) until they answer
+   * the request's words, the booking details already given (the new day
+   * anchored to the cancelled visit's time) and the classifier's confidence
+   * for that request until they answer
    * (create-voice-turn-processor.ts `handlePendingRebookOffer`).
    */
   rebookOffer?: {
     heldUtterance: string;
     cancelledAppointmentId: string;
     entities: Record<string, unknown>;
-    reasks: number;
+    confidence: number;
   };
   /**
    * #1223 — Twilio's STIR/SHAKEN verdict (`StirVerstat`) from the inbound

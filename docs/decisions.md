@@ -1655,13 +1655,16 @@ same exported helpers — never in a transport adapter and never in the simulato
 the line still outranks the words.** D-036 (1).3 stands: a verified caller-ID customer's spoken
 `customerName` never retargets a lookup or a draft. What changes is what the caller HEARS. When
 an S1 caller identified by caller-ID names a customer who is clearly not the account on the
-line (the spoken name scores below the resolver's confirm band, `TAU_ENT_CONFIRM_LOW`, against
-the account's display, first and last names — the #1331 matcher), the agent says
+line — a name the caller ACTUALLY SAID (the classifier's `customerName` must appear in the
+utterance and not be a generic word such as "the customer", since a model may emit a placeholder
+for a request that names nobody) of which neither the whole nor any single word confidently matches
+the account's display, first or last name (`TAU_ENT`, the #1331 matcher) — the agent says
 "I can only help with the account on this line." and asks what else it can help with. It never
 confirms or denies that the named customer exists, speaks nothing of either account in reply,
-drafts nothing, and does not hand off. A name that plausibly IS the caller (their own name, a
-household surname, a spelling the resolver would ask to confirm) is not refused — the #1331
-identity check and D-036 (1).3 handle it as before. The owner line, a resolved phone actor,
+drafts nothing, and does not hand off. A name that
+plausibly IS the caller (their own name, a household member sharing the surname — "John Smith" on
+Jane Smith's line — a first-name-only mention) is not refused — the #1331 identity check and
+D-036 (1).3 handle it as before. The owner line, a resolved phone actor,
 in-app sessions and a record minted on this call (no name to compare) are never refused.
 Spanish callers hear the catalogued translation. Audited as
 `agent.calling.<state>.cross_customer_refused`.
@@ -1674,30 +1677,35 @@ line that it will get a person, moves the call to `escalating`, notifies the on-
 with reason `abuse_repeated_intent` (skill reason `abuse_detected`), and audits the count. A
 phone transport dispatches no further turns after a hand-off, so the AI's part of the call ends
 there; the leg is bridged to a person or closes on the existing no-answer fallback. The count
-is per intent, not per utterance wording, so rephrasing does not reset it; lookups, confirmations,
-corrections, operator requests and emergencies are not counted. The owner line and in-app
+is per intent, not per utterance wording, so rephrasing does not reset it; a request that is read
+back, confirmed and drafted DOES reset it (five distinct bookings on one call are not spam);
+lookups, confirmations, corrections, operator requests and emergencies are never counted. The owner line and in-app
 sessions are not subject to it (an operator repeating a request is not spam).
 
 **Decision (3) — A caller who refers to a cancelled appointment is told so and offered a new
 one.** When an S1 caller identified by caller-ID asks to reschedule, cancel or confirm an
 appointment and the reference resolves to no live appointment of theirs but DOES match one of
-their own `canceled` appointments (the named day, or their only cancelled visit when they have
-no live ones), the agent says "That appointment was cancelled on <date> — would you like to
+their own `canceled` appointments (the named day — today's weekday spoken after noon still finds
+today's visit — or their ONLY cancelled visit when they have no live ones; completed and no-show
+history is not live, and several cancelled visits are never guessed between), the agent says "That appointment was cancelled on <date> — would you like to
 book a new one?" (the cancellation date is the row's last update, tenant-local, rendered in the
-session language) and holds the offer on the session. Nothing is drafted on that turn. A yes
+session language) and holds the offer on the session. Nothing is drafted on that turn. A PLAIN yes
 starts the normal booking flow deterministically (no model call): a `create_appointment` with
-whatever day/time the caller already gave — "Wednesday at the same time" is anchored to the
+whatever day/time the caller already gave and the real classifier confidence of the request — "Wednesday at the same time" is anchored to the
 cancelled visit's clock time (#1540 §1's rule) — read back by the FSM and drafted only on the
-caller's confirmation, exactly as any other booking. A no is acknowledged and the call stays
-open; anything else is treated as a new request. Audited as
+caller's confirmation, exactly as any other booking. A plain no is acknowledged and the call stays
+open; anything else ("yes, but can we do Thursday instead?") is a new request and is classified. Audited as
 `agent.calling.<state>.stale_appointment_offer`.
 
 **Decision (4) — Identity hand-offs are categorised as identity failures, not low confidence.**
 `mapNotifyReasonToSkillReason('caller_identification_failed')` now returns
 `max_retries_exceeded`, the category the in-app adapter already uses for an unresolved caller
-identity (`toEscalationReason('caller_identity_unresolved')`), so a dispatcher receiving a
-claims-existing-customer, archived-customer or identify-caller-threw hand-off is no longer told
-the AI "had low confidence".
+identity (`toEscalationReason('caller_identity_unresolved')`), so a claims-existing-customer,
+archived-customer or identify-caller-threw hand-off is recorded (`escalation.requested` metadata,
+the `escalation_triggered` event) under the same category in-app uses. The dispatcher-facing
+summary vocabulary (`EscalationContext['reason']`) still folds both categories into
+`low_confidence_intent`, exactly as it does for in-app today; a dedicated identity reason there is
+a separate follow-up, not part of this decision.
 
 **Consequences.** The Layer 1 scripts `cross-customer-extraction`, `spam-create-customer` and
 `stale-appointment-just-cancelled` are the specification of (1)–(3) and pass against production

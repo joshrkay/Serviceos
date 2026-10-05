@@ -2589,7 +2589,6 @@ export class TwilioGatherAdapter {
         session,
         opts.speechResult,
         opts.tenantId,
-        turnState,
       );
       if (rebook?.kind === 'respond') {
         sideEffectsAll.push(...rebook.effects);
@@ -2767,6 +2766,7 @@ export class TwilioGatherAdapter {
           session,
           classifierEvent.intentType,
           classifierEvent.entities,
+          opts.speechResult,
           opts.tenantId,
         );
         if (refusalFx) {
@@ -2943,6 +2943,7 @@ export class TwilioGatherAdapter {
             intentType: classifierEvent.intentType,
             utterance: opts.speechResult,
             entities: classifierEvent.entities,
+            confidence: classifierEvent.confidence,
           },
           opts.tenantId,
         );

@@ -185,6 +185,40 @@ describe("#1600 (1) — an S1 caller naming another customer's account", () => {
     // No lookup ran on anyone's account.
     expect(h.events.filter((e) => e.type === 'lookup_executed')).toHaveLength(0);
   });
+
+  it('a placeholder name the caller never said (classifier "Customer") is not a cross-customer ask — the request proceeds', async () => {
+    // The hermetic/live classifier can emit a generic customerName; only a
+    // name the caller actually spoke can be a different customer.
+    const h = await makeHarness({
+      classifyJson: classify('draft_estimate', { customerName: 'Customer', summary: 'leaking water heater' }),
+      customers: [john()],
+      callerPhone: '+15555551003',
+    });
+    h.session.customerId = JOHN_ID;
+    h.session.machine.dispatch({ type: 'caller_known', customerId: JOHN_ID });
+
+    const fx = await h.turn('Hi, I need an estimate for a leaking water heater.');
+
+    expect(h.spoken(fx)).not.toContain('I can only help with the account on this line.');
+    expect(h.spoken(fx)).toContain('Is that right?');
+    expect(h.session.machine.currentState).toBe('intent_confirm');
+  });
+
+  it("a household member sharing the account's surname is not refused (D-042: 'a household surname … is not refused')", async () => {
+    // Account: John Smith. His wife asks about Jane Smith's appointment.
+    const h = await makeHarness({
+      classifyJson: classify('lookup_appointments', { customerName: 'Jane Smith' }),
+      customers: [john()],
+      callerPhone: '+15555551003',
+    });
+    h.session.customerId = JOHN_ID;
+    h.session.machine.dispatch({ type: 'caller_known', customerId: JOHN_ID });
+
+    const fx = await h.turn("When is Jane Smith's appointment?");
+
+    expect(h.spoken(fx)).not.toContain('I can only help with the account on this line.');
+    expect(h.session.machine.currentState).toBe('intent_capture');
+  });
 });
 
 describe('#1600 (2) — the same write request asked five times on one call', () => {
@@ -327,6 +361,123 @@ describe('#1600 (3) — a caller who refers to a cancelled appointment', () => {
     });
     // Drafted for the team, never booked live (U3's honest pending-booking close).
     expect(h.spoken(close)).toContain("Someone from our team will confirm it before it's booked");
+    // The synthesized booking carries the classifier's REAL confidence for the
+    // request (0.95 here), never a fabricated certainty — read where the FSM
+    // records it, the intent_classified audit row.
+    const bookingRows = h.auditRepo
+      .getAll()
+      .filter(
+        (a) =>
+          a.eventType === 'agent.calling.intent_capture.intent_classified' &&
+          (a.metadata as { intentType?: string }).intentType === 'create_appointment',
+      );
+    expect(bookingRows).toHaveLength(1);
+    expect((bookingRows[0]!.metadata as { confidence?: number }).confidence).toBe(0.95);
+  });
+
+  it('a yes that carries a different request ("Yes, but can we do Thursday at 10 instead?") is a new request, not the held booking', async () => {
+    const h = await makeHarness({
+      classifyJson: classify('reschedule_appointment', {
+        appointmentReference: 'Tuesday',
+        newDateTimeDescription: 'Wednesday at the same time',
+      }),
+      customers: [jane()],
+      callerPhone: '+15555550494',
+      now: CALL_MOMENT,
+      ...seeds,
+    });
+    h.session.customerId = JANE_ID;
+    h.session.machine.dispatch({ type: 'caller_known', customerId: JANE_ID });
+    await h.turn("Hi, this is Jane Smith. I'd like to reschedule my Tuesday appointment to Wednesday at the same time.");
+    const callsBefore = h.gateway.calls.length;
+
+    const fx = await h.turn('Yes, but can we do Thursday at 10 instead?');
+
+    // Classified as what it is — the Wednesday booking is NOT read back.
+    expect(h.gateway.calls.length).toBe(callsBefore + 1);
+    expect(h.spoken(fx)).not.toContain('Wednesday, May 6 at 2:00 PM');
+  });
+
+  it("the caller's cancelled visit is found when their only other history is a completed visit (completed/no-show is not 'live')", async () => {
+    const DONE_ID = '00000000-0000-4000-8000-000000000904';
+    const h = await makeHarness({
+      // No day named — "my appointment".
+      classifyJson: classify('reschedule_appointment', {
+        appointmentReference: 'the appointment',
+        newDateTimeDescription: 'next week',
+      }),
+      customers: [jane()],
+      callerPhone: '+15555550494',
+      now: CALL_MOMENT,
+      jobs: seeds.jobs,
+      appointments: [
+        ...seeds.appointments,
+        {
+          ...seeds.appointments[0]!,
+          id: DONE_ID,
+          scheduledStart: new Date('2025-11-03T21:00:00.000Z'),
+          scheduledEnd: new Date('2025-11-03T23:00:00.000Z'),
+          status: 'completed',
+          updatedAt: new Date('2025-11-03T23:30:00.000Z'),
+        } as Appointment,
+      ],
+    });
+    h.session.customerId = JANE_ID;
+    h.session.machine.dispatch({ type: 'caller_known', customerId: JANE_ID });
+
+    const fx = await h.turn('I need to reschedule my appointment to next week.');
+
+    expect(h.spoken(fx)).toContain('That appointment was cancelled on Friday, May 1');
+    expect(h.session.machine.currentState).toBe('intent_capture');
+  });
+
+  it('a same-day weekday spoken after noon still finds the visit cancelled today', async () => {
+    // Tuesday May 5, 3:00 PM Pacific; the 2:00 PM visit today was cancelled at 1:00 PM.
+    const TUESDAY_3PM = new Date('2026-05-05T22:00:00.000Z');
+    const h = await makeHarness({
+      classifyJson: classify('reschedule_appointment', {
+        appointmentReference: 'Tuesday',
+        newDateTimeDescription: 'Wednesday at the same time',
+      }),
+      customers: [jane()],
+      callerPhone: '+15555550494',
+      now: TUESDAY_3PM,
+      jobs: seeds.jobs,
+      appointments: [
+        { ...seeds.appointments[0]!, updatedAt: new Date('2026-05-05T20:00:00.000Z') } as Appointment,
+      ],
+    });
+    h.session.customerId = JANE_ID;
+    h.session.machine.dispatch({ type: 'caller_known', customerId: JANE_ID });
+
+    const fx = await h.turn("Hi, this is Jane Smith. I'd like to reschedule my Tuesday appointment to Wednesday at the same time.");
+
+    expect(h.spoken(fx)).toContain('That appointment was cancelled on Tuesday, May 5');
+  });
+});
+
+describe('#1600 (2) — a completed request is not a repeat', () => {
+  it('five distinct bookings, each confirmed and drafted, never hand off as abuse', async () => {
+    const h = await makeHarness({
+      classifyJson: classify('create_appointment', { dateTimeDescription: 'Tuesday at 2pm' }),
+      customers: [jane()],
+      callerPhone: '+15555550494',
+      now: new Date('2026-05-01T12:00:00.000Z'),
+    });
+    h.session.customerId = JANE_ID;
+    h.session.machine.dispatch({ type: 'caller_known', customerId: JANE_ID });
+
+    for (let i = 0; i < 4; i++) {
+      await h.turn('Book me a service visit on Tuesday at 2pm.');
+      await h.turn("Yes, that's right.");
+    }
+    expect(await h.proposalRepo.findByTenant(TENANT)).toHaveLength(4);
+
+    const fifth = await h.turn('And one more visit on Tuesday at 2pm, please.');
+
+    expect(h.spoken(fifth)).toContain('Is that right?');
+    expect(h.session.machine.currentState).toBe('intent_confirm');
+    expect(h.events.filter((e) => e.type === 'escalation_triggered')).toHaveLength(0);
   });
 });
 
