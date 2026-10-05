@@ -124,7 +124,63 @@ Verification (plan 2026-09-05-001 U2): dispatch one gate with a required
 secret deliberately blank → the issue appears; restore the secret and re-run →
 the issue closes.
 
+## Deploy retry: cancelled Deploy runs
+
+On 2026-10-05, three consecutive `Deploy` runs on `main` (#1592, #1612, #1614)
+all ended `failure` with individual jobs `cancelled` — not failed —
+matching GitHub's "The job was not acquired by Runner of type hosted even
+after multiple attempts" annotation. `deploy.yml`'s
+`concurrency.cancel-in-progress` is already `false`, so these were not
+self-cancellations; they were GitHub's hosted-runner pool failing to pick up
+the job. Production stayed three commits behind `main` with **no alert**
+until a human ran `gh run rerun --failed` by hand.
+
+`.github/workflows/deploy-retry.yml` closes that hole. It is a
+`workflow_run` workflow that fires when a `Deploy` run on `main` completes:
+
+1. It fetches the completed run's jobs (`gh api
+   repos/{owner}/{repo}/actions/runs/{id}/jobs`).
+2. `.github/scripts/deploy-retry-decision.ts`'s `shouldRetryDeploy()` decides
+   whether to retry: **yes** only when at least one job concluded
+   `cancelled`, **none** concluded `failure`, and the run's `run_attempt` is
+   still below the cap (`MAX_RUN_ATTEMPT = 3`, i.e. at most 2 automatic
+   retries per run — attempt 1 → 2 → 3, then stop). A genuine `failure` is
+   never auto-retried; that would mask a real break.
+3. On **yes**, the workflow runs `gh run rerun <id> --failed` and leaves a
+   comment on the triggering commit (built by `buildRetryComment()`) with
+   the run URL and the attempt transition.
+4. On **no** (including a clean `success`, a genuine `failure`, or a run
+   already at the retry cap), the workflow does nothing further.
+
+Why `gh run rerun --failed` is safe here even though `deploy.yml`'s header
+warns against resuming a cancelled `railway up`: a job GitHub marks
+`cancelled` never reached a completed `railway up` run — it was never
+acquired by a runner at all, or was torn down before finishing. GitHub's
+rerun starts a **fresh** job run for anything cancelled/failed (jobs that
+already succeeded, like `test`, are skipped by GitHub itself), so this never
+resumes or races a half-finished Railway deploy.
+
+Permissions are minimal: `actions: write` (read the run's jobs + trigger the
+rerun — write implies read for the Actions resource) and `contents: write`
+(`actions/checkout`, plus the commit-comments API, which GitHub's REST docs
+list under the "Contents" repository permission).
+
+**Gap not covered by this issue (filed, not built):** item 2 from #1631 — an
+alert when the latest successful prod deploy sha lags `origin/main` by more
+than N minutes (a `report-gate-failure.ts`-style staleness check) — is a
+separate signal from "a run got cancelled" (e.g. covers a human cancelling
+the retry workflow itself, or a 3rd cancellation past the cap) and was not
+cheap to add alongside the retry logic; see the PR body for #1631 for the
+follow-up.
+
+Triage: a comment appears on the head commit of a retried run; if the retry
+itself is cancelled/fails, after 2 automatic retries the run is left failed
+with no further action — check the Deploy run's Actions page and rerun by
+hand (`gh run rerun <id> --failed`) as before.
+
 ## Known limitations
 
 - The queue-depth alert is deferred to tier 2 (requires emitting a metric;
   see `docs/runbooks/launch-quality-bar.md` for tier promotion).
+- The deploy-lag alert (#1631 item 2: alert when prod lags `main` by more
+  than N minutes) is not yet built — see "Deploy retry" above.
