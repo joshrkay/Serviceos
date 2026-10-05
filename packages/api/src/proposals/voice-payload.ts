@@ -36,6 +36,7 @@
  * grounding result is described structurally by `VoiceLineItemGrounding` below
  * so no `ai/` type has to be named here.
  */
+import { normalizeSpokenEmail } from '../ai/agents/customer-calling/spoken-email';
 import type { ProposalType } from './proposal';
 import {
   isSystemSuppliedIdField,
@@ -479,7 +480,8 @@ export async function buildVoiceProposalPayload(
   for (const [key, value] of Object.entries(entities)) {
     if (RESERVED_ENVELOPE_KEYS.has(key)) continue;
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-      flat[key] = value;
+      // #1613 — a spoken address ("ops at acme dot com") is drafted as the address.
+      flat[key] = key === 'email' && typeof value === 'string' ? normalizeSpokenEmail(value) : value;
     }
   }
 
@@ -528,9 +530,13 @@ export async function buildVoiceProposalPayload(
   // leg. Without it the payload validated with NO CHANGE IN IT at all —
   // `updateCustomerPayloadSchema` requires only `customerId` — so an approved
   // "update Khan's email" executed as a silent no-op (register case cust-02).
+  // #1613 — a spoken email ("ops at acme dot com") is drafted as the address
+  // the readback spelled from (ai/agents/customer-calling/spoken-email.ts).
   for (const [source, target] of UPDATE_CUSTOMER_FIELD_ALIASES) {
     const value = nonEmptyString(entities[source]);
-    if (value && flat[target] === undefined) flat[target] = value;
+    if (value && flat[target] === undefined) {
+      flat[target] = target === 'email' ? normalizeSpokenEmail(value) : value;
+    }
   }
 
   // The resolved customer every record-linking handler reads off `customerId`.

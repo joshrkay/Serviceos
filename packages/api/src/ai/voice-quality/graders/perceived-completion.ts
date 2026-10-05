@@ -93,6 +93,16 @@ How this product works (grade against THIS contract, not an imagined one):
   readback question.
 - It is still a failure when the agent drafted the wrong thing, lost the
   request, gave wrong information, or left the caller without an answer.
+- The "Expected outcome" given with the transcript is the product's
+  specification of the right outcome for this call. A reply that matches its
+  expected answer gave the caller what they came for — even where it corrects
+  the literal request (an existing customer who asks to "sign up" is told they
+  are already set up and offered what they can do next). Grade satisfaction
+  against that outcome, not against the literal words of the request; it is
+  still poor if the reply is wrong, lost, or leaves the caller nowhere to go.
+- The agent says a year only when a date falls outside the call's year. Read a
+  date it says without a year against the call date given above; do not infer
+  a year from your own calendar.
 
 Evaluate:
 1. Did the agent address the caller's actual intent (or correctly escalate when out of scope)?
@@ -128,7 +138,7 @@ export async function gradePerceivedCompletion(
   // #1331 — persona + the corpus call date, the same context the
   // criterion-12 judge gets, so a spoken date is judged on the right calendar.
   const caller = describeCorpusCall(input.script);
-  const userPrompt = `${caller}\n\nFull call transcript:\n${transcript}\n\nExpected behavior (per spec):\n${expected}`;
+  const userPrompt = `${caller}\n\nFull call transcript:\n${transcript}\n\nExpected outcome (the product's specification for this call; a reply matching it is the caller getting what they came for):\n${expected}`;
 
   const response = await input.gateway.complete({
     taskType: 'voice_quality_perceived_completion',
@@ -241,15 +251,24 @@ function buildTranscriptSummary(
   return lines.join('\n');
 }
 
+/**
+ * #1613 — the classification is a LABEL for the request (what the caller
+ * literally asked); the expected reply is the OUTCOME owed to them. Rendered
+ * as "intent=create_customer, answer matches …" the judge read the label as
+ * the outcome and failed the correct "you're already set up" reply.
+ */
 function describeExpected(script: VoiceQualityScript): string {
   return script.turns
     .map((t, i) => {
       const intent = t.expected.intent ?? 'any';
-      const escalates = t.expected.escalates === undefined ? 'any' : String(t.expected.escalates);
-      const expectedAnswer = t.expected.spokenAnswerMatches
-        ? `, answer matches "${t.expected.spokenAnswerMatches}"`
+      const also = t.expected.alsoAcceptedIntents?.length
+        ? ` (also accepted: ${t.expected.alsoAcceptedIntents.join(', ')})`
         : '';
-      return `Turn ${i + 1}: intent=${intent}, escalates=${escalates}${expectedAnswer}`;
+      const escalates = t.expected.escalates === undefined ? 'any' : String(t.expected.escalates);
+      const reply = t.expected.spokenAnswerMatches
+        ? `; the right reply matches: "${t.expected.spokenAnswerMatches}"`
+        : '';
+      return `Turn ${i + 1}: the request is classified as ${intent}${also}; escalates: ${escalates}${reply}`;
     })
-    .join('; ');
+    .join('\n');
 }

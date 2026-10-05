@@ -2,6 +2,11 @@
  * §8.4 row 4.3 — "Given two users, when both act, then revision tokens order
  * the writes and presence shows who holds which card" (issue #1017).
  *
+ * Known-flaky (ONE case: "TTL/lease expiry releases the hold without an
+ * explicit clear, at real Redis" — real-Redis TTL timing under CI load,
+ * root cause unconfirmed); passes reliably alone. See
+ * docs/testing/flaky-tests.md.
+ *
  * The mocked-ioredis suite (test/dispatch/redis-presence-store.test.ts) pins
  * RedisDispatchPresenceStore's shape against a scripted fake — §12.4d: mocks
  * are never the only proof. This file drives the REAL class

@@ -15,6 +15,7 @@
  * See docs/testing/flaky-tests.md.
  */
 import { describe, it, expect, vi } from 'vitest';
+import { TTS_COPY } from '../../src/ai/agents/customer-calling/tts-copy';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -142,7 +143,7 @@ describe('#1540 §2 — gateway DOWN: a name-only identify turn does not wait on
 
     const r = await nameThenGas(h, speak);
 
-    expect(r.identifyReply).toContain('How can I help you today?');
+    expect(r.identifyReply).toContain(TTS_COPY.how_can_i_help.en);
     expect(r.identifyMs).toBeLessThan(PROMPT_TURN_MS);
     expect(session.machine.currentContext.escalationReason).toBe('life_safety_e1');
     expect(r.e1Reply).toContain('911');
@@ -164,7 +165,7 @@ describe('#1540 §2 — gateway DOWN: a name-only identify turn does not wait on
 
     const r = await nameThenGas(h, speak);
 
-    expect(r.identifyReply).toContain('How can I help you today?');
+    expect(r.identifyReply).toContain(TTS_COPY.how_can_i_help.en);
     expect(r.identifyMs).toBeLessThan(PROMPT_TURN_MS);
     expect(session.machine.currentContext.escalationReason).toBe('life_safety_e1');
     expect(r.e1Reply).toContain('911');

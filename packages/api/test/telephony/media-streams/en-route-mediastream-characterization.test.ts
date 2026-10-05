@@ -19,6 +19,7 @@
  * most likely to be using.
  */
 import { describe, it, expect, vi } from 'vitest';
+import { TTS_COPY } from '../../../src/ai/agents/customer-calling/tts-copy';
 import { TwilioGatherAdapter } from '../../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
@@ -135,7 +136,7 @@ describe('en_route on the media-streams transport (speechTurn seam)', () => {
     const spoken = ttsTexts(fx);
     expect(spoken.some((t) => t.includes('Sent the customer an on-my-way text'))).toBe(true);
     // Stays a conversation — the FSM never left intent_capture.
-    expect(spoken).toContain('Anything else I can help you with?');
+    expect(spoken).toContain(TTS_COPY.anything_else.en);
     expect(h.session.machine.currentState).toBe('intent_capture');
     // The SAME act as the app button: coordinator enqueue + audited actor.
     expect(bundle.coordinator.enqueueEnRouteNotice).toHaveBeenCalledWith(
