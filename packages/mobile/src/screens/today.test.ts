@@ -111,6 +111,20 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('Today technician screen', () => {
+  it('gives a technician their quick links — including the Assistant — since they have no Home tab (#1603)', async () => {
+    const { getByText, findByText } = render(createElement(Today));
+
+    await findByText('Rivera Family');
+    expect(getByText('Quick links')).toBeTruthy();
+    const assistant = getByText('Assistant').closest('button')!;
+    expect(assistant.className).toMatch(/\bmin-h-11\b/);
+    fireEvent.click(assistant);
+    expect(h.push).toHaveBeenCalledWith('/assistant');
+    // The rest of the persona's links ride along.
+    expect(getByText('Jobs')).toBeTruthy();
+    expect(getByText('Messages')).toBeTruthy();
+  });
+
   it('loads the day with me.internal_user_id and never the Clerk user id', async () => {
     render(createElement(Today));
 
@@ -139,9 +153,11 @@ describe('Today technician screen', () => {
     expect(getByText('Repair upstairs air conditioner')).toBeTruthy();
     expect(getByText('Sharing location for Rivera Family')).toBeTruthy();
 
-    // En route + three running-late chips (10/20/30) + Open job + Maps.
+    // En route + three running-late chips (10/20/30) + Open job + Maps, plus
+    // the technician's four quick links (Jobs / Messages / Schedule /
+    // Assistant — #1603). Every one of them meets the 44px contract.
     const buttons = Array.from(container.querySelectorAll('button'));
-    expect(buttons).toHaveLength(6);
+    expect(buttons).toHaveLength(10);
     for (const button of buttons) {
       expect(button.className).toMatch(/\bmin-h-11\b/);
       expect(button.className).not.toMatch(/\bmin-w-\[/);

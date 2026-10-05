@@ -424,6 +424,19 @@ export function scriptHermeticResponse(request: LLMRequest): string {
         },
       });
     }
+    // #1603 — the speaker's own day ("what's my next job", "what's on my
+    // schedule today", "what does my day look like"): the self-scoped
+    // `lookup_my_day` the shared dispatch answers for a technician. Scripted
+    // so the keyless Maestro device run hears a real answer, not a
+    // clarification card. A QUESTION about MY day only — "schedule the first
+    // appointment for Patel" / "add a job to my schedule" are writes and must
+    // keep falling through to the other rules.
+    const asksAboutOwnDay =
+      /^(what|whats|what's|when|where|how many|do i have|anything)\b/.test(lower.trim()) &&
+      /\bmy\s+(next\s+|first\s+)?(job|visit|stop|appointment|day|schedule)\b/.test(lower);
+    if (asksAboutOwnDay) {
+      return JSON.stringify({ intentType: 'lookup_my_day', confidence: 0.9, extractedEntities: {} });
+    }
     return JSON.stringify({ intentType: 'unknown', confidence: 0.2 });
   }
 

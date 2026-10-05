@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useMe } from '../src/hooks/useMe';
@@ -13,14 +13,19 @@ import { useAssistantController } from '../src/assistant/useAssistantController'
  * chip that deep-links into the EXISTING review screen, where the U1 lane gate
  * (money still confirms on-screen) is untouched. No new approval path.
  *
- * ai:run-gated: technicians lack the permission, so this screen is not in their
- * personaNav quick links and the tech persona is redirected to Today (the same
- * defense-in-depth pattern as app/schedule.tsx).
+ * ai:run-gated server-side. Every role holds `ai:run` (auth/rbac.ts, owner
+ * decision 2026-07-27), so since #1603 technicians use this screen too: the
+ * server scopes what it answers (own day via lookup_my_day; owner-grade
+ * lookups refuse with copy, never data) and a technician's proposals go to a
+ * permission holder. In-app there is still no voice-approval path (D-025
+ * ratifies owner voice approval on the PHONE line only — docs/decisions.md),
+ * and this role holds no proposals:approve. The persona differences here are
+ * copy only: the subtitle and the drafted-card labels.
  */
 export default function AssistantScreen() {
   const router = useRouter();
   const { me } = useMe();
-  const technicianOnly = me
+  const technician = me
     ? navModelFor({
         role: me.role,
         currentMode: me.current_mode,
@@ -28,16 +33,10 @@ export default function AssistantScreen() {
       }).persona === 'tech'
     : false;
 
-  useEffect(() => {
-    if (technicianOnly) router.replace('/(tabs)/today');
-  }, [technicianOnly, router]);
-
   const session = useAssistantController();
   const recorder = useRecorder();
   const [draft, setDraft] = useState('');
   const [holding, setHolding] = useState(false);
-
-  if (technicianOnly) return null;
 
   const { status, turns, proposalIds, error, sttUnavailable } = session;
   const idle = status === 'idle';
@@ -66,8 +65,9 @@ export default function AssistantScreen() {
     <View className="flex-1 bg-background px-6 pb-6 pt-24">
       <Text className="font-heading text-2xl font-semibold text-foreground">Assistant</Text>
       <Text className="mt-1 text-base text-mutedForeground">
-        Ask about your business or dictate an action. Anything with money or
-        messages still comes back for your approval.
+        {technician
+          ? 'Ask about your day or dictate a job update. Anything with money or messages goes to your office for approval.'
+          : 'Ask about your business or dictate an action. Anything with money or messages still comes back for your approval.'}
       </Text>
 
       <ScrollView className="mt-4 flex-1" contentContainerClassName="pb-4">
@@ -91,18 +91,22 @@ export default function AssistantScreen() {
         {proposalIds.length > 0 ? (
           <View className="mt-1">
             <Text className="mb-2 text-xs font-medium uppercase tracking-wide text-mutedForeground">
-              For your approval
+              {technician ? 'Sent to your office for approval' : 'For your approval'}
             </Text>
             <View className="flex-row flex-wrap">
               {proposalIds.map((id) => (
                 <Pressable
                   key={id}
                   accessibilityRole="button"
-                  accessibilityLabel="Review proposal"
+                  accessibilityLabel={technician ? 'View proposal' : 'Review proposal'}
                   onPress={() => router.push(`/proposals/${id}`)}
                   className="mb-2 mr-2 min-h-11 items-center justify-center rounded-full border border-border bg-card px-4 py-2"
                 >
-                  <Text className="text-base text-foreground">Review proposal</Text>
+                  {/* A technician holds no proposals:approve — the review screen
+                      is read-only for them, so the chip says so. */}
+                  <Text className="text-base text-foreground">
+                    {technician ? 'View proposal' : 'Review proposal'}
+                  </Text>
                 </Pressable>
               ))}
             </View>

@@ -267,3 +267,34 @@ describe('#1119 — hermetic confirm_intent is deterministic', () => {
     expect(result.confirmed).toBe(true);
   });
 });
+
+describe("#1603 — a technician's own day is a real lookup on the keyless gateway", () => {
+  // The Maestro device proof (packages/mobile/.maestro/tech-assistant-next-job.yaml)
+  // runs against a keyless API; without this rule "what's my next job" fell to
+  // `unknown` and the in-app Assistant minted a clarification card instead of
+  // answering. `lookup_my_day` is the self-scoped lookup the shared dispatch
+  // already answers for a technician (workers/voice-lookup-answer.ts).
+  it("scripts \"what's my next job\" as lookup_my_day above the FSM intent gate (TAU_INT 0.75)", async () => {
+    const provider = new MockLLMProvider(undefined, { hermetic: true });
+    for (const phrase of ["what's my next job", "what's on my schedule today"]) {
+      const res = await provider.complete(req('classify_intent', phrase));
+      const parsed = JSON.parse(res.content) as { intentType: string; confidence: number };
+      expect(parsed.intentType, phrase).toBe('lookup_my_day');
+      expect(parsed.confidence, phrase).toBeGreaterThanOrEqual(0.75);
+    }
+  });
+
+  it('does not swallow WRITE phrasings that merely mention a first/next appointment or my schedule', async () => {
+    const provider = new MockLLMProvider(undefined, { hermetic: true });
+    for (const phrase of [
+      'schedule the first appointment for Patel tomorrow',
+      'add a job to my schedule for Friday',
+    ]) {
+      const res = await provider.complete(req('classify_intent', phrase));
+      const parsed = JSON.parse(res.content) as { intentType: string };
+      // These are not day lookups; they fall through to whatever the other
+      // hermetic rules (or `unknown`) make of them.
+      expect(parsed.intentType, phrase).not.toBe('lookup_my_day');
+    }
+  });
+});

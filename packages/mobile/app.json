@@ -17,6 +17,7 @@
       "bundleIdentifier": "com.serviceos.app",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": ["audio"],
         "NSLocationWhenInUseUsageDescription": "Allow Rivet to use your location for field tracking while Today is open and to enable Tap to Pay and nearby card readers.",
         "NSBluetoothAlwaysUsageDescription": "Allow Rivet to connect to Stripe Terminal card readers.",
         "NSBluetoothPeripheralUsageDescription": "Allow Rivet to connect to Stripe Terminal card readers.",
