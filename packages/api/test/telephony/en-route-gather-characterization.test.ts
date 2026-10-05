@@ -10,6 +10,7 @@
  * field is most likely to be holding.
  */
 import { describe, it, expect, vi } from 'vitest';
+import { TTS_COPY } from '../../src/ai/agents/customer-calling/tts-copy';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -119,7 +120,7 @@ describe('en_route on the Gather path', () => {
 
     expect(twiml).toContain('Sent the customer an on-my-way text');
     // Stays a conversation — next <Gather>, FSM never left intent_capture.
-    expect(twiml).toContain('Anything else I can help you with?');
+    expect(twiml).toContain(TTS_COPY.anything_else.en);
     expect(h.session.machine.currentState).toBe('intent_capture');
     // The SAME act as the app button: coordinator enqueue + audited actor.
     expect(bundle.coordinator.enqueueEnRouteNotice).toHaveBeenCalledWith(

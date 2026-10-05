@@ -32,6 +32,7 @@ import {
   LANGUAGE_SWITCH_ACK,
   LANGUAGE_SWITCH_CAP_LINE,
   LANGUAGE_UNSUPPORTED_LINE,
+  TTS_COPY,
   VOICE_APPROVAL_REFUSAL,
 } from '../../../../src/ai/agents/customer-calling/tts-copy';
 import type { LLMGateway, LLMResponse } from '../../../../src/ai/gateway/gateway';
@@ -43,8 +44,7 @@ const USER = 'user-x';
  * The exact sentence the closing state spoke on all three broken rows. Any
  * appearance of it on these turns is the regression.
  */
-const GENERIC_CLOSING_LINE =
-  "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?";
+const GENERIC_CLOSING_LINE = TTS_COPY.generic_proposal_confirmation.en;
 
 /** The sweep's auto-sent second turn. */
 const SWEEP_FOLLOW_UP = "Yes, that's correct.";

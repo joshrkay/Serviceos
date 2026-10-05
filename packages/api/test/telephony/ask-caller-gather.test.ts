@@ -11,6 +11,7 @@
  * now runs on the Gather path so the caller advances to intake.
  */
 import { describe, it, expect, vi } from 'vitest';
+import { TTS_COPY } from '../../src/ai/agents/customer-calling/tts-copy';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -98,7 +99,7 @@ describe('ask_caller on the Gather/PSTN path', () => {
 
     // 3. The next TwiML is the intake prompt on a fresh <Gather>, NOT a bare
     //    ask_caller reprompt loop.
-    expect(twiml).toContain('How can I help you today?');
+    expect(twiml).toContain(TTS_COPY.how_can_i_help.en);
     expect(twiml).toContain('<Gather');
   });
 
