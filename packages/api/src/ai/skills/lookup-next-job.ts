@@ -96,7 +96,8 @@ export interface NextJobData {
 
 export type LookupNextJobResult =
   | { status: 'found'; summary: string; data: NextJobData }
-  | { status: 'none'; summary: string; data: Record<string, never> };
+  | { status: 'none'; summary: string; data: Record<string, never> }
+  | { status: 'error'; summary: string; data: { error: string } };
 
 const DEFAULT_TIMEZONE = 'America/New_York';
 /** How far ahead "next" looks, in days from the start of today. */
@@ -171,6 +172,30 @@ export async function lookupNextJob(
     }
   };
 
+  try {
+    return await readNextJob(input, deps, { timezone, now, lang, record });
+  } catch (err) {
+    const summary = ttsCopy('next_job_error', lang);
+    await record('error', 0, summary);
+    return {
+      status: 'error',
+      summary,
+      data: { error: err instanceof Error ? err.message : String(err) },
+    };
+  }
+}
+
+async function readNextJob(
+  input: LookupNextJobInput,
+  deps: LookupNextJobDeps,
+  ctx: {
+    timezone: string;
+    now: Date;
+    lang: SessionLanguage;
+    record: (status: 'found' | 'none', count: number, summary: string) => Promise<void>;
+  },
+): Promise<LookupNextJobResult> {
+  const { timezone, now, lang, record } = ctx;
   const today = localDateString(now, timezone);
   const windowStart = resolveDayWindow(today, timezone).start;
   const windowEnd = new Date(windowStart.getTime() + LOOKAHEAD_DAYS * 24 * 3_600_000);

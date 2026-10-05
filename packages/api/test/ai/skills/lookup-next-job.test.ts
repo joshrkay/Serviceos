@@ -316,4 +316,28 @@ describe('lookupNextJob skill', () => {
     expect(res.status).toBe('none');
     expect(res.summary).toBe('That job has no upcoming visit on the schedule.');
   });
+
+  it('a repository failure degrades to an honest error result (never a throw into the dispatch), and is recorded', async () => {
+    const deps = await fixtures({ jobs: [makeJob({})], appointments: [makeAppointment({})] });
+    const events = eventsSpy();
+    const broken = {
+      ...deps,
+      appointmentRepo: {
+        findByDateRange: async () => {
+          throw new Error('connection reset');
+        },
+      },
+      lookupEvents: events,
+    };
+
+    const res = await lookupNextJob({ tenantId: TENANT, technicianId: ME, timezone: TZ, now: NOW }, broken);
+
+    expect(res.status).toBe('error');
+    expect(res.summary).toBe("I'm having trouble pulling up your next job right now.");
+    if (res.status !== 'error') throw new Error('unreachable');
+    expect(res.data.error).toBe('connection reset');
+    expect(events.record).toHaveBeenCalledWith(
+      expect.objectContaining({ intent: 'lookup_next_job', resultStatus: 'error', resultCount: 0 }),
+    );
+  });
 });

@@ -429,6 +429,10 @@ const SNAPSHOT: Record<string, Pinned> = {
     en: 'That job has no upcoming visit on the schedule.',
     es: 'Ese trabajo no tiene ninguna visita programada.',
   },
+  next_job_error: {
+    en: "I'm having trouble pulling up your next job right now.",
+    es: 'Tengo dificultades para consultar su próximo trabajo en este momento.',
+  },
   next_job_latest_note: {
     en: 'Latest note: {{note}}',
     es: 'Última nota: {{note}}',
