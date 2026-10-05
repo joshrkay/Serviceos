@@ -129,6 +129,7 @@ import {
   OPERATOR_DRAFTED_FOR_REVIEW_COPY,
   INAPP_INCOMPLETE_DRAFT_COPY,
   type SessionLanguage,
+  AFTER_HOURS_CALLBACK_COPY,
 } from '../agents/customer-calling/tts-copy';
 import {
   CreateCustomerVoiceTaskHandler,
@@ -189,7 +190,7 @@ import {
 } from '../scheduling/place-hold';
 import type { FeasibilityDependencies } from '../../scheduling/feasibility-types';
 import { DEFAULT_TENANT_TIMEZONE, formatForReadback } from '../scheduling/resolve-datetime';
-import { checkBusinessHours } from '../../compliance/business-hours';
+import { checkBusinessHours, type BusinessHoursConfig } from '../../compliance/business-hours';
 import { parseOnboardingBusinessHours } from '../../telephony/business-hours-loader';
 import { updateAppointment } from '../../appointments/appointment';
 import type { TenantSettings } from '../../settings/settings';
@@ -4679,6 +4680,95 @@ export function createVoiceTurnProcessor(
     return archived;
   }
 
+  /**
+   * #1587 / D-040 — is the tenant closed right now? The same rule the
+   * compliance skill applies (`enforceCompliance`): the tenant's zone and
+   * business-hours schedule from settings, against the processor's clock. No
+   * schedule, no zone, or no settings → open (never "after hours" by accident).
+   */
+  async function tenantIsAfterHours(tenantId: string): Promise<boolean> {
+    if (!deps.settingsRepo) return false;
+    const settings = await deps.settingsRepo.findByTenant(tenantId).catch(() => null);
+    if (!settings?.timezone) return false;
+    const schedule = (settings as { businessHoursSchedule?: BusinessHoursConfig['schedule'] })
+      .businessHoursSchedule;
+    if (!schedule || schedule.length === 0) return false;
+    const now = deps.now ? deps.now() : new Date();
+    return !checkBusinessHours({ timezone: settings.timezone, schedule }, now).isOpen;
+  }
+
+  /**
+   * #1587 / D-040 §1 — the after-hours booking as a `callback` proposal (an
+   * S1-allowed type: it routes a human, never a mutation; its executor is a
+   * no-op plus audit). Payload per the `callback` contract: the reason, the
+   * caller's words, their number and the conversation. Best-effort: a persist
+   * failure is logged and the caller still hears the callback line.
+   */
+  async function mintAfterHoursCallback(
+    session: VoiceSession,
+    tenantId: string,
+    utterance: string,
+    entities: Record<string, unknown>,
+  ): Promise<void> {
+    if (!deps.proposalRepo) return;
+    const callerPhone = deps.callerPhoneResolver?.(session) ?? session.callerPhone;
+    const requestedService =
+      typeof entities.jobTitle === 'string' && entities.jobTitle.trim().length > 0
+        ? entities.jobTitle.trim()
+        : undefined;
+    try {
+      const tenantThresholdOverride = await resolveThresholdOverride(tenantId);
+      const proposal = buildProposal({
+        tenantId,
+        proposalType: 'callback',
+        payload: {
+          reason: 'after_hours',
+          transcript: utterance,
+          ...(requestedService ? { requestedService } : {}),
+          ...(callerPhone ? { callerPhone } : {}),
+          ...(session.conversationId ? { conversationId: session.conversationId } : {}),
+        },
+        summary: requestedService
+          ? `After-hours booking request — call back to schedule: ${requestedService}`
+          : 'After-hours booking request — call back to schedule',
+        sourceContext: {
+          source: 'calling-agent',
+          channel: 'telephony',
+          surface: 'S1',
+          sessionId: session.id,
+          ...(session.customerId ? { callerCustomerId: session.customerId } : {}),
+        },
+        createdBy: deps.systemActorId ?? 'calling-agent',
+        ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+      });
+      const stored = await deps.proposalRepo.create(proposal);
+      session.proposalIds.push(stored.id);
+      if (deps.auditRepo) {
+        try {
+          await deps.auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: deps.systemActorId ?? 'calling-agent',
+              actorRole: 'system',
+              eventType: 'voice.after_hours_callback_queued',
+              entityType: 'proposal',
+              entityId: stored.id,
+              correlationId: session.id,
+              metadata: { sessionId: session.id, intent: 'create_appointment' },
+            }),
+          );
+        } catch {
+          /* audit is best-effort */
+        }
+      }
+    } catch (err) {
+      logger.warn('after-hours callback: persist failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+      });
+    }
+  }
+
   /** #1567 — a caller with no prior customer record (identified by this call, or not at all). */
   function isNewCaller(session: VoiceSession): boolean {
     if (session.machine.currentContext.ownerSession === true || session.actorUserId) return false;
@@ -6089,6 +6179,25 @@ export function createVoiceTurnProcessor(
           appendAgentTts(deps.store, session.id, sideEffectsAll);
           return sideEffectsAll;
         }
+      }
+
+      // #1587 / D-040 §1 — after hours the AI answers, but a CALLER's booking
+      // request is not read back and drafted live: it becomes a `callback`
+      // proposal for the morning, minted on this turn (no readback, nobody
+      // paged), and the FSM stays in intent_capture for the next request.
+      // The owner line and trusted surfaces keep normal drafting.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT &&
+        SERVICE_AREA_BOOKING_INTENTS.has(classifierEvent.intentType) &&
+        isUntrustedS1Session(session) &&
+        (await tenantIsAfterHours(tenantId))
+      ) {
+        await mintAfterHoursCallback(session, tenantId, speechResult, classifierEvent.entities);
+        sideEffectsAll.push({ type: 'tts_play', payload: { text: AFTER_HOURS_CALLBACK_COPY } });
+        await executeSideEffects(session, sideEffectsAll, tenantId);
+        appendAgentTts(deps.store, session.id, sideEffectsAll);
+        return sideEffectsAll;
       }
 
       sideEffectsAll.push(...session.machine.dispatch(classifierEvent));

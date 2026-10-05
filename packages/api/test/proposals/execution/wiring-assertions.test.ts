@@ -79,14 +79,14 @@ describe('U5: voice handler wiring guard', () => {
   // it the guard would have (correctly, at the time) flagged it as
   // non-persisting. 'callback' is not voice-reachable via
   // INTENT_TO_PROPOSAL_TYPE today (it is minted by task handlers directly —
-  // 4 production files / 5 createProposal call sites / 7 total callback-
+  // 4 production files / 6 createProposal call sites / 8 total callback-
   // producing content branches: negotiation-task.ts (2 direct calls),
-  // complaint-task.ts (1), create-voice-turn-processor.ts (1 call, 2 of 3
-  // branches), and sms/negotiation/inbound-negotiation-handler.ts (1 call, 2
+  // complaint-task.ts (1), create-voice-turn-processor.ts (2 calls: the
+  // negotiation branch, 2 of 3 outcomes, and the #1587 / D-040 after-hours
+  // branch), and sms/negotiation/inbound-negotiation-handler.ts (1 call, 2
   // of 3 branches) — see proposals/execution/callback-handler.ts's class doc
-  // for the counting rule. text-mode-driver.ts also mints one but is the
-  // VQ-007 harness, excluded from every count above), so this is a
-  // hypothetical-reachability check, same as the test above used to be.
+  // for the counting rule), so this is a hypothetical-reachability check,
+  // same as the test above used to be.
   it('does NOT flag callback if a voice intent were ever mapped to it — it has a handler and reports fully wired', () => {
     expect(
       findDegradedVoiceHandlers(fullyWiredRegistry(), ['callback' as ProposalType]),

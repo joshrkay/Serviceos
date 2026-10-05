@@ -229,6 +229,16 @@ export const CALLER_INCOMPLETE_REQUEST_COPY =
   "I've passed that along, but a few details still need to be sorted out before it's final — someone from our team will follow up with you. Is there anything else I can help you with?";
 
 /**
+ * #1587 / D-040 §1 — spoken when a CALLER asks to book after business hours.
+ * The AI answers after hours by default (D-040); a booking request is not
+ * read back and drafted live but captured as a `callback` proposal for the
+ * morning. States only what is true: a callback is logged and a person will
+ * call to schedule — no booking, no confirmation, is promised.
+ */
+export const AFTER_HOURS_CALLBACK_COPY =
+  "We're closed right now, so I've logged a callback request — a team member will reach out to schedule your visit. Is there anything else I can help you with?";
+
+/**
  * es translations for the FSM's hardcoded sentences (exact-match). Kept
  * small and literal — anything not listed passes through in English rather
  * than risking a bad machine paraphrase.
@@ -245,6 +255,9 @@ export const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Claro — ¿cuál es el código postal de la dirección donde necesita el servicio?',
   [CALLER_REQUEST_QUEUED_COPY]:
     'Ya le pasé su solicitud a nuestro equipo, y alguien se la confirmará en breve. ¿Hay algo más en lo que pueda ayudarle?',
+  // #1587 / D-040 — the after-hours booking callback.
+  [AFTER_HOURS_CALLBACK_COPY]:
+    'Ahora mismo estamos cerrados, así que registré una solicitud de devolución de llamada — un miembro del equipo le contactará para programar su visita. ¿Hay algo más en lo que pueda ayudarle?',
   "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?":
     'Perfecto, ya quedó registrado. Recibirá una confirmación en breve. ¿Hay algo más en lo que pueda ayudarle?',
   'How can I help you today?': '¿En qué puedo ayudarle hoy?',

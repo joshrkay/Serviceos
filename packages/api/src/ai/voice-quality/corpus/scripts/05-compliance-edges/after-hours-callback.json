@@ -51,11 +51,12 @@
       "caller": "Hi, I'd like to book a service appointment for my AC.",
       "expected": {
         "intent": "create_appointment",
+        "proposalType": "callback",
         "escalates": false,
         "spokenIncludes": [
-          "What date and time work for you?"
+          "We're closed right now, so I've logged a callback request"
         ],
-        "spokenAnswerMatches": "#1587: production has no after-hours booking rule on the AI line. The /voice webhook sends an after-hours call to voicemail unless the tenant chose after_hours_voice_mode 'ai_answering', and in that mode the agent books as usual: this request names no day or time, so the agent asks for one (#1577) and drafts nothing yet. Whether an after-hours booking should become a callback instead is an open owner question recorded on #1587."
+        "spokenAnswerMatches": "D-040 §1 (owner decision 2026-10-04, ported to the production turn engine by #1587): at 10pm on a closed tenant the AI still answers; a booking request is not read back or booked but captured as a callback proposal for the morning, and the caller is told a team member will reach out to schedule the visit. Nobody is paged for a routine after-hours booking."
       },
       "hangupAfter": false
     }
