@@ -89,6 +89,7 @@ describe('POST /api/telephony/voice — §10 voiceGate', () => {
     expect(voiceGate).toHaveBeenCalledWith({
       tenantId: TENANT_ID,
       callSid: 'CA-gate-1',
+      from: baseParams.From,
     });
     expect(store.size()).toBe(1);
   });

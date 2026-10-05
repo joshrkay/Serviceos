@@ -193,6 +193,34 @@ First response:
 4. For offline / per-call latency forensics, use the voice-quality eval harness
    (`ai/voice-quality/audio-timings.ts`) and Twilio's per-call diagnostics.
 
+### 5. `voice_graded_pass_rate_7d` (warning)
+
+| | |
+|---|---|
+| Measures | Share of PRODUCTION calls graded by the nightly voice-quality worker (`voice_session_grades`, cross-tenant, windowed on `graded_at`) in the trailing 7 days whose every graded criterion passed. Grading reuses the Layer 2 harness judges (`ai/voice-quality/graders/*`: perceived completion + disposition on the stored transcript; floor #3 from stored timing markers) on a consent-gated, cost-capped sample of real calls — see `packages/api/src/voice/quality/`. |
+| Threshold | `SLO_VOICE_GRADED_PASS_MIN` (default `0.85` — the same 85% Layer 2 launch gate CI enforces) |
+| Sample floor | `SLO_VOICE_GRADED_MIN_SAMPLE` (default `10`) — below this many graded calls in the window the rule never breaches |
+
+This is the first production signal that calls are actually going well (#1602,
+assessment gap #9): CI graded synthetic calls; this grades a sample of the
+AI's real answered calls every night (`SWEEP_LOCK.voiceQualityGrading`, at
+`VOICE_QUALITY_NIGHTLY_HOUR_UTC`, default 08:00Z), bounded per tenant by
+`tenant_settings.voice_quality_sample_rate_pct` / `voice_quality_daily_cap`
+(defaults 20% / 20 per day). Only calls that carried the recording disclosure
+(`consent_events` recording/implicit/voice for the session, not later revoked)
+and were billable (`call_usage_events.billable` — the owner's own test calls
+are excluded) are graded. Transcripts only, never audio.
+
+The owner sees the same numbers per tenant at `GET /api/voice/quality` (the
+"Call quality" card on Settings) and can run the sampler on demand with
+`POST /api/voice/quality/grade`.
+
+First response:
+1. Open the tenant breakdown: `SELECT tenant_id, COUNT(*) FILTER (WHERE passed) AS passed, COUNT(*) AS graded FROM voice_session_grades WHERE graded_at >= now() - interval '7 days' GROUP BY 1 ORDER BY graded DESC;` — one tenant's bad week and a platform-wide drop are different incidents.
+2. Read the failing grades' `criteria` JSON: the judge's `rationale` names the signal (wrong information, dropped request, unanswered turn, >7s hang). Cross-check a couple of transcripts on `voice_sessions.transcript`.
+3. Platform-wide + recent deploy → suspect a prompt/model/skill change; the CI Layer 1/Layer 2 reports for that PR show whether the harness saw it. A `floor` criterion 3 failure cluster (hang) points at the turn pipeline / provider latency, not the agent's answers.
+4. Judge outage shows as `voice-quality-grading` warnings in the worker logs and a flat graded count, not as a low pass rate — the worker counts failures and never records a grade it could not produce.
+
 ## Verification (staging)
 
 1. Set `SLO_QUEUE_STALE_MIN=0.02` (≈1s) on staging, enqueue any job with the
