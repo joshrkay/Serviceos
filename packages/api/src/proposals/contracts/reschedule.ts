@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const rescheduleAppointmentPayloadSchema = z.object({
-  appointmentId: z.string().uuid(),
+  appointmentId: z.guid(),
   newScheduledStart: z.string().min(1),
   newScheduledEnd: z.string().min(1),
   newArrivalWindowStart: z.string().optional(),

@@ -55,9 +55,9 @@ export type DroppedCallSuppressedReason =
  */
 export const DroppedCallEventSchema = z.object({
   /** Tenant the dropped call belongs to (RLS scope). */
-  tenantId: z.string().uuid(),
+  tenantId: z.guid(),
   /** The voice_sessions row the recovery threads back to. */
-  voiceSessionId: z.string().uuid(),
+  voiceSessionId: z.guid(),
   /** Caller phone in E.164 (e.g. "+15551234567"). */
   callerE164: z.string().min(7),
   /** Which terminal outcome armed recovery. */

@@ -33,7 +33,7 @@ export const rejectProposalBodySchema = z.object({
 export type RejectProposalBody = z.infer<typeof rejectProposalBodySchema>;
 
 export const editProposalBodySchema = z.object({
-  edits: z.record(z.unknown()),
+  edits: z.record(z.string(), z.unknown()),
 });
 
 export type EditProposalBody = z.infer<typeof editProposalBodySchema>;

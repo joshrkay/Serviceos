@@ -14,13 +14,13 @@ import { z } from 'zod';
  */
 const batchJobSchema = z
   .object({
-    jobId: z.string().uuid(),
-    customerId: z.string().uuid(),
-    estimateId: z.string().uuid().optional(),
+    jobId: z.guid(),
+    customerId: z.guid(),
+    estimateId: z.guid().optional(),
     amountCents: z.number().int().min(0),
     discountCents: z.number().int().min(0).optional(),
     taxRateBps: z.number().int().min(0).max(10000).optional(),
-    lineItems: z.array(z.record(z.unknown())).min(1),
+    lineItems: z.array(z.record(z.string(), z.unknown())).min(1),
   })
   .passthrough();
 

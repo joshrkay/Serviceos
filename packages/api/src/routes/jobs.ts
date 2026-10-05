@@ -122,7 +122,7 @@ export function createJobRouter(
   const fromEstimateBodySchema = z
     .object({
       durationMin: z.number().int().positive().optional(),
-      technicianId: z.string().uuid().optional(),
+      technicianId: z.guid().optional(),
       scheduledStart: z.string().datetime().optional(),
       timezone: z.string().min(1).optional(),
     })

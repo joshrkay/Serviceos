@@ -27,7 +27,7 @@ export type TrainingAssetStatus = z.infer<typeof trainingAssetStatusSchema>;
 
 export const trainingAssetLabelsSchema = z.object({
   intent: z.string().min(1).optional(),
-  entities: z.record(z.unknown()).optional(),
+  entities: z.record(z.string(), z.unknown()).optional(),
   urgencyTier: z.enum(['low', 'normal', 'high', 'emergency']).optional(),
   expectedNextQuestion: z.string().min(1).nullable().optional(),
   expectedNextAction: z.string().min(1).optional(),

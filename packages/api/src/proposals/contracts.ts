@@ -95,7 +95,7 @@ export const proposalConfidenceMetaSchema = z.object({
    */
   severity: z.enum(TIER_KEYS).optional(),
   /** Per-field certainty keyed by payload path, e.g. "lineItems[0].unitPrice". */
-  fieldConfidence: z.record(confidenceLevelSchema).optional(),
+  fieldConfidence: z.record(z.string(), confidenceLevelSchema).optional(),
   /** Human-readable callouts the review UI / SMS / voice readback render. */
   markers: z
     .array(
@@ -171,7 +171,7 @@ export const createCustomerPayloadSchema = z.object({
 });
 
 export const updateCustomerPayloadSchema = z.object({
-  customerId: z.string().uuid(),
+  customerId: z.guid(),
   name: z.string().min(1).optional(),
   email: z.string().email().optional(),
   phone: z.string().optional(),
@@ -180,7 +180,7 @@ export const updateCustomerPayloadSchema = z.object({
 });
 
 export const createJobPayloadSchema = z.object({
-  customerId: z.string().uuid(),
+  customerId: z.guid(),
   title: z.string().min(1),
   description: z.string().optional(),
   scheduledDate: z.string().optional(),
@@ -203,7 +203,7 @@ export const createJobPayloadSchema = z.object({
 // reschedule_appointment).
 export const updateJobPayloadSchema = z
   .object({
-    jobId: z.string().uuid(),
+    jobId: z.guid(),
     /** Free-text hint carried for review-card context; never trusted as an id. */
     jobReference: z.string().min(1).optional(),
     status: jobStatusSchema.optional(),
@@ -240,7 +240,7 @@ export const updateJobPayloadSchema = z
 // the proposal-chaining module for one regex; the two are cross-referenced
 // so they can't drift silently.
 const CHAIN_REF_TOKEN_RE = /^\$ref:chain\[\d+\]\.[a-zA-Z]+$/;
-const jobIdOrChainRef = z.union([z.string().uuid(), z.string().regex(CHAIN_REF_TOKEN_RE)]);
+const jobIdOrChainRef = z.union([z.guid(), z.string().regex(CHAIN_REF_TOKEN_RE)]);
 
 export const createAppointmentPayloadSchema = z
   .object({
@@ -258,7 +258,7 @@ export const createAppointmentPayloadSchema = z
     // validated before still validates.
     //
     // Round 4b — `jobIdOrChainRef` (UUID or a `$ref:chain[...]` token, see
-    // above) replaces a bare `z.string().uuid()`. This is the field the live
+    // above) replaces a bare `z.guid()`. This is the field the live
     // sweep defect (row A33) hit: `schedule_inspection` names an EXISTING
     // job ("for the QA Sweep Furnace Inspection job") and is a
     // JOB_REF_INTENTS member (entity-resolution.ts) — the reference is
@@ -276,7 +276,7 @@ export const createAppointmentPayloadSchema = z
     // handler validates the job exists in-tenant and attaches the
     // appointment to it, overriding `jobId`. Audit metadata marks the
     // appointment as a revisit.
-    linkedJobId: z.string().uuid().optional(),
+    linkedJobId: z.guid().optional(),
     /**
      * The `service_locations` row the auto-opened job should be sited at.
      *
@@ -289,10 +289,10 @@ export const createAppointmentPayloadSchema = z
      * location never needs it, and the executor's existing lookup is unchanged
      * when it is absent.
      */
-    locationId: z.string().uuid().optional(),
+    locationId: z.guid().optional(),
     scheduledStart: z.string().min(1),
     scheduledEnd: z.string().min(1),
-    technicianId: z.string().uuid().optional(),
+    technicianId: z.guid().optional(),
     notes: z.string().optional(),
     // IANA tenant timezone the times should render in (UTC instants are
     // stored; this is display/context only). Set by the AI booking path.
@@ -307,7 +307,7 @@ export const createAppointmentPayloadSchema = z
     // `create_appointment` ↔ `jobId`, deliberately NOT `customerId` — "booking
     // a brand-new customer therefore requires an intermediate create_job
     // segment"), so unlike `jobId` above it never needs the chain-ref union.
-    customerId: z.string().uuid().optional(),
+    customerId: z.guid().optional(),
     customerName: z.string().optional(),
     summary: z.string().optional(),
     // Declared (not merely tolerated by strip-mode) because the `jobId ||
@@ -361,7 +361,7 @@ export const createAppointmentPayloadSchema = z
   );
 
 export const createBookingPayloadSchema = z.object({
-  appointmentId: z.string().uuid(),
+  appointmentId: z.guid(),
 });
 
 // One price field is required, but which one depends on the producer:
@@ -382,7 +382,7 @@ const lineItemSchema = z
     unitPrice: z.number().optional(),
     unitPriceCents: z.number().int().min(0).nullable().optional(),
     category: z.string().optional(),
-    catalogItemId: z.string().uuid().optional(),
+    catalogItemId: z.guid().optional(),
     pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
     needsPricing: z.boolean().optional(),
     // Good-better-best grouping (estimates only; inert on invoices). Items
@@ -460,7 +460,7 @@ export function tierStructureIssues(
 // `"customerId": "<uuid>"` template and told it to "ensure customerId is
 // present", so it invented ids — observed in Development as "unknown",
 // "<uuid>", and the RFC 4122 EXAMPLE uuid 123e4567-e89b-12d3-a456-426614174000
-// (twice). That last one is syntactically valid, so `z.string().uuid()` alone
+// (twice). That last one is syntactically valid, so `z.guid()` alone
 // waves it through; format validation is NOT sufficient and the id is
 // existence-checked against the tenant by DraftEstimateExecutionHandler before
 // any write.
@@ -473,9 +473,9 @@ export function tierStructureIssues(
 // convention.
 export const draftEstimatePayloadSchema = z
   .object({
-    customerId: z.string().uuid().optional(),
+    customerId: z.guid().optional(),
     customerReference: z.string().min(1).optional(),
-    jobId: z.string().uuid().optional(),
+    jobId: z.guid().optional(),
     lineItems: z.array(lineItemSchema).min(1),
     notes: z.string().optional(),
     validUntil: z.string().optional(),
@@ -486,7 +486,7 @@ export const draftEstimatePayloadSchema = z
   // that path.
   .superRefine((val, ctx) => {
     for (const message of tierStructureIssues(val.lineItems)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: ['lineItems'] });
+      ctx.addIssue({ code: 'custom', message, path: ['lineItems'] });
     }
   })
   .refine((v) => Boolean(v.customerId || v.customerReference), {
@@ -531,14 +531,14 @@ export const estimateEditActionSchema = z
   );
 
 export const updateEstimatePayloadSchema = z.object({
-  estimateId: z.string().uuid(),
+  estimateId: z.guid(),
   editActions: z.array(estimateEditActionSchema).min(1),
 });
 
 // QA-2026-07-28 — same shape, and the same reasoning, as
 // draftEstimatePayloadSchema above; see that comment for the live evidence.
 // This path is the WORSE of the two: `customerId` here was a REQUIRED
-// `z.string().uuid()` while INVOICE_SYSTEM_PROMPT handed the model a
+// `z.guid()` while INVOICE_SYSTEM_PROMPT handed the model a
 // `"customerId": "<uuid>"` template and closed with "Ensure customerId and
 // jobId are present" — so the model was *obliged* to produce an id it could
 // not possibly know, and an invoice is a money proposal.
@@ -551,15 +551,15 @@ export const updateEstimatePayloadSchema = z.object({
 // `customerId` and `jobId` are existence-checked against THIS tenant by
 // CreateInvoiceExecutionHandler before any write.
 export const draftInvoicePayloadSchema = z.object({
-  customerId: z.string().uuid().optional(),
+  customerId: z.guid().optional(),
   customerReference: z.string().min(1).optional(),
   // B6 — jobId is optional, mirroring draftEstimatePayloadSchema: a
   // resolved customer with no resolvable job reference (e.g. "invoice the
   // Smith account") should still draft for review instead of stalling.
   // CreateInvoiceExecutionHandler auto-opens a job at execution when this
   // is absent, matching DraftEstimateExecutionHandler's job auto-create.
-  jobId: z.string().uuid().optional(),
-  estimateId: z.string().uuid().optional(),
+  jobId: z.guid().optional(),
+  estimateId: z.guid().optional(),
   invoiceNumber: z.string().min(1).optional(),
   lineItems: z.array(lineItemSchema).min(1),
   discountCents: z.number().int().min(0).optional(),
@@ -612,7 +612,7 @@ export const invoiceEditActionSchema = z
   );
 
 export const updateInvoicePayloadSchema = z.object({
-  invoiceId: z.string().uuid(),
+  invoiceId: z.guid(),
   editActions: z.array(invoiceEditActionSchema).min(1),
 });
 
@@ -630,7 +630,7 @@ export const issueInvoicePayloadSchema = z.object({
 // lead has none (QA-MANUAL-0730).
 export const convertLeadPayloadSchema = z
   .object({
-    leadId: z.string().uuid().optional(),
+    leadId: z.guid().optional(),
     leadReference: z.string().min(1).optional(),
     street1: z.string().trim().min(1).max(200).optional(),
     street2: z.string().trim().max(200).optional(),
@@ -659,7 +659,7 @@ export const convertLeadPayloadSchema = z
 // the free-text reference until the review UI resolves it.
 export const confirmAppointmentPayloadSchema = z
   .object({
-    appointmentId: z.string().uuid().optional(),
+    appointmentId: z.guid().optional(),
     appointmentReference: z.string().min(1).optional(),
   })
   .refine((v) => Boolean(v.appointmentId || v.appointmentReference), {
@@ -670,7 +670,7 @@ export const confirmAppointmentPayloadSchema = z
 // loseLead service, so the contract pins it.
 export const markLeadLostPayloadSchema = z
   .object({
-    leadId: z.string().uuid().optional(),
+    leadId: z.guid().optional(),
     leadReference: z.string().min(1).optional(),
     reason: z.string().min(1),
   })
@@ -684,7 +684,7 @@ export const markLeadLostPayloadSchema = z
 // customerReference must be present.
 export const addServiceLocationPayloadSchema = z
   .object({
-    customerId: z.string().uuid().optional(),
+    customerId: z.guid().optional(),
     customerReference: z.string().min(1).optional(),
     addressText: z.string().min(1).optional(),
     label: z.string().optional(),
@@ -706,7 +706,7 @@ export const addServiceLocationPayloadSchema = z
 // time_entries.duration_minutes column stores. Absent means "clock in now".
 export const logTimeEntryPayloadSchema = z.object({
   entryType: z.enum(['job', 'drive', 'break', 'admin']),
-  jobId: z.string().uuid().optional(),
+  jobId: z.guid().optional(),
   jobReference: z.string().optional(),
   durationMinutes: z.number().int().positive().optional(),
   notes: z.string().optional(),
@@ -715,7 +715,7 @@ export const logTimeEntryPayloadSchema = z.object({
 // notify_delay: outbound delay notice to a customer. Comms-class.
 export const notifyDelayPayloadSchema = z
   .object({
-    appointmentId: z.string().uuid().optional(),
+    appointmentId: z.guid().optional(),
     appointmentReference: z.string().min(1).optional(),
     delayMinutes: z.number().int().positive().optional(),
   })
@@ -726,7 +726,7 @@ export const notifyDelayPayloadSchema = z
 // request_feedback: send a post-job feedback/review request. Comms-class.
 export const requestFeedbackPayloadSchema = z
   .object({
-    jobId: z.string().uuid().optional(),
+    jobId: z.guid().optional(),
     jobReference: z.string().min(1).optional(),
     customerReference: z.string().min(1).optional(),
   })
@@ -741,7 +741,7 @@ export const requestFeedbackPayloadSchema = z
 // estimateReference; the execution handler requires the resolved id.
 export const sendEstimateNudgePayloadSchema = z
   .object({
-    estimateId: z.string().uuid().optional(),
+    estimateId: z.guid().optional(),
     estimateReference: z.string().min(1).optional(),
     /**
      * #1528 — 'auto': no channel was named; the nudge uses the customer's
@@ -842,7 +842,7 @@ export function isSystemSuppliedIdField(proposalType: string, field: string): bo
   return (SYSTEM_SUPPLIED_ID_FIELDS[proposalType as ProposalType] ?? []).includes(field);
 }
 
-export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodSchema> = {
+export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodType> = {
   create_customer: createCustomerPayloadSchema,
   update_customer: updateCustomerPayloadSchema,
   create_job: createJobPayloadSchema,

@@ -61,7 +61,7 @@ const changeOrderLineItemSchema = z.object({
   // stays in unitPriceCents). See the module doc comment above.
   unit: catalogUnitSchema.optional(),
   category: z.string().optional(),
-  catalogItemId: z.string().uuid().optional(),
+  catalogItemId: z.guid().optional(),
   pricingSource: z.enum(['catalog', 'ambiguous', 'uncatalogued', 'manual']).optional(),
   needsPricing: z.boolean().optional(),
   // EE-4 — catalog image snapshot stamped by the catalog resolver. See the
@@ -70,7 +70,7 @@ const changeOrderLineItemSchema = z.object({
 });
 
 export const createChangeOrderPayloadSchema = z.object({
-  jobId: z.string().uuid(),
+  jobId: z.guid(),
   title: z.string().min(1),
   lineItems: z.array(changeOrderLineItemSchema).min(1),
   customerMessage: z.string().optional(),

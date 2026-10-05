@@ -51,9 +51,9 @@ export function techStatusForKeyword(keyword: string): TechStatus | null {
  */
 export const TechStatusEventSchema = z.object({
   /** Tenant the technician belongs to (RLS scope). */
-  tenantId: z.string().uuid(),
+  tenantId: z.guid(),
   /** The resolved technician's user id (bound via findByMobileNumber). */
-  technicianId: z.string().uuid(),
+  technicianId: z.guid(),
   /** Normalized E.164 of the inbound mobile (e.g. "+15551234567"). */
   fromE164: z.string().min(7),
   /** The status the tech set for the day. */

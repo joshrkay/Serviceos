@@ -13,7 +13,7 @@ import { z } from 'zod';
  */
 export const recordPaymentPayloadSchema = z
   .object({
-    invoiceId: z.string().uuid().optional(),
+    invoiceId: z.guid().optional(),
     invoiceReference: z.string().optional(),
     amountCents: z.number().int().positive(),
     paymentMethod: z.enum(['cash', 'check', 'card', 'other']),

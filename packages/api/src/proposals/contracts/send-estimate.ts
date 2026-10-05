@@ -16,7 +16,7 @@ import { z } from 'zod';
  */
 export const sendEstimatePayloadSchema = z
   .object({
-    estimateId: z.string().uuid().optional(),
+    estimateId: z.guid().optional(),
     estimateReference: z.string().optional(),
     // #1524 — 'auto': no channel was named; the send uses the customer's
     // email when one is on file, else a text to their phone.

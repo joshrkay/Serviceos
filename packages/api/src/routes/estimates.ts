@@ -862,8 +862,8 @@ export function createEstimateRouter(
   const suggestSchema = z.object({
     description: z.string().min(1).max(5000),
     serviceType: z.enum(['HVAC', 'Plumbing', 'Painting']).optional(),
-    customerId: z.string().uuid().optional(),
-    jobId: z.string().uuid().optional(),
+    customerId: z.guid().optional(),
+    jobId: z.guid().optional(),
     existingLineItems: z
       .array(
         z.object({

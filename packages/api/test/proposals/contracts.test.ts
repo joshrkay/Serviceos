@@ -699,24 +699,24 @@ describe('voice_clarification reason enum', () => {
 // regression is caught immediately.
 describe('PROPOSAL_TYPE_SCHEMAS — no strict-mode schemas', () => {
   it('every schema in PROPOSAL_TYPE_SCHEMAS is strip-mode (never strict)', () => {
-    // ZodObject exposes `_def.unknownKeys` which is 'strip' by default and
-    // 'strict' when .strict() has been called. ZodEffects (from .refine())
-    // wrap an innerType — we unwrap one level if needed.
-    const isStrictObject = (schema: import('zod').ZodSchema): boolean => {
-      // Unwrap ZodEffects
-      let s: import('zod').ZodSchema = schema;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      while ((s as any)._def?.typeName === 'ZodEffects') {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        s = (s as any)._def.schema;
+    // zod 4 (#1561): `.strict()` sets the object's `catchall` to `z.never()`
+    // (strip mode has no catchall). `.refine()`/`.superRefine()` no longer
+    // wrap the object, but `.transform()` still wraps it in a pipe — unwrap
+    // the pipe's input side if needed.
+    type LooseDef = { type?: string; in?: { _zod?: { def?: LooseDef } }; catchall?: { _zod?: { def?: LooseDef } } };
+    const isStrictObject = (schema: import('zod').ZodType): boolean => {
+      let def = schema._zod.def as LooseDef | undefined;
+      while (def?.type === 'pipe') {
+        def = def.in?._zod?.def;
       }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (s as any)._def?.unknownKeys === 'strict';
+      return def?.type === 'object' && def.catchall?._zod?.def?.type === 'never';
     };
 
     // Positive control — the detector must fire on a known strict schema so
     // a future zod-internals change can't make the test pass vacuously.
     expect(isStrictObject(z.object({}).strict())).toBe(true);
+    expect(isStrictObject(z.object({}).strict().transform((v) => v))).toBe(true);
+    expect(isStrictObject(z.object({}))).toBe(false);
 
     const strictSchemas: string[] = [];
     for (const [type, schema] of Object.entries(PROPOSAL_TYPE_SCHEMAS)) {

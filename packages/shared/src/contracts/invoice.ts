@@ -11,10 +11,10 @@ import { customerSummarySchema } from './customer.js';
  * ./money.ts. amountPaid/amountDue are integer cents; dates are ISO strings.
  */
 export const invoiceSchema = z.object({
-  id: z.string().uuid(),
-  tenantId: z.string().uuid(),
-  jobId: z.string().uuid(),
-  estimateId: z.string().uuid().optional(),
+  id: z.guid(),
+  tenantId: z.guid(),
+  jobId: z.guid(),
+  estimateId: z.guid().optional(),
   invoiceNumber: z.string(),
   status: invoiceStatusSchema,
   lineItems: z.array(lineItemSchema),

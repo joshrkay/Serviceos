@@ -241,14 +241,14 @@ const assistantProposalSchema = z.object({
    * when nothing is left, instead of offering an undo `POST
    * /api/proposals/:id/undo` would 409 with UNDO_WINDOW_CLOSED.
    */
-  undoExpiresAt: z.string().nullish().transform((v) => v ?? undefined),
-  undoRemainingMs: z.number().nullish().transform((v) => v ?? undefined),
+  undoExpiresAt: z.string().nullish().transform((v) => v ?? undefined).optional(),
+  undoRemainingMs: z.number().nullish().transform((v) => v ?? undefined).optional(),
   // QA-2026-06-05: LLMs emit JSON null for "no value" — .optional() alone
   // rejects null, so every estimate-draft completion whose relatedId/impact
   // was null failed validation and degraded to the fallback envelope
   // (live: "LLM completion failed ... expected string, received null").
-  relatedId: z.string().nullish().transform((v) => v ?? undefined),
-  impact: z.string().nullish().transform((v) => v ?? undefined),
+  relatedId: z.string().nullish().transform((v) => v ?? undefined).optional(),
+  impact: z.string().nullish().transform((v) => v ?? undefined).optional(),
   // E10 (U7) — pass-through of the trust signals AIProposalCard already
   // renders: the 4-tier confidence + severity badge + "what I wasn't sure
   // about" markers (`_meta`), the per-line catalog-grounding source
@@ -258,36 +258,36 @@ const assistantProposalSchema = z.object({
   // -preprocess envelope — still validates unchanged.
   meta: z
     .object({
-      overallConfidence: z.enum(['high', 'medium', 'low', 'very_low']).nullish().transform((v) => v ?? undefined),
+      overallConfidence: z.enum(['high', 'medium', 'low', 'very_low']).nullish().transform((v) => v ?? undefined).optional(),
       severity: z
         .enum(['TIER_1_EVACUATE', 'TIER_2_EMERGENCY_DISPATCH', 'TIER_3_SAME_DAY_URGENT', 'TIER_4_SCHEDULE'])
         .nullish()
-        .transform((v) => v ?? undefined),
+        .transform((v) => v ?? undefined).optional(),
       markers: z
         .array(z.object({ path: z.string(), reason: z.string() }))
         .nullish()
-        .transform((v) => v ?? undefined),
+        .transform((v) => v ?? undefined).optional(),
       // UB-A3 — "Standing instruction applied" chips on the assistant card.
       appliedStandingInstructions: z
         .array(z.object({ id: z.string(), text: z.string() }))
         .nullish()
-        .transform((v) => v ?? undefined),
+        .transform((v) => v ?? undefined).optional(),
     })
     .nullish()
-    .transform((v) => v ?? undefined),
+    .transform((v) => v ?? undefined).optional(),
   lineItems: z
     .array(
       z.object({
-        description: z.string().nullish().transform((v) => v ?? undefined),
+        description: z.string().nullish().transform((v) => v ?? undefined).optional(),
         pricingSource: z
           .enum(['catalog', 'ambiguous', 'uncatalogued', 'manual'])
           .nullish()
-          .transform((v) => v ?? undefined),
+          .transform((v) => v ?? undefined).optional(),
       }),
     )
     .nullish()
-    .transform((v) => v ?? undefined),
-  missingFields: z.array(z.string()).nullish().transform((v) => v ?? undefined),
+    .transform((v) => v ?? undefined).optional(),
+  missingFields: z.array(z.string()).nullish().transform((v) => v ?? undefined).optional(),
   /**
    * #1277 — the one-tap catalog picks that lift a path-shaped
    * `lineItems[n].catalogItemId` gate: the same `sourceContext.catalogResolution`
@@ -310,7 +310,7 @@ const assistantProposalSchema = z.object({
       }),
     )
     .nullish()
-    .transform((v) => v ?? undefined),
+    .transform((v) => v ?? undefined).optional(),
   /**
    * #1277 — the candidates behind a gated id (`customerId`, `jobId`, …) that a
    * pending one-question clarification is waiting on. Picking one sends that
@@ -325,7 +325,7 @@ const assistantProposalSchema = z.object({
       ),
     })
     .nullish()
-    .transform((v) => v ?? undefined),
+    .transform((v) => v ?? undefined).optional(),
   /**
    * The address a `missingFields: ['locationId']` gate needs in order to be
    * closable by a human. Without it the card shows a bare "locationId"
@@ -337,21 +337,21 @@ const assistantProposalSchema = z.object({
   serviceLocationGap: z
     .object({
       customerId: z.string(),
-      recoveredAddress: z.string().nullish().transform((v) => v ?? undefined),
+      recoveredAddress: z.string().nullish().transform((v) => v ?? undefined).optional(),
       recoveredFrom: z
         .enum(['communication_notes', 'transcript'])
         .nullish()
-        .transform((v) => v ?? undefined),
-      prefill: z.record(z.string()).nullish().transform((v) => v ?? undefined),
-      stillMissing: z.array(z.string()).nullish().transform((v) => v ?? undefined),
+        .transform((v) => v ?? undefined).optional(),
+      prefill: z.record(z.string(), z.string()).nullish().transform((v) => v ?? undefined).optional(),
+      stillMissing: z.array(z.string()).nullish().transform((v) => v ?? undefined).optional(),
     })
     .nullish()
-    .transform((v) => v ?? undefined),
+    .transform((v) => v ?? undefined).optional(),
   /**
    * The internal proposal type, so the card can special-case a family
    * without pattern-matching on the humanized `type` label.
    */
-  proposalType: z.string().nullish().transform((v) => v ?? undefined),
+  proposalType: z.string().nullish().transform((v) => v ?? undefined).optional(),
   /**
    * The ADDRESS SLICE of a `create_customer` payload, passed through
    * verbatim — the free-text `address` the technician spoke plus whatever
@@ -368,16 +368,16 @@ const assistantProposalSchema = z.object({
    */
   addressCapture: z
     .object({
-      address: z.string().nullish().transform((v) => v ?? undefined),
-      street1: z.string().nullish().transform((v) => v ?? undefined),
-      street2: z.string().nullish().transform((v) => v ?? undefined),
-      city: z.string().nullish().transform((v) => v ?? undefined),
-      state: z.string().nullish().transform((v) => v ?? undefined),
-      postalCode: z.string().nullish().transform((v) => v ?? undefined),
-      country: z.string().nullish().transform((v) => v ?? undefined),
+      address: z.string().nullish().transform((v) => v ?? undefined).optional(),
+      street1: z.string().nullish().transform((v) => v ?? undefined).optional(),
+      street2: z.string().nullish().transform((v) => v ?? undefined).optional(),
+      city: z.string().nullish().transform((v) => v ?? undefined).optional(),
+      state: z.string().nullish().transform((v) => v ?? undefined).optional(),
+      postalCode: z.string().nullish().transform((v) => v ?? undefined).optional(),
+      country: z.string().nullish().transform((v) => v ?? undefined).optional(),
     })
     .nullish()
-    .transform((v) => v ?? undefined),
+    .transform((v) => v ?? undefined).optional(),
 });
 
 const assistantReplySchema = z.object({

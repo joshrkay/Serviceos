@@ -137,7 +137,7 @@ export const OnboardingStepSchema = z.object({
   id: OnboardingStepIdSchema,
   status: OnboardingStepStatusSchema,
   blockers: z.array(z.string()).optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 export type OnboardingStep = z.infer<typeof OnboardingStepSchema>;
 

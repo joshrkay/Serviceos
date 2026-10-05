@@ -74,7 +74,7 @@ export const addMaterialPayloadSchema = z.object({
   // .trim() BEFORE .min(1) (quality-review I5) — see module doc comment.
   description: z.string().trim().min(1).max(1000),
   quantity: z.number().int().positive().max(MAX_QUANTITY).default(1),
-  jobId: z.string().uuid().optional(),
+  jobId: z.guid().optional(),
   vendor: z.string().max(200).optional(),
   neededBy: neededBySchema.optional(),
 });

@@ -7,18 +7,18 @@ import { proposalStatusSchema } from './status.js';
  * Subset of full server `Proposal`; extend additively only (Tier 2).
  */
 export const proposalResponseSchema = z.object({
-  id: z.string().uuid(),
-  tenantId: z.string().uuid(),
+  id: z.guid(),
+  tenantId: z.guid(),
   // Typed to the canonical ProposalType enum, kept in exact lockstep with the
   // API's VALID_PROPOSAL_TYPES union via proposal-type.test.ts.
-  proposalType: z.nativeEnum(ProposalType),
+  proposalType: z.enum(ProposalType),
   status: proposalStatusSchema,
   summary: z.string(),
   explanation: z.string().optional(),
   confidenceScore: z.number().optional(),
   confidenceFactors: z.array(z.string()).optional(),
-  payload: z.record(z.unknown()),
-  sourceContext: z.record(z.unknown()).optional(),
+  payload: z.record(z.string(), z.unknown()),
+  sourceContext: z.record(z.string(), z.unknown()).optional(),
   targetEntityType: z.string().optional(),
   targetEntityId: z.string().optional(),
   resultEntityId: z.string().optional(),

@@ -1,9 +1,9 @@
 import { z } from 'zod';
 
 export const reassignAppointmentPayloadSchema = z.object({
-  appointmentId: z.string().uuid(),
-  fromTechnicianId: z.string().uuid().optional(),
-  toTechnicianId: z.string().uuid(),
+  appointmentId: z.guid(),
+  fromTechnicianId: z.guid().optional(),
+  toTechnicianId: z.guid(),
   reason: z.string().optional(),
 });
 

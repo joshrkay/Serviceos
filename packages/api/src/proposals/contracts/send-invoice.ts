@@ -14,7 +14,7 @@ import { z } from 'zod';
  */
 export const sendInvoicePayloadSchema = z
   .object({
-    invoiceId: z.string().uuid().optional(),
+    invoiceId: z.guid().optional(),
     invoiceReference: z.string().optional(),
     // #1524 — 'auto': no channel was named; the send uses the customer's
     // email when one is on file, else a text to their phone.

@@ -187,13 +187,13 @@ export const lateFeePolicyUpdateSchema = z
     if (val.lateFeeType === 'none') return;
     if (val.lateFeeValueCents === undefined || val.lateFeeValueCents <= 0) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: 'custom',
         message: `lateFeeValueCents must be a positive integer when lateFeeType is "${val.lateFeeType}"`,
         path: ['lateFeeValueCents'],
       });
     } else if (val.lateFeeType === 'percent' && val.lateFeeValueCents > 10000) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: 'custom',
         message: 'lateFeeValueCents is basis points for a percent fee and must be at most 10000 (100%)',
         path: ['lateFeeValueCents'],
       });

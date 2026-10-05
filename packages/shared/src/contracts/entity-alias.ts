@@ -32,29 +32,29 @@ export type EntityAliasSource = z.infer<typeof entityAliasSourceSchema>;
 export const entityAliasTextSchema = z.string().superRefine((value, ctx) => {
   if (Array.from(value).length > ENTITY_ALIAS_MAX_LENGTH) {
     ctx.addIssue({
-      code: z.ZodIssueCode.too_big,
+      code: 'too_big',
       maximum: ENTITY_ALIAS_MAX_LENGTH,
       inclusive: true,
-      type: 'string',
+      origin: 'string',
       message: `Alias must be ${ENTITY_ALIAS_MAX_LENGTH} characters or fewer`,
     });
   }
   if (/[\p{Cc}\p{Cf}]/u.test(value)) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: 'custom',
       message: 'Alias contains control or format characters',
     });
   }
 
   const normalized = value.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase();
   if (!normalized) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Alias cannot be empty' });
+    ctx.addIssue({ code: 'custom', message: 'Alias cannot be empty' });
   } else if (Array.from(normalized).length > ENTITY_ALIAS_MAX_LENGTH) {
     ctx.addIssue({
-      code: z.ZodIssueCode.too_big,
+      code: 'too_big',
       maximum: ENTITY_ALIAS_MAX_LENGTH,
       inclusive: true,
-      type: 'string',
+      origin: 'string',
       message: `Alias must be ${ENTITY_ALIAS_MAX_LENGTH} characters or fewer after normalization`,
     });
   }
@@ -69,9 +69,9 @@ export const adoptEntityAliasPayloadSchema = z
   .object({
     alias: entityAliasTextSchema,
     entityKind: entityAliasEntityKindSchema,
-    entityId: z.string().uuid(),
+    entityId: z.guid(),
     source: entityAliasSourceSchema,
-    groundedProposalId: z.string().uuid(),
+    groundedProposalId: z.guid(),
   })
   .strict();
 
