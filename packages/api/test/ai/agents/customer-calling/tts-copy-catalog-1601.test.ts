@@ -398,6 +398,20 @@ const SNAPSHOT: Record<string, Pinned> = {
       en: 'Your next job is today at 2 PM — Dana Keller, Water heater replacement, at 4120 East Oakhurst Boulevard, Yonkers.',
     },
   },
+  next_job_readback_with_technician: {
+    en: 'The next job is {{when}} — {{customer}}, {{job}}, at {{address}}, with {{technician}}.',
+    es: 'El próximo trabajo es {{when}} — {{customer}}, {{job}}, en {{address}}, con {{technician}}.',
+    sample: {
+      vars: {
+        when: 'today at 9 AM',
+        customer: 'Priya Patel',
+        job: 'AC tune-up',
+        address: '88 Mill Lane, Tarrytown',
+        technician: 'Carlos Ruiz',
+      },
+      en: 'The next job is today at 9 AM — Priya Patel, AC tune-up, at 88 Mill Lane, Tarrytown, with Carlos Ruiz.',
+    },
+  },
   next_job_access_notes: {
     en: 'Access notes: {{notes}}',
     es: 'Notas de acceso: {{notes}}',

@@ -506,6 +506,11 @@ export const TTS_COPY = {
     en: 'Your next job is {{when}} — {{customer}}, {{job}}, at {{address}}.',
     es: 'Su próximo trabajo es {{when}} — {{customer}}, {{job}}, en {{address}}.', // es: new 1604
   },
+  // The owner / dispatcher hears the BUSINESS's next visit, with who has it.
+  next_job_readback_with_technician: {
+    en: 'The next job is {{when}} — {{customer}}, {{job}}, at {{address}}, with {{technician}}.',
+    es: 'El próximo trabajo es {{when}} — {{customer}}, {{job}}, en {{address}}, con {{technician}}.', // es: new 1604
+  },
   next_job_access_notes: {
     en: 'Access notes: {{notes}}',
     es: 'Notas de acceso: {{notes}}', // es: new 1604

@@ -20,6 +20,7 @@ import { InMemoryJobRepository, type Job } from '../../../src/jobs/job';
 import { InMemoryCustomerRepository, type Customer } from '../../../src/customers/customer';
 import { InMemoryLocationRepository, type ServiceLocation } from '../../../src/locations/location';
 import { InMemoryNoteRepository, type InternalNote } from '../../../src/notes/note';
+import { InMemoryUserRepository } from '../../../src/users/user';
 import type { LookupEventService } from '../../../src/lookup-events/lookup-event-service';
 
 const TENANT = 'tenant-1604';
@@ -27,6 +28,7 @@ const TZ = 'America/New_York';
 // 2026-06-11 ~07:00 New York (11:00 UTC) — a Thursday.
 const NOW = new Date('2026-06-11T11:00:00.000Z');
 const ME = 'tech-mike';
+const COWORKER = 'tech-carlos';
 
 const SEEDED = new Date('2026-06-01T00:00:00.000Z');
 
@@ -137,13 +139,65 @@ async function fixtures(opts: FixtureOpts = {}) {
   const customerRepo = new InMemoryCustomerRepository();
   const locationRepo = new InMemoryLocationRepository();
   const noteRepo = new InMemoryNoteRepository();
+  const userRepo = new InMemoryUserRepository();
   for (const c of opts.customers ?? [makeCustomer({})]) await customerRepo.create(c);
   for (const l of opts.locations ?? [makeLocation({})]) await locationRepo.create(l);
   for (const j of opts.jobs ?? []) await jobRepo.create(j);
   for (const a of opts.appointments ?? []) await appointmentRepo.create(a);
   for (const n of opts.notes ?? []) await noteRepo.create(n);
-  return { appointmentRepo, jobRepo, customerRepo, locationRepo, noteRepo };
+  await userRepo.create({
+    id: ME,
+    tenantId: TENANT,
+    email: 'mike@example.com',
+    role: 'technician',
+    firstName: 'Mike',
+    lastName: 'Diaz',
+    canFieldServe: true,
+  });
+  await userRepo.create({
+    id: COWORKER,
+    tenantId: TENANT,
+    email: 'carlos@example.com',
+    role: 'technician',
+    firstName: 'Carlos',
+    lastName: 'Ruiz',
+    canFieldServe: true,
+  });
+  return { appointmentRepo, jobRepo, customerRepo, locationRepo, noteRepo, userRepo };
 }
+
+/** A second household, assigned to the coworker, visited BEFORE Mike's 2 PM. */
+const PATEL = {
+  customer: makeCustomer({
+    id: 'cust-patel',
+    firstName: 'Priya',
+    lastName: 'Patel',
+    displayName: 'Priya Patel',
+    primaryPhone: '+15125550288',
+  }),
+  location: makeLocation({
+    id: 'loc-patel',
+    customerId: 'cust-patel',
+    street1: '88 Mill Lane',
+    city: 'Tarrytown',
+    postalCode: '10591',
+    accessNotes: undefined,
+  }),
+  job: makeJob({
+    id: 'job-patel',
+    customerId: 'cust-patel',
+    locationId: 'loc-patel',
+    jobNumber: 'JOB-0002',
+    summary: 'AC tune-up',
+    assignedTechnicianId: COWORKER,
+  }),
+  appointment: makeAppointment({
+    id: 'appt-patel',
+    jobId: 'job-patel',
+    scheduledStart: new Date('2026-06-11T13:00:00.000Z'), // 9 AM NY, today
+    scheduledEnd: new Date('2026-06-11T14:00:00.000Z'),
+  }),
+};
 
 describe('lookupNextJob skill', () => {
   it("reads the technician's next visit today in spoken order: time, customer, job, address, access notes, latest note", async () => {
@@ -185,6 +239,24 @@ describe('lookupNextJob skill', () => {
         resultStatus: 'found',
         resultCount: 1,
       }),
+    );
+  });
+
+  it("owner (whole tenant) hears the BUSINESS's earliest upcoming visit, naming the technician", async () => {
+    const deps = await fixtures({
+      customers: [makeCustomer({}), PATEL.customer],
+      locations: [makeLocation({}), PATEL.location],
+      jobs: [makeJob({}), PATEL.job],
+      appointments: [makeAppointment({}), PATEL.appointment],
+    });
+
+    const res = await lookupNextJob({ tenantId: TENANT, wholeTenant: true, timezone: TZ, now: NOW }, deps);
+
+    expect(res.status).toBe('found');
+    if (res.status !== 'found') throw new Error('unreachable');
+    expect(res.data.appointmentId).toBe('appt-patel');
+    expect(res.summary).toBe(
+      'The next job is today at 9 AM — Priya Patel, AC tune-up, at 88 Mill Lane, Tarrytown, with Carlos Ruiz.',
     );
   });
 });
