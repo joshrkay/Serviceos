@@ -40,6 +40,10 @@
  *   - a count went 2 -> 1: you (perhaps accidentally) FIXED one of the
  *     duplicates. That is likely an improvement, but it changes in-memory
  *     test behaviour — land it deliberately, on its own, and say so.
+ *
+ * #1589 — KNOWN FLAKY under the full parallel suite (repeated full
+ * createApp() boots are slow and process-state-sensitive under CI
+ * contention); passes reliably alone. See docs/testing/flaky-tests.md.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 

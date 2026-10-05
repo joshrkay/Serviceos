@@ -18,7 +18,17 @@ from typing import Any
 import posthog_client as ph
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
-CLERK_SECRET = os.environ.get("CLERK_SECRET", "sk_test_y3Pg3Qrtv3lezUiItnRsCHePDxOYD4o6f1zWCGmrdB")
+# #1589 — this used to default to a hardcoded, real-shaped Clerk dev secret
+# committed to git since 2026-08-29. No default: the env var is required,
+# and the value must never be printed (not here, not in a log, not in an
+# error message) since it is still a live credential until rotated.
+CLERK_SECRET = os.environ.get("CLERK_SECRET")
+if not CLERK_SECRET:
+    sys.exit(
+        "CLERK_SECRET environment variable is required (no hardcoded "
+        "fallback — see #1589). Set it to the dev-environment Clerk "
+        "secret key before running this script."
+    )
 API_URL = "https://serviceosapi-development.up.railway.app"
 WEB_URL = "https://serviceosweb-development.up.railway.app"
 

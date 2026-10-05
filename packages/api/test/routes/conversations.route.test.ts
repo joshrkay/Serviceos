@@ -1,3 +1,7 @@
+/**
+ * #1589 — KNOWN FLAKY under the full parallel suite; passes reliably alone.
+ * See docs/testing/flaky-tests.md.
+ */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express, { Express, Request, Response, NextFunction } from 'express';
 import request from 'supertest';
