@@ -129,14 +129,41 @@ export function corpusCallMoment(script: VoiceQualityScript): Date {
 }
 
 /**
+ * #1613 — the fixture customer the script's caller-ID identifies, exactly as
+ * {@link establishLayer2Caller} identifies them on the call: one unblocked
+ * caller-ID matching exactly one fixture customer's primary phone. The judges
+ * grade a reply to a KNOWN customer ("nothing to sign up for"; the booking
+ * read back under the record's name) only if they know the line knew them.
+ */
+function identifiedCallerName(script: VoiceQualityScript): string | undefined {
+  if (script.callerIdBlocked || !script.callerId) return undefined;
+  const callerId = normalizePhone(script.callerId);
+  const customers = (script.fixtures.customers ?? []) as Array<Record<string, unknown>>;
+  const matches = customers.filter(
+    (c) => typeof c.primaryPhone === 'string' && normalizePhone(c.primaryPhone) === callerId,
+  );
+  if (matches.length !== 1) return undefined;
+  const match = matches[0]!;
+  const displayName =
+    typeof match.displayName === 'string' && match.displayName.trim()
+      ? match.displayName.trim()
+      : [match.firstName, match.lastName].filter((p) => typeof p === 'string' && p).join(' ').trim();
+  return displayName || undefined;
+}
+
+/**
  * #1331 — who is calling and on what date, for the LLM judges: a drafted
  * reply is graded against the right persona, and a spoken date against the
- * corpus world's calendar (not the judge's guess at "this year").
+ * corpus world's calendar (not the judge's guess at "this year"). #1613 —
+ * and, on the customer line, the record caller-ID identified them as.
  */
 export function describeCorpusCall(script: VoiceQualityScript): string {
+  const identified = script.callerIsOwner ? undefined : identifiedCallerName(script);
   const caller = script.callerIsOwner
     ? 'Caller: the business owner, calling their own business line.'
-    : 'Caller: a customer of the business.';
+    : identified
+      ? `Caller: a customer of the business, identified by caller ID as ${identified} (an existing customer record).`
+      : 'Caller: a customer of the business.';
   const date = new Intl.DateTimeFormat('en-US', {
     timeZone: corpusTimezone(script),
     weekday: 'long',
@@ -144,7 +171,7 @@ export function describeCorpusCall(script: VoiceQualityScript): string {
     day: 'numeric',
     year: 'numeric',
   }).format(corpusCallMoment(script));
-  return `${caller}\nCall date: ${date}`;
+  return `${caller}\nCall date: ${date} (the agent speaks no year; read every date it says against this date).`;
 }
 
 export function buildLayer2ProcessorWorld(

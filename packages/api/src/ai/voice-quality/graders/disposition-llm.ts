@@ -101,7 +101,7 @@ How this product works (grade against THIS contract, not an imagined one):
 The agent's line is speech recognition of the audio the caller heard:
 - Short pre-recorded fillers played while the agent works ("One moment", "Let me check on that", "Let me see", "Sure thing", "Absolutely", "Got it", "Okay") are not part of the answer — ignore them wherever they appear.
 - A word transcribed as a sound-alike of the expected word (e.g. a trade term like "PEX" heard as "pecks") is a transcription artifact, not an agent error. A different value — other digits, another date, address, amount or name — is still wrong.
-- Dates are relative to the call date given with the turn.`;
+- The agent never speaks a year. Judge every date it says against the call date given with the turn: a date with no year is the one nearest that call date (an upcoming visit falls on or after it; a due date may fall just before it). Do not infer a year from your own calendar — a correct day and month is a correct date.`;
 
 /**
  * Soft-field keys that the LLM judge owns on criterion 10. Hard fields

@@ -2058,6 +2058,39 @@ export function createVoiceTurnProcessor(
   }
 
   /**
+   * #1613 — a caller the line identified by caller-ID IS a customer record;
+   * the name the recogniser heard for them is not (Layer 2 run 37323734649
+   * read Jane Smith's booking back "for James Smith"). For that caller the
+   * record's display name is what the readback speaks and what the draft
+   * carries — it overrides the transcribed `customerName` in the resolved
+   * refs the FSM merges over the classifier's entities. Customer line only:
+   * the owner and a trusted operator name OTHER customers, and a record this
+   * call's ask_caller turn just created is only as good as what was heard.
+   * The heard name never touches the record.
+   */
+  async function bindIdentifiedCallerRecordName(
+    session: VoiceSession,
+    tenantId: string,
+    entities: Record<string, unknown>,
+    refs: Record<string, string>,
+  ): Promise<void> {
+    if (classifierProfileForSession(session) !== 'caller') return;
+    if (!session.customerId || session.callerCreatedThisCall === true) return;
+    const heard = typeof entities.customerName === 'string' ? entities.customerName.trim() : '';
+    if (!heard || !deps.customerRepo) return;
+    const record = await deps.customerRepo.findById(tenantId, session.customerId).catch(() => null);
+    const name = record?.displayName.trim();
+    if (!name) return;
+    if (name !== heard) {
+      logger.info('speechTurn: identified caller heard under another name; reading back the record', {
+        sessionId: session.id,
+        customerId: session.customerId,
+      });
+    }
+    refs.customerName = name;
+  }
+
+  /**
    * #1118 — map a classified turn's resolution to its FSM event. Only the
    * AMBIGUOUS outcome changes: it becomes `entity_ambiguous` (the FSM asks
    * and parks the candidates) instead of being folded into `entity_resolved`
@@ -2073,6 +2106,7 @@ export function createVoiceTurnProcessor(
     pinnedRefs?: Record<string, string>,
   ): Promise<CallingAgentEvent> {
     const resolution = await runTurnResolution(session, tenantId, intent, entities, pinnedRefs);
+    await bindIdentifiedCallerRecordName(session, tenantId, entities, resolution.refs);
     const pending = pendingAmbiguityFrom(resolution);
     if (pending) {
       return {

@@ -215,7 +215,8 @@ describe('#1539 — phone readback names what will be drafted', () => {
       [
         'update_customer',
         { customerName: 'Dana Reyes', updatedPhone: '480-555-0123', updatedEmail: 'dana@example.com' },
-        "update Dana Reyes's phone number to 480-555-0123 and email to dana@example.com",
+        // #1613 — the new email is spelled for the caller.
+        "update Dana Reyes's phone number to 480-555-0123 and email to d-a-n-a at example dot com",
       ],
       [
         'add_service_location',

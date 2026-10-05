@@ -16,6 +16,7 @@
  * The phrase completes "you'd like to …" / "usted desea …".
  */
 import type { SessionLanguage } from './tts-copy';
+import { normalizeSpokenEmail, spokenEmail } from './spoken-email';
 
 type Entities = Record<string, unknown>;
 type Phrase = (e: Entities) => string;
@@ -106,7 +107,7 @@ const EN: Record<string, Phrase> = {
     const changes = list(
       CUSTOMER_FIELDS_EN.flatMap(([key, label]) => {
         const v = text(e, key);
-        return v ? [`${label} to ${v}`] : [];
+        return v ? [`${label} to ${customerFieldValue(key, v, 'en')}`] : [];
       }),
       'and',
     );
@@ -252,6 +253,15 @@ function durationEn(minutes: number): string {
   const hours = h === 0 ? '' : `${h} hour${h === 1 ? '' : 's'}`;
   const mins = m === 0 ? '' : `${m} minute${m === 1 ? '' : 's'}`;
   return [hours, mins].filter(Boolean).join(' ') || `${minutes} minutes`;
+}
+
+/**
+ * #1613 — a new email address is spelled for the caller ("o-p-s at acme dot
+ * com"), after normalising a spoken form, so a misheard letter is audible at
+ * the readback; every other customer field is spoken as given.
+ */
+function customerFieldValue(key: string, value: string, lang: SessionLanguage): string {
+  return key === 'updatedEmail' ? spokenEmail(normalizeSpokenEmail(value), lang) : value;
 }
 
 const CUSTOMER_FIELDS_EN: ReadonlyArray<[string, string]> = [
@@ -418,7 +428,7 @@ const ES: Record<string, Phrase> = {
     const changes = list(
       CUSTOMER_FIELDS_ES.flatMap(([key, label]) => {
         const v = text(e, key);
-        return v ? [`${label}${who ? ` de ${who}` : ''} a ${v}`] : [];
+        return v ? [`${label}${who ? ` de ${who}` : ''} a ${customerFieldValue(key, v, 'es')}`] : [];
       }),
       'y',
     );
