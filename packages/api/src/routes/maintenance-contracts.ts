@@ -19,6 +19,7 @@ import {
   MaintenanceContract,
   MaintenanceContractRepository,
 } from '../maintenance-contracts/maintenance-contract';
+import { routeParam } from '../shared/route-params';
 
 export function createMaintenanceContractsRouter(
   repo: MaintenanceContractRepository,
@@ -44,7 +45,7 @@ export function createMaintenanceContractsRouter(
     requirePermission('customers:view'),
     notFoundOnMalformedId('Contract not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const found = await repo.findById(req.auth!.tenantId, req.params.id);
+      const found = await repo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!found) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Contract not found' });
         return;

@@ -11,6 +11,7 @@ import {
   updateBundle,
 } from '../verticals/bundles';
 import { AuditRepository } from '../audit/audit';
+import { routeParam } from '../shared/route-params';
 
 export function createBundleRouter(
   bundleRepo: ServiceBundleRepository,
@@ -52,7 +53,7 @@ export function createBundleRouter(
     requirePermission('estimates:view'),
     notFoundOnMalformedId('Bundle not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const bundle = await bundleRepo.findById(req.auth!.tenantId, req.params.id);
+      const bundle = await bundleRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!bundle) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Bundle not found' });
         return;
@@ -117,7 +118,7 @@ export function createBundleRouter(
       const result = await updateBundle(
         bundleRepo,
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         {
           ...(name !== undefined && { name }),
           ...(description !== undefined && { description }),

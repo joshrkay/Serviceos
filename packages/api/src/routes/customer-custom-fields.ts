@@ -9,6 +9,7 @@ import {
   createCustomFieldDef,
 } from '../customers/custom-field';
 import { createCustomFieldDefSchema } from '../shared/contracts';
+import { routeParam } from '../shared/route-params';
 
 /**
  * U2 (CRM Jobber parity) — tenant-level custom-field *definition* management.
@@ -66,7 +67,7 @@ export function createCustomerCustomFieldRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const archived = await customFieldRepo.archiveDef(
         req.auth!.tenantId,
-        req.params.fieldDefId
+        routeParam(req, 'fieldDefId')
       );
       if (!archived) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Custom field not found' });

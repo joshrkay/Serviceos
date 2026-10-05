@@ -3,6 +3,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { Permission, hasPermission, Role, isValidRole } from '../auth/rbac';
 import { Mode } from '@ai-service-os/shared';
 import { createLogger } from '../logging/logger';
+import { routeParam } from '../shared/route-params';
 
 const authzLogger = createLogger({
   service: 'authorization',
@@ -364,7 +365,7 @@ export function enforceTenantIsolation(tenantIdParam: string = 'tenantId') {
       return;
     }
 
-    const requestedTenantId = req.params[tenantIdParam] || req.body?.tenantId;
+    const requestedTenantId = routeParam(req, tenantIdParam) || req.body?.tenantId;
     if (requestedTenantId && requestedTenantId !== req.auth.tenantId) {
       res.status(403).json({
         error: 'FORBIDDEN',

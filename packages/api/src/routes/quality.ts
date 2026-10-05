@@ -15,6 +15,7 @@ import {
   computeVerticalQualityMetrics,
 } from '../estimates/vertical-quality-metrics';
 import { computeAccelerationBenchmark } from '../estimates/acceleration-benchmark';
+import { routeParam } from '../shared/route-params';
 
 export interface QualityRouterDeps {
   metricsRepo: QualityMetricsRepository;
@@ -27,7 +28,7 @@ interface VerticalAnalyticsFilters extends ComputeQualityOptions {
 }
 
 function parseVerticalAnalyticsFilters(req: AuthenticatedRequest): VerticalAnalyticsFilters {
-  const { verticalType } = req.params;
+  const verticalType = routeParam(req, 'verticalType');
 
   if (!isValidVerticalType(verticalType)) {
     throw new ValidationError('Validation failed', {
@@ -136,7 +137,7 @@ export function createQualityRouter({ metricsRepo, approvalRepo, deltaRepo }: Qu
 
       const series = await metricsRepo.getMetricTimeSeries(
         req.auth!.tenantId,
-        req.params.metricName,
+        routeParam(req, 'metricName'),
         startDate,
         endDate
       );

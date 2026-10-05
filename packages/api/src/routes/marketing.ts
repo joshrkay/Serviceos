@@ -13,6 +13,7 @@ import {
   sendCampaign,
 } from '../marketing/campaign';
 import { createCampaignSchema } from '../shared/contracts';
+import { routeParam } from '../shared/route-params';
 
 export interface MarketingRouterDeps {
   campaignRepo: CampaignRepository;
@@ -82,7 +83,7 @@ export function createMarketingRouter(deps: MarketingRouterDeps): Router {
       }
       const sent = await sendCampaign(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         {
           campaignRepo: deps.campaignRepo,
           customerRepo: deps.customerRepo,

@@ -20,6 +20,7 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { asyncRoute } from '../middleware/async-route';
 import { InAppVoiceAdapter } from '../ai/agents/customer-calling/inapp-adapter';
 import type { VoiceSessionStore, VoiceSessionEvent } from '../ai/agents/customer-calling/voice-session-store';
+import { routeParam } from '../shared/route-params';
 
 export interface VoiceSessionsRouterDeps {
   adapter: InAppVoiceAdapter;
@@ -98,7 +99,7 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
     requireTenant,
     requirePermission('ai:run'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const session = deps.store.peek(req.params.id);
+      const session = deps.store.peek(routeParam(req, 'id'));
       if (!session || session.tenantId !== req.auth!.tenantId) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Voice session not found' });
         return;
@@ -111,7 +112,7 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
         return;
       }
       const parsed = inputSchema.parse(req.body ?? {});
-      const result = await deps.adapter.handleInput(req.params.id, parsed.text);
+      const result = await deps.adapter.handleInput(routeParam(req, 'id'), parsed.text);
       res.json({
         state: result.state,
         sideEffects: result.sideEffects,
@@ -133,7 +134,7 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
     requireTenant,
     requirePermission('ai:run'),
     (req: AuthenticatedRequest, res: Response) => {
-      const session = deps.store.peek(req.params.id);
+      const session = deps.store.peek(routeParam(req, 'id'));
       if (!session || session.tenantId !== req.auth!.tenantId) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Voice session not found' });
         return;
@@ -219,12 +220,12 @@ export function createVoiceSessionsRouter(deps: VoiceSessionsRouterDeps): Router
     requireTenant,
     requirePermission('ai:run'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const session = deps.store.peek(req.params.id);
+      const session = deps.store.peek(routeParam(req, 'id'));
       if (!session || session.tenantId !== req.auth!.tenantId) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Voice session not found' });
         return;
       }
-      await deps.adapter.endSession(req.params.id);
+      await deps.adapter.endSession(routeParam(req, 'id'));
       res.status(204).end();
     })
   );

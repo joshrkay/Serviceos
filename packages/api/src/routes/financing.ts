@@ -15,6 +15,7 @@ import {
 } from '../financing/financing';
 import { FinancingProviderClient, mapWisetackStatus } from '../financing/financing-provider';
 import { offerFinancingSchema } from '../shared/contracts';
+import { routeParam } from '../shared/route-params';
 
 export interface FinancingRouterDeps {
   financingRepo: FinancingRepository;
@@ -45,7 +46,7 @@ export function createFinancingRouter(deps: FinancingRouterDeps): Router {
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = offerFinancingSchema.parse(req.body);
       const tenantId = req.auth!.tenantId;
-      const invoice = await deps.invoiceRepo.findById(tenantId, req.params.invoiceId);
+      const invoice = await deps.invoiceRepo.findById(tenantId, routeParam(req, 'invoiceId'));
       if (!invoice) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
         return;
@@ -98,7 +99,7 @@ export function createFinancingRouter(deps: FinancingRouterDeps): Router {
     requirePermission('invoices:view'),
     notFoundOnMalformedId('Invoice not found', 'invoiceId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const apps = await deps.financingRepo.listByInvoice(req.auth!.tenantId, req.params.invoiceId);
+      const apps = await deps.financingRepo.listByInvoice(req.auth!.tenantId, routeParam(req, 'invoiceId'));
       res.json(apps);
     })
   );
@@ -110,7 +111,7 @@ export function createFinancingRouter(deps: FinancingRouterDeps): Router {
     requirePermission('invoices:view'),
     notFoundOnMalformedId('Financing application not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const app = await deps.financingRepo.findById(req.auth!.tenantId, req.params.id);
+      const app = await deps.financingRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!app) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Financing application not found' });
         return;

@@ -13,6 +13,7 @@ import {
 import type { SettingsRepository } from '../settings/settings';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { AuditRepository } from '../audit/audit';
+import { routeParam } from '../shared/route-params';
 
 export function createPackActivationRouter(
   packActivationRepo: PackActivationRepository,
@@ -40,7 +41,7 @@ export function createPackActivationRouter(
     requirePermission('settings:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
-      const packId = req.params.packId;
+      const packId = routeParam(req, 'packId');
 
       const validationErrors = validateActivationInput({ tenantId, packId });
       if (validationErrors.length > 0) {
@@ -81,7 +82,7 @@ export function createPackActivationRouter(
     requirePermission('settings:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
-      const packId = req.params.packId;
+      const packId = routeParam(req, 'packId');
 
       const result = await deactivatePack(
         tenantId,

@@ -93,12 +93,12 @@ describe('API-shaped 404 (RIVET C-1)', () => {
   });
 
   it('a non-API path (e.g. /customers/123) still reaches the SPA catch-all, not the new JSON 404', async () => {
-    // The SPA catch-all sits AFTER our new middleware and is mounted on '*',
+    // The SPA catch-all sits AFTER our new middleware and is mounted on '/{*splat}',
     // so it only ever sees paths that aren't /api, /public, or /webhooks.
     // packages/web/dist is not built in this test environment, so the real,
     // unmodified catch-all behavior here is its documented failure path:
     // a 500 with the "Frontend assets unavailable" envelope (see app.ts's
-    // `app.get('*', ...)`). That 500 body is what's asserted below — it is
+    // `app.get('/{*splat}', ...)`). That 500 body is what's asserted below — it is
     // deterministic in CI/this sandbox (no build step ran) and, crucially,
     // is NOT the `{ error: 'NOT_FOUND', ... }` shape our new middleware
     // produces, which is the thing this test needs to prove: non-API paths

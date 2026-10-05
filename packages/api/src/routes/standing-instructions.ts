@@ -10,6 +10,7 @@ import {
   createStandingInstructionSchema,
   deactivateStandingInstruction,
 } from '../instructions/standing-instructions';
+import { routeParam } from '../shared/route-params';
 
 /**
  * UB-A1 (agent wave) — standing instructions management.
@@ -70,7 +71,7 @@ export function createStandingInstructionRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const deactivated = await deactivateStandingInstruction(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         repo,
         req.auth!.userId,
         auditRepo,

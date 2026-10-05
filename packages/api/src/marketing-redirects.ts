@@ -31,7 +31,7 @@ export const MARKETING_REDIRECT_PATHS = [
 
 /**
  * Register the marketing-path redirects. Must be mounted BEFORE the SPA
- * catch-all (`app.get('*')`) so these paths forward to the marketing site
+ * catch-all (`app.get('/{*splat}')`) so these paths forward to the marketing site
  * instead of falling through to index.html. None of these collide with an
  * API route, so an unconditional GET redirect is safe.
  */

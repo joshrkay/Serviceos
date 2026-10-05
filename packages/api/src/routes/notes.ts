@@ -7,6 +7,7 @@ import { createNoteSchema } from '../shared/contracts';
 import { OwnedEntityType, TenantOwnership } from '../shared/tenant-ownership';
 import { createNote, updateNote, deleteNote, listNotes, NoteRepository } from '../notes/note';
 import { AuditRepository } from '../audit/audit';
+import { routeParam } from '../shared/route-params';
 
 export function createNoteRouter(
   noteRepo: NoteRepository,
@@ -75,7 +76,7 @@ export function createNoteRouter(
       }
       const result = await updateNote(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         content,
         noteRepo,
         auditRepo,
@@ -99,7 +100,7 @@ export function createNoteRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const deleted = await deleteNote(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         noteRepo,
         auditRepo,
         req.auth!.userId,

@@ -15,6 +15,7 @@ import {
   updateCatalogItem,
 } from '../catalog/catalog-item';
 import { AuditRepository } from '../audit/audit';
+import { routeParam } from '../shared/route-params';
 
 const listCatalogItemsQuerySchema = z.object({
   search: z.string().trim().optional(),
@@ -107,7 +108,7 @@ export function createCatalogItemsRouter(
       const updated = await updateCatalogItem(
         catalogRepo,
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         parsed,
         { userId: req.auth!.userId, role: req.auth!.role },
         auditRepo,
@@ -132,7 +133,7 @@ export function createCatalogItemsRouter(
       const archived = await archiveCatalogItem(
         catalogRepo,
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         { userId: req.auth!.userId, role: req.auth!.role },
         auditRepo,
       );
