@@ -175,4 +175,64 @@ describe('Postgres integration — voice gate usage caps', () => {
       forwardTo: OWNER_PHONE,
     });
   });
+
+  // #1605 — the not_live bypass reads owner_phone/business_phone off
+  // tenant_settings directly (not through SettingsRepository), so a mocked
+  // Pool proves the SQL parses but not that the columns are real. This pins
+  // it against actual Postgres (CLAUDE.md: "tests that mock the DB are never
+  // the only proof a query works").
+  describe('#1605 — owner test call vs. not_live', () => {
+    async function notLiveTenant(opts: { ownerPhone?: string | null; businessPhone?: string | null } = {}) {
+      const tenantId = await liveTenant({ status: 'trialing', ownerPhone: opts.ownerPhone ?? null });
+      await pool.query(
+        `UPDATE tenant_settings SET voice_agent_live_at = NULL, business_phone = $2 WHERE tenant_id = $1`,
+        [tenantId, opts.businessPhone ?? null],
+      );
+      return tenantId;
+    }
+
+    it('blocks a stranger to voicemail while not_live', async () => {
+      const tenantId = await notLiveTenant({ ownerPhone: OWNER_PHONE });
+      const result = await gate({
+        tenantId,
+        callSid: `CA${randomUUID().slice(0, 8)}`,
+        from: '+19995550111',
+        stirVerstat: 'TN-Validation-Passed-A',
+      });
+      expect(result).toEqual({ allowed: false, reason: 'not_live' });
+    });
+
+    it('blocks the owner\'s own number while not_live when it is not fully attested', async () => {
+      const tenantId = await notLiveTenant({ ownerPhone: OWNER_PHONE });
+      const result = await gate({
+        tenantId,
+        callSid: `CA${randomUUID().slice(0, 8)}`,
+        from: OWNER_PHONE,
+      });
+      expect(result).toEqual({ allowed: false, reason: 'not_live' });
+    });
+
+    it('lets the owner\'s own attested cell through as a test session while not_live', async () => {
+      const tenantId = await notLiveTenant({ ownerPhone: OWNER_PHONE });
+      const result = await gate({
+        tenantId,
+        callSid: `CA${randomUUID().slice(0, 8)}`,
+        from: OWNER_PHONE,
+        stirVerstat: 'TN-Validation-Passed-A',
+      });
+      expect(result).toEqual({ allowed: true });
+    });
+
+    it('lets the tenant\'s own attested business number through while not_live', async () => {
+      const BUSINESS_PHONE = '+15125550199';
+      const tenantId = await notLiveTenant({ ownerPhone: null, businessPhone: BUSINESS_PHONE });
+      const result = await gate({
+        tenantId,
+        callSid: `CA${randomUUID().slice(0, 8)}`,
+        from: BUSINESS_PHONE,
+        stirVerstat: 'TN-Validation-Passed-A',
+      });
+      expect(result).toEqual({ allowed: true });
+    });
+  });
 });

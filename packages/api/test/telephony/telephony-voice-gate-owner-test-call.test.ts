@@ -104,18 +104,39 @@ function signedVoice(app: express.Application, params: Record<string, string>) {
 }
 
 describe('POST /api/telephony/voice — #1605 owner test call vs. not_live gate', () => {
-  it('lets the owner\'s own caller-ID through as an AI-answered test session while not_live', async () => {
+  it('lets the owner\'s own attested caller-ID through as an AI-answered test session while not_live', async () => {
     const { app, store } = buildHarness(mockPool({ ownerPhone: OWNER_PHONE }));
 
     const res = await signedVoice(app, {
       CallSid: 'CA-owner-test-call',
       From: OWNER_PHONE,
       To: '+15125550999',
+      StirVerstat: 'TN-Validation-Passed-A',
     });
 
     expect(res.status).toBe(200);
     expect(res.text).toContain('<Gather');
     expect(res.text).not.toContain('AI assistant yet');
     expect(store.size()).toBe(1);
+  });
+
+  // Code-review finding — without an attestation requirement, business_phone
+  // defaulting to the tenant's own DID at provisioning would let a caller who
+  // simply spoofs From=To through this gate with no secret at all. Proves
+  // the route seam still blocks a caller-ID match that isn't fully attested.
+  it('still sends an owner-matching caller-ID to voicemail while not_live when it is not fully attested', async () => {
+    const { app, store } = buildHarness(mockPool({ ownerPhone: OWNER_PHONE }));
+
+    const res = await signedVoice(app, {
+      CallSid: 'CA-owner-unattested',
+      From: OWNER_PHONE,
+      To: '+15125550999',
+      // No StirVerstat at all — e.g. a non-SHAKEN route, or a spoofed call.
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('AI assistant yet');
+    expect(res.text).not.toContain('<Gather');
+    expect(store.size()).toBe(0);
   });
 });

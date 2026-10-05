@@ -9,6 +9,7 @@ import { PgOverageCapStore } from '../billing/overage-cap';
 import { isOverageCapReached } from '../billing/call-usage-pricing';
 import { readTenantBillingState } from '../billing/tenant-billing-state';
 import { samePhone } from './activation';
+import { isOwnerLineAttested } from '../telephony/stir-attestation';
 
 export interface VoiceGateInput {
   tenantId: string;
@@ -20,6 +21,16 @@ export interface VoiceGateInput {
    * existing callers that predate #1605 keep compiling.
    */
   from?: string | null;
+  /**
+   * #1605 / #1223 — Twilio's `StirVerstat` for this call. Caller-ID is
+   * spoofable (that's the whole reason #1223 requires full attestation
+   * before granting owner-line authority elsewhere), and
+   * tenant_settings.business_phone defaults to the tenant's own DID at
+   * provisioning — so without this check, spoofing From=To would satisfy
+   * the owner/business-number match with no secret at all. The not_live
+   * bypass below requires `isOwnerLineAttested` on top of the phone match.
+   */
+  stirVerstat?: string | null;
 }
 
 export interface VoiceGateResult {
@@ -41,14 +52,16 @@ export interface VoiceGateDeps {
 }
 
 /**
- * Composes Gate A (subscription), go-live gate, and Gate B (usage caps) for
- * the telephony /voice webhook. Setup blocks return voicemail TwiML upstream;
- * usage caps forward to the owner (see VoiceGateResult.forwardTo).
+ * Composes Gate A (subscription), the go-live gate — which carries its own
+ * narrow, fully-attested owner-test-call bypass (#1605, see the `!liveAt`
+ * branch below) — and Gate B (usage caps) for the telephony /voice webhook.
+ * Setup blocks return voicemail TwiML upstream; usage caps forward to the
+ * owner (see VoiceGateResult.forwardTo).
  */
 export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
   const ledger = new PgCallUsageRepository(deps.pool);
   const overageCaps = new PgOverageCapStore(deps.pool);
-  return async ({ tenantId, callSid, from }) => {
+  return async ({ tenantId, callSid, from, stirVerstat }) => {
     const tenant = await readTenantBillingState(deps.pool, tenantId);
     const rawStatus = tenant?.status ?? null;
     const status = normalizeStatus(rawStatus);
@@ -87,7 +100,16 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
       // "verified, not a real customer") and let THAT call through as an
       // AI-answered test session. Every other caller still goes to
       // voicemail until go-live, exactly as before.
-      if (await isOwnersOwnNumber(deps.pool, tenantId, from)) {
+      //
+      // Requires full STIR/SHAKEN attestation (#1223's own bar for
+      // owner-line authority) on top of the phone match — caller-ID alone
+      // is spoofable, and business_phone defaults to the tenant's own DID
+      // at provisioning, so phone-match alone would let anyone spoofing
+      // From=To through with no secret at all. A genuine owner on a
+      // SHAKEN-capable carrier gets A-attestation automatically; a missing
+      // or partial attestation fails closed to the pre-#1605 behavior
+      // (voicemail) rather than granting the bypass.
+      if (isOwnerLineAttested(stirVerstat) && (await isOwnersOwnNumber(deps.pool, tenantId, from))) {
         return { allowed: true };
       }
       return block(deps, {

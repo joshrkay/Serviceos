@@ -220,7 +220,12 @@ export interface TelephonyRouterDeps {
    *
    * When unset, no gate runs (legacy behavior).
    */
-  voiceGate?: (input: { tenantId: string; callSid: string; from?: string | null }) => Promise<{
+  voiceGate?: (input: {
+    tenantId: string;
+    callSid: string;
+    from?: string | null;
+    stirVerstat?: string | null;
+  }) => Promise<{
     allowed: boolean;
     reason?: GateReason;
     /** Usage caps: ring this owner phone (null → voicemail). */
@@ -494,7 +499,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         ? `${gateBase}/api/telephony/recording`
         : '/api/telephony/recording';
       try {
-        const gate = await deps.voiceGate({ tenantId, callSid, from });
+        const gate = await deps.voiceGate({ tenantId, callSid, from, stirVerstat: body.StirVerstat });
         if (!gate.allowed) {
           res
             .status(200)

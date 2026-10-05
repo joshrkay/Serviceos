@@ -99,7 +99,52 @@ describe('createVoiceGate', () => {
 
   // #1605 — the owner's own caller-ID must pass the not_live gate as a test
   // session; every other caller still goes to voicemail until go-live.
-  it('#1605: lets the owner\'s own cell through while not_live', async () => {
+  const FULL_ATTESTATION = 'TN-Validation-Passed-A';
+
+  it('#1605: lets the owner\'s own cell through while not_live (full attestation)', async () => {
+    const gate = createVoiceGate({
+      pool: mockPool({
+        subscriptionStatus: 'trialing',
+        voiceAgentLiveAt: null,
+        ownerPhone: '+14805550100',
+      }),
+      auditRepo,
+    });
+    const result = await gate({
+      tenantId: 't1',
+      callSid: 'CA1',
+      from: '+14805550100',
+      stirVerstat: FULL_ATTESTATION,
+    });
+    expect(result.allowed).toBe(true);
+    expect(auditRepo.create).not.toHaveBeenCalled();
+  });
+
+  it('#1605: lets the tenant\'s own business number through while not_live (full attestation)', async () => {
+    const gate = createVoiceGate({
+      pool: mockPool({
+        subscriptionStatus: 'trialing',
+        voiceAgentLiveAt: null,
+        businessPhone: '+15125550999',
+      }),
+      auditRepo,
+    });
+    const result = await gate({
+      tenantId: 't1',
+      callSid: 'CA1',
+      from: '+15125550999',
+      stirVerstat: FULL_ATTESTATION,
+    });
+    expect(result.allowed).toBe(true);
+  });
+
+  // Code-review finding (#1605 follow-up) — caller-ID alone is spoofable
+  // (#1223's own rationale for requiring full STIR/SHAKEN attestation before
+  // granting owner-line authority elsewhere). Without it, business_phone
+  // defaulting to the tenant's own DID at provisioning would let anyone who
+  // spoofs From=To through this gate. Written RED against the pre-fix
+  // behavior (which granted the bypass on caller-ID match alone).
+  it('#1605: still blocks the owner\'s own number without full STIR/SHAKEN attestation', async () => {
     const gate = createVoiceGate({
       pool: mockPool({
         subscriptionStatus: 'trialing',
@@ -109,21 +154,8 @@ describe('createVoiceGate', () => {
       auditRepo,
     });
     const result = await gate({ tenantId: 't1', callSid: 'CA1', from: '+14805550100' });
-    expect(result.allowed).toBe(true);
-    expect(auditRepo.create).not.toHaveBeenCalled();
-  });
-
-  it('#1605: lets the tenant\'s own business number through while not_live', async () => {
-    const gate = createVoiceGate({
-      pool: mockPool({
-        subscriptionStatus: 'trialing',
-        voiceAgentLiveAt: null,
-        businessPhone: '+15125550999',
-      }),
-      auditRepo,
-    });
-    const result = await gate({ tenantId: 't1', callSid: 'CA1', from: '+15125550999' });
-    expect(result.allowed).toBe(true);
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe('not_live');
   });
 
   it('#1605: still blocks a stranger\'s number while not_live', async () => {
