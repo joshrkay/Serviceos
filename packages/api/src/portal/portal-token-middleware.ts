@@ -18,6 +18,7 @@ import {
 } from './portal-service';
 import type { ContactRepository } from '../customers/contact';
 import { PortalEntitlement, entitlementAllows } from './portal-entitlement';
+import { routeParam } from '../shared/route-params';
 
 export interface PortalRequest extends Request {
   portal?: ResolvedPortalSession;
@@ -109,7 +110,7 @@ export function createPortalTokenMiddleware(
   const buckets = new TokenBucketRegistry(max, windowMs, maxBuckets);
 
   return async (req: PortalRequest, res: Response, next: NextFunction): Promise<void> => {
-    const token = req.params.token;
+    const token = routeParam(req, 'token');
     if (!token) {
       res.status(401).json({ error: 'UNAUTHORIZED', message: 'Missing portal token' });
       return;

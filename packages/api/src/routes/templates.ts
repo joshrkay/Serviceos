@@ -11,6 +11,7 @@ import {
   updateTemplate,
 } from '../templates/estimate-template';
 import { AuditRepository } from '../audit/audit';
+import { routeParam } from '../shared/route-params';
 
 export function createTemplateRouter(
   templateRepo: EstimateTemplateRepository,
@@ -58,7 +59,7 @@ export function createTemplateRouter(
     requirePermission('estimates:view'),
     notFoundOnMalformedId('Template not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const template = await templateRepo.findById(req.auth!.tenantId, req.params.id);
+      const template = await templateRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!template) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Template not found' });
         return;
@@ -95,13 +96,13 @@ export function createTemplateRouter(
     requirePermission('estimates:create'),
     notFoundOnMalformedId('Template not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const template = await templateRepo.findById(req.auth!.tenantId, req.params.id);
+      const template = await templateRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!template) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Template not found' });
         return;
       }
       const result = instantiateTemplate(template);
-      await templateRepo.incrementUsage(req.auth!.tenantId, req.params.id);
+      await templateRepo.incrementUsage(req.auth!.tenantId, routeParam(req, 'id'));
       res.json(result);
     })
   );
@@ -120,7 +121,7 @@ export function createTemplateRouter(
       const result = await updateTemplate(
         templateRepo,
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         {
           ...(name !== undefined && { name }),
           ...(description !== undefined && { description }),

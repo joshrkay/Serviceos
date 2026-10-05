@@ -23,6 +23,7 @@ import { PendingInvitationRepository } from '../users/pending-invitation';
 import { inviteTeamMember } from '../users/invite-team-member';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
+import { routeParam } from '../shared/route-params';
 
 const updateUserSchema = z.object({
   role: z.enum(['owner', 'dispatcher', 'technician']).optional(),
@@ -98,7 +99,7 @@ export function createUsersRouter(
   > {
     const tenantId = req.auth!.tenantId;
     const clerkUserId = req.auth!.userId;
-    if (req.params.id !== 'me' && !z.guid().safeParse(req.params.id).success) {
+    if (routeParam(req, 'id') !== 'me' && !z.guid().safeParse(routeParam(req, 'id')).success) {
       return { ok: false, status: 400, error: 'BAD_REQUEST', message: 'Invalid user id.' };
     }
     const users = await userRepo.findByTenant(tenantId);
@@ -106,7 +107,7 @@ export function createUsersRouter(
     if (!actor) {
       return { ok: false, status: 404, error: 'NOT_FOUND', message: 'User not found' };
     }
-    const targetId = req.params.id === 'me' ? actor.id : req.params.id;
+    const targetId = routeParam(req, 'id') === 'me' ? actor.id : routeParam(req, 'id');
     return { ok: true, tenantId, actor, targetId, users };
   }
 
@@ -146,7 +147,7 @@ export function createUsersRouter(
         const parsed = updateUserSchema.parse(req.body ?? {});
         const updated = await updateUser(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           parsed,
           userRepo,
         );
@@ -200,7 +201,7 @@ export function createUsersRouter(
         const tenantId = req.auth!.tenantId;
         // Self-deactivation would lock the caller out mid-session with no way
         // back; offboarding yourself is DELETE /api/users/me instead.
-        const target = await userRepo.findById(tenantId, req.params.id);
+        const target = await userRepo.findById(tenantId, routeParam(req, 'id'));
         if (target && target.clerkUserId && target.clerkUserId === req.auth!.userId) {
           res.status(409).json({
             error: 'CANNOT_DEACTIVATE_SELF',

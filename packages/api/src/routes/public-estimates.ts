@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { asyncRoute } from '../middleware/async-route';
 import { extractIp } from '../shared/extract-ip';
 import { PublicEstimateService } from '../estimates/public-estimate-service';
+import { routeParam } from '../shared/route-params';
 
 const approveSchema = z.object({
   acceptedByName: z.string().trim().min(2).max(120),
@@ -29,12 +30,12 @@ export function createPublicEstimatesRouter(
   const router = Router();
 
   router.get('/:token', asyncRoute(async (req: Request, res: Response) => {
-    const view = await service.getByToken(req.params.token);
+    const view = await service.getByToken(routeParam(req, 'token'));
     res.json(view);
   }));
 
   router.post('/:token/view', asyncRoute(async (req: Request, res: Response) => {
-    const result = await service.recordView(req.params.token, {
+    const result = await service.recordView(routeParam(req, 'token'), {
       ip: extractIp(req),
       userAgent: req.get('user-agent') ?? undefined,
     });
@@ -44,7 +45,7 @@ export function createPublicEstimatesRouter(
   router.post('/:token/approve', asyncRoute(async (req: Request, res: Response) => {
     const parsed = approveSchema.parse(req.body ?? {});
     const view = await service.approve({
-      token: req.params.token,
+      token: routeParam(req, 'token'),
       acceptedByName: parsed.acceptedByName,
       signatureData: parsed.signatureData,
       expectedVersion: parsed.expectedVersion,
@@ -56,14 +57,14 @@ export function createPublicEstimatesRouter(
   }));
 
   router.post('/:token/deposit-checkout', asyncRoute(async (req: Request, res: Response) => {
-    const result = await service.getOrCreateDepositCheckoutUrl(req.params.token);
+    const result = await service.getOrCreateDepositCheckoutUrl(routeParam(req, 'token'));
     res.status(200).json(result);
   }));
 
   router.post('/:token/decline', asyncRoute(async (req: Request, res: Response) => {
     const parsed = declineSchema.parse(req.body ?? {});
     const view = await service.decline({
-      token: req.params.token,
+      token: routeParam(req, 'token'),
       reason: parsed.reason,
       ip: extractIp(req),
       userAgent: req.get('user-agent') ?? undefined,

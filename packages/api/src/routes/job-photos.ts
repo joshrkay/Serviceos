@@ -24,6 +24,7 @@ import { JobRepository } from '../jobs/job';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { asyncRoute } from '../middleware/async-route';
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
+import { routeParam } from '../shared/route-params';
 
 // Photos are bounded tighter than the generic 100MB file limit:
 // mobile cameras commonly emit 4–8MB JPEGs; 10MB is a comfortable
@@ -84,7 +85,7 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     notFoundOnMalformedId('Job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const body = (req.body ?? {}) as PresignBody;
-      const jobId = req.params.id;
+      const jobId = routeParam(req, 'id');
       const tenantId = req.auth!.tenantId;
 
       const uploadRequest = {
@@ -174,7 +175,7 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     notFoundOnMalformedId('Job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const body = (req.body ?? {}) as AttachBody;
-      const jobId = req.params.id;
+      const jobId = routeParam(req, 'id');
       const tenantId = req.auth!.tenantId;
 
       if (!body.fileId) {
@@ -242,7 +243,7 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     notFoundOnMalformedId('Job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
-      const photos = await service.listJobPhotos(tenantId, req.params.id);
+      const photos = await service.listJobPhotos(tenantId, routeParam(req, 'id'));
       res.json(photos);
     })
   );
@@ -259,7 +260,7 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
     notFoundOnMalformedId('Job photo not found', 'photoId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
-      const removed = await service.deleteJobPhoto(tenantId, req.params.id, req.params.photoId);
+      const removed = await service.deleteJobPhoto(tenantId, routeParam(req, 'id'), routeParam(req, 'photoId'));
       if (!removed) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Job photo not found' });
         return;
@@ -272,8 +273,8 @@ export function createJobPhotosRouter(deps: JobPhotosRouterDeps): Router {
           actorRole: req.auth!.role,
           eventType: 'job.photo.deleted',
           entityType: 'job',
-          entityId: req.params.id,
-          metadata: { photoId: req.params.photoId },
+          entityId: routeParam(req, 'id'),
+          metadata: { photoId: routeParam(req, 'photoId') },
         })
       );
 

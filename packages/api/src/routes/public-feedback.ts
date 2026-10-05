@@ -11,6 +11,7 @@ import {
 import { SettingsRepository } from '../settings/settings';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
+import { routeParam } from '../shared/route-params';
 
 /** Ratings at or below this are pushed to the owner (#1071); 4★+ get review links. */
 const LOW_RATING_MAX = 3;
@@ -39,11 +40,11 @@ export function createPublicFeedbackRouter(
     // invalid-token UX; JSON clients send Accept: application/json and are
     // unaffected.
     if ((req.headers.accept ?? '').includes('text/html')) {
-      res.redirect(302, `/feedback/${encodeURIComponent(req.params.token)}`);
+      res.redirect(302, `/feedback/${encodeURIComponent(routeParam(req, 'token'))}`);
       return;
     }
     try {
-      const request = await requestRepo.findByToken(req.params.token);
+      const request = await requestRepo.findByToken(routeParam(req, 'token'));
       if (!request) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Feedback request not found' });
         return;
@@ -74,7 +75,7 @@ export function createPublicFeedbackRouter(
 
   router.post('/:token', async (req: Request, res: Response) => {
     try {
-      const request = await requestRepo.findByToken(req.params.token);
+      const request = await requestRepo.findByToken(routeParam(req, 'token'));
       if (!request) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Feedback request not found' });
         return;
@@ -111,7 +112,7 @@ export function createPublicFeedbackRouter(
         await auditRepo.create(
           createAuditEvent({
             tenantId: request.tenantId,
-            actorId: publicActorFromToken(req.params.token),
+            actorId: publicActorFromToken(routeParam(req, 'token')),
             actorRole: 'customer',
             eventType: 'feedback_response.submitted',
             entityType: 'feedback_response',

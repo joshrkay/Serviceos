@@ -19,6 +19,7 @@ import {
   updateJobFormSubmissionSchema,
   updateJobFormTemplateSchema,
 } from '../shared/contracts';
+import { routeParam } from '../shared/route-params';
 
 /**
  * J-FORM (Jobber parity) — job forms & checklists.
@@ -56,7 +57,7 @@ export function createJobFormRouter(
     requirePermission('jobs:view'),
     notFoundOnMalformedId('Job form template not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const template = await jobFormRepo.findTemplateById(req.auth!.tenantId, req.params.id);
+      const template = await jobFormRepo.findTemplateById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!template) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Job form template not found' });
         return;
@@ -96,7 +97,7 @@ export function createJobFormRouter(
       const parsed = updateJobFormTemplateSchema.parse(req.body);
       const template = await updateJobFormTemplate(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         parsed,
         jobFormRepo,
         req.auth!.userId,
@@ -116,7 +117,7 @@ export function createJobFormRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const archived = await archiveJobFormTemplate(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         jobFormRepo,
         req.auth!.userId,
         auditRepo,
@@ -141,7 +142,7 @@ export function createJobFormRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const submissions = await jobFormRepo.listSubmissionsByJob(
         req.auth!.tenantId,
-        req.params.jobId
+        routeParam(req, 'jobId')
       );
       res.json(submissions);
     })
@@ -157,7 +158,7 @@ export function createJobFormRouter(
       const parsed = createJobFormSubmissionSchema.parse(req.body);
       // Confirm the job belongs to this tenant before attaching a submission —
       // the job_id FK isn't tenant-scoped, so guard against cross-tenant injection.
-      const job = await jobRepo.findById(req.auth!.tenantId, req.params.jobId);
+      const job = await jobRepo.findById(req.auth!.tenantId, routeParam(req, 'jobId'));
       if (!job) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
         return;
@@ -166,7 +167,7 @@ export function createJobFormRouter(
         {
           ...parsed,
           tenantId: req.auth!.tenantId,
-          jobId: req.params.jobId,
+          jobId: routeParam(req, 'jobId'),
           createdBy: req.auth!.userId,
           actorRole: req.auth!.role,
         },
@@ -184,7 +185,7 @@ export function createJobFormRouter(
     requirePermission('jobs:view'),
     notFoundOnMalformedId('Job form submission not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const submission = await jobFormRepo.findSubmissionById(req.auth!.tenantId, req.params.id);
+      const submission = await jobFormRepo.findSubmissionById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!submission) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Job form submission not found' });
         return;
@@ -203,7 +204,7 @@ export function createJobFormRouter(
       const parsed = updateJobFormSubmissionSchema.parse(req.body);
       const submission = await updateJobFormSubmission(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         parsed,
         jobFormRepo,
         req.auth!.userId,

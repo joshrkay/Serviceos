@@ -49,6 +49,7 @@ import {
   InMemoryTransactionRunner,
 } from '../db/tenant-transaction';
 import { createLogger } from '../logging/logger';
+import { routeParam } from '../shared/route-params';
 
 const bookingLogger = createLogger({
   service: 'public-booking-route',
@@ -209,7 +210,7 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
    */
   router.get('/:tenantId/availability', async (req: Request, res: Response) => {
     try {
-      const tenantId = req.params.tenantId;
+      const tenantId = routeParam(req, 'tenantId');
       if (!TENANT_UUID.test(tenantId)) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid tenantId' });
         return;
@@ -255,7 +256,7 @@ export function createPublicBookingRouter(deps: PublicBookingDeps): Router {
    */
   router.post('/:tenantId', async (req: Request, res: Response) => {
     try {
-      const tenantId = req.params.tenantId;
+      const tenantId = routeParam(req, 'tenantId');
       if (!TENANT_UUID.test(tenantId)) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid tenantId' });
         return;

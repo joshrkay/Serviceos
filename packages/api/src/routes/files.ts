@@ -16,6 +16,7 @@ import { AppError } from '../shared/errors';
 import type { JobRepository } from '../jobs/job';
 import { z } from 'zod';
 import { verifyDevStorageToken } from '../files/storage-provider';
+import { routeParam } from '../shared/route-params';
 
 interface UploadUrlBody {
   filename?: string;
@@ -132,7 +133,7 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
     requirePermission('files:view'),
     notFoundOnMalformedId('File not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const record = await fileRepo.findById(req.auth!.tenantId, req.params.id);
+      const record = await fileRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!record) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'File not found' });
         return;
@@ -154,7 +155,7 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
     requirePermission('files:upload'),
     notFoundOnMalformedId('File not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const record = await fileRepo.findById(req.auth!.tenantId, req.params.id);
+      const record = await fileRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!record) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'File not found' });
         return;
@@ -228,7 +229,7 @@ export function createDevStorageRouter(secret: string): Router {
   const router = Router();
   const store = new Map<string, { bytes: Buffer; contentType: string }>();
 
-  router.put('/*', (req, res) => {
+  router.put('/{*key}', (req, res) => {
     const key = req.path.replace(/^\/+/, '');
     if (!verifyDevStorageToken(secret, 'PUT', key, req.query.token as string | undefined)) {
       res.status(401).json({ error: 'UNAUTHORIZED', message: 'Missing or invalid dev-storage token' });
@@ -245,7 +246,7 @@ export function createDevStorageRouter(secret: string): Router {
     req.on('error', () => res.status(500).end());
   });
 
-  router.get('/*', (req, res) => {
+  router.get('/{*key}', (req, res) => {
     const key = req.path.replace(/^\/+/, '');
     if (!verifyDevStorageToken(secret, 'GET', key, req.query.token as string | undefined)) {
       res.status(401).json({ error: 'UNAUTHORIZED', message: 'Missing or invalid dev-storage token' });

@@ -14,11 +14,12 @@
  *   2. Where each mount sits relative to the auth/tenancy middleware chain,
  *      expressed as an exposure class.
  *
- * Express 4 note: `app.router` is a getter that THROWS ("'app.router' is
- * deprecated"), so the private `_router` is the only way in on this version.
+ * Express 5 exposes the root router as `app.router` (Express 4 hid it as
+ * `_router`); mount paths come from the registration-time stamp (#1555).
  */
 
 import type express from 'express';
+import { MOUNT_PATH } from './bootstrap/stamp-mount-paths';
 
 /**
  * How a mount is reached from outside. Derived from the mount path, then
@@ -81,27 +82,21 @@ export interface RouteManifest {
 export const GUARD_MIDDLEWARE = ['requireAuth', 'resolveAuthorization'] as const;
 
 /**
- * Recovers the literal mount path from an Express layer regexp.
+ * The literal path a layer was mounted at (#1555).
  *
- * Express 4 compiles `app.use('/api/jobs', …)` to
- * `/^\/api\/jobs\/?(?=\/|$)/i` and sets `fast_slash` for a path-less
- * `app.use(fn)`. Anything with a parameter or wildcard is not reversible, so
- * it is reported as-is rather than guessed at.
+ * Express 5 keeps no decodable regexp on a layer, so the path is read from
+ * the stamp bootstrap/stamp-mount-paths.ts writes at registration. A
+ * path-less `use(fn)` reads as `/`; an array mount reads as its paths joined
+ * with `|`; a parameterised mount reads literally (`/api/jobs/:id`).
  */
-export function decodeLayerPath(regexp: RegExp & { fast_slash?: boolean }): string {
-  if (regexp.fast_slash) return '/';
-
-  let source = regexp.source;
-  source = source
-    .replace(/^\^/, '')
-    .replace(/\\\/\?\(\?=\\\/\|\$\)$/, '')
-    .replace(/\\\/\?\$$/, '')
-    .replace(/\$$/, '');
-
-  const decoded = source.replace(/\\\//g, '/');
-  // A reversible mount path contains only literal characters.
-  if (/[()[\]?+*|]/.test(decoded)) return `(dynamic: ${regexp.source})`;
-  return decoded.length > 0 ? decoded : '/';
+export function layerMountPath(layer: object): string {
+  const path = (layer as Record<PropertyKey, unknown>)[MOUNT_PATH];
+  if (Array.isArray(path)) return path.join('|');
+  if (typeof path === 'string') return path;
+  throw new Error(
+    'Router layer has no stamped mount path — was bootstrap/stamp-mount-paths imported ' +
+      'before the router was built?',
+  );
 }
 
 /**
@@ -143,7 +138,6 @@ export function classifyExposure(path: string): ExposureClass {
 
 interface ExpressLayer {
   name?: string;
-  regexp: RegExp & { fast_slash?: boolean };
   route?: { path: string | string[]; methods: Record<string, boolean> };
   handle?: { stack?: ExpressLayer[] };
 }
@@ -171,11 +165,11 @@ function layerChildren(layer: ExpressLayer): string[] | undefined {
  * layers are skipped — they are framework internals, not application wiring.
  */
 export function buildRouteManifest(app: express.Express): RouteManifest {
-  const router = (app as unknown as { _router?: { stack?: ExpressLayer[] } })._router;
+  const router = (app as unknown as { router?: { stack?: ExpressLayer[] } }).router;
   if (!router?.stack) {
     throw new Error(
-      'Could not read the Express router stack. If Express was upgraded past 4.x, ' +
-        'this walker needs updating (5.x exposes `app.router` instead of `_router`).',
+      'Could not read the Express router stack (`app.router`). If Express was upgraded ' +
+        'past 5.x, this walker needs updating.',
     );
   }
 
@@ -202,7 +196,7 @@ export function buildRouteManifest(app: express.Express): RouteManifest {
       continue;
     }
 
-    const path = decodeLayerPath(layer.regexp);
+    const path = layerMountPath(layer);
     const children = layerChildren(layer);
     entries.push({
       path,

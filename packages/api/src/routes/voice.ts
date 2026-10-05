@@ -29,6 +29,7 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { Logger } from '../logging/logger';
 import type { FileRepository, StorageProvider } from '../files/file-service';
 import type { JobRepository } from '../jobs/job';
+import { routeParam } from '../shared/route-params';
 
 interface CreateVoiceRecordingBody {
   fileId: string;
@@ -523,7 +524,7 @@ export function createVoiceRouter(
     requirePermission('files:view'),
     notFoundOnMalformedId('Voice recording not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const recording = await voiceRepo.findById(req.auth!.tenantId, req.params.id);
+      const recording = await voiceRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!recording) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Voice recording not found' });
         return;
@@ -545,7 +546,7 @@ export function createVoiceRouter(
     requirePermission('files:view'),
     notFoundOnMalformedId('Voice recording not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const recording = await voiceRepo.findById(req.auth!.tenantId, req.params.id);
+      const recording = await voiceRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!recording) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Voice recording not found' });
         return;
@@ -631,7 +632,7 @@ export function createVoiceRouter(
     requirePermission('files:upload'),
     notFoundOnMalformedId('Voice recording not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const existing = await voiceRepo.findById(req.auth!.tenantId, req.params.id);
+      const existing = await voiceRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!existing) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Voice recording not found' });
         return;

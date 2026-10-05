@@ -91,6 +91,7 @@ import express from 'express';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
 import { createApp, type AppWithLifecycle } from '../../src/app';
+import { layerMountPath } from '../../src/app-route-manifest';
 import { resetConfig } from '../../src/shared/config';
 import { requireRole } from '../../src/middleware/auth';
 import { SUPPORTED_INTENTS } from '../../src/ai/orchestration/intent-classifier';
@@ -120,7 +121,6 @@ const OWNER_ONLY_ROUTES = 63;
 
 type Layer = {
   name?: string;
-  regexp: RegExp & { fast_slash?: boolean };
   route?: {
     path: string | string[];
     methods: Record<string, boolean>;
@@ -129,17 +129,15 @@ type Layer = {
   handle?: unknown;
 };
 
-/** Same Express-4 regexp decoding as src/app-route-manifest.ts. */
-function decodeLayerPath(regexp: RegExp & { fast_slash?: boolean }): string {
-  if (regexp.fast_slash) return '';
-  const source = regexp.source
-    .replace(/^\^/, '')
-    .replace(/\\\/\?\(\?=\\\/\|\$\)$/, '')
-    .replace(/\\\/\?\$$/, '')
-    .replace(/\$$/, '');
-  const decoded = source.replace(/\\\//g, '/');
-  if (/[()[\]?+*|]/.test(decoded)) return `(dynamic: ${regexp.source})`;
-  return decoded;
+/**
+ * A nested router's mount prefix. Express 5 keeps no decodable regexp on a
+ * layer, so this reads the registration-time stamp through the same
+ * layerMountPath() as src/app-route-manifest.ts (#1555). A path-less
+ * `use()` contributes no prefix.
+ */
+function mountPrefix(layer: Layer): string {
+  const p = layerMountPath(layer);
+  return p === '/' ? '' : p;
 }
 
 /**
@@ -214,15 +212,15 @@ function isOwnerOnly(guards: express.RequestHandler[]): boolean {
 
 /**
  * Walks a booted app and returns `METHOD /path` for every route whose executed
- * guard chain is owner-only. Express 4: `app.router` throws, so `_router` is
- * the only way in (same note as src/app-route-manifest.ts).
+ * guard chain is owner-only. Express 5 exposes the root router as
+ * `app.router` (same note as src/app-route-manifest.ts).
  */
 export function deriveOwnerOnlyRoutes(app: express.Express): string[] {
-  const root = (app as unknown as { _router?: { stack?: Layer[] } })._router;
+  const root = (app as unknown as { router?: { stack?: Layer[] } }).router;
   if (!root?.stack) {
     throw new Error(
-      'Could not read the Express router stack. If Express was upgraded past 4.x, ' +
-        'this derivation needs updating (5.x exposes `app.router` instead of `_router`).',
+      'Could not read the Express router stack (`app.router`). If Express was upgraded ' +
+        'past 5.x, this derivation needs updating.',
     );
   }
 
@@ -256,7 +254,7 @@ export function deriveOwnerOnlyRoutes(app: express.Express): string[] {
 
       const nested = (layer.handle as { stack?: Layer[] } | undefined)?.stack;
       if (nested) {
-        walk(nested, prefix + decodeLayerPath(layer.regexp), pending);
+        walk(nested, prefix + mountPrefix(layer), pending);
         continue;
       }
       if (isRoleGuard(layer.handle)) pending.push(layer.handle);
@@ -438,7 +436,7 @@ async function enclosingRouteOfOwnerCheck(
 
 /** Every `METHOD /path` the booted app mounts, owner-only or not. */
 function allMountedRoutes(app: express.Express): Set<string> {
-  const root = (app as unknown as { _router?: { stack?: Layer[] } })._router;
+  const root = (app as unknown as { router?: { stack?: Layer[] } }).router;
   const all = new Set<string>();
   const walk = (stack: Layer[], prefix: string): void => {
     for (const layer of stack) {
@@ -452,7 +450,7 @@ function allMountedRoutes(app: express.Express): Set<string> {
         continue;
       }
       const nested = (layer.handle as { stack?: Layer[] } | undefined)?.stack;
-      if (nested) walk(nested, prefix + decodeLayerPath(layer.regexp));
+      if (nested) walk(nested, prefix + mountPrefix(layer));
     }
   };
   walk(root?.stack ?? [], '');

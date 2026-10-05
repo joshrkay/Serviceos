@@ -3,6 +3,7 @@ import type { WhisperCache } from './whisper-cache';
 import { xmlEscape } from './twilio-adapter';
 import { sessionBelongsToAnotherTenant } from './twilio-signature';
 import { createLogger } from '../logging/logger';
+import { routeParam } from '../shared/route-params';
 
 const logger = createLogger({
   service: 'telephony.whisper',
@@ -42,11 +43,11 @@ export interface WhisperRouterDeps {
 export function whisperRouter(deps: WhisperRouterDeps): Router {
   const router = Router();
   router.get('/whisper/:escalationId', (req, res) => {
-    const entry = deps.whisperCache.get(req.params.escalationId);
+    const entry = deps.whisperCache.get(routeParam(req, 'escalationId'));
     const foreign = sessionBelongsToAnotherTenant(req, entry);
     if (foreign) {
       logger.warn('telephony.whisper_tenant_mismatch', {
-        escalationId: req.params.escalationId,
+        escalationId: routeParam(req, 'escalationId'),
       });
     }
     const text = foreign ? undefined : entry?.text;

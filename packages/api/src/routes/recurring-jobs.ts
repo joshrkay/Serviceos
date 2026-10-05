@@ -19,6 +19,7 @@ import {
 import { materializeRecurringJob } from '../recurring-jobs/materialize';
 import { describeRecurrence } from '../recurring-jobs/recurrence';
 import { createRecurringJobSchema, updateRecurringJobSchema } from '../shared/contracts';
+import { routeParam } from '../shared/route-params';
 
 /** Extra deps for materializing a series into real jobs + appointments. */
 export interface RecurringJobMaterializeDeps {
@@ -93,7 +94,7 @@ export function createRecurringJobRouter(
     requirePermission('jobs:view'),
     notFoundOnMalformedId('Recurring job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const job = await repo.findById(req.auth!.tenantId, req.params.id);
+      const job = await repo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!job) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Recurring job not found' });
         return;
@@ -109,7 +110,7 @@ export function createRecurringJobRouter(
     requirePermission('jobs:view'),
     notFoundOnMalformedId('Recurring job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const job = await repo.findById(req.auth!.tenantId, req.params.id);
+      const job = await repo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!job) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Recurring job not found' });
         return;
@@ -136,7 +137,7 @@ export function createRecurringJobRouter(
       const parsed = updateRecurringJobSchema.parse(req.body);
       const job = await updateRecurringJob(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         parsed,
         repo,
         req.auth!.userId,
@@ -156,7 +157,7 @@ export function createRecurringJobRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const archived = await archiveRecurringJob(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         repo,
         req.auth!.userId,
         auditRepo,
@@ -179,7 +180,7 @@ export function createRecurringJobRouter(
     requirePermission('jobs:create'),
     notFoundOnMalformedId('Recurring job not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const job = await repo.findById(req.auth!.tenantId, req.params.id);
+      const job = await repo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!job) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Recurring job not found' });
         return;

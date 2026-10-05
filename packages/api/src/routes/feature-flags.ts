@@ -15,6 +15,7 @@ import {
   FeatureFlagRepository,
 } from '../flags/feature-flags';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { routeParam } from '../shared/route-params';
 
 const upsertSchema = z.object({
   name: z.string().min(1),
@@ -75,7 +76,7 @@ export function createFeatureFlagsRouter(
     requireTenant,
     adminGate,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const flag = await repo.get(req.params.name);
+      const flag = await repo.get(routeParam(req, 'name'));
       if (!flag) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Flag not found' });
         return;
@@ -90,7 +91,7 @@ export function createFeatureFlagsRouter(
     requireTenant,
     adminGate,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const parsed = validate(upsertSchema, { ...req.body, name: req.params.name });
+      const parsed = validate(upsertSchema, { ...req.body, name: routeParam(req, 'name') });
       const flag: FeatureFlag = {
         name: parsed.name,
         enabled: parsed.enabled,
@@ -141,12 +142,12 @@ export function createFeatureFlagsRouter(
     requireTenant,
     adminGate,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const removed = await repo.delete(req.params.name);
+      const removed = await repo.delete(routeParam(req, 'name'));
       if (!removed) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Flag not found' });
         return;
       }
-      store.removeFlag(req.params.name);
+      store.removeFlag(routeParam(req, 'name'));
 
       // D2-1c — audit-log the delete. Same scope='platform' tagging as
       // the upsert path so the operator-history view can group
@@ -160,10 +161,10 @@ export function createFeatureFlagsRouter(
             actorRole: req.auth!.role,
             eventType: 'feature_flag.deleted',
             entityType: 'feature_flag',
-            entityId: req.params.name,
+            entityId: routeParam(req, 'name'),
             metadata: {
               scope: 'platform',
-              flagName: req.params.name,
+              flagName: routeParam(req, 'name'),
             },
           }),
         );

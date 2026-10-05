@@ -30,6 +30,7 @@ import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { formatBusinessHoursSummary } from '../public-intake/format-business-hours';
 import { isValidVerticalType } from '../shared/vertical-types';
 import { isTwilioTestNumber } from '../telephony/phone-policy';
+import { routeParam } from '../shared/route-params';
 
 const PUBLIC_INTAKE_SOURCE: LeadSource = 'web_form';
 const PUBLIC_INTAKE_ACTOR_ID = 'public_intake';
@@ -138,7 +139,7 @@ export function createPublicIntakeRouter(
   const router = Router();
 
   router.post('/:tenantId/leads', asyncRoute(async (req: Request, res: Response) => {
-    const tenantId = req.params.tenantId;
+    const tenantId = routeParam(req, 'tenantId');
     if (!TENANT_UUID.test(tenantId)) {
       res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid tenantId' });
       return;
@@ -191,7 +192,7 @@ export function createPublicIntakeRouter(
   // Public tenant info for the intake form header + service-type list.
   // Read-only; same UUID-in-path validation and rate limiting as the POST.
   router.get('/:tenantId', asyncRoute(async (req: Request, res: Response) => {
-    const tenantId = req.params.tenantId;
+    const tenantId = routeParam(req, 'tenantId');
     if (!TENANT_UUID.test(tenantId)) {
       res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid tenantId' });
       return;

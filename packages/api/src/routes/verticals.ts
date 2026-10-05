@@ -8,6 +8,7 @@ import { HVAC_CATEGORIES } from '../verticals/hvac/categories';
 import { PLUMBING_CATEGORIES } from '../verticals/plumbing/categories';
 import { HVAC_TERMINOLOGY, TerminologyMap } from '../verticals/hvac/terminology';
 import { PLUMBING_TERMINOLOGY } from '../verticals/plumbing/terminology';
+import { routeParam } from '../shared/route-params';
 
 function getVerticalCategories(verticalType: VerticalType) {
   switch (verticalType) {
@@ -130,7 +131,7 @@ export function createVerticalRouter(verticalPackRegistry: VerticalPackRegistry)
     requireAuth,
     requireTenant,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const verticalType = req.params.type;
+      const verticalType = routeParam(req, 'type');
       if (!isValidVerticalType(verticalType)) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid vertical type' });
         return;
@@ -151,7 +152,7 @@ export function createVerticalRouter(verticalPackRegistry: VerticalPackRegistry)
     requireAuth,
     requireTenant,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const verticalType = req.params.type;
+      const verticalType = routeParam(req, 'type');
       if (!isValidVerticalType(verticalType)) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid vertical type' });
         return;
@@ -176,7 +177,7 @@ export function createVerticalRouter(verticalPackRegistry: VerticalPackRegistry)
     requireAuth,
     requireTenant,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const verticalType = req.params.type;
+      const verticalType = routeParam(req, 'type');
       if (!isValidVerticalType(verticalType)) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invalid vertical type' });
         return;
@@ -188,7 +189,7 @@ export function createVerticalRouter(verticalPackRegistry: VerticalPackRegistry)
         return;
       }
 
-      const resolved = resolveTerminology(getVerticalTerminology(verticalType), req.params.term);
+      const resolved = resolveTerminology(getVerticalTerminology(verticalType), routeParam(req, 'term'));
       if (!resolved) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Term not found' });
         return;
