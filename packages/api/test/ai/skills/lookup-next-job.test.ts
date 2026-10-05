@@ -340,4 +340,42 @@ describe('lookupNextJob skill', () => {
       expect.objectContaining({ intent: 'lookup_next_job', resultStatus: 'error', resultCount: 0 }),
     );
   });
+
+  // Characterisation pins (not red slices): the when-phrase and the Spanish
+  // rendering follow from the catalogue-by-id design, pinned so they cannot drift.
+  it.each([
+    ['tomorrow', '2026-06-12T13:00:00.000Z', 'tomorrow at 9 AM'],
+    ['a later weekday', '2026-06-18T13:00:00.000Z', 'on Thursday, June 18 at 9 AM'],
+  ])('says WHEN the visit is — %s', async (_label, startIso, when) => {
+    const start = new Date(startIso);
+    const deps = await fixtures({
+      jobs: [makeJob({})],
+      appointments: [makeAppointment({ scheduledStart: start, scheduledEnd: new Date(start.getTime() + 3_600_000) })],
+    });
+
+    const res = await lookupNextJob({ tenantId: TENANT, technicianId: ME, timezone: TZ, now: NOW }, deps);
+
+    expect(res.summary).toBe(
+      `Your next job is ${when} — Dana Keller, Water heater replacement, at 4120 East Oakhurst Boulevard, Yonkers. ` +
+        'Access notes: Gate code 4421, dog in the yard.',
+    );
+  });
+
+  it('renders the whole readback in Spanish on an es session (tts-copy ids, not a sentence catalog)', async () => {
+    const deps = await fixtures({
+      jobs: [makeJob({})],
+      appointments: [makeAppointment({})],
+      notes: [makeNote({ content: 'Customer prefers a text before arrival.' })],
+    });
+
+    const res = await lookupNextJob(
+      { tenantId: TENANT, technicianId: ME, timezone: TZ, now: NOW, language: 'es' },
+      deps,
+    );
+
+    expect(res.summary).toBe(
+      'Su próximo trabajo es hoy a las 2 p.m. — Dana Keller, Water heater replacement, en 4120 East Oakhurst Boulevard, Yonkers. ' +
+        'Notas de acceso: Gate code 4421, dog in the yard. Última nota: Customer prefers a text before arrival.',
+    );
+  });
 });
