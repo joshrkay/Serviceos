@@ -10,6 +10,8 @@ function mockPool(opts: {
   subscriptionStatus: string | null;
   voiceAgentLiveAt?: Date | null;
   pastDueGraceUntil?: Date | null;
+  ownerPhone?: string | null;
+  businessPhone?: string | null;
 }): Pool {
   const liveAt = opts.voiceAgentLiveAt === undefined ? new Date() : opts.voiceAgentLiveAt;
   return {
@@ -26,6 +28,13 @@ function mockPool(opts: {
       }
       if (sql.includes('voice_agent_live_at')) {
         return { rows: [{ voice_agent_live_at: liveAt }] };
+      }
+      if (sql.includes('owner_phone')) {
+        return {
+          rows: [
+            { owner_phone: opts.ownerPhone ?? null, business_phone: opts.businessPhone ?? null },
+          ],
+        };
       }
       return { rows: [] };
     }),
@@ -86,6 +95,63 @@ describe('createVoiceGate', () => {
     expect(auditRepo.create).toHaveBeenCalledWith(
       expect.objectContaining({ eventType: 'voice_blocked_not_live' }),
     );
+  });
+
+  // #1605 — the owner's own caller-ID must pass the not_live gate as a test
+  // session; every other caller still goes to voicemail until go-live.
+  it('#1605: lets the owner\'s own cell through while not_live', async () => {
+    const gate = createVoiceGate({
+      pool: mockPool({
+        subscriptionStatus: 'trialing',
+        voiceAgentLiveAt: null,
+        ownerPhone: '+14805550100',
+      }),
+      auditRepo,
+    });
+    const result = await gate({ tenantId: 't1', callSid: 'CA1', from: '+14805550100' });
+    expect(result.allowed).toBe(true);
+    expect(auditRepo.create).not.toHaveBeenCalled();
+  });
+
+  it('#1605: lets the tenant\'s own business number through while not_live', async () => {
+    const gate = createVoiceGate({
+      pool: mockPool({
+        subscriptionStatus: 'trialing',
+        voiceAgentLiveAt: null,
+        businessPhone: '+15125550999',
+      }),
+      auditRepo,
+    });
+    const result = await gate({ tenantId: 't1', callSid: 'CA1', from: '+15125550999' });
+    expect(result.allowed).toBe(true);
+  });
+
+  it('#1605: still blocks a stranger\'s number while not_live', async () => {
+    const gate = createVoiceGate({
+      pool: mockPool({
+        subscriptionStatus: 'trialing',
+        voiceAgentLiveAt: null,
+        ownerPhone: '+14805550100',
+      }),
+      auditRepo,
+    });
+    const result = await gate({ tenantId: 't1', callSid: 'CA1', from: '+19995550111' });
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe('not_live');
+  });
+
+  it('#1605: still blocks when no caller-ID is given at all', async () => {
+    const gate = createVoiceGate({
+      pool: mockPool({
+        subscriptionStatus: 'trialing',
+        voiceAgentLiveAt: null,
+        ownerPhone: '+14805550100',
+      }),
+      auditRepo,
+    });
+    const result = await gate({ tenantId: 't1', callSid: 'CA1' });
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe('not_live');
   });
 
   it('treats unknown subscription_status as no_billing', async () => {

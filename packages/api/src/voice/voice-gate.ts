@@ -8,10 +8,18 @@ import { PgCallUsageRepository } from '../billing/call-usage-events';
 import { PgOverageCapStore } from '../billing/overage-cap';
 import { isOverageCapReached } from '../billing/call-usage-pricing';
 import { readTenantBillingState } from '../billing/tenant-billing-state';
+import { samePhone } from './activation';
 
 export interface VoiceGateInput {
   tenantId: string;
   callSid: string;
+  /**
+   * #1605 — the caller's E.164 number. Used only to recognize the owner's
+   * own test call while the tenant is not_live (see the not_live branch
+   * below); every other gate decision is unaffected by it. Optional so
+   * existing callers that predate #1605 keep compiling.
+   */
+  from?: string | null;
 }
 
 export interface VoiceGateResult {
@@ -40,7 +48,7 @@ export interface VoiceGateDeps {
 export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
   const ledger = new PgCallUsageRepository(deps.pool);
   const overageCaps = new PgOverageCapStore(deps.pool);
-  return async ({ tenantId, callSid }) => {
+  return async ({ tenantId, callSid, from }) => {
     const tenant = await readTenantBillingState(deps.pool, tenantId);
     const rawStatus = tenant?.status ?? null;
     const status = normalizeStatus(rawStatus);
@@ -67,6 +75,21 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
 
     const liveAt = await loadVoiceAgentLiveAt(deps.pool, tenantId);
     if (!liveAt) {
+      // #1605 — the onboarding test-call step can only complete when a
+      // voice_inbound session actually ends (deriveOnboardingStatus /
+      // isTestCallDone), and go-live only auto-fires on a session end
+      // (maybeAutoGoLiveOnInboundEnd) — but every call is blocked right
+      // here until go-live, including the owner's own test call. That's a
+      // deadlock the owner could only break by Skip-ping the step and
+      // manually flipping "Turn on AI answering" blind. So: recognize the
+      // owner's own verified caller-ID (their cell or the tenant's business
+      // number — same two columns activation.ts already treats as
+      // "verified, not a real customer") and let THAT call through as an
+      // AI-answered test session. Every other caller still goes to
+      // voicemail until go-live, exactly as before.
+      if (await isOwnersOwnNumber(deps.pool, tenantId, from)) {
+        return { allowed: true };
+      }
       return block(deps, {
         tenantId,
         callSid,
@@ -181,6 +204,27 @@ async function block(
   return input.forwardTo === undefined
     ? { allowed: false, reason: input.reason }
     : { allowed: false, reason: input.reason, forwardTo: input.forwardTo };
+}
+
+/**
+ * #1605 — true when `from` is the tenant owner's verified cell or their own
+ * business number (tenant_settings.owner_phone / business_phone — the same
+ * two columns `activation.ts` treats as "verified, not a real customer").
+ * `from` absent/empty never matches (no caller-ID → no bypass).
+ */
+async function isOwnersOwnNumber(
+  pool: Pool,
+  tenantId: string,
+  from: string | null | undefined,
+): Promise<boolean> {
+  if (!from) return false;
+  const res = await pool.query<{ owner_phone: string | null; business_phone: string | null }>(
+    `SELECT owner_phone, business_phone FROM tenant_settings WHERE tenant_id = $1`,
+    [tenantId],
+  );
+  const row = res.rows[0];
+  if (!row) return false;
+  return samePhone(from, row.owner_phone) || samePhone(from, row.business_phone);
 }
 
 const VALID_STATUSES = new Set(['trialing', 'active', 'past_due', 'canceled', 'incomplete']);
