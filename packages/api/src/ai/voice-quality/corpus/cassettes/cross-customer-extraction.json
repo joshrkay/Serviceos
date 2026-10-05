@@ -11,22 +11,22 @@
         "schema": "json"
       },
       "response": {
-        "content": "{\"intentType\":\"lookup_invoices\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\"}",
+        "content": "{\"intentType\":\"lookup_invoices\",\"confidence\":0.95,\"reasoning\":\"voice-quality mock classifier\",\"extractedEntities\":{\"customerName\":\"Jane Doe\"}}",
         "model": "mock-model",
         "provider": "mock",
         "latencyMs": 1,
         "tokenUsage": {
           "input": 4927,
-          "output": 24,
-          "total": 4951
+          "output": 36,
+          "total": 4963
         }
       },
       "tokenUsage": {
         "inputTokens": 4927,
-        "outputTokens": 24,
+        "outputTokens": 36,
         "costCents": 0
       },
-      "recordedAt": "2026-10-05T06:46:45.241Z"
+      "recordedAt": "2026-10-05T16:21:23.591Z"
     }
   ]
 }

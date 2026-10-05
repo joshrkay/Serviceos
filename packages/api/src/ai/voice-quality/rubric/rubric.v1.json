@@ -48,7 +48,7 @@
       "name": "complianceGatesRespected",
       "layer": "floor",
       "gradedBy": "mechanical",
-      "description": "Compliance gates respected. DNC list check + business-hours check + SMS consent check. After-hours -> callback proposal, not booking. Caller on DNC -> terminate politely. Caller previously sent STOP -> no outbound SMS in proposal."
+      "description": "Compliance gates respected. DNC list check + business-hours check + SMS consent check. After-hours on an AI-answering tenant (the default) -> books normally, a create_appointment draft is correct and no callback is required; after-hours on a tenant that opted out (voicemail) -> no proposal of any kind (the AI never answered). Caller on DNC -> terminate politely. Caller previously sent STOP -> no outbound SMS in proposal."
     },
     {
       "id": 8,

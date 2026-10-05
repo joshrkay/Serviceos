@@ -18,7 +18,12 @@ import type { EntityKind } from '../../resolution/entity-resolver';
 import { redactByTier } from '../../../logging/redact';
 import { selectRepairTemplate } from './repair-templates';
 import { EMERGENCY_SAFETY_LINE } from './emergency-detector';
-import { SENTENCE_CATALOG_ES, WHICH_APPOINTMENT_COPY } from './tts-copy';
+import {
+  REPEATED_REQUEST_HANDOFF_COPY,
+  TTS_COPY,
+  ttsCopy,
+  WHICH_APPOINTMENT_COPY,
+} from './tts-copy';
 
 /**
  * #1220 review — the catalogued Spanish rendering of the RV-142 911 line
@@ -26,7 +31,7 @@ import { SENTENCE_CATALOG_ES, WHICH_APPOINTMENT_COPY } from './tts-copy';
  * ahead of the E1 script to a Spanish caller. Not new wording: it is the line
  * a Spanish gas-leak caller already heard on the E2 path before #1220.
  */
-const EMERGENCY_SAFETY_LINE_ES = SENTENCE_CATALOG_ES[EMERGENCY_SAFETY_LINE] ?? EMERGENCY_SAFETY_LINE;
+const EMERGENCY_SAFETY_LINE_ES = ttsCopy('emergency_safety_line', 'es');
 
 // ─── Thresholds ───────────────────────────────────────────────────────────────
 
@@ -68,7 +73,7 @@ export const MAX_REFINEMENTS_PER_CALL = 3;
  * with a one-tap owner fallback. Deliberately makes NO booking claim.
  */
 export const REFINEMENT_CAP_LINE =
-  'Let me have the owner finalize the details and send you the full quote by text.';
+  TTS_COPY.refinement_cap.en;
 
 /**
  * WS18 — bounded reprompt spoken in `closing` when the caller's response to a
@@ -78,7 +83,7 @@ export const REFINEMENT_CAP_LINE =
  * repromptCount / MAX_REPROMPTS budget.
  */
 export const POST_QUOTE_REPROMPT_LINE =
-  'Sorry — did you want me to lock that in, or is there something to change?';
+  TTS_COPY.post_quote_reprompt.en;
 
 /**
  * N-003 (P2-036) — deterministic holding line spoken when the caller pushes on
@@ -90,7 +95,7 @@ export const POST_QUOTE_REPROMPT_LINE =
  * adapters/tests share it.
  */
 export const NEGOTIATION_HOLDING_LINE =
-  "That's a good question — I'll need to check with the owner on that, and we'll get right back to you. Is there anything else I can help with in the meantime?";
+  TTS_COPY.negotiation_holding.en;
 
 /**
  * #846 / D-027 — deterministic acknowledgment spoken when the caller reports
@@ -103,7 +108,7 @@ export const NEGOTIATION_HOLDING_LINE =
  * deflection. Exported so adapters/tests share it.
  */
 export const COMPLAINT_ESCALATION_LINE =
-  "I'm sorry to hear that — let me get a person on the line to help you right away.";
+  TTS_COPY.complaint_escalation.en;
 
 /**
  * #846 — spoken when the caller answers "yes" (a bare `confirm` intent) at
@@ -115,7 +120,7 @@ export const COMPLAINT_ESCALATION_LINE =
  * pending.) Exported so adapters/tests share it.
  */
 export const CONFIRM_NOTHING_PENDING_LINE =
-  "I don't have anything waiting on a yes from you just yet — what would you like to do?";
+  TTS_COPY.confirm_nothing_pending.en;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -255,7 +260,7 @@ function escalateEntityNotFound(
     nextState: 'escalating',
     sideEffects: [
       auditLog(context, fromState, 'escalating', eventType),
-      ttsPlay("I wasn't able to find the record you're referring to. Let me connect you with a team member."),
+      ttsPlay(TTS_COPY.entity_not_found_escalation.en),
       notifyOncall(context, 'entity_not_found'),
     ],
     updatedContext: {
@@ -322,7 +327,7 @@ function checkGlobalGuards(
       nextState: 'terminated',
       sideEffects: [
         auditLog(context, state, 'terminated', 'caller_farewell'),
-        ttsPlay('Okay — talk soon. Goodbye!'),
+        ttsPlay(TTS_COPY.farewell_close.en),
         endSession(context, 'closed'),
       ],
       updatedContext: context,
@@ -335,7 +340,7 @@ function checkGlobalGuards(
       nextState: 'terminated',
       sideEffects: [
         auditLog(context, state, 'terminated', 'abuse_detected', { category: event.category }),
-        ttsPlay('This call has been terminated due to policy violations.'),
+        ttsPlay(TTS_COPY.abuse_terminated.en),
         endSession(context, `abuse_detected:${event.category}`),
       ],
       updatedContext: { ...context, escalationReason: `abuse_detected:${event.category}` },
@@ -353,10 +358,32 @@ function checkGlobalGuards(
         auditLog(context, state, 'escalating', 'caller_identification_failed', {
           reason: event.reason,
         }),
-        ttsPlay("I'm having trouble pulling up your account. Let me connect you with a team member."),
+        ttsPlay(TTS_COPY.account_lookup_failed_escalation.en),
         notifyOncall(context, 'caller_identification_failed'),
       ],
       updatedContext: { ...context, escalationReason: 'caller_identification_failed' },
+    };
+  }
+
+  // #1600 (2) (owner decision 2026-10-04) — the same write request asked for
+  // the fifth time on one S1 call → escalating (any state): a polite "let me
+  // get a person" close, the on-call team notified (reason
+  // `abuse_repeated_intent` → skill reason abuse_detected), the count
+  // audited. A phone transport dispatches no further turns after a hand-off,
+  // so the AI's part of the call ends here. The counting lives in the
+  // voice-turn processor (`repeatedWriteIntentHandoff`).
+  if (event.type === 'repeated_write_intent') {
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(context, state, 'escalating', 'repeated_write_intent', {
+          intentType: event.intentType,
+          count: event.count,
+        }),
+        ttsPlay(REPEATED_REQUEST_HANDOFF_COPY),
+        notifyOncall(context, 'abuse_repeated_intent'),
+      ],
+      updatedContext: { ...context, escalationReason: 'abuse_repeated_intent' },
     };
   }
 
@@ -371,8 +398,8 @@ function checkGlobalGuards(
     const infra =
       typeof event.reason === 'string' && event.reason.startsWith('ai_infrastructure:');
     const line = infra
-      ? "One moment — I'm having a brief technical issue. Let me connect you with a team member."
-      : "I'm having trouble completing that. Let me connect you with a team member.";
+      ? TTS_COPY.technical_issue_escalation.en
+      : TTS_COPY.speech_turn_failure_escalation.en;
     return {
       nextState: 'escalating',
       sideEffects: [
@@ -390,7 +417,7 @@ function checkGlobalGuards(
       nextState: 'escalating',
       sideEffects: [
         auditLog(context, state, 'escalating', 'cost_cap_exceeded'),
-        ttsPlay("I'm connecting you with a team member who can assist you further."),
+        ttsPlay(TTS_COPY.escalation_transfer.en),
         notifyOncall(context, 'cost_cap_exceeded'),
       ],
       updatedContext: { ...context, escalationReason: 'cost_cap_exceeded' },
@@ -408,7 +435,7 @@ function checkGlobalGuards(
         nextState: state,
         sideEffects: [
           ttsPlay(
-            "I can help with scheduling and service questions. What do you need help with today?",
+            TTS_COPY.scheduling_help_redirect.en,
           ),
         ],
         updatedContext: context,
@@ -425,7 +452,7 @@ function checkGlobalGuards(
       nextState: 'escalating',
       sideEffects: [
         auditLog(updatedContext, state, 'escalating', 'operator_request'),
-        ttsPlay("Of course — let me connect you with a person right now."),
+        ttsPlay(TTS_COPY.operator_request_transfer.en),
         notifyOncall(updatedContext, 'operator_request'),
       ],
       updatedContext,
@@ -685,7 +712,7 @@ function checkGlobalGuards(
           keyword: event.keyword,
         }),
         ttsPlay(EMERGENCY_SAFETY_LINE, { priority: 'safety' }),
-        ttsPlay("This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately."),
+        ttsPlay(TTS_COPY.emergency_dispatch_transfer.en),
         {
           type: 'create_proposal',
           payload: {
@@ -779,7 +806,7 @@ function checkGlobalGuards(
             reasonHint: event.reasonHint ?? null,
           },
         },
-        ttsPlay("I understand. Let me get a person on the line for you right away."),
+        ttsPlay(TTS_COPY.frustration_transfer.en),
         notifyOncall(updatedContext, escalationReason),
       ],
       updatedContext,
@@ -859,7 +886,7 @@ function transitionIdentifying(
       nextState: 'intent_capture',
       sideEffects: [
         auditLog(context, 'identifying', 'intent_capture', 'operator_session'),
-        ttsPlay('How can I help you today?'),
+        ttsPlay(TTS_COPY.how_can_i_help.en),
       ],
       updatedContext: context,
     };
@@ -876,7 +903,7 @@ function transitionIdentifying(
         auditLog(updatedContext, 'identifying', 'intent_capture', 'caller_known', {
           customerId: event.customerId,
         }),
-        ttsPlay('How can I help you today?'),
+        ttsPlay(TTS_COPY.how_can_i_help.en),
       ],
       updatedContext,
     };
@@ -887,7 +914,7 @@ function transitionIdentifying(
       nextState: 'ask_caller',
       sideEffects: [
         auditLog(context, 'identifying', 'ask_caller', 'unknown_caller'),
-        ttsPlay("What's your name and the address you're calling about?"),
+        ttsPlay(TTS_COPY.ask_caller_name_address.en),
       ],
       updatedContext: { ...context, retryCount: 0 },
     };
@@ -913,7 +940,7 @@ function transitionAskCaller(
         auditLog(updatedContext, 'ask_caller', 'intent_capture', 'caller_known', {
           customerId: event.customerId,
         }),
-        ttsPlay('How can I help you today?'),
+        ttsPlay(TTS_COPY.how_can_i_help.en),
       ],
       updatedContext,
     };
@@ -927,7 +954,7 @@ function transitionAskCaller(
       nextState: 'intent_capture',
       sideEffects: [
         auditLog(updatedContext, 'ask_caller', 'intent_capture', 'caller_held'),
-        ttsPlay('How can I help you today?'),
+        ttsPlay(TTS_COPY.how_can_i_help.en),
       ],
       updatedContext,
     };
@@ -944,7 +971,7 @@ function transitionAskCaller(
           auditLog(context, 'ask_caller', 'escalating', 'max_retries_exceeded', {
             retryCount: newRetryCount,
           }),
-          ttsPlay("I'm having trouble verifying your identity. Let me connect you with a team member."),
+          ttsPlay(TTS_COPY.identity_verification_failed_escalation.en),
           notifyOncall(context, 'caller_identity_unresolved'),
         ],
         updatedContext: {
@@ -960,7 +987,7 @@ function transitionAskCaller(
       nextState: 'ask_caller',
       sideEffects: [
         auditLog(context, 'ask_caller', 'ask_caller', 'retry_ask', { retryCount: newRetryCount }),
-        ttsPlay("I'm sorry, I couldn't find your account. Can you please provide your full name and service address?"),
+        ttsPlay(TTS_COPY.account_not_found_ask_details.en),
       ],
       updatedContext: { ...context, retryCount: newRetryCount },
     };
@@ -976,7 +1003,7 @@ function transitionAskCaller(
  * agent asks who it is speaking with and keeps listening.
  */
 export const CALLER_IDENTITY_REJECTED_LINE =
-  "Sorry about that. Who am I speaking with, and how can I help you today?";
+  TTS_COPY.caller_id_mismatch_reask.en;
 
 function callerIdentityRejected(
   from: CallingAgentState,
@@ -1031,7 +1058,7 @@ function transitionIntentCapture(
           auditLog(updatedContext, 'intent_capture', 'escalating', 'emergency_dispatch'),
           // RV-142 — safety script first, before any transfer copy/bridge.
           ttsPlay(EMERGENCY_SAFETY_LINE, { priority: 'safety' }),
-          ttsPlay("This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately."),
+          ttsPlay(TTS_COPY.emergency_dispatch_transfer.en),
           notifyOncall(updatedContext, 'emergency_dispatch'),
         ],
         updatedContext,
@@ -1107,7 +1134,7 @@ function transitionIntentCapture(
               retryCount: newRetryCount,
             }),
             ttsPlay(
-              "I'm still having trouble understanding. Could you describe what you need in a few words?",
+              TTS_COPY.still_trouble_understanding_reprompt.en,
             ),
           ],
           updatedContext: { ...context, retryCount: newRetryCount },
@@ -1120,7 +1147,7 @@ function transitionIntentCapture(
             confidence: event.confidence,
             retryCount: newRetryCount,
           }),
-          ttsPlay("I'm having trouble understanding your request. Let me connect you with a team member."),
+          ttsPlay(TTS_COPY.understanding_failed_escalation.en),
           notifyOncall(context, 'low_confidence_intent'),
         ],
         updatedContext: {
@@ -1136,7 +1163,7 @@ function transitionIntentCapture(
       const repair = selectRepairTemplate(context.repairTemplates ?? [], {
         trigger: 'low_intent_confidence',
       });
-      const repromptText = repair?.text ?? "I want to make sure I got that right — can you say that again?";
+      const repromptText = repair?.text ?? TTS_COPY.confirm_repeat_reprompt.en;
       return {
         nextState: 'intent_capture',
         sideEffects: [
@@ -1176,7 +1203,7 @@ function transitionIntentCapture(
             retryCount: newRetryCount,
             repromptCount: newRepromptCount,
           }),
-          ttsPlay("I'm having trouble understanding your request. Let me connect you with a team member."),
+          ttsPlay(TTS_COPY.understanding_failed_escalation.en),
           notifyOncall(context, 'low_confidence_intent'),
         ],
         updatedContext: {
@@ -1192,7 +1219,7 @@ function transitionIntentCapture(
       const repair = selectRepairTemplate(context.repairTemplates ?? [], {
         trigger: 'low_audio_confidence',
       });
-      const repromptText = repair?.text ?? "I want to make sure I got that right — can you say that again?";
+      const repromptText = repair?.text ?? TTS_COPY.confirm_repeat_reprompt.en;
       return {
         nextState: 'intent_capture',
         sideEffects: [
@@ -1520,7 +1547,7 @@ function transitionIntentConfirm(
         auditLog(context, 'intent_confirm', 'intent_capture', 'correction', {
           newTranscript: event.newTranscript,
         }),
-        ttsPlay("My apologies — let me try again. What would you like to do?"),
+        ttsPlay(TTS_COPY.speech_turn_failure_reprompt.en),
       ],
       updatedContext: {
         ...context,
@@ -1541,7 +1568,7 @@ function transitionIntentConfirm(
       nextState: 'intent_capture',
       sideEffects: [
         auditLog(context, 'intent_confirm', 'intent_capture', 'correction_via_reclassify'),
-        ttsPlay("Let me make sure I understand — what would you like to do?"),
+        ttsPlay(TTS_COPY.clarify_intent_reprompt.en),
       ],
       updatedContext: {
         ...context,
@@ -1598,7 +1625,7 @@ function transitionProposalDraft(
         // uncatalogued work. Every other proposal type keeps the fixed line.
         ttsPlay(
           event.utterance ??
-            "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?",
+            TTS_COPY.generic_proposal_confirmation.en,
         ),
       ],
       updatedContext,
@@ -1620,7 +1647,7 @@ function transitionClosing(
       nextState: 'terminated',
       sideEffects: [
         auditLog(context, 'closing', 'terminated', 'closed'),
-        ttsPlay('Thank you for calling. Have a great day!'),
+        ttsPlay(TTS_COPY.goodbye_thanks.en),
         endSession(context, 'normal_close'),
       ],
       updatedContext: context,
@@ -1710,7 +1737,7 @@ function transitionClosing(
             score: event.score,
             repromptCount: newRepromptCount,
           }),
-          ttsPlay("I'm having trouble understanding your request. Let me connect you with a team member."),
+          ttsPlay(TTS_COPY.understanding_failed_escalation.en),
           notifyOncall(context, 'low_confidence_intent'),
         ],
         updatedContext: {
@@ -1740,7 +1767,7 @@ function transitionClosing(
       nextState: 'intent_capture',
       sideEffects: [
         auditLog(context, 'closing', 'intent_capture', 'second_intent'),
-        ttsPlay("Of course! What else can I help you with?"),
+        ttsPlay(TTS_COPY.anything_else_of_course.en),
       ],
       updatedContext: {
         ...context,

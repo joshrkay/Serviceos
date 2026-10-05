@@ -29,23 +29,37 @@
         "updatedAt": "2026-04-01T10:00:00.000Z"
       }
     ],
+    "jobs": [
+      {
+        "id": "job_09_stale_1",
+        "tenantId": "t_09_stale_cancelled",
+        "customerId": "cust_09_stale_jane",
+        "locationId": "loc_09_stale_1",
+        "jobNumber": "J-0901",
+        "summary": "AC service",
+        "status": "scheduled",
+        "priority": "normal",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-15T10:00:00.000Z",
+        "updatedAt": "2026-05-01T11:59:30.000Z"
+      }
+    ],
     "appointments": [
       {
         "id": "appt_09_stale_existing",
         "tenantId": "t_09_stale_cancelled",
         "jobId": "job_09_stale_1",
-        "scheduledStart": "2026-05-12T21:00:00.000Z",
-        "scheduledEnd": "2026-05-12T23:00:00.000Z",
-        "arrivalWindowStart": "2026-05-12T21:00:00.000Z",
-        "arrivalWindowEnd": "2026-05-12T21:30:00.000Z",
+        "scheduledStart": "2026-05-05T21:00:00.000Z",
+        "scheduledEnd": "2026-05-05T23:00:00.000Z",
+        "arrivalWindowStart": "2026-05-05T21:00:00.000Z",
+        "arrivalWindowEnd": "2026-05-05T21:30:00.000Z",
         "timezone": "America/Los_Angeles",
-        "status": "cancelled",
-        "notes": "AC service",
+        "status": "canceled",
+        "holdPendingApproval": false,
+        "notes": "AC service — cancelled by the customer 30 seconds before this call",
         "createdBy": "user_seed",
         "createdAt": "2026-04-15T10:00:00.000Z",
-        "updatedAt": "2026-05-04T17:59:30.000Z",
-        "cancelledAt": "2026-05-04T17:59:30.000Z",
-        "cancellationReason": "customer_request"
+        "updatedAt": "2026-05-01T11:59:30.000Z"
       }
     ]
   },
@@ -54,12 +68,28 @@
       "caller": "Hi, this is Jane Smith. I'd like to reschedule my Tuesday appointment to Wednesday at the same time.",
       "expected": {
         "intent": "reschedule_appointment",
-        "proposalType": "reschedule_appointment",
+        "escalates": false,
+        "spokenIncludes": [
+          "That appointment was cancelled on Friday, May 1",
+          "would you like to book a new one?"
+        ],
+        "spokenAnswerMatches": "#1600 (owner decision 2026-10-04): the only Tuesday appointment on the caller's account is cancelled (30 seconds before the call), so instead of reading back a move of a visit that no longer exists the agent discloses the cancellation with its date and offers to book a new appointment; nothing is drafted on this turn and the call is not handed off."
+      },
+      "hangupAfter": false
+    },
+    {
+      "caller": "Yes, please.",
+      "expected": {
+        "proposalType": "create_appointment",
+        "slots": {
+          "customerId": "cust_09_stale_jane",
+          "scheduledStart": "2026-05-06T21:00:00.000Z"
+        },
         "escalates": false,
         "spokenIncludes": [
           "Is that right?"
         ],
-        "spokenAnswerMatches": "#1587: the only appointment on the account is cancelled, so the reschedule resolves to no appointment; production reads the request back, drafts it gated for the team (no appointment id to act on) and tells the caller a few details still need to be sorted out before it's final — it does not act on the cancelled visit and does not announce the cancellation. Whether the agent should say the appointment was cancelled and hand off is an open owner question recorded on #1587."
+        "spokenAnswerMatches": "#1600: the caller's yes starts the normal booking flow — 'Wednesday at the same time' is anchored to the cancelled visit's 2:00 PM, so the agent reads back a new appointment for Wednesday, May 6 at 2:00 PM and asks for confirmation; the booking is drafted for the team on the caller's second yes (never booked live)."
       },
       "hangupAfter": false
     }

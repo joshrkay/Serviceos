@@ -255,8 +255,13 @@ describe('VQ-020 — gradeFloor', () => {
     expect(result.reasons[6]).toMatch(/duplicate|customer/i);
   });
 
-  it('VQ-020 — gradeFloor fails compliance: after-hours booker intent → expected callback', () => {
-    const obs = makeObservation({
+  // #1600 / D-040 §1 as amended (owner decision 2026-10-05): after hours an
+  // AI-answering tenant books NORMALLY — a create_appointment draft is the
+  // right outcome and no callback proposal is required. The voicemail fork
+  // applies only to a tenant that opted out of AI answering; on such a tenant
+  // the AI never answers, so any proposal at all means the fork was bypassed.
+  const afterHoursBookingObservation = () =>
+    makeObservation({
       events: [
         proposalCreated('p-1', 100),
         sessionTerminated('completed', 999),
@@ -267,7 +272,6 @@ describe('VQ-020 — gradeFloor', () => {
         {
           id: 'p-1',
           tenantId: 't-1',
-          // The booker proposed an appointment; spec says after-hours → callback.
           proposalType: 'create_appointment',
           status: 'ready_for_review',
           payload: {},
@@ -275,25 +279,43 @@ describe('VQ-020 — gradeFloor', () => {
         } as Proposal,
       ],
     });
+  const afterHoursBookingTurns = () => [
+    {
+      caller: 'I want to book an appointment',
+      expected: { intent: 'create_appointment', proposalType: 'create_appointment' },
+      hangupAfter: false,
+    },
+  ];
+
+  it('#1600 — gradeFloor passes compliance: an after-hours booking on an AI-answering tenant is drafted as an appointment (no callback required)', () => {
     const script = makeScript({
       fixtures: {
         tenant: { businessHours: { afterHours: true } },
         customers: [],
       },
-      turns: [
-        {
-          caller: 'I want to book an appointment',
-          expected: { intent: 'create_appointment', proposalType: 'create_appointment' },
-          hangupAfter: false,
-        },
-      ],
+      turns: afterHoursBookingTurns(),
     });
 
-    const result = gradeFloor(obs, script);
+    const result = gradeFloor(afterHoursBookingObservation(), script);
+
+    expect(result.failedCriteria).not.toContain(7);
+    expect(result.passed).toBe(true);
+  });
+
+  it('#1600 — gradeFloor fails compliance: a tenant that opted out of AI answering (voicemail) must not have been answered after hours', () => {
+    const script = makeScript({
+      fixtures: {
+        tenant: { businessHours: { afterHours: true }, afterHoursVoiceMode: 'voicemail' },
+        customers: [],
+      },
+      turns: afterHoursBookingTurns(),
+    });
+
+    const result = gradeFloor(afterHoursBookingObservation(), script);
 
     expect(result.passed).toBe(false);
     expect(result.failedCriteria).toContain(7);
-    expect(result.reasons[7]).toMatch(/after.?hours|callback|compliance/i);
+    expect(result.reasons[7]).toMatch(/voicemail|opt.?out/i);
   });
 
   it('VQ-020 — gradeFloor fails compliance: DNC caller → expected terminated session', () => {

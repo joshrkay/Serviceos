@@ -9,6 +9,7 @@ import {
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import {
   renderTtsText,
+  TTS_COPY,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
 } from '../../src/ai/agents/customer-calling/tts-copy';
@@ -1265,7 +1266,7 @@ describe('TwilioGatherAdapter.handleGather', () => {
       });
 
       expect(xml).toContain(expected);
-      expect(xml).toContain('Anything else I can help you with?');
+      expect(xml).toContain(TTS_COPY.anything_else.en);
     });
 
     it.each(['lookup_day_overview', 'lookup_digest', 'lookup_pending_items'])(
@@ -2254,7 +2255,7 @@ describe('buildTelephonyGreeting', () => {
     // Tenant's CTA is preserved verbatim
     expect(result).toContain('What can I help you with today?');
     // Default CTA "How can I help you today?" is NOT appended
-    expect(result).not.toContain('How can I help you today?');
+    expect(result).not.toContain(TTS_COPY.how_can_i_help.en);
   });
 
   it('appends default CTA only when no persona is set', () => {
@@ -2264,7 +2265,7 @@ describe('buildTelephonyGreeting', () => {
       // No persona
     );
     expect(result.trim().endsWith('?')).toBe(true);
-    expect(result).toContain('How can I help you today?');
+    expect(result).toContain(TTS_COPY.how_can_i_help.en);
   });
 
   it('on default branch does not double up when disclosure already ends with ?', () => {
@@ -2899,12 +2900,12 @@ describe('RV-142 — injectSafetySayLines', () => {
     const out = injectSafetySayLines(
       dial,
       [
-        { type: 'tts_play', payload: { text: 'If anyone is in immediate danger, hang up and call 911.', priority: 'safety' } },
-        { type: 'tts_play', payload: { text: "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.", priority: 'safety' } },
+        { type: 'tts_play', payload: { text: TTS_COPY.emergency_safety_line.en, priority: 'safety' } },
+        { type: 'tts_play', payload: { text: TTS_COPY.emergency_dispatch_transfer.en, priority: 'safety' } },
       ],
       { language: 'es' },
     );
-    // SENTENCE_CATALOG_ES entries, selected by the session language — the
+    // TTS_COPY entries, selected by the session language — the
     // same selector the Polly voice switch uses.
     expect(out).toContain('llame al 911');
     expect(out).toContain('despachador de guardia');

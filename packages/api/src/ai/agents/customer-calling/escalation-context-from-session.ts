@@ -3,11 +3,8 @@
  * Pure — no I/O.
  */
 import type { VoiceSession } from './voice-session-store';
-import type {
-  EscalationContext,
-  EscalationReason as BuilderReason,
-  TranscriptTurn,
-} from './escalation-summary-builder';
+import type { EscalationContext, TranscriptTurn } from './escalation-summary-builder';
+import { spokenSelfName } from './caller-identity-check';
 
 const TRANSCRIPT_TURN_RE = /^(caller|agent):\s*(.*)$/i;
 const MAX_SNAPSHOT_TURNS = 6;
@@ -26,17 +23,11 @@ export function parseTranscriptSnapshot(
   return turns.slice(-MAX_SNAPSHOT_TURNS);
 }
 
-/** Map notify_oncall / FSM escalation reason strings to builder vocabulary. */
-export function mapNotifyReasonToBuilderReason(
-  reason: string,
-): BuilderReason {
-  if (reason === 'operator_request') return 'operator_request';
-  if (reason === 'emergency_dispatch') return 'emergency_dispatch';
-  if (reason === 'keyword_frustration' || reason.includes('frustration')) {
-    return 'keyword_frustration';
+function lastCallerTurn(turns: ReadonlyArray<TranscriptTurn>): string | undefined {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === 'caller') return turns[i].text;
   }
-  if (reason === 'llm_sentiment') return 'llm_sentiment';
-  return 'low_confidence_intent';
+  return undefined;
 }
 
 export interface CallerContextBundle {
@@ -44,30 +35,44 @@ export interface CallerContextBundle {
   customer?: EscalationContext['customer'];
   intent: EscalationContext['intent'];
   transcriptSnapshot: ReadonlyArray<TranscriptTurn>;
-  builderReason: BuilderReason;
-  reasonDetail?: string;
 }
 
+/**
+ * @param escalationReason the FSM's `notify_oncall` reason. The dispatcher-
+ *   facing reason itself is derived by the escalate-to-human skill
+ *   (`mapSkillReasonToBuilderReason`); here it only decides whether the
+ *   caller's self-introduction is a claim worth carrying (#1616).
+ */
 export function buildCallerContextFromSession(
   session: VoiceSession,
   callerPhone: string,
   escalationReason: string,
 ): CallerContextBundle {
   const ctx = session.machine.currentContext;
-  const builderReason = mapNotifyReasonToBuilderReason(escalationReason);
+  const transcriptSnapshot = parseTranscriptSnapshot(session.transcript);
+  // #1616 — a claims-existing-customer hand-off (#1587) fires on the turn
+  // that carried the caller's self-introduction ("Hi, this is Jane Smith"),
+  // from a line NO record is bound to. So: identity hand-off, no record on
+  // the line, last turn names someone → that name is the caller's CLAIM
+  // (never `caller.name`). A caller with a record bound to this line (the
+  // archived case) introducing themselves is not claiming another record.
+  const noRecordOnLine = !ctx.customerId && !session.customerId;
+  const claimedName =
+    escalationReason === 'caller_identification_failed' && noRecordOnLine
+      ? spokenSelfName(lastCallerTurn(transcriptSnapshot) ?? '')
+      : undefined;
   return {
     caller: {
       phone: callerPhone,
       ...(ctx.customerName ? { name: ctx.customerName } : {}),
       ...(ctx.customerId ? { customerId: ctx.customerId } : {}),
+      ...(claimedName ? { claimedName } : {}),
     },
     intent: {
       type: ctx.currentIntent ?? 'unknown',
       entities: ctx.extractedEntities ?? {},
       confidence: 1,
     },
-    transcriptSnapshot: parseTranscriptSnapshot(session.transcript),
-    builderReason,
-    ...(ctx.escalationReason ? { reasonDetail: ctx.escalationReason } : {}),
+    transcriptSnapshot,
   };
 }

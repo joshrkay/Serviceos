@@ -110,6 +110,8 @@ import { askCallerUtteranceCarriesRequest } from '../ai/voice-turn/ask-caller-re
 import { detectPromptInjection } from '../ai/agents/customer-calling/untrusted-content';
 import {
   renderTtsText,
+  ttsCopy,
+  TTS_COPY,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   MAX_CALL_DURATION_WRAP_UP_COPY,
@@ -797,7 +799,7 @@ export function injectSafetySayLines(
         opts.voiceOverride ?? (lang === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
       // Localize the safety script by session language — same selector the
       // Polly voice switch above uses. renderTtsText resolves the FSM's
-      // fixed English sentences against SENTENCE_CATALOG_ES (exact match;
+      // fixed English sentences back to their TTS_COPY entry (exact match;
       // the 911 + transfer lines are catalogued), and passes unknown text
       // through unchanged, so an 'en' session is a no-op.
       const text = renderTtsText(String(fx.payload.text), fx.payload, lang);
@@ -1627,7 +1629,12 @@ export class TwilioGatherAdapter {
       // orchestrator: a canned greeting when the WS `start` referenced a
       // CallSid the store no longer knows about.
       return [
-        { type: 'tts_play', payload: { text: `Thank you for calling ${this.deps.businessName}. How can I help you today?` } },
+        {
+          type: 'tts_play',
+          payload: {
+            text: ttsCopy('missing_session_greeting', 'en', { business: this.deps.businessName }),
+          },
+        },
       ];
     }
     // WS16b — the stream transport's `from` was captured at webhook time into
@@ -2095,7 +2102,7 @@ export class TwilioGatherAdapter {
     if (!session) {
       logger.warn('processCallerUtterance: unknown session', { sessionId: opts.sessionId });
       return [
-        { type: 'tts_play', payload: { text: "I'm sorry, your session has ended. Please call again." } },
+        { type: 'tts_play', payload: { text: TTS_COPY.session_ended_call_again.en } },
         { type: 'end_session', payload: { reason: 'session_not_found' } },
       ];
     }
@@ -2348,7 +2355,7 @@ export class TwilioGatherAdapter {
       logger.warn('handleGather: unknown session', { sessionId: opts.sessionId });
       return buildTwiML(
         [
-          { type: 'tts_play', payload: { text: "I'm sorry, your session has ended. Please call again." } },
+          { type: 'tts_play', payload: { text: TTS_COPY.session_ended_call_again.en } },
           { type: 'end_session', payload: { reason: 'session_not_found' } },
         ],
         { gatherActionUrl: this.gatherUrl(opts.sessionId) },
@@ -2581,6 +2588,21 @@ export class TwilioGatherAdapter {
         )),
       );
     } else if (turnState === 'intent_capture' || turnState === 'closing') {
+      // #1600 (3) — the caller is answering the processor's offer to book a
+      // new appointment in place of a cancelled one (same rule as speechTurn):
+      // a yes starts the normal booking flow with no model call, a no is
+      // acknowledged, anything else is classified below as a new request.
+      const rebook = await this.processor.handlePendingRebookOffer(
+        session,
+        opts.speechResult,
+        opts.tenantId,
+      );
+      if (rebook?.kind === 'respond') {
+        sideEffectsAll.push(...rebook.effects);
+        await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+        return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+      }
+
       // 3. Classify intent. Failure → confidence_low so the bounded
       //    reprompt path triggers instead of bubbling 5xx out to Twilio
       //    (which would hang the caller mid-call).
@@ -2720,6 +2742,47 @@ export class TwilioGatherAdapter {
         );
       }
 
+      // #1600 (2) — the processor's shared repeated-request count (same rule
+      // as speechTurn): the fifth repeat of one write request hands the call
+      // to a person before any reply branch runs.
+      if (
+        classifierEvent?.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        const repeatFx = this.processor.repeatedWriteIntentHandoff(
+          session,
+          classifierEvent.intentType,
+        );
+        if (repeatFx) {
+          sideEffectsAll.push(...repeatFx);
+          await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+          return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+        }
+      }
+
+      // #1600 (1) — the processor's shared cross-customer refusal (same rule
+      // as speechTurn): an S1 caller naming another customer's account hears
+      // the refusal before any lookup or FSM dispatch. Emergencies keep
+      // their own path.
+      if (
+        classifierEvent?.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT &&
+        !EMERGENCY_INTENTS.has(classifierEvent.intentType)
+      ) {
+        const refusalFx = await this.processor.crossCustomerRefusal(
+          session,
+          classifierEvent.intentType,
+          classifierEvent.entities,
+          opts.speechResult,
+          opts.tenantId,
+        );
+        if (refusalFx) {
+          sideEffectsAll.push(...refusalFx);
+          await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+          return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+        }
+      }
+
       // P11-001 / #866: lookup intents bypass the proposal-draft path. Route
       // through the shared dispatch (phone surface adapter), push the line into the
       // tts_play stream, and DO NOT dispatch `intent_classified` —
@@ -2741,7 +2804,7 @@ export class TwilioGatherAdapter {
         });
         sideEffectsAll.push({
           type: 'tts_play',
-          payload: { text: 'Anything else I can help you with?' },
+          payload: { text: TTS_COPY.anything_else.en },
         });
         await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
@@ -2768,7 +2831,7 @@ export class TwilioGatherAdapter {
         });
         sideEffectsAll.push({
           type: 'tts_play',
-          payload: { text: 'Anything else I can help you with?' },
+          payload: { text: TTS_COPY.anything_else.en },
         });
         await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
@@ -2869,6 +2932,30 @@ export class TwilioGatherAdapter {
         );
         if (areaFx) {
           sideEffectsAll.push(...areaFx);
+          await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
+          return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
+        }
+      }
+
+      // #1600 (3) — the processor's shared cancelled-appointment gate (same
+      // rule as speechTurn): a caller referring to a CANCELLED appointment of
+      // theirs is told so and offered a new booking; nothing is drafted.
+      if (
+        classifierEvent.type === 'intent_classified' &&
+        classifierEvent.confidence >= TAU_INT
+      ) {
+        const staleFx = await this.processor.staleAppointmentGate(
+          session,
+          {
+            intentType: classifierEvent.intentType,
+            utterance: opts.speechResult,
+            entities: classifierEvent.entities,
+            confidence: classifierEvent.confidence,
+          },
+          opts.tenantId,
+        );
+        if (staleFx) {
+          sideEffectsAll.push(...staleFx);
           await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
           return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
         }
@@ -3330,7 +3417,7 @@ export class TwilioGatherAdapter {
       sideEffectsAll.push({
         type: 'tts_play',
         payload: {
-          text: "Of course — could I get your name to get you set up?",
+          text: TTS_COPY.signup_ask_name.en,
         },
       });
       return true;
@@ -3341,7 +3428,7 @@ export class TwilioGatherAdapter {
         type: 'tts_play',
         payload: {
           text:
-            "I'm sorry, I couldn't see your number. What's the best phone number to reach you on?",
+            TTS_COPY.signup_ask_callback.en,
         },
       });
       return true;
@@ -3409,7 +3496,7 @@ export class TwilioGatherAdapter {
         type: 'tts_play',
         payload: {
           text:
-            "I'm having trouble saving that. Let me get a person to help you finish signing up.",
+            TTS_COPY.signup_persist_failed.en,
         },
       });
       return true;
