@@ -402,7 +402,9 @@ export interface CallingAgentContext {
   ownerSession?: boolean;
   /**
    * Phase-2 Track A — resolved once at session establishment from the
-   * tenant `voice_extended_intents` flag + owner session. When true the
+   * tenant `voice_extended_intents` flag + owner session (#1588: the flag
+   * is default-ON — `flags/voice-flags.ts` — so every owner session carries
+   * this unless the tenant opted out). When true the
    * live-call classifier appends owner extended READ-ONLY lookups
    * (day overview / digest / pending items).
    */

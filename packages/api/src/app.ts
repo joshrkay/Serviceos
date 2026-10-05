@@ -226,6 +226,7 @@ import {
 } from './flags/feature-flags';
 import { PgFeatureFlagRepository } from './flags/pg-feature-flags';
 import { PgTenantFeatureFlagRepository } from './flags/pg-tenant-feature-flags';
+import { createVoiceFlagResolver } from './flags/voice-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { processMessage, type QueueMessage } from './queues/queue';
@@ -1379,6 +1380,16 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     return voiceExtendedIntentsFlagResolver
       ? voiceExtendedIntentsFlagResolver(tenantId)
       : false;
+  };
+  // #1588 — multi-action chaining for the recorded memo (voice_multi_action,
+  // default-ON). Same shim shape as the extended-intents flag above: the memo
+  // worker is constructed before the tenant flag repo exists, so the resolver
+  // is assigned below, next to voiceExtendedIntentsFlagResolver.
+  let voiceMultiActionFlagResolver:
+    | ((tenantId: string) => Promise<boolean>)
+    | null = null;
+  const voiceMultiActionFlagShim = async (tenantId: string): Promise<boolean> => {
+    return voiceMultiActionFlagResolver ? voiceMultiActionFlagResolver(tenantId) : false;
   };
   // WS5 — Presidio-first redaction. When both analyzer + anonymizer URLs are
   // configured we run a real Presidio pass ahead of the deterministic scrub and
@@ -2881,6 +2892,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     standingInstructionsResolver: (tenantId: string) =>
       standingInstructionRepo.listActive(tenantId),
     extendedIntentsEnabled: voiceExtendedIntentsFlagShim,
+    // #1588 — one sentence, several actions: "add 2 hours labor and a
+    // capacitor to the Rivera invoice and send it" becomes an ORDERED chain
+    // of linked proposals (processChain) instead of silently keeping one.
+    // Default-ON per tenant (voice_multi_action); the owner's override row
+    // is the opt-out, a platform row the kill switch. Was built in #883 and
+    // never passed from here.
+    multiActionEnabled: voiceMultiActionFlagShim,
     // U3 — respond_to_review on-ramp: recent-review lookup + the SAME
     // build-proposal dep bundle the google-reviews polling worker wires, so
     // voice-initiated drafts are identical to poll-initiated ones.
@@ -3724,8 +3742,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       tenantId,
     });
   };
-  voiceExtendedIntentsFlagResolver = (tenantId: string) =>
-    isFlagEnabledForTenant(tenantId, 'voice_extended_intents');
+  // #1588 — the voice capability flags ship DEFAULT-ON (tenant override →
+  // platform flag → ON), through the same PgTenantFeatureFlagRepository as
+  // every other per-tenant flag. `voice_extended_intents` was previously read
+  // default-false here and never seeded, so no live tenant ever heard the
+  // owner-extended lookups by voice; `voice_multi_action` is new.
+  const voiceFlags = createVoiceFlagResolver({ tenantFeatureFlags, featureFlagRepo });
+  voiceExtendedIntentsFlagResolver = voiceFlags.extendedIntentsEnabled;
+  voiceMultiActionFlagResolver = voiceFlags.multiActionEnabled;
 
   // WS18d — assembled as a VARIABLE (not an inline literal) deliberately: the
   // adapter spreads its deps into createVoiceTurnProcessor, and the processor-

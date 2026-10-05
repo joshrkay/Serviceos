@@ -141,6 +141,21 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     });
   });
 
+  it('#1588 — the dormant voice features are wired DEFAULT-ON: multi-action reaches the memo worker, both flags resolve through createVoiceFlagResolver', () => {
+    // #1588 — `multiActionEnabled` had zero call sites in app.ts, so a
+    // two-action memo silently kept one action; `voice_extended_intents` was
+    // read default-FALSE and never seeded. Both must resolve through the one
+    // default-on resolver (tenant override → platform flag → ON), and the
+    // memo worker must actually receive the multi-action gate.
+    expect(src).toMatch(/createVoiceFlagResolver\(\s*\{\s*tenantFeatureFlags,\s*featureFlagRepo\s*\}\s*\)/);
+    const workerCall = src.slice(src.indexOf('createVoiceActionRouterWorker({'));
+    const workerDeps = workerCall.slice(0, workerCall.indexOf('});'));
+    expect(workerDeps).toMatch(/multiActionEnabled:\s*voiceMultiActionFlagShim/);
+    expect(workerDeps).toMatch(/extendedIntentsEnabled:\s*voiceExtendedIntentsFlagShim/);
+    // The old default-false read is gone — nothing may resolve this flag off by default.
+    expect(src).not.toMatch(/isFlagEnabledForTenant\(\s*tenantId,\s*'voice_extended_intents'\s*\)/);
+  });
+
   it('#1534 — boot starts filler synthesis with the shared media-streams TTS, never awaited', () => {
     // No clips ship in the image; the boot fill is the only way the 250 ms
     // filler ever plays. It must use the same TTS the adapter speaks with and
