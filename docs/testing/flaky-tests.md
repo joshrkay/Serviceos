@@ -107,3 +107,37 @@ worker.
 ```
 npx vitest run test/telephony/ask-caller-e1-before-carry-forward-1540.test.ts
 ```
+
+## `test/integration/dispatch-presence-redis.test.ts` — "TTL/lease expiry releases the hold without an explicit clear, at real Redis"
+
+**Status:** unconfirmed root cause. Failed once on #1614's PR Checks run
+37355658382 and passed on rerun (2026-10-05). Only this one case of the file
+is implicated; the file's other cases (two-connection presence, tenant
+isolation, revision tokens) did not fail.
+
+**Cause (unconfirmed):** real-Redis TTL timing under CI load. The case
+upserts a hold with a 300 ms lease, waits 600 ms of REAL wall-clock (no
+fake timers — the lease is the stored payload's own `expiresAt`, checked
+against `Date.now()` on `list()`, which also best-effort purges the expired
+field), asserts `list()` is empty, then asserts the field is gone from the
+real hash via `HGETALL`. The captured failure is that last raw-hash
+assertion — the expired field was still present in Redis:
+
+```
+AssertionError: expected '{"displayName":"User One",…' to be undefined
+```
+
+Under CI contention the best-effort purge on read and the raw `HGETALL`
+that follows it are the suspect, not the 600 ms wait itself (the `list()`
+assertion before it did not fail). No isolated repro captured yet.
+
+This is a Docker-gated integration test: it needs a reachable Docker daemon
+for the Redis testcontainer AND the shared Postgres integration DB.
+
+**Rerun alone:**
+```
+EXTERNAL_TEST_DB_URL=postgres://postgres:test@127.0.0.1:55432/<your db> \
+  npx vitest run --config vitest.integration.config.mts \
+  test/integration/dispatch-presence-redis.test.ts \
+  -t "TTL/lease expiry releases the hold"
+```

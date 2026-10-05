@@ -364,12 +364,13 @@ function mapNotifyReasonToSkillReason(
     return 'caller_requested';
   }
   if (reason === 'max_retries_exceeded') return 'max_retries_exceeded';
-  // #1600 (4) — an identity hand-off (identify_caller_threw, #1587's
+  // #1600 (4) / #1616 — an identity hand-off (identify_caller_threw, #1587's
   // claims_existing_customer / customer_archived) is an unresolved caller
-  // identity, the category the in-app adapter already files it under
-  // (`toEscalationReason('caller_identity_unresolved')`), not "the AI had
-  // low confidence".
-  if (reason === 'caller_identification_failed') return 'max_retries_exceeded';
+  // identity, not "the AI had low confidence". The skill records it under
+  // D-042 (4)'s category (`max_retries_exceeded`, the one in-app files
+  // `caller_identity_unresolved` under) and names the identity problem to
+  // the dispatcher.
+  if (reason === 'caller_identification_failed') return 'identity_unverified';
   return 'low_confidence';
 }
 
