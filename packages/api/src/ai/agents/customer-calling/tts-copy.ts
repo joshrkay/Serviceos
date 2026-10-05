@@ -515,6 +515,10 @@ export const TTS_COPY = {
     en: 'Access notes: {{notes}}',
     es: 'Notas de acceso: {{notes}}', // es: new 1604
   },
+  next_job_none: {
+    en: 'Nothing is coming up on the schedule in the next two weeks.',
+    es: 'No hay nada programado en las próximas dos semanas.', // es: new 1604
+  },
   next_job_latest_note: {
     en: 'Latest note: {{note}}',
     es: 'Última nota: {{note}}', // es: new 1604

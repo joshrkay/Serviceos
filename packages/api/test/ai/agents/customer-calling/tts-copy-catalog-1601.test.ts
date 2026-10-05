@@ -417,6 +417,10 @@ const SNAPSHOT: Record<string, Pinned> = {
     es: 'Notas de acceso: {{notes}}',
     sample: { vars: { notes: 'Gate code 4421, dog in the yard.' }, en: 'Access notes: Gate code 4421, dog in the yard.' },
   },
+  next_job_none: {
+    en: 'Nothing is coming up on the schedule in the next two weeks.',
+    es: 'No hay nada programado en las próximas dos semanas.',
+  },
   next_job_latest_note: {
     en: 'Latest note: {{note}}',
     es: 'Última nota: {{note}}',

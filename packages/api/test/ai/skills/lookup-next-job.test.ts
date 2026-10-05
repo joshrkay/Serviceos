@@ -259,4 +259,27 @@ describe('lookupNextJob skill', () => {
       'The next job is today at 9 AM — Priya Patel, AC tune-up, at 88 Mill Lane, Tarrytown, with Carlos Ruiz.',
     );
   });
+
+  it("a technician whose only upcoming visit is a COWORKER's hears nothing coming up — never widens to the coworker's job", async () => {
+    const deps = await fixtures({
+      customers: [PATEL.customer],
+      locations: [PATEL.location],
+      jobs: [PATEL.job],
+      appointments: [PATEL.appointment],
+    });
+    const events = eventsSpy();
+
+    const res = await lookupNextJob(
+      { tenantId: TENANT, sessionId: 'sess-2', technicianId: ME, timezone: TZ, now: NOW },
+      { ...deps, lookupEvents: events },
+    );
+
+    expect(res.status).toBe('none');
+    expect(res.summary).toBe('Nothing is coming up on the schedule in the next two weeks.');
+    expect(JSON.stringify(res)).not.toContain('Priya');
+    expect(JSON.stringify(res)).not.toContain('Mill Lane');
+    expect(events.record).toHaveBeenCalledWith(
+      expect.objectContaining({ intent: 'lookup_next_job', resultStatus: 'none', resultCount: 0 }),
+    );
+  });
 });

@@ -88,7 +88,9 @@ export interface NextJobData {
   technicianName?: string;
 }
 
-export type LookupNextJobResult = { status: 'found'; summary: string; data: NextJobData };
+export type LookupNextJobResult =
+  | { status: 'found'; summary: string; data: NextJobData }
+  | { status: 'none'; summary: string; data: Record<string, never> };
 
 const DEFAULT_TIMEZONE = 'America/New_York';
 /** How far ahead "next" looks, in days from the start of today. */
@@ -189,7 +191,11 @@ export async function lookupNextJob(
     })
     .sort((a, b) => a.scheduledStart.getTime() - b.scheduledStart.getTime());
   const next = candidates[0];
-  if (!next) throw new Error('no upcoming visit');
+  if (!next) {
+    const summary = ttsCopy('next_job_none', lang);
+    await record('none', 0, summary);
+    return { status: 'none', summary, data: {} };
+  }
   const job = jobById.get(next.jobId)!;
 
   const customer = await deps.customerRepo.findById(input.tenantId, job.customerId);
