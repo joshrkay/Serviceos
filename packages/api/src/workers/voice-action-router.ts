@@ -98,6 +98,7 @@ import { classifyRecordingProvenance } from '../ai/content-provenance';
 import {
   executeLookupAnswer,
   LOOKUP_REQUIRED_PERMISSION,
+  SELF_SCOPED_LOOKUP_INTENTS,
   type VoiceLookupAnswerDeps,
 } from './voice-lookup-answer';
 import type { UserRepository } from '../users/user';
@@ -1377,17 +1378,18 @@ async function processSegment(
     // The memo creator (voice_recordings.created_by) is the authoritative
     // identity for the permission-gated authorization gate — the enqueue
     // payload's userId can be 'system' on this path. Resolved for
-    // permission-gated intents AND for `lookup_my_day` (Task 10): that
-    // intent carries no permission, but it still needs the memo creator's
-    // identity to resolve the SPEAKER to a technician — self-scoping is
-    // its entire access-control story (workers/voice-lookup-answer.ts's
-    // `lookup_my_day` case fails the turn when this is absent, rather than
-    // ever falling back to an unscoped answer). A read failure falls
-    // through to the adapter's fail-closed refusal either way.
+    // permission-gated intents AND for the self-scoped lookups
+    // (`SELF_SCOPED_LOOKUP_INTENTS`: lookup_my_day, Task 10; lookup_next_job,
+    // #1604): those carry no permission, but still need the memo creator's
+    // identity to resolve the SPEAKER to a technician — self-scoping is their
+    // entire access-control story (workers/voice-lookup-answer.ts's
+    // `resolveScheduleScope` fails the turn when this is absent, rather than
+    // ever falling back to an unscoped answer). A read failure falls through
+    // to the adapter's fail-closed refusal either way.
     let memoCreatorId: string | undefined;
     if (
       LOOKUP_REQUIRED_PERMISSION.has(classification.intentType) ||
-      classification.intentType === 'lookup_my_day'
+      SELF_SCOPED_LOOKUP_INTENTS.has(classification.intentType)
     ) {
       try {
         const recording = await deps.voiceRepo.findById(tenantId, recordingId);

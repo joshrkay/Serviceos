@@ -230,6 +230,12 @@ const JOB_REF_INTENTS = new Set([
   // so an unresolved (or absent) reference still logs the expense
   // unlinked — resolution only ever ADDS the link, never gates.
   'log_mileage',
+  // #1604 — lookup_next_job: "read me the Patel job" resolves the spoken
+  // jobReference → jobId so the skill reads THAT job's visit (and refuses it
+  // by name when it is not the technician's). Read-only — an unresolved
+  // reference is answered honestly by the dispatch, never silently replaced
+  // with the next job.
+  'lookup_next_job',
 ]);
 
 /**

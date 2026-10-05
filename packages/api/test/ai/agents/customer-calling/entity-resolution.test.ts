@@ -312,6 +312,18 @@ describe('planVoiceEntityLookups — intent-conditioned operator references', ()
     ]);
   });
 
+  // #1604 — "read me the Patel job": lookup_next_job joins JOB_REF_INTENTS so
+  // a NAMED job resolves to a verified jobId before the skill reads it (the
+  // skill then refuses a job that is not the technician's). Read-only.
+  it('plans a job lookup for lookup_next_job', () => {
+    const lookups = planVoiceEntityLookups('lookup_next_job', {
+      jobReference: 'the Patel job',
+    });
+    expect(lookups).toEqual([
+      { kind: 'job', reference: 'the Patel job', refKey: 'jobId' },
+    ]);
+  });
+
   // Task 11 (2026-08-07 tradesperson plan) — "Log 32 miles to the Patel
   // job" joins JOB_REF_INTENTS the SAME way log_expense does (log_mileage
   // is an ALIAS onto log_expense's proposal type), so the spoken job
