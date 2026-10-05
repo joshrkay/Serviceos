@@ -365,7 +365,11 @@ function mapNotifyReasonToSkillReason(
   if (reason === 'keyword_frustration' || reason === 'llm_sentiment') {
     return 'caller_requested';
   }
-  if (reason === 'max_retries_exceeded') return 'max_retries_exceeded';
+  if (reason === 'max_retries_exceeded' || reason === 'caller_identity_unresolved') {
+    // #1630 — ask_caller's retry cap is filed under max_retries_exceeded, the
+    // same category the in-app adapter's toEscalationReason uses.
+    return 'max_retries_exceeded';
+  }
   // #1600 (4) / #1616 — an identity hand-off (identify_caller_threw, #1587's
   // claims_existing_customer / customer_archived) is an unresolved caller
   // identity, not "the AI had low confidence". The skill records it under
@@ -3227,6 +3231,8 @@ export function createVoiceTurnProcessor(
       // Voice-parity (Feature 7) — single warm-transfer line. When configured
       // it replaces the on-call rotation for this handoff.
       let transferNumber: string | undefined;
+      // #1630 — the DISPATCHER's language: the tenant's default_language.
+      let dispatcherLanguage: 'en' | 'es' = 'en';
       if (deps.settingsRepo) {
         try {
           const tenantSettings = await deps.settingsRepo.findByTenant(tenantId);
@@ -3237,6 +3243,7 @@ export function createVoiceTurnProcessor(
             whisper: escSettings.channel_whisper,
           };
           transferNumber = tenantSettings?.transferNumber ?? undefined;
+          dispatcherLanguage = tenantSettings?.defaultLanguage === 'es' ? 'es' : 'en';
         } catch {
           // Best-effort: if settings lookup fails, fall back to all-enabled.
         }
@@ -3252,6 +3259,7 @@ export function createVoiceTurnProcessor(
         session,
         callerPhone,
         rawReason,
+        typeof fx.payload.identityReason === 'string' ? fx.payload.identityReason : undefined,
       );
 
       const crm = await hydrateEscalationCrm(
@@ -3292,12 +3300,14 @@ export function createVoiceTurnProcessor(
         ...(session.callSid ? { callSid: session.callSid } : {}),
         dialActionUrl: dialResultUrl(session.id),
         channelPreferences,
+        language: dispatcherLanguage,
         buildSummary: buildEscalationSummary,
         callerContext: {
           caller: enrichedCaller.caller,
           ...(enrichedCaller.customer ? { customer: enrichedCaller.customer } : {}),
           intent: enrichedCaller.intent,
           transcriptSnapshot: enrichedCaller.transcriptSnapshot,
+          ...(enrichedCaller.identityCase ? { identityCase: enrichedCaller.identityCase } : {}),
         },
         shopName: deps.businessName,
         ...(deps.publicBaseUrl ? { publicWebBaseUrl: deps.publicBaseUrl } : {}),

@@ -256,6 +256,7 @@ export interface EscalateToHumanInput {
     customer?: EscalationContext['customer'];
     intent: EscalationContext['intent'];
     transcriptSnapshot: EscalationContext['transcriptSnapshot'];
+    identityCase?: EscalationContext['identityCase'];
   };
   /**
    * F1 wiring: tenant's trading name, included in whisper/SMS output.
@@ -412,6 +413,8 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         intent: callerContext.intent,
         reason: mapSkillReasonToBuilderReason(reason),
         transcriptSnapshot: callerContext.transcriptSnapshot,
+        language: lang,
+        ...(callerContext.identityCase ? { identityCase: callerContext.identityCase } : {}),
         ...(publicWebBaseUrl !== undefined ? { publicWebBaseUrl } : {}),
       };
       try {
@@ -650,6 +653,8 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
         intent: callerContext.intent,
         reason: mapSkillReasonToBuilderReason(reason),
         transcriptSnapshot: callerContext.transcriptSnapshot,
+        language: lang,
+        ...(callerContext.identityCase ? { identityCase: callerContext.identityCase } : {}),
         ...(publicWebBaseUrl !== undefined ? { publicWebBaseUrl } : {}),
       };
       try {

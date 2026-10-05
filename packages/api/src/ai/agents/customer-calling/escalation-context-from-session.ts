@@ -3,8 +3,9 @@
  * Pure — no I/O.
  */
 import type { VoiceSession } from './voice-session-store';
-import type { EscalationContext, TranscriptTurn } from './escalation-summary-builder';
+import type { EscalationContext, IdentityCase, TranscriptTurn } from './escalation-summary-builder';
 import { spokenSelfName } from './caller-identity-check';
+import { lastCallerLine } from '../../../voice/last-caller-line';
 
 const TRANSCRIPT_TURN_RE = /^(caller|agent):\s*(.*)$/i;
 const MAX_SNAPSHOT_TURNS = 6;
@@ -23,11 +24,11 @@ export function parseTranscriptSnapshot(
   return turns.slice(-MAX_SNAPSHOT_TURNS);
 }
 
-function lastCallerTurn(turns: ReadonlyArray<TranscriptTurn>): string | undefined {
-  for (let i = turns.length - 1; i >= 0; i--) {
-    if (turns[i].role === 'caller') return turns[i].text;
-  }
-  return undefined;
+function identityCaseFor(escalationReason: string, identityReason?: string): IdentityCase | undefined {
+  if (escalationReason !== 'caller_identification_failed') return undefined;
+  if (identityReason === 'customer_archived') return 'archived';
+  if (identityReason === 'claims_existing_customer') return 'claims';
+  return 'unverified';
 }
 
 export interface CallerContextBundle {
@@ -35,32 +36,35 @@ export interface CallerContextBundle {
   customer?: EscalationContext['customer'];
   intent: EscalationContext['intent'];
   transcriptSnapshot: ReadonlyArray<TranscriptTurn>;
+  /** #1630 — set for an identity hand-off; see `EscalationContext.identityCase`. */
+  identityCase?: IdentityCase;
 }
 
 /**
  * @param escalationReason the FSM's `notify_oncall` reason. The dispatcher-
  *   facing reason itself is derived by the escalate-to-human skill
- *   (`mapSkillReasonToBuilderReason`); here it only decides whether the
- *   caller's self-introduction is a claim worth carrying (#1616).
+ *   (`mapSkillReasonToBuilderReason`).
+ * @param identityReason the FSM's identity sub-reason (#1630) carried on the
+ *   `notify_oncall` payload of a `caller_identification_failed` hand-off. It
+ *   alone decides the identity case, and whether the caller's
+ *   self-introduction is a claim worth carrying (#1616).
  */
 export function buildCallerContextFromSession(
   session: VoiceSession,
   callerPhone: string,
   escalationReason: string,
+  identityReason?: string,
 ): CallerContextBundle {
   const ctx = session.machine.currentContext;
   const transcriptSnapshot = parseTranscriptSnapshot(session.transcript);
-  // #1616 — a claims-existing-customer hand-off (#1587) fires on the turn
-  // that carried the caller's self-introduction ("Hi, this is Jane Smith"),
-  // from a line NO record is bound to. So: identity hand-off, no record on
-  // the line, last turn names someone → that name is the caller's CLAIM
-  // (never `caller.name`). A caller with a record bound to this line (the
-  // archived case) introducing themselves is not claiming another record.
-  const noRecordOnLine = !ctx.customerId && !session.customerId;
+  // #1616 / #1630 — the FSM names the identity problem. A claims-existing-
+  // customer hand-off (#1587) fires on the turn that carried the caller's
+  // self-introduction ("Hi, this is Jane Smith"): that name is the caller's
+  // CLAIM (never `caller.name`). An archived record or a failed lookup is not
+  // a claim about another record.
+  const identityCase = identityCaseFor(escalationReason, identityReason);
   const claimedName =
-    escalationReason === 'caller_identification_failed' && noRecordOnLine
-      ? spokenSelfName(lastCallerTurn(transcriptSnapshot) ?? '')
-      : undefined;
+    identityCase === 'claims' ? spokenSelfName(lastCallerLine(session.transcript) ?? '') : undefined;
   return {
     caller: {
       phone: callerPhone,
@@ -74,5 +78,6 @@ export function buildCallerContextFromSession(
       confidence: 1,
     },
     transcriptSnapshot,
+    ...(identityCase ? { identityCase } : {}),
   };
 }

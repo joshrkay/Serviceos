@@ -464,6 +464,7 @@ describe('#1616 — identity_unverified names identity to the dispatcher but is 
       shopName: "Joe's HVAC",
       callerContext: {
         caller: { phone: '+15555550404', claimedName: 'Jane Smith' },
+        identityCase: 'claims',
         intent: { type: 'unknown', entities: {}, confidence: 1 },
         transcriptSnapshot: [],
       },
