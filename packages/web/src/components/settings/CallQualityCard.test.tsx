@@ -16,6 +16,7 @@ vi.mock('../../utils/api-fetch', () => ({
 vi.mock('sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
+import { toast } from 'sonner';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -68,13 +69,15 @@ const QUALITY = {
 
 beforeEach(() => {
   apiFetchMock.mockReset();
+  vi.mocked(toast.info).mockClear();
+  vi.mocked(toast.error).mockClear();
 });
 
 describe('CallQualityCard', () => {
   it('shows the 7-day and 30-day pass rates against the 85% gate and the last graded calls', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse(QUALITY));
 
-    render(<CallQualityCard canManage />);
+    render(<CallQualityCard />);
 
     expect(await screen.findByText('9 of 10 graded calls passed in the last 7 days (90%)')).toBeInTheDocument();
     expect(screen.getByText('32 of 40 passed in the last 30 days (80%) · gate 85%')).toBeInTheDocument();
@@ -97,7 +100,7 @@ describe('CallQualityCard', () => {
       }),
     );
 
-    render(<CallQualityCard canManage />);
+    render(<CallQualityCard />);
 
     expect(await screen.findByText('No calls graded yet')).toBeInTheDocument();
   });
@@ -110,32 +113,60 @@ describe('CallQualityCard', () => {
       }),
     );
 
-    render(<CallQualityCard canManage />);
+    render(<CallQualityCard />);
 
     expect(await screen.findByText('Below the 85% gate')).toBeInTheDocument();
   });
 
-  it('lets the owner grade a sample now and refreshes the card', async () => {
+  it('lets the owner start a grading pass: 202 accepted, a toast that it runs in the background, and a refetch', async () => {
     apiFetchMock
       .mockResolvedValueOnce(jsonResponse(QUALITY))
-      .mockResolvedValueOnce(jsonResponse({ ran: true, tenantsSwept: 1, graded: 3, skipped: 0, failures: 0 }, 202))
+      .mockResolvedValueOnce(jsonResponse({ accepted: true }, 202))
       .mockResolvedValueOnce(
         jsonResponse({ ...QUALITY, windows: { ...QUALITY.windows, last7d: { graded: 13, passed: 12, passRate: 12 / 13 } } }),
       );
 
-    render(<CallQualityCard canManage />);
+    render(<CallQualityCard />);
 
     fireEvent.click(await screen.findByRole('button', { name: /grade a sample now/i }));
 
     await waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(3));
     expect(apiFetchMock.mock.calls[1][0]).toBe('/api/voice/quality/grade');
     expect(apiFetchMock.mock.calls[1][1]).toMatchObject({ method: 'POST' });
+    expect(toast.info).toHaveBeenCalledWith(
+      'Grading started — new grades appear here within a few minutes',
+    );
     expect(await screen.findByText('12 of 13 graded calls passed in the last 7 days (92%)')).toBeInTheDocument();
+  });
+
+  it('tells the owner when a grading pass is already running (409)', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse(QUALITY))
+      .mockResolvedValueOnce(jsonResponse({ accepted: false, alreadyRunning: true }, 409));
+
+    render(<CallQualityCard />);
+    fireEvent.click(await screen.findByRole('button', { name: /grade a sample now/i }));
+
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith('A grading pass is already running'));
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('renders each graded call\'s date in the tenant timezone, not the viewer\'s', async () => {
+    // 2026-10-05T03:30Z is still Oct 4 in America/New_York (the hook's default
+    // without a provider) but Oct 5 in UTC / Europe.
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        ...QUALITY,
+        recent: [{ ...QUALITY.recent[0], callEndedAt: '2026-10-05T03:30:00.000Z' }],
+      }),
+    );
+    render(<CallQualityCard />);
+    expect(await screen.findByText('Oct 4')).toBeInTheDocument();
   });
 
   it('stays hidden when the API answers with something that is not a quality report (partial adapters)', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }));
-    const { container } = render(<CallQualityCard canManage />);
+    const { container } = render(<CallQualityCard />);
     // Let the fetch + json() + state update settle inside act so a render
     // crash on the unexpected shape surfaces here rather than being swallowed.
     await act(async () => {
@@ -145,16 +176,9 @@ describe('CallQualityCard', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('hides the grading trigger from non-owners', async () => {
-    apiFetchMock.mockResolvedValueOnce(jsonResponse(QUALITY));
-    render(<CallQualityCard canManage={false} />);
-    await screen.findByText('9 of 10 graded calls passed in the last 7 days (90%)');
-    expect(screen.queryByRole('button', { name: /grade a sample now/i })).not.toBeInTheDocument();
-  });
-
   it('keeps tap targets at least 44px (min-h-11) and never forces a horizontal scroll at 320px', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse(QUALITY));
-    render(<CallQualityCard canManage />);
+    render(<CallQualityCard />);
     expect(await screen.findByRole('button', { name: /grade a sample now/i })).toHaveClass('min-h-11');
     // Class contract for the 320px viewport: text containers shrink (min-w-0)
     // and the call rows wrap instead of fixing a width.

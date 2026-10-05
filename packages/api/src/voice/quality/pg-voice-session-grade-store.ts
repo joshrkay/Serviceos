@@ -14,8 +14,10 @@
  *              (owner / business-phone test calls are `false`, classifyCall).
  *
  * Timing markers for floor #3 come from `call_transcript_turns.started_at`
- * (mid-call persistence, keyed by session_id). Every tenant-scoped read runs
- * inside `withTenant`, so RLS applies on top of the explicit tenant_id.
+ * (mid-call persistence, keyed by session_id), read in TURN order — the rows
+ * are inserted fire-and-forget, so `started_at` alone can place a reply
+ * before the caller line it answers. Every tenant-scoped read runs inside
+ * `withTenant`, so RLS applies on top of the explicit tenant_id.
  */
 import type { Pool, PoolClient } from 'pg';
 import { PgBaseRepository } from '../../db/pg-base';
@@ -49,6 +51,24 @@ const DISCLOSED_SQL = `
        AND cr.kind = 'recording' AND cr.state = 'revoked'
   )`;
 
+/**
+ * FROM/WHERE of an eligible call: ended inbound, billable (owner / test calls
+ * excluded), disclosure played and not revoked, and a NON-EMPTY transcript —
+ * an empty `'[]'` (caller never spoke) would only burn a sample slot on an
+ * `empty_transcript` skip. $1 tenant, $2 ended-since, $3 ended-before.
+ */
+const ELIGIBLE_FROM_WHERE_SQL = `
+  FROM voice_sessions vs
+  JOIN call_usage_events cue
+    ON cue.tenant_id = vs.tenant_id AND cue.call_id = vs.id::text AND cue.billable
+ WHERE vs.tenant_id = $1
+   AND vs.channel = 'voice_inbound'
+   AND vs.ended_at IS NOT NULL
+   AND vs.ended_at >= $2 AND vs.ended_at < $3
+   AND jsonb_typeof(vs.transcript) = 'array'
+   AND jsonb_array_length(vs.transcript) > 0
+   AND (${DISCLOSED_SQL})`;
+
 interface GradeRow {
   id: string;
   tenant_id: string;
@@ -73,7 +93,7 @@ function mapGrade(row: GradeRow): VoiceSessionGrade {
     gradedAt: new Date(row.graded_at),
     passed: row.passed,
     criteria: row.criteria,
-    rubricVersion: 'v1',
+    rubricVersion: row.rubric_version,
     model: row.model,
     judgeCalls: Number(row.judge_calls),
     costMicroCents: Number(row.cost_micro_cents),
@@ -118,7 +138,7 @@ export class PgVoiceSessionGradeStore extends PgBaseRepository implements VoiceS
         `SELECT speaker, started_at
            FROM call_transcript_turns
           WHERE tenant_id = $1 AND session_id = $2
-          ORDER BY started_at ASC, turn_index ASC`,
+          ORDER BY turn_index ASC, started_at ASC`,
         [tenantId, sessionId],
       );
       return {
@@ -158,15 +178,7 @@ export class PgVoiceSessionGradeStore extends PgBaseRepository implements VoiceS
     return this.withTenant(tenantId, async (client) => {
       const res = await client.query<{ id: string }>(
         `SELECT vs.id
-           FROM voice_sessions vs
-           JOIN call_usage_events cue
-             ON cue.tenant_id = vs.tenant_id AND cue.call_id = vs.id::text AND cue.billable
-          WHERE vs.tenant_id = $1
-            AND vs.channel = 'voice_inbound'
-            AND vs.ended_at IS NOT NULL
-            AND vs.ended_at >= $2 AND vs.ended_at < $3
-            AND vs.transcript IS NOT NULL
-            AND (${DISCLOSED_SQL})
+           ${ELIGIBLE_FROM_WHERE_SQL}
             AND NOT EXISTS (
               SELECT 1 FROM voice_session_grades g
                WHERE g.tenant_id = vs.tenant_id AND g.session_id = vs.id
@@ -176,6 +188,19 @@ export class PgVoiceSessionGradeStore extends PgBaseRepository implements VoiceS
         [tenantId, opts.endedSince, opts.endedBefore, opts.limit],
       );
       return res.rows.map((r) => r.id);
+    });
+  }
+
+  async countEligible(
+    tenantId: string,
+    opts: Pick<ListCandidatesOptions, 'endedSince' | 'endedBefore'>,
+  ): Promise<number> {
+    return this.withTenant(tenantId, async (client) => {
+      const res = await client.query<{ n: string }>(
+        `SELECT COUNT(*)::text AS n ${ELIGIBLE_FROM_WHERE_SQL}`,
+        [tenantId, opts.endedSince, opts.endedBefore],
+      );
+      return Number(res.rows[0]?.n ?? 0);
     });
   }
 

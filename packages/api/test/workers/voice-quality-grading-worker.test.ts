@@ -109,6 +109,59 @@ describe('voice-quality grading worker handle() (#1602)', () => {
     expect((await store.summary(TENANT_A, NOW)).last7d.graded).toBe(3);
   });
 
+  it('a second tick inside the same nightly hour grades nothing more (the sample is per night, not per tick)', async () => {
+    const store = new InMemoryVoiceSessionGradeStore();
+    seedEligibleCalls(store, TENANT_A, 10);
+    const worker = buildWorker(store, [TENANT_A]);
+
+    expect((await worker.handle()).graded).toBe(2);
+    // 30 minutes later, still 08:xx — the ungraded pool is 8 but tonight's
+    // sample (20% of 10 eligible) is already taken.
+    expect((await worker.handle()).graded).toBe(0);
+    expect((await store.summary(TENANT_A, NOW)).last7d.graded).toBe(2);
+  });
+
+  it('a 0% sample rate turns grading off for the tenant', async () => {
+    const store = new InMemoryVoiceSessionGradeStore();
+    seedEligibleCalls(store, TENANT_A, 5);
+    store.setQuota(TENANT_A, { sampleRatePct: 0, dailyCap: 20 });
+    const worker = buildWorker(store, [TENANT_A]);
+
+    expect((await worker.handle()).graded).toBe(0);
+    expect((await worker.handle({ tenantId: TENANT_A, trigger: 'manual' })).graded).toBe(0);
+  });
+
+  it('refuses a manual trigger while that tenant\'s pass is already running in this process', async () => {
+    const store = new InMemoryVoiceSessionGradeStore();
+    seedEligibleCalls(store, TENANT_A, 1);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const gateway = fakeGateway();
+    gateway.complete.mockImplementation(async (req: LLMRequest) => {
+      await gate;
+      return {
+        content: GOOD_REPLIES[req.taskType] ?? '{}',
+        model: 'judge-mock-1',
+        provider: 'mock',
+        tokenUsage: { input: 1, output: 1, total: 2 },
+        latencyMs: 1,
+      };
+    });
+    const worker = buildWorker(store, [TENANT_A], gateway);
+
+    const nightly = worker.handle();
+    await new Promise((resolve) => setImmediate(resolve));
+    const manual = await worker.handle({ tenantId: TENANT_A, trigger: 'manual' });
+    expect(manual).toMatchObject({ ran: false, alreadyRunning: true, graded: 0 });
+
+    release();
+    expect((await nightly).graded).toBe(1);
+    // Once the pass is over, the trigger works again (nothing left to grade).
+    expect((await worker.handle({ tenantId: TENANT_A, trigger: 'manual' })).ran).toBe(true);
+  });
+
   it('isolates a failing tenant: the others are still graded and the failure is counted', async () => {
     const store = new InMemoryVoiceSessionGradeStore();
     seedEligibleCalls(store, TENANT_A, 1);

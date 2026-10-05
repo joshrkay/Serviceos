@@ -577,7 +577,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // #1564 — per-tenant A2P 10DLC registration (a2p_registrations).
   ['303_a2p_registrations', '1b48b89415acfeadd19479956a6d47f759b5153b3f5d76eb410af6e2ccc17a9f'],
   // #1602 — production voice-quality grades (voice_session_grades) + tenant_settings sampling bounds.
-  ['305_voice_session_grades', '7f9b07358bc55e34f402a93176368b02f81832011dd8d8b2a83235a1a68b4eb7'],
+  ['305_voice_session_grades', '3d47b28627c77a500d18bbdd98637e343d01d59768cec9b875bcf96937cdae12'],
 ];
 
 function hashMigration(value: string): string {

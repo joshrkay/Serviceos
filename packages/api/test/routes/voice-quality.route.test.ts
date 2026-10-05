@@ -16,6 +16,7 @@ import { createVoiceQualityRouter } from '../../src/routes/voice-quality';
 import { createVoiceSessionGrader } from '../../src/voice/quality/grade-voice-session';
 import { InMemoryVoiceSessionGradeStore } from '../../src/voice/quality/voice-session-grade-store';
 import { createVoiceQualityGradingWorker } from '../../src/workers/voice-quality-grading-worker';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 const OTHER_TENANT = '22222222-2222-4222-8222-222222222222';
@@ -97,6 +98,7 @@ function buildApp(role: 'owner' | 'dispatcher', store: InMemoryVoiceSessionGrade
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     now: () => NOW,
   });
+  const auditRepo = new InMemoryAuditRepository();
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -108,8 +110,16 @@ function buildApp(role: 'owner' | 'dispatcher', store: InMemoryVoiceSessionGrade
     };
     next();
   });
-  app.use('/api/voice/quality', createVoiceQualityRouter({ store, grader, worker, now: () => NOW }));
-  return { app, grader };
+  app.use(
+    '/api/voice/quality',
+    createVoiceQualityRouter({ store, grader, worker, auditRepo, now: () => NOW }),
+  );
+  return { app, grader, auditRepo };
+}
+
+/** Let a detached grading pass (kicked off by POST {}) run to completion. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
 }
 
 describe('GET /api/voice/quality (#1602)', () => {
@@ -175,7 +185,7 @@ describe('GET /api/voice/quality (#1602)', () => {
 });
 
 describe('POST /api/voice/quality/grade (#1602)', () => {
-  it('runs the owner\'s tenant through the grading pass now and the result shows up on GET', async () => {
+  it('accepts the owner\'s request immediately, grades the tenant detached from the request, and audits the trigger', async () => {
     const store = new InMemoryVoiceSessionGradeStore();
     seedCall(store, UNGRADED_CALL, new Date('2026-10-05T01:00:00.000Z'), [
       'caller: Are you open Saturday?',
@@ -183,17 +193,28 @@ describe('POST /api/voice/quality/grade (#1602)', () => {
     ]);
     // Another tenant's call must not be touched by this owner's trigger.
     seedCall(store, GOOD_CALL, new Date('2026-10-05T01:00:00.000Z'), ['caller: Hi', 'agent: Hello'], OTHER_TENANT);
-    const { app } = buildApp('owner', store);
+    const { app, auditRepo } = buildApp('owner', store);
 
     const run = await request(app).post('/api/voice/quality/grade').send({});
 
+    // 202 with no result yet: the pass (up to cap × judge calls) runs after the
+    // response, never inside the request's transaction.
     expect(run.status).toBe(202);
-    expect(run.body).toMatchObject({ ran: true, tenantsSwept: 1, graded: 1, failures: 0 });
+    expect(run.body).toEqual({ accepted: true });
+    await settle();
     const res = await request(app).get('/api/voice/quality');
     expect(res.body.recent.map((g: { sessionId: string; trigger: string }) => [g.sessionId, g.trigger])).toEqual([
       [UNGRADED_CALL, 'manual'],
     ]);
     expect((await store.summary(OTHER_TENANT, NOW)).recent).toEqual([]);
+    // The owner's action is on the audit trail (all mutations emit audit events).
+    const audit = await auditRepo.findByEntity(TENANT, 'voice_quality_grading', TENANT);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({
+      actorId: 'user-1',
+      eventType: 'voice_quality.grade_requested',
+      metadata: { trigger: 'manual', scope: 'sample' },
+    });
   });
 
   it('grades one named call on demand and answers with its grade', async () => {
@@ -202,7 +223,7 @@ describe('POST /api/voice/quality/grade (#1602)', () => {
       'caller: Are you open Saturday?',
       'agent: Yes, 8 to noon.',
     ]);
-    const { app } = buildApp('owner', store);
+    const { app, auditRepo } = buildApp('owner', store);
 
     const res = await request(app).post('/api/voice/quality/grade').send({ sessionId: UNGRADED_CALL });
 
@@ -211,6 +232,8 @@ describe('POST /api/voice/quality/grade (#1602)', () => {
       status: 'graded',
       grade: { sessionId: UNGRADED_CALL, passed: true, trigger: 'manual', judgeCalls: 2 },
     });
+    const audit = await auditRepo.findByEntity(TENANT, 'voice_session', UNGRADED_CALL);
+    expect(audit.map((e) => e.eventType)).toEqual(['voice_quality.grade_requested']);
   });
 
   it('rejects a malformed session id', async () => {

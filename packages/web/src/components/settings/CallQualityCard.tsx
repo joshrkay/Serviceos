@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Gauge } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
+import { formatDateInTenantTz } from '../../utils/formatInTenantTz';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 
 /** Mirrors GET /api/voice/quality (#1602). */
 interface QualityWindow {
@@ -33,6 +35,9 @@ interface CallQuality {
   recent: GradedCall[];
 }
 
+/** A started pass grades up to the daily cap × judge calls; refetch once it has had time to land. */
+const REFETCH_AFTER_GRADING_MS = 15_000;
+
 function pct(rate: number): string {
   return `${Math.round(rate * 100)}%`;
 }
@@ -46,15 +51,19 @@ function headlineRationale(call: GradedCall): string {
 }
 
 /**
- * Production call quality on Settings: how many of the AI's real answered
- * calls, sampled and graded nightly by the same judges the CI harness uses,
- * passed in the last 7 / 30 days against the 85% launch gate — and the last
- * graded calls with the judge's one-line reason. The owner can grade a sample
- * now (the API enforces owner-only and the tenant's daily cap).
+ * Production call quality on Settings (owner-only — the API behind it is
+ * `tenant:manage`, so the page mounts this for owners only): how many of the
+ * AI's real answered calls, sampled and graded nightly by the same judges the
+ * CI harness uses, passed in the last 7 / 30 days against the 85% launch gate,
+ * and the last graded calls with the judge's one-line reason. The owner can
+ * start a grading pass now; it runs in the background under the tenant's
+ * daily cap.
  */
-export function CallQualityCard({ canManage }: { canManage: boolean }) {
+export function CallQualityCard() {
   const [quality, setQuality] = useState<CallQuality | null>(null);
-  const [grading, setGrading] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const timezone = useTenantTimezone();
+  const refetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -72,28 +81,34 @@ export function CallQualityCard({ canManage }: { canManage: boolean }) {
 
   useEffect(() => {
     void load();
+    return () => {
+      if (refetchTimer.current) clearTimeout(refetchTimer.current);
+    };
   }, [load]);
 
   async function gradeNow() {
-    setGrading(true);
+    setStarting(true);
     try {
       const res = await apiFetch('/api/voice/quality/grade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       });
+      if (res.status === 409) {
+        toast.info('A grading pass is already running');
+        return;
+      }
       if (!res.ok) throw new Error(String(res.status));
-      const run = (await res.json()) as { graded: number; skipped: number };
-      toast.success(
-        run.graded === 0
-          ? 'No new calls to grade right now'
-          : `Graded ${run.graded} call${run.graded === 1 ? '' : 's'}`,
-      );
+      toast.info('Grading started — new grades appear here within a few minutes');
+      // The pass runs after the 202; pick up what has landed now and again
+      // once the judges have had time to finish.
       await load();
+      if (refetchTimer.current) clearTimeout(refetchTimer.current);
+      refetchTimer.current = setTimeout(() => void load(), REFETCH_AFTER_GRADING_MS);
     } catch {
       toast.error('Could not start grading');
     } finally {
-      setGrading(false);
+      setStarting(false);
     }
   }
 
@@ -151,10 +166,7 @@ export function CallQualityCard({ canManage }: { canManage: boolean }) {
                 {call.passed ? 'Passed' : 'Failed'}
               </span>
               <span className="text-xs text-slate-400 shrink-0">
-                {new Date(call.callEndedAt).toLocaleDateString(undefined, {
-                  month: 'short',
-                  day: 'numeric',
-                })}
+                {formatDateInTenantTz(call.callEndedAt, timezone)}
               </span>
               <p className="basis-full text-xs text-slate-600 min-w-0 break-words">
                 {headlineRationale(call)}
@@ -164,22 +176,20 @@ export function CallQualityCard({ canManage }: { canManage: boolean }) {
         </ul>
       )}
 
-      {canManage && (
-        <div className="mt-3 border-t border-slate-100 pt-3 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            disabled={grading}
-            onClick={() => void gradeNow()}
-            className="min-h-11 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 disabled:opacity-50"
-          >
-            {grading ? 'Grading…' : 'Grade a sample now'}
-          </button>
-          <span className="text-xs text-slate-400 min-w-0">
-            {quality.quota.gradedToday} of {quality.quota.dailyCap} graded today · samples{' '}
-            {quality.quota.sampleRatePct}% of answered calls nightly
-          </span>
-        </div>
-      )}
+      <div className="mt-3 border-t border-slate-100 pt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={starting}
+          onClick={() => void gradeNow()}
+          className="min-h-11 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 disabled:opacity-50"
+        >
+          {starting ? 'Starting…' : 'Grade a sample now'}
+        </button>
+        <span className="text-xs text-slate-400 min-w-0">
+          {quality.quota.gradedToday} of {quality.quota.dailyCap} graded today · samples{' '}
+          {quality.quota.sampleRatePct}% of answered calls nightly
+        </span>
+      </div>
     </div>
   );
 }

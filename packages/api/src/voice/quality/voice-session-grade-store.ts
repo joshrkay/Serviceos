@@ -45,7 +45,8 @@ export interface VoiceSessionGrade {
   /** Every graded criterion passed. */
   passed: boolean;
   criteria: VoiceSessionGradeCriterion[];
-  rubricVersion: 'v1';
+  /** Rubric that produced the criteria ('v1' today); read back from the row, never assumed. */
+  rubricVersion: string;
   /** Model that answered the judge calls (last response's model id). */
   model: string;
   /** Number of LLM judge calls this grade cost. */
@@ -101,7 +102,11 @@ export interface VoiceQualityQuota {
   dailyCap: number;
 }
 
-/** Defaults when tenant_settings carries no override. */
+/**
+ * Defaults when tenant_settings carries no override. A sample rate of 0 turns
+ * grading OFF for the tenant (nightly and the owner's sample trigger alike);
+ * a daily cap of 0 does the same.
+ */
 export const DEFAULT_VOICE_QUALITY_SAMPLE_RATE_PCT = 20;
 export const DEFAULT_VOICE_QUALITY_DAILY_CAP = 20;
 
@@ -133,9 +138,16 @@ export interface VoiceSessionGradeStore {
   findGrade(tenantId: string, sessionId: string): Promise<VoiceSessionGrade | null>;
   /**
    * Session ids of ended `voice_inbound` calls in the window that carried the
-   * disclosure, were billable and have no grade yet. Newest first.
+   * disclosure, were billable, have a non-empty transcript and no grade yet.
+   * Newest first.
    */
   listUngradedCandidates(tenantId: string, opts: ListCandidatesOptions): Promise<string[]>;
+  /**
+   * How many calls in the window are eligible at all (graded or not). The
+   * nightly sample size is a share of THIS, so grades landing during the
+   * night never shrink the night's target.
+   */
+  countEligible(tenantId: string, opts: Pick<ListCandidatesOptions, 'endedSince' | 'endedBefore'>): Promise<number>;
   countGradedSince(tenantId: string, since: Date): Promise<number>;
   quota(tenantId: string): Promise<VoiceQualityQuota>;
   /** Upsert on (tenant, session): a manual re-grade replaces the earlier grade. */
@@ -170,22 +182,36 @@ export class InMemoryVoiceSessionGradeStore implements VoiceSessionGradeStore {
     return this.grades.get(key(tenantId, sessionId)) ?? null;
   }
 
+  private eligible(
+    tenantId: string,
+    opts: Pick<ListCandidatesOptions, 'endedSince' | 'endedBefore'>,
+  ): GradableVoiceSession[] {
+    return [...this.sessions.values()].filter(
+      (s) =>
+        s.tenantId === tenantId &&
+        s.channel === 'voice_inbound' &&
+        s.endedAt !== null &&
+        s.endedAt >= opts.endedSince &&
+        s.endedAt < opts.endedBefore &&
+        s.recordingDisclosed &&
+        s.billable === true &&
+        s.transcript.length > 0,
+    );
+  }
+
   async listUngradedCandidates(tenantId: string, opts: ListCandidatesOptions): Promise<string[]> {
-    return [...this.sessions.values()]
-      .filter(
-        (s) =>
-          s.tenantId === tenantId &&
-          s.channel === 'voice_inbound' &&
-          s.endedAt !== null &&
-          s.endedAt >= opts.endedSince &&
-          s.endedAt < opts.endedBefore &&
-          s.recordingDisclosed &&
-          s.billable === true &&
-          !this.grades.has(key(tenantId, s.id)),
-      )
+    return this.eligible(tenantId, opts)
+      .filter((s) => !this.grades.has(key(tenantId, s.id)))
       .sort((a, b) => b.endedAt!.getTime() - a.endedAt!.getTime())
       .slice(0, opts.limit)
       .map((s) => s.id);
+  }
+
+  async countEligible(
+    tenantId: string,
+    opts: Pick<ListCandidatesOptions, 'endedSince' | 'endedBefore'>,
+  ): Promise<number> {
+    return this.eligible(tenantId, opts).length;
   }
 
   async countGradedSince(tenantId: string, since: Date): Promise<number> {

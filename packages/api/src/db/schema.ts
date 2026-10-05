@@ -7440,6 +7440,12 @@ export const MIGRATIONS = {
       ON voice_session_grades (tenant_id, call_ended_at DESC);
     CREATE INDEX IF NOT EXISTS idx_voice_session_grades_graded_at
       ON voice_session_grades (graded_at);
+    -- The eligibility read correlates each ended call to its disclosure row
+    -- and its timing markers by session id; neither table had that path.
+    CREATE INDEX IF NOT EXISTS idx_consent_events_tenant_session
+      ON consent_events (tenant_id, voice_session_id) WHERE voice_session_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_tenant_session
+      ON call_transcript_turns (tenant_id, session_id) WHERE session_id IS NOT NULL;
     ALTER TABLE voice_session_grades ENABLE ROW LEVEL SECURITY;
     ALTER TABLE voice_session_grades FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_voice_session_grades ON voice_session_grades;

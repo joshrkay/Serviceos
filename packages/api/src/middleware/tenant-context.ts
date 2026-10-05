@@ -198,6 +198,10 @@ const REQUEST_IDLE_TX_TIMEOUT_MS = positiveIntEnv('DB_REQUEST_IDLE_TX_TIMEOUT_MS
  */
 const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
   { method: 'POST', re: /\/assistant\/chat$/ },
+  // #1602 — the owner's call-quality grading trigger: a named call is up to
+  // 13 judge calls in-request, and the sampling pass is kicked off detached
+  // (outside tenantContextStore) — neither may hold a request transaction.
+  { method: 'POST', re: /\/voice\/quality\/grade$/ },
 ];
 
 function isLlmLongCallRoute(req: { method: string; path: string }): boolean {

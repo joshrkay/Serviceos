@@ -61,24 +61,27 @@ export function pairTranscriptTurns(transcript: readonly string[]): TranscriptTu
 }
 
 /**
- * Per-turn latency from stored markers: each caller marker to the first agent
- * marker after it. A caller turn with no following agent marker counts its
- * wait to the call's end — the same "no reply is a hang" reading the harness
- * observation builder uses.
+ * Per-turn latency from stored markers, read in the order given (the store
+ * orders by `turn_index`): each caller marker to the first agent marker that
+ * follows it in the conversation. The markers are stamped at insert time by a
+ * fire-and-forget persist, so a reply's row can carry an EARLIER timestamp
+ * than the caller line it answers — turn order keeps the pairing right and a
+ * negative gap reads as 0, never as a hang. A caller turn with no following
+ * agent marker counts its wait to the call's end — the same "no reply is a
+ * hang" reading the harness observation builder uses.
  */
 export function latenciesFromTimings(
   timings: ReadonlyArray<{ speaker: 'caller' | 'agent'; startedAt: Date }>,
   endedAt: Date,
 ): number[] {
-  const ordered = [...timings].sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
   const latencies: number[] = [];
   let pendingCallerTs: number | null = null;
-  for (const t of ordered) {
+  for (const t of timings) {
     if (t.speaker === 'caller') {
-      if (pendingCallerTs !== null) latencies.push(t.startedAt.getTime() - pendingCallerTs);
+      if (pendingCallerTs !== null) latencies.push(Math.max(0, t.startedAt.getTime() - pendingCallerTs));
       pendingCallerTs = t.startedAt.getTime();
     } else if (pendingCallerTs !== null) {
-      latencies.push(t.startedAt.getTime() - pendingCallerTs);
+      latencies.push(Math.max(0, t.startedAt.getTime() - pendingCallerTs));
       pendingCallerTs = null;
     }
   }

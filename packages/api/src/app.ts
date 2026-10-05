@@ -5996,6 +5996,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       store: voiceQualityStore,
       grader: voiceSessionGrader,
       worker: voiceQualityWorker,
+      auditRepo,
+      logger: voiceQualityLogger,
       passRateMin: config.SLO_VOICE_GRADED_PASS_MIN,
     }),
   );

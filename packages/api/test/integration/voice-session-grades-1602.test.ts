@@ -156,6 +156,7 @@ describe('Postgres integration — voice_session_grades + PgVoiceSessionGradeSto
     await seedCall(pool, tenantA, { channel: 'inapp_voice' });
     await seedCall(pool, tenantA, { revokedLater: true });
     await seedCall(pool, tenantA, { transcript: null });
+    await seedCall(pool, tenantA, { transcript: [] });
     await seedCall(pool, tenantA, { endedAt: new Date('2026-10-01T15:02:00.000Z') });
   }, 120_000);
 
@@ -163,9 +164,22 @@ describe('Postgres integration — voice_session_grades + PgVoiceSessionGradeSto
     await closeSharedTestDb();
   });
 
-  it('lists only ended inbound calls that carried the disclosure, were billable and have a transcript', async () => {
+  it('lists only ended inbound calls that carried the disclosure, were billable and have a non-empty transcript', async () => {
     expect(await store.listUngradedCandidates(tenantA.tenantId, WINDOW)).toEqual([eligible]);
+    expect(await store.countEligible(tenantA.tenantId, WINDOW)).toBe(1);
     expect(await store.listUngradedCandidates(tenantB.tenantId, WINDOW)).toEqual([]);
+  });
+
+  it('indexes the two per-session lookups the eligibility read depends on (migration 305)', async () => {
+    const res = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+        WHERE indexname IN ('idx_consent_events_tenant_session', 'idx_call_transcript_turns_tenant_session')
+        ORDER BY indexname`,
+    );
+    expect(res.rows.map((r) => r.indexname)).toEqual([
+      'idx_call_transcript_turns_tenant_session',
+      'idx_consent_events_tenant_session',
+    ]);
   });
 
   it('loads the call with its disclosure + billable evidence, tenant zone and stored timing markers', async () => {
@@ -229,8 +243,11 @@ describe('Postgres integration — voice_session_grades + PgVoiceSessionGradeSto
         { grader: 'perceived_completion', criterion: 12, name: 'rightCallerFacingAnswer', passed: true, rationale: 'Caller got the appointment time without friction' },
       ]),
     );
-    // Graded calls leave the candidate set and count against today's cap.
+    // Graded calls leave the candidate set (but still count as eligible, so the
+    // nightly sample size does not shrink as the night's grades land) and
+    // count against today's cap.
     expect(await store.listUngradedCandidates(tenantA.tenantId, WINDOW)).toEqual([]);
+    expect(await store.countEligible(tenantA.tenantId, WINDOW)).toBe(1);
     expect(await store.countGradedSince(tenantA.tenantId, new Date('2026-10-05T00:00:00.000Z'))).toBe(1);
     // A second grade of the same call replaces, never duplicates.
     expect((await grader.gradeVoiceSession(tenantA.tenantId, eligible, { force: true })).status).toBe('graded');

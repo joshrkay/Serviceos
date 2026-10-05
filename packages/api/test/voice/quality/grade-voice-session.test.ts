@@ -255,4 +255,33 @@ describe('gradeVoiceSession (#1602)', () => {
     if (noTimings.status !== 'graded') throw new Error('unreachable');
     expect(noTimings.grade.criteria.some((c) => c.grader === 'floor')).toBe(false);
   });
+
+  it('reads timing markers in turn order, so a reply row that landed before its caller row is not a hang', async () => {
+    const store = new InMemoryVoiceSessionGradeStore();
+    // Markers are persisted fire-and-forget: the agent's row for turn 1 was
+    // stamped 100ms BEFORE the caller's row for turn 0. In turn order the
+    // reply still answers the caller; by timestamp it would look like a 60s wait.
+    store.seedSession({
+      id: SESSION,
+      tenantId: TENANT,
+      channel: 'voice_inbound',
+      startedAt: new Date('2026-10-04T16:00:00.000Z'),
+      endedAt: new Date('2026-10-04T16:01:00.000Z'),
+      outcome: 'completed',
+      transcript: ['caller: Do you do water heaters?', 'agent: Yes, we install and repair them.'],
+      recordingDisclosed: true,
+      billable: true,
+      turnTimings: [
+        { speaker: 'caller', startedAt: new Date('2026-10-04T16:00:10.100Z') },
+        { speaker: 'agent', startedAt: new Date('2026-10-04T16:00:10.000Z') },
+      ],
+    });
+    const grader = createVoiceSessionGrader({ store, gateway: fakeGateway(GOOD_CALL_REPLIES), now: () => NOW });
+
+    const result = await grader.gradeVoiceSession(TENANT, SESSION);
+    if (result.status !== 'graded') throw new Error('unreachable');
+    expect(result.grade.criteria).toEqual(
+      expect.arrayContaining([expect.objectContaining({ grader: 'floor', criterion: 3, passed: true })]),
+    );
+  });
 });
