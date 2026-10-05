@@ -7,6 +7,8 @@ const apiFetchMock = vi.fn();
 // The AI minutes card fetches its own endpoint on mount (AiMinutesCard.test
 // covers it); stub it so these ordered apiFetch seeds stay about toggles.
 vi.mock('./AiMinutesCard', () => ({ AiMinutesCard: () => null }));
+// #1602 — same for the call-quality card (CallQualityCard.test covers it).
+vi.mock('./CallQualityCard', () => ({ CallQualityCard: () => null }));
 
 vi.mock('../../utils/api-fetch', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),

@@ -115,7 +115,8 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 7;
 // #1402 §13: +1 (POST /api/users/:id/deactivate — occasional, offboarding).
 // #1563: +1 (POST /api/onboarding/phone/change — occasional, Settings → Phone).
 // #1564: +2 (GET occasional / PUT onboarding /api/settings/texting-registration).
-const OWNER_ONLY_ROUTES = 63;
+// #1602: +2 (GET /api/voice/quality/ + POST /api/voice/quality/grade — occasional, call-quality score).
+const OWNER_ONLY_ROUTES = 65;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 

@@ -62,6 +62,17 @@ terms float.
   reachable, or refuse with the honest copy
   (`ai/voice-turn/coverage-table.ts`). A structural test forbids undeclared
   cells, so refusals happen on purpose and silence is impossible.
+- **Graded call** (#1602, D-041) — a production phone call the nightly
+  sampler judged with the SAME Layer 2 graders the CI harness uses
+  (`voice/quality/grade-voice-session.ts` over `ai/voice-quality/graders/*`),
+  from its stored transcript only. Gradable means: ended, `voice_inbound`,
+  the recording disclosure played (`consent_events` recording/implicit/voice
+  for the session, not revoked) and billable (`call_usage_events` — the
+  owner's own test calls are not). The grade (`voice_session_grades`) carries
+  per-criterion pass/fail with the judge's rationale and is advisory: it never
+  changes a proposal, an outcome or billing. The 7-day graded pass rate is the
+  production counterpart of the Layer 2 launch gate (SLO
+  `voice_graded_pass_rate_7d`).
 
 ## The evidence ladder (D-031, D-032)
 

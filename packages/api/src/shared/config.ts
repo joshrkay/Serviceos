@@ -163,6 +163,13 @@ const configSchema = z.object({
   SLO_TURN_LATENCY_P95_MS: z.coerce.number().positive().default(3500),
   // WS26 — minimum recorded turns before the turn-latency rule can breach.
   SLO_TURN_LATENCY_MIN_SAMPLE: z.coerce.number().int().positive().default(30),
+  // #1602 — minimum 7-day PRODUCTION graded pass rate (voice_session_grades,
+  // cross-tenant). Default 0.85 = the Layer 2 launch gate the CI harness enforces.
+  SLO_VOICE_GRADED_PASS_MIN: z.coerce.number().min(0).max(1).default(0.85),
+  // #1602 — graded-call sample floor before the pass-rate rule can breach.
+  SLO_VOICE_GRADED_MIN_SAMPLE: z.coerce.number().int().positive().default(10),
+  // #1602 — UTC hour of the nightly voice-quality grading pass (08:00Z ≈ 1–4am US).
+  VOICE_QUALITY_NIGHTLY_HOUR_UTC: z.coerce.number().int().min(0).max(23).default(8),
   // Per-rule alert cooldown (minutes) — a persistent breach re-pages at most
   // once per cooldown window, not every monitor tick.
   SLO_ALERT_COOLDOWN_MIN: z.coerce.number().positive().default(60),

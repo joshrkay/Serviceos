@@ -326,7 +326,7 @@ export const voiceDrainAbandonedCallsTotal = new Counter({
 /** WS15 — last evaluated value per SLO rule (see workers/slo-monitor.ts). */
 export const sloRuleValue = new Gauge({
   name: 'slo_rule_value',
-  help: 'Last evaluated value per platform SLO rule (call_completion_rate=ratio, queue_staleness=stale job count, sweep_lag=seconds since last sweep success, voice_turn_latency_p95=P95 turn latency ms)',
+  help: 'Last evaluated value per platform SLO rule (call_completion_rate=ratio, queue_staleness=stale job count, sweep_lag=seconds since last sweep success, voice_turn_latency_p95=P95 turn latency ms, voice_graded_pass_rate_7d=ratio of graded production calls that passed)',
   labelNames: ['rule'],
   registers: [metricsRegistry],
 });
