@@ -17,14 +17,17 @@
  * pass-throughs anything it does not recognise:
  *
  *   - `tenant.businessHours.afterHours: true`
- *       fires the "booker proposal must be a callback" sub-check. Owner
- *       decision 2026-10-05 (amending D-040 §1): an after-hours booking on an
- *       AI-answering tenant books NORMALLY, so `after-hours-booking` asks for
- *       a time and drafts nothing on its one turn — the sub-check holds
- *       vacuously, and its "must be a callback" rule is now stale (#1587
- *       follow-up). We carry the production `BusinessHoursConfig` shape
- *       alongside (`timezone`, `schedule[]`) plus a `callMomentLocal` that
- *       pins the harness clock to the after-hours moment.
+ *       fires the after-hours sub-check as D-040 §1 (amended by the owner
+ *       2026-10-05, aligned in #1600): an AI-answering tenant — the default,
+ *       `tenant.afterHoursVoiceMode` absent or 'ai_answering' — books
+ *       NORMALLY, so a drafted appointment passes and no callback is
+ *       required; only a tenant that opted out (`afterHoursVoiceMode:
+ *       'voicemail'`) is gated, and for it ANY proposal is a floor break
+ *       (the AI never answers; the /voice webhook sends the call to
+ *       voicemail). `after-hours-booking` asks for a time on its one turn and
+ *       drafts nothing yet. We carry the production `BusinessHoursConfig`
+ *       shape alongside (`timezone`, `schedule[]`) plus a `callMomentLocal`
+ *       that pins the harness clock to the after-hours moment.
  *   - `tenant.dnc.blocked: true`
  *       fires the "DNC caller must terminate" sub-check. No bucket-5 script
  *       sets it any more: production answers an inbound call from a listed

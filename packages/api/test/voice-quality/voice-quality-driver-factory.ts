@@ -134,6 +134,13 @@ function displayNameFromCaller(caller: string): string | undefined {
  * The classifier surfaces these as `operator_request` so the FSM
  * escalates (these turns pin no specific `expected.intent`).
  */
+/**
+ * #1600 — scripts whose caller names ANOTHER customer in the possessive and
+ * whose point is what the agent does with that name; the mock emits it as
+ * `customerName`, as the live classifier does.
+ */
+const POSSESSIVE_CUSTOMER_NAME_SCRIPTS = new Set(['cross-customer-extraction']);
+
 const OPERATOR_REQUEST_SCRIPTS = new Set([
   'add-note-escalated',
   'payment-request-escalated',
@@ -378,6 +385,16 @@ function classifierJsonForTurn(script: VoiceQualityScript, turnIndex: number): s
   // slots-optional-with-a-fixed-fallback convention just above.
   if (intent === 'send_estimate_nudge') {
     entities.customerName = typeof slots.customerReference === 'string' ? slots.customerReference : 'Khan';
+  }
+  // #1600 — the live classifier extracts a customer the caller names in the
+  // possessive ("what's Jane Doe's balance?") as `customerName`; for the
+  // scripts that opt in (POSSESSIVE_CUSTOMER_NAME_SCRIPTS) the first
+  // "First Last's" in the utterance stands in for that extraction. Opt-in,
+  // not a corpus-wide heuristic: a script must not silently acquire an
+  // entity the live classifier may not emit.
+  if (POSSESSIVE_CUSTOMER_NAME_SCRIPTS.has(script.id) && entities.customerName === undefined) {
+    const possessive = turn.caller.match(/\b([A-Z][a-z]+ [A-Z][a-z]+)'s\b/);
+    if (possessive) entities.customerName = possessive[1];
   }
   return JSON.stringify({
     intentType: intent,

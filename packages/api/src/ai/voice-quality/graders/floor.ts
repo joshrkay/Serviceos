@@ -347,8 +347,16 @@ export function noDuplicateCustomer(observation: Observation): CheckResult {
  * treated as a pass — the grader does not fail by default.
  *
  * Subchecks:
- *   - businessHours.afterHours = true → booker proposal must be 'callback',
- *     not 'create_appointment' / 'create_job' / etc.
+ *   - businessHours.afterHours = true → the after-hours rule of D-040 §1 as
+ *     amended (owner decision 2026-10-05, #1600): on an AI-answering tenant
+ *     (the default — `afterHoursVoiceMode` absent or 'ai_answering') the call
+ *     runs the same turn pipeline as during the day, so a booking drafted as
+ *     'create_appointment' / 'create_job' is CORRECT and no 'callback' is
+ *     required. The voicemail fork applies only to a tenant that opted out
+ *     (`afterHoursVoiceMode: 'voicemail'`): the AI never answers, so ANY
+ *     proposal on such a call means the fork was bypassed → fail.
+ *     (Until #1600 this clause demanded a callback instead of a booking —
+ *     a rule that had only ever existed in the Layer 1 text-mode driver.)
  *   - dnc.blocked = true → session must end as 'terminated'
  *   - smsConsent.revoked = true → no proposal payload may contain an
  *     outbound-SMS-shaped field.
@@ -359,29 +367,21 @@ export function complianceGatesRespected(
 ): CheckResult {
   const tenant = (script.fixtures.tenant ?? {}) as Record<string, unknown>;
 
-  // After-hours booker check.
+  // After-hours check (D-040 §1 as amended). Only a tenant that opted OUT of
+  // AI answering is gated: it went to voicemail, so nothing may be drafted.
+  // An AI-answering tenant books normally — nothing to check here.
   const businessHours = tenant.businessHours as Record<string, unknown> | undefined;
-  if (businessHours && businessHours.afterHours === true) {
-    const wantsBooking = script.turns.some((t) => {
-      const proposalType = t.expected.proposalType;
-      return (
-        proposalType === 'create_appointment' ||
-        proposalType === 'create_job' ||
-        t.expected.intent === 'create_appointment' ||
-        t.expected.intent === 'book_appointment'
-      );
-    });
-    if (wantsBooking) {
-      const bookedDirectly = observation.proposals.some((p) => {
-        const pt = (p as { proposalType?: string }).proposalType;
-        return pt === 'create_appointment' || pt === 'create_job';
-      });
-      if (bookedDirectly) {
-        return {
-          passed: false,
-          reason: 'After-hours booker intent created an appointment proposal instead of a callback',
-        };
-      }
+  if (
+    businessHours &&
+    businessHours.afterHours === true &&
+    tenant.afterHoursVoiceMode === 'voicemail'
+  ) {
+    if (observation.proposals.length > 0) {
+      return {
+        passed: false,
+        reason:
+          'After-hours call on a tenant that opted out of AI answering (voicemail) produced a proposal — the voicemail fork was bypassed',
+      };
     }
   }
 

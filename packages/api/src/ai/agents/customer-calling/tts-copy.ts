@@ -229,6 +229,72 @@ export const CALLER_INCOMPLETE_REQUEST_COPY =
   "I've passed that along, but a few details still need to be sorted out before it's final — someone from our team will follow up with you. Is there anything else I can help you with?";
 
 /**
+ * #1600 (1) (owner decision 2026-10-04) — spoken to an S1 caller identified
+ * by caller-ID who names a DIFFERENT customer's account ("what's Jane Doe's
+ * balance?"). Says plainly what the agent can do; never confirms or denies
+ * that the named customer exists, and nothing of either account follows.
+ * D-036 (1).3 (identity outranks words) is unchanged — this is only what
+ * the caller hears instead of their own account being read in Jane's place.
+ */
+export const CROSS_CUSTOMER_REFUSAL_COPY = 'I can only help with the account on this line.';
+
+/**
+ * #1600 (2) (owner decision 2026-10-04) — spoken when the same write request
+ * has been asked for the fifth time on one S1 call: the agent stops answering
+ * it and hands the call to a person (transitions.ts `repeated_write_intent`).
+ * Polite by design — a repeated request is not an accusation.
+ */
+export const REPEATED_REQUEST_HANDOFF_COPY =
+  'I want to make sure this gets handled properly — let me get a person to help you with it.';
+
+/**
+ * #1600 (3) — the caller declined the offer to book a new appointment; the
+ * call stays open for whatever else they need.
+ */
+export const REBOOK_DECLINED_COPY = 'No problem. Is there anything else I can help you with?';
+
+/**
+ * #1600 (3) (owner decision 2026-10-04) — spoken when an S1 caller refers to
+ * an appointment of theirs that is CANCELLED: the cancellation is disclosed
+ * with its date and a new booking is offered. Templated (`rebook_offer`,
+ * payload `cancelledOn` ISO + `timezone`) because the date is dynamic — an
+ * exact-match catalog cannot localize it — so the date renders tenant-local
+ * in the session language. Without a usable date the sentence still holds.
+ */
+export function rebookOfferLine(
+  cancelledOnIso: string | undefined,
+  timezone: string | undefined,
+  lang: SessionLanguage,
+): string {
+  const date = cancelledOnIso ? formatCancelledOn(cancelledOnIso, timezone, lang) : undefined;
+  if (lang === 'es') {
+    return date
+      ? `Esa cita se canceló el ${date} — ¿le gustaría reservar una nueva?`
+      : 'Esa cita se canceló — ¿le gustaría reservar una nueva?';
+  }
+  return date
+    ? `That appointment was cancelled on ${date} — would you like to book a new one?`
+    : 'That appointment was cancelled — would you like to book a new one?';
+}
+
+function formatCancelledOn(
+  iso: string,
+  timezone: string | undefined,
+  lang: SessionLanguage,
+): string | undefined {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return undefined;
+  const locale = lang === 'es' ? 'es' : 'en-US';
+  const parts: Intl.DateTimeFormatOptions = { weekday: 'long', month: 'long', day: 'numeric' };
+  try {
+    return new Intl.DateTimeFormat(locale, { ...parts, ...(timezone ? { timeZone: timezone } : {}) }).format(at);
+  } catch {
+    // An unusable zone never costs the caller the sentence.
+    return new Intl.DateTimeFormat(locale, parts).format(at);
+  }
+}
+
+/**
  * es translations for the FSM's hardcoded sentences (exact-match). Kept
  * small and literal — anything not listed passes through in English rather
  * than risking a bad machine paraphrase.
@@ -309,6 +375,13 @@ export const SENTENCE_CATALOG_ES: Record<string, string> = {
     'Lo dejé como borrador, pero le faltan algunos datos antes de poder aprobarlo — abra la tarjeta para completarlos. ¿Hay algo más en lo que pueda ayudarle?',
   [CALLER_INCOMPLETE_REQUEST_COPY]:
     'Ya pasé su solicitud, pero faltan algunos detalles antes de que quede lista — alguien de nuestro equipo se comunicará con usted. ¿Hay algo más en lo que pueda ayudarle?',
+  // #1600 (1) — the cross-customer refusal.
+  [CROSS_CUSTOMER_REFUSAL_COPY]: 'Solo puedo ayudarle con la cuenta de esta línea.',
+  // #1600 (2) — the repeated-request hand-off.
+  [REPEATED_REQUEST_HANDOFF_COPY]:
+    'Quiero asegurarme de que esto se atienda bien — déjeme comunicarle con una persona que pueda ayudarle.',
+  // #1600 (3) — the rebook offer declined.
+  [REBOOK_DECLINED_COPY]: 'No hay problema. ¿Hay algo más en lo que pueda ayudarle?',
   [WHICH_APPOINTMENT_COPY.reschedule_appointment]:
     '¿Qué cita quiere reprogramar? Puede decirme el nombre del cliente.',
   [WHICH_APPOINTMENT_COPY.cancel_appointment]:
@@ -457,6 +530,13 @@ export function renderTtsText(
         ? `No encontré ${entityKindArticleEs(entityKind)} ${entityKindLabel(entityKind, 'es')} que coincida con ${reference}. ¿Quiere intentar con otro nombre, o crearlo?`
         : `I couldn't find a matching ${entityKindLabel(entityKind, 'en')} for ${reference}. Want to try a different name, or create it?`;
     }
+    case 'rebook_offer':
+      // #1600 (3) — the caller's cancelled appointment: disclose + offer to rebook.
+      return rebookOfferLine(
+        typeof payload.cancelledOn === 'string' ? payload.cancelledOn : undefined,
+        typeof payload.timezone === 'string' ? payload.timezone : undefined,
+        lang,
+      );
     case 'greeting':
       return lang === 'es'
         ? '¡Hola! ¿En qué puedo ayudarle hoy?'

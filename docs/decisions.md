@@ -1630,3 +1630,85 @@ sessions that revoked recording) are never judged.
   7-day trailing signal at ICP call volumes, and the owner can grade more on demand.
 - *Gate on the in-memory `recordingDisclosed` flag.* Rejected: it is process-scoped and lost at
   reap; the ledger row is the durable evidence the transports already write.
+
+---
+
+## D-042 — Four inbound (S1) behaviours the Layer 1 simulator used to fake are decided for production: a spoken cross-customer refusal, a hand-off after five repeats of one write request, disclosure of a cancelled appointment with an offer to rebook, and identity hand-offs categorised as identity failures
+
+**Date:** 2026-10-04
+**Status:** Accepted (owner decisions on #1600, 2026-10-04)
+**Resolves:** the open owner questions PR #1599 (#1587) recorded when the Layer 1 corpus was
+moved onto the production turn engine and six simulator-only gates were found to have no
+production equivalent. Items 4–6 of #1600 (inbound DNC callers are answered; no separate
+after-hours callback mode; no adversarial-text rule) were accepted as recommended and change
+nothing. Paths are relative to `packages/api/src/`.
+
+**Context.** Before #1587 the voice-quality text driver carried its own identity, spam,
+after-hours and stale-appointment gates, so the corpus passed against behaviour no caller could
+reach. #1599 pinned the affected scripts to production truth and asked the owner what production
+should do. This entry records the answers so a later change is a deliberate change of decision.
+Each behaviour lives in the shared turn pipeline (`ai/voice-turn/create-voice-turn-processor.ts`),
+reached by `speechTurn` (media streams, the Layer 1 driver) and by the Gather loop through the
+same exported helpers — never in a transport adapter and never in the simulator.
+
+**Decision (1) — A caller naming another customer's account hears a refusal; the account on
+the line still outranks the words.** D-036 (1).3 stands: a verified caller-ID customer's spoken
+`customerName` never retargets a lookup or a draft. What changes is what the caller HEARS. When
+an S1 caller identified by caller-ID names a customer who is clearly not the account on the
+line — a name the caller ACTUALLY SAID (the classifier's `customerName` must appear in the
+utterance and not be a generic word such as "the customer", since a model may emit a placeholder
+for a request that names nobody) of which neither the whole nor any single word confidently matches
+the account's display, first or last name (`TAU_ENT`, the #1331 matcher) — the agent says
+"I can only help with the account on this line." and asks what else it can help with. It never
+confirms or denies that the named customer exists, speaks nothing of either account in reply,
+drafts nothing, and does not hand off. A name that
+plausibly IS the caller (their own name, a household member sharing the surname — "John Smith" on
+Jane Smith's line — a first-name-only mention) is not refused — the #1331 identity check and
+D-036 (1).3 handle it as before. The owner line, a resolved phone actor,
+in-app sessions and a record minted on this call (no name to compare) are never refused.
+Spanish callers hear the catalogued translation. Audited as
+`agent.calling.<state>.cross_customer_refused`.
+
+**Decision (2) — The same write request asked five times on one call ends in a polite
+hand-off.** A write intent (one that drafts a proposal — a key of `INTENT_TO_PROPOSAL_TYPE`)
+classified at or above τ_int is counted per intent on the session. The fifth occurrence on an S1
+call is not answered again: the FSM's new global guard (`repeated_write_intent`) speaks a polite
+line that it will get a person, moves the call to `escalating`, notifies the on-call rotation
+with reason `abuse_repeated_intent` (skill reason `abuse_detected`), and audits the count. A
+phone transport dispatches no further turns after a hand-off, so the AI's part of the call ends
+there; the leg is bridged to a person or closes on the existing no-answer fallback. The count
+is per intent, not per utterance wording, so rephrasing does not reset it; a request that is read
+back, confirmed and drafted DOES reset it (five distinct bookings on one call are not spam);
+lookups, confirmations, corrections, operator requests and emergencies are never counted. The owner line and in-app
+sessions are not subject to it (an operator repeating a request is not spam).
+
+**Decision (3) — A caller who refers to a cancelled appointment is told so and offered a new
+one.** When an S1 caller identified by caller-ID asks to reschedule, cancel or confirm an
+appointment and the reference resolves to no live appointment of theirs but DOES match one of
+their own `canceled` appointments (the named day — today's weekday spoken after noon still finds
+today's visit — or their ONLY cancelled visit when they have no live ones; completed and no-show
+history is not live, and several cancelled visits are never guessed between), the agent says "That appointment was cancelled on <date> — would you like to
+book a new one?" (the cancellation date is the row's last update, tenant-local, rendered in the
+session language) and holds the offer on the session. Nothing is drafted on that turn. A PLAIN yes
+starts the normal booking flow deterministically (no model call): a `create_appointment` with
+whatever day/time the caller already gave and the real classifier confidence of the request — "Wednesday at the same time" is anchored to the
+cancelled visit's clock time (#1540 §1's rule) — read back by the FSM and drafted only on the
+caller's confirmation, exactly as any other booking. A plain no is acknowledged and the call stays
+open; anything else ("yes, but can we do Thursday instead?") is a new request and is classified. Audited as
+`agent.calling.<state>.stale_appointment_offer`.
+
+**Decision (4) — Identity hand-offs are categorised as identity failures, not low confidence.**
+`mapNotifyReasonToSkillReason('caller_identification_failed')` now returns
+`max_retries_exceeded`, the category the in-app adapter already uses for an unresolved caller
+identity (`toEscalationReason('caller_identity_unresolved')`), so a claims-existing-customer,
+archived-customer or identify-caller-threw hand-off is recorded (`escalation.requested` metadata,
+the `escalation_triggered` event) under the same category in-app uses. The dispatcher-facing
+summary vocabulary (`EscalationContext['reason']`) still folds both categories into
+`low_confidence_intent`, exactly as it does for in-app today; a dedicated identity reason there is
+a separate follow-up, not part of this decision.
+
+**Consequences.** The Layer 1 scripts `cross-customer-extraction`, `spam-create-customer` and
+`stale-appointment-just-cancelled` are the specification of (1)–(3) and pass against production
+code; their cassettes were re-recorded with the offline mock. The simulator still carries no gate
+of its own (the #1587 structural test). In-app voice (S2, the authenticated operator) is
+deliberately outside (1)–(3).

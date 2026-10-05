@@ -183,6 +183,11 @@ export type CallingAgentEvent =
   | { type: 'operator_session' }
   | { type: 'unknown_caller' }
   | { type: 'caller_identification_failed'; reason: string }
+  /**
+   * #1600 (2) — the same write request was classified for the fifth time on
+   * one S1 call (counted by the voice-turn processor): a person takes it.
+   */
+  | { type: 'repeated_write_intent'; intentType: string; count: number }
   | { type: 'system_failure'; reason: string }
   | { type: 'confirmed' }
   | { type: 'correction'; newTranscript: string }

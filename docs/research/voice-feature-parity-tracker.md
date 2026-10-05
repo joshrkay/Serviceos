@@ -32,7 +32,7 @@ in `packages/api/src/ai/voice-quality/`:
 | 4 | `noCostCapBreak` | session under per-session cost ceiling, or escalates cleanly |
 | 5 | `noTenantLeak` | never speaks another tenant's data |
 | 6 | `noDuplicateCustomer` | known caller-id never spawns a duplicate customer |
-| 7 | `complianceGatesRespected` | DNC terminate · after-hours→callback · post-STOP→no SMS |
+| 7 | `complianceGatesRespected` | DNC terminate · after-hours: AI-answering tenant books normally, voicemail opt-out drafts nothing (D-040 §1 amended · #1600) · post-STOP→no SMS |
 | 8 | `hangupHandled` | mid-flow hangup → session `terminated`, no half-baked proposal |
 
 **Disposition criteria (soft / scored):**
@@ -69,7 +69,7 @@ Legend: ✅ at parity · 🟡 partial / unverified · 🔴 gap. "Corpus" = eval 
 | 2 | **Identify caller / known-customer handling** | `identify-caller` skill; caller-id match | `04-identity-edges` ✅ (5 scripts) | 1,5,6 | **✅** |
 | 3 | **Lookups / FAQ answering** | 12+ `lookup_*` intents | `01-happy-lookups` ✅ (10 scripts) | 3,9,12 | **🟡 verify L2** |
 | 4 | **Lead capture (unknown caller)** | `find-or-create-lead`, `convert_lead` | `03-lead-capture` ✅ | 6,9,10 | **✅** |
-| 5 | **After-hours / compliance / DNC** | `enforce-compliance`; after-hours→callback | `05-compliance-edges` ✅ | 7 | **✅** |
+| 5 | **After-hours / compliance / DNC** | `enforce-compliance`; after-hours: AI-answering tenant books normally, voicemail opt-out drafts nothing (D-040 §1 amended · #1600) | `05-compliance-edges` ✅ | 7 | **✅** |
 | 6 | **Hangup robustness** | session lifecycle + termination events | `06-hangup-edges` ✅ | 8 | **✅** |
 | 7 | **Ambiguity / accent / mumble recovery** | entity-resolver clarifications; reprompt; **dialect WER + per-dialect report scaffold** (`ai/voice-quality/dialect/`) | `08-ambiguity` ✅; **dialect grading core ✅, real-audio fixtures pending** | 9,10,12 | **🟡 author real-audio dialect fixtures** |
 | 8 | **Concurrency (slot taken mid-call)** | optimistic checks | `09-concurrency` ✅ | 2,11 | **✅** |

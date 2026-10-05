@@ -18,7 +18,11 @@ import type { EntityKind } from '../../resolution/entity-resolver';
 import { redactByTier } from '../../../logging/redact';
 import { selectRepairTemplate } from './repair-templates';
 import { EMERGENCY_SAFETY_LINE } from './emergency-detector';
-import { SENTENCE_CATALOG_ES, WHICH_APPOINTMENT_COPY } from './tts-copy';
+import {
+  REPEATED_REQUEST_HANDOFF_COPY,
+  SENTENCE_CATALOG_ES,
+  WHICH_APPOINTMENT_COPY,
+} from './tts-copy';
 
 /**
  * #1220 review — the catalogued Spanish rendering of the RV-142 911 line
@@ -357,6 +361,28 @@ function checkGlobalGuards(
         notifyOncall(context, 'caller_identification_failed'),
       ],
       updatedContext: { ...context, escalationReason: 'caller_identification_failed' },
+    };
+  }
+
+  // #1600 (2) (owner decision 2026-10-04) — the same write request asked for
+  // the fifth time on one S1 call → escalating (any state): a polite "let me
+  // get a person" close, the on-call team notified (reason
+  // `abuse_repeated_intent` → skill reason abuse_detected), the count
+  // audited. A phone transport dispatches no further turns after a hand-off,
+  // so the AI's part of the call ends here. The counting lives in the
+  // voice-turn processor (`repeatedWriteIntentHandoff`).
+  if (event.type === 'repeated_write_intent') {
+    return {
+      nextState: 'escalating',
+      sideEffects: [
+        auditLog(context, state, 'escalating', 'repeated_write_intent', {
+          intentType: event.intentType,
+          count: event.count,
+        }),
+        ttsPlay(REPEATED_REQUEST_HANDOFF_COPY),
+        notifyOncall(context, 'abuse_repeated_intent'),
+      ],
+      updatedContext: { ...context, escalationReason: 'abuse_repeated_intent' },
     };
   }
 

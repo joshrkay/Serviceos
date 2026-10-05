@@ -196,6 +196,21 @@ export function isNegation(text: string): boolean {
 }
 
 /**
+ * #1600 — the STRICT form of {@link isNegation}, the twin of
+ * {@link isPlainAffirmation}: the utterance is a rejection and NOTHING ELSE.
+ * `isNegation` matches on the leading token, which is right at a readback
+ * and wrong at `intent_capture` — "no, I want Friday morning instead" is a
+ * request, not a refusal of the question on the table (the rebook offer).
+ */
+export function isPlainNegation(text: string): boolean {
+  const normalized = normalizeConfirmText(text);
+  if (!normalized) return false;
+  if (NEGATION_PHRASES.has(normalized)) return true;
+  const core = stripConfirmWrapper(normalized);
+  return core.length > 0 && NEGATION_PHRASES.has(core);
+}
+
+/**
  * D01 — the PENDING intents whose `intent_confirm` readback may be answered
  * with MORE DETAIL rather than a yes/no. Deliberately just the creation
  * family: these are the requests a caller builds up across turns ("book a
