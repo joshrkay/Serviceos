@@ -17,6 +17,7 @@ import {
   postRunningLate,
 } from '../../src/api/technicianField';
 import { ErrorState } from '../../src/components/ErrorState';
+import { QuickLinks } from '../../src/components/QuickLinks';
 import { useToast } from '../../src/components/Toast';
 import { useMe } from '../../src/hooks/useMe';
 import { useForegroundLocationTracker } from '../../src/location/useForegroundLocationTracker';
@@ -208,6 +209,10 @@ export default function Today() {
       })
     : null;
   const personaAllowsTracking = nav?.persona === 'tech' || nav?.persona === 'both';
+  // #1603 — personas without a Home tab (technicians) have nowhere else to
+  // reach their quick links (Jobs / Messages / Schedule / Assistant), so Today
+  // carries the same row Home renders. Personas that have Home keep it there.
+  const showQuickLinks = nav ? !nav.visibleTabs.includes('index') : false;
   const activeAppointment = useMemo(() => {
     if (
       enRouteFocusId &&
@@ -408,6 +413,8 @@ export default function Today() {
             );
           })
         )}
+
+        {showQuickLinks && nav ? <QuickLinks links={nav.quickLinks} /> : null}
       </View>
     </ScrollView>
   );
