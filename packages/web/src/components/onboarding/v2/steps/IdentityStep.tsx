@@ -285,7 +285,8 @@ export function IdentityStep({ onSaved }: IdentityStepProps) {
       <fieldset className="space-y-3">
         <legend className="text-sm font-medium text-slate-700">Business hours</legend>
         <p className="text-xs text-slate-500 -mt-1">
-          When the AI books jobs and answers as &ldquo;open.&rdquo; Off-hours go to voicemail or emergency triage.
+          When the AI books jobs and answers as &ldquo;open.&rdquo; After hours the AI still answers:
+          emergencies get the safety script and everyone else gets a callback for when you open.
         </p>
         <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-2">
           {DAYS.map((day) => {

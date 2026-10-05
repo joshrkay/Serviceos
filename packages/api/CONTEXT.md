@@ -62,7 +62,7 @@ terms float.
   reachable, or refuse with the honest copy
   (`ai/voice-turn/coverage-table.ts`). A structural test forbids undeclared
   cells, so refusals happen on purpose and silence is impossible.
-- **Graded call** (#1602, D-040) — a production phone call the nightly
+- **Graded call** (#1602, D-041) — a production phone call the nightly
   sampler judged with the SAME Layer 2 graders the CI harness uses
   (`voice/quality/grade-voice-session.ts` over `ai/voice-quality/graders/*`),
   from its stored transcript only. Gradable means: ended, `voice_inbound`,
