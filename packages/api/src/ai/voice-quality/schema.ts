@@ -74,6 +74,18 @@ export const VoiceQualityScriptSchema = z.object({
      * quoting-scenario gap). Seeded into the driver factory's catalog repo.
      */
     catalog: z.array(z.unknown()).optional(),
+    /**
+     * #1604 — team members to seed (`users`), so a caller-ID that matches a
+     * technician's registered mobile resolves to the D-026 phone actor the
+     * way production resolves it (`telephony/phone-actor.ts`), and the
+     * owner line can name the assigned technician. Rows are `User` shapes
+     * minus the timestamps the in-memory repo stamps.
+     */
+    users: z.array(z.unknown()).optional(),
+    /** #1604 — service locations (the address + access notes a next-job readback speaks). */
+    locations: z.array(z.unknown()).optional(),
+    /** #1604 — internal notes (`entityType: 'job'` rows are a next-job readback's latest note). */
+    notes: z.array(z.unknown()).optional(),
   }),
   callerId: z.string().nullable(),
   callerIdBlocked: z.boolean().default(false),

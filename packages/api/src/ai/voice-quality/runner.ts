@@ -78,6 +78,13 @@ import { InMemoryJobRepository, type Job } from '../../jobs/job';
 import { InMemoryLeadRepository } from '../../leads/in-memory-lead';
 import { InMemoryProposalRepository } from '../../proposals/proposal';
 import { InMemoryAuditRepository } from '../../audit/audit';
+import { InMemoryUserRepository, type User, type UserRepository } from '../../users/user';
+import {
+  InMemoryLocationRepository,
+  type LocationRepository,
+  type ServiceLocation,
+} from '../../locations/location';
+import { InMemoryNoteRepository, type InternalNote, type NoteRepository } from '../../notes/note';
 import type { TenantRow } from '../../db/schema';
 
 import type { CustomerRepository } from '../../customers/customer';
@@ -100,6 +107,12 @@ export interface RepoBundle {
   jobRepo: JobRepository;
   proposalRepo: ProposalRepository;
   auditRepo: AuditRepository;
+  /** #1604 — team members (phone-actor resolution, technician names). */
+  userRepo: UserRepository;
+  /** #1604 — service locations (a next-job readback's address + access notes). */
+  locationRepo: LocationRepository;
+  /** #1604 — internal notes (a next-job readback's latest job note). */
+  noteRepo: NoteRepository;
 }
 
 /**
@@ -199,6 +212,9 @@ export function makeRepoBundle(mode: 'memory'): RepoBundle {
     jobRepo: new InMemoryJobRepository(),
     proposalRepo: new InMemoryProposalRepository(),
     auditRepo: new InMemoryAuditRepository(),
+    userRepo: new InMemoryUserRepository(),
+    locationRepo: new InMemoryLocationRepository(),
+    noteRepo: new InMemoryNoteRepository(),
   };
 }
 
@@ -333,6 +349,11 @@ const APPOINTMENT_DATE_FIELDS = [
 
 const INVOICE_DATE_FIELDS = ['issuedAt', 'dueDate', 'createdAt', 'updatedAt'] as const;
 
+// #1604 — the note repo sorts by `createdAt.getTime()`; the location rows carry
+// the same timestamp pair.
+const LOCATION_DATE_FIELDS = ['archivedAt', 'createdAt', 'updatedAt'] as const;
+const NOTE_DATE_FIELDS = ['createdAt', 'updatedAt'] as const;
+
 async function seedFixtures(
   script: VoiceQualityScript,
   repos: RepoBundle,
@@ -385,6 +406,24 @@ async function seedFixtures(
   if (script.fixtures.estimates) {
     for (const e of script.fixtures.estimates as Estimate[]) {
       await repos.estimateRepo.create(coerceFixtureDates(e, ESTIMATE_DATE_FIELDS));
+    }
+  }
+  // #1604 — team members, service locations and internal notes: what a
+  // next-job readback speaks (address, access notes, latest note) and what a
+  // technician's caller-ID resolves against (a registered mobile).
+  if (script.fixtures.users) {
+    for (const u of script.fixtures.users as Array<Omit<User, 'createdAt' | 'updatedAt'>>) {
+      await repos.userRepo.create?.(u);
+    }
+  }
+  if (script.fixtures.locations) {
+    for (const l of script.fixtures.locations as ServiceLocation[]) {
+      await repos.locationRepo.create(coerceFixtureDates(l, LOCATION_DATE_FIELDS));
+    }
+  }
+  if (script.fixtures.notes) {
+    for (const n of script.fixtures.notes as InternalNote[]) {
+      await repos.noteRepo.create(coerceFixtureDates(n, NOTE_DATE_FIELDS));
     }
   }
 }

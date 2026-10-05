@@ -360,11 +360,12 @@ jobs:
       # added the 12-script 12-life-safety bucket; 85 → 87: #1596 added
       # lookup-day-overview-owner-line, #1598 added e1-gas-leak-after-hours.
       # #1587 renamed dnc-caller-terminated → dnc-caller-answered and
-      # after-hours-callback → after-hours-booking, net 0.)
+      # after-hours-callback → after-hours-booking, net 0. 87 → 89: #1604
+      # added lookup-next-job-owner-line + lookup-next-job-technician-line.)
       - name: Cassette seed script executes end to end (blocking)
         run: |
           set -o pipefail
-          EXPECTED_SEEDED=87
+          EXPECTED_SEEDED=89
           npm run voice-quality:seed-cassettes --workspace=packages/api 2>&1 | tee /tmp/seed.log
           if ! grep -qx "Seeded ${EXPECTED_SEEDED}/${EXPECTED_SEEDED} cassettes." /tmp/seed.log; then
             echo "::error title=Cassette seed did not seed the whole corpus::Expected the script to print 'Seeded ${EXPECTED_SEEDED}/${EXPECTED_SEEDED} cassettes.'"
