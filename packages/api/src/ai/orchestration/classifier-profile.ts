@@ -110,6 +110,7 @@ const ALL_INTENTS: readonly IntentType[] = [
   'lookup_crew_schedule',
   'lookup_timesheets',
   'lookup_my_day',
+  'lookup_next_job',
   'log_mileage',
   'add_catalog_item',
   'create_invoice_schedule',
@@ -222,6 +223,9 @@ const FIELD_TECH_INTENTS: readonly IntentType[] = [
   'log_warranty_claim',
   'en_route',
   'lookup_my_day',
+  // #1604 — the technician's own next visit in full (self-scoped like
+  // lookup_my_day). Not offered to 'caller': a customer has no jobs to drive to.
+  'lookup_next_job',
   'lookup_materials',
   'lookup_availability',
   'confirm',

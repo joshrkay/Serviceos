@@ -180,6 +180,7 @@ describe('buildClassifierSystemPrompt — per-profile assembly', () => {
         'log_warranty_claim',
         'en_route',
         'lookup_my_day',
+        'lookup_next_job', // #1604 — the technician's own next visit in full
         'lookup_materials',
         'lookup_availability',
         'confirm',
@@ -530,9 +531,9 @@ describe('advertisedIntentsForProfile — derived from the block table, never ha
   it('advertised counts per profile match the assembled prompts', () => {
     const expected: Record<ClassifierProfile, number> = {
       caller: 18,
-      field_tech: 15,
-      owner_line: 60,
-      operator: 68,
+      field_tech: 16, // #1604: + lookup_next_job
+      owner_line: 61,
+      operator: 69,
     };
     for (const profile of ['caller', 'field_tech', 'owner_line', 'operator'] as const) {
       const advertised = advertisedIntentsForProfile(profile);

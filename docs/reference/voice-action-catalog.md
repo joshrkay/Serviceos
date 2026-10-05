@@ -1371,7 +1371,7 @@ approves by screen/SMS tap).
 
 <!-- BEGIN generated: lookups -->
 <!-- Generated from packages/api/src/capabilities/capabilities.ts — do not edit by hand; run `npm run catalog:generate` in packages/api. -->
-20 `lookup_*` intents: `lookup_account_summary`, `lookup_agreements`, `lookup_appointments`, `lookup_availability`, `lookup_balance`, `lookup_catalog`, `lookup_crew_schedule`, `lookup_customer`, `lookup_day_overview`, `lookup_digest`, `lookup_estimates`, `lookup_invoices`, `lookup_job_profit`, `lookup_jobs`, `lookup_leads`, `lookup_materials`, `lookup_my_day`, `lookup_pending_items`, `lookup_revenue`, `lookup_timesheets`.
+21 `lookup_*` intents: `lookup_account_summary`, `lookup_agreements`, `lookup_appointments`, `lookup_availability`, `lookup_balance`, `lookup_catalog`, `lookup_crew_schedule`, `lookup_customer`, `lookup_day_overview`, `lookup_digest`, `lookup_estimates`, `lookup_invoices`, `lookup_job_profit`, `lookup_jobs`, `lookup_leads`, `lookup_materials`, `lookup_my_day`, `lookup_next_job`, `lookup_pending_items`, `lookup_revenue`, `lookup_timesheets`.
 <!-- END generated: lookups -->
 
 Each is routed to a read-only skill, never to a proposal (correct by design).
@@ -1635,7 +1635,7 @@ either `speakable` or `lookups`.
     { "intent": "create_standing_instruction", "proposalType": "create_standing_instruction", "actionClass": "capture" },
     { "intent": "update_brand_voice", "proposalType": "update_brand_voice", "actionClass": "manual" }
   ],
-  "lookups": ["lookup_account_summary","lookup_agreements","lookup_appointments","lookup_availability","lookup_balance","lookup_catalog","lookup_crew_schedule","lookup_customer","lookup_day_overview","lookup_digest","lookup_estimates","lookup_invoices","lookup_job_profit","lookup_jobs","lookup_leads","lookup_materials","lookup_my_day","lookup_pending_items","lookup_revenue","lookup_timesheets"],
+  "lookups": ["lookup_account_summary","lookup_agreements","lookup_appointments","lookup_availability","lookup_balance","lookup_catalog","lookup_crew_schedule","lookup_customer","lookup_day_overview","lookup_digest","lookup_estimates","lookup_invoices","lookup_job_profit","lookup_jobs","lookup_leads","lookup_materials","lookup_my_day","lookup_next_job","lookup_pending_items","lookup_revenue","lookup_timesheets"],
   "handlerNoOnramp": ["adopt_entity_alias","callback","create_booking","onboarding_estimate_template","onboarding_schedule","onboarding_service_category","onboarding_team_member","onboarding_tenant_settings"],
   "gated": ["approve_proposal","reject_proposal","edit_proposal"]
 }

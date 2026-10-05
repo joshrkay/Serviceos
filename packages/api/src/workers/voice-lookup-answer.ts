@@ -99,8 +99,12 @@ import { lookupMaterials } from '../ai/skills/lookup-materials';
 import { lookupCrewSchedule } from '../ai/skills/lookup-crew-schedule';
 import { lookupTimesheets } from '../ai/skills/lookup-timesheets';
 import { lookupMyDay } from '../ai/skills/lookup-my-day';
+import { lookupNextJob, type NextJobData } from '../ai/skills/lookup-next-job';
 import { formatHours } from '../ai/skills/spoken-format';
 import { resolveSpokenDay } from '../ai/scheduling/resolve-datetime';
+import type { LocationRepository } from '../locations/location';
+import type { NoteRepository } from '../notes/note';
+import type { SessionLanguage } from '../ai/agents/customer-calling/tts-copy';
 
 /**
  * Permission-gated lookups: the DB-authoritative permission the ASKING
@@ -154,6 +158,19 @@ export const CUSTOMER_SCOPED_LOOKUP_INTENTS: ReadonlySet<IntentType> = new Set<I
 ]);
 
 /**
+ * Self-scoped lookups: no permission entry, because the answer is scoped to
+ * the ASKING SPEAKER (their own assignments) unless their DB-authoritative
+ * role holds `dispatch:view`. They therefore need the speaker's identity even
+ * where no permission is checked — the memo router resolves the recording's
+ * creator for them, and the phone's no-actor refusal is an IDENTITY line, not
+ * an authorization one (`phone-lookup-surface.ts`). See `resolveScheduleScope`.
+ */
+export const SELF_SCOPED_LOOKUP_INTENTS: ReadonlySet<IntentType> = new Set<IntentType>([
+  'lookup_my_day',
+  'lookup_next_job',
+]);
+
+/**
  * Deps the router lacks for answer execution, grouped so app.ts wires
  * them as one bundle. Full repo types where the skill signatures demand
  * them (the router's own `estimateRepo`/`settingsRepo` are narrowed
@@ -188,6 +205,13 @@ export interface VoiceLookupAnswerDeps {
    * operator (technician included) may hear the pending shopping list.
    */
   materialItemRepo?: MaterialItemRepository;
+  /**
+   * #1604 — `lookup_next_job` reads the visit's service address (+ access
+   * notes) and the job's latest internal note. Self-scoped like
+   * `lookup_my_day` (no `LOOKUP_REQUIRED_PERMISSION` entry).
+   */
+  locationRepo?: Pick<LocationRepository, 'findById'>;
+  noteRepo?: Pick<NoteRepository, 'findByEntity'>;
   /** P11-001 analytics table writer — the memo path now records rows too. */
   lookupEvents?: LookupEventService;
   /**
@@ -272,6 +296,12 @@ export interface ExecuteLookupInput {
   dateTimeDescription?: string;
   /** Tenant IANA timezone for date rendering. */
   timezone?: string;
+  /**
+   * #1604 — the session language, for a skill that renders its answer from
+   * the id-keyed copy catalog (`lookup_next_job`). Absent → English, as the
+   * chat and memo surfaces speak today.
+   */
+  language?: SessionLanguage;
   /**
    * #1490 — `lookup_catalog`: the item a price question names ("how much is
    * a drain snake?"). The skill quotes a price only for a search matching one
@@ -393,6 +423,39 @@ function shortDateTime(d: Date, timezone?: string): string {
     minute: 'numeric',
     ...(timezone ? { timeZone: timezone } : {}),
   }).format(d);
+}
+
+const NO_TECHNICIAN_ERROR = 'could not match you to a technician';
+
+/** The street line of a card address: "88 Mill Lane, Tarrytown, NY 10591". */
+function cardAddress(address: NonNullable<NextJobData['address']>): string {
+  const street = [address.street1, address.street2].filter(Boolean).join(' ');
+  return `${street}, ${address.city}, ${address.state} ${address.postalCode}`;
+}
+
+/**
+ * WHOSE schedule a self-scoped lookup (`SELF_SCOPED_LOOKUP_INTENTS`) reads,
+ * decided from the asking actor's DB-authoritative role:
+ *   - `dispatch:view` (owner, dispatcher) → the business's schedule;
+ *   - anyone else → the resolved SPEAKER's own assignments. An unresolvable
+ *     speaker FAILS the turn — it must NEVER fall back to an unscoped
+ *     (whole-crew) answer. An unresolvable ROLE fails closed to that same
+ *     self-scoped path.
+ * Returns a `LookupExecution` (`failed` / `unsupported`) when no scope can be
+ * decided, so the caller returns it as-is.
+ */
+async function resolveScheduleScope(
+  deps: VoiceLookupAnswerDeps,
+  shared: SharedLookupRepos,
+  tenantId: string,
+  actorId: string | undefined,
+): Promise<{ wholeTenant: true } | { technicianId: string } | LookupExecution> {
+  if (await actorHolds(deps, tenantId, actorId, 'dispatch:view')) return { wholeTenant: true };
+  if (!shared.userRepo) return { kind: 'unsupported' };
+  if (!actorId) return { kind: 'failed', error: NO_TECHNICIAN_ERROR };
+  const technician = await resolveCanonicalUser(shared.userRepo, tenantId, actorId);
+  if (!technician) return { kind: 'failed', error: NO_TECHNICIAN_ERROR };
+  return { technicianId: technician.id };
 }
 
 /** "Which customer?" answer for a customer-scoped ask with no resolvable name. */
@@ -916,28 +979,13 @@ export async function executeLookupAnswer(
       // Task 10 / #1498 — the ONE schedule lookup (ai/skills/lookup-my-day.ts
       // documents scope, day and the "left today" rule). Deliberately NOT in
       // LOOKUP_REQUIRED_PERMISSION: any technician may hear their own day.
-      // WHOSE day is decided here, from the DB-authoritative role:
-      //   - `dispatch:view` (owner, dispatcher) → the business's schedule;
-      //   - anyone else → the resolved SPEAKER's own assignments. An
-      //     unresolvable speaker fails the turn — it must NEVER fall back to
-      //     an unscoped (whole-crew) answer. An unresolvable ROLE fails
-      //     closed to that same self-scoped path.
+      // WHOSE day is decided by `resolveScheduleScope` (dispatch:view → the
+      // business's; else the resolved SPEAKER's own, failing the turn when
+      // the speaker cannot be resolved).
       case 'lookup_my_day': {
         if (!shared.appointmentRepo || !shared.jobRepo) return { kind: 'unsupported' };
-        let scope: { wholeTenant: true } | { technicianId: string };
-        if (await actorHolds(deps, tenantId, input.actorId, 'dispatch:view')) {
-          scope = { wholeTenant: true };
-        } else {
-          if (!shared.userRepo) return { kind: 'unsupported' };
-          if (!input.actorId) {
-            return { kind: 'failed', error: 'could not match you to a technician' };
-          }
-          const technician = await resolveCanonicalUser(shared.userRepo, tenantId, input.actorId);
-          if (!technician) {
-            return { kind: 'failed', error: 'could not match you to a technician' };
-          }
-          scope = { technicianId: technician.id };
-        }
+        const scope = await resolveScheduleScope(deps, shared, tenantId, input.actorId);
+        if ('kind' in scope) return scope;
         const day = spokenDay(input.dateTimeDescription, timezone, now);
         const r = await lookupMyDay(
           {
@@ -975,6 +1023,57 @@ export async function executeLookupAnswer(
                 )
             : [];
         return { kind: 'answer', answer: buildAnswer(intent, r.status, r.summary, rows) };
+      }
+
+      // #1604 — "read me the next job": ONE visit in full (time, customer,
+      // service address, access notes, latest note). Same scope rule as
+      // lookup_my_day (`resolveScheduleScope`); a resolver-verified named job
+      // (`input.jobId`) reads that job's visit — refused by name inside the
+      // skill when it is not the technician's.
+      case 'lookup_next_job': {
+        if (!shared.appointmentRepo || !shared.jobRepo || !shared.customerRepo || !deps.locationRepo) {
+          return { kind: 'unsupported' };
+        }
+        const scope = await resolveScheduleScope(deps, shared, tenantId, input.actorId);
+        if ('kind' in scope) return scope;
+        const r = await lookupNextJob(
+          {
+            tenantId,
+            sessionId,
+            ...scope,
+            ...(input.jobId ? { jobId: input.jobId } : {}),
+            ...(timezone ? { timezone } : {}),
+            ...(input.language ? { language: input.language } : {}),
+            now,
+          },
+          {
+            appointmentRepo: shared.appointmentRepo,
+            jobRepo: shared.jobRepo,
+            customerRepo: shared.customerRepo,
+            locationRepo: deps.locationRepo,
+            ...(deps.noteRepo ? { noteRepo: deps.noteRepo } : {}),
+            ...(shared.userRepo ? { userRepo: shared.userRepo } : {}),
+            ...events,
+          },
+        );
+        if (r.status === 'error') return { kind: 'failed', error: r.data.error };
+        if (r.status === 'none') return { kind: 'answer', answer: buildAnswer(intent, 'none', r.summary) };
+        const d = r.data;
+        const rows: VoiceAnswerRow[] = [
+          text('When', shortDateTime(d.scheduledStart, timezone)),
+          ...(d.customerName ? [text('Customer', d.customerName)] : []),
+          text('Job', d.jobSummary || `Job ${d.jobId.slice(0, 8)}`),
+          ...(d.address ? [text('Address', cardAddress(d.address))] : []),
+          // Masked (`maskPhone`), as lookup_customer's card row is.
+          ...(d.customerPhoneMasked ? [text('Phone', d.customerPhoneMasked)] : []),
+          ...(d.accessNotes ? [text('Access notes', d.accessNotes)] : []),
+          ...(d.latestNote ? [text('Latest note', d.latestNote)] : []),
+          ...(d.technicianName ? [text('Technician', d.technicianName)] : []),
+        ];
+        return {
+          kind: 'answer',
+          answer: buildAnswer(intent, 'found', r.summary, rows, { kind: 'job', id: d.jobId }),
+        };
       }
 
       case 'lookup_day_overview': {
