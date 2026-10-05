@@ -66,6 +66,7 @@ import type { Invoice } from '../invoices/invoice';
 import type { PaymentLinkProvider } from '../payments/payment-link-provider';
 import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
 import { dispatchInboundSms } from '../sms/inbound-dispatch';
+import { routeParam } from '../shared/route-params';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -3084,7 +3085,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     }
   };
   const recordTwilio = async (kind: string, req: Request, res: Response) => {
-    const tenantId = req.params.tenantId;
+    const tenantId = routeParam(req, 'tenantId');
     // `tenantId` comes from the public URL. Reject a malformed id here, before
     // any tenant-scoped work — both the resolver AND the rejectBound audit
     // write go through setTenantContext, which throws on a non-UUID. Returning
@@ -3224,7 +3225,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
   // detection) and runs identity-based activation. Mounted with
   // express.raw() in app.ts so the HMAC sees the exact bytes.
   router.post('/vapi/:tenantId', async (req: Request, res: Response) => {
-    const tenantId = req.params.tenantId;
+    const tenantId = routeParam(req, 'tenantId');
     if (!isValidTenantId(tenantId)) {
       return res.status(403).json({ error: 'Forbidden' });
     }
@@ -3281,7 +3282,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
   });
 
   router.post('/sendgrid/:tenantId', async (req: Request, res: Response) => {
-    const tenantId = req.params.tenantId;
+    const tenantId = routeParam(req, 'tenantId');
     // See recordTwilio: gate the public tenant id before any tenant-scoped
     // work so a malformed UUID can't throw inside setTenantContext.
     if (!isValidTenantId(tenantId)) {

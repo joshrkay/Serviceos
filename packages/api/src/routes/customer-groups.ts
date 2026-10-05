@@ -14,6 +14,7 @@ import {
 } from '../customers/customer-group';
 import { CustomerRepository } from '../customers/customer';
 import { createCustomerGroupSchema, updateCustomerGroupSchema } from '../shared/contracts';
+import { routeParam } from '../shared/route-params';
 
 /**
  * U8 (CRM Jobber parity) — customer groups / segmentation.
@@ -79,7 +80,7 @@ export function createCustomerGroupRouter(
       const parsed = updateCustomerGroupSchema.parse(req.body);
       const group = await updateCustomerGroup(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         parsed,
         repo,
         req.auth!.userId,
@@ -99,7 +100,7 @@ export function createCustomerGroupRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const archived = await archiveCustomerGroup(
         req.auth!.tenantId,
-        req.params.id,
+        routeParam(req, 'id'),
         repo,
         req.auth!.userId,
         auditRepo,
@@ -120,7 +121,7 @@ export function createCustomerGroupRouter(
     requirePermission('customers:view'),
     notFoundOnMalformedId('Customer not found', 'customerId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      res.json(await repo.listGroupsForCustomer(req.auth!.tenantId, req.params.customerId));
+      res.json(await repo.listGroupsForCustomer(req.auth!.tenantId, routeParam(req, 'customerId')));
     })
   );
 
@@ -131,7 +132,7 @@ export function createCustomerGroupRouter(
     requirePermission('customers:view'),
     notFoundOnMalformedId('Customer group not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      res.json({ customerIds: await repo.listMemberIds(req.auth!.tenantId, req.params.id) });
+      res.json({ customerIds: await repo.listMemberIds(req.auth!.tenantId, routeParam(req, 'id')) });
     })
   );
 
@@ -146,7 +147,7 @@ export function createCustomerGroupRouter(
       // #1187 — look the customer up through the tenant-scoped repository
       // before writing; the group id is already checked inside
       // addCustomerToGroup (NotFoundError from findGroupById).
-      const customer = await customerRepo.findById(req.auth!.tenantId, req.params.customerId);
+      const customer = await customerRepo.findById(req.auth!.tenantId, routeParam(req, 'customerId'));
       if (!customer) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Customer not found' });
         return;
@@ -154,8 +155,8 @@ export function createCustomerGroupRouter(
 
       const added = await addCustomerToGroup(
         req.auth!.tenantId,
-        req.params.id,
-        req.params.customerId,
+        routeParam(req, 'id'),
+        routeParam(req, 'customerId'),
         repo,
         req.auth!.userId,
         auditRepo,
@@ -175,8 +176,8 @@ export function createCustomerGroupRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       await removeCustomerFromGroup(
         req.auth!.tenantId,
-        req.params.id,
-        req.params.customerId,
+        routeParam(req, 'id'),
+        routeParam(req, 'customerId'),
         repo,
         req.auth!.userId,
         auditRepo,

@@ -68,6 +68,7 @@ import {
   PortalTokenMiddlewareOptions,
 } from '../portal/portal-token-middleware';
 import { ContactRepository } from '../customers/contact';
+import { routeParam } from '../shared/route-params';
 
 export interface PublicPortalDeps {
   portalRepo: PortalSessionRepository;
@@ -855,7 +856,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         return;
       }
 
-      const owned = await loadOwnedChangeableAppointment(deps, tenantId, customerId, req.params.id, res);
+      const owned = await loadOwnedChangeableAppointment(deps, tenantId, customerId, routeParam(req, 'id'), res);
       if (!owned) return;
 
       const parsed = cancelSchema.parse(req.body ?? {});
@@ -910,7 +911,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         return;
       }
 
-      const owned = await loadOwnedChangeableAppointment(deps, tenantId, customerId, req.params.id, res);
+      const owned = await loadOwnedChangeableAppointment(deps, tenantId, customerId, routeParam(req, 'id'), res);
       if (!owned) return;
 
       const parsed = rescheduleSchema.parse(req.body ?? {});

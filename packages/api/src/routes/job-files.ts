@@ -7,6 +7,7 @@ import { JobRepository } from '../jobs/job';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
+import { routeParam } from '../shared/route-params';
 
 interface UploadBody {
   filename?: string;
@@ -34,7 +35,7 @@ export function createJobFilesRouter(deps: JobFilesRouterDeps): Router {
 
   const createUploadUrl = asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
     const body = (req.body ?? {}) as UploadBody;
-    const jobId = req.params.id;
+    const jobId = routeParam(req, 'id');
     const uploadRequest: UploadRequest = {
       tenantId: req.auth!.tenantId,
       uploadedBy: req.auth!.userId,
@@ -133,7 +134,7 @@ export function createJobFilesRouter(deps: JobFilesRouterDeps): Router {
     requireTenant,
     requirePermission('jobs:view'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const files = await jobFileRepo.listByJob(req.auth!.tenantId, req.params.id);
+      const files = await jobFileRepo.listByJob(req.auth!.tenantId, routeParam(req, 'id'));
       const withUrls = await Promise.all(
         files.map(async (file) => ({
           ...file,
@@ -151,8 +152,8 @@ export function createJobFilesRouter(deps: JobFilesRouterDeps): Router {
     requirePermission('jobs:update'),
     notFoundOnMalformedId('Job file not found', 'fileId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const file = await jobFileRepo.findById(req.auth!.tenantId, req.params.fileId);
-      if (!file || file.jobId !== req.params.id) {
+      const file = await jobFileRepo.findById(req.auth!.tenantId, routeParam(req, 'fileId'));
+      if (!file || file.jobId !== routeParam(req, 'id')) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Job file not found' });
         return;
       }
@@ -167,7 +168,7 @@ export function createJobFilesRouter(deps: JobFilesRouterDeps): Router {
           actorRole: req.auth!.role,
           eventType: 'job.file.deleted',
           entityType: 'job',
-          entityId: req.params.id,
+          entityId: routeParam(req, 'id'),
           metadata: { fileId: file.id },
         })
       );

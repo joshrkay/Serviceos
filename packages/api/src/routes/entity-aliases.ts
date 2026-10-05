@@ -5,6 +5,7 @@ import { requireAuth, requireTenant } from '../middleware/auth';
 import { NotFoundError, ValidationError, ForbiddenError } from '../shared/errors';
 import { uuidSchema } from '../shared/validation';
 import type { EntityAliasRepository } from '../learning/entity-aliases/entity-alias';
+import { routeParam } from '../shared/route-params';
 
 /**
  * Owner-only revoke path for learned tenant aliases. Activation remains
@@ -29,7 +30,7 @@ export function createEntityAliasesRouter(
         throw new ForbiddenError('Canonical owner actor is required');
       }
 
-      const aliasId = req.params.id;
+      const aliasId = routeParam(req, 'id');
       if (!uuidSchema.safeParse(aliasId).success) {
         throw new ValidationError('Entity alias ID must be a UUID');
       }

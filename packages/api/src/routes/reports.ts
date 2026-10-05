@@ -18,6 +18,7 @@ import { SettingsRepository } from '../settings/settings';
 import { getJobProfit, MaterialsResolver } from '../jobs/job-profit';
 import { getCustomerProfit, type GetCustomerProfitDeps } from '../reports/customer-profit';
 import { getTechnicianProfit } from '../reports/technician-profit';
+import { routeParam } from '../shared/route-params';
 
 /**
  * Tenant-scoped reporting endpoints. Add new reports here rather than
@@ -334,7 +335,7 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
           return;
         }
         const tenantId = req.auth!.tenantId;
-        const jobId = req.params.jobId;
+        const jobId = routeParam(req, 'jobId');
 
         const job = await deps.jobRepo.findById(tenantId, jobId);
         if (!job) {
@@ -391,7 +392,7 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
         const profit = await getCustomerProfit(
           {
             tenantId,
-            customerId: req.params.customerId,
+            customerId: routeParam(req, 'customerId'),
             laborRateCentsPerHour: settings?.laborRateCentsPerHour ?? null,
           },
           {
@@ -437,7 +438,7 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
         // Guard before the query: a non-UUID id (e.g. a stale client's
         // hardcoded 'tech-1') previously reached Postgres and 500'd on the
         // uuid cast (QA 2026-07-02).
-        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.technicianId)) {
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(routeParam(req, 'technicianId'))) {
           res
             .status(400)
             .json({ error: 'VALIDATION_ERROR', message: 'technician id must be a UUID' });
@@ -448,7 +449,7 @@ export function createReportsRouter(deps: ReportsRouterDeps): Router {
         const profit = await getTechnicianProfit(
           {
             tenantId,
-            technicianId: req.params.technicianId,
+            technicianId: routeParam(req, 'technicianId'),
             laborRateCentsPerHour: settings?.laborRateCentsPerHour ?? null,
           },
           {

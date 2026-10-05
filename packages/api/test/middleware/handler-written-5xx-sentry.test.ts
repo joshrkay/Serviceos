@@ -212,7 +212,8 @@ describe('handler-written 5xx and post-headers-sent errors → Sentry (#1205 ite
     // router (or future router) mounted ahead of the hook would let its
     // handler-written 500s escape Sentry again.
     type Layer = { name: string; handle: { name?: string } };
-    const stack = (app as unknown as { _router: { stack: Layer[] } })._router.stack;
+    // Express 5 exposes the app's router as `app.router` (Express 4: `_router`).
+    const stack = (app as unknown as { router: { stack: Layer[] } }).router.stack;
     const hookAt = stack.findIndex((l) => l.handle.name === 'reportHandlerWrittenServerErrorsHook');
     expect(hookAt).toBeGreaterThanOrEqual(0);
     const routersBefore = stack.slice(0, hookAt).filter((l) => l.name === 'router');

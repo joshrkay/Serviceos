@@ -39,6 +39,7 @@ import { createInvoicePaymentLink } from '../invoices/invoice-payment-link';
 import { ConnectAccountResolver } from '../invoices/public-invoice-service';
 import { InvoiceScheduleRepository } from '../invoices/invoice-schedule';
 import { wholeInvoiceBlockedByPlan } from '../invoices/milestone-billing-guard';
+import { routeParam } from '../shared/route-params';
 
 const logger = createLogger({
   service: 'invoices-route',
@@ -423,7 +424,7 @@ export function createInvoiceRouter(
     notFoundOnMalformedId('Invoice not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const result = await getInvoice(req.auth!.tenantId, req.params.id, invoiceRepo);
+        const result = await getInvoice(req.auth!.tenantId, routeParam(req, 'id'), invoiceRepo);
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
           return;
@@ -439,7 +440,7 @@ export function createInvoiceRouter(
   const updateHandler = async (req: AuthenticatedRequest, res: Response) => {
     try {
       const input = updateInvoiceSchema.parse(req.body);
-      const result = await updateInvoice(req.auth!.tenantId, req.params.id, input, invoiceRepo, {
+      const result = await updateInvoice(req.auth!.tenantId, routeParam(req, 'id'), input, invoiceRepo, {
         auditRepo,
         actor: { actorId: req.auth!.userId, actorRole: req.auth!.role ?? 'unknown' },
       });
@@ -489,7 +490,7 @@ export function createInvoiceRouter(
         }
         const result = await createInvoicePaymentLink(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           invoiceRepo,
           paymentLinkProvider,
           connectAccountResolver,
@@ -533,7 +534,7 @@ export function createInvoiceRouter(
         }
         const result = await issueInvoice(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           paymentTermDays,
           invoiceRepo,
           refreshDeps,
@@ -571,7 +572,7 @@ export function createInvoiceRouter(
           {
             ...parsed,
             tenantId: req.auth!.tenantId,
-            invoiceId: req.params.id,
+            invoiceId: routeParam(req, 'id'),
             processedBy: req.auth!.userId,
           },
           invoiceRepo,
@@ -609,7 +610,7 @@ export function createInvoiceRouter(
         }
         const result = await transitionInvoiceStatus(
           req.auth!.tenantId,
-          req.params.id,
+          routeParam(req, 'id'),
           status,
           invoiceRepo,
           refreshDeps,
@@ -668,7 +669,7 @@ export function createInvoiceRouter(
         }
         const result = await sendService.sendInvoice({
           tenantId: req.auth!.tenantId,
-          invoiceId: req.params.id,
+          invoiceId: routeParam(req, 'id'),
           ...parsed.data,
           // #1145 — distinguishes this owner-triggered manual send from an
           // unrelated proposal-execution send (invoice-delivery-adapter.ts)
@@ -685,7 +686,7 @@ export function createInvoiceRouter(
           actorRole: req.auth!.role ?? 'unknown',
           eventType: 'invoice.sent',
           entityType: 'invoice',
-          entityId: req.params.id,
+          entityId: routeParam(req, 'id'),
           metadata: {
             channels: result.channelsSent.map((c) => c.channel),
             dispatchIds: result.channelsSent.map((c) => c.dispatchId),

@@ -148,6 +148,21 @@ its declaration opts out, with a reason.
 | `edit_proposal` | chat | D-025 scopes voice approval to a transport-identified owner LINE; in-app answers "Tap the card to approve — I don't take approvals by voice here yet." |
 <!-- END generated: surface-opt-outs -->
 
+### Multi-action sentences on the recorded memo (#1588, D-039)
+
+One memo can carry several actions: "add 2 hours labor and a capacitor to the Rivera
+invoice and send it" is decomposed (`ai/orchestration/transcript-decomposer.ts`, one
+extra LLM call per message) into an ORDERED chain of linked proposals
+(`workers/voice-action-router.ts#processChain`): here an `update_invoice` at chain index 0
+and a `send_invoice` whose `payload.invoiceId` is the symbolic ref `$ref:chain[0].invoiceId`,
+resolved to the parent's result entity at execution. Dependents land as `draft` so they can
+never run ahead of their parent; the chain head is supervisor-reviewed (PRD-v5 §5 as
+amended). The gate is the tenant flag `voice_multi_action`, **ON by default** through
+`createVoiceFlagResolver` (tenant override → platform row → ON) — it had been built in #883
+and never passed from `app.ts`, so every live memo silently kept one action. Chat splits
+compound asks the same way (#1499/#1506, `routes/assistant.ts`); the live phone and in-app
+voice have no decomposition path (one action per turn).
+
 > **Voice technician resolution (U1, taxonomy 1.2.0):** `reassign_appointment`,
 > `add_crew_member`, and `remove_crew_member` now resolve the spoken technician
 > name via the entity resolver (`kind: 'technician'`, pg_trgm over the `users`
@@ -1360,6 +1375,18 @@ approves by screen/SMS tap).
 <!-- END generated: lookups -->
 
 Each is routed to a read-only skill, never to a proposal (correct by design).
+
+> **Owner-extended lookups are ON by default (#1588, D-039).** `lookup_day_overview`,
+> `lookup_digest`, `lookup_pending_items`, `lookup_crew_schedule` and `lookup_timesheets`
+> (plus the complaint/negotiation sections) are *offered* to the classifier only when the
+> session carries `extendedIntents`, which the phone (`establishInboundSession`), in-app voice
+> (`startSession`) and the memo router derive from `ownerSession && voice_extended_intents`.
+> Until 2026-10-04 that tenant flag was read default-false and never seeded, so no live
+> tenant ever heard these by voice while chat set them unconditionally. It now resolves
+> through `flags/voice-flags.ts#createVoiceFlagResolver`: tenant override → platform
+> `_feature_flags` row → **ON**. Opt a tenant out with a `tenant_feature_flags` row
+> (`voice_extended_intents`, `enabled=false`); a platform row with `enabled=false` is the
+> kill switch. Layer 1 corpus: `01-happy-lookups/lookup-day-overview-owner-line`.
 
 > **Dispatch is ONE switch behind THREE surface adapters (#866), with FOUR
 > callers (#869).** Classification

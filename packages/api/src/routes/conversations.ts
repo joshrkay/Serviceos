@@ -35,6 +35,7 @@ import type { LeadRepository } from '../leads/lead';
 import type { DncRepository } from '../compliance/dnc';
 import type { DispatchRepository } from '../notifications/dispatch-repository';
 import type { MessageDeliveryProvider } from '../notifications/delivery-provider';
+import { routeParam } from '../shared/route-params';
 
 export interface ConversationRouterAiDeps {
   /** When present, enables POST /:id/suggest-reply (AI draft replies). */
@@ -136,7 +137,7 @@ export function createConversationRouter(
     notFoundOnMalformedId('Customer not found', 'customerId'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
-      const customerId = req.params.customerId;
+      const customerId = routeParam(req, 'customerId');
       if (customerLookup) {
         const customer = await customerLookup.findById(tenantId, customerId);
         if (!customer) {
@@ -236,7 +237,7 @@ export function createConversationRouter(
     requirePermission('conversations:view'),
     notFoundOnMalformedId('Conversation not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const result = await conversationRepo.findById(req.auth!.tenantId, req.params.id);
+      const result = await conversationRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
       if (!result) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
         return;
@@ -247,7 +248,7 @@ export function createConversationRouter(
       // visible thread back to the welcome bubble even though the messages
       // were persisted. `role` is derived from senderRole for the UI's
       // user/assistant bubble split (senderRole itself also rides along).
-      const messages = await conversationRepo.getMessages(req.auth!.tenantId, req.params.id);
+      const messages = await conversationRepo.getMessages(req.auth!.tenantId, routeParam(req, 'id'));
       res.json({
         ...result,
         messages: messages.map((m) => ({
@@ -267,7 +268,7 @@ export function createConversationRouter(
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const parsed = createMessageSchema.parse({
         ...req.body,
-        conversationId: req.params.id,
+        conversationId: routeParam(req, 'id'),
       });
       const result = await conversationRepo.addMessage({
         ...parsed,
@@ -291,12 +292,12 @@ export function createConversationRouter(
       // in-tenant conversation or an ID owned by another tenant. Verify the
       // parent first so cross-tenant IDs cannot be used as an existence
       // oracle (and so this endpoint matches GET /:id).
-      const conversation = await conversationRepo.findById(tenantId, req.params.id);
+      const conversation = await conversationRepo.findById(tenantId, routeParam(req, 'id'));
       if (!conversation) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
         return;
       }
-      const result = await conversationRepo.getMessages(tenantId, req.params.id);
+      const result = await conversationRepo.getMessages(tenantId, routeParam(req, 'id'));
       res.json(result);
     })
   );
@@ -316,13 +317,13 @@ export function createConversationRouter(
         return;
       }
       const tenantId = req.auth!.tenantId;
-      const conversation = await conversationRepo.findById(tenantId, req.params.id);
+      const conversation = await conversationRepo.findById(tenantId, routeParam(req, 'id'));
       if (!conversation) {
         res.status(404).json({ error: 'NOT_FOUND', message: 'Conversation not found' });
         return;
       }
 
-      const messages = await conversationRepo.getMessages(tenantId, req.params.id);
+      const messages = await conversationRepo.getMessages(tenantId, routeParam(req, 'id'));
       const settings = await aiDeps.settingsRepo?.findByTenant(tenantId);
 
       // UB-A3 — owner standing instructions applicable to suggested replies,
@@ -347,7 +348,7 @@ export function createConversationRouter(
       if (aiDeps.retrieveAdapter) {
         try {
           const context = trimContext(
-            await buildSourceContext(tenantId, req.params.id, {}, {
+            await buildSourceContext(tenantId, routeParam(req, 'id'), {}, {
               // Reuse the thread fetched above rather than re-querying.
               getConversationMessages: async () => messages,
               retrieve: aiDeps.retrieveAdapter,
@@ -411,7 +412,7 @@ export function createConversationRouter(
           },
           {
             tenantId,
-            conversationId: req.params.id,
+            conversationId: routeParam(req, 'id'),
             body: parsed.body,
             actorId: req.auth!.userId,
             actorRole: req.auth!.role,

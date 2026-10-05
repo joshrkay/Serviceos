@@ -16,6 +16,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import type { DailyDigestRepository } from '../digest/digest-service';
+import { routeParam } from '../shared/route-params';
 
 export interface DigestsRouterDeps {
   digestRepo: DailyDigestRepository;
@@ -42,7 +43,7 @@ export function createDigestsRouter(deps: DigestsRouterDeps): Router {
     requirePermission('reports:view'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
-      const raw = req.params.date;
+      const raw = routeParam(req, 'date');
 
       const record =
         raw === 'latest'

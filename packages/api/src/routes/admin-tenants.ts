@@ -9,6 +9,7 @@ import {
   type DeprovisionTenantPayload,
 } from '../workers/deprovision-tenant';
 import type { DeprovisionReason } from '../tenants/deprovision';
+import { routeParam } from '../shared/route-params';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -36,7 +37,7 @@ export function createAdminTenantsRouter(deps: AdminTenantsRouterDeps): Router {
     adminGuard,
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const { tenantId } = req.params;
+        const tenantId = routeParam(req, 'tenantId');
         if (!UUID_REGEX.test(tenantId)) {
           res.status(400).json({ error: 'VALIDATION_ERROR', message: 'tenantId must be a UUID' });
           return;

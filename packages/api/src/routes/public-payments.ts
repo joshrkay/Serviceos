@@ -25,6 +25,7 @@ import {
   StripePaymentIntentConfig,
 } from '../payments/stripe-payment-intent';
 import { asyncRoute } from '../middleware/async-route';
+import { routeParam } from '../shared/route-params';
 
 const requestSchema = z.object({
   invoiceId: z.string().min(1, 'invoiceId is required'),
@@ -156,7 +157,7 @@ export function createPublicPaymentsRouter(deps: PublicPaymentsDeps): Router {
   });
 
   router.get('/status/:invoiceId', asyncRoute(async (req: Request, res: Response) => {
-    const { invoiceId } = req.params;
+    const invoiceId = routeParam(req, 'invoiceId');
     const { token: viewToken } = statusQuerySchema.parse(req.query);
 
     if (!deps.invoiceRepo.findByViewToken) {
