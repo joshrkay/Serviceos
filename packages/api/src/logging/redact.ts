@@ -14,6 +14,20 @@ const SECRET_KEY_PATTERNS = [
 
 const PII_KEY_PATTERNS = [/email/i, /phone/i, /name/i, /address/i, /user/i, /tenant/i];
 
+// #1589 — raw caller PII (phone numbers, verbatim speech-to-text content)
+// that PII_KEY_PATTERNS above never catches (`from`/`to`/`text` don't match
+// any existing pattern; `transcript`/`speechResult` are telephony-specific)
+// AND that, even where a pattern WOULD match (none here currently do), only
+// the 'strict' tier masks — logger.ts hardcodes every createLogger()
+// instance to 'standard' tier, so routes/telephony.ts:440 logged
+// `{ callSid, from, to }` with the caller's raw phone number on every
+// missing-field warning. Masked at every tier regardless, like
+// URL_VALUE_KEY_PATTERN below — this is PII minimization for a specific
+// known-sensitive set of keys, not the general PII tier gate. `from`/`to`/
+// `text` are exact-matched (anchored) since unanchored they'd over-mask
+// unrelated keys (`fromDate`, `total`, `context`, ...).
+const ALWAYS_MASK_PII_KEY_PATTERNS = [/^from$/i, /^to$/i, /transcript/i, /speechResult/i, /^text$/i];
+
 // SEC-20 — keys whose VALUE is a raw request URL/path. Key-based redaction
 // above never inspects a string value for an embedded secret, so a `route`
 // or `url` field logged verbatim leaks live bearer tokens that travel as a
@@ -152,6 +166,12 @@ function walk<T>(
       // Applies at every tier (not just 'strict') — this is a live-secret
       // exposure, not a PII-minimization concern.
       out[key] = redactUrlValue(value);
+      continue;
+    }
+    if (ALWAYS_MASK_PII_KEY_PATTERNS.some((re) => re.test(key)) && shouldRedactValue(value)) {
+      // #1589 — applies at every tier, same rationale as the URL-value
+      // scrub above.
+      out[key] = maskValue(value);
       continue;
     }
     if (tier === 'strict' && !piiExempt?.has(key) && isPiiKey(key) && shouldRedactValue(value)) {
