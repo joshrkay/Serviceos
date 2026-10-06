@@ -171,16 +171,12 @@ export async function hydrateEscalationCrm(
       ...(lastService ? { lastService } : {}),
       ...(membership ?? {}),
       ...(notes ? { communicationNotes: notes } : {}),
-      // #1616 — an archived record is why #1587 hands the call off; the
-      // summary names it. Only ever present when true.
-      ...(customer.isArchived ? { isArchived: true } : {}),
     };
 
     if (
       !customerBlock.lastService &&
       !customerBlock.isMember &&
-      !customerBlock.communicationNotes &&
-      !customerBlock.isArchived
+      !customerBlock.communicationNotes
     ) {
       return { tags };
     }
@@ -217,13 +213,11 @@ export function mergeCallerContextWithCrm<
     memberTier: base.customer?.memberTier ?? crm.customer?.memberTier,
     communicationNotes:
       base.customer?.communicationNotes ?? crm.customer?.communicationNotes,
-    isArchived: base.customer?.isArchived ?? crm.customer?.isArchived,
   };
   const hasCustomer =
     customer.lastService != null ||
     customer.isMember === true ||
-    Boolean(customer.communicationNotes) ||
-    customer.isArchived === true;
+    Boolean(customer.communicationNotes);
 
   return {
     ...base,

@@ -23,6 +23,7 @@
  * becomes instructions.
  */
 import type { ProposalType } from './proposal';
+import { lastCallerLine } from '../voice/last-caller-line';
 
 export interface VoiceClarificationInput {
   /** Session transcript lines, newest last. `caller:`-prefixed lines are the caller's. */
@@ -51,9 +52,6 @@ export function buildVoiceClarificationPayload(
   input: VoiceClarificationInput,
 ): Record<string, unknown> {
   const { transcript: lines, intent, entities, requestedProposalType } = input;
-  const lastCallerTurn = [...lines]
-    .reverse()
-    .find((line) => line.toLowerCase().startsWith('caller:'));
   const entityDetails = Object.entries(entities)
     .filter(([, v]) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
     .map(([k, v]) => `${k}=${String(v)}`)
@@ -62,7 +60,7 @@ export function buildVoiceClarificationPayload(
     (typeof entities.transcript === 'string' && entities.transcript.trim().length > 0
       ? entities.transcript.trim()
       : undefined) ??
-    (lastCallerTurn ? lastCallerTurn.slice('caller:'.length).trim() || undefined : undefined) ??
+    lastCallerLine(lines) ??
     `Caller asked for '${intent ?? 'unknown'}' but the request was incomplete.` +
       (entityDetails ? ` Details heard: ${entityDetails}.` : '');
   return {

@@ -158,19 +158,6 @@ describe('hydrateEscalationCrm', () => {
     expect(crm.customer?.communicationNotes).toContain('Prefers mornings');
     expect(crm.tags).toContain('Spanish');
   });
-
-  // #1616 — an archived record is why #1587 hands the call off; the
-  // dispatcher summary must be able to say so.
-  it('surfaces an archived record as customer.isArchived, even with no other CRM detail', async () => {
-    const customerRepo = new InMemoryCustomerRepository();
-    await customerRepo.create(
-      makeCustomer({ isArchived: true, communicationNotes: undefined, preferredLanguage: undefined }),
-    );
-
-    const crm = await hydrateEscalationCrm(TENANT, { customerId: CUSTOMER_ID }, { customerRepo });
-
-    expect(crm.customer?.isArchived).toBe(true);
-  });
 });
 
 describe('mergeCallerContextWithCrm + buildEscalationSummary', () => {
@@ -217,18 +204,5 @@ describe('mergeCallerContextWithCrm + buildEscalationSummary', () => {
     expect(summary.panel.lastInteraction).toContain('AC tune-up');
     expect(summary.panel.lastInteraction).toContain('$189.00');
     expect(summary.panel.lastInteraction).toContain('Notes: Prefers mornings.');
-  });
-
-  it('#1616 — carries an archived record through to the summary context', () => {
-    const merged = mergeCallerContextWithCrm(
-      {
-        caller: { name: 'María López', phone: '+15125550142', customerId: CUSTOMER_ID },
-        intent: { type: 'reschedule_appointment', entities: {}, confidence: 1 },
-        transcriptSnapshot: [],
-      },
-      { tags: [], customer: { isArchived: true } },
-    );
-
-    expect(merged.customer?.isArchived).toBe(true);
   });
 });
