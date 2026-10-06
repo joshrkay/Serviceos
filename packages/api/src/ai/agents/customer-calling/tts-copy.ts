@@ -26,6 +26,15 @@ import { interpolate } from '../../i18n/i18n';
 
 export type SessionLanguage = 'en' | 'es';
 
+/**
+ * The language a session speaks: 'es' when the session says so, else 'en'
+ * (the universal fallback). One rule for every renderer and helper (#1601
+ * step 2) — a session with no language set speaks English.
+ */
+export function sessionLanguage(session: { language?: string | null }): SessionLanguage {
+  return session.language === 'es' ? 'es' : 'en';
+}
+
 const ES_MARKERS = [
   'hola', 'necesito', 'quiero', 'quisiera', 'ayuda', 'por favor', 'gracias',
   'cita', 'agendar', 'programar', 'cancelar', 'cliente', 'mañana',

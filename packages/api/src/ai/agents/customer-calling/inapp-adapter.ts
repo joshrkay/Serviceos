@@ -67,6 +67,15 @@ import {
   languageSwitchedEvent,
 } from '../../voice-quality/events';
 import { TAU_INT, CONFIRM_NOTHING_PENDING_LINE } from './transitions';
+import {
+  createSessionTimezoneResolver,
+  type SessionTimezoneResolver,
+} from '../../voice-turn/shared/session-timezone';
+import { createSessionCostRecorder } from '../../voice-turn/shared/session-cost';
+import {
+  answerConfirmTurnQuestion as answerConfirmTurnQuestionShared,
+  type ConfirmTurnLookupPorts,
+} from '../../voice-turn/shared/confirm-turn-answer';
 // R1/R2 (#inapp-50) — per-turn action-path trace + the deterministic
 // duplicate/noise recovery helpers that run BEFORE any classifier call.
 import { deriveTurnTrace, normalizeTurnText } from './turn-trace';
@@ -93,7 +102,6 @@ import {
 } from './entity-resolution';
 import type { SchedulingEntityResolution } from './entity-resolution';
 import type { SettingsRepository } from '../../../settings/settings';
-import { isRuntimeTimezone } from '../../../shared/timezone';
 import {
   MAX_DISAMBIGUATION_ATTEMPTS,
   refKeyForEntityKind,
@@ -146,8 +154,6 @@ import type { IntentType } from '../../orchestration/intent-classifier';
 import { answerInAppLookup } from '../../voice-turn/inapp-lookup-surface';
 import { answerInAppEnRoute } from '../../voice-turn/inapp-en-route-surface';
 import {
-  answerCallbackNumberQuestion,
-  answerPendingDetailQuestion,
   detectConfirmTurnQuestion,
 } from '../../voice-turn/confirm-turn-question';
 import type { InAppEnRouteDeps } from '../../voice-turn/inapp-en-route-surface';
@@ -623,7 +629,9 @@ function toPendingCandidates(
 }
 
 export class InAppVoiceAdapter {
-  constructor(private readonly deps: InAppAdapterDeps) {}
+  constructor(private readonly deps: InAppAdapterDeps) {
+    this.resolveSessionTimezone = createSessionTimezoneResolver(deps);
+  }
 
   /**
    * Lazily-constructed PgEntityResolver when `pool` is wired but no explicit
@@ -665,21 +673,14 @@ export class InAppVoiceAdapter {
   /**
    * U4 — tenant timezone for spoken-datetime resolution, memoized per
    * SESSION (settings read once per session, the E1-script convention).
-   * Keyed by the live session OBJECT via WeakMap — the same shape as
-   * create-voice-turn-processor.ts — so entries are garbage-collected
-   * with the session. This replaces a string-keyed Map whose
-   * `${tenantId}:${sessionId ?? ''}` key pinned ONE tenant-lifetime value
-   * whenever a session id was absent, and whose >500 clear() dumped every
-   * LIVE session's memo (review finding). `undefined` outcomes are still
-   * memoized: the session then refuses to resolve spoken times (never a
-   * silent UTC/default-zone parse) and the NEXT session retries the read.
-   * A rare session-less caller gets an unmemoized read — correct, just
-   * uncached.
+   * #1601 step 2: the shared resolver (`shared/session-timezone.ts`) owns
+   * the WeakMap memo and the refusal semantics; a rare session-less caller
+   * gets an unmemoized read.
    */
-  private readonly sessionTimezones = new WeakMap<
-    VoiceSession,
-    Promise<string | undefined>
-  >();
+  private readonly resolveSessionTimezone: SessionTimezoneResolver;
+
+  /** #1601 step 2 — the processor's cap rule for the confirm-step question path (`shared/session-cost.ts`). */
+  private readonly costRecorder = createSessionCostRecorder();
 
   /**
    * #1485 — the executability ask for the proposal this session last
@@ -689,26 +690,6 @@ export class InAppVoiceAdapter {
     VoiceSession,
     { proposalId: string; ask: string }
   >();
-
-  private resolveSessionTimezone(
-    tenantId: string,
-    session: VoiceSession | undefined,
-  ): Promise<string | undefined> {
-    const cached = session ? this.sessionTimezones.get(session) : undefined;
-    if (cached) return cached;
-    const pending = (async () => {
-      if (!this.deps.settingsRepo) return undefined;
-      try {
-        const settings = await this.deps.settingsRepo.findByTenant(tenantId);
-        const tz = settings?.timezone;
-        return typeof tz === 'string' && isRuntimeTimezone(tz.trim()) ? tz.trim() : undefined;
-      } catch {
-        return undefined;
-      }
-    })();
-    if (session) this.sessionTimezones.set(session, pending);
-    return pending;
-  }
 
   /**
    * Resolve scheduling entity references, translating the resolver outcome
@@ -734,7 +715,7 @@ export class InAppVoiceAdapter {
   ): Promise<SchedulingEntityResolution> {
     const resolver = this.getEntityResolver();
     try {
-      const timezone = await this.resolveSessionTimezone(tenantId, session);
+      const timezone = await this.resolveSessionTimezone(session, tenantId);
       const appointmentRepo = this.deps.lookups?.shared.appointmentRepo;
       const opts = {
         ...(timezone ? { timezone } : {}),
@@ -938,37 +919,20 @@ export class InAppVoiceAdapter {
     session: VoiceSession,
     kind: NonNullable<ReturnType<typeof detectConfirmTurnQuestion>>,
     text: string,
-  ): Promise<{ text: string; capExceeded: boolean }> {
+  ): Promise<{ text: string; capExceeded: false } | { capExceeded: true }> {
     const context = session.machine.currentContext;
     const entities = (context.extractedEntities ?? {}) as Record<string, unknown>;
-    let answer: string;
-    let capExceeded = false;
-    if (kind === 'callback_number') {
-      const customerId =
-        (typeof entities.customerId === 'string' ? entities.customerId : undefined) ??
-        session.customerId;
-      let onFile: string | undefined;
-      if (customerId && this.deps.customerRepo) {
-        const customer = await this.deps.customerRepo
-          .findById(session.tenantId, customerId)
-          .catch(() => null);
-        onFile = customer?.primaryPhone ?? customer?.secondaryPhone;
-      }
-      answer = answerCallbackNumberQuestion({
-        untrustedCaller: false,
-        givenThisCall: typeof entities.phone === 'string' ? entities.phone : undefined,
-        onFile,
-      });
-    } else {
-      let looked: string | undefined;
-      const detail = answerPendingDetailQuestion(kind, entities);
-      if (detail === undefined) {
-        const lookup = await this.answerConfirmTurnQuestionByLookup(session, text);
-        looked = lookup.text;
-        capExceeded = lookup.capExceeded;
-      }
-      answer = detail ?? looked ?? TTS_COPY.no_detail_yet.en;
-    }
+    // #1601 step 2 — the shared answer (`ai/voice-turn/shared/confirm-turn-answer.ts`)
+    // with the in-app ports: an authenticated tenant user (never S1), the
+    // number on file may be read, and the lookup path below. The cost cap is
+    // decided the processor's way (tracker level, #1204) — see
+    // `inapp-confirm-question-cost-cap-1601.test.ts` for the pinned change.
+    const answered = await answerConfirmTurnQuestionShared(session, kind, text, {
+      untrustedCaller: false,
+      customerRepo: this.deps.customerRepo,
+      lookup: this.confirmTurnLookupPorts(session, text),
+    });
+    if (answered.capExceeded) return { capExceeded: true };
     const readback = renderTtsText(
       'intent_confirm',
       // The pending request's own details (#1539 parity with the phone
@@ -977,65 +941,39 @@ export class InAppVoiceAdapter {
       { template: 'confirm_intent', intent: context.currentIntent, entities },
       session.language ?? 'en',
     );
-    return { text: `${answer} ${readback}`, capExceeded };
+    return { text: `${answered.answer} ${readback}`, capExceeded: false };
   }
 
   /**
    * #1476 — a confirm-step question the pending request cannot answer itself
-   * goes through the EXISTING read-only lookup path: the unchanged classifier
-   * names the lookup, the shared dispatch answers it (RBAC and all). Anything
-   * that is not a confident lookup — or a classifier failure — is undefined:
-   * the question is not an instruction, so it never becomes one here.
+   * goes through the EXISTING read-only lookup path (#1601 step 2: the shared
+   * `answerConfirmTurnQuestionByLookup`, with the in-app ports): the
+   * unchanged classifier names the lookup, the shared dispatch answers it
+   * (RBAC and all). The in-app surface always serves lookups.
    */
-  private async answerConfirmTurnQuestionByLookup(
-    session: VoiceSession,
-    text: string,
-  ): Promise<{ text?: string; capExceeded: boolean }> {
+  private confirmTurnLookupPorts(session: VoiceSession, text: string): ConfirmTurnLookupPorts {
     const context = session.machine.currentContext;
-    let classification: Awaited<ReturnType<typeof classifyIntent>>;
-    try {
-      classification = await this.classifyIntentWithRetry(text, {
-        tenantId: session.tenantId,
-        sessionId: session.id,
-        ...(session.callSid ? { callSid: session.callSid } : {}),
-        ...(context.ownerSession ? { ownerSession: true } : {}),
-        ...(context.extendedIntents ? { extendedIntents: true } : {}),
-        ...(context.customerProtectionIntents ? { customerProtectionIntents: true } : {}),
-      });
-    } catch {
-      return { capExceeded: false };
-    }
-    if (classification.tokenUsage) {
-      const { input, output } = classification.tokenUsage;
-      const cents = estimateCostCents(input, output);
-      const capEvents = session.costTracker.recordUsage({
-        inputTokens: input,
-        outputTokens: output,
-        costCents: cents,
-      });
-      session.events.emit(
-        'voice-event',
-        costIncurredEvent(cents, session.costTracker.totals.costCents),
-      );
-      if (capEvents.some((e) => e.type === 'cost_cap_exceeded')) {
-        return { capExceeded: true };
-      }
-    }
-    if (
-      classification.confidence < TAU_INT ||
-      !isLookupIntent(classification.intentType as IntentType)
-    ) {
-      return { capExceeded: false };
-    }
-    const answered = await answerInAppLookup(this.deps.lookups, {
-      session,
-      tenantId: session.tenantId,
-      userId: session.actorUserId,
-      intent: classification.intentType as IntentType,
-      entities: classification.extractedEntities as Record<string, unknown> | undefined,
-      transcript: text,
-    });
-    return { text: answered, capExceeded: false };
+    return {
+      classify: (t) =>
+        this.classifyIntentWithRetry(t, {
+          tenantId: session.tenantId,
+          sessionId: session.id,
+          ...(session.callSid ? { callSid: session.callSid } : {}),
+          ...(context.ownerSession ? { ownerSession: true } : {}),
+          ...(context.extendedIntents ? { extendedIntents: true } : {}),
+          ...(context.customerProtectionIntents ? { customerProtectionIntents: true } : {}),
+        }),
+      recordCost: this.costRecorder.recordCost,
+      answer: (classification) =>
+        answerInAppLookup(this.deps.lookups, {
+          session,
+          tenantId: session.tenantId,
+          userId: session.actorUserId,
+          intent: classification.intentType as IntentType,
+          entities: classification.extractedEntities as Record<string, unknown> | undefined,
+          transcript: text,
+        }),
+    };
   }
 
   private async classifyIntentWithRetry(
@@ -1697,9 +1635,9 @@ export class InAppVoiceAdapter {
       const answered = await this.answerConfirmTurnQuestion(session, confirmQuestion, text);
       if (answered.capExceeded) {
         // The lookup classify crossed the session cap: escalation supersedes
-        // the answer, exactly as on a classifier turn (branch C below).
+        // the answer, exactly as on a classifier turn (branch C below). The
+        // shared cost recorder already emitted session_terminated (#1204).
         fsmEvent = { type: 'cost_cap_exceeded' };
-        session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
       } else {
         confirmQuestionAnswer = answered.text;
         // Never dispatched (see effects1) — the FSM stays in intent_confirm.
@@ -2887,7 +2825,7 @@ export class InAppVoiceAdapter {
           // #1540 §6 — tenant context (same posture as the phone leg): the
           // tenant zone fills spentAt / startsOn, unset ⇒ they stay gated.
           ...(await (async () => {
-            const timezone = await this.resolveSessionTimezone(session.tenantId, session);
+            const timezone = await this.resolveSessionTimezone(session, session.tenantId);
             return timezone ? { timezone } : {};
           })()),
           // #1540 §6 — a change order's spoken-price line, catalog-grounded
