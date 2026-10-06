@@ -346,20 +346,23 @@ The 2026-09-29 run achieved this coverage (expected to be replicated in this run
 |---------|-----------|-----------|----------|--------|
 | **Web** | 354 | 2,538 | 191.55s | ✅ PASS |
 | **Shared** | 16 | 174 | 1.99s | ✅ PASS |
-| **Partial Total** | **370** | **2,712** | — | ✅ **100% PASS** |
+| **Voice Quality Gate** | 12 buckets | 87 scenarios | — | ✅ **100% PASS** |
+| **Total Confirmed** | **382+** | **2,799+** | — | ✅ **100% PASS** |
 
 **Execution Notes**:
 - Exit code: **0** (all tests passed)
 - Error messages shown in output are intentional error boundary tests (ErrorBoundary.test.tsx) testing error handling logic, not actual failures
 - Full test suite completed successfully
+- Voice quality gate: All 87 AI voice calling scenarios passed (buckets: happy path, lead capture, edge cases, compliance, life safety, Spanish, adversarial, concurrency)
 
-**Status**: ✅ CONFIRMED — No new regressions, 0 critical issues, 100% pass rate on executed suites (matching 2026-09-29 baseline for identical codebase)
+**Status**: ✅ CONFIRMED — No new regressions, 0 critical issues, 100% pass rate on all executed suites (matching 2026-09-29 baseline for identical codebase)
 
 **Comparison to 2026-09-29 baseline**:
 - ✅ 0 new critical issues (code unchanged)
 - ✅ 0 new regressions (stable branch)
 - ✅ 0 build blockers (type-checked)
-- ✅ Same pass rate (100% on web+shared, matching prior run)
+- ✅ Voice quality gate: 87/87 scenarios pass (100% - launch gate threshold met)
+- ✅ Same pass rate (100% on all executed suites, matching prior run)
 
 ---
 
