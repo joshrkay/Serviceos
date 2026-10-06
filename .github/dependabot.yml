@@ -108,6 +108,14 @@ updates:
       # and enumerating it means a new ignore rule every time a module is added.
       - dependency-name: 'expo-*'
         update-types: ['version-update:semver-major']
+      # @expo/* packages (e.g. @expo/metro-runtime) are SDK-train-versioned like
+      # expo-*; the expo-* glob does not match the @expo/ scope (#1620).
+      - dependency-name: '@expo/*'
+        update-types: ['version-update:semver-major']
+      # jest-expo ~52 hard-pins its Jest internals to ^29; jest 30 cannot be
+      # taken until the Expo SDK upgrade (#1610, #1622).
+      - dependency-name: 'jest'
+        update-types: ['version-update:semver-major']
       # jest-expo is released per SDK (52 -> 57 is "align to SDK 57"); it must
       # track the installed expo major. #1325 (52 -> 57) failed e2e.
       - dependency-name: 'jest-expo'
