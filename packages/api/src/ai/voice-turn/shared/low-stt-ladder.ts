@@ -27,9 +27,9 @@ import type { SideEffect } from '../../agents/customer-calling/types';
 import type { VoiceSession } from '../../agents/customer-calling/voice-session-store';
 import {
   renderTtsText,
+  sessionLanguage,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
-  type SessionLanguage,
 } from '../../agents/customer-calling/tts-copy';
 import { recordVoiceError, type VoiceErrorChannel } from '../../../analytics/posthog';
 
@@ -87,9 +87,8 @@ export function lowSttLadderStep(streak: number): LowSttLadderStep {
 
 /** The side effects a step speaks, rendered in the session's language. */
 export function lowSttLadderEffects(session: Pick<VoiceSession, 'language'>, step: LowSttLadderStep): SideEffect[] {
-  const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
   const effects: SideEffect[] = [
-    { type: 'tts_play', payload: { text: renderTtsText(step.copy, {}, lang) } },
+    { type: 'tts_play', payload: { text: renderTtsText(step.copy, {}, sessionLanguage(session)) } },
   ];
   if (step.escalate) {
     effects.push({ type: 'end_session', payload: { reason: LOW_STT_LADDER_TERMINAL_REASON } });
@@ -98,20 +97,38 @@ export function lowSttLadderEffects(session: Pick<VoiceSession, 'language'>, ste
 }
 
 /**
- * Bump the session's streak in `streaks` (keyed by `session.id`), decide the
- * step and build its effects. At the cap the streak is cleared so a later
- * call (should the session somehow continue) starts a fresh ladder. The
- * caller finalizes the terminated session and renders the effects.
+ * A streak store: consecutive strikes per live session. Keyed by the session
+ * OBJECT so an entry is garbage-collected with the session — a caller who is
+ * reprompted once and then hangs up (or is ended by the cap, the safety scan,
+ * the cost cap…) leaves nothing behind. One per owner (Gather adapter,
+ * processor); the owner clears it on every good turn.
+ */
+export type LowSttStreak = WeakMap<VoiceSession, number>;
+
+export function createLowSttStreak(): LowSttStreak {
+  return new WeakMap();
+}
+
+/** A good (dispatched, or confidence-absent) turn: the next strike is a fresh first one. */
+export function clearLowSttStreak(streak: LowSttStreak, session: VoiceSession): void {
+  streak.delete(session);
+}
+
+/**
+ * Bump the session's streak, decide the step and build its effects. At the
+ * cap the streak is cleared so a later call (should the session somehow
+ * continue) starts a fresh ladder. The caller finalizes the terminated
+ * session (when `step.escalate`) and renders the effects.
  */
 export function runLowSttConfidenceLadder(
   session: VoiceSession,
-  streaks: Map<string, number>,
-): { effects: SideEffect[]; escalated: boolean; step: LowSttLadderStep } {
-  const streak = (streaks.get(session.id) ?? 0) + 1;
-  const step = lowSttLadderStep(streak);
-  if (step.escalate) streaks.delete(session.id);
-  else streaks.set(session.id, streak);
-  return { effects: lowSttLadderEffects(session, step), escalated: step.escalate, step };
+  streak: LowSttStreak,
+): { effects: SideEffect[]; step: LowSttLadderStep } {
+  const strikes = (streak.get(session) ?? 0) + 1;
+  const step = lowSttLadderStep(strikes);
+  if (step.escalate) streak.delete(session);
+  else streak.set(session, strikes);
+  return { effects: lowSttLadderEffects(session, step), step };
 }
 
 /** OBS — the `voice_error` row for a step; IDs only, fired after the step is rendered. */

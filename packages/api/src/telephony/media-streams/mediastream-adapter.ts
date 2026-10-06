@@ -76,7 +76,6 @@ import {
   detectLanguageFromTranscript,
   detectLanguageSwitchIntent,
   isLanguageSupported,
-  MAX_LANGUAGE_SWITCHES_PER_CALL,
 } from '../../ai/orchestration/language-detector';
 import {
   renderTtsText,
@@ -470,14 +469,14 @@ const SENTIMENT_MAX_BUDGET_RATIO = 0.8;
 /**
  * UB-C1 — the per-call language flap cap. Defined in
  * `ai/orchestration/language-detector.ts` alongside the rest of the language
- * POLICY it belongs to (`detectLanguageSwitchIntent`, `isLanguageSupported`)
- * and re-exported here so this module's existing importers are unchanged.
+ * POLICY it belongs to (`detectLanguageSwitchIntent`, `isLanguageSupported`);
+ * this adapter applies it through `ai/voice-turn/shared/language-switch.ts`
+ * (#1601 step 2 — the re-export it used to carry is gone with its last importer).
  *
  * It moved because a third surface now enforces it — the in-app voice-session
  * adapter — and an in-app turn should not have to import the Deepgram
  * websocket adapter to learn a number. See that constant's doc comment.
  */
-export { MAX_LANGUAGE_SWITCHES_PER_CALL } from '../../ai/orchestration/language-detector';
 
 /**
  * VOX-35c — after this many CONSECUTIVE `speechTurn` failures the adapter
@@ -490,17 +489,9 @@ export { MAX_LANGUAGE_SWITCHES_PER_CALL } from '../../ai/orchestration/language-
  */
 const MAX_CONSECUTIVE_SPEECH_TURN_FAILURES = 2;
 
-/**
- * A3 — the acoustic-confidence floor and the consecutive-strike cap live in
- * the shared ladder (#1601 step 2, `ai/voice-turn/shared/low-stt-ladder.ts`):
- * ONE env var (`VOICE_MIN_STT_CONFIDENCE`), ONE number, for every surface.
- * Re-exported here so existing importers (tests, the Gather adapter) keep
- * their path.
- */
-export {
-  MIN_STT_CONFIDENCE,
-  MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
-} from '../../ai/voice-turn/shared/low-stt-ladder';
+// A3 — the acoustic-confidence floor and the consecutive-strike cap live in
+// the shared ladder (#1601 step 2, `ai/voice-turn/shared/low-stt-ladder.ts`):
+// ONE env var (`VOICE_MIN_STT_CONFIDENCE`), ONE number, for every surface.
 
 interface RuntimeState {
   ws: WsLike;
@@ -950,16 +941,9 @@ function observeTurnLatency(startMs: number | null): void {
  */
 export const DEFAULT_AUDIO_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
-/**
- * U5 — the per-call cap's limit and warning lead live in the shared cap
- * (#1601 step 2, `ai/voice-turn/shared/max-call-duration.ts`) so both
- * transports cut at the same wall-clock limit. Re-exported for existing
- * importers.
- */
-export {
-  DEFAULT_MAX_CALL_DURATION_MS,
-  MAX_CALL_DURATION_WRAP_UP_LEAD_MS,
-} from '../../ai/voice-turn/shared/max-call-duration';
+// U5 — the per-call cap's limit and warning lead live in the shared cap
+// (#1601 step 2, `ai/voice-turn/shared/max-call-duration.ts`) so both
+// transports cut at the same wall-clock limit.
 
 /**
  * T2-F05 — how long after the agent finishes speaking a totally silent caller
@@ -2270,7 +2254,7 @@ export class TwilioMediaStreamAdapter {
    * an in-flight FSM turn. NOTE the lock is a non-reentrant promise chain
    * — this method must never be called from inside another lock body.
    *
-   * Flap guard: hard cap of {@link MAX_LANGUAGE_SWITCHES_PER_CALL}
+   * Flap guard: hard cap of `MAX_LANGUAGE_SWITCHES_PER_CALL`
    * reopen cycles per call; the 3rd request is refused (audio keeps
    * flowing in the current language).
    *
@@ -2299,10 +2283,11 @@ export class TwilioMediaStreamAdapter {
         switchCount: this.state.languageSwitchCount,
       });
       if (decision.kind !== 'switch') {
-        if (decision.kind === 'flap_capped') {
-          logger.info('mediastream: language switch refused — flap guard', {
+        if (decision.kind !== 'already_active') {
+          logger.info('mediastream: language switch refused', {
             callSid: this.state.callSid,
             target,
+            reason: decision.kind,
             switchCount: this.state.languageSwitchCount,
           });
         }

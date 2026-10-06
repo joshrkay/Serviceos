@@ -13,13 +13,15 @@
  * `low_stt_confidence_max_retries`; a good turn clears the streak. The copy
  * renders in the session's language.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   MIN_STT_CONFIDENCE,
   MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
   isLowSttConfidence,
   lowSttLadderStep,
   runLowSttConfidenceLadder,
+  createLowSttStreak,
+  clearLowSttStreak,
   LOW_STT_LADDER_TERMINAL_REASON,
 } from '../../../../src/ai/voice-turn/shared/low-stt-ladder';
 import {
@@ -42,10 +44,30 @@ const ends = (fx: SideEffect[]) =>
   fx.filter((f) => f.type === 'end_session').map((f) => String((f.payload as { reason?: string }).reason));
 
 describe('low-STT ladder (shared)', () => {
-  it('the floor is 0.5 by default and the ladder is two strikes long', () => {
-    expect(MIN_STT_CONFIDENCE).toBe(0.5);
+  const ORIGINAL_FLOOR = process.env.VOICE_MIN_STT_CONFIDENCE;
+  afterEach(() => {
+    if (ORIGINAL_FLOOR === undefined) delete process.env.VOICE_MIN_STT_CONFIDENCE;
+    else process.env.VOICE_MIN_STT_CONFIDENCE = ORIGINAL_FLOOR;
+    vi.resetModules();
+  });
+
+  it('the floor is 0.5 by default (VOICE_MIN_STT_CONFIDENCE unset) and the ladder is two strikes long', async () => {
+    delete process.env.VOICE_MIN_STT_CONFIDENCE;
+    vi.resetModules();
+    const fresh = await import('../../../../src/ai/voice-turn/shared/low-stt-ladder');
+    expect(fresh.MIN_STT_CONFIDENCE).toBe(0.5);
+    expect(fresh.MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS).toBe(2);
+    expect(fresh.LOW_STT_LADDER_TERMINAL_REASON).toBe('low_stt_confidence_max_retries');
     expect(MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS).toBe(2);
-    expect(LOW_STT_LADDER_TERMINAL_REASON).toBe('low_stt_confidence_max_retries');
+  });
+
+  it('VOICE_MIN_STT_CONFIDENCE overrides the floor; an out-of-range value falls back to the default', async () => {
+    process.env.VOICE_MIN_STT_CONFIDENCE = '0.7';
+    vi.resetModules();
+    expect((await import('../../../../src/ai/voice-turn/shared/low-stt-ladder')).MIN_STT_CONFIDENCE).toBe(0.7);
+    process.env.VOICE_MIN_STT_CONFIDENCE = '7';
+    vi.resetModules();
+    expect((await import('../../../../src/ai/voice-turn/shared/low-stt-ladder')).MIN_STT_CONFIDENCE).toBe(0.5);
   });
 
   it('a missing, non-finite, or at-or-above-floor confidence is HIGH — only a real number below the floor is low', () => {
@@ -70,27 +92,37 @@ describe('low-STT ladder (shared)', () => {
   });
 
   it('keeps one streak per session: reprompt, then escalation + end_session, then a fresh first strike', () => {
-    const streaks = new Map<string, number>();
+    const streak = createLowSttStreak();
     const s = session();
 
-    const first = runLowSttConfidenceLadder(s, streaks);
-    expect(first.escalated).toBe(false);
+    const first = runLowSttConfidenceLadder(s, streak);
+    expect(first.step.escalate).toBe(false);
     expect(tts(first.effects)).toEqual([renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
     expect(ends(first.effects)).toEqual([]);
-    expect(streaks.get(s.id)).toBe(1);
+    expect(streak.get(s)).toBe(1);
 
-    const second = runLowSttConfidenceLadder(s, streaks);
-    expect(second.escalated).toBe(true);
+    const second = runLowSttConfidenceLadder(s, streak);
+    expect(second.step.escalate).toBe(true);
     expect(tts(second.effects)).toEqual([renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en')]);
     expect(ends(second.effects)).toEqual(['low_stt_confidence_max_retries']);
-    expect(streaks.has(s.id)).toBe(false);
+    expect(streak.has(s)).toBe(false);
 
-    expect(runLowSttConfidenceLadder(s, streaks).escalated).toBe(false);
+    expect(runLowSttConfidenceLadder(s, streak).step.escalate).toBe(false);
+  });
+
+  it('a good turn clears the streak, and sessions never share one', () => {
+    const streak = createLowSttStreak();
+    const a = session();
+    const b = session();
+    runLowSttConfidenceLadder(a, streak);
+    clearLowSttStreak(streak, a);
+    expect(runLowSttConfidenceLadder(a, streak).step.escalate).toBe(false);
+    expect(runLowSttConfidenceLadder(b, streak).step.escalate).toBe(false);
   });
 
   it('speaks the ladder in Spanish on an es session', () => {
     const s = session('es');
-    const fx = runLowSttConfidenceLadder(s, new Map()).effects;
+    const fx = runLowSttConfidenceLadder(s, createLowSttStreak()).effects;
     expect(tts(fx)).toEqual([renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'es')]);
     expect(tts(fx)[0]).not.toBe(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'));
   });

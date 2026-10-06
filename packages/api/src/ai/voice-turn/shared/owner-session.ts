@@ -24,7 +24,7 @@ const logger = createLogger({
 });
 
 export interface OwnerSessionDeps {
-  settingsRepo?: SettingsRepository;
+  settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
   /** Resolves the backup supervisor's mobile. Optional — owner_phone still works. */
   userRepo?: Pick<UserRepository, 'findById'>;
 }

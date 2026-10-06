@@ -122,6 +122,8 @@ import {
 } from '../ai/voice-turn/shared/max-call-duration';
 import {
   LOW_STT_LADDER_TERMINAL_REASON,
+  createLowSttStreak,
+  clearLowSttStreak,
   isLowSttConfidence,
   runLowSttConfidenceLadder,
   recordLowSttLadderError,
@@ -876,8 +878,9 @@ export class TwilioGatherAdapter {
    * Limitation: this streak is process-local — a mid-call replica
    * restart/redeploy silently resets it to 0. Acceptable for a short,
    * bounded reprompt budget (2 turns) rather than a durable guarantee.
+   * Keyed by the live session object (#1601 step 2), so it dies with it.
    */
-  private readonly lowConfidenceGatherStreak = new Map<string, number>();
+  private readonly lowConfidenceGatherStreak = createLowSttStreak();
 
   /**
    * A2 — lazily-constructed fallback source for `<Gather hints="...">`
@@ -3038,7 +3041,7 @@ export class TwilioGatherAdapter {
     if (!isLowSttConfidence(opts.confidence)) {
       // High confidence (or no signal at all) clears the streak so a later
       // isolated blip on this session gets its own reprompt budget.
-      this.lowConfidenceGatherStreak.delete(opts.sessionId);
+      clearLowSttStreak(this.lowConfidenceGatherStreak, session);
       return null;
     }
 
@@ -3061,9 +3064,9 @@ export class TwilioGatherAdapter {
     // #1601 step 2 — the rules (floor, cap, copy, terminal reason) are the
     // shared ladder's; this method owns the Gather streak map, the TwiML and
     // the terminal finalize. `sessionId` IS `session.id` (store.get).
-    const { effects, escalated, step } = runLowSttConfidenceLadder(session, this.lowConfidenceGatherStreak);
+    const { effects, step } = runLowSttConfidenceLadder(session, this.lowConfidenceGatherStreak);
     const twiml = await this.finalizeTwiml(session, effects, sessionId);
-    if (escalated && !session.ended) {
+    if (step.escalate && !session.ended) {
       session.ended = true;
       this.finalizeTerminatedSession(session, effects, LOW_STT_LADDER_TERMINAL_REASON);
       // PR #975 F5 — same omission as the max-duration end: without this a
@@ -3202,7 +3205,7 @@ export class TwilioGatherAdapter {
    */
   private async handleLanguageSwitchGather(
     session: VoiceSession,
-    opts: { sessionId: string; tenantId: string; speechResult: string },
+    opts: { tenantId: string; speechResult: string },
   ): Promise<SideEffect[]> {
     // #1601 step 2 — the shared handler (`ai/voice-turn/shared/language-switch.ts`):
     // same policy, same voice re-resolve (settings.ttsVoiceEn/Es), same ack.

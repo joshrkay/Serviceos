@@ -28,6 +28,7 @@ import type { SideEffect } from '../../agents/customer-calling/types';
 import type { VoiceSession } from '../../agents/customer-calling/voice-session-store';
 import type { SettingsRepository } from '../../../settings/settings';
 import {
+  sessionLanguage,
   LANGUAGE_SWITCH_ACK,
   LANGUAGE_UNSUPPORTED_LINE,
   LANGUAGE_SWITCH_CAP_LINE,
@@ -61,7 +62,7 @@ export function decideLanguageSwitch(input: {
 }): LanguageSwitchDecision {
   const { current, target, switchCount } = input;
   if (target === current) return { kind: 'already_active', current };
-  if (!isLanguageSupported(target, input.supportedLanguages ? [...input.supportedLanguages] : null)) {
+  if (!isLanguageSupported(target, input.supportedLanguages ?? null)) {
     return { kind: 'unsupported', current, target };
   }
   if (switchCount >= MAX_LANGUAGE_SWITCHES_PER_CALL) {
@@ -106,7 +107,7 @@ export async function switchSessionLanguage(
     surface: 'gather' | 'speechTurn';
   },
 ): Promise<SideEffect[]> {
-  const current: SessionLanguage = session.language === 'es' ? 'es' : 'en';
+  const current = sessionLanguage(session);
   const decision = decideLanguageSwitch({
     current,
     target: requestedLanguageSwitchTarget(opts.speechResult, current),

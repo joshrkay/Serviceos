@@ -110,6 +110,7 @@ import { answerPhoneLookup, type PhoneLookupDeps } from './phone-lookup-surface'
 import { COVERAGE_TABLE, type CoverageSurface, type IntentFamilyId } from './coverage-table';
 import {
   renderTtsText,
+  sessionLanguage,
   ttsCopy,
   TTS_COPY,
   CALLER_INCOMPLETE_REQUEST_COPY,
@@ -327,6 +328,8 @@ import {
 } from '../../telephony/media-streams/mediastream-adapter';
 import {
   LOW_STT_LADDER_TERMINAL_REASON,
+  createLowSttStreak,
+  clearLowSttStreak,
   isLowSttConfidence,
   runLowSttConfidenceLadder as sharedLowSttLadder,
   recordLowSttLadderError,
@@ -1325,7 +1328,7 @@ export function createVoiceTurnProcessor(
    * retry cap — counter unification is a separate, explicit decision
    * (#965).
    */
-  const lowConfidenceStreak = new Map<string, number>();
+  const lowConfidenceStreak = createLowSttStreak();
 
   /**
    * U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
@@ -1443,8 +1446,8 @@ export function createVoiceTurnProcessor(
     const answered = await answerConfirmTurnQuestionShared(session, kind, speechResult, {
       untrustedCaller,
       callerId: deps.callerPhoneResolver?.(session) ?? session.callerPhone,
-      // Trusted line only: an S1 caller never gets a record read to them.
-      customerRepo: untrustedCaller ? undefined : deps.customerRepo,
+      // The shared rule reads the record only on a trusted line.
+      customerRepo: deps.customerRepo,
       lookup: confirmTurnLookupPorts(session, tenantId),
     });
     // The lookup classify crossed the session cap: escalation supersedes
@@ -1638,10 +1641,6 @@ export function createVoiceTurnProcessor(
       sessionLanguage(session),
     );
     return sideEffects;
-  }
-
-  function sessionLanguage(session: VoiceSession): SessionLanguage {
-    return session.language === 'es' ? 'es' : 'en';
   }
 
   function expandIntentConfirmTemplate(
@@ -5439,8 +5438,8 @@ export function createVoiceTurnProcessor(
   function runLowSttConfidenceLadder(session: VoiceSession): SideEffect[] {
     // #1601 step 2 — the rules are the shared ladder's; this owns the
     // processor's streak map and the terminal finalize.
-    const { effects, escalated, step } = sharedLowSttLadder(session, lowConfidenceStreak);
-    if (escalated && !session.ended) {
+    const { effects, step } = sharedLowSttLadder(session, lowConfidenceStreak);
+    if (step.escalate && !session.ended) {
       session.ended = true;
       finalizeTerminatedSession(session, effects, LOW_STT_LADDER_TERMINAL_REASON);
     }
@@ -5463,7 +5462,7 @@ export function createVoiceTurnProcessor(
     if (!isLowSttConfidence(confidence)) {
       // High confidence (or no signal at all) clears the streak so a later
       // isolated blip on this session gets its own reprompt budget.
-      lowConfidenceStreak.delete(session.id);
+      clearLowSttStreak(lowConfidenceStreak, session);
       return null;
     }
 
@@ -5763,7 +5762,7 @@ export function createVoiceTurnProcessor(
     // reach this line — same as the Gather loop, where the approval branch
     // returns before the confidence gate.
     if (servesFamilyHere('silence_low_stt_ladder')) {
-      lowConfidenceStreak.delete(session.id);
+      clearLowSttStreak(lowConfidenceStreak, session);
     }
 
     // #1540 §2 (owner decision 2026-10-01) — the state this turn is handled

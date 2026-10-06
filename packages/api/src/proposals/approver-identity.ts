@@ -23,7 +23,8 @@ import type { UserRepository } from '../users/user';
 import { normalizePhone } from '../shared/phone';
 
 export interface ApproverIdentityDeps {
-  settingsRepo: SettingsRepository;
+  /** Only `findByTenant` is read (owner_phone + backupSupervisorUserId). */
+  settingsRepo: Pick<SettingsRepository, 'findByTenant'>;
   /**
    * Resolves the backup supervisor's mobile. Optional — owner_phone still
    * works. Only `findById` is read (#1601 step 2 narrowed the type so the

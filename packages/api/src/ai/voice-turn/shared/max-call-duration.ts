@@ -15,8 +15,8 @@ import type { SideEffect } from '../../agents/customer-calling/types';
 import type { VoiceSession } from '../../agents/customer-calling/voice-session-store';
 import {
   renderTtsText,
+  sessionLanguage,
   MAX_CALL_DURATION_WRAP_UP_COPY,
-  type SessionLanguage,
 } from '../../agents/customer-calling/tts-copy';
 
 /**
@@ -68,9 +68,8 @@ export function maxCallDurationEndEffect(): SideEffect {
 
 /** Wrap-up line (in the session's language) + the end effect — Gather's speak-then-end turn. */
 export function maxCallDurationEffects(session: Pick<VoiceSession, 'language'>): SideEffect[] {
-  const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
   return [
-    { type: 'tts_play', payload: { text: renderTtsText(MAX_CALL_DURATION_WRAP_UP_COPY, {}, lang) } },
+    { type: 'tts_play', payload: { text: renderTtsText(MAX_CALL_DURATION_WRAP_UP_COPY, {}, sessionLanguage(session)) } },
     maxCallDurationEndEffect(),
   ];
 }

@@ -43,7 +43,7 @@ export interface DetectLanguageInput {
  */
 export function isLanguageSupported(
   lang: Language,
-  supportedLanguages?: Language[] | null,
+  supportedLanguages?: readonly Language[] | null,
 ): boolean {
   if (lang === 'en') return true;
   return Array.isArray(supportedLanguages) && supportedLanguages.includes(lang);
