@@ -132,11 +132,16 @@ export async function lookupBalance(
       amount: formatCents(balanceCents),
       count: invoices.length,
     });
+    // #1613 — one open invoice IS the balance: name it.
+    if (invoices.length === 1) summary += ` La factura es ${invoices[0].invoiceNumber}.`;
     if (dueText) summary += ` La fecha de vencimiento más antigua es ${dueText}.`;
   } else {
+    // #1613 — Layer 2 run 37323734649: the judge wanted the one open invoice
+    // named with the balance; with a single invoice the balance is that
+    // invoice, so the reply says which.
     summary =
       invoices.length === 1
-        ? `Your current balance is ${formatCents(balanceCents)}` +
+        ? `Your current balance is ${formatCents(balanceCents)} on invoice ${invoices[0].invoiceNumber}` +
           (dueText ? `, due ${dueText}.` : '.')
         : `Your current balance is ${formatCents(balanceCents)} across ${invoices.length} open invoices` +
           (dueText ? `, with the earliest due ${dueText}.` : '.');

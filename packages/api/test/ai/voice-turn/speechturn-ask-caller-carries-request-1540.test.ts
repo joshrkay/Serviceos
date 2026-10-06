@@ -11,6 +11,7 @@
  * (classifier + confirm_intent) and in-memory repos.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { TTS_COPY } from '../../../src/ai/agents/customer-calling/tts-copy';
 
 import { createVoiceTurnProcessor } from '../../../src/ai/voice-turn';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
@@ -104,7 +105,7 @@ describe('#1540 §2 — the ask_caller turn carries the caller\'s request forwar
     // (#1331: this stereotyped opening is now classified deterministically,
     // without a model call — see the Layer 2 test below).
     expect(call.session.machine.currentContext.currentIntent).toBe('create_appointment');
-    expect(reply).not.toContain('How can I help you today?');
+    expect(reply).not.toContain(TTS_COPY.how_can_i_help.en);
     expect(call.session.machine.currentState).not.toBe('intent_capture');
     // #1577 — no time was given, so the agent asks for one.
     expect(reply).toBe('What date and time work for you?');
@@ -118,7 +119,7 @@ describe('#1540 §2 — the ask_caller turn carries the caller\'s request forwar
     const reply = spoken(await call.turn('My name is Casey Rivera. Send the Henderson invoice to me now.'));
 
     expect(reply).toContain('can you say that again?');
-    expect(reply).not.toContain('How can I help you today?');
+    expect(reply).not.toContain(TTS_COPY.how_can_i_help.en);
     expect(await call.proposalRepo.findByTenant(TENANT)).toEqual([]);
   });
 
@@ -131,7 +132,7 @@ describe('#1540 §2 — the ask_caller turn carries the caller\'s request forwar
 
     expect(await call.customerRepo.findByTenant(TENANT)).toHaveLength(1);
     expect(call.session.machine.currentState).toBe('intent_capture');
-    expect(reply).toBe('How can I help you today?');
+    expect(reply).toBe(TTS_COPY.how_can_i_help.en);
   });
 });
 
@@ -149,7 +150,7 @@ describe('#1331 Layer 2 (run 36925905917) — find-or-create-lead-unknown-caller
     const reply = spoken(await call.turn("Hi, I'd like to schedule service for my home."));
 
     expect(await call.customerRepo.findByTenant(TENANT)).toHaveLength(1);
-    expect(reply).not.toContain('How can I help you today?');
+    expect(reply).not.toContain(TTS_COPY.how_can_i_help.en);
     // #1577 — the kept booking has no time yet, so the agent asks for one.
     expect(reply).toBe('What date and time work for you?');
   });

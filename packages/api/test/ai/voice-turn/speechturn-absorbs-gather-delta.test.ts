@@ -41,6 +41,7 @@ import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { COVERAGE_TABLE } from '../../../src/ai/voice-turn/coverage-table';
 import {
   renderTtsText,
+  TTS_COPY,
   LANGUAGE_SWITCH_ACK,
   LANGUAGE_UNSUPPORTED_LINE,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
@@ -190,7 +191,7 @@ describe('PR-B lookup — gated by the (lookup, surface) cell', () => {
     const answers = ttsWithSource(fx, 'lookup_skill');
     expect(answers).toHaveLength(1);
     expect(String((answers[0]!.payload as { text?: string }).text)).toContain('copper elbows');
-    expect(ttsTexts(fx)).toContain('Anything else I can help you with?');
+    expect(ttsTexts(fx)).toContain(TTS_COPY.anything_else.en);
     // Out-of-FSM: the state is untouched, ready for the next request.
     expect(h.session.machine.currentState).toBe('intent_capture');
   });
@@ -220,7 +221,7 @@ describe('PR-B lookup — gated by the (lookup, surface) cell', () => {
     const answers = ttsWithSource(fx, 'lookup_skill');
     expect(answers).toHaveLength(1);
     expect(String((answers[0]!.payload as { text?: string }).text)).toContain('copper elbows');
-    expect(ttsTexts(fx)).toContain('Anything else I can help you with?');
+    expect(ttsTexts(fx)).toContain(TTS_COPY.anything_else.en);
     expect(h.events.some((e) => e.type === 'lookup_executed')).toBe(true);
     // Out-of-FSM: no drafting funnel, no proposal / clarification card — the
     // caller can ask the next question.

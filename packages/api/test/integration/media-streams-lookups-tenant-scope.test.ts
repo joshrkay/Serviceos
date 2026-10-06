@@ -18,6 +18,7 @@
  * in another tenant who shares their phone number.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { TTS_COPY } from '../../src/ai/agents/customer-calling/tts-copy';
 import { Pool } from 'pg';
 import crypto from 'node:crypto';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
@@ -224,7 +225,7 @@ describe('#1395 — caller lookups on the media-streams transport (real Postgres
     expect(line).toContain('Miller water heater replacement');
     expect(line).not.toContain('Neighbour sprinkler repair');
     expect(line).not.toContain('Foreign tenant furnace tune-up');
-    expect(line).toContain('Anything else I can help you with?');
+    expect(line).toContain(TTS_COPY.anything_else.en);
     // Out-of-FSM: the caller can ask the next question.
     expect(state).toBe('intent_capture');
   });

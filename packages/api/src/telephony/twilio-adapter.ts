@@ -110,6 +110,8 @@ import { askCallerUtteranceCarriesRequest } from '../ai/voice-turn/ask-caller-re
 import { detectPromptInjection } from '../ai/agents/customer-calling/untrusted-content';
 import {
   renderTtsText,
+  ttsCopy,
+  TTS_COPY,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   MAX_CALL_DURATION_WRAP_UP_COPY,
@@ -797,7 +799,7 @@ export function injectSafetySayLines(
         opts.voiceOverride ?? (lang === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
       // Localize the safety script by session language — same selector the
       // Polly voice switch above uses. renderTtsText resolves the FSM's
-      // fixed English sentences against SENTENCE_CATALOG_ES (exact match;
+      // fixed English sentences back to their TTS_COPY entry (exact match;
       // the 911 + transfer lines are catalogued), and passes unknown text
       // through unchanged, so an 'en' session is a no-op.
       const text = renderTtsText(String(fx.payload.text), fx.payload, lang);
@@ -1627,7 +1629,12 @@ export class TwilioGatherAdapter {
       // orchestrator: a canned greeting when the WS `start` referenced a
       // CallSid the store no longer knows about.
       return [
-        { type: 'tts_play', payload: { text: `Thank you for calling ${this.deps.businessName}. How can I help you today?` } },
+        {
+          type: 'tts_play',
+          payload: {
+            text: ttsCopy('missing_session_greeting', 'en', { business: this.deps.businessName }),
+          },
+        },
       ];
     }
     // WS16b — the stream transport's `from` was captured at webhook time into
@@ -2095,7 +2102,7 @@ export class TwilioGatherAdapter {
     if (!session) {
       logger.warn('processCallerUtterance: unknown session', { sessionId: opts.sessionId });
       return [
-        { type: 'tts_play', payload: { text: "I'm sorry, your session has ended. Please call again." } },
+        { type: 'tts_play', payload: { text: TTS_COPY.session_ended_call_again.en } },
         { type: 'end_session', payload: { reason: 'session_not_found' } },
       ];
     }
@@ -2348,7 +2355,7 @@ export class TwilioGatherAdapter {
       logger.warn('handleGather: unknown session', { sessionId: opts.sessionId });
       return buildTwiML(
         [
-          { type: 'tts_play', payload: { text: "I'm sorry, your session has ended. Please call again." } },
+          { type: 'tts_play', payload: { text: TTS_COPY.session_ended_call_again.en } },
           { type: 'end_session', payload: { reason: 'session_not_found' } },
         ],
         { gatherActionUrl: this.gatherUrl(opts.sessionId) },
@@ -2797,7 +2804,7 @@ export class TwilioGatherAdapter {
         });
         sideEffectsAll.push({
           type: 'tts_play',
-          payload: { text: 'Anything else I can help you with?' },
+          payload: { text: TTS_COPY.anything_else.en },
         });
         await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
@@ -2824,7 +2831,7 @@ export class TwilioGatherAdapter {
         });
         sideEffectsAll.push({
           type: 'tts_play',
-          payload: { text: 'Anything else I can help you with?' },
+          payload: { text: TTS_COPY.anything_else.en },
         });
         await this.processor.executeSideEffects(session, sideEffectsAll, opts.tenantId);
         return this.finalizeTwiml(session, sideEffectsAll, opts.sessionId);
@@ -3410,7 +3417,7 @@ export class TwilioGatherAdapter {
       sideEffectsAll.push({
         type: 'tts_play',
         payload: {
-          text: "Of course — could I get your name to get you set up?",
+          text: TTS_COPY.signup_ask_name.en,
         },
       });
       return true;
@@ -3421,7 +3428,7 @@ export class TwilioGatherAdapter {
         type: 'tts_play',
         payload: {
           text:
-            "I'm sorry, I couldn't see your number. What's the best phone number to reach you on?",
+            TTS_COPY.signup_ask_callback.en,
         },
       });
       return true;
@@ -3489,7 +3496,7 @@ export class TwilioGatherAdapter {
         type: 'tts_play',
         payload: {
           text:
-            "I'm having trouble saving that. Let me get a person to help you finish signing up.",
+            TTS_COPY.signup_persist_failed.en,
         },
       });
       return true;

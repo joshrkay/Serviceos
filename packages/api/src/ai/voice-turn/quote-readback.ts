@@ -31,22 +31,22 @@
  */
 import { formatCents } from '../skills/spoken-format';
 import { calculateLineItemTotal } from '../../shared/billing-engine';
+import { TTS_COPY, ttsCopy } from '../agents/customer-calling/tts-copy';
 
 /**
  * The pre-WS5 fixed confirmation line, kept verbatim so NON-estimate
  * proposals (and estimates with no line items) speak exactly what they did
- * before. Sourced from the `proposal_draft` transition.
+ * before. Sourced from the `proposal_draft` transition. Text lives in
+ * tts-copy.ts (#1601); this alias keeps the existing imports working.
  */
-export const GENERIC_PROPOSAL_CONFIRMATION =
-  "Great, I've got that taken care of. You'll receive a confirmation shortly. Is there anything else I can help you with?";
+export const GENERIC_PROPOSAL_CONFIRMATION = TTS_COPY.generic_proposal_confirmation.en;
 
 /**
  * No-number acknowledgment spoken whenever ANY line is uncatalogued /
  * ambiguous, or the catalog could not be consulted. Defers pricing to the
  * operator's written quote — deliberately carries no dollar figure.
  */
-export const UNCATALOGUED_QUOTE_READBACK =
-  "I've got the details — the owner will confirm pricing and you'll get the full quote by text.";
+export const UNCATALOGUED_QUOTE_READBACK = TTS_COPY.uncatalogued_quote_readback.en;
 
 /** One grounded line item, as produced by `applyCatalogPricing`. */
 export interface QuoteReadbackLine {
@@ -163,7 +163,13 @@ export function buildQuoteReadback(input: QuoteReadbackInput): string {
 
   if (lines.length === 1) {
     const li = lines[0]!;
-    return `For the ${li.description}, that's typically ${formatCents(lineTotalCents(li))}. I'll send the full quote to confirm.`;
+    // The builder has no session language yet, so it speaks English; the
+    // Spanish twin is catalogued for when it does. `String()` keeps the
+    // pre-#1601 rendering of a missing description byte-identical.
+    return ttsCopy('quote_readback_single', 'en', {
+      description: String(li.description),
+      price: formatCents(lineTotalCents(li)),
+    });
   }
 
   const total = quoteReadbackTotalCents(lines);
@@ -173,9 +179,9 @@ export function buildQuoteReadback(input: QuoteReadbackInput): string {
   // quote follows the spoken number (trust + the close-the-sale flow).
   if (lines.length <= PER_LINE_READBACK_MAX_LINES) {
     const sentence = capitalizeFirst(joinPhrases(lines.map(linePhrase)));
-    return `${sentence} — that's ${formatCents(total)} all together. I'll send the full quote to confirm.`;
+    return ttsCopy('quote_readback_lines_total', 'en', { lines: sentence, total: formatCents(total) });
   }
 
   // More than N lines: a per-line recital would overwhelm — total only.
-  return `That usually comes to about ${formatCents(total)} all together. I'll send the full quote to confirm.`;
+  return ttsCopy('quote_readback_total_only', 'en', { total: formatCents(total) });
 }
