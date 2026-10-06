@@ -82,6 +82,7 @@ import type {
 import type { VoiceSession, VoiceSessionStore } from './voice-session-store';
 import type { VoiceSessionRepository } from '../../../voice/voice-session';
 import type { CallOutcome } from '../../../voice/voice-service';
+import { lastCallerLine } from '../../../voice/last-caller-line';
 import { deriveCallOutcome } from './outcome-mapper';
 import {
   appointmentWindowFrom,
@@ -483,22 +484,6 @@ function classifierErrorCode(error: unknown): string | undefined {
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
-}
-
-/**
- * A48 fallback — `entities.brandVoiceInstruction` is populated verbatim by
- * the classifier for every `update_brand_voice` turn (see
- * ai/orchestration/intent-taxonomy-blocks.ts / intent-classifier.ts), so
- * this should not normally be reached; kept as defense-in-depth (mirrors
- * `UpdateBrandVoiceTaskHandler`'s own `context.message` fallback) rather
- * than assuming the field is always present.
- */
-function lastCallerTranscriptLine(session: VoiceSession): string | undefined {
-  for (let i = session.transcript.length - 1; i >= 0; i -= 1) {
-    const line = session.transcript[i];
-    if (line.startsWith('caller: ')) return nonEmptyString(line.slice('caller: '.length));
-  }
-  return undefined;
 }
 
 function classifierFailureFromError(
@@ -2806,7 +2791,9 @@ export class InAppVoiceAdapter {
       let built: Awaited<ReturnType<typeof buildVoiceProposalPayload>>;
       if (proposalType === 'update_brand_voice') {
         const spoken =
-          nonEmptyString(entities.brandVoiceInstruction) ?? lastCallerTranscriptLine(session) ?? '';
+          // A48 fallback: the classifier fills brandVoiceInstruction verbatim; the
+          // caller's last line is defense-in-depth.
+          nonEmptyString(entities.brandVoiceInstruction) ?? lastCallerLine(session.transcript) ?? '';
         brandVoiceFields = await extractBrandVoiceProposalFields(this.deps.gateway, session.tenantId, spoken);
         built = {
           payload: brandVoiceFields.payload,

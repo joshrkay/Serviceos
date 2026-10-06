@@ -147,6 +147,7 @@ describe('#1616 — identity hand-offs name the identity problem', () => {
     const result = buildEscalationSummary(
       baseCtx({
         caller: { phone: '+15125550142', claimedName: 'Jane Smith' },
+        identityCase: 'claims',
         intent: { type: 'unknown', entities: {}, confidence: 1 },
         reason: 'identity_unverified',
       }),
@@ -168,7 +169,7 @@ describe('#1616 — identity hand-offs name the identity problem', () => {
     const result = buildEscalationSummary(
       baseCtx({
         caller: { name: 'Sarah Chen', phone: '+15125550142', customerId: 'cust-1' },
-        customer: { isArchived: true },
+        identityCase: 'archived',
         intent: { type: 'reschedule_appointment', entities: {}, confidence: 1 },
         reason: 'identity_unverified',
       }),
@@ -182,6 +183,7 @@ describe('#1616 — identity hand-offs name the identity problem', () => {
     const result = buildEscalationSummary(
       baseCtx({
         caller: { phone: '+15125550142', claimedName: 'Jane Smith' },
+        identityCase: 'claims',
         intent: { type: 'unknown', entities: {}, confidence: 1 },
         reason: 'identity_unverified',
       }),
@@ -199,6 +201,7 @@ describe('#1616 — identity hand-offs name the identity problem', () => {
       baseCtx({
         shopName: 'Johnson Brothers Plumbing & Heating',
         caller: { phone: '+15125550142', claimedName: 'Mary Ann Smith' },
+        identityCase: 'claims',
         intent: { type: 'cancel_appointment', entities: {}, confidence: 1 },
         reason: 'identity_unverified',
       }),
@@ -212,6 +215,7 @@ describe('#1616 — identity hand-offs name the identity problem', () => {
     const result = buildEscalationSummary(
       baseCtx({
         caller: { phone: '+15125550142', claimedName: 'Jane Smith' },
+        identityCase: 'claims',
         intent: { type: 'unknown', entities: {}, confidence: 1 },
         reason: 'identity_unverified',
         language: 'es',
