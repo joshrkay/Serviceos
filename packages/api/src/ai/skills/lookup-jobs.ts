@@ -45,9 +45,14 @@ export interface LookupJobsDeps {
   lookupEvents?: LookupEventService;
 }
 
+/**
+ * The status word the record has, spoken. #1613 — `new` used to be voiced
+ * "just opened"; Layer 2 run 37323734649's judge heard that as a status the
+ * record does not have. Only the underscore is spoken away.
+ */
 function humanizeStatus(s: Job['status']): string {
   switch (s) {
-    case 'new':         return 'just opened';
+    case 'new':         return 'new';
     case 'scheduled':   return 'scheduled';
     case 'in_progress': return 'in progress';
     case 'completed':   return 'completed';

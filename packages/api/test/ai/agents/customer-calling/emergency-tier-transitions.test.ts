@@ -18,8 +18,7 @@ import type {
   CallingAgentState,
   SideEffect,
 } from '../../../../src/ai/agents/customer-calling/types';
-import { EMERGENCY_SAFETY_LINE } from '../../../../src/ai/agents/customer-calling/emergency-detector';
-import { SENTENCE_CATALOG_ES } from '../../../../src/ai/agents/customer-calling/tts-copy';
+import { ttsCopy } from '../../../../src/ai/agents/customer-calling/tts-copy';
 
 const baseContext: CallingAgentContext = {
   sessionId: 'session-e1',
@@ -101,7 +100,7 @@ describe('ANS-001 E1 — life safety never books, from any state', () => {
 });
 
 describe('#1220 review — a Spanish E1 caller hears the catalogued Spanish 911 line before the E1 script', () => {
-  const ES_911_LINE = SENTENCE_CATALOG_ES[EMERGENCY_SAFETY_LINE];
+  const ES_911_LINE = ttsCopy('emergency_safety_line', 'es');
   const ttsPayloads = (fx: SideEffect[]) =>
     fx.filter((f) => f.type === 'tts_play').map((f) => f.payload as Record<string, unknown>);
 

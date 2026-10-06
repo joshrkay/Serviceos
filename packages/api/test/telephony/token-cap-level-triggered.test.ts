@@ -20,6 +20,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
+import { TTS_COPY } from '../../src/ai/agents/customer-calling/tts-copy';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { gradeVulnerability } from '../../src/ai/agents/customer-calling/vulnerability-grader';
 import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
@@ -47,7 +48,7 @@ const DRAFT_ESTIMATE = JSON.stringify({
   extractedEntities: { customerName: 'Acme' },
 });
 const CONFIRM_YES = JSON.stringify({ answer: 'yes', reasoning: 'caller said yes' });
-const CAP_WRAP_UP = "I'm connecting you with a team member who can assist you further.";
+const CAP_WRAP_UP = TTS_COPY.escalation_transfer.en;
 
 function makeGatewayScript(steps: Array<{ content: string; output: number }>): LLMGateway {
   let i = 0;
@@ -350,8 +351,7 @@ const EMERGENCY = JSON.stringify({
   reasoning: 'active scalding-water release, needs someone now',
   extractedEntities: {},
 });
-const EMERGENCY_HANDOFF_LINE =
-  "This sounds like an emergency. I'm connecting you with our on-call dispatcher immediately.";
+const EMERGENCY_HANDOFF_LINE = TTS_COPY.emergency_dispatch_transfer.en;
 const xmlText = (s: string) => s.replace(/'/g, '&apos;');
 
 const emergencyScript = () =>

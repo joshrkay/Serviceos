@@ -8,6 +8,7 @@
  * in-memory repos (the ask-caller-gather.test.ts harness).
  */
 import { describe, it, expect, vi } from 'vitest';
+import { TTS_COPY } from '../../src/ai/agents/customer-calling/tts-copy';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -68,7 +69,7 @@ describe('#1540 §2 — Gather: the ask_caller turn carries the request forward'
     expect(session.machine.currentState).toBe('intent_confirm');
     // #1577 — the held booking has no time yet: the agent asks for one.
     expect(twiml).toContain('What date and time work for you?');
-    expect(twiml).not.toContain('How can I help you today?');
+    expect(twiml).not.toContain(TTS_COPY.how_can_i_help.en);
   });
 });
 
@@ -103,7 +104,7 @@ describe('#1540 §2 — S1 intact: an off-surface request on the carry-forward t
     expect(auditRepo.getAll().filter((e) => e.eventType === 'voice.intent_off_surface')).toHaveLength(1);
     expect(await proposalRepo.findByTenant(TENANT)).toEqual([]);
     expect(twiml).toContain('can you say that again?');
-    expect(twiml).not.toContain('How can I help you today?');
+    expect(twiml).not.toContain(TTS_COPY.how_can_i_help.en);
   });
 });
 

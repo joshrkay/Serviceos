@@ -367,3 +367,27 @@ describe('VQ-022 — gradeDispositionLlm', () => {
     expect(maxInFlight).toBeGreaterThan(1); // sanity: parallelism IS happening
   });
 });
+
+// #1613 — Layer 2 run 37323734649: with the call date in hand (Friday, May 1,
+// 2026) the judge still failed "Friday, June 12th" three times as "should be
+// June 12, 2026, not June 12, 2025" and "May 15" as "not a valid due date for
+// the current year" — the agent never spoke a year; the judge supplied one.
+// The prompt says so, and says how a year-less date is to be read.
+describe('#1613 — the criterion-12 judge is told how to read a date the agent says without a year', () => {
+  it('states it in the system prompt and pins the call date beside the agent line', async () => {
+    resetJudgeCache();
+    const { gateway, provider } = createMockLLMGateway(PASS_RESPONSE);
+    const observation = makeObservation({
+      events: [{ type: 'speech_outbound', transcript: 'Your next appointment is Friday, June 12th at 9 a.m.', turnIndex: 0, ts: 1 }],
+    });
+
+    await gradeDispositionLlm({ observation, script: makeScript(), gateway });
+
+    const [call] = provider.getCalls();
+    const system = call.messages.find((m) => m.role === 'system')!.content;
+    const user = call.messages.find((m) => m.role === 'user')!.content;
+    expect(system).toMatch(/says a year only when a date falls outside the call's year/i);
+    expect(system).toMatch(/do not infer a year/i);
+    expect(user).toMatch(/Call date: Friday, May 1, 2026 \(a date the agent says without a year is read against this date\)/);
+  });
+});

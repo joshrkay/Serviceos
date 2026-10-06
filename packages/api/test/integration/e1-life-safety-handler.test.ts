@@ -40,6 +40,7 @@
  * call is not dragged onto the E1 path.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { TTS_COPY } from '../../src/ai/agents/customer-calling/tts-copy';
 import { Pool } from 'pg';
 import crypto from 'node:crypto';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
@@ -314,7 +315,7 @@ describe('#1014 row 2.5 — E1 life safety at the real handler (real Postgres)',
     const t0 = performance.now();
     const identifyTwiml = await turn(c, 'Casey Rivera, 12 Oak Street');
     expect(performance.now() - t0).toBeLessThan(2_000);
-    expect(identifyTwiml).toContain('How can I help you today?');
+    expect(identifyTwiml).toContain(TTS_COPY.how_can_i_help.en);
 
     const twiml = await turn(c, EN_GAS);
 

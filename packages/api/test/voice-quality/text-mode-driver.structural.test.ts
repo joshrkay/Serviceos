@@ -23,33 +23,14 @@
 import { describe, it, expect } from 'vitest';
 import path from 'path';
 import { readFileSync } from 'fs';
+// #1601 — the scanner is shared with spoken-copy.structural.test.ts, which
+// extends this guard to the voice files whose copy lives in tts-copy.ts.
+import { stripComments, stringLiterals, isSpokenCopy } from './spoken-copy-scan';
 
 const DRIVER_PATH = path.resolve(
   __dirname,
   '../../src/ai/voice-quality/text-mode-driver.ts',
 );
-
-/** Strip block + line comments so documentation prose is not read as copy. */
-function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:\\])\/\/[^\n]*/g, '$1');
-}
-
-/** Every string literal (single, double, template) in comment-free source. */
-function stringLiterals(code: string): string[] {
-  const out: string[] = [];
-  const re = /'((?:[^'\\\n]|\\.)*)'|"((?:[^"\\\n]|\\.)*)"|`((?:[^`\\]|\\.)*)`/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(code)) !== null) {
-    out.push(m[1] ?? m[2] ?? m[3] ?? '');
-  }
-  return out;
-}
-
-/** A caller-facing sentence: three or more words and sentence punctuation. */
-export function isSpokenCopy(literal: string): boolean {
-  const words = literal.trim().split(/\s+/).filter((w) => w.length > 0);
-  return words.length >= 3 && /[.?!—¿¡]/.test(literal);
-}
 
 export interface DriverDriftReport {
   escalateBranches: number;
