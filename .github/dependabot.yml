@@ -35,6 +35,10 @@ updates:
       # migration guide with a payment smoke test, not on a weekly cadence.
       - dependency-name: '@stripe/react-stripe-js'
         update-types: ['version-update:semver-major']
+      # @stripe/stripe-js majors must move together with react-stripe-js (peer
+      # range) — paired upgrade tracked separately (#1638 closed).
+      - dependency-name: '@stripe/stripe-js'
+        update-types: ['version-update:semver-major']
       # ESLint environment table. Majors add and remove environment keys, so a
       # key our eslint.config still references disappearing is a repo-wide lint
       # failure — real breakage for no runtime benefit.
