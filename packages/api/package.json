@@ -51,7 +51,7 @@
   },
   "dependencies": {
     "@ai-service-os/shared": "*",
-    "@sentry/node": "^10.75.0",
+    "@sentry/node": "^11.4.0",
     "chrono-node": "^2.10.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
