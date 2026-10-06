@@ -1,0 +1,194 @@
+{
+  "id": "lookup-next-job-technician-line",
+  "bucket": "01-happy-lookups",
+  "callerId": "+15555551642",
+  "callerIdBlocked": false,
+  "fixtures": {
+    "tenant": {
+      "id": "t_01_lookup_next_job_tech",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_01_next_job_keller",
+        "tenantId": "t_01_lookup_next_job_tech",
+        "firstName": "Dana",
+        "lastName": "Keller",
+        "displayName": "Dana Keller",
+        "companyName": null,
+        "primaryPhone": "+15555551643",
+        "secondaryPhone": null,
+        "email": "dana.keller@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      },
+      {
+        "id": "cust_01_next_job_patel2",
+        "tenantId": "t_01_lookup_next_job_tech",
+        "firstName": "Priya",
+        "lastName": "Patel",
+        "displayName": "Priya Patel",
+        "companyName": null,
+        "primaryPhone": "+15555551644",
+        "secondaryPhone": null,
+        "email": "priya.patel@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "users": [
+      {
+        "id": "user_01_next_job_mike",
+        "tenantId": "t_01_lookup_next_job_tech",
+        "email": "mike.diaz@testhvac.example",
+        "role": "technician",
+        "firstName": "Mike",
+        "lastName": "Diaz",
+        "canFieldServe": true,
+        "mobileNumber": "+15555551642"
+      },
+      {
+        "id": "user_01_next_job_carlos2",
+        "tenantId": "t_01_lookup_next_job_tech",
+        "email": "carlos.ruiz@testhvac.example",
+        "role": "technician",
+        "firstName": "Carlos",
+        "lastName": "Ruiz",
+        "canFieldServe": true
+      }
+    ],
+    "locations": [
+      {
+        "id": "loc_01_next_job_keller",
+        "tenantId": "t_01_lookup_next_job_tech",
+        "customerId": "cust_01_next_job_keller",
+        "street1": "4120 East Oakhurst Boulevard",
+        "city": "Yonkers",
+        "state": "NY",
+        "postalCode": "10701",
+        "country": "US",
+        "accessNotes": "Gate code 4421, dog in the yard",
+        "isPrimary": true,
+        "addressType": "service",
+        "isArchived": false,
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      },
+      {
+        "id": "loc_01_next_job_patel2",
+        "tenantId": "t_01_lookup_next_job_tech",
+        "customerId": "cust_01_next_job_patel2",
+        "street1": "88 Mill Lane",
+        "city": "Tarrytown",
+        "state": "NY",
+        "postalCode": "10591",
+        "country": "US",
+        "isPrimary": true,
+        "addressType": "service",
+        "isArchived": false,
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "jobs": [
+      {
+        "id": "e0000000-0000-4000-8000-000000001642",
+        "tenantId": "t_01_lookup_next_job_tech",
+        "customerId": "cust_01_next_job_keller",
+        "locationId": "loc_01_next_job_keller",
+        "jobNumber": "JOB-1642",
+        "summary": "Water heater replacement",
+        "status": "scheduled",
+        "priority": "normal",
+        "assignedTechnicianId": "user_01_next_job_mike",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-20T10:00:00.000Z",
+        "updatedAt": "2026-04-28T10:00:00.000Z"
+      },
+      {
+        "id": "e0000000-0000-4000-8000-000000001643",
+        "tenantId": "t_01_lookup_next_job_tech",
+        "customerId": "cust_01_next_job_patel2",
+        "locationId": "loc_01_next_job_patel2",
+        "jobNumber": "JOB-1643",
+        "summary": "AC tune-up",
+        "status": "scheduled",
+        "priority": "normal",
+        "assignedTechnicianId": "user_01_next_job_carlos2",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-20T10:00:00.000Z",
+        "updatedAt": "2026-04-28T10:00:00.000Z"
+      }
+    ],
+    "appointments": [
+      {
+        "id": "appt_01_next_job_patel2",
+        "tenantId": "t_01_lookup_next_job_tech",
+        "jobId": "e0000000-0000-4000-8000-000000001643",
+        "scheduledStart": "2026-05-01T16:00:00.000Z",
+        "scheduledEnd": "2026-05-01T17:00:00.000Z",
+        "timezone": "America/Los_Angeles",
+        "status": "scheduled",
+        "holdPendingApproval": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-20T10:00:00.000Z",
+        "updatedAt": "2026-04-28T10:00:00.000Z"
+      },
+      {
+        "id": "appt_01_next_job_keller",
+        "tenantId": "t_01_lookup_next_job_tech",
+        "jobId": "e0000000-0000-4000-8000-000000001642",
+        "scheduledStart": "2026-05-01T21:00:00.000Z",
+        "scheduledEnd": "2026-05-01T23:00:00.000Z",
+        "timezone": "America/Los_Angeles",
+        "status": "scheduled",
+        "holdPendingApproval": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-20T10:00:00.000Z",
+        "updatedAt": "2026-04-28T10:00:00.000Z"
+      }
+    ],
+    "notes": [
+      {
+        "id": "note_01_next_job_keller",
+        "tenantId": "t_01_lookup_next_job_tech",
+        "entityType": "job",
+        "entityId": "e0000000-0000-4000-8000-000000001642",
+        "content": "Customer prefers a text before arrival.",
+        "authorId": "user_seed",
+        "authorRole": "owner",
+        "isPinned": false,
+        "createdAt": "2026-04-28T10:00:00.000Z",
+        "updatedAt": "2026-04-28T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "What's my next job?",
+      "expected": {
+        "intent": "lookup_next_job",
+        "spokenAnswerMatches": "Your next job is today at 2 PM — Dana Keller, Water heater replacement, at 4120 East Oakhurst Boulevard, Yonkers. Access notes: Gate code 4421, dog in the yard. Latest note: Customer prefers a text before arrival.",
+        "spokenIncludes": ["4120 East Oakhurst Boulevard", "Dana Keller", "Gate code 4421", "Customer prefers a text before arrival."],
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": false
+}

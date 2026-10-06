@@ -36,6 +36,7 @@ import {
 import { InMemoryMaterialItemRepository } from '../../src/materials/material-item';
 import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import { InMemoryUserRepository } from '../../src/users/user';
+import { InMemoryLocationRepository } from '../../src/locations/location';
 import type { Appointment } from '../../src/appointments/appointment';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import {
@@ -3938,6 +3939,63 @@ describe('voice-action-router U3 lookup answers (recorded-memo path)', () => {
         expect(rec?.answer?.result).toBe('found');
         expect(rec?.answer?.summary).toContain('Carlos Ruiz');
         expect(rec?.answer?.summary).not.toContain('Mike');
+      });
+    });
+
+    // #1604 — lookup_next_job is self-scoped exactly like lookup_my_day: the
+    // memo's CREATOR is the speaker, resolved for the skill even though the
+    // intent carries no permission entry. Without that resolution the shared
+    // dispatch fails the turn (never an unscoped answer).
+    describe('lookup_next_job (#1604)', () => {
+      const NOW = new Date('2026-06-11T11:00:00.000Z'); // 07:00 New York
+      const JOB_MINE = 'c0000000-0000-4000-8000-000000001604';
+      const JOB_THEIRS = 'c0000000-0000-4000-8000-000000001605';
+
+      it("a technician's own recorded memo hears THEIR next visit in full — address included, coworker's job never", async () => {
+        const proposalRepo = new InMemoryProposalRepository();
+        const voiceRepo = seededVoiceRepo('user-tech');
+        const gateway = gatewayReturning([classify('lookup_next_job')]);
+        const jobRepo = new InMemoryJobRepository();
+        await jobRepo.create(makeJob({ id: JOB_MINE, customerId: 'cust-mine', locationId: 'loc-mine', assignedTechnicianId: 'user-tech', summary: 'My AC job' }));
+        await jobRepo.create(makeJob({ id: JOB_THEIRS, customerId: 'cust-theirs', locationId: 'loc-theirs', assignedTechnicianId: 'tech-carlos', summary: "Carlos's job" }));
+        const appointmentRepo = new InMemoryAppointmentRepository();
+        // Carlos's visit is EARLIER — the business's next, but not mine.
+        await appointmentRepo.create(makeAppointment({ id: 'appt-theirs', jobId: JOB_THEIRS, scheduledStart: new Date('2026-06-11T13:00:00.000Z'), scheduledEnd: new Date('2026-06-11T14:00:00.000Z') }));
+        await appointmentRepo.create(makeAppointment({ id: 'appt-mine', jobId: JOB_MINE, scheduledStart: new Date('2026-06-11T18:00:00.000Z'), scheduledEnd: new Date('2026-06-11T20:00:00.000Z') }));
+        const customerRepo = new InMemoryCustomerRepository();
+        await customerRepo.create({ id: 'cust-mine', tenantId: TENANT, firstName: 'Dana', lastName: 'Keller', displayName: 'Dana Keller', preferredChannel: 'phone', smsConsent: false, isArchived: false, createdBy: 'user-owner', createdAt: NOW, updatedAt: NOW } as never);
+        const locationRepo = new InMemoryLocationRepository();
+        await locationRepo.create({ id: 'loc-mine', tenantId: TENANT, customerId: 'cust-mine', street1: '4120 East Oakhurst Boulevard', city: 'Yonkers', state: 'NY', postalCode: '10701', country: 'US', accessNotes: 'Gate code 4421', isPrimary: true, addressType: 'service', isArchived: false, createdAt: NOW, updatedAt: NOW });
+        const userRepo = await seededUserRepo([
+          { id: 'user-tech', firstName: 'Me', lastName: 'Technician' },
+          { id: 'tech-carlos', firstName: 'Carlos', lastName: 'Ruiz' },
+        ]);
+
+        const worker = createVoiceActionRouterWorker({
+          gateway,
+          proposalRepo,
+          voiceRepo,
+          appointmentRepo,
+          jobRepo,
+          customerRepo,
+          userRepo,
+          now: () => NOW,
+          // No resolveMemberRole wired — this intent carries no permission gate.
+          lookupAnswers: { locationRepo },
+        });
+
+        await worker.handle(
+          msg({ tenantId: TENANT, userId: 'system', transcript: 'read me the next job', recordingId: RECORDING_ID }),
+          silentLogger(),
+        );
+
+        const rec = await voiceRepo.findById(TENANT, RECORDING_ID);
+        expect(rec?.answer?.result).toBe('found');
+        expect(rec?.answer?.summary).toBe(
+          'Your next job is today at 2 PM — Dana Keller, My AC job, at 4120 East Oakhurst Boulevard, Yonkers. Access notes: Gate code 4421.',
+        );
+        expect(rec?.answer?.summary).not.toContain("Carlos's job");
+        expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
       });
     });
 

@@ -23,6 +23,9 @@ export type EscalationReason =
    */
   | 'identity_unverified';
 
+/** #1630 — which identity problem an `identity_unverified` hand-off names. */
+export type IdentityCase = 'archived' | 'claims' | 'unverified';
+
 export interface TranscriptTurn {
   role: 'caller' | 'ai';
   text: string;
@@ -52,12 +55,6 @@ export interface EscalationContext {
     memberTier?: string;
     /** Free-form CRM notes (e.g. "prefers mornings") — panel only. */
     communicationNotes?: string;
-    /**
-     * #1616 — the caller's record is archived (#1587: the account is closed,
-     * so the AI hands the call off). Names the identity problem for an
-     * `identity_unverified` hand-off.
-     */
-    isArchived?: boolean;
   };
   intent: {
     type: string;
@@ -65,13 +62,19 @@ export interface EscalationContext {
     confidence: number;
   };
   reason: EscalationReason;
+  /**
+   * #1630 — the identity problem, threaded from the FSM's identity
+   * sub-reason (customer_archived / claims_existing_customer /
+   * identify_caller_threw). Only read for `identity_unverified`; absent means
+   * unverified.
+   */
+  identityCase?: IdentityCase;
   /** Free-form detail: matched keyword, sentiment score, etc. */
   reasonDetail?: string;
   /**
    * #1616 — language of the dispatcher-facing identity copy (EN + ES).
    * Defaults to 'en'. This is the DISPATCHER's language, not the caller's:
-   * no tenant setting carries it yet, so every production caller leaves it
-   * unset. The rest of the summary (frame, intent, next action) is EN-only.
+   * the voice processor passes the tenant's `default_language` (#1630). The rest of the summary (frame, intent, next action) is EN-only.
    */
   language?: Language;
   /** Last 4-6 turns before escalation fires. Caller-first ordering. */
@@ -147,14 +150,13 @@ const identityCopy = makeTranslator({
 type IdentityForm = 'sentence' | 'whisper' | 'sms';
 
 /**
- * Which identity problem to name for an `identity_unverified` hand-off. An
- * archived record outranks a claimed name: a record bound to this line is
- * known, a claim is not.
+ * Which identity problem to name for an `identity_unverified` hand-off: the
+ * FSM's sub-reason. A claim needs the name that was claimed; without one the
+ * honest sentence is the generic one.
  */
-function identityCase(ctx: EscalationContext): 'archived' | 'claims' | 'unverified' {
-  if (ctx.customer?.isArchived) return 'archived';
-  if (ctx.caller.claimedName) return 'claims';
-  return 'unverified';
+function identityCase(ctx: EscalationContext): IdentityCase {
+  if (ctx.identityCase === 'claims' && !ctx.caller.claimedName) return 'unverified';
+  return ctx.identityCase ?? 'unverified';
 }
 
 function identityReason(ctx: EscalationContext, form: IdentityForm): string {

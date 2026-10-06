@@ -16,6 +16,7 @@
  *     (the caller's sentence owns punctuation).
  */
 import { formatUsdCentsPlain } from '@ai-service-os/shared';
+import type { SessionLanguage } from '../agents/customer-calling/tts-copy';
 
 /**
  * Simple pluralisation helper.
@@ -77,8 +78,8 @@ export function formatHours(hours: number): string {
  * (day overview, crew schedule, my-day) — previously three byte-identical
  * copies (quality-review I2).
  */
-export function formatTime(d: Date, timezone: string): string {
-  return new Intl.DateTimeFormat('en-US', {
+export function formatTime(d: Date, timezone: string, lang: SessionLanguage = 'en'): string {
+  return new Intl.DateTimeFormat(spokenLocale(lang), {
     hour: 'numeric',
     minute: 'numeric',
     hour12: true,
@@ -86,6 +87,11 @@ export function formatTime(d: Date, timezone: string): string {
   })
     .format(d)
     .replace(':00', '');
+}
+
+/** The Intl locale a session language speaks dates and times in (#1604). */
+export function spokenLocale(lang: SessionLanguage): 'en-US' | 'es-US' {
+  return lang === 'es' ? 'es-US' : 'en-US';
 }
 
 /**

@@ -765,3 +765,16 @@ describe('QA-2026-07-26 — transitionIntentConfirm bridges context.customerId i
     expect(payload.entities.customerId).toBeUndefined();
   });
 });
+
+describe('#1630 — the identity hand-off carries its sub-reason to the dispatcher summary', () => {
+  it.each(['claims_existing_customer', 'customer_archived', 'identify_caller_threw'])(
+    'caller_identification_failed(%s) notifies on-call with that identity reason',
+    (reason) => {
+      const result = transition('intent_capture', { type: 'caller_identification_failed', reason }, baseContext);
+
+      const notify = result.sideEffects.find((fx) => fx.type === 'notify_oncall');
+      expect(notify?.payload.reason).toBe('caller_identification_failed');
+      expect(notify?.payload.identityReason).toBe(reason);
+    },
+  );
+});

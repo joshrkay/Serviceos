@@ -223,6 +223,7 @@ export const CAPABILITIES: Readonly<Record<ClassifiableIntent, CapabilityDeclara
   lookup_crew_schedule: LOOKUP,
   lookup_timesheets: LOOKUP,
   lookup_my_day: LOOKUP,
+  lookup_next_job: LOOKUP,
   lookup_appointments: LOOKUP,
   lookup_invoices: LOOKUP,
   lookup_balance: LOOKUP,

@@ -369,6 +369,87 @@ const SNAPSHOT: Record<string, Pinned> = {
       en: "That usually comes to about $4,120 all together. I'll send the full quote to confirm.",
     },
   },
+  // ── #1604 — ai/skills/lookup-next-job.ts ──────────────────────────────────
+  next_job_when_today: {
+    en: 'today at {{time}}',
+    es: 'hoy a las {{time}}',
+    sample: { vars: { time: '2 PM' }, en: 'today at 2 PM' },
+  },
+  next_job_when_tomorrow: {
+    en: 'tomorrow at {{time}}',
+    es: 'mañana a las {{time}}',
+    sample: { vars: { time: '9 AM' }, en: 'tomorrow at 9 AM' },
+  },
+  next_job_when_on_day: {
+    en: 'on {{day}} at {{time}}',
+    es: 'el {{day}} a las {{time}}',
+    sample: { vars: { day: 'Friday, June 12', time: '9 AM' }, en: 'on Friday, June 12 at 9 AM' },
+  },
+  next_job_readback: {
+    en: 'Your next job is {{when}} — {{customer}}, {{job}}, at {{address}}.',
+    es: 'Su próximo trabajo es {{when}} — {{customer}}, {{job}}, en {{address}}.',
+    sample: {
+      vars: {
+        when: 'today at 2 PM',
+        customer: 'Dana Keller',
+        job: 'Water heater replacement',
+        address: '4120 East Oakhurst Boulevard, Yonkers',
+      },
+      en: 'Your next job is today at 2 PM — Dana Keller, Water heater replacement, at 4120 East Oakhurst Boulevard, Yonkers.',
+    },
+  },
+  next_job_readback_with_technician: {
+    en: 'The next job is {{when}} — {{customer}}, {{job}}, at {{address}}, with {{technician}}.',
+    es: 'El próximo trabajo es {{when}} — {{customer}}, {{job}}, en {{address}}, con {{technician}}.',
+    sample: {
+      vars: {
+        when: 'today at 9 AM',
+        customer: 'Priya Patel',
+        job: 'AC tune-up',
+        address: '88 Mill Lane, Tarrytown',
+        technician: 'Carlos Ruiz',
+      },
+      en: 'The next job is today at 9 AM — Priya Patel, AC tune-up, at 88 Mill Lane, Tarrytown, with Carlos Ruiz.',
+    },
+  },
+  next_job_access_notes: {
+    en: 'Access notes: {{notes}}',
+    es: 'Notas de acceso: {{notes}}',
+    sample: { vars: { notes: 'Gate code 4421, dog in the yard.' }, en: 'Access notes: Gate code 4421, dog in the yard.' },
+  },
+  next_job_none: {
+    en: 'Nothing is coming up on the schedule in the next two weeks.',
+    es: 'No hay nada programado en las próximas dos semanas.',
+  },
+  next_job_not_yours: {
+    en: "That job isn't on your schedule, so I can't read it out.",
+    es: 'Ese trabajo no está en su agenda, así que no puedo leerlo.',
+  },
+  next_job_no_visit: {
+    en: 'That job has no upcoming visit on the schedule.',
+    es: 'Ese trabajo no tiene ninguna visita programada.',
+  },
+  next_job_error: {
+    en: "I'm having trouble pulling up your next job right now.",
+    es: 'Tengo dificultades para consultar su próximo trabajo en este momento.',
+  },
+  no_actor_next_job: {
+    en: "I couldn't match your number to a team member, so I can't read your next job. Let me get a person to help.",
+    es: 'No pude vincular su número con un miembro del equipo, así que no puedo leerle su próximo trabajo. Le paso con una persona para que le ayude.',
+  },
+  lookup_job_reference_not_found: {
+    en: 'I couldn\'t find a job matching "{{reference}}".',
+    es: 'No encontré ningún trabajo que coincida con "{{reference}}".',
+    sample: { vars: { reference: 'the Nguyen job' }, en: 'I couldn\'t find a job matching "the Nguyen job".' },
+  },
+  next_job_latest_note: {
+    en: 'Latest note: {{note}}',
+    es: 'Última nota: {{note}}',
+    sample: {
+      vars: { note: 'Customer prefers a text before arrival.' },
+      en: 'Latest note: Customer prefers a text before arrival.',
+    },
+  },
 };
 
 const isParameterised = (s: string): boolean => /\{\{\w+\}\}/.test(s);

@@ -31,6 +31,9 @@ const SCRIPT_IDS = [
   'lookup-appointments-next',
   'lookup-invoices-balance',
   'lookup-estimates-recent',
+  // #1604 — "read me the next job" on the owner line and the technician line.
+  'lookup-next-job-owner-line',
+  'lookup-next-job-technician-line',
 ] as const;
 
 describe('VQ-010 — Bucket 01 happy lookups', () => {

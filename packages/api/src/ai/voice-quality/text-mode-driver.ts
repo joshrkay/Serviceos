@@ -83,6 +83,8 @@ import type { SideEffect } from '../agents/customer-calling/types';
 import { liveE1Script, type SettingsRepository } from '../../settings/settings';
 import { isNanpKey, normalizePhone } from '../../shared/phone';
 import { findOrCreateLeadByPhone } from '../skills/find-or-create-lead';
+import { resolvePhoneActor } from '../../telephony/phone-actor';
+import type { UserRepository } from '../../users/user';
 import { CALLER_ID_IDENTITY_LOOKUP_SKILL } from './layer2-world';
 import type { OnCallRepository } from '../../oncall/rotation';
 import type { CustomerRepository } from '../../customers/customer';
@@ -151,6 +153,14 @@ export interface TextModeDriverDeps {
   leadRepo?: LeadRepository;
   auditRepo?: AuditRepository;
   catalogRepo?: CatalogItemRepository;
+  /**
+   * #1604 — team members (`fixtures.users`). A caller-ID matching a member's
+   * registered mobile resolves to the D-026 phone actor through the
+   * production resolver (`telephony/phone-actor.ts`), exactly as
+   * `establishInboundSession` does; without it only the owner line has an
+   * actor.
+   */
+  userRepo?: Pick<UserRepository, 'findByMobileNumber' | 'findByTenant'>;
   /**
    * #869 — the shared lookup bundle, IDENTICAL in shape to the one the live
    * phone takes (`app.ts` builds one and hands it to every surface). Omit it
@@ -234,6 +244,33 @@ export const vqResolveMemberRole = (
   userId: string,
 ): Promise<string | null> =>
   Promise.resolve(userId.startsWith(VQ_OWNER_ACTOR_PREFIX) ? 'owner' : null);
+
+/**
+ * #1604 — `vqResolveMemberRole` over a seeded team (`fixtures.users`): the
+ * owner line's synthetic subject is still the owner; a subject the phone
+ * actor resolver minted for a seeded member (their Clerk subject, else their
+ * row id — `telephony/phone-actor.ts#subjectOf`) resolves to that member's
+ * fixture role; anything else stays unknown and fails closed.
+ */
+export function vqResolveMemberRoleFor(
+  userRepo: Pick<UserRepository, 'findByTenant'>,
+): (tenantId: string, userId: string) => Promise<string | null> {
+  return async (tenantId, userId) => {
+    const synthetic = await vqResolveMemberRole(tenantId, userId);
+    if (synthetic) return synthetic;
+    const users = await userRepo.findByTenant(tenantId);
+    return users.find((u) => u.clerkUserId === userId || u.id === userId)?.role ?? null;
+  };
+}
+
+/**
+ * #1604 — skill name stamped on the `lookup_executed` event a caller-ID that
+ * matched a team member's registered mobile emits at session establishment:
+ * the phone actor IS identity verification (D-026), so the member's own
+ * readbacks — which name customers and addresses — are post-identity for the
+ * floor PII grader (graders/floor.ts IDENTITY_RESOLVING_LOOKUPS).
+ */
+export const TEAM_MEMBER_IDENTITY_LOOKUP_SKILL = 'verify_team_member_identity';
 
 /**
  * WS21b — skill name stamped on the `lookup_executed` event a recognized owner
@@ -334,6 +371,22 @@ export class TextModeDriver implements AgentDriver {
     // (establishInboundSession pins it for both transports).
     const from = opts.callerId && !opts.callerIdBlocked ? opts.callerId : '';
     if (from) session.callerPhone = from;
+
+    // #1604 — a caller-ID that matches a team member's registered mobile is
+    // the D-026 phone actor, resolved ONCE here through the production
+    // resolver (`telephony/phone-actor.ts`) and never from utterance content,
+    // exactly as establishInboundSession resolves it. The owner line keeps
+    // its synthetic subject above; the owner-phone bridge is not exercised.
+    if (!ownerSession && from && this.deps.userRepo) {
+      const actor = await resolvePhoneActor({ userRepo: this.deps.userRepo }, tenantId, from, false);
+      if (actor) {
+        session.actorUserId = actor.userId;
+        session.events.emit(
+          'voice-event',
+          lookupExecutedEvent(TEAM_MEMBER_IDENTITY_LOOKUP_SKILL, 0, true),
+        );
+      }
+    }
 
     // bootstrapCallEstablishment: greeting, then identity, then the FSM's
     // known / unknown branch; the processor executes the audit effects.

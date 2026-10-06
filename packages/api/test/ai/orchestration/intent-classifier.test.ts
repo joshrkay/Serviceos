@@ -975,6 +975,10 @@ describe('consistency pin — EXTENDED_INTENT_TYPES', () => {
     // lookup_timesheets were deliberately left out.
     'lookup_materials',
     'lookup_catalog',
+    // #1604 — lookup_next_job: the bare "next job" asks are entity-free and
+    // read-only (self-scoped to the speaker); a NAMED job stays LLM-routed so
+    // its jobReference is extracted.
+    'lookup_next_job',
   ]);
 
   // Extract quoted intent names from EXTENDED_INTENTS_PROMPT_SECTION.
@@ -1025,10 +1029,17 @@ describe('consistency pin — EXTENDED_INTENT_TYPES', () => {
       lookup_digest: ['Read me my day', 'give me the daily digest'],
       lookup_pending_items: ['What am I waiting on?', 'what are we still waiting on'],
       lookup_revenue: ['What did we sell last month?', 'How much did we make this month?'],
-      lookup_my_day: ["What's on my schedule today?", "What's my next job?"],
+      lookup_my_day: ["What's on my schedule today?"],
       lookup_leads: ['Any new leads?', 'How many open leads do we have?'],
       lookup_materials: ["What's on the shopping list?"],
       lookup_catalog: ['Show the price book'],
+      // #1604 — moved "What's my next job?" here from lookup_my_day.
+      lookup_next_job: [
+        "What's my next job?",
+        'Read me the next job',
+        'Where am I going next?',
+        "What's the address for my next job?",
+      ],
     };
     for (const [intent, transcripts] of Object.entries(triggersByIntent)) {
       expect(PHRASE_MATCH_ALLOWLIST.has(intent), `"${intent}" must be in the phrase-match allowlist`).toBe(true);
@@ -2427,8 +2438,12 @@ describe('taxonomy 1.2.0 — new intents + entities', () => {
   // lookup_account_summary / lookup_leads phrasings, a confirm vs lookup
   // appointment rule, and a problemDescription entity (+ serviceAddress on
   // create_appointment / emergency_dispatch) for the launch slots.
-  it('taxonomy version reflects the latest coordinated bump (1.21.0)', () => {
-    expect(INTENT_TAXONOMY_VERSION).toBe('1.21.0');
+  // #1604 bumped it to 1.22.0: lookup_next_job — one NEW read-only
+  // lookup-skill family member ("read me the next job": one visit in full,
+  // the first lookup that speaks an address), a my_day-vs-next_job rule, and
+  // "What's my next job?" moved from lookup_my_day's block + short-circuit.
+  it('taxonomy version reflects the latest coordinated bump (1.22.0)', () => {
+    expect(INTENT_TAXONOMY_VERSION).toBe('1.22.0');
   });
 
   // Task 11 (2026-08-07 tradesperson plan) — log_mileage is a new intent

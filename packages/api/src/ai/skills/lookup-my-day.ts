@@ -52,14 +52,12 @@ import { resolveDayWindow } from '../../reports/money-dashboard';
 import { localDateString, nextDateString } from '../../digest/digest-service';
 import { plural, formatTime, technicianDisplayName } from './spoken-format';
 
-export type LookupMyDayInput = {
-  tenantId: string;
-  sessionId?: string;
-  timezone?: string;
-  now?: Date;
-  /** Tenant-local `YYYY-MM-DD`; absent → today. */
-  day?: string;
-} & (
+/**
+ * WHOSE schedule a self-scoped lookup reads — decided by the caller, never
+ * guessed here. Shared by `lookup_my_day`, `lookup_next_job` (#1604) and the
+ * dispatch's `resolveScheduleScope`, so the two readings cannot drift.
+ */
+export type ScheduleScope =
   | {
       /**
        * The SPEAKER's own canonical technician id, already resolved by the
@@ -69,8 +67,16 @@ export type LookupMyDayInput = {
       technicianId: string;
       wholeTenant?: never;
     }
-  | { wholeTenant: true; technicianId?: never }
-);
+  | { wholeTenant: true; technicianId?: never };
+
+export type LookupMyDayInput = {
+  tenantId: string;
+  sessionId?: string;
+  timezone?: string;
+  now?: Date;
+  /** Tenant-local `YYYY-MM-DD`; absent → today. */
+  day?: string;
+} & ScheduleScope;
 
 export interface LookupMyDayDeps {
   appointmentRepo: AppointmentRepository;
