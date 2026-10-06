@@ -1,0 +1,113 @@
+name: Deploy Retry
+
+# #1631 — the Deploy workflow's runs are sometimes CANCELLED by GitHub's
+# hosted-runner pool ("The job was not acquired by Runner of type hosted
+# even after multiple attempts"), not by `concurrency.cancel-in-progress`
+# (already `false` for Deploy — see deploy.yml's header) and not by a real
+# failure. On 2026-10-05 this left three consecutive main pushes
+# undeployed with no alert until a human ran `gh run rerun --failed` by
+# hand.
+#
+# This workflow_run job fires when a Deploy run on main completes. It
+# fetches that run's jobs, and if any job concluded `cancelled` and NONE
+# concluded `failure`, it reruns the run once via `gh run rerun --failed`
+# and leaves a commit comment — capped at 2 automatic retries per run (see
+# .github/scripts/deploy-retry-decision.ts for the exact rule; a genuine
+# `failure` is left alone on purpose, so a real break is never masked by
+# an auto-retry).
+#
+# Safety (deploy.yml header): `gh run rerun --failed` never resumes a
+# cancelled job's own process — a cancelled job never reached a completed
+# `railway up`, and GitHub starts the rerun attempt as a FRESH job run,
+# not a resumed one. Jobs that already succeeded (e.g. `test`) are
+# skipped by GitHub itself, so this never re-deploys on top of a half
+# -finished Railway deploy. A run whose commit is no longer the tip of
+# main is never retried (it would redeploy an older commit).
+on:
+  workflow_run:
+    workflows: ["Deploy"]
+    types: [completed]
+    branches: [main]
+
+# actions:write — gh api .../jobs (read) + gh run rerun (write); write
+# implies read for the Actions resource.
+# contents:write — actions/checkout (read) + the commit-comments API
+# write, which the GitHub REST docs list under the "Contents" permission.
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  retry:
+    # The vast majority of Deploy runs succeed; only inspect the ones that
+    # didn't. A job-level `cancelled` with no job-level `failure` still
+    # surfaces as a `failure` (this issue's three cases) or `cancelled`
+    # run-level conclusion depending on which job GitHub picks to
+    # summarize the run from — gate on both and let
+    # deploy-retry-decision.ts make the precise, job-level call.
+    if: |
+      github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+      - run: npm ci
+
+      - name: Fetch the completed run's jobs
+        id: jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jobs_json="$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}/jobs" --jq '.jobs')"
+          {
+            echo "json<<DEPLOY_RETRY_JOBS_EOF"
+            echo "$jobs_json"
+            echo "DEPLOY_RETRY_JOBS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the current tip of main
+        id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "sha=$(gh api "repos/${{ github.repository }}/git/ref/heads/main" --jq .object.sha)" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to retry
+        id: decide
+        env:
+          JOBS_JSON: ${{ steps.jobs.outputs.json }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          MAIN_SHA: ${{ steps.tip.outputs.sha }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          result="$(npx tsx .github/scripts/deploy-retry-decision.ts)"
+          retry="$(echo "$result" | jq -r '.retry')"
+          comment="$(echo "$result" | jq -r '.comment')"
+          echo "retry=$retry" >> "$GITHUB_OUTPUT"
+          {
+            echo "comment<<DEPLOY_RETRY_COMMENT_EOF"
+            echo "$comment"
+            echo "DEPLOY_RETRY_COMMENT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Only a job-level cancellation with no job-level failure reaches
+      # here (see deploy-retry-decision.ts); a genuine test/deploy
+      # failure is never retried automatically.
+      - name: Rerun the cancelled run (gh run rerun --failed)
+        if: steps.decide.outputs.retry == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run rerun "${{ github.event.workflow_run.id }}" --failed --repo "${{ github.repository }}"
+
+      - name: Comment on the commit
+        if: steps.decide.outputs.retry == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT_BODY: ${{ steps.decide.outputs.comment }}
+        run: |
+          gh api "repos/${{ github.repository }}/commits/${{ github.event.workflow_run.head_sha }}/comments" -f body="$COMMENT_BODY"
