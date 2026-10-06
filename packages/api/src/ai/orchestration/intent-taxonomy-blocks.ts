@@ -785,12 +785,26 @@ export const INTENT_BLOCKS = {
                                      "What materials are open on the Patel job?"
                                      "What do I need to grab for tomorrow?"
 `,
-  lookup_my_day: `- "lookup_my_day"        — the SPEAKER asks about their own schedule today.
-                           Available to any technician; scoped to the
-                           speaker's own assignments only.
-                           Examples: "What's my next job?"
-                                     "What's on my schedule today?"
-                                     "Where am I going after this one?"
+  lookup_my_day: `- "lookup_my_day"        — the SPEAKER asks about their own schedule today,
+                           as a LIST of the day's visits. Available to any
+                           technician; scoped to the speaker's own
+                           assignments only.
+                           Examples: "What's on my schedule today?"
+                                     "How many jobs do I have today?"
+                                     "What's my day look like tomorrow?"
+`,
+  lookup_next_job: `- "lookup_next_job"      — the SPEAKER asks to hear ONE upcoming visit in
+                           full: its time, the customer, the service
+                           address, gate / access notes and the latest job
+                           note. The next visit by default; extract
+                           jobReference when a job or customer is named.
+                           A technician hears only their own jobs; the
+                           owner any job. Read-only.
+                           Examples: "Read me the next job"
+                                     "What's my next job?"
+                                     "Where am I going next?"
+                                     "What's the address for my next job?"
+                                     "Read me the Patel job"
 `,
   log_mileage: `- "log_mileage"          — technician logs drive miles (tax deduction).
                            Maps to log_expense, category "vehicle", amount =
@@ -974,11 +988,19 @@ export const DISTINCTION_RULES: ReadonlyArray<{ intents: readonly IntentType[]; 
   coming out?", "what time is my appointment?") — the caller is not doing
   the work, they are having work done TO them. lookup_my_day is a
   TECHNICIAN or crew member asking about their OWN day of work to perform
-  ("what's my next job?", "where am I going after this one?") — the
+  ("what's on my schedule today?", "how many jobs do I have?") — the
   caller IS the one doing the work. When the phrasing gives no other
   signal, a caller asking about "MY appointment" (singular, something
   scheduled for them) is lookup_appointments; a caller asking about "MY
   schedule/day/jobs" (plural work to do) is lookup_my_day.
+` },
+  { intents: ['lookup_my_day', 'lookup_next_job'], text: `- "lookup_my_day" vs "lookup_next_job" (#1604): both are the SPEAKER
+  asking about their own work. lookup_my_day is the DAY as a list ("what's
+  on my schedule today?", "how many jobs do I have?"). lookup_next_job is
+  ONE visit read out in full — its time, customer, address, access notes
+  and latest note ("read me the next job", "where am I going next?",
+  "what's the address for the Patel job?"). Asking for an address, a gate
+  code or the notes on a job is always lookup_next_job.
 ` },
   { intents: ['confirm_appointment', 'lookup_appointments'], text: `- A QUESTION about whether a booking exists or is still happening ("am
   I on the books for Friday?", "is that visit still happening?")

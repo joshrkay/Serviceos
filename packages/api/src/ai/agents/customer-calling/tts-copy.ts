@@ -484,6 +484,73 @@ export const TTS_COPY = {
     en: "That usually comes to about {{total}} all together. I'll send the full quote to confirm.",
     es: 'Normalmente suma unos {{total}} en total. Le enviaré el presupuesto completo para confirmarlo.', // es: new 1601
   },
+
+  // ── ai/skills/lookup-next-job.ts (#1604) ─────────────────────────────────
+  // "Read me the next job": the skill renders these by id in the session
+  // language — the one lookup that speaks an address and notes. `{{when}}` is
+  // one of the three when-phrases below; the access-notes / latest-note lines
+  // are appended only when the record has them.
+  next_job_when_today: {
+    en: 'today at {{time}}',
+    es: 'hoy a las {{time}}', // es: new 1604
+  },
+  next_job_when_tomorrow: {
+    en: 'tomorrow at {{time}}',
+    es: 'mañana a las {{time}}', // es: new 1604
+  },
+  next_job_when_on_day: {
+    en: 'on {{day}} at {{time}}',
+    es: 'el {{day}} a las {{time}}', // es: new 1604
+  },
+  next_job_readback: {
+    en: 'Your next job is {{when}} — {{customer}}, {{job}}, at {{address}}.',
+    es: 'Su próximo trabajo es {{when}} — {{customer}}, {{job}}, en {{address}}.', // es: new 1604
+  },
+  // The owner / dispatcher hears the BUSINESS's next visit, with who has it.
+  next_job_readback_with_technician: {
+    en: 'The next job is {{when}} — {{customer}}, {{job}}, at {{address}}, with {{technician}}.',
+    es: 'El próximo trabajo es {{when}} — {{customer}}, {{job}}, en {{address}}, con {{technician}}.', // es: new 1604
+  },
+  next_job_access_notes: {
+    en: 'Access notes: {{notes}}',
+    es: 'Notas de acceso: {{notes}}', // es: new 1604
+  },
+  next_job_none: {
+    en: 'Nothing is coming up on the schedule in the next two weeks.',
+    es: 'No hay nada programado en las próximas dos semanas.', // es: new 1604
+  },
+  // A technician named a job that is not assigned to them.
+  next_job_not_yours: {
+    en: "That job isn't on your schedule, so I can't read it out.",
+    es: 'Ese trabajo no está en su agenda, así que no puedo leerlo.', // es: new 1604
+  },
+  // A named job with no live visit in the window (completed, canceled, none booked).
+  next_job_no_visit: {
+    en: 'That job has no upcoming visit on the schedule.',
+    es: 'Ese trabajo no tiene ninguna visita programada.', // es: new 1604
+  },
+  next_job_error: {
+    en: "I'm having trouble pulling up your next job right now.",
+    es: 'Tengo dificultades para consultar su próximo trabajo en este momento.', // es: new 1604
+  },
+  // ai/voice-turn/phone-lookup-surface.ts — a self-scoped lookup asked with
+  // no resolved actor is an IDENTITY outcome, not an authorization one (the
+  // lookup_my_day twin is NO_ACTOR_MY_DAY_LINE).
+  no_actor_next_job: {
+    en: "I couldn't match your number to a team member, so I can't read your next job. Let me get a person to help.",
+    es: 'No pude vincular su número con un miembro del equipo, así que no puedo leerle su próximo trabajo. Le paso con una persona para que le ayude.', // es: new 1604
+  },
+  // workers/voice-lookup-answer.ts — a spoken job name the resolver matched
+  // nothing for (the same sentence lookup_materials / lookup_job_profit speak
+  // inline today; #1601 step 2 will point them at this entry).
+  lookup_job_reference_not_found: {
+    en: 'I couldn\'t find a job matching "{{reference}}".',
+    es: 'No encontré ningún trabajo que coincida con "{{reference}}".', // es: new 1604
+  },
+  next_job_latest_note: {
+    en: 'Latest note: {{note}}',
+    es: 'Última nota: {{note}}', // es: new 1604
+  },
 } as const satisfies Record<string, TtsCopyEntry>;
 
 export type TtsCopyId = keyof typeof TTS_COPY;

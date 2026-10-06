@@ -1045,13 +1045,13 @@ Action class in brackets.
 > surface even when the row it writes is not novel.** A plumber says "log the
 > permit," not "add a note."
 
-### 7.2 Read-only voice queries — 20 lookups
+### 7.2 Read-only voice queries — 21 lookups
 
 These never mint a proposal. The intent→proposal map deliberately returns a
 clarification type for every one, so the drift test reads their exclusion as
 intentional rather than as a gap.
 
-`lookup_my_day` · `lookup_day_overview` · `lookup_appointments` ·
+`lookup_my_day` · `lookup_next_job` · `lookup_day_overview` · `lookup_appointments` ·
 `lookup_availability` · `lookup_crew_schedule` · `lookup_jobs` ·
 `lookup_job_profit` · `lookup_customer` · `lookup_account_summary` ·
 `lookup_estimates` · `lookup_invoices` · `lookup_balance` · `lookup_revenue` ·
@@ -1074,12 +1074,14 @@ customer legitimately asks ("when could you come out?"), revealing only
 aggregate booking density. Anything added to that set must be argued for in the
 decision log.
 
-**Requirement — self-scoping is the access control.** `lookup_my_day` carries no
-permission entry by design: it is scoped to the *acting speaker* and cannot be
-widened. A technician naming a colleague is ignored — the speaker is always
-self. Correspondingly, an unresolvable speaker **fails the turn** rather than
-falling back to the whole crew, and an unresolved crew-member name refuses
-honestly rather than widening.
+**Requirement — self-scoping is the access control.** `lookup_my_day` and
+`lookup_next_job` (#1604 — one visit read in full: time, customer, address,
+access notes, latest note) carry no permission entry by design: they are scoped
+to the *acting speaker* and cannot be widened. A technician naming a colleague
+is ignored — the speaker is always self — and a technician naming a job that is
+not theirs is refused by name. Correspondingly, an unresolvable speaker **fails
+the turn** rather than falling back to the whole crew, and an unresolved
+crew-member or job name refuses honestly rather than widening.
 
 ### 7.3 Direct status acts — audited, never proposed
 

@@ -29,9 +29,9 @@ import {
  * live prompt — re-pin hash+length here IN THE SAME PR as the cassette
  * re-record and voice-eval sign-off.
  */
-const OPERATOR_PROMPT_LENGTH = 59755; // #1469/#1468 re-pin: operator lookups, confirm-vs-lookup rule, problemDescription
+const OPERATOR_PROMPT_LENGTH = 61116; // #1604 re-pin: lookup_next_job block, my_day examples, my_day-vs-next_job rule
 const OPERATOR_PROMPT_SHA256 =
-  'a2b2111dadd6e60ff5852f8e1ec37af576a03c9f3d122141c594b6424ee2091a';
+  '3bf65d3d57f639c97a8cd490f9c258221bc68f8f4ccdf7adb4a2418b068eb963';
 
 describe('intent-taxonomy-blocks extraction', () => {
   it("buildClassifierSystemPrompt('operator') IS the exported SYSTEM_PROMPT", () => {
@@ -52,11 +52,11 @@ describe('intent-taxonomy-blocks extraction', () => {
     );
   });
 
-  it('moved the whole taxonomy: 68 distinct blocks (+ trailing unknown), 7 rules, 58 fields', () => {
+  it('moved the whole taxonomy: 69 distinct blocks (+ trailing unknown), 8 rules, 58 fields', () => {
     // 69 blocks in the literal; 'unknown' appears twice (full + trailing
-    // catch-all), so the keyed table holds 68.
-    expect(INTENT_BLOCK_ORDER).toHaveLength(68);
-    expect(DISTINCTION_RULES).toHaveLength(7); // #1469: confirm vs lookup appointments
+    // catch-all), so the keyed table held 68; #1604 added lookup_next_job.
+    expect(INTENT_BLOCK_ORDER).toHaveLength(69);
+    expect(DISTINCTION_RULES).toHaveLength(8); // #1469: confirm vs lookup appointments; #1604: my_day vs next_job
     expect(ENTITY_FIELDS).toHaveLength(58); // #1468: problemDescription
   });
 

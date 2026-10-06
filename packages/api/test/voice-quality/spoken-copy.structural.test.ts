@@ -84,6 +84,8 @@ const GUARDED_FILES: Record<string, Allowed[]> = {
     { why: "proposal_summary", literal: "Review response drafting isn't available on this call yet." },
   ],
   "ai/agents/customer-calling/transitions.ts": [],
+  // #1604 — the next-job skill renders every spoken fragment by catalog id.
+  "ai/skills/lookup-next-job.ts": [],
   "ai/voice-turn/quote-readback.ts": [],
 };
 
