@@ -52,7 +52,7 @@
   "dependencies": {
     "@ai-service-os/shared": "*",
     "@sentry/node": "^10.75.0",
-    "chrono-node": "^2.10.1",
+    "chrono-node": "^2.10.2",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "express-rate-limit": "^8.7.0",
