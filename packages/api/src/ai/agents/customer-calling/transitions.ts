@@ -180,10 +180,15 @@ function endSession(context: CallingAgentContext, reason: string): SideEffect {
   };
 }
 
-function notifyOncall(context: CallingAgentContext, reason: string): SideEffect {
+function notifyOncall(
+  context: CallingAgentContext,
+  reason: string,
+  extra: Record<string, unknown> = {},
+): SideEffect {
   return {
     type: 'notify_oncall',
     payload: {
+      ...extra,
       sessionId: context.sessionId,
       tenantId: context.tenantId,
       reason,
@@ -359,7 +364,10 @@ function checkGlobalGuards(
           reason: event.reason,
         }),
         ttsPlay(TTS_COPY.account_lookup_failed_escalation.en),
-        notifyOncall(context, 'caller_identification_failed'),
+        // #1630 — the identity sub-reason (claims_existing_customer,
+        // customer_archived, identify_caller_threw) rides along so the
+        // dispatcher summary names it without re-deriving it.
+        notifyOncall(context, 'caller_identification_failed', { identityReason: event.reason }),
       ],
       updatedContext: { ...context, escalationReason: 'caller_identification_failed' },
     };

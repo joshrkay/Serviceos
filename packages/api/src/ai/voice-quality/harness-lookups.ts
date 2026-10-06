@@ -18,7 +18,7 @@ import { InMemoryMoneyDashboardRepository } from '../../reports/money-dashboard'
 import type { SettingsRepository } from '../../settings/settings';
 import type { PhoneLookupDeps } from '../voice-turn/phone-lookup-surface';
 import type { RepoBundle } from './runner';
-import { vqResolveMemberRole } from './text-mode-driver';
+import { vqResolveMemberRoleFor } from './text-mode-driver';
 
 export interface HarnessLookupExtras {
   /** Shared with the caller-plan resolver when the lane wires one (#897). */
@@ -42,15 +42,22 @@ export function buildHarnessPhoneLookups(
       moneyDashboardRepo: new InMemoryMoneyDashboardRepository(),
       catalogRepo: extras.catalogRepo ?? new InMemoryCatalogItemRepository(),
       ...(settingsRepo ? { settingsRepo } : {}),
-      // Harness-owned actor → role seam: the owner-line flag is the corpus's
-      // identity vocabulary; no `users` fixtures exist.
-      resolveMemberRole: vqResolveMemberRole,
+      // #1604 — the next-job readback's address / access notes and latest note.
+      locationRepo: repos.locationRepo,
+      noteRepo: repos.noteRepo,
+      // Harness-owned actor → role seam: the owner line's synthetic subject is
+      // the owner; a seeded team member (`fixtures.users`, #1604) resolves to
+      // their fixture role; anything else is unknown.
+      resolveMemberRole: vqResolveMemberRoleFor(repos.userRepo),
     },
     shared: {
       jobRepo: repos.jobRepo,
       appointmentRepo: repos.appointmentRepo,
       customerRepo: repos.customerRepo,
       proposalRepo: repos.proposalRepo,
+      // #1604 — the speaker's identity for the self-scoped lookups and the
+      // crew names a whole-tenant readback speaks.
+      userRepo: repos.userRepo,
       // No `availabilityFinder`: with an appointmentRepo wired the shared
       // dispatch takes the business-hours-aware `lookupBookableAvailability`
       // path (F2), exactly as the live phone does.

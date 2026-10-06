@@ -70,6 +70,7 @@ import {
 import { TECHNICIAN_REF_INTENTS } from '../agents/customer-calling/entity-resolution';
 import { ambiguousReferenceLine, resolveLookupReference } from './lookup-reference';
 import { customerDisplayName, speakForOperator } from './operator-point-of-view';
+import type { SessionLanguage } from '../agents/customer-calling/tts-copy';
 import {
   answerDocumentLookup,
   answerTenantWideLookup,
@@ -239,6 +240,12 @@ export interface DispatchAssistantLookupInput {
   extractedEntities?: Record<string, unknown>;
   /** The operator's own words this turn — read only where an entity is missing. */
   message?: string;
+  /**
+   * #1604 — the in-app voice session's language, for skills that render
+   * their answer from the id-keyed copy catalog. Chat has no session
+   * language and omits it (English).
+   */
+  language?: SessionLanguage;
 }
 
 /** Lookups that read the schedule for one day. */
@@ -451,6 +458,7 @@ export async function dispatchAssistantLookup(
         ...(dateTimeDescription ? { dateTimeDescription } : {}),
         ...(timezone ? { timezone } : {}),
         ...(catalogSearch ? { catalogSearch } : {}),
+        ...(input.language ? { language: input.language } : {}),
         now: deps.now ? deps.now() : new Date(),
       },
       deps.answers,

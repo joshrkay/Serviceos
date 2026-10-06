@@ -1371,7 +1371,7 @@ approves by screen/SMS tap).
 
 <!-- BEGIN generated: lookups -->
 <!-- Generated from packages/api/src/capabilities/capabilities.ts — do not edit by hand; run `npm run catalog:generate` in packages/api. -->
-20 `lookup_*` intents: `lookup_account_summary`, `lookup_agreements`, `lookup_appointments`, `lookup_availability`, `lookup_balance`, `lookup_catalog`, `lookup_crew_schedule`, `lookup_customer`, `lookup_day_overview`, `lookup_digest`, `lookup_estimates`, `lookup_invoices`, `lookup_job_profit`, `lookup_jobs`, `lookup_leads`, `lookup_materials`, `lookup_my_day`, `lookup_pending_items`, `lookup_revenue`, `lookup_timesheets`.
+21 `lookup_*` intents: `lookup_account_summary`, `lookup_agreements`, `lookup_appointments`, `lookup_availability`, `lookup_balance`, `lookup_catalog`, `lookup_crew_schedule`, `lookup_customer`, `lookup_day_overview`, `lookup_digest`, `lookup_estimates`, `lookup_invoices`, `lookup_job_profit`, `lookup_jobs`, `lookup_leads`, `lookup_materials`, `lookup_my_day`, `lookup_next_job`, `lookup_pending_items`, `lookup_revenue`, `lookup_timesheets`.
 <!-- END generated: lookups -->
 
 Each is routed to a read-only skill, never to a proposal (correct by design).
@@ -1571,6 +1571,41 @@ not a gap. No new `JobStatus` value was introduced for this.
 
 ---
 
+**`lookup_next_job` (#1604, 2026-10-05) — "read me the next job":** the first
+lookup that speaks an ADDRESS. One visit read in full, in spoken order: the
+scheduled time, the customer, the service address, the gate / access notes on
+that address (`service_locations.access_notes`) and the job's latest internal
+note. `ai/skills/lookup-next-job.ts`; taxonomy 1.22.0.
+
+- **Same posture as `lookup_my_day`, by construction.** No permission entry;
+  `SELF_SCOPED_LOOKUP_INTENTS` (`workers/voice-lookup-answer.ts`) names both,
+  and ONE `resolveScheduleScope` decides whose job for both: a
+  `dispatch:view` actor (owner, dispatcher) hears the business's next visit,
+  with the technician who has it; anyone else hears their OWN next visit
+  only; an unresolvable speaker fails the turn. The owner line, the
+  technician line (D-026 phone actor from a registered mobile) and the in-app
+  Assistant all go through that one dispatch. The customer line is not
+  offered the intent (`classifier-profile.ts`): a customer has no jobs to
+  drive to, and on the phone a caller with no actor hears the identity line
+  (`no_actor_next_job`), never data.
+- **A named job never widens.** `lookup_next_job` joins `JOB_REF_INTENTS`,
+  so "read me the Patel job" resolves to a verified `jobId` first; the skill
+  reads THAT job's visit, and refuses by name when it is not the
+  technician's. A spoken job the resolver could not match is refused by name
+  (`lookup_job_reference_not_found`) — never silently replaced with the next
+  job.
+- **Spoken copy lives in `tts-copy.ts` by id (EN + ES).** The skill renders
+  every fragment through `ttsCopy(id, lang, vars)` in the session language the
+  phone surface now threads (`ExecuteLookupInput.language`), because a
+  dynamic sentence cannot be localized by the transport's exact-match pass.
+  The customer's phone follows the `lookup_customer` rule: masked
+  (`maskPhone`) on the answer card, never spoken.
+- **Layer 1 proves both lines.** `lookup-next-job-owner-line` and
+  `lookup-next-job-technician-line` seed `fixtures.users` / `locations` /
+  `notes`; the technician's caller-ID resolves through the production
+  `resolvePhoneActor`, and the floor PII grader treats that match as
+  identity (`verify_team_member_identity`).
+
 **`lookups` (added at final verification, 2026-08-07 tradesperson plan):**
 read-only lookup-skill intents. They never create a proposal (no
 `proposalType`/`actionClass` — `intentToProposalType(...)` returns
@@ -1635,7 +1670,7 @@ either `speakable` or `lookups`.
     { "intent": "create_standing_instruction", "proposalType": "create_standing_instruction", "actionClass": "capture" },
     { "intent": "update_brand_voice", "proposalType": "update_brand_voice", "actionClass": "manual" }
   ],
-  "lookups": ["lookup_account_summary","lookup_agreements","lookup_appointments","lookup_availability","lookup_balance","lookup_catalog","lookup_crew_schedule","lookup_customer","lookup_day_overview","lookup_digest","lookup_estimates","lookup_invoices","lookup_job_profit","lookup_jobs","lookup_leads","lookup_materials","lookup_my_day","lookup_pending_items","lookup_revenue","lookup_timesheets"],
+  "lookups": ["lookup_account_summary","lookup_agreements","lookup_appointments","lookup_availability","lookup_balance","lookup_catalog","lookup_crew_schedule","lookup_customer","lookup_day_overview","lookup_digest","lookup_estimates","lookup_invoices","lookup_job_profit","lookup_jobs","lookup_leads","lookup_materials","lookup_my_day","lookup_next_job","lookup_pending_items","lookup_revenue","lookup_timesheets"],
   "handlerNoOnramp": ["adopt_entity_alias","callback","create_booking","onboarding_estimate_template","onboarding_schedule","onboarding_service_category","onboarding_team_member","onboarding_tenant_settings"],
   "gated": ["approve_proposal","reject_proposal","edit_proposal"]
 }

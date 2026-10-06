@@ -33,9 +33,15 @@ describe('#1616 — buildCallerContextFromSession for an identity hand-off', () 
     const session = sessionWithCallerTurns(["Hi, this is Jane Smith, when's my appointment?"]);
     session.customerId = '00000000-0000-4000-8000-000000001616';
 
-    const bundle = buildCallerContextFromSession(session, '+15555550494', 'caller_identification_failed');
+    const bundle = buildCallerContextFromSession(
+      session,
+      '+15555550494',
+      'caller_identification_failed',
+      'customer_archived',
+    );
 
     expect(bundle.caller.claimedName).toBeUndefined();
+    expect(bundle.identityCase).toBe('archived');
   });
 
   it('a non-identity hand-off never carries a claimedName, even after a self-introduction', () => {
@@ -44,14 +50,35 @@ describe('#1616 — buildCallerContextFromSession for an identity hand-off', () 
     const bundle = buildCallerContextFromSession(session, '+15555550404', 'operator_request');
 
     expect(bundle.caller.claimedName).toBeUndefined();
+    expect(bundle.identityCase).toBeUndefined();
   });
 
   it("carries the name the caller gave in their last turn as caller.claimedName — a claim, never caller.name", () => {
     const session = sessionWithCallerTurns(['Hi, this is Jane Smith.']);
 
-    const bundle = buildCallerContextFromSession(session, '+15555550404', 'caller_identification_failed');
+    const bundle = buildCallerContextFromSession(
+      session,
+      '+15555550404',
+      'caller_identification_failed',
+      'claims_existing_customer',
+    );
 
     expect(bundle.caller.claimedName).toBe('Jane Smith');
     expect(bundle.caller.name).toBeUndefined();
+    expect(bundle.identityCase).toBe('claims');
+  });
+
+  it('identifyCaller throwing is a plain unverified identity — a self-introduction is not carried as a claim', () => {
+    const session = sessionWithCallerTurns(['Hi, this is Jane Smith.']);
+
+    const bundle = buildCallerContextFromSession(
+      session,
+      '+15555550404',
+      'caller_identification_failed',
+      'identify_caller_threw',
+    );
+
+    expect(bundle.caller.claimedName).toBeUndefined();
+    expect(bundle.identityCase).toBe('unverified');
   });
 });

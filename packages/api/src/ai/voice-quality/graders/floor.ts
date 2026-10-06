@@ -77,6 +77,11 @@ const IDENTITY_RESOLVING_LOOKUPS = new Set([
   // harness (`establishLayer2Caller`) only on a single match — an unknown,
   // blocked or ambiguous caller is never stamped.
   'identify_caller_by_caller_id',
+  // #1604 — caller-ID matched a TEAM MEMBER's registered mobile at session
+  // establishment (production: `resolvePhoneActor` → `session.actorUserId`,
+  // the D-026 phone actor). A technician's own readbacks name customers and
+  // addresses; the matched mobile is the identity they rest on.
+  'verify_team_member_identity',
 ]);
 
 /**

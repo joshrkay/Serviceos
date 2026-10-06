@@ -55,10 +55,11 @@ describe('#840 capability declarations — one per intent, the single source', (
     }
   });
 
-  it('kind census matches the audit: 48 proposal, 20 lookup, 1 direct act, 3 approval, 5 dialogue', () => {
+  it('kind census matches the audit: 48 proposal, 21 lookup, 1 direct act, 3 approval, 5 dialogue', () => {
     const census: Record<string, number> = {};
     for (const [, cap] of entries) census[cap.kind] = (census[cap.kind] ?? 0) + 1;
-    expect(census).toEqual({ proposal: 48, lookup: 20, direct_act: 1, approval: 3, dialogue: 5 });
+    // #1604 — lookup_next_job is the 21st lookup.
+    expect(census).toEqual({ proposal: 48, lookup: 21, direct_act: 1, approval: 3, dialogue: 5 });
   });
 
   it('a lookup_* intent is always a lookup capability, and nothing else is', () => {

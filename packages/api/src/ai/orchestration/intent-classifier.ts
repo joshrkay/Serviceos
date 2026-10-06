@@ -133,6 +133,11 @@ export type IntentType =
   | 'lookup_crew_schedule'
   | 'lookup_timesheets'
   | 'lookup_my_day'
+  // #1604 — "read me the next job": ONE visit in full (time, customer,
+  // service address, access notes, latest note). Same self-scoping posture
+  // as lookup_my_day (any technician, own jobs only; owner any job); the
+  // only lookup that speaks an address. ai/skills/lookup-next-job.ts.
+  | 'lookup_next_job'
   // Task 11 (2026-08-07 tradesperson plan) — ALIAS intent onto the
   // EXISTING `log_expense` proposal type/execution handler: a technician
   // logs drive miles for the tax-deduction mileage log ("Log 32 miles to
@@ -326,6 +331,7 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
   'lookup_crew_schedule',
   'lookup_timesheets',
   'lookup_my_day',
+  'lookup_next_job',
   'log_mileage',
   'add_catalog_item',
   'create_invoice_schedule',
@@ -636,8 +642,19 @@ export const SUPPORTED_INTENTS: readonly IntentType[] = [
  *           field also carries the caller's own name, and the
  *           reschedule_appointment / emergency_dispatch blocks ask for it
  *           (the live model left it empty on those calls).
+ *   1.22.0 — #1604 (2026-10-05). One NEW read-only lookup-skill family
+ *           member, `lookup_next_job` ("read me the next job"): ONE visit
+ *           read in full — time, customer, service address, access notes,
+ *           latest job note — the first lookup that speaks an address. Same
+ *           self-scoping posture as lookup_my_day (any technician, own jobs
+ *           only; owner any job); `jobReference` (existing slot) names a
+ *           job. The lookup_my_day block loses its "What's my next job?" /
+ *           "Where am I going after this one?" examples to the new intent
+ *           (the day as a LIST vs ONE visit's details — a new distinction
+ *           rule), and the deterministic short-circuit for "what's my next
+ *           job" moves with them. No proposal types, no migrations.
  */
-export const INTENT_TAXONOMY_VERSION = '1.21.0';
+export const INTENT_TAXONOMY_VERSION = '1.22.0';
 
 /**
  * P11-001: convenience predicate the FSM adapter uses to route
@@ -1671,7 +1688,9 @@ function matchOwnerOperatorCommand(transcript: string): IntentClassification | n
  * extraction for all non-read-only extended intents.
  * Permitted phrase-match intents: lookup_day_overview, lookup_digest,
  * lookup_pending_items, lookup_revenue, lookup_my_day, lookup_leads,
- * lookup_materials, lookup_catalog.
+ * lookup_materials, lookup_catalog, lookup_next_job (#1604 — the bare
+ * "next job" asks only; a named job keeps its jobReference and stays
+ * LLM-routed).
  *
  * #910 — lookup_revenue / lookup_my_day / lookup_leads added: the 2026-08-29
  * live sweep found these stereotyped, entity-free lookup phrasings answered
@@ -1763,9 +1782,21 @@ const EXTENDED_INTENT_PHRASES: ReadonlyArray<{ intent: IntentType; patterns: Rea
     // like" = owner cross-crew overview); "on my schedule" always means
     // the SPEAKER's own day.
     intent: 'lookup_my_day',
+    patterns: [/^\s*what(?:'s| is)\s+on\s+my\s+schedule\s+today\s*[?.!]?\s*$/i],
+  },
+  {
+    // #1604 — "read me the next job" / "what's my next job?" / "where am I
+    // going next?": ONE visit in full (self-scoped like lookup_my_day; the
+    // speaker is always self). Bare asks only — the instant a job or
+    // customer is named ("read me the Patel job") these stop matching and
+    // the LLM extracts jobReference. "What's my next job?" moved here from
+    // lookup_my_day (the day as a list) with the taxonomy 1.22.0 bump.
+    intent: 'lookup_next_job',
     patterns: [
-      /^\s*what(?:'s| is)\s+on\s+my\s+schedule\s+today\s*[?.!]?\s*$/i,
       /^\s*what(?:'s| is)\s+my\s+next\s+job\s*[?.!]?\s*$/i,
+      /^\s*(?:read|give|tell)\s+me\s+(?:my|the)\s+next\s+job\s*[?.!]?\s*$/i,
+      /^\s*where\s+am\s+i\s+(?:going|headed)\s+next\s*[?.!]?\s*$/i,
+      /^\s*what(?:'s| is)\s+the\s+address\s+(?:for|of)\s+my\s+next\s+job\s*[?.!]?\s*$/i,
     ],
   },
   {

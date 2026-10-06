@@ -1,0 +1,143 @@
+{
+  "id": "lookup-next-job-owner-line",
+  "bucket": "01-happy-lookups",
+  "callerId": "+15555551640",
+  "callerIdBlocked": false,
+  "callerIsOwner": true,
+  "fixtures": {
+    "tenant": {
+      "id": "t_01_lookup_next_job_owner",
+      "display_name": "Test HVAC Co",
+      "timezone": "America/Los_Angeles"
+    },
+    "customers": [
+      {
+        "id": "cust_01_next_job_owner",
+        "tenantId": "t_01_lookup_next_job_owner",
+        "firstName": "Sam",
+        "lastName": "Owner",
+        "displayName": "Sam Owner",
+        "companyName": null,
+        "primaryPhone": "+15555551640",
+        "secondaryPhone": null,
+        "email": "sam.nextjob@testhvac.example",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      },
+      {
+        "id": "cust_01_next_job_patel",
+        "tenantId": "t_01_lookup_next_job_owner",
+        "firstName": "Priya",
+        "lastName": "Patel",
+        "displayName": "Priya Patel",
+        "companyName": null,
+        "primaryPhone": "+15555551641",
+        "secondaryPhone": null,
+        "email": "priya.patel@example.com",
+        "preferredChannel": "phone",
+        "smsConsent": false,
+        "communicationNotes": null,
+        "isArchived": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "users": [
+      {
+        "id": "user_01_next_job_carlos",
+        "tenantId": "t_01_lookup_next_job_owner",
+        "email": "carlos.ruiz@testhvac.example",
+        "role": "technician",
+        "firstName": "Carlos",
+        "lastName": "Ruiz",
+        "canFieldServe": true
+      }
+    ],
+    "locations": [
+      {
+        "id": "loc_01_next_job_patel",
+        "tenantId": "t_01_lookup_next_job_owner",
+        "customerId": "cust_01_next_job_patel",
+        "street1": "88 Mill Lane",
+        "city": "Tarrytown",
+        "state": "NY",
+        "postalCode": "10591",
+        "country": "US",
+        "accessNotes": "Side gate, code 2290",
+        "isPrimary": true,
+        "addressType": "service",
+        "isArchived": false,
+        "createdAt": "2026-01-15T10:00:00.000Z",
+        "updatedAt": "2026-04-01T10:00:00.000Z"
+      }
+    ],
+    "jobs": [
+      {
+        "id": "e0000000-0000-4000-8000-000000001640",
+        "tenantId": "t_01_lookup_next_job_owner",
+        "customerId": "cust_01_next_job_patel",
+        "locationId": "loc_01_next_job_patel",
+        "jobNumber": "JOB-1640",
+        "summary": "AC tune-up",
+        "status": "scheduled",
+        "priority": "normal",
+        "assignedTechnicianId": "user_01_next_job_carlos",
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-20T10:00:00.000Z",
+        "updatedAt": "2026-04-28T10:00:00.000Z"
+      }
+    ],
+    "appointments": [
+      {
+        "id": "appt_01_next_job_patel",
+        "tenantId": "t_01_lookup_next_job_owner",
+        "jobId": "e0000000-0000-4000-8000-000000001640",
+        "scheduledStart": "2026-05-01T16:00:00.000Z",
+        "scheduledEnd": "2026-05-01T17:00:00.000Z",
+        "timezone": "America/Los_Angeles",
+        "status": "scheduled",
+        "holdPendingApproval": false,
+        "createdBy": "user_seed",
+        "createdAt": "2026-04-20T10:00:00.000Z",
+        "updatedAt": "2026-04-28T10:00:00.000Z"
+      }
+    ],
+    "notes": [
+      {
+        "id": "note_01_next_job_patel",
+        "tenantId": "t_01_lookup_next_job_owner",
+        "entityType": "job",
+        "entityId": "e0000000-0000-4000-8000-000000001640",
+        "content": "Bring the 16x25 filters.",
+        "authorId": "user_seed",
+        "authorRole": "owner",
+        "isPinned": false,
+        "createdAt": "2026-04-28T10:00:00.000Z",
+        "updatedAt": "2026-04-28T10:00:00.000Z"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "caller": "Read me the next job",
+      "expected": {
+        "intent": "lookup_next_job",
+        "spokenAnswerMatches": "The next job is today at 9 AM — Priya Patel, AC tune-up, at 88 Mill Lane, Tarrytown, with Carlos Ruiz. Access notes: Side gate, code 2290. Latest note: Bring the 16x25 filters.",
+        "spokenIncludes": ["88 Mill Lane", "Priya Patel", "Carlos Ruiz", "Side gate, code 2290", "Bring the 16x25 filters."],
+        "escalates": false
+      },
+      "hangupAfter": false
+    }
+  ],
+  "grading": {
+    "appliesFloor": [1, 2, 3, 4, 5, 6, 7, 8],
+    "appliesDisposition": [9, 10, 11, 12]
+  },
+  "layer2Eligible": false
+}

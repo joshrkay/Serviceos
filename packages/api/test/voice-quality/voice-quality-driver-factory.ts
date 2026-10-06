@@ -709,6 +709,9 @@ export function makeVoiceQualityDriverFactory(
       leadRepo: fctx.repos.leadRepo,
       auditRepo: fctx.repos.auditRepo,
       catalogRepo,
+      // #1604 — seeded team members: a technician's caller-ID resolves to the
+      // phone actor through the production resolver.
+      userRepo: fctx.repos.userRepo,
       // #869 — the shared lookup bundle, same shape the live phone takes,
       // built from the repos the runner already seeded for this script's
       // fixtures. #1395 — the SAME builder Layer 2 wires, so the two lanes
