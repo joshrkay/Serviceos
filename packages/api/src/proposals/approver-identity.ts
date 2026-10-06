@@ -24,8 +24,12 @@ import { normalizePhone } from '../shared/phone';
 
 export interface ApproverIdentityDeps {
   settingsRepo: SettingsRepository;
-  /** Resolves the backup supervisor's mobile. Optional — owner_phone still works. */
-  userRepo?: UserRepository;
+  /**
+   * Resolves the backup supervisor's mobile. Optional — owner_phone still
+   * works. Only `findById` is read (#1601 step 2 narrowed the type so the
+   * Layer 1 driver's partial repo qualifies; no runtime change).
+   */
+  userRepo?: Pick<UserRepository, 'findById'>;
 }
 
 /**

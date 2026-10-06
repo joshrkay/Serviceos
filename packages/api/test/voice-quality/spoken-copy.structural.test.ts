@@ -65,12 +65,10 @@ const GUARDED_FILES: Record<string, Allowed[]> = {
     { why: "log", literal: "post-quote close: strict confirm failed — treating as not confirmed" },
     { why: "proposal_summary", literal: "Caller ${maskPhone(callerPhone)} matched ${candidates.length} customers — pick which one before this call is attached." },
     { why: "proposal_summary", literal: "Outside the service area (ZIP ${zip}) — asked to book by phone: \"${request}\"" },
-    { why: "log", literal: "speechTurn: language switch refused — flap guard" },
   ],
   "telephony/twilio-adapter.ts": [
     { why: "twiml", literal: "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response>${parts.join('')}</Response>" },
     { why: "log", literal: "owner-line caller-ID without A-attestation — treating as untrusted caller" },
-    { why: "log", literal: "resolveOwnerSession failed — treating caller as non-owner" },
     { why: "log", literal: "loadB2bAccountContext failed — caller routes as normal account" },
     { why: "twiml", literal: "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" },
     { why: "log", literal: "E1 audit write exceeded deadline — speaking 911 script anyway" },
@@ -78,7 +76,6 @@ const GUARDED_FILES: Record<string, Allowed[]> = {
     { why: "log", literal: "handleInbound: replay for existing CallSid — reusing session" },
     { why: "log", literal: "handleGather: max call duration reached — ending call" },
     { why: "log", literal: "twilio-adapter: gather hints resolution failed — proceeding without hints" },
-    { why: "log", literal: "gather: language switch refused — flap guard" },
   ],
   "ai/agents/customer-calling/inapp-adapter.ts": [
     { why: "proposal_summary", literal: "Review response drafting isn't available on this call yet." },
@@ -87,6 +84,19 @@ const GUARDED_FILES: Record<string, Allowed[]> = {
   // #1604 — the next-job skill renders every spoken fragment by catalog id.
   "ai/skills/lookup-next-job.ts": [],
   "ai/voice-turn/quote-readback.ts": [],
+  // #1601 step 2 — the shared voice helpers speak only catalog copy too.
+  "ai/voice-turn/shared/blocked-caller-id.ts": [],
+  "ai/voice-turn/shared/session-timezone.ts": [],
+  "ai/voice-turn/shared/low-stt-ladder.ts": [],
+  "ai/voice-turn/shared/language-switch.ts": [
+    { why: "log", literal: "language switch refused — flap guard" },
+  ],
+  "ai/voice-turn/shared/max-call-duration.ts": [],
+  "ai/voice-turn/shared/session-cost.ts": [],
+  "ai/voice-turn/shared/confirm-turn-answer.ts": [],
+  "ai/voice-turn/shared/owner-session.ts": [
+    { why: "log", literal: "resolveOwnerSession failed — treating caller as non-owner" },
+  ],
 };
 
 interface SpokenCopyReport {
