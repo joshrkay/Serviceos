@@ -151,11 +151,15 @@ describe('Maestro device flows — static contract', () => {
     const offlineAt = at(capture, (c) => c.setAirplaneMode === 'enabled');
     // Hold-to-record needs a hold long enough for MediaRecorder to reach
     // RECORDING on an emulator. Run 36772438631: `longPressOn` (~3 s) released
-    // while the recorder was still only PREPARED ("stop called in an invalid
-    // state: 8") → "No audio captured". Hold with a slow in-place swipe instead.
+    // while the recorder was still only PREPARED. Anchor a slow swipe to the
+    // accessible mic: screen percentages missed it after the layout changed.
     const recordAt = at(capture, (c) => {
-      const s = c.swipe as { duration?: number; start?: string; end?: string } | undefined;
-      return !!s && (s.duration ?? 0) >= 8000 && s.start !== undefined && s.end !== undefined;
+      const s = c.swipe as {
+        duration?: number; from?: { text?: string }; direction?: string;
+        start?: string; end?: string;
+      } | undefined;
+      return !!s && (s.duration ?? 0) >= 30000 && s.from?.text === 'Hold to record'
+        && s.direction === 'DOWN' && s.start === undefined && s.end === undefined;
     });
     expect(capture.some((c) => typeof c === 'object' && 'longPressOn' in c)).toBe(false);
     const queuedAt = at(capture, (c) => (c.extendedWaitUntil as { visible?: string })?.visible === 'Saved offline');
