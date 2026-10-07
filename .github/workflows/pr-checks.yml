@@ -276,6 +276,16 @@ jobs:
       - name: Type check Mobile
         run: npm run typecheck
         working-directory: packages/mobile
+      # Typechecking cannot detect missing runtime imports inside Expo Router.
+      # Catch Metro failures before the nightly emulator spends time building.
+      - name: Bundle Android for device tests
+        run: npx expo export --platform android --dev --max-workers 2 --output-dir "$RUNNER_TEMP/mobile-android"
+        working-directory: packages/mobile
+        env:
+          EXPO_NO_TYPESCRIPT_SETUP: '1'
+          EXPO_PUBLIC_AUTH_MODE: dev
+          EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_dev_auth_shim
+          EXPO_PUBLIC_API_URL: http://10.0.2.2:3000
 
   # T6-F02 — corpus-integrity gate.
   #

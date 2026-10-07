@@ -82,6 +82,10 @@ updates:
         applies-to: version-updates
         update-types: ['minor', 'patch']
     ignore:
+      # Mobile runs on the same Node 20 runtime as root CI. Vitest 5 drops
+      # Node 20 support; move both test toolchains with the runtime migration.
+      - dependency-name: 'vitest'
+        update-types: ['version-update:semver-major']
       # Expo SDK majors move react-native, react, and the whole native module
       # set together; they are migrations, not dependency bumps.
       - dependency-name: 'expo'
