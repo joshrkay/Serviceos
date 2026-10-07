@@ -34,6 +34,12 @@ config.resolver.nodeModulesPaths = [
 
 const baseResolveRequest = config.resolver.resolveRequest;
 config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (
+    moduleName === 'query-string' &&
+    context.originModulePath.includes(`${path.sep}expo-router${path.sep}`)
+  ) {
+    return { type: 'sourceFile', filePath: path.join(projectRoot, 'src/lib/queryStringCompat.ts') };
+  }
   if (devAuth.shimPath && moduleName === '@clerk/clerk-expo') {
     return { type: 'sourceFile', filePath: devAuth.shimPath };
   }

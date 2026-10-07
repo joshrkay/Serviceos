@@ -276,6 +276,9 @@ jobs:
       - name: Type check Mobile
         run: npm run typecheck
         working-directory: packages/mobile
+      - name: Verify Expo Router query serialization
+        run: node --import tsx --test test/query-string-compat.test.ts
+        working-directory: packages/mobile
       # Typechecking cannot detect missing runtime imports inside Expo Router.
       # Catch Metro failures before the nightly emulator spends time building.
       - name: Bundle Android for device tests
