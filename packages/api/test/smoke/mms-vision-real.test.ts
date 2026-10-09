@@ -18,13 +18,15 @@
  */
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../../src/shared/config';
 import { createLLMGateway } from '../../src/ai/gateway/factory';
 import { MmsEstimateTaskHandler } from '../../src/ai/tasks/mms-estimate-task';
 
 const MMS_VISION_SMOKE = process.env.MMS_VISION_SMOKE === '1';
 const HAS_API_KEY = !!process.env.AI_PROVIDER_API_KEY;
-const IMAGE_PATH = process.env.MMS_VISION_SMOKE_IMAGE ?? 'test/fixtures/mms-smoke.jpg';
+const DEFAULT_IMAGE_PATH = fileURLToPath(new URL('../fixtures/mms-smoke.jpg', import.meta.url));
+const IMAGE_PATH = process.env.MMS_VISION_SMOKE_IMAGE ?? DEFAULT_IMAGE_PATH;
 const HAS_IMAGE = existsSync(IMAGE_PATH);
 
 // Fail-hard: when MMS_VISION_SMOKE=1 (the workflow sets this), missing API key
@@ -44,6 +46,16 @@ if (MMS_VISION_SMOKE && !HAS_IMAGE) {
 }
 
 const ENABLED = MMS_VISION_SMOKE && HAS_API_KEY;
+
+// Check the committed prerequisite even in the offline lane, so a missing
+// photo cannot remain hidden behind the live-test skip until a scheduled run.
+describe('MMS vision fixture', () => {
+  it('ships a JPEG fixture for the live smoke test', () => {
+    const bytes = readFileSync(DEFAULT_IMAGE_PATH);
+    expect(bytes.subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
+    expect(bytes.length).toBeGreaterThan(1_000);
+  });
+});
 
 function imageDataUri(): string {
   const bytes = readFileSync(IMAGE_PATH);

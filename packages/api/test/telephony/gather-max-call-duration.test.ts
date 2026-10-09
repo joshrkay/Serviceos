@@ -20,7 +20,7 @@ import {
 import {
   MIN_STT_CONFIDENCE,
   MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
-} from '../../src/telephony/media-streams/mediastream-adapter';
+} from '../../src/ai/voice-turn/shared/low-stt-ladder';
 
 const TENANT = 't-max-duration';
 const MINUTE_MS = 60_000;

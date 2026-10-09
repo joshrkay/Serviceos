@@ -24,9 +24,9 @@ vi.mock('../../../src/analytics/posthog', () => ({
 import {
   TwilioMediaStreamAdapter,
   DEFAULT_SILENCE_REPROMPT_MS,
-  DEFAULT_MAX_CALL_DURATION_MS,
   type WsLike,
 } from '../../../src/telephony/media-streams/mediastream-adapter';
+import { DEFAULT_MAX_CALL_DURATION_MS } from '../../../src/ai/voice-turn/shared/max-call-duration';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import type { VoiceSession } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import type {

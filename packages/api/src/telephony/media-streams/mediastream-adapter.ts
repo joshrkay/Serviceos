@@ -25,6 +25,18 @@
  */
 
 import { callerTranscriptText } from '../../ai/voice-turn/transcript-append';
+import {
+  isLowSttConfidence,
+  lowSttLadderStep,
+  recordLowSttLadderError,
+  LOW_STT_LADDER_TERMINAL_REASON,
+} from '../../ai/voice-turn/shared/low-stt-ladder';
+import { decideLanguageSwitch } from '../../ai/voice-turn/shared/language-switch';
+import {
+  resolveMaxCallDurationMs,
+  maxCallDurationWarnDelayMs,
+  maxCallDurationEndEffect,
+} from '../../ai/voice-turn/shared/max-call-duration';
 import { z } from 'zod';
 import { createLogger } from '../../logging/logger';
 import type {
@@ -64,7 +76,6 @@ import {
   detectLanguageFromTranscript,
   detectLanguageSwitchIntent,
   isLanguageSupported,
-  MAX_LANGUAGE_SWITCHES_PER_CALL,
 } from '../../ai/orchestration/language-detector';
 import {
   renderTtsText,
@@ -72,7 +83,6 @@ import {
   SPEECH_TURN_FAILURE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
   TURN_HOLD_COPY,
-  LOW_STT_CONFIDENCE_REPROMPT_COPY,
   MAX_CALL_DURATION_WRAP_UP_COPY,
   type SessionLanguage,
 } from '../../ai/agents/customer-calling/tts-copy';
@@ -459,14 +469,14 @@ const SENTIMENT_MAX_BUDGET_RATIO = 0.8;
 /**
  * UB-C1 — the per-call language flap cap. Defined in
  * `ai/orchestration/language-detector.ts` alongside the rest of the language
- * POLICY it belongs to (`detectLanguageSwitchIntent`, `isLanguageSupported`)
- * and re-exported here so this module's existing importers are unchanged.
+ * POLICY it belongs to (`detectLanguageSwitchIntent`, `isLanguageSupported`);
+ * this adapter applies it through `ai/voice-turn/shared/language-switch.ts`
+ * (#1601 step 2 — the re-export it used to carry is gone with its last importer).
  *
  * It moved because a third surface now enforces it — the in-app voice-session
  * adapter — and an in-app turn should not have to import the Deepgram
  * websocket adapter to learn a number. See that constant's doc comment.
  */
-export { MAX_LANGUAGE_SWITCHES_PER_CALL } from '../../ai/orchestration/language-detector';
 
 /**
  * VOX-35c — after this many CONSECUTIVE `speechTurn` failures the adapter
@@ -479,43 +489,9 @@ export { MAX_LANGUAGE_SWITCHES_PER_CALL } from '../../ai/orchestration/language-
  */
 const MAX_CONSECUTIVE_SPEECH_TURN_FAILURES = 2;
 
-/**
- * A3 — minimum Deepgram acoustic `confidence` (0..1, on FINAL transcripts
- * only) the adapter requires before treating a transcript as heard correctly
- * and dispatching it into the FSM. Below this, the turn is NOT dispatched —
- * the caller is asked to repeat instead (see {@link LOW_STT_CONFIDENCE_REPROMPT_COPY}).
- * A misheard turn acted on as if correct is worse than one extra reprompt
- * (e.g. "cancel" dispatched from a misheard "confirm").
- *
- * 0.5 is a conservative default: Deepgram Nova-3's acoustic confidence for
- * ordinary, clearly-heard speech is typically well above 0.7-0.8, while a
- * genuinely garbled/crosstalk/very-noisy-line utterance tends to fall well
- * below 0.5. A conservative (low) floor means we mostly catch the clearly-bad
- * tail rather than second-guessing ordinary accented or slightly-quiet audio.
- * Env-overridable per deployment (e.g. a noisier vertical may want it lower).
- * Invalid/out-of-range overrides fall back to the default rather than
- * disabling or over-triggering the gate.
- */
-// Exported (not just module-local) so the Gather/PSTN fallback adapter
-// (twilio-adapter.ts `_handleGatherLocked`) gates Twilio's `Confidence` field
-// against the SAME threshold and cap as the media-streams/Deepgram path —
-// one env var, one number, for both surfaces.
-export const MIN_STT_CONFIDENCE = ((): number => {
-  const raw = process.env.VOICE_MIN_STT_CONFIDENCE;
-  if (raw === undefined) return 0.5;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : 0.5;
-})();
-
-/**
- * A3 — after this many CONSECUTIVE low-acoustic-confidence finals the
- * adapter stops reprompting and hands the caller off gracefully, mirroring
- * {@link MAX_CONSECUTIVE_SPEECH_TURN_FAILURES}: a caller on a persistently
- * noisy/unintelligible line should not be trapped in a "could you repeat
- * that" loop forever. Exported for the same cross-surface reason as
- * {@link MIN_STT_CONFIDENCE}.
- */
-export const MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS = 2;
+// A3 — the acoustic-confidence floor and the consecutive-strike cap live in
+// the shared ladder (#1601 step 2, `ai/voice-turn/shared/low-stt-ladder.ts`):
+// ONE env var (`VOICE_MIN_STT_CONFIDENCE`), ONE number, for every surface.
 
 interface RuntimeState {
   ws: WsLike;
@@ -965,21 +941,9 @@ function observeTurnLatency(startMs: number | null): void {
  */
 export const DEFAULT_AUDIO_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
-/**
- * U5 — default absolute per-call duration cap: 15 minutes, matching the
- * intent of the never-wired `DEFAULT_TELEPHONY_CAPS.maxDurationMs` this cap
- * replaces. Overridden per process by `VOICE_MAX_CALL_DURATION_MS` (wired
- * into `deps.maxCallDurationMs` by app.ts); shared with the Gather adapter so
- * both transports cut at the same wall-clock limit.
- */
-export const DEFAULT_MAX_CALL_DURATION_MS = 15 * 60 * 1000;
-
-/**
- * U5 — how long before the cap the wrap-up line is spoken, so the caller is
- * not cut mid-sentence without warning. Limits shorter than twice this lead
- * skip the pre-warning and speak the wrap-up at the limit instead.
- */
-export const MAX_CALL_DURATION_WRAP_UP_LEAD_MS = 30_000;
+// U5 — the per-call cap's limit and warning lead live in the shared cap
+// (#1601 step 2, `ai/voice-turn/shared/max-call-duration.ts`) so both
+// transports cut at the same wall-clock limit.
 
 /**
  * T2-F05 — how long after the agent finishes speaking a totally silent caller
@@ -1776,11 +1740,7 @@ export class TwilioMediaStreamAdapter {
     // transcription-providers.ts), but the check is still defensive: a
     // missing/non-finite value is treated as HIGH so it can never block a
     // turn on absent data (requirement: never block on absent confidence).
-    if (
-      typeof event.confidence === 'number' &&
-      Number.isFinite(event.confidence) &&
-      event.confidence < MIN_STT_CONFIDENCE
-    ) {
+    if (isLowSttConfidence(event.confidence)) {
       await this.recoverFromLowSttConfidence(session);
       return;
     }
@@ -2093,32 +2053,19 @@ export class TwilioMediaStreamAdapter {
    * (high-confidence, or confidence-absent) final.
    */
   private async recoverFromLowSttConfidence(session: VoiceSession): Promise<void> {
+    // #1601 step 2 — the rules (cap, copy, terminal reason) are the shared
+    // ladder's; this leg owns its streak counter and how the line is spoken.
     this.state.consecutiveLowConfidenceTurns += 1;
+    const step = lowSttLadderStep(this.state.consecutiveLowConfidenceTurns);
 
-    if (
-      this.state.consecutiveLowConfidenceTurns >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS
-    ) {
-      await this.speakAndEndAfterRepeatedSpeechTurnFailures(
-        session,
-        'low_stt_confidence_max_retries',
-      );
-      // OBS — fired after the hand-off is spoken/the call is torn down;
-      // never alters the recovery behavior above.
-      recordVoiceError({
-        errorKind: 'low_stt_confidence_repeated',
-        channel: 'media_streams',
-        callSid: this.state.callSid,
-        tenantId: this.state.tenantId,
-      });
-      return;
+    if (step.escalate) {
+      await this.speakAndEndAfterRepeatedSpeechTurnFailures(session, LOW_STT_LADDER_TERMINAL_REASON);
+    } else {
+      await this.speakRecoveryLine(session, step.copy);
     }
-
-    await this.speakRecoveryLine(session, LOW_STT_CONFIDENCE_REPROMPT_COPY);
-    // OBS — fired after the reprompt is spoken; never alters the recovery
-    // behavior above.
-    recordVoiceError({
-      errorKind: 'low_stt_confidence',
-      channel: 'media_streams',
+    // OBS — fired after the line is spoken / the call is torn down; never
+    // alters the recovery behavior above.
+    recordLowSttLadderError(step, 'media_streams', {
       callSid: this.state.callSid,
       tenantId: this.state.tenantId,
     });
@@ -2307,7 +2254,7 @@ export class TwilioMediaStreamAdapter {
    * an in-flight FSM turn. NOTE the lock is a non-reentrant promise chain
    * — this method must never be called from inside another lock body.
    *
-   * Flap guard: hard cap of {@link MAX_LANGUAGE_SWITCHES_PER_CALL}
+   * Flap guard: hard cap of `MAX_LANGUAGE_SWITCHES_PER_CALL`
    * reopen cycles per call; the 3rd request is refused (audio keeps
    * flowing in the current language).
    *
@@ -2324,15 +2271,26 @@ export class TwilioMediaStreamAdapter {
     if (!session || this.state.closed) return false;
     return this.deps.store.withSessionLock(session.id, async () => {
       // Re-validate under the lock — a queued concurrent switch may have
-      // already flipped the language or spent the flap budget.
+      // already flipped the language or spent the flap budget. #1601 step 2:
+      // the shared policy (`ai/voice-turn/shared/language-switch.ts`) decides
+      // already-active / opt-in / flap-cap; both callers pre-gate the opt-in,
+      // so under the lock that branch is a re-validation.
       if (this.state.closed) return false;
-      if (target === this.state.language) return false;
-      if (this.state.languageSwitchCount >= MAX_LANGUAGE_SWITCHES_PER_CALL) {
-        logger.info('mediastream: language switch refused — flap guard', {
-          callSid: this.state.callSid,
-          target,
-          switchCount: this.state.languageSwitchCount,
-        });
+      const decision = decideLanguageSwitch({
+        current: this.state.language,
+        target,
+        supportedLanguages: session.supportedLanguages ?? null,
+        switchCount: this.state.languageSwitchCount,
+      });
+      if (decision.kind !== 'switch') {
+        if (decision.kind !== 'already_active') {
+          logger.info('mediastream: language switch refused', {
+            callSid: this.state.callSid,
+            target,
+            reason: decision.kind,
+            switchCount: this.state.languageSwitchCount,
+          });
+        }
         return false;
       }
 
@@ -3378,15 +3336,18 @@ export class TwilioMediaStreamAdapter {
    * every Twilio call does, silence included) still ends at the limit.
    */
   private armMaxCallDurationTimers(): void {
-    const limitMs = this.deps.maxCallDurationMs ?? DEFAULT_MAX_CALL_DURATION_MS;
+    // #1601 step 2 — limit and warning lead are the shared cap's; the leg
+    // owns its two timers.
+    const limitMs = resolveMaxCallDurationMs(this.deps.maxCallDurationMs);
     const unref = (t: NodeJS.Timeout) => {
       if (typeof t.unref === 'function') t.unref();
     };
-    if (limitMs >= MAX_CALL_DURATION_WRAP_UP_LEAD_MS * 2) {
+    const warnDelayMs = maxCallDurationWarnDelayMs(limitMs);
+    if (warnDelayMs !== null) {
       this.state.maxCallDurationWarnTimer = setTimeout(() => {
         this.state.maxCallDurationWarnTimer = null;
         void this.speakMaxCallDurationWrapUp();
-      }, limitMs - MAX_CALL_DURATION_WRAP_UP_LEAD_MS);
+      }, warnDelayMs);
       unref(this.state.maxCallDurationWarnTimer);
     }
     this.state.maxCallDurationTimer = setTimeout(() => {
@@ -3505,9 +3466,7 @@ export class TwilioMediaStreamAdapter {
       limitMs,
     });
     this.state.maxCallDurationReached = true;
-    this.state.pendingFinalizeEffects = [
-      { type: 'end_session', payload: { reason: 'max_call_duration' } },
-    ];
+    this.state.pendingFinalizeEffects = [maxCallDurationEndEffect()];
     this.handleClose('end_session');
   }
 
