@@ -74,6 +74,22 @@ export function initSentry(config: SentryConfig): SentryClient {
     environment: config.environment,
     release: config.release,
     tracesSampleRate: config.tracesSampleRate ?? (config.environment === 'production' ? 0.1 : 1.0),
+    // Sentry 11 replaced `sendDefaultPii` with `dataCollection`, whose defaults
+    // collect HTTP bodies/headers/cookies/user info/query params/AI I/O/local
+    // variables. Opt out of every channel explicitly: beforeSend redaction only
+    // sees error events, not span data or auto-collected request data.
+    dataCollection: {
+      userInfo: false,
+      cookies: false,
+      httpHeaders: { request: false, response: false },
+      httpBodies: [],
+      urlQueryParams: false,
+      graphQL: { document: false, variables: false },
+      genAI: { inputs: false, outputs: false },
+      databaseQueryData: false,
+      queues: false,
+      stackFrameVariables: false,
+    },
     beforeSend(event: unknown) {
       return redactSentryEvent(event) as any;
     },
