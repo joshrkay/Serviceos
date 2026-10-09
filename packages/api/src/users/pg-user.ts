@@ -37,6 +37,23 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
     super(pool);
   }
 
+  /** Dev/test bootstrap parity with InMemoryUserRepository. */
+  async create(user: Omit<User, 'createdAt' | 'updatedAt'>): Promise<User> {
+    return this.withTenant(user.tenantId, async (client) => {
+      const result = await client.query(
+        `INSERT INTO users
+           (id, tenant_id, clerk_user_id, email, role, first_name, last_name,
+            can_field_serve, mobile_number, status, deleted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING *`,
+        [user.id, user.tenantId, user.clerkUserId ?? null, user.email, user.role,
+          user.firstName ?? null, user.lastName ?? null, user.canFieldServe,
+          user.mobileNumber ?? null, user.status ?? 'active', user.deletedAt ?? null],
+      );
+      return mapRow(result.rows[0] as Record<string, unknown>);
+    });
+  }
+
   async findByTenant(tenantId: string, options?: UserListOptions): Promise<User[]> {
     return this.withTenant(tenantId, async (client) => {
       // Explicit tenant scoping: RLS is a runtime no-op unless
