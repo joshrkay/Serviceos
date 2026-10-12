@@ -133,3 +133,67 @@ describe('SEC-26 — tenant attribution prefers verified req.auth.tenantId over 
     expect(tenantId).toBe('header-tenant');
   });
 });
+
+describe('request logging never emits request bodies (PII / raw webhook payloads)', () => {
+  let logger: Logger;
+  let calls: Array<{ message: string; meta?: Record<string, unknown> }>;
+
+  beforeEach(() => {
+    ({ logger, calls } = createMockLogger());
+  });
+
+  it('logs only the key count of a JSON body, never keys or values', async () => {
+    const app = express();
+    app.use(express.json());
+    app.use(createRequestLoggingMiddleware(logger));
+    app.post('/api/customers', (_req, res) => res.json({ ok: true }));
+
+    await request(app)
+      .post('/api/customers')
+      .send({ name: 'Jane Doe', phone: '602-555-0199', email: 'jane@example.com' });
+
+    const serialized = JSON.stringify(calls.map((c) => c.meta));
+    expect(serialized).not.toContain('Jane Doe');
+    expect(serialized).not.toContain('602-555-0199');
+    expect(serialized).not.toContain('jane@example.com');
+    const incoming = calls.find((c) => c.message === 'incoming request');
+    expect((incoming?.meta?.safeRequestLog as any)?.body).toBe('[OBJECT 3 keys]');
+  });
+
+  it('does not log client-controlled key names (they can carry PII)', async () => {
+    const app = express();
+    app.use(express.json());
+    app.use(createRequestLoggingMiddleware(logger));
+    app.post('/api/customers', (_req, res) => res.json({ ok: true }));
+
+    await request(app).post('/api/customers').send({ 'jane@example.com': true });
+
+    expect(JSON.stringify(calls.map((c) => c.meta))).not.toContain('jane@example.com');
+  });
+
+  it('summarizes a raw-body (Buffer) webhook payload instead of enumerating its bytes', async () => {
+    const app = express();
+    app.use(express.raw({ type: '*/*' }));
+    app.use(createRequestLoggingMiddleware(logger));
+    app.post('/webhooks/stripe', (_req, res) => res.json({ ok: true }));
+
+    const payload = JSON.stringify({ customer_email: 'payer@example.com' });
+    await request(app).post('/webhooks/stripe').set('content-type', 'application/json').send(payload);
+
+    const incoming = calls.find((c) => c.message === 'incoming request');
+    expect((incoming?.meta?.safeRequestLog as any)?.body).toBe(`[BINARY ${Buffer.byteLength(payload)} bytes]`);
+    expect(JSON.stringify(calls.map((c) => c.meta))).not.toContain('payer@example.com');
+  });
+
+  it('redacts OAuth callback code/state in both the route and query fields', async () => {
+    const app = express();
+    app.use(createRequestLoggingMiddleware(logger));
+    app.get('/api/integrations/callback', (_req, res) => res.json({ ok: true }));
+
+    await request(app).get('/api/integrations/callback?code=AUTHCODE123&state=CSRFSTATE456');
+
+    const serialized = JSON.stringify(calls.map((c) => c.meta));
+    expect(serialized).not.toContain('AUTHCODE123');
+    expect(serialized).not.toContain('CSRFSTATE456');
+  });
+});

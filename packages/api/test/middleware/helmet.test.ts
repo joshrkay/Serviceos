@@ -21,6 +21,8 @@ import express from 'express';
 import helmet from 'helmet';
 import request from 'supertest';
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { buildHelmetOptions } from '../../src/app';
 
 function makeApp(isProd: boolean): express.Express {
@@ -141,5 +143,45 @@ describe('D1-3 — helmet hardening headers', () => {
       expect(res.headers['x-frame-options']).toBe('DENY');
       expect(res.headers['referrer-policy']).toBe('no-referrer');
     });
+  });
+});
+
+describe('D1-3 — static frontend is served behind helmet', () => {
+  // createApp() needs a live Pg pool + prod secrets, so pin the mount
+  // order in source: express.static mounted before helmet() serves `/`
+  // and index.html with no CSP / frame-ancestors / HSTS.
+  it('mounts express.static(frontendPath) after helmet()', () => {
+    const src = readFileSync(join(__dirname, '../../src/app.ts'), 'utf8');
+    const helmetAt = src.indexOf('app.use(helmet(buildHelmetOptions(isProd)))');
+    const staticAt = src.indexOf('app.use(express.static(frontendPath))');
+    expect(helmetAt).toBeGreaterThan(-1);
+    expect(staticAt).toBeGreaterThan(helmetAt);
+  });
+});
+
+describe('D1-3 — API CSP covers the SPA shell it serves', () => {
+  // The API serves packages/web/dist (index.html + assets) behind helmet, so
+  // every source the nginx edge allows for the SPA (e.g. the Pendo loader's
+  // inline-script hash and CDN) must be allowed here too, or those pages
+  // break only when served from the API host.
+  it('allows every source the web edge CSP (security-headers.conf) allows', () => {
+    const conf = readFileSync(join(__dirname, '../../../web/security-headers.conf'), 'utf8');
+    const edge = conf.match(/Content-Security-Policy "([^"]+)"/)?.[1];
+    expect(edge).toBeTruthy();
+    const directives = (buildHelmetOptions(true) as any).contentSecurityPolicy.directives as Record<
+      string,
+      string[]
+    >;
+    const api = new Map(
+      Object.entries(directives).map(([k, v]) => [k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`), v]),
+    );
+    const missing: string[] = [];
+    for (const part of edge!.split(';').map((p) => p.trim()).filter(Boolean)) {
+      const [name, ...sources] = part.split(/\s+/);
+      for (const src of sources) {
+        if (!(api.get(name) ?? []).includes(src)) missing.push(`${name} ${src}`);
+      }
+    }
+    expect(missing).toEqual([]);
   });
 });

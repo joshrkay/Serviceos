@@ -76,6 +76,7 @@ function buildApp(opts: {
   googleConfig?: typeof GOOGLE_CONFIG;
   googleFetch?: typeof fetch;
   authenticate?: boolean;
+  role?: NonNullable<AuthenticatedRequest['auth']>['role'];
   auditRepo?: InMemoryAuditRepository;
   pollStateRepo?: InMemoryReviewPollStateRepository;
 }) {
@@ -87,7 +88,7 @@ function buildApp(opts: {
         userId: USER,
         sessionId: 'sess-1',
         tenantId: TENANT,
-        role: 'owner',
+        role: opts.role ?? 'owner',
       };
       next();
     });
@@ -208,6 +209,14 @@ describe('Google Business integrations routes', () => {
     expect(raw).not.toContain('TokenEnc');
   });
 
+  it('403s a technician on connect and disconnect (tenant-wide integration, settings:update)', async () => {
+    const app = buildApp({ integrationRepo, stateRepo, googleConfig: GOOGLE_CONFIG, role: 'technician' });
+    const connect = await request(app).post('/api/googlebusiness-integrations/google/connect').send({});
+    expect(connect.status).toBe(403);
+    const disconnect = await request(app).delete('/api/googlebusiness-integrations/google');
+    expect(disconnect.status).toBe(403);
+  });
+
   it('POST /google/connect mints a business.manage consent URL with a state nonce', async () => {
     const auditRepo = new InMemoryAuditRepository();
     const app = buildApp({
@@ -250,7 +259,7 @@ describe('Google Business integrations routes', () => {
     const { id: stateId } = await stateRepo.create({
       tenantId: TENANT,
       userId: USER,
-      provider: 'google',
+      provider: 'google_business',
     });
     const fetchMock = makeConnectFetch();
 
@@ -291,7 +300,7 @@ describe('Google Business integrations routes', () => {
     const { id: stateId } = await stateRepo.create({
       tenantId: TENANT,
       userId: USER,
-      provider: 'google',
+      provider: 'google_business',
     });
     const app = buildApp({
       integrationRepo,
@@ -368,11 +377,36 @@ describe('Google Business integrations routes', () => {
     expect(res.status).toBe(400);
   });
 
+  it('GET /google/callback rejects a state minted by the calendar connect flow', async () => {
+    // Calendar connect is open to any member and shares the Google OAuth
+    // client; its nonce must not complete this owner-only connect even
+    // when the code exchange would succeed.
+    const { id: stateId } = await stateRepo.create({
+      tenantId: TENANT,
+      userId: 'technician-1',
+      provider: 'google',
+    });
+    const fetchMock = makeConnectFetch();
+    const app = buildApp({
+      integrationRepo,
+      stateRepo,
+      authenticate: false,
+      googleConfig: GOOGLE_CONFIG,
+      googleFetch: fetchMock as unknown as typeof fetch,
+    });
+    const res = await request(app)
+      .get('/api/googlebusiness-integrations/google/callback')
+      .query({ code: 'auth-xyz', state: stateId });
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await integrationRepo.get(TENANT)).toBeNull();
+  });
+
   it('GET /google/callback ignores an open-redirect attempt and falls back to default', async () => {
     const { id: stateId } = await stateRepo.create({
       tenantId: TENANT,
       userId: USER,
-      provider: 'google',
+      provider: 'google_business',
       redirectAfter: '//evil.com/phish',
     });
     const app = buildApp({

@@ -585,6 +585,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['306_tenant_signup_attribution', '84b60ec6dcae9cf9b2187861d6581c2e70f2ffe7619cb349b87e298396848751'],
   // Platform-admin tenant usage report — ai_runs (tenant_id, created_at).
   ['307_ai_runs_tenant_created_at_index', 'd40b650d25ab0e63f1deef7e8262123f32c60657037182ddc5d73280adc6464c'],
+  // Google Business OAuth states get their own provider (flow binding).
+  ['308_oauth_states_google_business_provider', '79915b29a7a0fe83f95f798f21646cccf3ea6c50ce323b5bdb4106a0b36eb3a1'],
 ];
 
 function hashMigration(value: string): string {

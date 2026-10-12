@@ -7528,6 +7528,15 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_ai_runs_tenant_created_at
       ON ai_runs (tenant_id, created_at);
   `,
+
+  // Google Business OAuth states get their own provider so a nonce minted
+  // by the per-user calendar connect cannot complete the owner-only Google
+  // Business callback (both flows share one Google OAuth client).
+  '308_oauth_states_google_business_provider': `
+    ALTER TABLE oauth_states DROP CONSTRAINT IF EXISTS oauth_states_provider_check;
+    ALTER TABLE oauth_states ADD CONSTRAINT oauth_states_provider_check
+      CHECK (provider IN ('google', 'google_business', 'quickbooks', 'xero')) NOT VALID;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

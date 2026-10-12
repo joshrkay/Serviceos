@@ -15,6 +15,14 @@ describe('deployment secret hygiene', () => {
     expect(dockerfile).not.toMatch(/ELEVENLABS_API_KEY=.*render-fillers/m);
   });
 
+  it('runs the API production image as a non-root user', () => {
+    const dockerfile = readFileSync(resolve(root, 'Dockerfile'), 'utf8');
+    const apiStage = dockerfile.slice(dockerfile.indexOf(' AS api\n'));
+    const userAt = apiStage.search(/^USER node$/m);
+    expect(userAt).toBeGreaterThan(-1);
+    expect(userAt).toBeLessThan(apiStage.indexOf('CMD '));
+  });
+
   it('suppresses access logging on the websocket token endpoint', () => {
     const template = readFileSync(
       resolve(root, 'packages/web/nginx.conf.template'),

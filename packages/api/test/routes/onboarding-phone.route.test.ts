@@ -246,6 +246,15 @@ describe('POST /api/onboarding/phone/claim', () => {
 });
 
 describe('POST /api/onboarding/phone/retry', () => {
+  it('forbids a non-owner from retrying (auto-picks and buys a number)', async () => {
+    const queue = new InMemoryQueue();
+    const { app } = buildApp({ pool: fakePool('failed'), queue, role: 'dispatcher' });
+    const res = await request(app).post('/api/onboarding/phone/retry').send({});
+
+    expect(res.status).toBe(403);
+    expect(await queue.receive()).toBeNull();
+  });
+
   it('409s with PHONE_BILLING_REQUIRED when the tenant has no live subscription', async () => {
     const { app } = buildApp({ pool: fakePool('failed', null), queue: new InMemoryQueue() });
     const res = await request(app).post('/api/onboarding/phone/retry');

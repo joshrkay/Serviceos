@@ -94,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **65** |
+| Owner-only routes in code | **72** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **7** |
-| `cadence: occasional` | **56** |
+| `cadence: occasional` | **63** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **7** |
 
@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 65,
+  "ownerOnlyRoutes": 72,
   "daily": 2,
   "onboarding": 7,
-  "occasional": 56,
+  "occasional": 63,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 7
 }
@@ -135,6 +135,12 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `POST /api/billing/connect/onboarding` | onboarding | Stripe Connect onboarding. Until it is done the tenant cannot take card payments, which is half of the time-to-cash metric. | false | none | Reviewed: one-time activation; Stripe's hosted onboarding is a browser flow by construction. |
 | `POST /api/voice/go-live` | onboarding | Flips the tenant's voice agent live. Until it is called the AI answers nothing, so it is the last forced step of activation. | false | none | Reviewed: one-time activation. Deliberately a considered on-screen act — the owner is handing their phone line to an AI. |
 | `PUT /api/settings/texting-registration/` | onboarding | US A2P 10DLC registration (#1564): the owner submits the business's legal name, EIN, address and authorized contact once; Rivet (as ISV) registers the Brand and campaign with the carriers. Until it is approved the tenant's texts are unregistered 10DLC traffic. | false | none | Reviewed: one-time activation. The carriers vet exact legal identity data (legal name must match the EIN record), so this is a deliberate form entry, not a spoken or SMS action; the long carrier review that follows needs no owner action (the worker polls it). |
+| `DELETE /api/googlebusiness-integrations/google` | occasional | Disconnects review monitoring — teardown of an optional integration, never part of a working day. | false | none | |
+| `POST /api/googlebusiness-integrations/google/connect` | occasional | Connects the tenant's Google Business profile for review monitoring. Tenant-wide credential, set once; owner-gated so a member cannot repoint it at an account they control. | false | none | |
+| `POST /api/integrations/quickbooks/connect` | occasional | Connects the tenant's books to a QuickBooks company. Tenant-wide financial integration set up once; owner-gated so a member cannot sync paid invoices/customers into their own Intuit company. | false | none | |
+| `POST /api/integrations/quickbooks/disconnect` | occasional | QuickBooks teardown — never part of a working day. | false | none | |
+| `POST /api/integrations/quickbooks/sync` | occasional | Manual re-sync to QuickBooks; an optional nudge, not something the day forces. Pushes financial data, so owner-gated like connect. | false | none | |
+| `POST /api/onboarding/phone/retry` | occasional | Re-runs number provisioning after a failure; auto-picks and buys a DID (recurring spend), so owner-only like `/phone/claim`. Recovery, not a daily action. | false | none | |
 | `PUT /api/billing/ai-overage-cap` | occasional | Sets or removes the monthly AI-minute overage cap (default: one plan price) after which calls ring the owner instead of the AI. A spending limit, changed rarely. | false | none | |
 | `DELETE /api/billing/connect` | occasional | Disconnects Stripe payouts — teardown, never part of a working day. | false | none | |
 | `DELETE /api/catalog/items/:id` | occasional | Price-book cleanup; the day's work adds items, it does not delete them. | false | none | |
@@ -183,6 +189,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `POST /api/vertical-training-assets/:id/archive` | occasional | Training-asset lifecycle. | false | none | |
 | `POST /api/voice/pause` | occasional | Pauses the voice agent. Discretionary — the owner chooses it, the day does not force it. | false | none | |
 | `PUT /api/catalog/items/:id` | occasional | Price correction, triggered by supplier prices rather than by the day's jobs. Voice can reach it. | true | voice_intent:update_catalog_item | |
+| `PUT /api/onboarding/operator-hours` | occasional | Edits business hours after onboarding (Settings). Hours drive after-hours voice routing and booking windows, so owner-only like `/identity`; changed rarely. | false | none | |
 | `PUT /api/onboarding/voice` | occasional | Voice preset + greeting. Not one of the 7 wizard steps; presets ship with a default. | false | none | |
 | `PUT /api/settings/` | occasional | The general settings write. Configuration, by definition. | false | none | |
 | `PUT /api/settings/brand-voice/` | occasional | Brand-voice configuration. Voice can reach it (`update_brand_voice` is `manual` class — owner-only, never auto-approved). | true | voice_intent:update_brand_voice | |

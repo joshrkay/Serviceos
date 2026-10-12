@@ -65,4 +65,7 @@ COPY --from=api-build /app/packages/api/package.json packages/api/
 COPY --from=shared-build /app/packages/shared/dist packages/shared/dist
 COPY --from=web-build /app/packages/web/dist packages/web/dist
 EXPOSE 3000
+# Drop root: the API never writes to its own filesystem at runtime, so the
+# root-owned /app stays read-only to the process (limits RCE blast radius).
+USER node
 CMD ["node", "packages/api/dist/src/index.js"]
