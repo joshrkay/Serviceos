@@ -27,8 +27,16 @@ const BUCKET = 'serviceos-attachments-test';
 const JOB_ID = uuidv4();
 const INVOICE_ID = uuidv4();
 
+const uploadUrlCalls: Array<{ key: string; sizeBytes: number }> = [];
+
 class FakeStorageProvider implements StorageProvider {
-  async generateUploadUrl(bucket: string, key: string): Promise<string> {
+  async generateUploadUrl(
+    bucket: string,
+    key: string,
+    _contentType: string,
+    sizeBytes: number
+  ): Promise<string> {
+    uploadUrlCalls.push({ key, sizeBytes });
     return `https://fake.local/put/${bucket}/${key}`;
   }
   async generateDownloadUrl(bucket: string, key: string): Promise<string> {
@@ -154,6 +162,15 @@ describe('attachments router (RV-005)', () => {
 
       const events = auditRepo.getAll().map((e) => e.eventType);
       expect(events).toContain('attachment.upload_requested');
+    });
+
+    // Security audit: the declared size must reach the presign so it is
+    // signed as Content-Length (R2/S3 then reject a PUT of any other size).
+    it('passes the declared sizeBytes through to the presigned upload URL', async () => {
+      uploadUrlCalls.length = 0;
+      const res = await presign({ sizeBytes: 2048 });
+      expect(res.status).toBe(201);
+      expect(uploadUrlCalls).toEqual([{ key: res.body.fileRecord.storageKey, sizeBytes: 2048 }]);
     });
 
     it('rejects invalid entityType', async () => {

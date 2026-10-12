@@ -71,11 +71,18 @@ class FakeStorageProvider implements StorageProvider {
   public uploadKeys: string[] = [];
   public lastUploadBucket: string | null = null;
   public lastUploadContentType: string | null = null;
+  public lastUploadSizeBytes: number | null = null;
 
-  async generateUploadUrl(bucket: string, key: string, contentType: string): Promise<string> {
+  async generateUploadUrl(
+    bucket: string,
+    key: string,
+    contentType: string,
+    sizeBytes: number
+  ): Promise<string> {
     this.lastUploadBucket = bucket;
     this.uploadKeys.push(key);
     this.lastUploadContentType = contentType;
+    this.lastUploadSizeBytes = sizeBytes;
     return `https://s3.fake/${bucket}/${key}?sig=presigned-put`;
   }
   async generateDownloadUrl(bucket: string, key: string): Promise<string> {
@@ -367,6 +374,8 @@ describe('U9 voicemail-status route', () => {
     expect(key).toContain('-voicemail');
     expect(h.storage.uploadKeys).toEqual([key]);
     expect(h.storage.lastUploadBucket).toBe(STORAGE_BUCKET);
+    // The presign binds the exact fetched byte length as Content-Length.
+    expect(h.storage.lastUploadSizeBytes).toBe(Buffer.from('ID3FAKEVOICEMAIL').length);
 
     // voice_recordings row: idempotent insert, untrusted source, files FK.
     expect(h.pool.voiceRows).toHaveLength(1);

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { createHash, createHmac } from 'crypto';
 import {
   S3StorageProvider,
   DevStorageProvider,
@@ -100,6 +101,120 @@ describe('signS3Request (pure SigV4)', () => {
   });
 });
 
+// Independent re-implementation of what S3/R2 do when a presigned PUT
+// arrives: rebuild the canonical request from the URL's query and the
+// headers the client ACTUALLY sent (restricted to X-Amz-SignedHeaders), and
+// compare signatures. Written separately from signS3Request so the test
+// exercises the wire contract, not the implementation against itself.
+function storageAcceptsPut(
+  presignedUrl: string,
+  sentHeaders: Record<string, string>,
+  secretAccessKey: string
+): boolean {
+  const url = new URL(presignedUrl);
+  const q = url.searchParams;
+  const providedSignature = q.get('X-Amz-Signature');
+  const signedHeaderNames = (q.get('X-Amz-SignedHeaders') ?? '').split(';');
+  const lower: Record<string, string> = { host: url.host };
+  for (const [k, v] of Object.entries(sentHeaders)) lower[k.toLowerCase()] = v;
+  const canonicalHeaders = signedHeaderNames.map((h) => `${h}:${lower[h] ?? ''}\n`).join('');
+  const enc = (v: string) =>
+    encodeURIComponent(v).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+  const canonicalQuery = [...q.entries()]
+    .filter(([k]) => k !== 'X-Amz-Signature')
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${enc(k)}=${enc(v)}`)
+    .join('&');
+  const canonicalRequest = [
+    'PUT',
+    url.pathname,
+    canonicalQuery,
+    canonicalHeaders,
+    signedHeaderNames.join(';'),
+    'UNSIGNED-PAYLOAD',
+  ].join('\n');
+  const [, dateStamp, region, service] = (q.get('X-Amz-Credential') ?? '').split('/');
+  const stringToSign = [
+    'AWS4-HMAC-SHA256',
+    q.get('X-Amz-Date'),
+    `${dateStamp}/${region}/${service}/aws4_request`,
+    createHash('sha256').update(canonicalRequest).digest('hex'),
+  ].join('\n');
+  const h = (key: Buffer | string, data: string) => createHmac('sha256', key).update(data).digest();
+  const kSigning = h(h(h(h(`AWS4${secretAccessKey}`, dateStamp), region), service), 'aws4_request');
+  const expected = createHmac('sha256', kSigning).update(stringToSign).digest('hex');
+  return expected === providedSignature;
+}
+
+describe('presigned PUT binds the declared size as Content-Length', () => {
+  const SECRET = 'secret-test-key';
+  const provider = new S3StorageProvider({
+    bucket: 'serviceos',
+    region: 'auto',
+    endpoint: 'https://abcdef.r2.cloudflarestorage.com',
+    accessKeyId: 'AKIATEST',
+    secretAccessKey: SECRET,
+  });
+
+  it('signs content-length (sorted before content-type and host) on upload URLs', async () => {
+    const url = await provider.generateUploadUrl('serviceos', 'tenant-1/f/photo.jpg', 'image/jpeg', 2048);
+    expect(new URL(url).searchParams.get('X-Amz-SignedHeaders')).toBe(
+      'content-length;content-type;host'
+    );
+  });
+
+  it('is accepted only when the PUT Content-Length equals the declared sizeBytes', async () => {
+    const declared = 100;
+    const url = await provider.generateUploadUrl('serviceos', 'tenant-1/f/photo.jpg', 'image/jpeg', declared);
+    // Legitimate upload: browser sends Content-Length = blob.size = declared.
+    expect(
+      storageAcceptsPut(url, { 'Content-Type': 'image/jpeg', 'Content-Length': String(declared) }, SECRET)
+    ).toBe(true);
+    // The audited attack: declare 100 bytes, PUT 5 GB.
+    expect(
+      storageAcceptsPut(url, { 'Content-Type': 'image/jpeg', 'Content-Length': String(5 * 1024 ** 3) }, SECRET)
+    ).toBe(false);
+    // Off-by-one in either direction is rejected too.
+    expect(storageAcceptsPut(url, { 'Content-Type': 'image/jpeg', 'Content-Length': '101' }, SECRET)).toBe(false);
+    expect(storageAcceptsPut(url, { 'Content-Type': 'image/jpeg', 'Content-Length': '99' }, SECRET)).toBe(false);
+    // Content-Type binding still holds alongside it.
+    expect(storageAcceptsPut(url, { 'Content-Type': 'text/html', 'Content-Length': '100' }, SECRET)).toBe(false);
+  });
+
+  it('different declared sizes produce different signatures', async () => {
+    const a = await provider.generateUploadUrl('serviceos', 'k.jpg', 'image/jpeg', 100);
+    const b = await provider.generateUploadUrl('serviceos', 'k.jpg', 'image/jpeg', 101);
+    expect(new URL(a).searchParams.get('X-Amz-Signature')).not.toBe(
+      new URL(b).searchParams.get('X-Amz-Signature')
+    );
+  });
+
+  it('refuses to mint an upload URL without a valid integer size', async () => {
+    for (const bad of [NaN, -1, 1.5, Number.POSITIVE_INFINITY, undefined as unknown as number]) {
+      await expect(provider.generateUploadUrl('serviceos', 'k.jpg', 'image/jpeg', bad)).rejects.toThrow(
+        /sizeBytes/
+      );
+    }
+  });
+
+  it('signS3Request rejects a non-integer contentLength and ignores it for non-PUT', () => {
+    const base = {
+      endpoint: 'https://s3.amazonaws.com',
+      region: 'us-east-1',
+      bucket: 'examplebucket',
+      key: 'a.jpg',
+      accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+      secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      expiresSeconds: 300,
+      now: new Date('2013-05-24T00:00:00.000Z'),
+      pathStyle: false,
+    };
+    expect(() => signS3Request({ ...base, method: 'PUT', contentLength: 1.5 })).toThrow(/contentLength/);
+    const get = signS3Request({ ...base, method: 'GET', contentLength: 10 });
+    expect(new URL(get).searchParams.get('X-Amz-SignedHeaders')).toBe('host');
+  });
+});
+
 describe('S3StorageProvider', () => {
   const provider = new S3StorageProvider({
     bucket: 'serviceos',
@@ -113,7 +228,8 @@ describe('S3StorageProvider', () => {
     const url = await provider.generateUploadUrl(
       'serviceos',
       'tenant-1/file-1/voice.webm',
-      'audio/webm'
+      'audio/webm',
+      1234
     );
     const parsed = new URL(url);
     expect(parsed.host).toBe('abcdef.r2.cloudflarestorage.com');
@@ -121,7 +237,7 @@ describe('S3StorageProvider', () => {
     expect(parsed.searchParams.get('X-Amz-Algorithm')).toBe('AWS4-HMAC-SHA256');
     expect(parsed.searchParams.get('X-Amz-Credential')).toContain('AKIATEST');
     expect(parsed.searchParams.get('X-Amz-Expires')).toBe('300');
-    expect(parsed.searchParams.get('X-Amz-SignedHeaders')).toBe('content-type;host');
+    expect(parsed.searchParams.get('X-Amz-SignedHeaders')).toBe('content-length;content-type;host');
     expect(parsed.searchParams.get('X-Amz-Signature')).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -129,7 +245,8 @@ describe('S3StorageProvider', () => {
     const url = await provider.generateUploadUrl(
       'serviceos',
       'tenant-1/file-1/name with spaces.webm',
-      'audio/webm'
+      'audio/webm',
+      1234
     );
     expect(url).toContain('/tenant-1/file-1/name%20with%20spaces.webm');
   });
@@ -158,7 +275,8 @@ describe('DevStorageProvider', () => {
     const url = await provider.generateUploadUrl(
       'serviceos-dev',
       'tenant-1/file-1/voice.webm',
-      'audio/webm'
+      'audio/webm',
+      1234
     );
     const parsed = new URL(url);
     expect(`${parsed.origin}${parsed.pathname}`).toBe(
@@ -174,7 +292,7 @@ describe('DevStorageProvider', () => {
       publicUrlBase: 'http://localhost:3000/storage-dev',
       secret: 'test-secret',
     });
-    const uploadUrl = await provider.generateUploadUrl('serviceos-dev', 'tenant-1/x.webm', 'audio/webm');
+    const uploadUrl = await provider.generateUploadUrl('serviceos-dev', 'tenant-1/x.webm', 'audio/webm', 1234);
     const downloadUrl = await provider.generateDownloadUrl('serviceos-dev', 'tenant-1/x.webm');
     const putToken = new URL(uploadUrl).searchParams.get('token');
     const getToken = new URL(downloadUrl).searchParams.get('token');
@@ -256,7 +374,7 @@ describe('createStorageProvider factory', () => {
 
   it('defaults dev public URL to an absolute localhost address', async () => {
     const { provider } = createStorageProvider({ NODE_ENV: 'development', API_PORT: '4321' });
-    const url = await provider.generateUploadUrl('b', 'k', 'audio/webm');
+    const url = await provider.generateUploadUrl('b', 'k', 'audio/webm', 1234);
     expect(url.startsWith('http://localhost:4321/storage-dev/')).toBe(true);
   });
 
@@ -270,7 +388,7 @@ describe('createStorageProvider factory', () => {
       NODE_ENV: 'development',
       PUBLIC_API_URL: 'https://dev-api.example.com',
     });
-    const url = await provider.generateUploadUrl('b', 'tenant-1/k.webm', 'audio/webm');
+    const url = await provider.generateUploadUrl('b', 'tenant-1/k.webm', 'audio/webm', 1234);
     expect(url.startsWith('https://dev-api.example.com/storage-dev/')).toBe(true);
   });
 
@@ -279,7 +397,7 @@ describe('createStorageProvider factory', () => {
       NODE_ENV: 'development',
       PUBLIC_API_URL: 'https://dev-api.example.com/',
     });
-    const url = await provider.generateUploadUrl('b', 'tenant-1/k.webm', 'audio/webm');
+    const url = await provider.generateUploadUrl('b', 'tenant-1/k.webm', 'audio/webm', 1234);
     expect(url.startsWith('https://dev-api.example.com/storage-dev/')).toBe(true);
     expect(url).not.toContain('.com//storage-dev');
   });

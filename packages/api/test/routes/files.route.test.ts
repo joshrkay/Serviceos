@@ -27,13 +27,18 @@ const oneJob: Pick<JobRepository, 'findById'> = {
 const noJobs: Pick<JobRepository, 'findById'> = { findById: async () => null };
 
 class FakeStorageProvider implements StorageProvider {
-  generateUploadCalls: Array<{ bucket: string; key: string; contentType: string }> = [];
+  generateUploadCalls: Array<{ bucket: string; key: string; contentType: string; sizeBytes: number }> = [];
   generateDownloadCalls: Array<{ bucket: string; key: string }> = [];
   headResult: ObjectMetadata | null = { contentLength: 1234, contentType: 'audio/webm' };
   deleted: Array<{ bucket: string; key: string }> = [];
 
-  async generateUploadUrl(bucket: string, key: string, contentType: string): Promise<string> {
-    this.generateUploadCalls.push({ bucket, key, contentType });
+  async generateUploadUrl(
+    bucket: string,
+    key: string,
+    contentType: string,
+    sizeBytes: number
+  ): Promise<string> {
+    this.generateUploadCalls.push({ bucket, key, contentType, sizeBytes });
     return `https://fake.storage/put/${bucket}/${key}?sig=up`;
   }
 
@@ -157,6 +162,27 @@ describe('files router', () => {
       expect(res.body.fileRecord.storageKey).toContain('voice-123.webm');
       expect(storage.generateUploadCalls).toHaveLength(1);
       expect(storage.generateUploadCalls[0].contentType).toBe('audio/webm');
+    });
+
+    // Security audit: the declared size must reach the presign so it is
+    // signed as Content-Length — otherwise a client declares 100 bytes and
+    // PUTs gigabytes to the URL.
+    it('passes the declared sizeBytes through to the presigned upload URL', async () => {
+      const res = await request(app)
+        .post('/api/files/upload-url')
+        .send({ filename: 'v.webm', contentType: 'audio/webm', sizeBytes: 12345, entityType: 'voice_recording' });
+      expect(res.status).toBe(201);
+      expect(storage.generateUploadCalls).toEqual([
+        expect.objectContaining({ key: res.body.fileRecord.storageKey, sizeBytes: 12345 }),
+      ]);
+    });
+
+    it('rejects a fractional sizeBytes (it is signed verbatim as Content-Length)', async () => {
+      const res = await request(app)
+        .post('/api/files/upload-url')
+        .send({ filename: 'v.webm', contentType: 'audio/webm', sizeBytes: 100.5, entityType: 'voice_recording' });
+      expect(res.status).toBe(400);
+      expect(storage.generateUploadCalls).toHaveLength(0);
     });
 
     it('emits an audit event for the upload request', async () => {

@@ -48,15 +48,18 @@ class FakeStorageProvider implements StorageProvider {
   public lastUploadKey: string | null = null;
   public lastUploadBucket: string | null = null;
   public lastUploadContentType: string | null = null;
+  public lastUploadSizeBytes: number | null = null;
 
   async generateUploadUrl(
     bucket: string,
     key: string,
     contentType: string,
+    sizeBytes: number,
   ): Promise<string> {
     this.lastUploadBucket = bucket;
     this.lastUploadKey = key;
     this.lastUploadContentType = contentType;
+    this.lastUploadSizeBytes = sizeBytes;
     return `https://s3.fake/${bucket}/${key}?sig=presigned`;
   }
   async generateDownloadUrl(bucket: string, key: string): Promise<string> {
@@ -280,6 +283,8 @@ describe('P8-014 record_call recording webhook', () => {
       expect(uploadCalls).toHaveLength(1);
       expect(uploadCalls[0].bytes).toBe(fakeBytes);
       expect(uploadCalls[0].contentType).toBe('audio/mpeg');
+      // The presign binds the exact fetched byte length as Content-Length.
+      expect(storage.lastUploadSizeBytes).toBe(fakeBytes.length);
 
       // voice_recordings row inserted with the right shape.
       expect(pool.voiceRows).toHaveLength(1);
