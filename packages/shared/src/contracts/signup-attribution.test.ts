@@ -162,10 +162,13 @@ describe('readCookieValue', () => {
 });
 
 describe('signupAttributionProperties', () => {
-  it('flattens to analytics property names, omitting absent fields', () => {
+  it('emits enums only: known values pass, anything else is "other", free-text utm fields are dropped', () => {
     expect(
       signupAttributionProperties({
-        utmSource: 'google',
+        utmSource: 'Google',
+        utmMedium: 'cpc',
+        utmCampaign: 'spring',
+        utmContent: 'ad1',
         utmTerm: 't',
         ref: 'https://www.reddit.com/r/HVAC/comments/abc/',
         landing: '/trades/hvac',
@@ -173,29 +176,34 @@ describe('signupAttributionProperties', () => {
       }),
     ).toEqual({
       utm_source: 'google',
-      utm_term: 't',
-      signup_referrer_host: 'www.reddit.com',
+      utm_medium: 'cpc',
+      signup_referrer: 'reddit',
       signup_landing_section: '/trades',
       signup_first_touch_at: '2026-10-01',
     });
     expect(signupAttributionProperties({ landing: '/' })).toEqual({ signup_landing_section: '/' });
     expect(signupAttributionProperties(null)).toEqual({});
   });
+
+  it('never forwards label-shaped PII (phone, email path, unknown host)', () => {
+    expect(
+      signupAttributionProperties({
+        utmSource: '555-123-4567',
+        utmMedium: 'alice',
+        utmTerm: 'alice@example.com',
+        ref: 'https://alice-smith.example.org/',
+        landing: '/alice@example.com',
+      }),
+    ).toEqual({
+      utm_source: 'other',
+      utm_medium: 'other',
+      signup_referrer: 'other',
+      signup_landing_section: 'other',
+    });
+  });
 });
 
 describe('review fixes', () => {
-  it('keeps label-shaped UTM values out of analytics only when they look like PII or URLs', () => {
-    expect(
-      signupAttributionProperties({
-        utmSource: 'google',
-        utmMedium: 'cpc',
-        utmCampaign: 'spring_sale-2026',
-        utmTerm: 'alice@example.com',
-        utmContent: 'https://evil.example/?t=secret',
-      }),
-    ).toEqual({ utm_source: 'google', utm_medium: 'cpc', utm_campaign: 'spring_sale-2026' });
-    expect(signupAttributionProperties({ utmCampaign: 'x'.repeat(65) })).toEqual({});
-  });
 
   it('a URL utm parameter that fails validation still overrides the cookie campaign', () => {
     const cookie = encodeURIComponent(JSON.stringify({ landing: '/', at: '2026-09-28', utm_source: 'hn' }));

@@ -185,32 +185,79 @@ export function readCookieValue(cookieHeader: string | null | undefined, name: s
   return null;
 }
 
-/** Campaign-label shape: short, no `@`, no URL or query syntax. */
-const ANALYTICS_UTM_RE = /^[A-Za-z0-9 ._+-]{1,64}$/;
+// Analytics gets enums only (analytics/posthog.ts: IDs/enums/flags, never
+// PII). Every value below is matched against a fixed list and anything
+// unknown becomes "other" — free text never reaches PostHog, however it is
+// shaped. The full sanitized values stay in the tenant's signup_* columns.
+
+/** Known utm_source values (lower-cased). */
+const ANALYTICS_UTM_SOURCES = new Set([
+  'google', 'bing', 'facebook', 'instagram', 'linkedin', 'reddit', 'youtube',
+  'tiktok', 'x', 'twitter', 'nextdoor', 'yelp', 'chatgpt', 'perplexity',
+  'newsletter', 'email', 'outbound', 'partner', 'referral',
+]);
+
+/** Known utm_medium values (lower-cased). */
+const ANALYTICS_UTM_MEDIUMS = new Set([
+  'cpc', 'ppc', 'paid', 'paid_social', 'display', 'social', 'organic',
+  'email', 'outbound', 'referral', 'affiliate', 'partner', 'community',
+]);
+
+/** Referrer hostnames, matched on the domain or any subdomain of it. */
+const ANALYTICS_REFERRERS: ReadonlyArray<[domain: string, label: string]> = [
+  ['google.com', 'google'], ['bing.com', 'bing'], ['duckduckgo.com', 'duckduckgo'],
+  ['yahoo.com', 'yahoo'], ['facebook.com', 'facebook'], ['instagram.com', 'instagram'],
+  ['linkedin.com', 'linkedin'], ['lnkd.in', 'linkedin'], ['reddit.com', 'reddit'],
+  ['youtube.com', 'youtube'], ['tiktok.com', 'tiktok'], ['x.com', 'x'], ['t.co', 'x'],
+  ['twitter.com', 'x'], ['nextdoor.com', 'nextdoor'], ['yelp.com', 'yelp'],
+  ['chatgpt.com', 'chatgpt'], ['openai.com', 'chatgpt'], ['perplexity.ai', 'perplexity'],
+  ['claude.ai', 'claude'], ['therivetapp.com', 'rivet'],
+];
+
+/** First path segments of the marketing site (therivetapp.com). */
+const ANALYTICS_LANDING_SECTIONS = new Set([
+  '', 'trades', 'go', 'blog', 'guides', 'pricing', 'vs', 'tools', 'faq', 'about',
+  'contact', 'demo', 'security', 'going-independent',
+  'ai-answering-service-for-contractors', 'editorial-standards',
+]);
+
+function enumOrOther(value: string | undefined, known: ReadonlySet<string>): string | undefined {
+  if (value === undefined) return undefined;
+  const v = value.toLowerCase();
+  return known.has(v) ? v : 'other';
+}
+
+function referrerLabel(ref: string): string {
+  const host = new URL(ref).hostname.toLowerCase();
+  for (const [domain, label] of ANALYTICS_REFERRERS) {
+    if (host === domain || host.endsWith(`.${domain}`)) return label;
+  }
+  return 'other';
+}
 
 /**
- * Flat analytics properties for an attribution (PostHog-style `utm_*` names),
- * so the browser `signup_started` and server `signup_completed` events carry
- * identical keys. Absent fields are omitted.
- *
- * Coarser than what the tenant row stores: analytics props are IDs/enums
- * only (analytics/posthog.ts), so the referrer is reduced to its hostname
- * and the landing path to its first segment ("/trades/hvac" → "/trades").
- * UTM values are free text, so only campaign-label-shaped ones are sent
- * (ANALYTICS_UTM_RE); anything else — an email, a URL — is left out.
- * The full sanitized values stay in the tenant's signup_* columns.
+ * Flat analytics properties for an attribution, so the browser
+ * `signup_started` and server `signup_completed` events carry identical keys.
+ * Absent fields are omitted. Enum-only (see the lists above):
+ * - utm_source / utm_medium: a known value, else "other"
+ * - utm_campaign / utm_content / utm_term: never sent (free text)
+ * - signup_referrer: a known site label, else "other"
+ * - signup_landing_section: a known marketing section ("/trades"), else "other"
  */
 export function signupAttributionProperties(
   attr: SignupAttribution | null,
 ): Record<string, string> {
   if (!attr) return {};
   const props: Record<string, string> = {};
-  for (const [field, param] of UTM_FIELDS) {
-    const value = attr[field];
-    if (value !== undefined && ANALYTICS_UTM_RE.test(value)) props[param] = value;
+  const source = enumOrOther(attr.utmSource, ANALYTICS_UTM_SOURCES);
+  const medium = enumOrOther(attr.utmMedium, ANALYTICS_UTM_MEDIUMS);
+  if (source !== undefined) props.utm_source = source;
+  if (medium !== undefined) props.utm_medium = medium;
+  if (attr.ref !== undefined) props.signup_referrer = referrerLabel(attr.ref);
+  if (attr.landing !== undefined) {
+    const segment = attr.landing.split('/')[1] ?? '';
+    props.signup_landing_section = ANALYTICS_LANDING_SECTIONS.has(segment) ? `/${segment}` : 'other';
   }
-  if (attr.ref !== undefined) props.signup_referrer_host = new URL(attr.ref).hostname;
-  if (attr.landing !== undefined) props.signup_landing_section = `/${attr.landing.split('/')[1] ?? ''}`;
   if (attr.firstTouchAt !== undefined) props.signup_first_touch_at = attr.firstTouchAt;
   return props;
 }

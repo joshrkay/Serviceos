@@ -135,9 +135,9 @@ describe('Clerk user.created → signup attribution', () => {
         tenantId,
         emailDomain: 'shop.com',
         utm_source: 'google',
-        // 200-char campaign is stored on the tenant but is not label-shaped,
-        // so it stays out of analytics.
-        signup_referrer_host: 'www.google.com',
+        // utm_campaign is free text: stored on the tenant, never sent to
+        // analytics.
+        signup_referrer: 'google',
         signup_first_touch_at: '2026-10-01',
       },
     });
