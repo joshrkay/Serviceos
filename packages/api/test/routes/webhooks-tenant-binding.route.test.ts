@@ -40,3 +40,32 @@ describe('tenant-bound webhooks', () => {
     expect([200,403]).toContain(r2.status);
   });
 });
+
+describe('unauthenticated webhook failures do not flood the tenant audit log', () => {
+  it('writes one auth_failed row per tenant/reason/kind window for bad signatures, but still 403s every request', async () => {
+    const auditRepo = { create: vi.fn(async (e: unknown) => e) };
+    const app = express(); app.use(express.urlencoded({ extended: false }));
+    app.use('/webhooks', createWebhookRouter(cfg, {
+      integrationResolver: async () => ({ tenantId: TENANT_ID, provider: 'twilio', subaccountSid: 'AC-real', authTokenPrimary: 'x' }),
+      auditRepo: auditRepo as any,
+    }));
+    for (let i = 0; i < 25; i++) {
+      const r = await request(app).post(`/webhooks/twilio/sms/${TENANT_ID}`).set('x-twilio-signature', 'bad').send(`AccountSid=AC-real&MessageSid=SM${i}`);
+      expect(r.status).toBe(403);
+    }
+    const rows = auditRepo.create.mock.calls.map(([e]) => e as { eventType: string; entityId: string });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ eventType: 'webhook.auth_failed', entityId: 'invalid_signature' });
+  });
+
+  it('keys the throttle per tenant, so one tenant being sprayed does not hide another', async () => {
+    const OTHER = '22222222-2222-2222-2222-222222222222';
+    const auditRepo = { create: vi.fn(async (e: unknown) => e) };
+    const app = express(); app.use(express.urlencoded({ extended: false }));
+    app.use('/webhooks', createWebhookRouter(cfg, { integrationResolver: async () => null, auditRepo: auditRepo as any }));
+    for (let i = 0; i < 5; i++) await request(app).post(`/webhooks/twilio/sms/${TENANT_ID}`).send({});
+    await request(app).post(`/webhooks/twilio/sms/${OTHER}`).send({});
+    const tenants = auditRepo.create.mock.calls.map(([e]) => (e as { tenantId: string }).tenantId);
+    expect(tenants).toEqual([TENANT_ID, OTHER]);
+  });
+});
