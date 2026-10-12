@@ -12,6 +12,7 @@ Rule: judgment → Claude, volume → Codex, hands-on → Cursor, non-code → K
 | Finish-setup UX for ACCOUNT_SETUP_INCOMPLETE | Claude | queued | From Sep 28 handoff. User hitting incomplete setup needs to see WHAT is incomplete and HOW to finish. |
 | In-app onboarding checklist (productized setup) | Claude | queued | Needed before ~20 accounts — founder-led onboarding won't scale past that. |
 | E2E: full signup → card → onboarding flow | Codex | queued | Tight spec: use test account joshrkay+8@gmail.com; report breaks. Blocked on Josh setting the test password via secure card. |
+| Activation instrumentation audit (read-only, report only — no code changes) | Codex | queued | For each of the five activation checkpoints — (1) signup completed, (2) setup call booked, (3) setup completed/onboarded, (4) first answered call on the customer's line, (5) day-14 trial conversion/charge — locate where the event or timestamp is recorded (DB table/column, event log, or provider webhook) and report per checkpoint: recorded? (yes/no/partial), exact table+field or code path, and the gap if missing. If a checkpoint's recording path is ambiguous, mark UNKNOWN and move on — no judgment calls, no refactors. Deliverable: a 5-row table. This unblocks Monday loop scoring: without these timestamps the signup→paid funnel can't be measured. |
 
 ## Status values
 
