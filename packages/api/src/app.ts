@@ -240,6 +240,7 @@ import { PgTenantFeatureFlagRepository } from './flags/pg-tenant-feature-flags';
 import { createVoiceFlagResolver } from './flags/voice-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { createAdminTenantsRouter } from './routes/admin-tenants';
+import { PgTenantUsageRepository } from './admin/pg-tenant-usage';
 import { processMessage, type QueueMessage } from './queues/queue';
 import { createProvisionTwilioWorker } from './workers/provision-twilio';
 import { runOrphanedNumberSweep } from './workers/orphaned-number-sweep';
@@ -7460,10 +7461,21 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     createFeatureFlagsRouter(featureFlagRepo, featureFlagStore, {}, auditRepo),
   );
 
-  // Platform-admin tenant lifecycle (hard-delete / deprovision). Requires a
-  // DB pool; the queue is always present (Pg- or in-memory).
+  // Platform-admin tenant lifecycle (hard-delete / deprovision) and the
+  // read-only per-tenant usage report. Requires a DB pool — the usage report
+  // is Postgres-only aggregate SQL, so it is built here rather than in
+  // buildRepositories (whose set must resolve in-memory without a pool); the
+  // queue is always present (Pg- or in-memory).
   if (pool) {
-    app.use('/api/admin/tenants', createAdminTenantsRouter({ pool, queue }));
+    app.use(
+      '/api/admin/tenants',
+      createAdminTenantsRouter({
+        pool,
+        queue,
+        usageRepo: new PgTenantUsageRepository(pool),
+        auditRepo,
+      }),
+    );
   }
 
   // ── Rivet P2 F-1: Supervisor Agent v1 ─────────────────────────────────────

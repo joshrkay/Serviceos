@@ -7502,6 +7502,15 @@ export const MIGRATIONS = {
       ADD CONSTRAINT tenant_settings_voice_quality_daily_cap_nonneg
         CHECK (voice_quality_daily_cap IS NULL OR voice_quality_daily_cap >= 0) NOT VALID;
   `,
+  // Platform-admin tenant usage report (admin/pg-tenant-usage.ts) filters
+  // ai_runs by (tenant_id, created_at window). ai_runs only had a tenant_id-
+  // only index and a platform-wide (created_at) index (263), so a tenant's
+  // window read scanned that tenant's entire AI history. Additive, no-op on
+  // re-run.
+  '306_ai_runs_tenant_created_at_index': `
+    CREATE INDEX IF NOT EXISTS idx_ai_runs_tenant_created_at
+      ON ai_runs (tenant_id, created_at);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
