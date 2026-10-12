@@ -39,7 +39,7 @@ const URL_VALUE_KEY_PATTERN = /^(url|route|originalUrl|referrer|referer)$/i;
 
 // Query param names that may carry a bearer/session token as their value.
 const TOKEN_QUERY_PARAM_PATTERN =
-  /^(token|access[_-]?token|session[_-]?token|view[_-]?token|auth|authorization|api[_-]?key|secret|password)$/i;
+  /^(token|access[_-]?token|session[_-]?token|view[_-]?token|auth|authorization|api[_-]?key|secret|password|code|state)$/i;
 
 // Public, unauthenticated routes where a bearer/session token travels as a
 // single path segment. Enumerated by grepping `app.use('/public/...')` /

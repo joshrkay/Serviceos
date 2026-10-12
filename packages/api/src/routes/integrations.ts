@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { requireAuth, requireTenant } from '../middleware/auth';
+import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { asyncRoute } from '../middleware/async-route';
 import { ValidationError, NotFoundError } from '../shared/errors';
 import { extractIp } from '../shared/extract-ip';
@@ -179,6 +179,7 @@ export function createIntegrationsRouter(deps: IntegrationsRouteDeps): Router {
     '/quickbooks/connect',
     requireAuth,
     requireTenant,
+    requirePermission('settings:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       if (!deps.qboConfig) {
         throw new ValidationError('QuickBooks integration is not configured');
@@ -202,6 +203,7 @@ export function createIntegrationsRouter(deps: IntegrationsRouteDeps): Router {
     '/quickbooks/disconnect',
     requireAuth,
     requireTenant,
+    requirePermission('settings:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const ok = await deps.integrationRepo.disconnect(req.auth!.tenantId, 'quickbooks');
       if (!ok) {
@@ -256,6 +258,7 @@ export function createIntegrationsRouter(deps: IntegrationsRouteDeps): Router {
     '/quickbooks/sync',
     requireAuth,
     requireTenant,
+    requirePermission('settings:update'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       if (!deps.qboConfig || !deps.logger) {
         throw new ValidationError('QuickBooks sync is not configured');

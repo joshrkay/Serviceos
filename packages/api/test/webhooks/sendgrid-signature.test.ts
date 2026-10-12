@@ -5,9 +5,12 @@
  * and sends the signature base64-encoded. We generate a throwaway EC keypair to
  * exercise the real crypto path, plus the early-return and catch branches.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import crypto from 'node:crypto';
-import { verifySendGridSignature } from '../../src/webhooks/sendgrid-signature';
+import {
+  verifySendGridSignature,
+  SENDGRID_SIGNATURE_TOLERANCE_SECONDS,
+} from '../../src/webhooks/sendgrid-signature';
 
 let publicKeyPem: string;
 let privateKey: crypto.KeyObject;
@@ -21,11 +24,18 @@ function sign(timestamp: string, payload: string | Buffer): string {
 }
 
 beforeAll(() => {
+  // Fixture timestamps are 1716422400; pin "now" inside the replay window.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(1716422400 * 1000);
   const { publicKey, privateKey: priv } = crypto.generateKeyPairSync('ec', {
     namedCurve: 'prime256v1',
   });
   privateKey = priv;
   publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+});
+
+afterAll(() => {
+  vi.useRealTimers();
 });
 
 describe('verifySendGridSignature — valid signatures', () => {
@@ -119,7 +129,7 @@ describe('verifySendGridSignature — rejection paths', () => {
         publicKeyPem,
         payload,
         signatureBase64: signature,
-        timestamp: '1716426000',
+        timestamp: '1716422401',
       })
     ).toBe(false);
   });
@@ -157,6 +167,57 @@ describe('verifySendGridSignature — rejection paths', () => {
     const foreignSig = signer.sign(otherPriv).toString('base64');
     expect(
       verifySendGridSignature({ publicKeyPem, payload, signatureBase64: foreignSig, timestamp })
+    ).toBe(false);
+  });
+});
+
+describe('verifySendGridSignature — replay window', () => {
+  const payload = '{"event":"open"}';
+  const signedAt = 1716422400;
+
+  it('rejects a correctly signed delivery older than the tolerance', () => {
+    const timestamp = String(signedAt);
+    expect(
+      verifySendGridSignature({
+        publicKeyPem,
+        payload,
+        signatureBase64: sign(timestamp, payload),
+        timestamp,
+        nowMs: (signedAt + SENDGRID_SIGNATURE_TOLERANCE_SECONDS + 1) * 1000,
+      })
+    ).toBe(false);
+  });
+
+  it('rejects a correctly signed delivery too far in the future', () => {
+    const timestamp = String(signedAt);
+    expect(
+      verifySendGridSignature({
+        publicKeyPem,
+        payload,
+        signatureBase64: sign(timestamp, payload),
+        timestamp,
+        nowMs: (signedAt - SENDGRID_SIGNATURE_TOLERANCE_SECONDS - 1) * 1000,
+      })
+    ).toBe(false);
+  });
+
+  it('accepts a delivery at the edge of the tolerance', () => {
+    const timestamp = String(signedAt);
+    expect(
+      verifySendGridSignature({
+        publicKeyPem,
+        payload,
+        signatureBase64: sign(timestamp, payload),
+        timestamp,
+        nowMs: (signedAt + SENDGRID_SIGNATURE_TOLERANCE_SECONDS) * 1000,
+      })
+    ).toBe(true);
+  });
+
+  it('rejects a non-numeric timestamp even when it was signed', () => {
+    const timestamp = 'not-a-number';
+    expect(
+      verifySendGridSignature({ publicKeyPem, payload, signatureBase64: sign(timestamp, payload), timestamp })
     ).toBe(false);
   });
 });

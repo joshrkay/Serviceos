@@ -9,6 +9,7 @@ import {
   requirePlatformAdmin,
 } from '../../src/auth/platform-admin';
 import { DEPROVISION_TENANT_JOB_TYPE } from '../../src/workers/deprovision-tenant';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 const TENANT = '00000000-0000-0000-0000-000000000001';
 const TARGET = '11111111-1111-1111-1111-111111111111';
@@ -44,6 +45,8 @@ function buildApp(opts: { platformAdmins?: string[]; tenantExists?: boolean } = 
     createAdminTenantsRouter({
       pool: pool as never,
       queue,
+      usageRepo: { getUsage: vi.fn() },
+      auditRepo: new InMemoryAuditRepository(),
       requirePlatformAdmin: requirePlatformAdmin(checker),
     }),
   );

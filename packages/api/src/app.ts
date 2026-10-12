@@ -240,6 +240,7 @@ import { PgTenantFeatureFlagRepository } from './flags/pg-tenant-feature-flags';
 import { createVoiceFlagResolver } from './flags/voice-flags';
 import { createFeatureFlagsRouter } from './routes/feature-flags';
 import { createAdminTenantsRouter } from './routes/admin-tenants';
+import { PgTenantUsageRepository } from './admin/pg-tenant-usage';
 import { processMessage, type QueueMessage } from './queues/queue';
 import { createProvisionTwilioWorker } from './workers/provision-twilio';
 import { runOrphanedNumberSweep } from './workers/orphaned-number-sweep';
@@ -681,13 +682,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     next();
   });
 
-  // Serve static frontend files from the built React app.
-  // resolveWebDistDir anchors on the packages/api boundary so it points at
-  // <repoRoot>/packages/web/dist in both dev (__dirname=.../api/src) and the
-  // built image (__dirname=.../api/dist/src). See web-static-path.ts.
-  const frontendPath = resolveWebDistDir(__dirname);
-  app.use(express.static(frontendPath));
-
   // Load validated config — must happen before CORS so validateProductionConfig()
   // can throw on missing CORS_ORIGIN before we wire the middleware.
   const config = loadConfig();
@@ -744,6 +738,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // the full CSP whitelist + rationale.
   const isProd = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
   app.use(helmet(buildHelmetOptions(isProd)));
+
+  // Serve static frontend files from the built React app. Mounted AFTER
+  // helmet so `/`, index.html and assets carry the same CSP / frame /
+  // HSTS headers as the SPA catch-all (and no X-Powered-By).
+  // resolveWebDistDir anchors on the packages/api boundary so it points at
+  // <repoRoot>/packages/web/dist in both dev (__dirname=.../api/src) and the
+  // built image (__dirname=.../api/dist/src). See web-static-path.ts.
+  const frontendPath = resolveWebDistDir(__dirname);
+  app.use(express.static(frontendPath));
 
   // CORS — use explicit origin(s) in prod/staging (validated by config),
   // wildcard in dev/test. Comma-separated CORS_ORIGIN lets Railway host
@@ -3183,6 +3186,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       max: 10,
       standardHeaders: true,
       legacyHeaders: false,
+      // Shared Redis store so the cap holds across replicas.
+      store: createRateLimitStore(redisUrl, 'public-intake:'),
     }),
     createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry, pool)
   );
@@ -3349,6 +3354,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       max: 5,
       standardHeaders: true,
       legacyHeaders: false,
+      // Shared Redis store so the cap holds across replicas.
+      store: createRateLimitStore(redisUrl, 'public-booking:'),
     }),
     createPublicBookingRouter({
       tenantRepo: intakeTenantRepo,
@@ -7460,10 +7467,21 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     createFeatureFlagsRouter(featureFlagRepo, featureFlagStore, {}, auditRepo),
   );
 
-  // Platform-admin tenant lifecycle (hard-delete / deprovision). Requires a
-  // DB pool; the queue is always present (Pg- or in-memory).
+  // Platform-admin tenant lifecycle (hard-delete / deprovision) and the
+  // read-only per-tenant usage report. Requires a DB pool — the usage report
+  // is Postgres-only aggregate SQL, so it is built here rather than in
+  // buildRepositories (whose set must resolve in-memory without a pool); the
+  // queue is always present (Pg- or in-memory).
   if (pool) {
-    app.use('/api/admin/tenants', createAdminTenantsRouter({ pool, queue }));
+    app.use(
+      '/api/admin/tenants',
+      createAdminTenantsRouter({
+        pool,
+        queue,
+        usageRepo: new PgTenantUsageRepository(pool),
+        auditRepo,
+      }),
+    );
   }
 
   // ── Rivet P2 F-1: Supervisor Agent v1 ─────────────────────────────────────

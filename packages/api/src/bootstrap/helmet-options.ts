@@ -49,13 +49,21 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               // PostHog analytics: posthog-js lazy-loads optional modules
               // (surveys, web-vitals, exception capture) from the assets host.
               'https://us-assets.i.posthog.com',
+              // Pendo: the inline loader in packages/web/index.html (pinned by
+              // hash — regenerate if that snippet changes) fetches the agent
+              // from the CDN. Same entries as packages/web/security-headers.conf;
+              // the API serves the SPA shell too, so the two must stay in sync.
+              'https://cdn.pendo.io',
+              "'sha256-aZMpeYECdzzxmDLBhnOjENAvYOF7sj61Qkt1ogk9GMk='",
             ],
             styleSrc: [
               "'self'",
               "'unsafe-inline'",
+              'https://fonts.googleapis.com',
               'https://*.clerk.com',
               'https://clerk.com',
             ],
+            fontSrc: ["'self'", 'https://fonts.gstatic.com'],
             imgSrc: ["'self'", 'data:', 'https:', 'blob:'],
             connectSrc: [
               "'self'",
@@ -84,6 +92,9 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               // custom host would need to be added here too.
               'https://us.i.posthog.com',
               'https://us-assets.i.posthog.com',
+              'https://data.pendo.io',
+              // Signed upload/download URLs for file attachments.
+              'https://*.storage.googleapis.com',
             ],
             frameSrc: [
               "'self'",

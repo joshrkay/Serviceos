@@ -54,6 +54,7 @@ import {
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
 import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
 import { recordFunnelEvent } from '../analytics/posthog';
+import { sanitizeSignupAttribution, signupAttributionProperties } from '@ai-service-os/shared';
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
 import { handleVapiCallEvent } from '../integrations/vapi/webhook';
 import type { SendEmailFn } from '../voice/check-upgrade-nudge';
@@ -923,6 +924,27 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             signupCorrelationId,
           });
 
+          // Marketing-site first touch, forwarded by the signup page as Clerk
+          // unsafe_metadata. Browser-controlled, so it is re-validated with
+          // the same shared rules before use. Persisted write-once (the repo
+          // only fills a tenant with no attribution yet), deliberately NOT
+          // gated on result.created: a Clerk retry forced by a later failure
+          // in this handler arrives with created=false and must still be
+          // able to record it. Best-effort — never fails the signup.
+          const unsafeMetadata = userData.unsafe_metadata as { signupAttribution?: unknown } | null | undefined;
+          const signupAttribution = sanitizeSignupAttribution(unsafeMetadata?.signupAttribution);
+          if (signupAttribution && deps.tenantRepo.setSignupAttribution) {
+            try {
+              await deps.tenantRepo.setSignupAttribution(result.tenantId, signupAttribution);
+            } catch (err) {
+              logger.warn('Signup attribution persist failed', {
+                tenantId: result.tenantId,
+                signupCorrelationId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+
           // Server-side funnel: every Clerk userId here matches the
           // distinctId the browser SDK identifies with, so this single
           // event closes the gap between the page load that fires
@@ -934,6 +956,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               properties: {
                 tenantId: result.tenantId,
                 emailDomain: primaryEmail.split('@')[1] ?? null,
+                ...signupAttributionProperties(signupAttribution),
               },
             });
           }
@@ -987,6 +1010,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 clerkUserId: userId,
                 email: primaryEmail,
                 created: result.created,
+                signupAttribution,
               },
             }));
           }

@@ -72,10 +72,13 @@ export interface CustomerTimelineResult {
  * maps to TimelineEvents, then merges, sorts desc, and slices to limit.
  *
  * Hard guarantees:
- *   - Every source repo gets at most one query per request (no N+1) —
- *     except for payments and conversations where we fall back to a
- *     bounded loop because no `findByCustomer` exists today.
- *   - All source queries run in parallel via `Promise.all`.
+ *   - Every job-scoped source is ONE batched query (`findByJobs` /
+ *     `findByEntities`) regardless of job count — no N+1. Payments and
+ *     conversation messages still loop (per invoice / per conversation)
+ *     because no batched read exists for them today.
+ *   - Queries are issued via `Promise.all`, but inside a request the repos
+ *     share one pg client, so they execute serially — hence batching, not
+ *     parallelism, is what bounds the cost.
  *   - All queries pass `tenantId` as the first argument; the repo
  *     implementations enforce tenant isolation.
  *   - Returns `{ events: [], nextCursor: null }` for customers with no
@@ -104,51 +107,46 @@ export async function getCustomerTimeline(
 
   const jobIds = customerJobs.map((j) => j.id);
 
-  // Per-job fan-out: each repo exposes a `findByJob(tenantId, jobId)` method.
-  // We run the per-job queries in parallel to preserve the no-serial-loop
-  // contract. With the (already-bounded) `MAX_TIMELINE_LIMIT` job cap, the
-  // total query count is O(jobs) but parallel — never serial.
+  // Per-job sources: ONE batched `= ANY(jobIds)` query per repo, not one per
+  // job. Inside a request the repos share a single pg client, so a per-job
+  // `Promise.all` would still run its ~5×jobs queries one after another.
+  // Cross-job row order differs from a per-job loop, but nothing below
+  // depends on it: mergeAndSliceEvents sorts by (occurredAt desc,
+  // sourceEntityId), and each row's own events stay adjacent.
   const [
-    jobTimelineLists,
-    estimatesLists,
-    invoicesLists,
-    appointmentLists,
+    jobTimelineEntries,
+    estimates,
+    invoices,
+    appointments,
     conversationsByJob,
     conversationsByCustomer,
   ] = await Promise.all([
-    Promise.all(jobIds.map((id) => deps.jobTimelineRepo.findByJob(tenantId, id))),
-    Promise.all(jobIds.map((id) => deps.estimateRepo.findByJob(tenantId, id))),
-    Promise.all(jobIds.map((id) => deps.invoiceRepo.findByJob(tenantId, id))),
-    Promise.all(jobIds.map((id) => deps.appointmentRepo.findByJob(tenantId, id))),
-    Promise.all(
-      jobIds.map((id) => deps.conversationRepo.findByEntity(tenantId, 'job', id))
-    ),
+    deps.jobTimelineRepo.findByJobs(tenantId, jobIds),
+    deps.estimateRepo.findByJobs(tenantId, jobIds),
+    deps.invoiceRepo.findByJobs(tenantId, jobIds),
+    deps.appointmentRepo.findByJobs(tenantId, jobIds),
+    deps.conversationRepo.findByEntities(tenantId, 'job', jobIds),
     deps.conversationRepo.findByEntity(tenantId, 'customer', customerId),
   ]);
 
-  // Flatten repo result groups.
-  const jobTimelineEntries = jobTimelineLists.flat();
-  const estimates = estimatesLists.flat();
-  const invoices = invoicesLists.flat();
-  const appointments = appointmentLists.flat();
   // Dedupe conversations — a single conversation may be linked to both a
   // customer and a job, in which case both fan-out queries return the row.
   const conversationMap = new Map<string, (typeof conversationsByCustomer)[number]>();
-  for (const c of [...conversationsByCustomer, ...conversationsByJob.flat()]) {
+  for (const c of [...conversationsByCustomer, ...conversationsByJob]) {
     if (!conversationMap.has(c.id)) conversationMap.set(c.id, c);
   }
   const conversations = Array.from(conversationMap.values());
 
   // Payments — the existing repo only exposes `findByInvoice(tenantId, id)`.
-  // We loop the customer's invoices (already bounded by job-cap above) in
-  // parallel; documented choice in the dispatch addendum.
+  // We loop the customer's invoices (already bounded by job-cap above);
+  // documented choice in the dispatch addendum.
   const paymentLists = await Promise.all(
     invoices.map((inv) => deps.paymentRepo.findByInvoice(tenantId, inv.id))
   );
   const payments = paymentLists.flat();
   const invoiceNumberById = new Map(invoices.map((i) => [i.id, i.invoiceNumber] as const));
 
-  // Conversation messages — one query per conversation, in parallel.
+  // Conversation messages — one query per conversation.
   const messageLists = await Promise.all(
     conversations.map((c) => deps.conversationRepo.getMessages(tenantId, c.id))
   );

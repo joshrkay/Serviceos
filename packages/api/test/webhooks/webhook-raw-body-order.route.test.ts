@@ -86,7 +86,7 @@ function postSendGrid(app: express.Express, rawBody: string, timestamp: string, 
 }
 
 describe('SEC-40 — /webhooks/sendgrid raw-body signature verification', () => {
-  const timestamp = '1716422400';
+  const timestamp = String(Math.floor(Date.now() / 1000));
   // Deliberately NOT the compact JSON.stringify() form: SendGrid signs its own
   // wire bytes (spacing / key order we don't control). Signing these exact bytes
   // means the handler only verifies if it sees the raw buffer — re-serializing

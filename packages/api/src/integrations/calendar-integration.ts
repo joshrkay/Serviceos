@@ -78,19 +78,27 @@ export interface CalendarIntegrationRepository {
   revoke(tenantId: string, userId: string, provider: CalendarProvider): Promise<boolean>;
 }
 
+/** Which OAuth flow minted a state nonce. Calendar ('google') and Google
+ *  Business share one Google OAuth client, so the flow — not the
+ *  redirect_uri, which the caller controls — is what keeps a state minted
+ *  by the per-user calendar connect from completing the tenant-wide
+ *  (owner-only) Google Business connect. */
+export type OAuthStateProvider = CalendarProvider | 'google_business';
+
 export interface OAuthStateRepository {
   create(input: {
     tenantId: string;
     userId: string;
-    provider: CalendarProvider;
+    provider: OAuthStateProvider;
     redirectAfter?: string;
   }): Promise<{ id: string }>;
-  /** Atomic consume: mark consumed_at AND return the row only if
-   *  it was unconsumed + not expired. Prevents replay. */
-  consume(id: string): Promise<{
+  /** Atomic consume: mark consumed_at AND return the row only if it was
+   *  unconsumed, not expired, and minted by `provider`'s flow. Prevents
+   *  replay and cross-flow reuse. */
+  consume(id: string, provider: OAuthStateProvider): Promise<{
     tenantId: string;
     userId: string;
-    provider: CalendarProvider;
+    provider: OAuthStateProvider;
     redirectAfter?: string;
   } | null>;
 }
@@ -216,7 +224,7 @@ export class InMemoryOAuthStateRepository implements OAuthStateRepository {
     {
       tenantId: string;
       userId: string;
-      provider: CalendarProvider;
+      provider: OAuthStateProvider;
       redirectAfter?: string;
       expiresAt: Date;
       consumedAt: Date | null;
@@ -226,7 +234,7 @@ export class InMemoryOAuthStateRepository implements OAuthStateRepository {
   async create(input: {
     tenantId: string;
     userId: string;
-    provider: CalendarProvider;
+    provider: OAuthStateProvider;
     redirectAfter?: string;
   }): Promise<{ id: string }> {
     const id = uuidv4();
@@ -238,14 +246,15 @@ export class InMemoryOAuthStateRepository implements OAuthStateRepository {
     return { id };
   }
 
-  async consume(id: string): Promise<{
+  async consume(id: string, provider: OAuthStateProvider): Promise<{
     tenantId: string;
     userId: string;
-    provider: CalendarProvider;
+    provider: OAuthStateProvider;
     redirectAfter?: string;
   } | null> {
     const row = this.rows.get(id);
     if (!row) return null;
+    if (row.provider !== provider) return null;
     if (row.consumedAt) return null;
     if (row.expiresAt.getTime() < Date.now()) return null;
     row.consumedAt = new Date();
@@ -421,7 +430,7 @@ export class PgOAuthStateRepository implements OAuthStateRepository {
   async create(input: {
     tenantId: string;
     userId: string;
-    provider: CalendarProvider;
+    provider: OAuthStateProvider;
     redirectAfter?: string;
   }): Promise<{ id: string }> {
     const result = await this.pool.query(
@@ -435,10 +444,10 @@ export class PgOAuthStateRepository implements OAuthStateRepository {
 
   /** Atomic consume — single UPDATE protects against concurrent
    *  callbacks (e.g. user double-clicks the OAuth redirect). */
-  async consume(id: string): Promise<{
+  async consume(id: string, provider: OAuthStateProvider): Promise<{
     tenantId: string;
     userId: string;
-    provider: CalendarProvider;
+    provider: OAuthStateProvider;
     redirectAfter?: string;
   } | null> {
     const result = await this.pool.query(
@@ -447,15 +456,16 @@ export class PgOAuthStateRepository implements OAuthStateRepository {
        WHERE id = $1
          AND consumed_at IS NULL
          AND expires_at > NOW()
+         AND provider = $2
        RETURNING tenant_id, user_id, provider, redirect_after`,
-      [id],
+      [id, provider],
     );
     if (result.rows.length === 0) return null;
     const row = result.rows[0] as Record<string, unknown>;
     return {
       tenantId: row.tenant_id as string,
       userId: row.user_id as string,
-      provider: row.provider as CalendarProvider,
+      provider: row.provider as OAuthStateProvider,
       redirectAfter: (row.redirect_after as string) ?? undefined,
     };
   }

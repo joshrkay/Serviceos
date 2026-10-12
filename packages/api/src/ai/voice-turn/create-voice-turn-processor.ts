@@ -4809,8 +4809,8 @@ export function createVoiceTurnProcessor(
     const jobs = jobRepo.findByCustomer
       ? await jobRepo.findByCustomer(tenantId, customerId, { includeArchived: true })
       : (await jobRepo.findByTenant(tenantId)).filter((j) => j.customerId === customerId);
-    const lists = await Promise.all(jobs.map((j) => appointmentRepo.findByJob(tenantId, j.id)));
-    return lists.flat();
+    // One batched read, not one query per job (callers only filter/count).
+    return appointmentRepo.findByJobs(tenantId, jobs.map((j) => j.id));
   }
 
   /** The tenant-local calendar day of an instant, as YYYY-MM-DD. */

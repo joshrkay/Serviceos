@@ -560,6 +560,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     '/operator-hours',
     requireAuth,
     requireTenant,
+    requireRole('owner'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!pool) {
@@ -639,6 +640,7 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
     '/phone/retry',
     requireAuth,
     requireTenant,
+    requireRole('owner'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!pool || !queue) {

@@ -20,6 +20,13 @@ export interface JobTimelineEntry {
 export interface JobTimelineRepository {
   create(entry: JobTimelineEntry): Promise<JobTimelineEntry>;
   findByJob(tenantId: string, jobId: string): Promise<JobTimelineEntry[]>;
+  /**
+   * Batched findByJob — the timeline entries of many jobs in ONE query.
+   * Within a job, entries keep findByJob's order (created_at ASC); order
+   * across jobs is unspecified — group by `jobId` if it matters.
+   * An empty `jobIds` returns [] without querying.
+   */
+  findByJobs(tenantId: string, jobIds: string[]): Promise<JobTimelineEntry[]>;
 }
 
 export const JOB_TIMELINE_EVENT_TYPES = {
@@ -278,6 +285,14 @@ export class InMemoryJobTimelineRepository implements JobTimelineRepository {
   async findByJob(tenantId: string, jobId: string): Promise<JobTimelineEntry[]> {
     return this.entries
       .filter((e) => e.tenantId === tenantId && e.jobId === jobId)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .map((e) => ({ ...e }));
+  }
+
+  async findByJobs(tenantId: string, jobIds: string[]): Promise<JobTimelineEntry[]> {
+    const wanted = new Set(jobIds);
+    return this.entries
+      .filter((e) => e.tenantId === tenantId && wanted.has(e.jobId))
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
       .map((e) => ({ ...e }));
   }
