@@ -136,7 +136,7 @@ describe('Clerk user.created → signup attribution', () => {
         emailDomain: 'shop.com',
         utm_source: 'google',
         utm_campaign: 'x'.repeat(200),
-        signup_referrer: 'https://www.google.com/search',
+        signup_referrer_host: 'www.google.com',
         signup_first_touch_at: '2026-10-01',
       },
     });

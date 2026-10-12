@@ -167,17 +167,32 @@ describe('signupAttributionProperties', () => {
       signupAttributionProperties({
         utmSource: 'google',
         utmTerm: 't',
-        ref: 'https://x.com/',
-        landing: '/p',
+        ref: 'https://www.reddit.com/r/HVAC/comments/abc/',
+        landing: '/trades/hvac',
         firstTouchAt: '2026-10-01',
       }),
     ).toEqual({
       utm_source: 'google',
       utm_term: 't',
-      signup_referrer: 'https://x.com/',
-      signup_landing_path: '/p',
+      signup_referrer_host: 'www.reddit.com',
+      signup_landing_section: '/trades',
       signup_first_touch_at: '2026-10-01',
     });
+    expect(signupAttributionProperties({ landing: '/' })).toEqual({ signup_landing_section: '/' });
     expect(signupAttributionProperties(null)).toEqual({});
+  });
+});
+
+describe('review fixes', () => {
+  it('a URL utm parameter that fails validation still overrides the cookie campaign', () => {
+    const cookie = encodeURIComponent(JSON.stringify({ landing: '/', at: '2026-09-28', utm_source: 'hn' }));
+    for (const search of ['?utm_source=', '?utm_source=%00']) {
+      expect(parseSignupAttribution({ search, cookie })?.utmSource).toBeUndefined();
+    }
+  });
+
+  it('strips query and fragment from the landing path, in the parser and the sanitizer', () => {
+    expect(parseSignupAttribution({ search: '?rvt_landing=' + encodeURIComponent('/invite/x?email=a@b.co#t') })?.landing).toBe('/invite/x');
+    expect(sanitizeSignupAttribution({ landing: '/p?token=s' })?.landing).toBe('/p');
   });
 });

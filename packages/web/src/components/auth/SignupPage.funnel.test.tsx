@@ -71,8 +71,8 @@ describe('SignupPage funnel instrumentation', () => {
     expect(analytics.trackFunnel).toHaveBeenCalledWith('signup_started', undefined, {
       utm_source: 'google',
       utm_campaign: 'spring',
-      signup_landing_path: '/pricing',
-      signup_referrer: 'https://www.google.com/',
+      signup_landing_section: '/pricing',
+      signup_referrer_host: 'www.google.com',
     });
   });
 

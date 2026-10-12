@@ -75,7 +75,9 @@ function cleanRef(value: unknown): string | undefined {
 function cleanLanding(value: unknown): string | undefined {
   const cleaned = cleanString(value);
   if (!cleaned || !cleaned.startsWith('/')) return undefined;
-  return cleaned.length <= SIGNUP_ATTRIBUTION_MAX_LENGTH ? cleaned : undefined;
+  // Path only: a query or fragment can carry emails or tokens.
+  const path = cleaned.split(/[?#]/, 1)[0];
+  return path.length <= SIGNUP_ATTRIBUTION_MAX_LENGTH ? path : undefined;
 }
 
 function cleanDate(value: unknown): string | undefined {
@@ -123,8 +125,9 @@ function decodeCookie(raw: string | null | undefined): Record<string, unknown> |
 /**
  * Build a validated attribution from the signup URL's query string plus the
  * raw (still URI-encoded) `rvt_ft` cookie value. Precedence mirrors the
- * marketing site: if the URL carries any utm_* value, the URL's utm set is
- * used alone (never mixed with the cookie's); otherwise the cookie's.
+ * marketing site: if the URL carries any utm_* parameter (even one that
+ * fails validation), the URL's utm set is used alone (never mixed with the
+ * cookie's); otherwise the cookie's.
  * ref / landing / first-touch date each come from the URL, else the cookie.
  * Returns null when nothing valid remains.
  */
@@ -138,8 +141,8 @@ export function parseSignupAttribution(input: {
       : new URLSearchParams(input.search ?? '');
   const cookie = decodeCookie(input.cookie) ?? {};
 
-  const urlUtm = utmSet((key) => params.get(key));
-  const utm = Object.keys(urlUtm).length > 0 ? urlUtm : utmSet((key) => cookie[key]);
+  const urlHasUtm = UTM_FIELDS.some(([, param]) => params.has(param));
+  const utm = urlHasUtm ? utmSet((key) => params.get(key)) : utmSet((key) => cookie[key]);
 
   return compact({
     ...utm,
@@ -186,6 +189,11 @@ export function readCookieValue(cookieHeader: string | null | undefined, name: s
  * Flat analytics properties for an attribution (PostHog-style `utm_*` names),
  * so the browser `signup_started` and server `signup_completed` events carry
  * identical keys. Absent fields are omitted.
+ *
+ * Coarser than what the tenant row stores: analytics props are IDs/enums
+ * only (analytics/posthog.ts), so the referrer is reduced to its hostname
+ * and the landing path to its first segment ("/trades/hvac" → "/trades").
+ * The full sanitized values stay in the tenant's signup_* columns.
  */
 export function signupAttributionProperties(
   attr: SignupAttribution | null,
@@ -196,8 +204,8 @@ export function signupAttributionProperties(
     const value = attr[field];
     if (value !== undefined) props[param] = value;
   }
-  if (attr.ref !== undefined) props.signup_referrer = attr.ref;
-  if (attr.landing !== undefined) props.signup_landing_path = attr.landing;
+  if (attr.ref !== undefined) props.signup_referrer_host = new URL(attr.ref).hostname;
+  if (attr.landing !== undefined) props.signup_landing_section = `/${attr.landing.split('/')[1] ?? ''}`;
   if (attr.firstTouchAt !== undefined) props.signup_first_touch_at = attr.firstTouchAt;
   return props;
 }
