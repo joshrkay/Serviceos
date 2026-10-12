@@ -184,6 +184,19 @@ describe('signupAttributionProperties', () => {
 });
 
 describe('review fixes', () => {
+  it('keeps label-shaped UTM values out of analytics only when they look like PII or URLs', () => {
+    expect(
+      signupAttributionProperties({
+        utmSource: 'google',
+        utmMedium: 'cpc',
+        utmCampaign: 'spring_sale-2026',
+        utmTerm: 'alice@example.com',
+        utmContent: 'https://evil.example/?t=secret',
+      }),
+    ).toEqual({ utm_source: 'google', utm_medium: 'cpc', utm_campaign: 'spring_sale-2026' });
+    expect(signupAttributionProperties({ utmCampaign: 'x'.repeat(65) })).toEqual({});
+  });
+
   it('a URL utm parameter that fails validation still overrides the cookie campaign', () => {
     const cookie = encodeURIComponent(JSON.stringify({ landing: '/', at: '2026-09-28', utm_source: 'hn' }));
     for (const search of ['?utm_source=', '?utm_source=%00']) {

@@ -185,6 +185,9 @@ export function readCookieValue(cookieHeader: string | null | undefined, name: s
   return null;
 }
 
+/** Campaign-label shape: short, no `@`, no URL or query syntax. */
+const ANALYTICS_UTM_RE = /^[A-Za-z0-9 ._+-]{1,64}$/;
+
 /**
  * Flat analytics properties for an attribution (PostHog-style `utm_*` names),
  * so the browser `signup_started` and server `signup_completed` events carry
@@ -193,6 +196,8 @@ export function readCookieValue(cookieHeader: string | null | undefined, name: s
  * Coarser than what the tenant row stores: analytics props are IDs/enums
  * only (analytics/posthog.ts), so the referrer is reduced to its hostname
  * and the landing path to its first segment ("/trades/hvac" → "/trades").
+ * UTM values are free text, so only campaign-label-shaped ones are sent
+ * (ANALYTICS_UTM_RE); anything else — an email, a URL — is left out.
  * The full sanitized values stay in the tenant's signup_* columns.
  */
 export function signupAttributionProperties(
@@ -202,7 +207,7 @@ export function signupAttributionProperties(
   const props: Record<string, string> = {};
   for (const [field, param] of UTM_FIELDS) {
     const value = attr[field];
-    if (value !== undefined) props[param] = value;
+    if (value !== undefined && ANALYTICS_UTM_RE.test(value)) props[param] = value;
   }
   if (attr.ref !== undefined) props.signup_referrer_host = new URL(attr.ref).hostname;
   if (attr.landing !== undefined) props.signup_landing_section = `/${attr.landing.split('/')[1] ?? ''}`;

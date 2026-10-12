@@ -135,7 +135,8 @@ describe('Clerk user.created → signup attribution', () => {
         tenantId,
         emailDomain: 'shop.com',
         utm_source: 'google',
-        utm_campaign: 'x'.repeat(200),
+        // 200-char campaign is stored on the tenant but is not label-shaped,
+        // so it stays out of analytics.
         signup_referrer_host: 'www.google.com',
         signup_first_touch_at: '2026-10-01',
       },
