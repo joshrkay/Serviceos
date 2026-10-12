@@ -3,7 +3,21 @@ import { randomUUID } from 'crypto';
 import type { Logger } from '../logging/logger';
 import { redactUrlValue } from '../logging/redact';
 
-const SENSITIVE_KEY_PATTERN = /(authorization|cookie|token|secret|password|api[_-]?key)/i;
+// `code`/`state` are exact-match: OAuth callbacks carry a live
+// authorization code and CSRF state as query params.
+const SENSITIVE_KEY_PATTERN = /(authorization|cookie|token|secret|password|api[_-]?key|^code$|^state$)/i;
+
+// Request bodies carry customer PII (names, phones, addresses, SMS text)
+// and, on raw-body webhook routes, the full signed payload as a Buffer —
+// which Object.entries would enumerate byte-by-byte. Log only the shape.
+function summarizeBody(body: unknown): unknown {
+  if (body === null || body === undefined) return body;
+  if (Buffer.isBuffer(body)) return `[BINARY ${body.length} bytes]`;
+  if (typeof body === 'string') return `[TEXT ${body.length} chars]`;
+  if (Array.isArray(body)) return `[ARRAY ${body.length} items]`;
+  if (typeof body === 'object') return { keys: Object.keys(body as Record<string, unknown>) };
+  return typeof body;
+}
 
 function sanitizeValue(value: unknown, depth = 0): unknown {
   if (depth > 5) return '[TRUNCATED]';
@@ -63,7 +77,7 @@ export function createRequestLoggingMiddleware(logger: Logger) {
       tenant_id: tenantId,
       params: sanitizeValue(req.params),
       query: sanitizeValue(req.query),
-      body: sanitizeValue(req.body),
+      body: summarizeBody(req.body),
       headers: sanitizeHeaders(req.headers),
     };
 

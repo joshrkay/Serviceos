@@ -21,6 +21,8 @@ import express from 'express';
 import helmet from 'helmet';
 import request from 'supertest';
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { buildHelmetOptions } from '../../src/app';
 
 function makeApp(isProd: boolean): express.Express {
@@ -141,5 +143,18 @@ describe('D1-3 — helmet hardening headers', () => {
       expect(res.headers['x-frame-options']).toBe('DENY');
       expect(res.headers['referrer-policy']).toBe('no-referrer');
     });
+  });
+});
+
+describe('D1-3 — static frontend is served behind helmet', () => {
+  // createApp() needs a live Pg pool + prod secrets, so pin the mount
+  // order in source: express.static mounted before helmet() serves `/`
+  // and index.html with no CSP / frame-ancestors / HSTS.
+  it('mounts express.static(frontendPath) after helmet()', () => {
+    const src = readFileSync(join(__dirname, '../../src/app.ts'), 'utf8');
+    const helmetAt = src.indexOf('app.use(helmet(buildHelmetOptions(isProd)))');
+    const staticAt = src.indexOf('app.use(express.static(frontendPath))');
+    expect(helmetAt).toBeGreaterThan(-1);
+    expect(staticAt).toBeGreaterThan(helmetAt);
   });
 });
