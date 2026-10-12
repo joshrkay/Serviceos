@@ -80,3 +80,25 @@ describe('PgTenantRepository.create', () => {
     expect(calls[0].params).toEqual([OWNER_ID, 'owner@example.com', "Owner's Organization"]);
   });
 });
+
+describe('PgTenantRepository.setSignupAttribution', () => {
+  it('parameterizes every column (absent fields → NULL) behind a write-once guard', async () => {
+    const { pool, calls } = makeMockPool([{}]);
+    const wrote = await new PgTenantRepository(pool).setSignupAttribution(TENANT_ID, {
+      utmSource: 'google',
+      landing: '/pricing',
+      firstTouchAt: '2026-10-01',
+    });
+    expect(wrote).toBe(true);
+    expect(calls[0].sql).toContain('UPDATE tenants SET');
+    expect(calls[0].sql).toContain('signup_first_touch_at IS NULL');
+    expect(calls[0].params).toEqual([
+      TENANT_ID, 'google', null, null, null, null, null, '/pricing', '2026-10-01',
+    ]);
+  });
+
+  it('returns false when the guard matched no row (already attributed)', async () => {
+    const { pool } = makeMockPool([]);
+    expect(await new PgTenantRepository(pool).setSignupAttribution(TENANT_ID, { utmSource: 'x' })).toBe(false);
+  });
+});

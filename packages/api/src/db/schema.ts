@@ -7502,6 +7502,23 @@ export const MIGRATIONS = {
       ADD CONSTRAINT tenant_settings_voice_quality_daily_cap_nonneg
         CHECK (voice_quality_daily_cap IS NULL OR voice_quality_daily_cap >= 0) NOT VALID;
   `,
+  // Signup attribution — the marketing-site first touch (utm_*, external
+  // referrer, first landing path, first-visit date) forwarded through Clerk
+  // unsafe_metadata and written once by the user.created webhook
+  // (PgTenantRepository.setSignupAttribution). Additive + nullable; the
+  // shared parser bounds every value to 200 chars before it gets here.
+  // tenants carries no tenant_id/RLS (it IS the tenant row).
+  '306_tenant_signup_attribution': `
+    ALTER TABLE tenants
+      ADD COLUMN IF NOT EXISTS signup_utm_source TEXT,
+      ADD COLUMN IF NOT EXISTS signup_utm_medium TEXT,
+      ADD COLUMN IF NOT EXISTS signup_utm_campaign TEXT,
+      ADD COLUMN IF NOT EXISTS signup_utm_content TEXT,
+      ADD COLUMN IF NOT EXISTS signup_utm_term TEXT,
+      ADD COLUMN IF NOT EXISTS signup_referrer TEXT,
+      ADD COLUMN IF NOT EXISTS signup_landing_path TEXT,
+      ADD COLUMN IF NOT EXISTS signup_first_touch_at DATE;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
