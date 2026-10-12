@@ -12,7 +12,7 @@ import { toErrorResponse } from './shared/errors';
 import { createPool, createDirectPool } from './db/pool';
 import { buildRepositories, type Repositories } from './db/build-repositories';
 import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
-import { loadConfig, resolveMediaStreamsEnabled } from './shared/config';
+import { loadConfig, resolveMediaStreamsEnabled, validateEnvSchema } from './shared/config';
 import { resolveWebDistDir } from './web-static-path';
 import { registerMarketingRedirects } from './marketing-redirects';
 import { createWebhookRouter } from './webhooks/routes';
@@ -681,6 +681,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     if (req.body === undefined) req.body = {};
     next();
   });
+
+  // Fail-fast env schema: in production this refuses Clerk test keys (unless
+  // ALLOW_CLERK_TEST_KEYS=true), CORS_ORIGIN='true', and DEV_AUTH_BYPASS /
+  // CLERK_DEV_HMAC_TOKENS=true — guards that loadConfig() does not cover.
+  validateEnvSchema(process.env);
 
   // Load validated config — must happen before CORS so validateProductionConfig()
   // can throw on missing CORS_ORIGIN before we wire the middleware.
