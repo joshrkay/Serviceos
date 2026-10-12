@@ -100,9 +100,9 @@
     "loadtest:mixed:selfcheck": "tsx loadtest/mixed-1000-selfcheck.ts"
   },
   "devDependencies": {
-    "@clerk/testing": "^2.2.42",
+    "@clerk/testing": "^2.2.44",
     "@eslint/js": "^10.0.1",
-    "@playwright/test": "^1.63.0",
+    "@playwright/test": "^1.64.0",
     "@testcontainers/postgresql": "^11.13.0",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/react": "^16.3.3",
@@ -115,7 +115,7 @@
     "testcontainers": "^11.13.0",
     "tsx": "^4.23.15",
     "typescript": "^5.4.0",
-    "typescript-eslint": "^8.71.0",
+    "typescript-eslint": "^8.71.1",
     "vitest": "^4.1.10"
   },
   "overrides": {
