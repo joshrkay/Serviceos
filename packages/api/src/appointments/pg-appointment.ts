@@ -148,6 +148,20 @@ export class PgAppointmentRepository extends PgBaseRepository implements Appoint
     });
   }
 
+  async findByJobs(tenantId: string, jobIds: string[]): Promise<Appointment[]> {
+    // Same isUuid guard as findByJob: a non-UUID id matches nothing, and
+    // casting it to uuid[] would raise 22P02 for the whole batch.
+    const ids = jobIds.filter(isUuid);
+    if (ids.length === 0) return [];
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM appointments WHERE tenant_id = $1 AND job_id = ANY($2::uuid[]) ORDER BY scheduled_start ASC',
+        [tenantId, ids]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async findByDateRange(tenantId: string, start: Date, end: Date): Promise<Appointment[]> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(

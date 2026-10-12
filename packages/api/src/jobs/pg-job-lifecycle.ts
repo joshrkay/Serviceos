@@ -60,4 +60,17 @@ export class PgJobTimelineRepository extends PgBaseRepository implements JobTime
       return result.rows.map(mapRow);
     });
   }
+
+  async findByJobs(tenantId: string, jobIds: string[]): Promise<JobTimelineEntry[]> {
+    if (jobIds.length === 0) return [];
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM job_timeline_events
+         WHERE tenant_id = $1 AND job_id = ANY($2::uuid[])
+         ORDER BY created_at ASC`,
+        [tenantId, jobIds]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
 }
