@@ -390,7 +390,7 @@ export interface VerifyClerkSessionDeps {
   env?: NodeJS.ProcessEnv;
 }
 
-function isHmacDevModeEnabled(env: NodeJS.ProcessEnv): boolean {
+export function isHmacDevModeEnabled(env: NodeJS.ProcessEnv): boolean {
   if (env.CLERK_DEV_HMAC_TOKENS !== 'true') return false;
   // Defense in depth: even if validateEnvSchema misses (e.g. someone
   // bypasses it on boot), we refuse the HMAC path in production at runtime.
