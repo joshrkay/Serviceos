@@ -129,6 +129,13 @@ export interface ConversationRepository {
   createConversation(input: CreateConversationInput): Promise<Conversation>;
   findById(tenantId: string, id: string): Promise<Conversation | null>;
   findByEntity(tenantId: string, entityType: string, entityId: string): Promise<Conversation[]>;
+  /**
+   * Batched findByEntity — the conversations of many entities of one type in
+   * ONE query. Within an entity, rows keep findByEntity's order (created_at
+   * DESC in Pg); order across entities is unspecified — group by `entityId`
+   * if it matters. An empty `entityIds` returns [] without querying.
+   */
+  findByEntities(tenantId: string, entityType: string, entityIds: string[]): Promise<Conversation[]>;
   addMessage(input: CreateMessageInput): Promise<Message>;
   getMessages(tenantId: string, conversationId: string): Promise<Message[]>;
   /**
@@ -450,6 +457,17 @@ export class InMemoryConversationRepository implements ConversationRepository {
   async findByEntity(tenantId: string, entityType: string, entityId: string): Promise<Conversation[]> {
     return Array.from(this.conversations.values()).filter(
       (c) => c.tenantId === tenantId && c.entityType === entityType && c.entityId === entityId
+    );
+  }
+
+  async findByEntities(tenantId: string, entityType: string, entityIds: string[]): Promise<Conversation[]> {
+    const wanted = new Set(entityIds);
+    return Array.from(this.conversations.values()).filter(
+      (c) =>
+        c.tenantId === tenantId &&
+        c.entityType === entityType &&
+        c.entityId !== undefined &&
+        wanted.has(c.entityId)
     );
   }
 

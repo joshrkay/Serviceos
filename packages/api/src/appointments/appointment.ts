@@ -146,6 +146,13 @@ export interface AppointmentRepository {
   create(appointment: Appointment): Promise<Appointment>;
   findById(tenantId: string, id: string): Promise<Appointment | null>;
   findByJob(tenantId: string, jobId: string): Promise<Appointment[]>;
+  /**
+   * Batched findByJob — the appointments of many jobs in ONE query.
+   * Within a job, rows keep findByJob's order (scheduled_start ASC in Pg);
+   * order across jobs is unspecified — group by `jobId` if it matters.
+   * An empty `jobIds` returns [] without querying.
+   */
+  findByJobs(tenantId: string, jobIds: string[]): Promise<Appointment[]>;
   findByDateRange(tenantId: string, start: Date, end: Date): Promise<Appointment[]>;
   /**
    * U6 — tentative holds whose `hold_expiry_at` has passed (and that are still

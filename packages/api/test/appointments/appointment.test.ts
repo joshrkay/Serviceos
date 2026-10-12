@@ -587,6 +587,8 @@ describe('listAppointmentsWithMeta — fallback path (repository without listWit
       findById: async (tid, id) => appointments.find((a) => a.tenantId === tid && a.id === id) ?? null,
       findByJob: async (tid, jobId) =>
         appointments.filter((a) => a.tenantId === tid && a.jobId === jobId),
+      findByJobs: async (tid, jobIds) =>
+        appointments.filter((a) => a.tenantId === tid && jobIds.includes(a.jobId)),
       findByDateRange: async (tid, start, end) =>
         appointments.filter(
           (a) => a.tenantId === tid && a.scheduledStart >= start && a.scheduledStart <= end,

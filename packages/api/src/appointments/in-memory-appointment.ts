@@ -81,6 +81,13 @@ export class InMemoryAppointmentRepository implements AppointmentRepository {
       .map((a) => ({ ...a }));
   }
 
+  async findByJobs(tenantId: string, jobIds: string[]): Promise<Appointment[]> {
+    const wanted = new Set(jobIds);
+    return Array.from(this.appointments.values())
+      .filter((a) => a.tenantId === tenantId && wanted.has(a.jobId))
+      .map((a) => ({ ...a }));
+  }
+
   async findByDateRange(tenantId: string, start: Date, end: Date): Promise<Appointment[]> {
     return Array.from(this.appointments.values())
       .filter(
