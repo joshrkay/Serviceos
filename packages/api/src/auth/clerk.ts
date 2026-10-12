@@ -1,6 +1,7 @@
 import * as crypto from 'crypto';
 import { Request, Response, NextFunction } from 'express';
 import { createLogger } from '../logging/logger';
+import type { SignupAttribution } from '@ai-service-os/shared';
 
 const authLogger = createLogger({
   service: 'auth',
@@ -651,4 +652,11 @@ export interface TenantRepository {
   findByOwner(ownerId: string): Promise<Tenant | null>;
   findById(id: string): Promise<Tenant | null>;
   create(data: { ownerId: string; ownerEmail: string; name: string }): Promise<Tenant>;
+  /**
+   * Record the marketing-site first touch on a tenant. Write-once: a no-op
+   * (returns false) when the tenant already has any attribution stored, so a
+   * webhook redelivery can never overwrite the original first touch.
+   * Optional — only the Postgres repository persists attribution.
+   */
+  setSignupAttribution?(tenantId: string, attribution: SignupAttribution): Promise<boolean>;
 }

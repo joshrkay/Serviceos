@@ -581,6 +581,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['304_after_hours_voice_mode_default_backfill', '67993fc9f5a05c5c1ac7d63a37fb94c723234aacaad24ff9a337c92cbbb4af0c'],
   // #1602 — production voice-quality grades (voice_session_grades) + tenant_settings sampling bounds.
   ['305_voice_session_grades', '3d47b28627c77a500d18bbdd98637e343d01d59768cec9b875bcf96937cdae12'],
+  // Signup attribution — marketing first-touch columns on tenants.
+  ['306_tenant_signup_attribution', '84b60ec6dcae9cf9b2187861d6581c2e70f2ffe7619cb349b87e298396848751'],
 ];
 
 function hashMigration(value: string): string {
