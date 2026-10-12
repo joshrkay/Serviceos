@@ -170,6 +170,50 @@ export function setAuthorizationLoader(loader: AuthorizationLoader | null): void
 }
 
 /**
+ * The outcome of checking a Clerk subject's live membership for a tenant.
+ * Shared by the HTTP middleware (`resolveAuthorization`) and the client
+ * WebSocket gateway (connect + periodic re-check) so both surfaces make the
+ * SAME access decision from the same loader.
+ *
+ * - `unchecked`     — no loader wired (no-DB dev / dev-auth-bypass): keep the
+ *                     token claim.
+ * - `allowed`       — active, non-deleted membership; `membership.role` is
+ *                     authoritative over the token's role claim.
+ * - `no_membership` — no row for this subject in this tenant.
+ * - `revoked`       — row exists but is soft-deleted or not `active`.
+ * - `unavailable`   — the loader threw (DB down). Callers MUST fail closed.
+ */
+export type MembershipDecision =
+  | { outcome: 'unchecked' }
+  | { outcome: 'allowed'; membership: MembershipRecord }
+  | { outcome: 'no_membership' }
+  | { outcome: 'revoked'; membership: MembershipRecord }
+  | { outcome: 'unavailable'; error: unknown };
+
+/**
+ * Decide whether `userId` (the Clerk subject) currently has access to
+ * `tenantId` via the wired authorization loader. Never throws: a loader error
+ * is reported as `unavailable` so every caller fails closed explicitly.
+ */
+export async function decideMembership(
+  userId: string,
+  tenantId: string,
+): Promise<MembershipDecision> {
+  if (!authorizationLoader) return { outcome: 'unchecked' };
+  let membership: MembershipRecord | null;
+  try {
+    membership = await authorizationLoader(userId, tenantId);
+  } catch (error) {
+    return { outcome: 'unavailable', error };
+  }
+  if (!membership) return { outcome: 'no_membership' };
+  if (membership.deleted || membership.status !== 'active') {
+    return { outcome: 'revoked', membership };
+  }
+  return { outcome: 'allowed', membership };
+}
+
+/**
  * DB-authoritative authorization middleware. Mount after `requireAuth` so
  * `req.auth` is populated. Overwrites `req.auth.role` with the DB role and
  * rejects deleted / suspended / non-member callers. Fails closed on DB errors.
@@ -186,13 +230,6 @@ export async function resolveAuthorization(
     return;
   }
 
-  // No loader wired → no DB to be authoritative over (dev / dev-auth-bypass).
-  // Keep the JWT claim.
-  if (!authorizationLoader) {
-    next();
-    return;
-  }
-
   // A token with no tenant context has no tenant-scoped membership to resolve.
   // Tenant-scoped routes are independently gated by requireTenant (403); leave
   // the claim untouched for the rare authenticated-but-tenantless request.
@@ -201,10 +238,17 @@ export async function resolveAuthorization(
     return;
   }
 
-  let membership: MembershipRecord | null;
-  try {
-    membership = await authorizationLoader(req.auth.userId, req.auth.tenantId);
-  } catch (err) {
+  const decision = await decideMembership(req.auth.userId, req.auth.tenantId);
+
+  // No loader wired → no DB to be authoritative over (dev / dev-auth-bypass).
+  // Keep the JWT claim.
+  if (decision.outcome === 'unchecked') {
+    next();
+    return;
+  }
+
+  if (decision.outcome === 'unavailable') {
+    const err = decision.error;
     // Fail closed: deny rather than trust the (possibly stale) token claim.
     authzLogger.error('Authorization resolution failed — failing closed', {
       reason: err instanceof Error ? err.message : String(err),
@@ -219,7 +263,7 @@ export async function resolveAuthorization(
     return;
   }
 
-  if (!membership) {
+  if (decision.outcome === 'no_membership') {
     authzLogger.warn('Authorization denied — no membership row', {
       userId: req.auth.userId,
       tenantId: req.auth.tenantId,
@@ -232,7 +276,8 @@ export async function resolveAuthorization(
     return;
   }
 
-  if (membership.deleted || membership.status !== 'active') {
+  const { membership } = decision;
+  if (decision.outcome === 'revoked') {
     authzLogger.warn('Authorization denied — user not active', {
       userId: req.auth.userId,
       tenantId: req.auth.tenantId,

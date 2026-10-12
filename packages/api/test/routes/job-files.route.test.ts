@@ -12,8 +12,16 @@ import express, { type Express } from 'express';
 const OTHER_TENANT_ID = 'tenant-jf-2';
 const BUCKET = 'serviceos-job-files-test';
 
+const uploadUrlCalls: Array<{ key: string; sizeBytes: number }> = [];
+
 class FakeStorageProvider implements StorageProvider {
-  async generateUploadUrl(bucket: string, key: string): Promise<string> {
+  async generateUploadUrl(
+    bucket: string,
+    key: string,
+    _contentType: string,
+    sizeBytes: number
+  ): Promise<string> {
+    uploadUrlCalls.push({ key, sizeBytes });
     return `https://fake.local/put/${bucket}/${key}`;
   }
 
@@ -120,6 +128,22 @@ describe('job files router', () => {
     const afterDelete = await request(app).get(`/api/jobs/${createdJob.body.id}/files`);
     expect(afterDelete.status).toBe(200);
     expect(afterDelete.body).toHaveLength(0);
+  });
+
+  // Security audit: the declared size must reach the presign so it is
+  // signed as Content-Length (R2/S3 then reject a PUT of any other size).
+  it('passes the declared sizeBytes through to the presigned upload URL', async () => {
+    const createdJob = await request(app).post('/api/jobs').send({
+      customerId: 'cust-size-1',
+      locationId: 'loc-size-1',
+      summary: 'Job for size binding',
+    });
+    uploadUrlCalls.length = 0;
+    const upload = await request(app)
+      .post(`/api/jobs/${createdJob.body.id}/files/upload-url`)
+      .send({ filename: 'spec.pdf', contentType: 'application/pdf', sizeBytes: 4321 });
+    expect(upload.status).toBe(201);
+    expect(uploadUrlCalls).toEqual([{ key: upload.body.fileRecord.storageKey, sizeBytes: 4321 }]);
   });
 
   it('enforces tenant boundaries for list/delete', async () => {

@@ -59,6 +59,7 @@ import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twili
 import { handleVapiCallEvent } from '../integrations/vapi/webhook';
 import type { SendEmailFn } from '../voice/check-upgrade-nudge';
 import { verifySendGridSignature } from './sendgrid-signature';
+import { createAuthFailureThrottle } from './auth-failure-throttle';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
@@ -3095,7 +3096,24 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     }
   });
 
+  // Failures before the request is authenticated (no integration for the
+  // path tenant / bad signature) are attacker-volume: tenant ids are public.
+  // Throttle their audit rows; account_sid_mismatch follows a VALID
+  // signature, so it is always recorded.
+  const UNAUTHENTICATED_REJECT_REASONS = new Set(['tenant_mismatch', 'invalid_signature']);
+  const authFailureThrottle = createAuthFailureThrottle({ windowMs: 10 * 60 * 1000, maxKeys: 10_000 });
   const rejectBound = async (tenantId: string, reason: string, meta: Record<string, unknown>) => {
+    let metadata = meta;
+    if (UNAUTHENTICATED_REJECT_REASONS.has(reason)) {
+      const admitted = authFailureThrottle.admit(`${tenantId}:${reason}:${String(meta.kind)}`);
+      if (!admitted) {
+        logger.warn('webhook auth failure (audit throttled)', { tenantId, reason, kind: meta.kind });
+        return;
+      }
+      if (admitted.suppressedSinceLast > 0) {
+        metadata = { ...meta, suppressedSinceLast: admitted.suppressedSinceLast };
+      }
+    }
     if (deps.auditRepo) {
       await deps.auditRepo.create(createAuditEvent({
         tenantId,
@@ -3104,7 +3122,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         eventType: 'webhook.auth_failed',
         entityType: 'webhook',
         entityId: reason,
-        metadata: meta,
+        metadata,
       }));
     }
   };

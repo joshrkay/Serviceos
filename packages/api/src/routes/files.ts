@@ -80,7 +80,12 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
     const saved = await fileRepo.create(record);
 
     const [uploadUrl, downloadUrl] = await Promise.all([
-      storage.generateUploadUrl(saved.storageBucket, saved.storageKey, saved.contentType),
+      storage.generateUploadUrl(
+        saved.storageBucket,
+        saved.storageKey,
+        saved.contentType,
+        saved.sizeBytes
+      ),
       storage.generateDownloadUrl(saved.storageBucket, saved.storageKey),
     ]);
 
