@@ -142,7 +142,7 @@ describe('request logging never emits request bodies (PII / raw webhook payloads
     ({ logger, calls } = createMockLogger());
   });
 
-  it('logs only the key names of a JSON body, never the values', async () => {
+  it('logs only the key count of a JSON body, never keys or values', async () => {
     const app = express();
     app.use(express.json());
     app.use(createRequestLoggingMiddleware(logger));
@@ -157,7 +157,18 @@ describe('request logging never emits request bodies (PII / raw webhook payloads
     expect(serialized).not.toContain('602-555-0199');
     expect(serialized).not.toContain('jane@example.com');
     const incoming = calls.find((c) => c.message === 'incoming request');
-    expect((incoming?.meta?.safeRequestLog as any)?.body).toEqual({ keys: ['name', 'phone', 'email'] });
+    expect((incoming?.meta?.safeRequestLog as any)?.body).toBe('[OBJECT 3 keys]');
+  });
+
+  it('does not log client-controlled key names (they can carry PII)', async () => {
+    const app = express();
+    app.use(express.json());
+    app.use(createRequestLoggingMiddleware(logger));
+    app.post('/api/customers', (_req, res) => res.json({ ok: true }));
+
+    await request(app).post('/api/customers').send({ 'jane@example.com': true });
+
+    expect(JSON.stringify(calls.map((c) => c.meta))).not.toContain('jane@example.com');
   });
 
   it('summarizes a raw-body (Buffer) webhook payload instead of enumerating its bytes', async () => {

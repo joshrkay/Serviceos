@@ -38,12 +38,12 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
  * and the reply resolver read (see
  * reputation/google-business-integration.ts for the pinned shape).
  *
- * oauth_states note: its provider CHECK is ('google','quickbooks',
- * 'xero'), so this flow stores provider='google' like calendar rather
- * than widening the constraint (no migration). A calendar-minted nonce
- * replayed against this callback fails closed anyway — the
- * authorization code is bound to THIS flow's redirect_uri, so the token
- * exchange is rejected by Google.
+ * oauth_states note: this flow mints and consumes provider
+ * 'google_business' (migration 308). Calendar and Google Business share
+ * one Google OAuth client, and the caller controls the redirect_uri and
+ * scope in the consent URL, so the redirect_uri binding does NOT keep a
+ * calendar-minted nonce (any member can mint one) out of this owner-only
+ * callback — the provider check in consume() does.
  */
 export interface GoogleBusinessIntegrationsRouteDeps {
   integrationRepo: GoogleBusinessIntegrationRepository;
@@ -138,7 +138,7 @@ export function createGoogleBusinessOAuthCallbackRouter(
         throw new ValidationError('Google Business integration is not configured');
       }
 
-      const consumed = await deps.stateRepo.consume(state);
+      const consumed = await deps.stateRepo.consume(state, 'google_business');
       if (!consumed) {
         throw new ValidationError('Invalid or expired OAuth state');
       }
@@ -260,13 +260,11 @@ export function createGoogleBusinessIntegrationsRouter(
         const rawRedirect =
           typeof req.body?.redirectAfter === 'string' ? req.body.redirectAfter : undefined;
         const redirectAfter = isSafeRelativePath(rawRedirect) ? rawRedirect : undefined;
-        // provider 'google' — see the oauth_states note in the module
-        // docblock (the CHECK constraint doesn't include
-        // 'google_business'; the redirect_uri binding disambiguates).
+        // See the oauth_states note in the module docblock.
         const { id: stateId } = await deps.stateRepo.create({
           tenantId: req.auth!.tenantId,
           userId: req.auth!.userId,
-          provider: 'google',
+          provider: 'google_business',
           ...(redirectAfter !== undefined ? { redirectAfter } : {}),
         });
         const url = buildGoogleBusinessAuthUrl(deps.googleConfig, stateId);

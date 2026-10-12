@@ -9,13 +9,14 @@ const SENSITIVE_KEY_PATTERN = /(authorization|cookie|token|secret|password|api[_
 
 // Request bodies carry customer PII (names, phones, addresses, SMS text)
 // and, on raw-body webhook routes, the full signed payload as a Buffer —
-// which Object.entries would enumerate byte-by-byte. Log only the shape.
+// which Object.entries would enumerate byte-by-byte. Log only the size:
+// even key names are client-controlled and can carry PII or bloat a line.
 function summarizeBody(body: unknown): unknown {
   if (body === null || body === undefined) return body;
   if (Buffer.isBuffer(body)) return `[BINARY ${body.length} bytes]`;
   if (typeof body === 'string') return `[TEXT ${body.length} chars]`;
   if (Array.isArray(body)) return `[ARRAY ${body.length} items]`;
-  if (typeof body === 'object') return { keys: Object.keys(body as Record<string, unknown>) };
+  if (typeof body === 'object') return `[OBJECT ${Object.keys(body as Record<string, unknown>).length} keys]`;
   return typeof body;
 }
 

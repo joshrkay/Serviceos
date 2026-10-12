@@ -107,15 +107,26 @@ describe('CalendarIntegration repos + Google OAuth helpers (PR 1)', () => {
       const { id } = await repo.create({
         tenantId: 'tenant-1', userId: 'user-1', provider: 'google',
       });
-      const first = await repo.consume(id);
+      const first = await repo.consume(id, 'google');
       expect(first?.tenantId).toBe('tenant-1');
-      const replay = await repo.consume(id);
+      const replay = await repo.consume(id, 'google');
       expect(replay).toBeNull();
+    });
+
+    it('refuses a state minted by a different flow, and leaves it unconsumed', async () => {
+      // Calendar connect is open to any member; Google Business is
+      // owner-only. A calendar nonce must not complete the GB callback.
+      const repo = new InMemoryOAuthStateRepository();
+      const { id } = await repo.create({
+        tenantId: 'tenant-1', userId: 'tech-1', provider: 'google',
+      });
+      expect(await repo.consume(id, 'google_business')).toBeNull();
+      expect((await repo.consume(id, 'google'))?.userId).toBe('tech-1');
     });
 
     it('refuses an unknown state id', async () => {
       const repo = new InMemoryOAuthStateRepository();
-      const result = await repo.consume('unknown-id');
+      const result = await repo.consume('unknown-id', 'google');
       expect(result).toBeNull();
     });
   });
