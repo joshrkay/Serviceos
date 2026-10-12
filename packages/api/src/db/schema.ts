@@ -7519,6 +7519,15 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS signup_landing_path TEXT,
       ADD COLUMN IF NOT EXISTS signup_first_touch_at DATE;
   `,
+  // Platform-admin tenant usage report (admin/pg-tenant-usage.ts) filters
+  // ai_runs by (tenant_id, created_at window). ai_runs only had a tenant_id-
+  // only index and a platform-wide (created_at) index (263), so a tenant's
+  // window read scanned that tenant's entire AI history. Additive, no-op on
+  // re-run.
+  '307_ai_runs_tenant_created_at_index': `
+    CREATE INDEX IF NOT EXISTS idx_ai_runs_tenant_created_at
+      ON ai_runs (tenant_id, created_at);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
