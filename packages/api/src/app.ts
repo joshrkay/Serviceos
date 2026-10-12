@@ -12,7 +12,7 @@ import { toErrorResponse } from './shared/errors';
 import { createPool, createDirectPool } from './db/pool';
 import { buildRepositories, type Repositories } from './db/build-repositories';
 import { verifyRlsRuntimeRole } from './db/rls-runtime-role';
-import { loadConfig, resolveMediaStreamsEnabled } from './shared/config';
+import { loadConfig, resolveMediaStreamsEnabled, validateEnvSchema } from './shared/config';
 import { resolveWebDistDir } from './web-static-path';
 import { registerMarketingRedirects } from './marketing-redirects';
 import { createWebhookRouter } from './webhooks/routes';
@@ -32,11 +32,10 @@ import { createTwilioCallRedirector } from './telephony/twilio-call-redirect';
 import { createRecordingTranscriptHook } from './telephony/recording-transcript-hook';
 import { RealtimeHealthCircuit } from './telephony/realtime-health-circuit';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
+import { createClientGatewayAuth } from './ws/client-gateway-auth';
 import { setDraining, isDraining as isDrainingFlag } from './ws/drain-state';
 import { createConnectionRegistry } from './ws/connection-registry';
-import {
-  decodeClerkToken,
-  verifyRs256Token, type AuthenticatedRequest } from './auth/clerk';
+import { type AuthenticatedRequest } from './auth/clerk';
 import { RESILIENCE_FLAG_NAMES } from './flags/resilience-flags';
 import { DeepgramStreamingProvider } from './voice/transcription-providers';
 
@@ -681,6 +680,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     if (req.body === undefined) req.body = {};
     next();
   });
+
+  // Fail-fast env schema: in production this refuses Clerk test keys (unless
+  // ALLOW_CLERK_TEST_KEYS=true), CORS_ORIGIN='true', and DEV_AUTH_BYPASS /
+  // CLERK_DEV_HMAC_TOKENS=true — guards that loadConfig() does not cover.
+  validateEnvSchema(process.env);
 
   // Load validated config — must happen before CORS so validateProductionConfig()
   // can throw on missing CORS_ORIGIN before we wire the middleware.
@@ -4931,46 +4935,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             RESILIENCE_FLAG_NAMES.clientGatewayEnabled,
             { environment: process.env.NODE_ENV ?? 'development' },
           ),
-        auth: {
-          authenticate: async (req) => {
-            // Token via Authorization header (rare for WS), Sec-WebSocket-Protocol,
-            // or ?token=...
-            const authHeader = req.headers.authorization;
-            const proto = (req.headers['sec-websocket-protocol'] as string | undefined) ?? '';
-            const url = new URL(req.url ?? '/', 'http://localhost');
-            const queryToken = url.searchParams.get('token') ?? undefined;
-            const headerToken =
-              authHeader && authHeader.startsWith('Bearer ')
-                ? authHeader.substring(7)
-                : undefined;
-            const protoToken = proto
-              .split(',')
-              .map((s) => s.trim())
-              .find((s) => s.startsWith('bearer.'))
-              ?.substring('bearer.'.length);
-            const token = headerToken || queryToken || protoToken;
-            if (!token) return null;
-
-            try {
-              const isHmacDev =
-                process.env.NODE_ENV !== 'production' &&
-                process.env.NODE_ENV !== 'prod' &&
-                process.env.CLERK_DEV_HMAC_TOKENS === 'true';
-              const payload = isHmacDev
-                ? decodeClerkToken(token, process.env.CLERK_SECRET_KEY ?? '')
-                : await verifyRs256Token(token, {
-                    pubKey: process.env.CLERK_PUBLISHABLE_KEY ?? '',
-                  });
-              if (!payload?.tenant_id) return null;
-              return {
-                tenantId: payload.tenant_id,
-                userId: payload.sub,
-              };
-            } catch {
-              return null;
-            }
-          },
-        },
+        // Same token verification + DB-authoritative membership decision as
+        // the HTTP chain (verifyClerkSession → resolveAuthorization, via the
+        // loader wired by setAuthorizationLoader below), plus close-on-exp
+        // and a periodic live-membership re-check of the open socket.
+        auth: createClientGatewayAuth(),
       });
       return server;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

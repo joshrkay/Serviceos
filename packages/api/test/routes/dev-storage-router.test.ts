@@ -109,7 +109,7 @@ describe('createDevStorageRouter (#1273)', () => {
       secret: SECRET,
     });
     const key = 'tenant-9/file-9/note.txt';
-    const uploadUrl = await provider.generateUploadUrl('serviceos-dev', key, 'text/plain');
+    const uploadUrl = await provider.generateUploadUrl('serviceos-dev', key, 'text/plain', 10);
     const uploadPath = uploadUrl.replace('http://localhost:0', '');
     const putRes = await request(app)
       .put(uploadPath)

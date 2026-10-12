@@ -78,7 +78,12 @@ export function createJobFilesRouter(deps: JobFilesRouterDeps): Router {
     });
 
     const [uploadUrl, downloadUrl] = await Promise.all([
-      storage.generateUploadUrl(file.storageBucket, file.storageKey, file.contentType),
+      storage.generateUploadUrl(
+        file.storageBucket,
+        file.storageKey,
+        file.contentType,
+        file.sizeBytes
+      ),
       storage.generateDownloadUrl(file.storageBucket, file.storageKey),
     ]);
 

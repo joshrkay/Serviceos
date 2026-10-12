@@ -187,4 +187,11 @@ export const WS_CLOSE_CODE = {
   too_big: 1009,
   internal_error: 1011,
   try_again_later: 1013,
+  /** App-defined (4000-4999): the credential the socket was opened with expired. */
+  unauthorized: 4401,
+  /** App-defined: the caller's tenant membership was revoked mid-session. */
+  forbidden: 4403,
 } as const;
+
+/** How often an open client-gateway socket re-checks the caller's membership. */
+export const WS_AUTH_REVALIDATE_INTERVAL_MS = 60_000;

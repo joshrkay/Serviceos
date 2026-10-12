@@ -811,7 +811,11 @@ export function validateEnvSchema(
   env: Record<string, string | undefined> = process.env
 ): Env {
   const schema = isProductionEnv(env.NODE_ENV) ? prodEnvSchema : devEnvSchema;
-  const result = schema.safeParse(env);
+  // An empty value means unset (shells and CI templating export `VAR=`), the
+  // same as loadConfig() treats it: a blank DATABASE_URL in dev is "use the
+  // in-memory repos", not an invalid URL. Required prod vars still fail.
+  const present = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== ''));
+  const result = schema.safeParse(present);
 
   if (!result.success) {
     const lines = result.error.issues.map((issue) => {

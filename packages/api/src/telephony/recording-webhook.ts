@@ -348,6 +348,7 @@ export function createRecordingRouter(
         deps.storageBucket,
         storageKey,
         contentType,
+        bytes.length,
       );
       await uploadObject(uploadUrl, bytes, contentType);
 

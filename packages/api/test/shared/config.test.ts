@@ -905,6 +905,14 @@ describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
     PUBLIC_API_URL: 'https://api.example.com',
   };
 
+  it('treats an empty value as unset in dev (CI exports DATABASE_URL= for in-memory boot)', () => {
+    expect(() => validateEnvSchema({ NODE_ENV: 'dev', DATABASE_URL: '', DEV_AUTH_BYPASS: 'true' })).not.toThrow();
+  });
+
+  it('still rejects an empty required var in production', () => {
+    expect(() => validateEnvSchema({ ...fullProdEnv, DATABASE_URL: '' })).toThrow(/DATABASE_URL: Required/);
+  });
+
   it('happy path — all vars present, returns typed Env object', () => {
     const env = validateEnvSchema(fullProdEnv);
     expect(env.NODE_ENV).toBe('production');

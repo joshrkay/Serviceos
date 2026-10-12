@@ -6,6 +6,7 @@ import {
   requireRole,
   enforceTenantIsolation,
   resolveAuthorization,
+  decideMembership,
   setAuthorizationLoader,
   type AuthorizationLoader,
   type MembershipRecord,
@@ -98,6 +99,37 @@ describe('P0-003 — Auth middleware', () => {
   // ───────────────────────────────────────────────────────────────────────
   // QUALITY-2026-07-12 WS4 — DB-authoritative authorization.
   // ───────────────────────────────────────────────────────────────────────
+  describe('decideMembership (shared by HTTP + /api/ws)', () => {
+    afterEach(() => setAuthorizationLoader(null));
+    const rec = (over: Partial<MembershipRecord> = {}): MembershipRecord => ({
+      userId: 'canon',
+      role: 'dispatcher',
+      deleted: false,
+      status: 'active',
+      ...over,
+    });
+
+    it('unchecked when no loader is wired', async () => {
+      expect(await decideMembership('u1', 't1')).toEqual({ outcome: 'unchecked' });
+    });
+
+    it('allowed / no_membership / revoked / unavailable', async () => {
+      setAuthorizationLoader(async () => rec());
+      expect(await decideMembership('u1', 't1')).toEqual({ outcome: 'allowed', membership: rec() });
+      setAuthorizationLoader(async () => null);
+      expect((await decideMembership('u1', 't1')).outcome).toBe('no_membership');
+      setAuthorizationLoader(async () => rec({ status: 'suspended' }));
+      expect((await decideMembership('u1', 't1')).outcome).toBe('revoked');
+      setAuthorizationLoader(async () => rec({ deleted: true }));
+      expect((await decideMembership('u1', 't1')).outcome).toBe('revoked');
+      const boom = new Error('db down');
+      setAuthorizationLoader(async () => {
+        throw boom;
+      });
+      expect(await decideMembership('u1', 't1')).toEqual({ outcome: 'unavailable', error: boom });
+    });
+  });
+
   describe('resolveAuthorization', () => {
     afterEach(() => {
       // Never leak a loader into another test — the module-level ref is shared.

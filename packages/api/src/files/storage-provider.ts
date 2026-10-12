@@ -110,6 +110,13 @@ export interface SignS3RequestInput {
   // When provided, binds the Content-Type into the signature so a client
   // cannot PUT a different MIME type than what the server validated.
   contentType?: string;
+  // When provided (PUT only), binds the exact Content-Length into the
+  // signature. S3/R2 recompute the canonical request from the headers the
+  // client actually sends, so a PUT whose body length differs from the
+  // declared size fails with SignatureDoesNotMatch — this is what makes
+  // the upload-intent size cap (MAX_FILE_SIZE / MAX_JOB_PHOTO_SIZE) real
+  // rather than advisory.
+  contentLength?: number;
 }
 
 // Pure SigV4 presign. Exported for test vector verification.
@@ -126,6 +133,7 @@ export function signS3Request(input: SignS3RequestInput): string {
     now,
     pathStyle,
     contentType,
+    contentLength,
   } = input;
   const { amzDate: ts, dateStamp } = amzDate(now);
   const scope = `${dateStamp}/${region}/s3/aws4_request`;
@@ -144,7 +152,16 @@ export function signS3Request(input: SignS3RequestInput): string {
     : `${basePath}/${encodedKey}`;
 
   const signContentType = !!contentType && method === 'PUT';
-  const signedHeaders = signContentType ? 'content-type;host' : 'host';
+  const signContentLength = contentLength !== undefined && method === 'PUT';
+  if (signContentLength && !(Number.isSafeInteger(contentLength) && contentLength! >= 0)) {
+    throw new Error(`Invalid contentLength for presigned PUT: ${contentLength}`);
+  }
+  // SigV4 requires canonical headers sorted by lowercase name.
+  const headerEntries: Array<[string, string]> = [];
+  if (signContentLength) headerEntries.push(['content-length', String(contentLength)]);
+  if (signContentType) headerEntries.push(['content-type', contentType!]);
+  headerEntries.push(['host', host]);
+  const signedHeaders = headerEntries.map(([name]) => name).join(';');
 
   const params: Record<string, string> = {
     'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
@@ -158,9 +175,7 @@ export function signS3Request(input: SignS3RequestInput): string {
     .map((k) => `${encodeRfc3986(k)}=${encodeRfc3986(params[k])}`)
     .join('&');
 
-  const canonicalHeaders = signContentType
-    ? `content-type:${contentType}\nhost:${host}\n`
-    : `host:${host}\n`;
+  const canonicalHeaders = headerEntries.map(([name, value]) => `${name}:${value}\n`).join('');
   const canonicalRequest = [
     method,
     canonicalPath,
@@ -201,8 +216,23 @@ export class S3StorageProvider implements StorageProvider {
     this.config = { ...config, pathStyle: config.pathStyle ?? true };
   }
 
-  async generateUploadUrl(bucket: string, key: string, contentType: string): Promise<string> {
-    return this.presign('PUT', bucket, key, DEFAULT_UPLOAD_EXPIRES_SECONDS, contentType);
+  // sizeBytes is the size the upload-intent route validated against its
+  // cap; it is signed as Content-Length so the storage backend rejects any
+  // PUT of a different length. Required — no caller may mint an unbounded
+  // upload URL.
+  async generateUploadUrl(
+    bucket: string,
+    key: string,
+    contentType: string,
+    sizeBytes: number
+  ): Promise<string> {
+    // Non-negative (not positive): server-side callers (telephony) may
+    // legitimately store an empty object; a 0 binding still caps the PUT.
+    // Client-facing routes reject 0 earlier via validateUpload.
+    if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
+      throw new Error(`generateUploadUrl requires a non-negative integer sizeBytes (got ${sizeBytes})`);
+    }
+    return this.presign('PUT', bucket, key, DEFAULT_UPLOAD_EXPIRES_SECONDS, contentType, sizeBytes);
   }
 
   async generateDownloadUrl(bucket: string, key: string): Promise<string> {
@@ -241,7 +271,7 @@ export class S3StorageProvider implements StorageProvider {
     // Content-Type is bound into the signature (same guarantee as client
     // presigned uploads): the stored object's MIME type matches what the
     // pipeline produced.
-    const url = this.presign('PUT', bucket, key, 60, contentType);
+    const url = this.presign('PUT', bucket, key, 60, contentType, body.length);
     const res = await fetch(url, {
       method: 'PUT',
       headers: { 'content-type': contentType },
@@ -266,7 +296,8 @@ export class S3StorageProvider implements StorageProvider {
     bucket: string,
     key: string,
     expiresSeconds: number,
-    contentType?: string
+    contentType?: string,
+    contentLength?: number
   ): string {
     const { endpoint, region, accessKeyId, secretAccessKey, pathStyle } = this.config;
     return signS3Request({
@@ -281,6 +312,7 @@ export class S3StorageProvider implements StorageProvider {
       now: new Date(),
       pathStyle: pathStyle ?? true,
       contentType,
+      contentLength,
     });
   }
 }
@@ -302,7 +334,16 @@ export class DevStorageProvider implements StorageProvider {
     this.secret = config.secret ?? randomBytes(32).toString('hex');
   }
 
-  async generateUploadUrl(_bucket: string, key: string, _contentType: string): Promise<string> {
+  // sizeBytes is accepted for interface parity but not enforced: the dev
+  // receiver discards uploaded bytes, and this provider is never active in
+  // prod/staging (createStorageProvider throws, and app.ts keeps the
+  // /storage-dev receiver dark there).
+  async generateUploadUrl(
+    _bucket: string,
+    key: string,
+    _contentType: string,
+    _sizeBytes: number
+  ): Promise<string> {
     const token = signDevStorageToken(this.secret, 'PUT', key);
     return `${this.config.publicUrlBase.replace(/\/$/, '')}/${encodeKeyPath(key)}?token=${token}`;
   }

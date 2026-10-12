@@ -175,6 +175,97 @@ describe('ClientGatewayConnection', () => {
   });
 });
 
+describe('ClientGatewayConnection — credential expiry + membership re-check', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('closes with 4401 when the token exp passes', () => {
+    const ws = new FakeWs();
+    const { lease, raw } = makeLease();
+    const conn = makeConn(ws, lease, { ...AUTH, expiresAtMs: Date.now() + 5_000 });
+    vi.advanceTimersByTime(4_999);
+    expect(conn.isClosed()).toBe(false);
+    vi.advanceTimersByTime(2);
+    expect(conn.isClosed()).toBe(true);
+    expect(ws.closes).toEqual([{ code: 4401, reason: 'token_expired' }]);
+    expect(raw.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes immediately when the token is already expired at accept', () => {
+    const ws = new FakeWs();
+    const conn = makeConn(ws, makeLease().lease, { ...AUTH, expiresAtMs: Date.now() - 1 });
+    expect(conn.isClosed()).toBe(true);
+    expect(ws.closes[0]?.code).toBe(4401);
+  });
+
+  it('closes with 4403 when membership is revoked mid-session', async () => {
+    const ws = new FakeWs();
+    const outcomes: Array<'ok' | 'revoked'> = ['ok', 'revoked'];
+    const revalidate = vi.fn(async () => outcomes.shift() ?? 'revoked');
+    const conn = makeConn(ws, makeLease().lease, AUTH, { revalidate, revalidateIntervalMs: 1_000 });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(revalidate).toHaveBeenCalledTimes(1);
+    expect(revalidate).toHaveBeenCalledWith(AUTH);
+    expect(conn.isClosed()).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(conn.isClosed()).toBe(true);
+    expect(ws.closes).toEqual([{ code: 4403, reason: 'access_revoked' }]);
+  });
+
+  it('fails closed (1013) when the re-check is unavailable or throws', async () => {
+    const ws1 = new FakeWs();
+    const c1 = makeConn(ws1, makeLease().lease, AUTH, {
+      revalidate: async () => 'unavailable' as const,
+      revalidateIntervalMs: 1_000,
+    });
+    const ws2 = new FakeWs();
+    const c2 = makeConn(ws2, makeLease().lease, AUTH, {
+      revalidate: async () => {
+        throw new Error('db down');
+      },
+      revalidateIntervalMs: 1_000,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(c1.isClosed()).toBe(true);
+    expect(ws1.closes[0]?.code).toBe(1013);
+    expect(c2.isClosed()).toBe(true);
+    expect(ws2.closes[0]?.code).toBe(1013);
+  });
+
+  it('clears the expiry + re-check timers on close', async () => {
+    const ws = new FakeWs();
+    const revalidate = vi.fn(async () => 'ok' as const);
+    makeConn(ws, makeLease().lease, { ...AUTH, expiresAtMs: Date.now() + 5_000 }, {
+      revalidate,
+      revalidateIntervalMs: 1_000,
+    });
+    ws.emit('close');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(revalidate).not.toHaveBeenCalled();
+    // No server-initiated close after the client already left.
+    expect(ws.closes).toEqual([]);
+  });
+
+  it('server shutdown (going_away) still closes cleanly with timers armed', async () => {
+    const ws = new FakeWs();
+    const revalidate = vi.fn(async () => 'ok' as const);
+    const conn = makeConn(ws, makeLease().lease, { ...AUTH, expiresAtMs: Date.now() + 5_000 }, {
+      revalidate,
+      revalidateIntervalMs: 1_000,
+    });
+    conn.terminate('server_shutdown', 1001);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(ws.closes).toEqual([{ code: 1001, reason: 'server_shutdown' }]);
+    expect(revalidate).not.toHaveBeenCalled();
+  });
+});
+
 // ── attachClientGateway upgrade rejections ───────────────────────────
 class FakeSocket extends EventEmitter {
   written: string[] = [];
