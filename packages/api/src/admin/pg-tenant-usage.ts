@@ -13,7 +13,7 @@
  *
  * Everything is aggregated in SQL (COUNT / SUM / GROUP BY); no rows are
  * loaded. Index support per window filter:
- *   - ai_runs (tenant_id, created_at)            idx_ai_runs_tenant_created_at (306)
+ *   - ai_runs (tenant_id, created_at)            idx_ai_runs_tenant_created_at (307)
  *   - call_usage_events (tenant_id, …)           UNIQUE (tenant_id, call_id) prefix;
  *                                                billable rows also idx_call_usage_events_period
  *   - ai_voice_usage_costs (tenant_id, occurred_at)  idx_ai_voice_usage_costs_period

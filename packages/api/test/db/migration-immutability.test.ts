@@ -581,7 +581,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['304_after_hours_voice_mode_default_backfill', '67993fc9f5a05c5c1ac7d63a37fb94c723234aacaad24ff9a337c92cbbb4af0c'],
   // #1602 — production voice-quality grades (voice_session_grades) + tenant_settings sampling bounds.
   ['305_voice_session_grades', '3d47b28627c77a500d18bbdd98637e343d01d59768cec9b875bcf96937cdae12'],
-  ['306_ai_runs_tenant_created_at_index', 'd40b650d25ab0e63f1deef7e8262123f32c60657037182ddc5d73280adc6464c'],
+  // Signup attribution — marketing first-touch columns on tenants.
+  ['306_tenant_signup_attribution', '84b60ec6dcae9cf9b2187861d6581c2e70f2ffe7619cb349b87e298396848751'],
+  // Platform-admin tenant usage report — ai_runs (tenant_id, created_at).
+  ['307_ai_runs_tenant_created_at_index', 'd40b650d25ab0e63f1deef7e8262123f32c60657037182ddc5d73280adc6464c'],
 ];
 
 function hashMigration(value: string): string {
