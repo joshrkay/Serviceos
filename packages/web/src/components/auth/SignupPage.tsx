@@ -1,16 +1,37 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { SignUp, useAuth } from '@clerk/clerk-react';
 import { Navigate } from 'react-router';
 import { Zap } from 'lucide-react';
+import {
+  parseSignupAttribution,
+  readCookieValue,
+  signupAttributionProperties,
+  SIGNUP_ATTRIBUTION_COOKIE,
+} from '@ai-service-os/shared';
 import { trackFunnel } from '../../lib/analytics';
 
 export function SignupPage() {
   const { isLoaded, isSignedIn } = useAuth();
+  // Marketing-site first touch (utm_* / rvt_* params, else the rvt_ft
+  // cookie). Handed to Clerk as unsafe_metadata so the user.created webhook
+  // can persist it on the new tenant — the API re-validates it there.
+  const attribution = useMemo(
+    () =>
+      parseSignupAttribution({
+        search: window.location.search,
+        cookie: readCookieValue(document.cookie, SIGNUP_ATTRIBUTION_COOKIE),
+      }),
+    [],
+  );
   // Funnel step between view_landing and signup_completed. Fires once when
   // the signup form mounts. No tenant/user yet — null context.
   useEffect(() => {
-    trackFunnel('signup_started');
-  }, []);
+    if (attribution) {
+      trackFunnel('signup_started', undefined, signupAttributionProperties(attribution));
+    } else {
+      trackFunnel('signup_started');
+    }
+  }, [attribution]);
   if (isLoaded && isSignedIn) return <Navigate to="/" replace />;
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
@@ -27,6 +48,7 @@ export function SignupPage() {
         <SignUp
           signInUrl="/login"
           fallbackRedirectUrl="/onboarding"
+          unsafeMetadata={attribution ? { signupAttribution: attribution } : undefined}
           appearance={{
             elements: {
               rootBox: 'w-full max-w-sm',
