@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { requireAuth, requireTenant } from '../middleware/auth';
+import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { toErrorResponse, ValidationError, NotFoundError } from '../shared/errors';
 import { extractIp } from '../shared/extract-ip';
 import { OAuthStateRepository } from '../integrations/calendar-integration';
@@ -251,6 +251,7 @@ export function createGoogleBusinessIntegrationsRouter(
     '/google/connect',
     requireAuth,
     requireTenant,
+    requirePermission('settings:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         if (!deps.googleConfig) {
@@ -303,6 +304,7 @@ export function createGoogleBusinessIntegrationsRouter(
     '/google',
     requireAuth,
     requireTenant,
+    requirePermission('settings:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const ok = await deps.integrationRepo.disconnect(req.auth!.tenantId);

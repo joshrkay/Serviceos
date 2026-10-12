@@ -13,7 +13,7 @@ import type { CallPlanId } from '../../src/billing/call-usage-pricing';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 
-function buildApp(planId: CallPlanId | null) {
+function buildApp(planId: CallPlanId | null, role: NonNullable<AuthenticatedRequest['auth']>['role'] = 'owner') {
   const deps = {
     integrationRepo: { findByTenant: vi.fn(async () => null) },
     syncLogRepo: {},
@@ -37,7 +37,7 @@ function buildApp(planId: CallPlanId | null) {
       userId: 'user-owner',
       sessionId: 'sess',
       tenantId: TENANT,
-      role: 'owner',
+      role,
     };
     next();
   });
@@ -75,5 +75,20 @@ describe('QuickBooks is Growth-only', () => {
     const res = await request(app).post('/api/integrations/quickbooks/sync').send({});
     expect(res.status).toBe(403);
     expect(res.body.error).toBe('PLAN_UPGRADE_REQUIRED');
+  });
+});
+
+describe('QuickBooks connection is owner-only (settings:update)', () => {
+  // A technician must not be able to point the tenant's books at their own
+  // Intuit company, drop the owner's connection, or push a sync.
+  it.each([
+    ['post', '/api/integrations/quickbooks/connect'],
+    ['post', '/api/integrations/quickbooks/disconnect'],
+    ['post', '/api/integrations/quickbooks/sync'],
+  ] as const)('403s a technician on %s %s', async (_method, path) => {
+    const { app, deps } = buildApp('growth', 'technician');
+    const res = await request(app).post(path).send({});
+    expect(res.status).toBe(403);
+    expect(deps.oauthStateRepo.create).not.toHaveBeenCalled();
   });
 });

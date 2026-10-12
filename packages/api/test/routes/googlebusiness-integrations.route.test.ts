@@ -76,6 +76,7 @@ function buildApp(opts: {
   googleConfig?: typeof GOOGLE_CONFIG;
   googleFetch?: typeof fetch;
   authenticate?: boolean;
+  role?: NonNullable<AuthenticatedRequest['auth']>['role'];
   auditRepo?: InMemoryAuditRepository;
   pollStateRepo?: InMemoryReviewPollStateRepository;
 }) {
@@ -87,7 +88,7 @@ function buildApp(opts: {
         userId: USER,
         sessionId: 'sess-1',
         tenantId: TENANT,
-        role: 'owner',
+        role: opts.role ?? 'owner',
       };
       next();
     });
@@ -206,6 +207,14 @@ describe('Google Business integrations routes', () => {
     expect(raw).not.toContain('AT');
     expect(raw).not.toContain('RT');
     expect(raw).not.toContain('TokenEnc');
+  });
+
+  it('403s a technician on connect and disconnect (tenant-wide integration, settings:update)', async () => {
+    const app = buildApp({ integrationRepo, stateRepo, googleConfig: GOOGLE_CONFIG, role: 'technician' });
+    const connect = await request(app).post('/api/googlebusiness-integrations/google/connect').send({});
+    expect(connect.status).toBe(403);
+    const disconnect = await request(app).delete('/api/googlebusiness-integrations/google');
+    expect(disconnect.status).toBe(403);
   });
 
   it('POST /google/connect mints a business.manage consent URL with a state nonce', async () => {
