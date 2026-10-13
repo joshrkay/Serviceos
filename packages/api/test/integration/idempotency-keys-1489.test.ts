@@ -13,6 +13,9 @@ import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb, type TestTenant } from './shared';
 import { createCustomerRouter } from '../../src/routes/customers';
 import { createPaymentRouter } from '../../src/routes/payments';
+import { createInvoiceRouter } from '../../src/routes/invoices';
+import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgJobRepository } from '../../src/jobs/pg-job';
@@ -91,6 +94,16 @@ describe('Postgres integration — Idempotency-Key on create routes (#1489)', ()
     app.use(
       '/api/payments',
       createPaymentRouter(new PgPaymentRepository(pool), new PgInvoiceRepository(pool)),
+    );
+    app.use(
+      '/api/invoices',
+      createInvoiceRouter(
+        new PgInvoiceRepository(pool),
+        new PgSettingsRepository(pool),
+        audit,
+        permissiveTenantOwnership(),
+        new PgPaymentRepository(pool),
+      ),
     );
     invoiceId = await seedOpenInvoice();
   }, 120_000);
@@ -217,5 +230,27 @@ describe('Postgres integration — Idempotency-Key on create routes (#1489)', ()
       .send({ firstName: 'Ttl2', lastName: 'Varga1489' });
     expect(again.status).toBe(201);
     expect(await customersNamed('Varga1489')).toHaveLength(2);
+  });
+
+  // Money-data #12 — the manual cash/check route was outside the mounted
+  // create paths: a double-tapped "Record payment" recorded two payments.
+  it('two concurrent POST /api/invoices/:id/payment with the same key record the payment once', async () => {
+    const paymentsFor = async () => {
+      const res = await request(app).get(`/api/payments?invoiceId=${invoiceId}`);
+      expect(res.status).toBe(200);
+      return (res.body as unknown[]).length;
+    };
+    const before = await paymentsFor();
+    const body = { amountCents: 2500, method: 'cash' };
+    const [a, b] = await Promise.all([
+      request(app).post(`/api/invoices/${invoiceId}/payment`).set('Idempotency-Key', 'k-inv-pay-1').send(body),
+      request(app).post(`/api/invoices/${invoiceId}/payment`).set('Idempotency-Key', 'k-inv-pay-1').send(body),
+    ]);
+    const statuses = [a.status, b.status];
+    expect(statuses).toContain(201);
+    // The duplicate either waits and replays (201) or, past the store's wait
+    // bound, is told the first is still in flight (409) — never a 2nd payment.
+    for (const status of statuses) expect([201, 409]).toContain(status);
+    expect(await paymentsFor()).toBe(before + 1);
   });
 });

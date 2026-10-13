@@ -23,7 +23,12 @@ import type { AuthenticatedRequest } from '../auth/clerk';
 import type { IdempotencyScope, IdempotencyStore } from './idempotency-store';
 
 
-/** The create endpoints that honour `Idempotency-Key` (POST only). */
+/**
+ * The create endpoints that honour `Idempotency-Key` (POST only). These are
+ * Express route paths matched exactly (not as prefixes), so a nested create
+ * must be listed with its own `:param` pattern. The fingerprint covers the
+ * concrete path, so one key reused on another invoice is a 422, not a replay.
+ */
 export const IDEMPOTENT_CREATE_PATHS = [
   '/api/customers',
   '/api/jobs',
@@ -31,6 +36,8 @@ export const IDEMPOTENT_CREATE_PATHS = [
   '/api/estimates',
   '/api/invoices',
   '/api/payments',
+  // Manual cash/check "Record payment" on an invoice (money-data #12).
+  '/api/invoices/:id/payment',
 ] as const;
 
 export const IDEMPOTENCY_HEADER = 'Idempotency-Key';
