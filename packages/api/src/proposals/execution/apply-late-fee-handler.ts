@@ -2,8 +2,8 @@ import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { Invoice, InvoiceRepository } from '../../invoices/invoice';
 import {
+  applyNonTaxableAdjustment,
   buildLineItem,
-  calculateDocumentTotals,
 } from '../../shared/billing-engine';
 import {
   RefreshJobMoneyStateDeps,
@@ -45,10 +45,12 @@ export function lateFeeLineId(invoiceId: string, stepKey: string): string {
  * Executes an approved `apply_late_fee` proposal (collections cadence).
  *
  * Appends the already-computed late fee as a NON-TAXABLE line item to an
- * overdue invoice, recomputes the document totals through the shared billing
- * engine (so the cent-rounding convention can't drift from tax/discount
- * math), and refreshes the job money-state rollup. The fee amount is integer
- * cents end-to-end — no float ever enters this path.
+ * overdue invoice, moves the document totals by exactly the fee through the
+ * shared billing engine's adjustment path (`applyNonTaxableAdjustment` — tax,
+ * discount and processing fee stay as issued, so a discounted + taxed invoice
+ * can still be fee'd instead of tripping the #1288 mixed-taxability
+ * refusal), and refreshes the job money-state rollup. The fee amount is
+ * integer cents end-to-end — no float ever enters this path.
  *
  * Money-class: this only ever runs after explicit owner approval (money
  * proposals never auto-approve). Guards:
@@ -64,11 +66,11 @@ export function lateFeeLineId(invoiceId: string, stepKey: string): string {
  * passthrough when no invoiceRepo is wired, returns failed ExecutionResults
  * (never throws through), and emits a failure-soft audit event.
  *
- * DRY threshold breadcrumb: the append-line-then-recompute block below
- * (build the line, append it, `calculateDocumentTotals`, derive
+ * DRY threshold breadcrumb: the append-line-then-adjust block below
+ * (build the line, append it, `applyNonTaxableAdjustment`, derive
  * `amountDueCents`) is mechanically identical to
  * `ApplyCreditExecutionHandler`'s (proposals/execution/
- * apply-credit-handler.ts, ~lines 154-160) — only the line's sign and
+ * apply-credit-handler.ts) — only the line's sign and
  * description differ. Left duplicated for these two; if a THIRD
  * append-a-line-to-invoice sibling shows up (e.g. a hypothetical
  * `apply_discount`), extract an `appendInvoiceLineAndRecompute(invoice,
@@ -152,11 +154,7 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
       'other',
     );
     const lineItems = [...invoice.lineItems, feeLine];
-    const totals = calculateDocumentTotals(
-      lineItems,
-      invoice.totals.discountCents,
-      invoice.totals.taxRateBps,
-    );
+    const totals = applyNonTaxableAdjustment(invoice.totals, feeLine.totalCents);
     const amountDueCents = Math.max(0, totals.totalCents - invoice.amountPaidCents);
 
     let updated: Invoice | null;

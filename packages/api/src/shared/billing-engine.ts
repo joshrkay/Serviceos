@@ -191,6 +191,30 @@ export function calculateDocumentTotals(
 }
 
 /**
+ * Move an ISSUED document's totals by ONE non-taxable adjustment line — an
+ * owner-approved credit (negative) or late fee (positive) appended after the
+ * fact. The adjustment shifts subtotal and total by exactly its own amount
+ * and nothing else: it is non-taxable, so the taxable subtotal and tax (and
+ * the discount and processing fee the document was issued with) cannot
+ * move. This is what `calculateDocumentTotals` would compute for the
+ * appended line — without its #1288 mixed-taxability refusal, which exists
+ * to stop a discount being mis-allocated across lines at CREATION time. The
+ * discount here was already allocated (and taxed) when the document was
+ * totalled; a non-taxable adjustment never re-opens that allocation, so a
+ * discounted, taxed invoice stays creditable without weakening the guard.
+ */
+export function applyNonTaxableAdjustment(
+  totals: DocumentTotals,
+  adjustmentCents: number,
+): DocumentTotals {
+  return {
+    ...totals,
+    subtotalCents: totals.subtotalCents + adjustmentCents,
+    totalCents: totals.totalCents + adjustmentCents,
+  };
+}
+
+/**
  * True when an estimate carries any customer-selectable line items
  * (tier options or optional add-ons). Used to decide whether the
  * approval flow needs a selection at all.

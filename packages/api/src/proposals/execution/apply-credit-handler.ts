@@ -3,8 +3,8 @@ import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { Invoice, InvoiceRepository } from '../../invoices/invoice';
 import {
+  applyNonTaxableAdjustment,
   buildLineItem,
-  calculateDocumentTotals,
 } from '../../shared/billing-engine';
 import {
   RefreshJobMoneyStateDeps,
@@ -24,10 +24,12 @@ import { formatUsdCentsPlain } from '@ai-service-os/shared';
  *
  * Reduces what a customer owes on an issued invoice — goodwill, warranty
  * labor, a price match. Mutation shape mirrors `ApplyLateFeeExecutionHandler`
- * EXACTLY (same file this is adapted from): append a line item, recompute
- * the document totals through the shared billing engine (so the cent-
- * rounding convention can't drift from tax/discount math), then refresh the
- * job money-state rollup. The differences are:
+ * EXACTLY (same file this is adapted from): append a NON-taxable line item,
+ * move the document totals by exactly its amount through the shared billing
+ * engine's adjustment path (`applyNonTaxableAdjustment` — tax, discount and
+ * processing fee stay as issued, so a discounted + taxed invoice stays
+ * creditable instead of tripping the #1288 mixed-taxability refusal), then
+ * refresh the job money-state rollup. The differences are:
  *
  *   1. The appended line is NEGATIVE (`unitPriceCents: -amountCents`) —
  *      this REDUCES the total instead of raising it.
@@ -75,9 +77,9 @@ import { formatUsdCentsPlain } from '@ai-service-os/shared';
  * (never throws through), and emits a failure-soft audit event
  * (`credit.applied`, entityType `invoice`).
  *
- * DRY threshold breadcrumb: the append-line-then-recompute block below
- * (~lines 154-160 — build the line, append it, `calculateDocumentTotals`,
- * derive `amountDueCents`) is mechanically identical to
+ * DRY threshold breadcrumb: the append-line-then-adjust block below
+ * (build the line, append it, `applyNonTaxableAdjustment`, derive
+ * `amountDueCents`) is mechanically identical to
  * `ApplyLateFeeExecutionHandler`'s (proposals/execution/
  * apply-late-fee-handler.ts, ~lines 144-150) — only the line's sign and
  * description differ. Left duplicated for these two; if a THIRD
@@ -162,11 +164,7 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
       'other',
     );
     const lineItems = [...invoice.lineItems, creditLine];
-    const totals = calculateDocumentTotals(
-      lineItems,
-      invoice.totals.discountCents,
-      invoice.totals.taxRateBps,
-    );
+    const totals = applyNonTaxableAdjustment(invoice.totals, creditLine.totalCents);
     const amountDueCents = Math.max(0, totals.totalCents - invoice.amountPaidCents);
 
     let updated: Invoice | null;

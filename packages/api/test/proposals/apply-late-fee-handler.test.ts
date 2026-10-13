@@ -192,6 +192,64 @@ describe('apply_late_fee execution handler', () => {
     expect(untouched!.amountDueCents).toBe(15000);
   });
 
+  // #1288 guard × fee line — on a member-discount invoice (all lines
+  // taxable, discount > 0, tax > 0) the NON-taxable fee line used to trip the
+  // engine's mixed-taxability refusal inside execute(): an owner-approved
+  // fee threw, retried, and landed in execution_failed — and dunning had
+  // already advanced its step ledger, so it was never re-raised.
+  describe('discounted + taxed invoice', () => {
+    // $150.00 taxable labor, $10.00 discount, 10% tax on the discounted
+    // base: tax 1400, total 15000 − 1000 + 1400 = 15400.
+    function makeDiscountedTaxedInvoice(overrides: Partial<Invoice> = {}): Invoice {
+      const lineItems: LineItem[] = [buildLineItem('li-1', 'Labor', 1, 15000, 0, true, 'labor')];
+      const totals = calculateDocumentTotals(lineItems, 1000, 1000);
+      return makeInvoice({ lineItems, totals, amountDueCents: totals.totalCents, ...overrides });
+    }
+
+    it('applies the fee on an open invoice: total and due rise by exactly the fee, tax unchanged', async () => {
+      invoiceRepo = new InMemoryInvoiceRepository();
+      const seeded = await invoiceRepo.create(makeDiscountedTaxedInvoice());
+      expect(seeded.totals.totalCents).toBe(15400);
+      handler = new ApplyLateFeeExecutionHandler(invoiceRepo, auditRepo);
+
+      const result = await handler.execute(makeProposal(), ctx);
+
+      expect(result).toEqual({ success: true, resultEntityId: INVOICE_ID });
+      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+      expect(updated!.totals).toMatchObject({
+        subtotalCents: 17500,
+        discountCents: 1000,
+        taxRateBps: 1000,
+        taxableSubtotalCents: 15000,
+        taxCents: 1400,
+        totalCents: 17900,
+      });
+      expect(updated!.amountDueCents).toBe(17900);
+    });
+
+    it('applies the fee on a partially_paid invoice and nets the due against what was paid', async () => {
+      invoiceRepo = new InMemoryInvoiceRepository();
+      await invoiceRepo.create(
+        makeDiscountedTaxedInvoice({
+          status: 'partially_paid',
+          amountPaidCents: 4000,
+          amountDueCents: 11400,
+        }),
+      );
+      handler = new ApplyLateFeeExecutionHandler(invoiceRepo, auditRepo);
+
+      const result = await handler.execute(makeProposal(), ctx);
+
+      expect(result).toEqual({ success: true, resultEntityId: INVOICE_ID });
+      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+      expect(updated!.totals.taxCents).toBe(1400);
+      expect(updated!.totals.totalCents).toBe(17900);
+      // 17900 total − 4000 paid = 13900 owed.
+      expect(updated!.amountDueCents).toBe(13900);
+      expect(updated!.status).toBe('partially_paid');
+    });
+  });
+
   // P0-9 — the fee RE-PRICES the invoice: a link or PaymentIntent minted at
   // the pre-fee balance no longer prices what is owed and must die so the
   // pay-now flows mint a fresh one at the current balance.

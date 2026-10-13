@@ -404,6 +404,100 @@ describe('apply_credit execution handler', () => {
     });
   });
 
+  // #1288 guard × credit line — a member-discount invoice (every line
+  // taxable, discount > 0, tax > 0) plus the NON-taxable credit line used to
+  // trip the engine's mixed-taxability refusal inside execute(), so an
+  // owner-APPROVED credit threw, retried and landed in execution_failed.
+  // The credit adjusts the existing totals instead: total − credit, tax
+  // untouched (a non-taxable adjustment cannot move the tax base).
+  describe('discounted + taxed invoice', () => {
+    // $200.00 taxable labor, $20.00 discount, 10% tax on the discounted
+    // base: tax 1800, total 20000 − 2000 + 1800 = 19800.
+    function makeDiscountedTaxedInvoice(overrides: Partial<Invoice> = {}): Invoice {
+      const lineItems: LineItem[] = [buildLineItem('li-1', 'Labor', 1, 20000, 0, true, 'labor')];
+      const totals = calculateDocumentTotals(lineItems, 2000, 1000);
+      return makeInvoice({ lineItems, totals, amountDueCents: totals.totalCents, ...overrides });
+    }
+
+    it('applies the credit on an open invoice: total and due drop by exactly the credit, tax unchanged', async () => {
+      invoiceRepo = new InMemoryInvoiceRepository();
+      const seeded = await invoiceRepo.create(makeDiscountedTaxedInvoice());
+      expect(seeded.totals.totalCents).toBe(19800);
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo);
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 3000 } }),
+        ctx,
+      );
+
+      expect(result).toEqual({ success: true, resultEntityId: INVOICE_ID });
+      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+      expect(updated!.totals).toMatchObject({
+        subtotalCents: 17000,
+        discountCents: 2000,
+        taxRateBps: 1000,
+        taxableSubtotalCents: 20000,
+        taxCents: 1800,
+        totalCents: 16800,
+      });
+      expect(updated!.amountDueCents).toBe(16800);
+      expect(updated!.lineItems.map((li) => li.totalCents)).toEqual([20000, -3000]);
+    });
+
+    it('applies the credit on a partially_paid invoice and nets the due against what was paid', async () => {
+      invoiceRepo = new InMemoryInvoiceRepository();
+      await invoiceRepo.create(
+        makeDiscountedTaxedInvoice({
+          status: 'partially_paid',
+          amountPaidCents: 5000,
+          amountDueCents: 14800,
+        }),
+      );
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo);
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 3000 } }),
+        ctx,
+      );
+
+      expect(result).toEqual({ success: true, resultEntityId: INVOICE_ID });
+      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+      expect(updated!.totals.taxCents).toBe(1800);
+      expect(updated!.totals.totalCents).toBe(16800);
+      // 16800 total − 5000 paid = 11800 still owed.
+      expect(updated!.amountDueCents).toBe(11800);
+      expect(updated!.amountPaidCents).toBe(5000);
+      expect(updated!.status).toBe('partially_paid');
+    });
+  });
+
+  it('keeps the invoice’s processing-fee surcharge: the total moves by exactly the approved credit', async () => {
+    // $100.00 labor + 3% processing fee (300) = 10300.
+    const lineItems: LineItem[] = [buildLineItem('li-1', 'Labor', 1, 10000, 0, true, 'labor')];
+    const totals = calculateDocumentTotals(lineItems, 0, 0, 300);
+    invoiceRepo = new InMemoryInvoiceRepository();
+    const seeded = await invoiceRepo.create(
+      makeInvoice({ lineItems, totals, amountDueCents: totals.totalCents }),
+    );
+    expect(seeded.totals.totalCents).toBe(10300);
+    handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo);
+
+    const result = await handler.execute(
+      makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }),
+      ctx,
+    );
+
+    expect(result.success).toBe(true);
+    const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(updated!.totals).toMatchObject({
+      subtotalCents: 8000,
+      processingFeeBps: 300,
+      processingFeeCents: 300,
+      totalCents: 8300,
+    });
+    expect(updated!.amountDueCents).toBe(8300);
+  });
+
   it('production registry wiring threads paymentLinkCleanup into apply_credit AND apply_late_fee', async () => {
     invoiceRepo = new InMemoryInvoiceRepository();
     await invoiceRepo.create(
