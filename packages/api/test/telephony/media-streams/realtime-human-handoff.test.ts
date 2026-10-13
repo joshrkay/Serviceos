@@ -18,6 +18,7 @@ import twilio from 'twilio';
 import { createTelephonyRouter } from '../../../src/routes/telephony';
 import {
   TwilioMediaStreamAdapter,
+  type MediaStreamAdapterDeps,
   type WsLike,
 } from '../../../src/telephony/media-streams/mediastream-adapter';
 import { TwilioGatherAdapter } from '../../../src/telephony/twilio-adapter';
@@ -35,6 +36,10 @@ import type {
 } from '../../../src/voice/transcription-providers';
 import type { TtsProvider } from '../../../src/ai/tts/tts-provider';
 import { HANDOFF_UNAVAILABLE_COPY } from '../../../src/ai/agents/customer-calling/tts-copy';
+import { patchOwnerThrough } from '../../../src/ai/skills/patch-owner-through';
+import { DEFAULT_ESCALATION_SETTINGS } from '../../../src/settings/settings';
+import type { VoiceSession } from '../../../src/ai/agents/customer-calling/voice-session-store';
+import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
 
 const TENANT = 'tenant-handoff';
 const PUBLIC_BASE_URL = 'https://api.test';
@@ -152,6 +157,14 @@ async function harness(opts: {
   rotation?: OnCallEntry[];
   /** Replace the real turn host (for effects no production producer emits yet). */
   speechTurn?: ConstructorParameters<typeof TwilioMediaStreamAdapter>[0]['speechTurn'];
+  /** The per-turn vulnerability triage hook (bound to the gather adapter). */
+  vulnerabilityTriageHook?: (
+    gather: TwilioGatherAdapter,
+  ) => NonNullable<ConstructorParameters<typeof TwilioMediaStreamAdapter>[0]['vulnerabilityTriageHook']>;
+  /** Tenant has LLM-sentiment escalation on; the classifier scores this. */
+  llmFrustrationScore?: number;
+  /** Further host deps, bound to the gather adapter. */
+  extraDeps?: (gather: TwilioGatherAdapter) => Partial<MediaStreamAdapterDeps>;
 } = {}) {
   const callSid = `CA-handoff-${++callSeq}`;
   const streamSid = `MZ-handoff-${callSeq}`;
@@ -195,6 +208,17 @@ async function harness(opts: {
         (({ session: s, speechResult, callSid: cs, tenantId }) =>
           gather.processCallerUtterance({ sessionId: s.id, callSid: cs, speechResult, tenantId })),
       callControl: new DefaultTwilioCallControl(),
+      ...(opts.vulnerabilityTriageHook
+        ? { vulnerabilityTriageHook: opts.vulnerabilityTriageHook(gather) }
+        : {}),
+      ...(opts.llmFrustrationScore !== undefined
+        ? {
+            escalationSettings: { ...DEFAULT_ESCALATION_SETTINGS, trigger_llm_sentiment: true },
+            sentimentClassifier: async () => ({ frustrationScore: opts.llmFrustrationScore! }),
+            deliverEscalationEffects: (s: VoiceSession, fx: SideEffect[], tenantId: string) =>
+              gather.deliverOutOfBandEffects(s, fx, tenantId),
+          }
+        : {}),
       interimEmergencyScan: ({ session: s, speechResult, tenantId }) =>
         gather.scanInterimForEmergency({ sessionId: s.id, speechResult, tenantId }),
       finalizeOnClose,
@@ -202,6 +226,7 @@ async function harness(opts: {
       setPendingTransferTwiml: gather.setPendingTransferTwiml.bind(gather),
       takePendingTransferTwiml: gather.takePendingTransferTwiml.bind(gather),
       restRedirect,
+      ...(opts.extraDeps ? opts.extraDeps(gather) : {}),
     },
     ws,
   );
@@ -381,6 +406,108 @@ describe('realtime hand-off — idempotency', () => {
     expect(h.twilio.transfers()[0].body.get('Twiml')).toBe(DIAL_A);
   });
 });
+
+// ─── (f) vulnerable-caller owner patch ───────────────────────────────────────
+
+describe('realtime hand-off — vulnerable-caller owner patch', () => {
+  it('the owner patch parked by the post-turn triage hook is delivered to the live call', async () => {
+    const OWNER = '+15125550177';
+    const h = await harness({
+      speechTurn: async () => [{ type: 'tts_play', payload: { text: 'I can help with that.' } }],
+      // As app.ts's onPatchOwner: the real patchOwnerThrough builds the
+      // announce + <Dial>, parked on the gather adapter's shared Map.
+      vulnerabilityTriageHook: (gather) => async ({ session, tenantId }) => {
+        const result = await patchOwnerThrough(
+          {
+            tenantId,
+            sessionId: session.id,
+            ...(session.callSid ? { callSid: session.callSid } : {}),
+            dialActionUrl: `${PUBLIC_BASE_URL}/api/telephony/dial-result?sid=${encodeURIComponent(session.id)}`,
+            reason: 'elderly caller, no heat',
+            shopName: 'Acme Plumbing',
+          },
+          { callControl: new DefaultTwilioCallControl(), ownerPhoneResolver: async () => OWNER },
+        );
+        if (result.kind === 'bridged') gather.setPendingTransferTwiml(session.id, result.twiml);
+      },
+    });
+
+    h.say("my mother is 90 and the heat is out");
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+    const twiml = h.twilio.transfers()[0].body.get('Twiml')!;
+    expect(twiml).toMatch(/<Response><Say[^>]*>[^<]+<\/Say><Dial/);
+    expect(twiml).toContain(OWNER);
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+  });
+});
+
+describe('realtime hand-off — LLM-sentiment frustration', () => {
+  it('the out-of-band frustration escalation (classifier fires after the turn) is transferred', async () => {
+    const h = await harness({
+      speechTurn: async () => [{ type: 'tts_play', payload: { text: 'Let me look into that.' } }],
+      llmFrustrationScore: 0.95,
+    });
+
+    h.say('this has been going on for three days and nobody calls me back');
+    // The turn's reply, then the reassurance line from the sentiment escalation.
+    await vi.waitFor(() => expect(h.ws.markNames().filter((n) => n.startsWith('silence-arm-'))).toHaveLength(2));
+    h.ws.ackAllMarks(h.streamSid);
+
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+    expect(h.twilio.transfers()[0].body.get('Twiml')).toContain(DISPATCHER);
+  });
+});
+
+const PARKED_DIAL = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial action="${PUBLIC_BASE_URL}/api/telephony/dial-result?sid=s"><Number>${DISPATCHER}</Number></Dial></Response>`;
+
+describe('realtime hand-off — escalations outside a caller turn', () => {
+  it('a hand-off parked during session bootstrap (identity hand-off) is delivered after the greeting plays', async () => {
+    const h = await harness({
+      extraDeps: (gather) => ({
+        initializeSession: async ({ callSid }) => {
+          gather.setPendingTransferTwiml(h0SessionId(gather, callSid), PARKED_DIAL);
+          return [{ type: 'tts_play', payload: { text: 'Thanks for calling. Let me get someone for you.' } }];
+        },
+      }),
+    });
+
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+    expect(h.twilio.transfers()[0].body.get('Twiml')).toBe(PARKED_DIAL);
+  });
+
+  it('a hand-off parked by the silence-timer pending-dialogue handler is delivered', async () => {
+    const h = await harness({
+      speechTurn: async () => [{ type: 'tts_play', payload: { text: 'Shall I go ahead?' } }],
+      extraDeps: (gather) => ({
+        silenceRepromptTimeoutMs: 20,
+        handlePendingDialogueSilence: async (session) => {
+          gather.setPendingTransferTwiml(session.id, PARKED_DIAL);
+          return [{ type: 'tts_play', payload: { text: 'Let me get someone on the line.' } }];
+        },
+      }),
+    });
+
+    h.say('approve it');
+    await vi.waitFor(() => expect(h.ws.markNames().filter((n) => n.startsWith('silence-arm-'))).toHaveLength(1));
+    h.ws.ackAllMarks(h.streamSid); // the question played; the caller stays silent
+    await vi.waitFor(() => expect(h.ws.markNames().filter((n) => n.startsWith('silence-arm-'))).toHaveLength(2));
+    h.ws.ackAllMarks(h.streamSid);
+
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+    expect(h.twilio.transfers()[0].body.get('Twiml')).toBe(PARKED_DIAL);
+  });
+});
+
+/** The session the bootstrap runs for (created by handleInboundForStream). */
+function h0SessionId(gather: TwilioGatherAdapter, callSid: string): string {
+  return gather.getDeps().store.findByCallSid(callSid)!.id;
+}
 
 // ─── (d) the Gather transport keeps its own delivery ─────────────────────────
 

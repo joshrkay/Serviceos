@@ -1511,6 +1511,10 @@ export class TwilioMediaStreamAdapter {
           // an ACK that will never come and leave the call deaf.
           this.enableCapture('no_disclosure_audio');
         }
+        // Realtime hand-off — the bootstrap itself can escalate (e.g. a
+        // caller-identity hand-off), parking a <Dial> the Gather transport
+        // would have returned instead of its greeting TwiML.
+        void this.maybeHandOffToHuman('session_bootstrap');
         // WS16a — establishment success is deliberately NOT recorded here. The
         // old recordSuccess() at this site reset the circuit's consecutive-
         // failure counter, so a call that established cleanly then died mid-call
@@ -1990,6 +1994,9 @@ export class TwilioMediaStreamAdapter {
           priorTurns: this.extractPriorTurns(session, 4),
           tenantId,
         })
+        // RV-121 — a vulnerable + urgent caller's owner patch is parked by
+        // the hook itself, after this turn's effects already rendered.
+        .then(() => this.maybeHandOffToHuman('vulnerability_patch'))
         .catch((err) =>
           logger.warn('vulnerability triage hook failed', {
             error: err instanceof Error ? err.message : String(err),
@@ -2211,6 +2218,8 @@ export class TwilioMediaStreamAdapter {
       }
       if (consumed) {
         await this.emitSideEffects(consumed);
+        // The handler's confidence_low / cost-cap dispatches can escalate.
+        void this.maybeHandOffToHuman('silence_pending_dialogue');
         // Mirrors the main turn path: a pending-dialogue side effect that
         // itself ends the session (e.g. a challenge-lockout hand-off)
         // must still close the call.
@@ -2548,6 +2557,8 @@ export class TwilioMediaStreamAdapter {
       // emitSideEffects only renders tts_play), then render the reassurance TTS.
       await this.deps.deliverEscalationEffects?.(session, newEffects, session.tenantId);
       await this.emitSideEffects(newEffects);
+      // Realtime hand-off — the delivered notify_oncall parked the <Dial>.
+      void this.maybeHandOffToHuman('llm_sentiment');
       // Record the agent's reassurance line so summarizeSession + later turns
       // see it — mirrors the speechTurn path (create-voice-turn-processor.ts).
       const spokenTts = [...newEffects].reverse().find((fx) => fx.type === 'tts_play');
