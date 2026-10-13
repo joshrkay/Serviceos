@@ -230,9 +230,13 @@ export interface InvoiceRepository {
    * / 'partially_paid' (a void or settle committing after the caller's
    * status check is never re-priced) AND the adjusted total still covers
    * amount_paid (a credit that no longer fits the live due — a payment
-   * landed first — is refused instead of overpaying, L4). Returns the
-   * updated invoice, or null when the row is missing or a guard refused it
-   * (callers re-read to explain).
+   * landed first — is refused instead of overpaying, L4) AND, for a positive
+   * adjustment (late fee), something is still owed. Status is derived in the
+   * same write (review M2): an adjustment that clears the balance of an
+   * invoice with money paid settles it as 'paid'; with nothing paid the
+   * status is unchanged (a credit is not a payment). Returns the updated
+   * invoice, or null when the row is missing or a guard refused it (callers
+   * re-read to explain).
    */
   applyNonTaxableAdjustmentAtomic(
     tenantId: string,
@@ -878,18 +882,25 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     // Mirror the Pg WHERE guard: only an issued invoice still carrying a
     // balance is adjusted; a void/paid/draft row returns null.
     if (i.status !== 'open' && i.status !== 'partially_paid') return null;
-    // …and only while the adjusted total still covers what was paid (a
-    // credit can never push amount paid past the total).
-    if (i.amountPaidCents > i.totals.totalCents + line.totalCents) return null;
+    // …a positive adjustment (late fee) only while something is still owed…
+    if (line.totalCents > 0 && i.totals.totalCents - i.amountPaidCents <= 0) return null;
     // JS is single-threaded, so this read-modify-write is already atomic; the
     // Pg impl uses a single UPDATE for the same guarantee. Derive from the
     // STORED row (live amount paid), never a caller snapshot.
     const totals = applyNonTaxableAdjustment(i.totals, line.totalCents);
+    // …and only while the adjusted total still covers what was paid (a
+    // credit can never push amount paid past the total).
+    if (i.amountPaidCents > totals.totalCents) return null;
+    const amountDueCents = Math.max(0, totals.totalCents - i.amountPaidCents);
+    // Mirror the Pg status CASE (review M2): cleared with money paid → paid.
+    const status: InvoiceStatus =
+      i.amountPaidCents > 0 && amountDueCents === 0 ? 'paid' : i.status;
     const updated: Invoice = {
       ...i,
       lineItems: [...i.lineItems, line],
       totals,
-      amountDueCents: Math.max(0, totals.totalCents - i.amountPaidCents),
+      amountDueCents,
+      status,
       updatedAt: now,
     };
     this.invoices.set(id, updated);

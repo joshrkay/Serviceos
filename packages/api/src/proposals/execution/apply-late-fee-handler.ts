@@ -135,6 +135,16 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
       };
     }
 
+    // Review M2 — a credit can clear an invoice's balance without a payment
+    // (it then stays 'open' at $0 due). A fee raised before that credit must
+    // not resurrect a balance the owner already forgave.
+    if (invoice.amountDueCents <= 0) {
+      return {
+        success: false,
+        error: `Invoice ${invoice.invoiceNumber} has no balance due — late fee not applied.`,
+      };
+    }
+
     const feeLine = buildLineItem(
       feeLineId,
       'Late fee',
@@ -168,6 +178,12 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
       const live = await this.invoiceRepo.findById(context.tenantId, invoice.id);
       if (!live) {
         return { success: false, error: `Invoice ${invoiceId} not found in this tenant` };
+      }
+      if ((live.status === 'open' || live.status === 'partially_paid') && live.amountDueCents <= 0) {
+        return {
+          success: false,
+          error: `Invoice ${live.invoiceNumber} has no balance due (a credit cleared it while the late fee was being applied) — late fee not applied.`,
+        };
       }
       return {
         success: false,

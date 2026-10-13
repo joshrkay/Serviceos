@@ -255,6 +255,10 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
               proposalType: 'apply_credit',
               amountCents,
               newAmountDueCents: updated.amountDueCents,
+              // Review M2 — a credit that clears a partly-paid balance settles
+              // the invoice; the status change rides this audit event.
+              oldStatus: invoice.status,
+              newStatus: updated.status,
               ...(reason ? { reason } : {}),
             },
           }),

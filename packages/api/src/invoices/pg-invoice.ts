@@ -429,18 +429,29 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       // the caller's status check matches 0 rows instead of re-pricing a
       // dead invoice; the balance guard means a credit that no longer fits
       // the live amount due (a payment landed first) matches 0 rows instead
-      // of pushing amount_paid past total_cents (L4). The line insert rides
-      // the same transaction, so the ledger (Σ lines == subtotal, L2) moves
+      // of pushing amount_paid past total_cents (L4); the positive-adjustment
+      // guard means a late fee never lands on an invoice whose live balance
+      // is already $0 (a credit cleared it). Status is derived in the same
+      // statement (review M2): a credit that clears the balance of an invoice
+      // the customer has partly paid settles it as 'paid'; one with nothing
+      // paid stays as it was (a credit is not a payment — product posture,
+      // pinned in apply-credit-handler.test.ts). The line insert rides the
+      // same transaction, so the ledger (Σ lines == subtotal, L2) moves
       // together.
       const { rows } = await client.query<{ id: string }>(
         `UPDATE invoices
          SET subtotal_cents   = subtotal_cents + $3,
              total_cents      = total_cents + $3,
              amount_due_cents = GREATEST(0, total_cents + $3 - amount_paid_cents),
+             status = CASE
+               WHEN amount_paid_cents > 0 AND total_cents + $3 - amount_paid_cents <= 0 THEN 'paid'
+               ELSE status
+             END,
              updated_at       = $4
          WHERE id = $2 AND tenant_id = $1
            AND status IN ('open', 'partially_paid')
            AND amount_paid_cents <= total_cents + $3
+           AND ($3 < 0 OR total_cents - amount_paid_cents > 0)
          RETURNING id`,
         [tenantId, id, line.totalCents, now],
       );

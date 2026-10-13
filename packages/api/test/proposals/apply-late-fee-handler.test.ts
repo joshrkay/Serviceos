@@ -150,6 +150,28 @@ describe('apply_late_fee execution handler', () => {
     expect(untouched!.lineItems.some((li) => li.id === lateFeeLineId(INVOICE_ID, 'initial'))).toBe(false);
   });
 
+  // Review M2 — a fully CREDITED invoice with nothing paid stays 'open' at $0
+  // due (product posture: a credit is not a payment). A late fee raised
+  // before that credit and approved after it must not resurrect a balance.
+  it('refuses a fee on an open invoice whose balance a credit already cleared ($0 due)', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    const lineItems: LineItem[] = [
+      buildLineItem('li-1', 'Labor', 1, 15000, 0, true, 'labor'),
+      buildLineItem('li-2', 'Credit — goodwill', 1, -15000, 1, false, 'other'),
+    ];
+    const totals = calculateDocumentTotals(lineItems, 0, 0);
+    await invoiceRepo.create(makeInvoice({ lineItems, totals, amountDueCents: 0 }));
+    handler = new ApplyLateFeeExecutionHandler(invoiceRepo, auditRepo);
+
+    const result = await handler.execute(makeProposal(), ctx);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/no balance/i);
+    const untouched = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(untouched!.lineItems).toHaveLength(2);
+    expect(untouched!.amountDueCents).toBe(0);
+  });
+
   it('applies to a partially_paid invoice and nets against the amount already paid', async () => {
     invoiceRepo = new InMemoryInvoiceRepository();
     await invoiceRepo.create(makeInvoice({ status: 'partially_paid', amountPaidCents: 5000, amountDueCents: 10000 }));

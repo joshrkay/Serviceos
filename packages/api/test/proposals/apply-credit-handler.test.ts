@@ -203,6 +203,34 @@ describe('apply_credit execution handler', () => {
     expect(updated!.status).toBe('open');
   });
 
+  // Review M2 — the atomic write derives status. A credit that clears the
+  // balance of an invoice the customer has PARTLY paid leaves it fully paid
+  // (paid == the reduced total): it must read 'paid', not a payable status
+  // with $0 due that dunning keeps sweeping and a pending late fee can land on.
+  it('a credit that clears the remaining balance of a partly-paid invoice settles it as paid', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    await invoiceRepo.create(
+      makeInvoice({ status: 'partially_paid', amountPaidCents: 1000, amountDueCents: 2000 }),
+    );
+    handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo);
+
+    const result = await handler.execute(
+      makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }),
+      ctx,
+    );
+
+    expect(result.success).toBe(true);
+    const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(updated!.totals.totalCents).toBe(1000);
+    expect(updated!.amountPaidCents).toBe(1000);
+    expect(updated!.amountDueCents).toBe(0);
+    expect(updated!.status).toBe('paid');
+    const applied = (await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID)).find(
+      (e) => e.eventType === 'credit.applied',
+    );
+    expect(applied!.metadata).toMatchObject({ oldStatus: 'partially_paid', newStatus: 'paid' });
+  });
+
   it('appends a non-taxable credit line with the reason folded into the description', async () => {
     await handler.execute(
       makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000, reason: 'goodwill — repeat leak' } }),

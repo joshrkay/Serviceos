@@ -282,6 +282,56 @@ describe('Postgres integration — apply_credit / apply_late_fee are atomic agai
     },
   );
 
+  // Review M2 — the atomic UPDATE derives status.
+  it('apply_credit: clearing the remaining balance of a partly-paid invoice settles it as paid', async () => {
+    const seeded = await seedOpenInvoice(30000);
+    await readRepo.incrementAmountPaidAtomic(seeded.tenantId, seeded.invoiceId, 10000, new Date());
+    const handler = new ApplyCreditExecutionHandler(readRepo, auditRepo);
+
+    const result = await handler.execute(creditProposal(seeded, 20000), {
+      tenantId: seeded.tenantId,
+      executedBy: seeded.userId,
+    });
+
+    expect(result.success).toBe(true);
+    const row = await readRepo.findById(seeded.tenantId, seeded.invoiceId);
+    expect(row!.totals.totalCents).toBe(10000);
+    expect(row!.amountPaidCents).toBe(10000);
+    expect(row!.amountDueCents).toBe(0);
+    expect(row!.status).toBe('paid');
+  });
+
+  it('apply_late_fee: a credit that clears the balance mid-execution refuses the fee (no resurrected balance)', async () => {
+    const seeded = await seedOpenInvoice(15000);
+    invoiceRepo.arm(async (repo, tenantId, id) => {
+      const credited = await repo.applyNonTaxableAdjustmentAtomic(
+        tenantId,
+        id,
+        buildLineItem(uuidv4(), 'Credit — waived', 1, -15000, 1, false, 'other'),
+        new Date(),
+      );
+      expect(credited).not.toBeNull();
+    });
+    const handler = new ApplyLateFeeExecutionHandler(invoiceRepo, auditRepo);
+
+    const result = await handler.execute(
+      {
+        ...creditProposal(seeded, 0),
+        proposalType: 'apply_late_fee',
+        payload: { invoiceId: seeded.invoiceId, feeCents: 2500, stepKey: 'initial' },
+      },
+      { tenantId: seeded.tenantId, executedBy: seeded.userId },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/no balance/i);
+    const row = await readRepo.findById(seeded.tenantId, seeded.invoiceId);
+    expect(row!.totals.totalCents).toBe(0);
+    expect(row!.amountDueCents).toBe(0);
+    expect(row!.status).toBe('open');
+    expect(row!.lineItems.map((li) => li.totalCents)).toEqual([15000, -15000]);
+  });
+
   // H1 — apply_credit calls Stripe (stale link / PI cleanup). Through the REAL
   // executor + PgIdempotencyLockProvider (production wiring) that cleanup must
   // run AFTER the credit committed and released its row lock — never inside
