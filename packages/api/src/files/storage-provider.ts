@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { ObjectMetadata, StorageProvider } from './file-service';
+import { resolveStorageConfig, type StorageConfigEnv } from '../shared/storage-config';
 
 export interface S3StorageConfig {
   bucket: string;
@@ -25,12 +26,7 @@ export interface DevStorageConfig {
   secret?: string;
 }
 
-export interface StorageProviderEnv {
-  STORAGE_BUCKET?: string;
-  STORAGE_ENDPOINT?: string;
-  STORAGE_REGION?: string;
-  STORAGE_ACCESS_KEY_ID?: string;
-  STORAGE_SECRET_ACCESS_KEY?: string;
+export interface StorageProviderEnv extends StorageConfigEnv {
   STORAGE_PUBLIC_URL?: string;
   /** Explicit opt-out aligned with validateFeatureRequiredConfig. */
   STORAGE_ENABLED?: string;
@@ -402,35 +398,21 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
    */
   devStorageSecret?: string;
 } {
-  const {
-    STORAGE_BUCKET,
-    STORAGE_ENDPOINT,
-    STORAGE_REGION,
-    STORAGE_ACCESS_KEY_ID,
-    STORAGE_SECRET_ACCESS_KEY,
-    STORAGE_PUBLIC_URL,
-    STORAGE_ENABLED,
-    NODE_ENV,
-  } = env;
+  const { STORAGE_PUBLIC_URL, STORAGE_ENABLED, NODE_ENV } = env;
 
-  const hasS3 =
-    STORAGE_BUCKET &&
-    STORAGE_ENDPOINT &&
-    STORAGE_REGION &&
-    STORAGE_ACCESS_KEY_ID &&
-    STORAGE_SECRET_ACCESS_KEY;
-
-  if (hasS3) {
+  const resolved = resolveStorageConfig(env);
+  if (resolved.ok) {
+    const { bucket, endpoint, region, accessKeyId, secretAccessKey } = resolved.config;
     return {
       provider: new S3StorageProvider({
-        bucket: STORAGE_BUCKET!,
-        endpoint: STORAGE_ENDPOINT!,
-        region: STORAGE_REGION!,
-        accessKeyId: STORAGE_ACCESS_KEY_ID!,
-        secretAccessKey: STORAGE_SECRET_ACCESS_KEY!,
+        bucket,
+        endpoint,
+        region,
+        accessKeyId,
+        secretAccessKey,
         publicUrlBase: STORAGE_PUBLIC_URL,
       }),
-      bucket: STORAGE_BUCKET!,
+      bucket,
       mode: 's3',
     };
   }
@@ -444,7 +426,7 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
     );
   }
 
-  const bucket = STORAGE_BUCKET || 'serviceos-dev';
+  const bucket = env.STORAGE_BUCKET || 'serviceos-dev';
   const publicUrlBase = STORAGE_PUBLIC_URL || defaultDevPublicUrl(env);
   // Fresh per-boot secret — never persisted, never logged, only ever held
   // by this DevStorageProvider instance and the /storage-dev router app.ts
