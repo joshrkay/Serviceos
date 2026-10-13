@@ -2056,6 +2056,17 @@ export class TwilioMediaStreamAdapter {
     await this.emitSideEffects(effects);
     // Realtime hand-off — an E2 escalation parks the dispatcher <Dial>.
     void this.maybeHandOffToHuman('interim_emergency');
+    // E1 life-safety ends the call (911 script + end_session). The final
+    // transcript that follows hits a terminated FSM and returns no
+    // end_session of its own, so THIS is the only chance to close: end the
+    // leg like the final-transcript path does — once the script has played
+    // (closing the stream drops audio Twilio has not played yet).
+    if (effects.some((fx) => fx.type === 'end_session')) {
+      await this.awaitPlayout(this.deps.handoffPlayoutMaxWaitMs ?? DEFAULT_HANDOFF_PLAYOUT_MAX_WAIT_MS);
+      if (this.state.closed) return;
+      this.state.pendingFinalizeEffects = effects;
+      this.handleClose('end_session');
+    }
   }
 
   /**
@@ -2080,6 +2091,7 @@ export class TwilioMediaStreamAdapter {
    * The counter is bumped here and reset to 0 by any successful turn.
    */
   private async recoverFromSpeechTurnFailure(session: VoiceSession): Promise<void> {
+    if (this.repromptSuppressed(session)) return;
     this.state.consecutiveSpeechTurnFailures += 1;
 
     if (
@@ -2166,6 +2178,7 @@ export class TwilioMediaStreamAdapter {
    * (high-confidence, or confidence-absent) final.
    */
   private async recoverFromLowSttConfidence(session: VoiceSession): Promise<void> {
+    if (this.repromptSuppressed(session)) return;
     // #1601 step 2 — the rules (cap, copy, terminal reason) are the shared
     // ladder's; this leg owns its streak counter and how the line is spoken.
     this.state.consecutiveLowConfidenceTurns += 1;
@@ -2205,7 +2218,7 @@ export class TwilioMediaStreamAdapter {
    * pre-existing test fixture does) reproduces the exact prior behavior.
    */
   private async recoverFromSilenceExpiry(session: VoiceSession): Promise<void> {
-    if (this.state.closed) return;
+    if (this.repromptSuppressed(session)) return;
     if (this.deps.handlePendingDialogueSilence) {
       let consumed: SideEffect[] | null = null;
       try {
@@ -3687,6 +3700,20 @@ export class TwilioMediaStreamAdapter {
     if (turnId > this.state.lastEnqueuedSilenceArmTurnId) {
       this.state.lastEnqueuedSilenceArmTurnId = turnId;
     }
+  }
+
+  /**
+   * No reprompt / apology ladder (silence, low STT confidence, speech-turn
+   * failure) may speak once the conversation is over or being handed to a
+   * human: the leg closed, the FSM terminated (an E1 close whose final
+   * transcript arrives after the 911 script must never hear "Sorry, I didn't
+   * catch that"), or a hand-off is pending / delivered.
+   */
+  private repromptSuppressed(session: VoiceSession): boolean {
+    if (this.state.closed) return true;
+    if (session.machine.currentState === 'terminated') return true;
+    const handoff = this.state.handoff;
+    return handoff === 'awaiting_playout' || handoff === 'delivering' || handoff === 'delivered';
   }
 
   // ─── Realtime hand-off ─────────────────────────────────────────────────────

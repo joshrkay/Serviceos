@@ -35,7 +35,10 @@ import type {
   StreamingTranscriptEvent,
 } from '../../../src/voice/transcription-providers';
 import type { TtsProvider } from '../../../src/ai/tts/tts-provider';
-import { HANDOFF_UNAVAILABLE_COPY } from '../../../src/ai/agents/customer-calling/tts-copy';
+import {
+  HANDOFF_UNAVAILABLE_COPY,
+  LOW_STT_CONFIDENCE_REPROMPT_COPY,
+} from '../../../src/ai/agents/customer-calling/tts-copy';
 import { patchOwnerThrough } from '../../../src/ai/skills/patch-owner-through';
 import { DEFAULT_ESCALATION_SETTINGS } from '../../../src/settings/settings';
 import type { VoiceSession } from '../../../src/ai/agents/customer-calling/voice-session-store';
@@ -306,6 +309,28 @@ describe('realtime hand-off — escalation on a stream call reaches a human', ()
     expect(h.session.terminalOutcome).toBeUndefined();
   });
 
+  it('caller silence while the transfer is in flight never triggers a reprompt over it', async () => {
+    let accept!: (r: { ok: boolean; status: number }) => void;
+    const twilio = makeTwilioRest();
+    twilio.fetchImpl.mockImplementationOnce(
+      () => new Promise<{ ok: boolean; status: number }>((resolve) => { accept = resolve; }),
+    );
+    const h = await harness({ twilio, extraDeps: () => ({ silenceRepromptTimeoutMs: 20 }) });
+    const spoken = () =>
+      (h.tts.synthesize as ReturnType<typeof vi.fn>).mock.calls.map(([input]) => (input as { text: string }).text);
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    const linesBefore = spoken().length;
+    h.ws.ackAllMarks(h.streamSid);
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 80)); // the silence window passes mid-transfer
+
+    expect(spoken()).toHaveLength(linesBefore);
+    accept({ ok: true, status: 200 });
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+  });
+
   it('an E2 emergency caught on an INTERIM transcript is transferred to the dispatcher', async () => {
     const h = await harness();
 
@@ -501,6 +526,56 @@ describe('realtime hand-off — escalations outside a caller turn', () => {
 
     await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
     expect(h.twilio.transfers()[0].body.get('Twiml')).toBe(PARKED_DIAL);
+  });
+});
+
+// ─── (h) E1 on an interim transcript ends the call ───────────────────────────
+
+describe('E1 life-safety on an INTERIM transcript', () => {
+  it('closes the call once the 911 script has played, stamped life_safety_e1, with no reprompt after it', async () => {
+    const h = await harness({ extraDeps: () => ({ silenceRepromptTimeoutMs: 20 }) });
+    const spoken = () =>
+      (h.tts.synthesize as ReturnType<typeof vi.fn>).mock.calls.map(([input]) => (input as { text: string }).text);
+
+    h.deepgram.emit({ type: 'partial', transcript: 'I smell gas in the kitchen', confidence: 0.9, isFinal: false });
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    const scriptLines = spoken().length;
+    expect(scriptLines).toBeGreaterThan(0);
+
+    h.ws.ackAllMarks(h.streamSid); // the evacuation script finished playing
+    await new Promise((r) => setTimeout(r, 80)); // well past the silence window
+
+    expect(h.ws.closed).toBe(true);
+    expect(h.session.terminalReason).toBe('life_safety_e1');
+    expect(spoken()).not.toContain(LOW_STT_CONFIDENCE_REPROMPT_COPY);
+    expect(spoken()).toHaveLength(scriptLines);
+  });
+
+  it('the silence ladder never reprompts once the FSM has terminated, even if the leg is still open', async () => {
+    const h = await harness({
+      extraDeps: () => ({ silenceRepromptTimeoutMs: 20 }),
+      // A host path that ends the conversation (FSM → terminated) but hands
+      // back no end_session — the shape the post-E1 final transcript has.
+      speechTurn: async ({ session }) => {
+        session.machine.dispatch({
+          type: 'emergency_detected',
+          keyword: 'gas',
+          utterance: 'I smell gas',
+          tier: 'E1',
+        });
+        return [{ type: 'tts_play', payload: { text: 'Leave the house now and call 911 from outside.' } }];
+      },
+    });
+    const spoken = () =>
+      (h.tts.synthesize as ReturnType<typeof vi.fn>).mock.calls.map(([input]) => (input as { text: string }).text);
+
+    h.say('I smell gas');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    expect(h.session.machine.currentState).toBe('terminated');
+    h.ws.ackAllMarks(h.streamSid);
+    await new Promise((r) => setTimeout(r, 80)); // well past the silence window
+
+    expect(spoken()).toEqual(['Leave the house now and call 911 from outside.']);
   });
 });
 
