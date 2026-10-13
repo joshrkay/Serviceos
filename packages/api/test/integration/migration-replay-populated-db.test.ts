@@ -18,9 +18,19 @@
  * legal under the final schema (production traffic), applies the corpus again
  * (deploy N+1), and requires it to succeed.
  */
+import { createHmac } from 'crypto';
+import express from 'express';
+import request from 'supertest';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { applyMigrations } from '../../src/db/migrate';
+import { createWebhookRouter } from '../../src/webhooks/routes';
+import { InMemoryWebhookRepository } from '../../src/webhooks/webhook-handler';
+import { PgTenantRepository } from '../../src/auth/pg-tenant';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
+import type { AppConfig } from '../../src/shared/config';
+import { createUsersRouter } from '../../src/routes/users';
+import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import { PgCallMeBackRepository } from '../../src/voice/call-me-back/pg-call-me-back';
 import { PgVoiceApprovalPinLockAlertRepository } from '../../src/settings/pg-voice-approval-pin-lock-alert';
 import { createPinLockAlertRetryWorker } from '../../src/workers/pin-lock-alert-retry';
@@ -268,6 +278,69 @@ const RELAXED_SINCE: RelaxedInvariant[] = [
   },
 ];
 
+const CLERK_WEBHOOK_SECRET = 'whsec_dGVzdC1zZWNyZXQ='; // base64("test-secret")
+
+/**
+ * A real owner signup: a signed Clerk `user.created` through the production
+ * `/webhooks/clerk` route, which bootstraps the tenant and inserts the owner's
+ * membership row.
+ */
+async function signUpOwner(db: Pool): Promise<TestTenant> {
+  const app = express();
+  app.use(express.json());
+  app.use(
+    '/webhooks',
+    createWebhookRouter(
+      { CLERK_WEBHOOK_SECRET, CLERK_SECRET_KEY: undefined } as unknown as AppConfig,
+      {
+        tenantRepo: new PgTenantRepository(db),
+        pool: db,
+        webhookRepo: new InMemoryWebhookRepository(),
+        auditRepo: new PgAuditRepository(db),
+      },
+    ),
+  );
+  const clerkUserId = `user_owner_${crypto.randomUUID()}`;
+  const payload = {
+    type: 'user.created',
+    data: { id: clerkUserId, email_addresses: [{ email_address: `${crypto.randomUUID()}@example.com` }] },
+  };
+  const svixId = `evt_${crypto.randomUUID()}`;
+  const ts = String(Math.floor(Date.now() / 1000));
+  const signed = `${svixId}.${ts}.${JSON.stringify(payload)}`;
+  const secret = Buffer.from(CLERK_WEBHOOK_SECRET.replace(/^whsec_/, ''), 'base64');
+  const res = await request(app)
+    .post('/webhooks/clerk')
+    .set('svix-id', svixId)
+    .set('svix-timestamp', ts)
+    .set('svix-signature', `v1,${createHmac('sha256', secret).update(signed).digest('base64')}`)
+    .send(payload);
+  expect(res.status).toBe(200);
+
+  const tenant = await new PgTenantRepository(db).findByOwner(clerkUserId);
+  if (!tenant) throw new Error('signup did not bootstrap a tenant');
+  const [owner] = await new PgUserRepository(db).findByTenant(tenant.id, { role: 'owner' });
+  if (!owner) throw new Error('signup did not create the owner membership row');
+  return { tenantId: tenant.id, userId: owner.id };
+}
+
+/** The production /api/users router, acting as `actor` (an owner of its tenant). */
+function usersApi(db: Pool, actor: TestTenant): express.Express {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as AuthenticatedRequest).auth = {
+      userId: actor.userId,
+      sessionId: 'sess-replay',
+      tenantId: actor.tenantId,
+      role: 'owner',
+    };
+    next();
+  });
+  app.use('/api/users', createUsersRouter(new PgUserRepository(db), {}, new PgAuditRepository(db)));
+  return app;
+}
+
 /** One deploy: the exact entrypoint the Railway preDeployCommand runs. */
 async function deploy(pool: Pool): Promise<void> {
   const client = await pool.connect();
@@ -419,19 +492,32 @@ describe('Postgres integration — migration corpus replays over a populated dat
       expect(await alerts.isSent(tenant.tenantId, episodeKey)).toBe(true);
     });
 
-    it("an owner who turned field-serving off keeps it off across the next deploy (066)", async () => {
-      // PUT /api/users/:id { canFieldServe: false } — an office-only owner
-      // opting out of being counted as a sendable field tech.
-      const tenant = await createTestTenant(pool);
+    it('an owner created by Clerk signup is field-capable, and still is after the next deploy (066 + 309)', async () => {
+      // 066's owner backfill no longer re-runs, so it no longer quietly
+      // turns new owners field-capable at the next deploy — creation must.
+      const owner = await signUpOwner(pool);
       const users = new PgUserRepository(pool);
-      await users.update(tenant.tenantId, tenant.userId, { canFieldServe: true });
-      await users.update(tenant.tenantId, tenant.userId, { canFieldServe: false });
+      expect((await users.findById(owner.tenantId, owner.userId))?.canFieldServe).toBe(true);
 
       await deploy(pool);
 
-      const owner = await users.findById(tenant.tenantId, tenant.userId);
-      expect(owner?.role).toBe('owner');
-      expect(owner?.canFieldServe).toBe(false);
+      expect((await users.findById(owner.tenantId, owner.userId))?.canFieldServe).toBe(true);
+    });
+
+    it("an owner who turned field-serving off keeps it off across the next deploy (066)", async () => {
+      // PATCH /api/users/:id { canFieldServe: false } — an office-only owner
+      // opting out of being counted as a sendable field tech.
+      const owner = await signUpOwner(pool);
+      const res = await request(usersApi(pool, owner))
+        .patch(`/api/users/${owner.userId}`)
+        .send({ canFieldServe: false });
+      expect(res.status).toBe(200);
+
+      await deploy(pool);
+
+      const after = await new PgUserRepository(pool).findById(owner.tenantId, owner.userId);
+      expect(after?.role).toBe('owner');
+      expect(after?.canFieldServe).toBe(false);
     });
 
     it('a job completed before a deploy still gets its 24h review request (214)', async () => {

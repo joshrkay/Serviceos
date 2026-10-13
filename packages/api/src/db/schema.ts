@@ -7623,6 +7623,43 @@ export const MIGRATIONS = {
     ALTER TABLE oauth_states ADD CONSTRAINT oauth_states_provider_check
       CHECK (provider IN ('google', 'google_business', 'quickbooks', 'xero')) NOT VALID;
   `,
+
+  // New owners are field-capable by default. Migration 066's owner backfill
+  // used to re-run on every deploy (no ledger) and so flipped every owner
+  // created since the previous deploy to can_field_serve = true; now that it
+  // is one-shot, the INSERT must supply that default itself, or a solo
+  // owner-operator is never counted as sendable crew (lookup-crew-schedule).
+  // The default lives on the table because the production creation paths —
+  // the Clerk user.created owner insert and the invitation join in
+  // webhooks/routes.ts, plus 249's backfill and the seed/QA scripts — write
+  // raw SQL and never reach PgUserRepository.create.
+  //
+  // The column DEFAULT (false) is dropped so an omitted value reaches the
+  // BEFORE INSERT trigger as NULL: NULL → (role = 'owner'); an explicit
+  // true/false is always kept, and NOT NULL still holds after the trigger.
+  // Existing rows and UPDATEs are untouched. Re-run safe: no data statement,
+  // CREATE OR REPLACE + DROP/CREATE TRIGGER, and DROP DEFAULT is a no-op once
+  // dropped. Rollback-safe: older code that omits the column still gets the
+  // trigger's default. Pinned by test/integration/users-field-serve-default.test.ts
+  // and migration-replay-populated-db.test.ts.
+  '309_users_owner_can_field_serve_default': `
+    CREATE OR REPLACE FUNCTION users_default_can_field_serve()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF NEW.can_field_serve IS NULL THEN
+        NEW.can_field_serve := (NEW.role = 'owner');
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_users_default_can_field_serve ON users;
+    CREATE TRIGGER trg_users_default_can_field_serve
+      BEFORE INSERT ON users
+      FOR EACH ROW EXECUTE FUNCTION users_default_can_field_serve();
+
+    ALTER TABLE users ALTER COLUMN can_field_serve DROP DEFAULT;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

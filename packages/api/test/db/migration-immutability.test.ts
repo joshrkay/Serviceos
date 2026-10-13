@@ -605,6 +605,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['307_ai_runs_tenant_created_at_index', 'd40b650d25ab0e63f1deef7e8262123f32c60657037182ddc5d73280adc6464c'],
   // Google Business OAuth states get their own provider (flow binding).
   ['308_oauth_states_google_business_provider', '79915b29a7a0fe83f95f798f21646cccf3ea6c50ce323b5bdb4106a0b36eb3a1'],
+  // New owners default field-capable at INSERT now that 066's backfill is one-shot.
+  ['309_users_owner_can_field_serve_default', 'e84f9ebc0b7ca4f2bd596006e3c4a2d9394be92fc18732cc405c95a4f6372a33'],
 ];
 
 function hashMigration(value: string): string {
