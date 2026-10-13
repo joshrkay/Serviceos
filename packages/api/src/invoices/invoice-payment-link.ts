@@ -295,7 +295,13 @@ export async function deactivateInvoicePaymentLink(params: {
 export async function cancelInvoicePaymentIntents(params: {
   tenantId: string;
   invoice: Invoice;
-  reason: 'voided' | 'canceled';
+  /**
+   * voided/canceled — the invoice left the payable world (P0-1);
+   * repriced — an owner-approved credit or late fee changed the balance a
+   * minted PI was priced at (P0-9), so its client secret would capture the
+   * wrong amount. The pay page mints a fresh PI at the current balance.
+   */
+  reason: 'voided' | 'canceled' | 'repriced';
   provider: PaymentLinkProvider;
   connectAccountResolver?: ConnectAccountResolver;
   auditRepo?: AuditRepository;

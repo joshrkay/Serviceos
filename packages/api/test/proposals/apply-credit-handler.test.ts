@@ -17,6 +17,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ApplyCreditExecutionHandler } from '../../src/proposals/execution/apply-credit-handler';
+import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import { InMemoryInvoiceRepository, Invoice } from '../../src/invoices/invoice';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { Proposal, VALID_PROPOSAL_TYPES, actionClassForProposalType } from '../../src/proposals/proposal';
@@ -62,6 +63,35 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
     updatedAt: new Date(),
     ...overrides,
   };
+}
+
+/**
+ * Fake Stripe-side provider: records which links were deactivated and which
+ * PaymentIntents were cancelled. `intents` are what the metadata search
+ * returns for the invoice (platform scope).
+ */
+function makeFakeProvider(opts: {
+  intents?: Array<{ id: string; status: string }>;
+  deactivateError?: Error;
+  cancelError?: Error;
+} = {}) {
+  const deactivated: string[] = [];
+  const canceled: string[] = [];
+  const provider = {
+    generateLink: async () => {
+      throw new Error('not used');
+    },
+    deactivateLink: async (linkId: string) => {
+      if (opts.deactivateError) throw opts.deactivateError;
+      deactivated.push(linkId);
+    },
+    listInvoicePaymentIntents: async () => opts.intents ?? [],
+    cancelPaymentIntent: async (paymentIntentId: string) => {
+      if (opts.cancelError) throw opts.cancelError;
+      canceled.push(paymentIntentId);
+    },
+  };
+  return { provider, deactivated, canceled };
 }
 
 describe('apply_credit proposal type', () => {
@@ -279,6 +309,136 @@ describe('apply_credit execution handler', () => {
     const untouched = await invoiceRepo.findById(TENANT, INVOICE_ID);
     expect(untouched!.lineItems).toHaveLength(1);
     expect(untouched!.amountDueCents).toBe(3000);
+  });
+
+  // P0-9 — a credit RE-PRICES the invoice. A hosted payment link (or a
+  // minted PaymentIntent) priced at the OLD balance would otherwise still
+  // charge the customer the pre-credit amount, with the excess landing as
+  // audit-only unapplied money.
+  describe('stale charge vectors die when the credit re-prices the invoice', () => {
+    it('deactivates the stored payment link, clears its columns, and audits it as repriced', async () => {
+      invoiceRepo = new InMemoryInvoiceRepository();
+      await invoiceRepo.create(
+        makeInvoice({
+          stripePaymentLinkId: 'plink_old',
+          stripePaymentLinkUrl: 'https://buy.stripe.test/plink_old',
+        }),
+      );
+      const { provider, deactivated } = makeFakeProvider();
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo, undefined, { provider });
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }),
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      expect(deactivated).toEqual(['plink_old']);
+      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+      expect(updated!.amountDueCents).toBe(1000);
+      expect(updated!.stripePaymentLinkId).toBeUndefined();
+      expect(updated!.stripePaymentLinkUrl).toBeUndefined();
+      const events = await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID);
+      const killed = events.find((e) => e.eventType === 'invoice.payment_link_deactivated');
+      expect(killed).toBeDefined();
+      expect(killed!.metadata).toMatchObject({ stripePaymentLinkId: 'plink_old', reason: 'repriced' });
+    });
+
+    it('cancels still-confirmable PaymentIntents minted at the old balance and audits each', async () => {
+      const { provider, canceled } = makeFakeProvider({
+        intents: [
+          { id: 'pi_open', status: 'requires_payment_method' },
+          { id: 'pi_done', status: 'succeeded' },
+        ],
+      });
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo, undefined, { provider });
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }),
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      // A succeeded PI is already settled money — never cancelled.
+      expect(canceled).toEqual(['pi_open']);
+      const events = await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID);
+      const cancelEvents = events.filter((e) => e.eventType === 'invoice.payment_intent_canceled');
+      expect(cancelEvents).toHaveLength(1);
+      expect(cancelEvents[0].metadata).toMatchObject({
+        stripePaymentIntentId: 'pi_open',
+        reason: 'repriced',
+      });
+    });
+
+    it('a Stripe failure to kill the link/PI never fails or unwinds the approved credit — it is audited instead', async () => {
+      invoiceRepo = new InMemoryInvoiceRepository();
+      await invoiceRepo.create(
+        makeInvoice({
+          stripePaymentLinkId: 'plink_old',
+          stripePaymentLinkUrl: 'https://buy.stripe.test/plink_old',
+        }),
+      );
+      const { provider } = makeFakeProvider({
+        intents: [{ id: 'pi_open', status: 'requires_payment_method' }],
+        deactivateError: new Error('stripe 500 on deactivate'),
+        cancelError: new Error('stripe 500 on cancel'),
+      });
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo, undefined, { provider });
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }),
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+      expect(updated!.amountDueCents).toBe(1000);
+      expect(updated!.totals.totalCents).toBe(1000);
+      // The link is still live at Stripe, so its columns are KEPT (a cleared
+      // column would hide the exposure) and the miss is on the audit trail.
+      expect(updated!.stripePaymentLinkId).toBe('plink_old');
+      const types = (await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID)).map((e) => e.eventType);
+      expect(types).toContain('invoice.payment_link_deactivation_failed');
+      expect(types).toContain('invoice.payment_intent_cancel_failed');
+      expect(types).toContain('credit.applied');
+    });
+  });
+
+  it('production registry wiring threads paymentLinkCleanup into apply_credit AND apply_late_fee', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    await invoiceRepo.create(
+      makeInvoice({
+        stripePaymentLinkId: 'plink_credit',
+        stripePaymentLinkUrl: 'https://buy.stripe.test/plink_credit',
+      }),
+    );
+    const { provider, deactivated } = makeFakeProvider();
+    const registry = createExecutionHandlerRegistry({
+      invoiceRepo,
+      auditRepo,
+      paymentLinkCleanup: { provider },
+    });
+
+    const credit = await registry.get('apply_credit')!.execute(
+      makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 500 } }),
+      ctx,
+    );
+    expect(credit.success).toBe(true);
+    expect(deactivated).toEqual(['plink_credit']);
+
+    await invoiceRepo.update(TENANT, INVOICE_ID, {
+      stripePaymentLinkId: 'plink_fee',
+      stripePaymentLinkUrl: 'https://buy.stripe.test/plink_fee',
+    });
+    const fee = await registry.get('apply_late_fee')!.execute(
+      makeProposal({
+        proposalType: 'apply_late_fee',
+        payload: { invoiceId: INVOICE_ID, feeCents: 700, stepKey: 'initial' },
+      }),
+      ctx,
+    );
+    expect(fee.success).toBe(true);
+    expect(deactivated).toEqual(['plink_credit', 'plink_fee']);
   });
 
   it('emits a credit.applied audit event carrying proposalId/amountCents/reason', async () => {

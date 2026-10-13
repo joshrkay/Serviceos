@@ -11,6 +11,11 @@ import {
 } from '../../jobs/job-money-state';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { applyLateFeePayloadSchema } from '../contracts/apply-late-fee';
+import type { PaymentLinkCleanupDeps } from '../../invoices/payment';
+import {
+  cancelInvoicePaymentIntents,
+  deactivateInvoicePaymentLink,
+} from '../../invoices/invoice-payment-link';
 import { v5 as uuidv5 } from 'uuid';
 
 /**
@@ -79,6 +84,11 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
     private readonly invoiceRepo?: InvoiceRepository,
     private readonly auditRepo?: AuditRepository,
     private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
+    /**
+     * P0-9 — the fee re-prices the invoice, so a hosted payment link minted
+     * at the pre-fee balance must die (a fresh one is minted on demand).
+     */
+    private readonly paymentLinkCleanup?: PaymentLinkCleanupDeps,
   ) {}
 
   // U8 — degrades to an echo passthrough (charges nothing) without the
@@ -165,6 +175,33 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
     }
     if (!updated) {
       return { success: false, error: `Invoice ${invoiceId} not found in this tenant` };
+    }
+
+    // P0-9 — the stored link and any minted PaymentIntent were priced at the
+    // pre-fee balance and no longer price what is owed. Both helpers are
+    // best-effort and audit every outcome (never throw), so a Stripe failure
+    // can't unwind the already-approved fee.
+    if (this.paymentLinkCleanup) {
+      const actor = { actorId: context.executedBy, actorRole: 'system' };
+      await deactivateInvoicePaymentLink({
+        tenantId: context.tenantId,
+        invoice: updated,
+        reason: 'repriced',
+        invoiceRepo: this.invoiceRepo,
+        provider: this.paymentLinkCleanup.provider,
+        connectAccountResolver: this.paymentLinkCleanup.connectAccountResolver,
+        auditRepo: this.auditRepo,
+        actor,
+      });
+      await cancelInvoicePaymentIntents({
+        tenantId: context.tenantId,
+        invoice: updated,
+        reason: 'repriced',
+        provider: this.paymentLinkCleanup.provider,
+        connectAccountResolver: this.paymentLinkCleanup.connectAccountResolver,
+        auditRepo: this.auditRepo,
+        actor,
+      });
     }
 
     // §6 Time-to-Cash. Best-effort job money-state rollup.
