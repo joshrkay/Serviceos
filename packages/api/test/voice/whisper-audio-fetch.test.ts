@@ -172,6 +172,18 @@ describe('H2 — dev/local storage origins are fetchable outside production only
 
 const MINTED_KEY = 'tenant-1/file-1/memo.m4a';
 
+async function prodProvider(opts: { fetchImpl: typeof fetch; timeoutMs?: number; maxBytes?: number }) {
+  const storage = prodStorage();
+  const url = await storage.provider.generateDownloadUrl(storage.bucket, MINTED_KEY);
+  vi.stubGlobal('fetch', opts.fetchImpl);
+  const provider = new WhisperTranscriptionProvider({
+    apiKey: 'sk_test',
+    audioUrlPolicy: storage.downloadUrlPolicy,
+    ...opts,
+  });
+  return { provider, url };
+}
+
 /** Settles with the rejection, 'resolved', or 'still pending' after `ms`. */
 function settleWithin<T>(p: Promise<T>, ms: number): Promise<unknown> {
   return Promise.race([
@@ -179,6 +191,98 @@ function settleWithin<T>(p: Promise<T>, ms: number): Promise<unknown> {
     new Promise((r) => setTimeout(() => r('still pending'), ms)),
   ]);
 }
+
+describe('H2 — the audio GET is bounded in time', () => {
+  it('aborts a storage GET that never answers and fails retriably', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(
+      (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+        }),
+    );
+    const { provider, url } = await prodProvider({ fetchImpl, timeoutMs: 30 });
+
+    const outcome = await settleWithin(provider.transcribe(url), 1_000);
+
+    expect(outcome).toMatchObject({ name: 'WhisperTimeoutError', retriable: true });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** An audio body that counts how much of it was ever pulled, and whether it was cancelled. */
+function countingAudioBody(chunkBytes: number, chunks: number, headers: Record<string, string> = {}) {
+  const meter = { pulledBytes: 0, cancelled: false };
+  let sent = 0;
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        if (sent >= chunks) {
+          controller.close();
+          return;
+        }
+        sent += 1;
+        meter.pulledBytes += chunkBytes;
+        controller.enqueue(new Uint8Array(chunkBytes));
+      },
+      cancel() {
+        meter.cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const response = new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'audio/mp4', ...headers },
+  });
+  return { response, meter };
+}
+
+describe('H2 — the audio GET is bounded in bytes', () => {
+  it('refuses a declared content-length over the cap without reading the body', async () => {
+    const { response, meter } = countingAudioBody(512, 4, { 'content-length': '2048' });
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(response);
+    const { provider, url } = await prodProvider({ fetchImpl, maxBytes: 1024 });
+
+    const outcome = await settleWithin(provider.transcribe(url), 1_000);
+
+    expect(outcome).toMatchObject({ name: 'WhisperFileTooLargeError', retriable: false });
+    expect(meter.pulledBytes).toBe(0);
+    expect(meter.cancelled).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops reading an undeclared-length body as soon as it passes the cap', async () => {
+    // 100 x 512 B = 50 KiB on offer against a 1 KiB cap: the provider must
+    // give up after the chunk that crosses the cap, not buffer the rest.
+    const { response, meter } = countingAudioBody(512, 100);
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(response);
+    const { provider, url } = await prodProvider({ fetchImpl, maxBytes: 1024 });
+
+    const outcome = await settleWithin(provider.transcribe(url), 1_000);
+
+    expect(outcome).toMatchObject({ name: 'WhisperFileTooLargeError', retriable: false });
+    expect(meter.pulledBytes).toBeLessThanOrEqual(1024 + 512);
+    expect(meter.cancelled).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('still uploads a body exactly at the cap, typed by its Content-Type', async () => {
+    const { response } = countingAudioBody(512, 2);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(response)
+      .mockResolvedValueOnce(jsonRes({ text: 'at the cap' }));
+    const { provider, url } = await prodProvider({ fetchImpl, maxBytes: 1024 });
+
+    const result = await provider.transcribe(url);
+
+    expect(result.transcript).toBe('at the cap');
+    const upload = (fetchImpl.mock.calls[1][1] as RequestInit).body as FormData;
+    const file = upload.get('file') as File;
+    expect(file.size).toBe(1024);
+    expect(file.name).toBe('audio.m4a');
+  });
+});
 
 describe('H2 — audio fetch diagnostics go to the log, minus the signature', () => {
   it('logs a failed storage GET at warn with the status and the URL without its query', async () => {

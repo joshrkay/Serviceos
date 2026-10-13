@@ -186,10 +186,20 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
       throw new AudioUrlRejectedError(rejection);
     }
 
-    // 1) Fetch audio bytes from the signed URL — never redirected: the
-    //    policy vetted THIS URL, not wherever a 3xx points (storage
-    //    presigned GETs answer directly).
-    const audioRes = await this.fetchImpl(audioUrl, { redirect: 'error' });
+    // 1) Fetch audio bytes from the signed URL — bounded in time (H2: fetch
+    //    has no default timeout; a stalled GET would pin the worker) and
+    //    never redirected: the policy vetted THIS URL, not wherever a 3xx
+    //    points (storage presigned GETs answer directly).
+    const audioSignal = AbortSignal.timeout(this.timeoutMs);
+    let audioRes: Response;
+    try {
+      audioRes = await this.fetchImpl(audioUrl, { signal: audioSignal, redirect: 'error' });
+    } catch (err) {
+      if (audioSignal.aborted) {
+        throw new WhisperTimeoutError(this.timeoutMs);
+      }
+      throw err;
+    }
     if (!audioRes.ok) {
       // H2 — never the URL: this message becomes the recording's
       // user-visible errorMessage, and the URL is a presigned secret.
@@ -200,12 +210,26 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
       });
       throw new WhisperClientError(audioRes.status, `Failed to fetch audio: HTTP ${audioRes.status}`);
     }
-    const audioBlob = await audioRes.blob();
+    // H2 — a declared length over the cap is refused before a byte is read.
+    const declaredBytes = Number(audioRes.headers.get('content-length'));
+    if (Number.isFinite(declaredBytes) && declaredBytes > this.maxBytes) {
+      await audioRes.body?.cancel().catch(() => undefined);
+      throw new WhisperFileTooLargeError(declaredBytes, this.maxBytes);
+    }
 
-    // 2) Pre-flight size guard — reject before upload to save bandwidth and
-    //    return a clear error rather than letting OpenAI return a 413.
-    if (audioBlob.size > this.maxBytes) {
-      throw new WhisperFileTooLargeError(audioBlob.size, this.maxBytes);
+    // 2) Read the body under a byte cap — rejects (and cancels the stream)
+    //    on the chunk that crosses the cap, so neither a lying nor a missing
+    //    Content-Length can make the process buffer an unbounded response.
+    //    The cap is Whisper's own upload limit, so this also stands in for
+    //    the old post-download size check.
+    let audioBlob: Blob;
+    try {
+      audioBlob = await readBodyCapped(audioRes, this.maxBytes);
+    } catch (err) {
+      if (audioSignal.aborted) {
+        throw new WhisperTimeoutError(this.timeoutMs);
+      }
+      throw err;
     }
 
     // 3) Build multipart form. Field names are required by Whisper.
@@ -276,6 +300,30 @@ function withoutQuery(url: string): string {
   } catch {
     return '<unparseable url>';
   }
+}
+
+/**
+ * H2 — drain `res.body` into a Blob typed by its Content-Type, throwing
+ * {@link WhisperFileTooLargeError} (after cancelling the stream) as soon as
+ * more than `maxBytes` have arrived.
+ */
+async function readBodyCapped(res: Response, maxBytes: number): Promise<Blob> {
+  const type = res.headers.get('content-type') ?? '';
+  if (!res.body) return new Blob([], { type });
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new WhisperFileTooLargeError(received, maxBytes);
+    }
+    chunks.push(value);
+  }
+  return new Blob(chunks, { type });
 }
 
 async function safeReadText(res: Response): Promise<string> {
