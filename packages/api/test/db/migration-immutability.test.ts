@@ -123,7 +123,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['063_language_detection', '918c4cd778821e6b38a381c6dfceb3e3446c9e390245fcb6eca0e486067b576f'],
   ['064_create_job_photos', '3ad6f895d04b29e6ef6f1d2d5b74757b6417fe9e73cfe61e61ebe31b15dfd2a7'],
   ['065_create_portal_sessions', '6b939dc150298e5af212577fda04ec07aec8338f026a6107c7ad09491f1ded10'],
-  ['066_create_voice_sessions_and_modes', '8268a58eecee1db168757965fe310b203a7bd9eb77b5b4fe2ed9e97d0bc94614'],
+  // Replay-clobber fix (2026-10-13): the owner can_field_serve backfill re-ran
+  // on every deploy (no ledger), re-flipping owners who had turned it off. It
+  // now runs only when the column is first added; same fresh-DB result.
+  ['066_create_voice_sessions_and_modes', 'da91abcaf6da051986b5135b03c9b1158915808e2d7223dbdffc5e951b0fe8bd'],
   ['067_create_time_entries', '069290a0144fb08de0171bb07d5255496236ef2d66a4dce40228a2de02c5a49f'],
   ['068_create_language_settings', 'dc485f4a1ec4e0bab7f3a58c6e54339d434057ceccbaa562c78952efa19e9931'],
   ['069_extend_leads_source_check', '881aeb61d3da8670bab3c92fb45c35cebd722ec3b3549cf6fe8b7f1e6047caff'],

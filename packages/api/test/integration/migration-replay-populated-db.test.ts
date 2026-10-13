@@ -24,6 +24,7 @@ import { applyMigrations } from '../../src/db/migrate';
 import { PgCallMeBackRepository } from '../../src/voice/call-me-back/pg-call-me-back';
 import { PgVoiceApprovalPinLockAlertRepository } from '../../src/settings/pg-voice-approval-pin-lock-alert';
 import { createPinLockAlertRetryWorker } from '../../src/workers/pin-lock-alert-retry';
+import { PgUserRepository } from '../../src/users/pg-user';
 import type { QueueMessage } from '../../src/queues/queue';
 import { createLogger } from '../../src/logging/logger';
 import { createTestTenant, ensureRlsRuntimeRole, type TestTenant } from './shared';
@@ -406,6 +407,21 @@ describe('Postgres integration — migration corpus replays over a populated dat
       // The owner is told their PIN was brute-forced into a lock.
       expect(texted).toEqual(['+15125550142']);
       expect(await alerts.isSent(tenant.tenantId, episodeKey)).toBe(true);
+    });
+
+    it("an owner who turned field-serving off keeps it off across the next deploy (066)", async () => {
+      // PUT /api/users/:id { canFieldServe: false } — an office-only owner
+      // opting out of being counted as a sendable field tech.
+      const tenant = await createTestTenant(pool);
+      const users = new PgUserRepository(pool);
+      await users.update(tenant.tenantId, tenant.userId, { canFieldServe: true });
+      await users.update(tenant.tenantId, tenant.userId, { canFieldServe: false });
+
+      await deploy(pool);
+
+      const owner = await users.findById(tenant.tenantId, tenant.userId);
+      expect(owner?.role).toBe('owner');
+      expect(owner?.canFieldServe).toBe(false);
     });
   });
 });

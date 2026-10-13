@@ -1818,12 +1818,32 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
 
     -- users: field-capable + current mode
+    --
+    -- One-shot owner backfill (2026-10-13): the runner has no ledger and
+    -- re-runs every migration on every deploy, so a bare
+    --   UPDATE users SET can_field_serve = true WHERE role = 'owner' ...
+    -- re-flipped every owner who had turned field-serving off
+    -- (PUT /api/users/:id) on every boot, and flipped every owner created
+    -- since the last deploy. It now runs only in the statement that first
+    -- adds the column; identical on a fresh database, a no-op once it exists.
+    -- Pinned by test/integration/migration-replay-populated-db.test.ts.
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'users'
+           AND column_name = 'can_field_serve'
+      ) THEN
+        ALTER TABLE users ADD COLUMN can_field_serve BOOLEAN NOT NULL DEFAULT false;
+        UPDATE users SET can_field_serve = true WHERE role = 'owner' AND can_field_serve = false;
+      END IF;
+    END $$;
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS can_field_serve BOOLEAN NOT NULL DEFAULT false,
       ADD COLUMN IF NOT EXISTS current_mode TEXT NOT NULL DEFAULT 'supervisor'
         CHECK (current_mode IN ('supervisor','tech','both')),
       ADD COLUMN IF NOT EXISTS mode_changed_at TIMESTAMPTZ;
-    UPDATE users SET can_field_serve = true WHERE role = 'owner' AND can_field_serve = false;
 
     -- tenant_settings: backup supervisor + unsupervised routing
     ALTER TABLE tenant_settings
