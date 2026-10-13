@@ -117,8 +117,12 @@ describe('H2 — POST /api/voice/recordings selects audio from server-owned reco
     expect(await queue.receiveBatch(10)).toHaveLength(0);
   });
 
-  it('an idempotent replay re-enqueues a URL minted for the original recording file, not the replayed audioUrl', async () => {
-    const { app, queue, generateDownloadUrl } = await harness();
+  it('an idempotent replay re-enqueues a URL minted for the original recording file, not the replayed fileId/audioUrl', async () => {
+    const OTHER = '6b1f3c9e-1d2b-4c7a-8e6f-1248000000b9';
+    const { app, queue, generateDownloadUrl } = await harness([
+      audioFile(),
+      audioFile({ id: OTHER, storageKey: `${TENANT}/${OTHER}/other.m4a` }),
+    ]);
     const first = await request(app)
       .post('/api/voice/recordings')
       .send({ fileId: FILE, audioUrl: 'https://storage.example.test/memo.m4a', idempotencyKey: 'memo-h2' });
@@ -129,10 +133,11 @@ describe('H2 — POST /api/voice/recordings selects audio from server-owned reco
     const replayUrl = 'http://169.254.169.254/latest/meta-data/iam/security-credentials/';
     const replay = await request(app)
       .post('/api/voice/recordings')
-      .send({ fileId: FILE, audioUrl: replayUrl, idempotencyKey: 'memo-h2' });
+      .send({ fileId: OTHER, audioUrl: replayUrl, idempotencyKey: 'memo-h2' });
 
     expect(replay.status).toBe(202);
     expect(replay.body.recording.id).toBe(first.body.recording.id);
+    expect(generateDownloadUrl).toHaveBeenCalledTimes(1);
     expect(generateDownloadUrl).toHaveBeenCalledWith('voice', `${TENANT}/${FILE}/memo.m4a`);
     const jobs = await queue.receiveBatch<Record<string, unknown>>(10);
     expect(jobs.map((j) => j.payload.audioUrl)).toEqual([SERVER_URL]);
