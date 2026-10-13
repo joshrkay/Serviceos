@@ -13,16 +13,16 @@ import { createBillingRouter } from '../../src/routes/billing';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import { fakePool } from './fake-pool';
 import { fakeStripe } from '../helpers/fake-stripe';
-import { settleWithin, settleWithinIo, useProviderClock } from '../helpers/hanging-fetch';
+import { advance, settleWithin, settleWithinIo, track, useProviderClock } from '../helpers/hanging-fetch';
 
 const TENANT = '66666666-6666-4666-8666-666666666666';
 
 /** Stripe holding one trialing subscription; ending the trial charges the card. */
-function stripeWithTrial(chargeTakesMs: number, initialStatus = 'trialing') {
+function stripeWithTrial(chargeTakesMs: number, initialStatus = 'trialing', readTakesMs = 0) {
   let status = initialStatus;
   const stripe = fakeStripe((call) => {
     if (call.path !== '/v1/subscriptions/sub_1') return { status: 404, body: { error: { message: 'no' } } };
-    if (call.method === 'GET') return { body: { id: 'sub_1', status } };
+    if (call.method === 'GET') return { body: { id: 'sub_1', status }, delayMs: readTakesMs || undefined };
     status = 'active'; // trial ended: first invoice finalized and paid
     return { body: { id: 'sub_1', status: 'active' }, delayMs: chargeTakesMs };
   });
@@ -89,6 +89,34 @@ describe('BillingService.endTrialNow', () => {
       expect(stripe.charges()).toBe(0);
     },
   );
+
+  const NEVER = 600_000; // Stripe answers long after every deadline
+
+  it('a charge that never answers fails at 40 s with a clear retryable error (a re-click recovers via the pre-read)', async () => {
+    const stripe = stripeWithTrial(NEVER);
+    vi.stubGlobal('fetch', stripe.fetchFn);
+    const call = track(service().endTrialNow(TENANT));
+
+    await advance(39_000);
+    expect(call.state.status).toBe('pending');
+    await advance(1_000);
+
+    expect(call.state.status).toBe('rejected');
+    expect((call.state as { reason: unknown }).reason).toMatchObject({ statusCode: 503, code: 'BILLING_PROVIDER_TIMEOUT' });
+  });
+
+  it('a slow pre-read plus a hung charge stop at the 45 s budget, inside the 60 s idle-transaction guard', async () => {
+    const stripe = stripeWithTrial(NEVER, 'trialing', 8_000); // read takes 8 s, then the charge hangs
+    vi.stubGlobal('fetch', stripe.fetchFn);
+    const call = track(service().endTrialNow(TENANT));
+
+    await advance(44_000);
+    expect(call.state.status).toBe('pending');
+    await advance(1_000);
+
+    expect(call.state.status).toBe('rejected');
+    expect((call.state as { reason: unknown }).reason).toMatchObject({ statusCode: 503, code: 'BILLING_PROVIDER_TIMEOUT' });
+  });
 
   it('a re-click after the trial already ended does not charge again', async () => {
     const stripe = stripeWithTrial(0);

@@ -36,7 +36,30 @@ interface ProviderResponse {
   headers?: { get(name: string): string | null };
 }
 
-const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** Wait `ms`, or reject as soon as `signal` aborts. */
+const pause = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
+
+export interface IdempotentCreateOptions {
+  /** Waits before resending on 409; a slow request (a charge) needs longer. */
+  inProgressRetryDelaysMs?: readonly number[];
+  /** Aborts the 409 waits too (an overall budget); pass it to `send` as well. */
+  signal?: AbortSignal;
+}
 
 /**
  * Send a create with an Idempotency-Key from `deterministicIdempotencyKey`
@@ -47,14 +70,13 @@ export async function sendIdempotentCreate<R extends ProviderResponse>(
   scope: string,
   params: URLSearchParams | string,
   send: (idempotencyKey: string) => Promise<R>,
-  /** Waits before resending on 409; a slow request (a charge) needs longer. */
-  inProgressRetryDelaysMs: readonly number[] = IN_PROGRESS_RETRY_DELAYS_MS,
+  options: IdempotentCreateOptions = {},
 ): Promise<R> {
   const key = deterministicIdempotencyKey(scope, params);
   let res = await send(key);
-  for (const delayMs of inProgressRetryDelaysMs) {
+  for (const delayMs of options.inProgressRetryDelaysMs ?? IN_PROGRESS_RETRY_DELAYS_MS) {
     if (res.status !== 409) break;
-    await pause(delayMs);
+    await pause(delayMs, options.signal);
     res = await send(key);
   }
   const replayedError =

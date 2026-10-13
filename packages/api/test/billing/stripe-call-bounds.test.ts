@@ -13,7 +13,7 @@
  * the tenant's next attempt.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BillingService, END_TRIAL_TIMEOUT_MS } from '../../src/billing/subscription';
+import { BillingService } from '../../src/billing/subscription';
 import { StripeConnectService } from '../../src/billing/stripe-connect';
 import { fakePool } from './fake-pool';
 import {
@@ -93,16 +93,8 @@ describe('BillingService — Stripe calls are bounded when no fetch is injected'
       hangOn: '/v1/checkout/sessions/cs_pending',
       run: (svc) => svc.createTrialCheckoutSession({ tenantId: TENANT, ownerEmail: 'o@x.com', successUrl: 'https://app/ok', cancelUrl: 'https://app/no' }),
     },
-    {
-      // #1677 H1 — this update charges the card inside the request: it gets
-      // the long END_TRIAL deadline instead of the 10 s default.
-      name: 'end trial now (charges the card)',
-      tenant: { stripe_subscription_id: 'sub_1' },
-      hangOn: '/v1/subscriptions/sub_1',
-      method: 'POST',
-      boundMs: END_TRIAL_TIMEOUT_MS,
-      run: (svc) => svc.endTrialNow(TENANT),
-    },
+    // endTrialNow charges the card: its deadline and overall budget are
+    // covered in end-trial-now.test.ts.
     {
       name: 'cancel pending checkout: session expire',
       tenant: { pending_checkout_session_id: 'cs_1' },

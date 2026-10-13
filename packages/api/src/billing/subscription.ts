@@ -134,13 +134,17 @@ export interface BillingServiceDeps {
 const boundedStripeFetch: BillingFetch = timedFetch();
 
 /**
- * Ending a trial early charges the card inside the Stripe request, so it is
- * NOT cut off at the 10 s default. 40 s still lands inside the request
- * transaction's 60 s idle guard, so the route's audit write and COMMIT run.
+ * Ending a trial early charges the card inside the Stripe request, so the
+ * update is NOT cut off at the 10 s default: it gets 40 s. END_TRIAL_BUDGET_MS
+ * caps the whole call (read + update + 409 waits + replay resend) at 45 s, so
+ * it ends inside the request transaction's 60 s idle guard and the route's
+ * audit write and COMMIT still run.
  */
 export const END_TRIAL_TIMEOUT_MS = 40_000;
 const endTrialStripeFetch: BillingFetch = timedFetch(END_TRIAL_TIMEOUT_MS);
 const END_TRIAL_IN_PROGRESS_RETRY_DELAYS_MS = [2_000, 8_000];
+/** Everything endTrialNow does, together, stays under the 60 s idle guard. */
+export const END_TRIAL_BUDGET_MS = 45_000;
 
 /**
  * Turns a failed "open the billing portal" Stripe REST call into an
@@ -755,54 +759,82 @@ export class BillingService {
     const apiKey = this.deps.config.apiKey;
     const subscriptionUrl = `https://api.stripe.com/v1/subscriptions/${subId}`;
 
-    // A re-click after the trial already ended (the first answer was lost, or
-    // Stripe ended it on its own) must not end it — and charge — again. A
-    // re-click after a timeout recovers here: the read sees the trial ended.
-    // Best-effort: if the read fails, the keyed update below still dedupes.
-    const current = await (this.deps.fetchFn ?? boundedStripeFetch)(subscriptionUrl, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${apiKey}` },
-    }).catch(() => null);
-    if (current?.ok) {
-      const sub = (await current.json().catch(() => ({}))) as { status?: string };
-      // active / past_due: the trial really ended (paid, or the first charge
-      // is being retried) — nothing to do. A canceled, paused or incomplete
-      // subscription has no trial to end: refuse without touching Stripe, so
-      // the route never reports (or audits) an early trial end that didn't
-      // happen.
-      if (sub.status === 'active' || sub.status === 'past_due') return;
-      if (sub.status && sub.status !== 'trialing') {
-        throw new ConflictError(`This subscription is ${sub.status}; there is no trial to end.`, {
-          subscriptionStatus: sub.status,
-        });
+    // One budget for the whole call (read, update, 409 waits, replay resend),
+    // so it can never outlive the request transaction's 60 s idle guard.
+    const budget = new AbortController();
+    const budgetTimer = setTimeout(() => {
+      budget.abort(new DOMException(`end-trial exceeded its ${END_TRIAL_BUDGET_MS}ms budget`, 'TimeoutError'));
+    }, END_TRIAL_BUDGET_MS);
+    (budgetTimer as { unref?: () => void }).unref?.();
+    try {
+      // A re-click after the trial already ended (the first answer was lost,
+      // or Stripe ended it on its own) must not end it — and charge — again.
+      // A re-click after a timeout recovers here: the read sees the trial
+      // ended. Best-effort: if the read fails, the keyed update still dedupes.
+      const current = await (this.deps.fetchFn ?? boundedStripeFetch)(subscriptionUrl, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: budget.signal,
+      }).catch(() => null);
+      if (current?.ok) {
+        const sub = (await current.json().catch(() => ({}))) as { status?: string };
+        // active / past_due: the trial really ended (paid, or the first charge
+        // is being retried) — nothing to do. A canceled, paused or incomplete
+        // subscription has no trial to end: refuse without touching Stripe, so
+        // the route never reports (or audits) an early trial end that didn't
+        // happen.
+        if (sub.status === 'active' || sub.status === 'past_due') return;
+        if (sub.status && sub.status !== 'trialing') {
+          throw new ConflictError(`This subscription is ${sub.status}; there is no trial to end.`, {
+            subscriptionStatus: sub.status,
+          });
+        }
       }
-    }
 
-    // trial_end=now makes Stripe finalize the first invoice AND attempt the
-    // charge inside this request: it gets the long END_TRIAL deadline, not the
-    // 10 s default (a cut-off charge would be reported as failed and skip the
-    // route's audit event), and an Idempotency-Key so a double-click replays
-    // the first answer instead of ending the trial twice.
-    const body = new URLSearchParams();
-    body.set('trial_end', 'now');
-    body.set('proration_behavior', 'create_prorations');
-    const chargeFetch = this.deps.fetchFn ?? endTrialStripeFetch;
-    const res = await sendIdempotentCreate(`end-trial:${subId}`, body, (idempotencyKey) =>
-      chargeFetch(subscriptionUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Idempotency-Key': idempotencyKey,
-        },
+      // trial_end=now makes Stripe finalize the first invoice AND attempt the
+      // charge inside this request: it gets the long END_TRIAL deadline, not
+      // the 10 s default (a cut-off charge would be reported as failed and
+      // skip the route's audit event), and an Idempotency-Key so a
+      // double-click replays the first answer instead of ending the trial
+      // twice.
+      const body = new URLSearchParams();
+      body.set('trial_end', 'now');
+      body.set('proration_behavior', 'create_prorations');
+      const chargeFetch = this.deps.fetchFn ?? endTrialStripeFetch;
+      const res = await sendIdempotentCreate(
+        `end-trial:${subId}`,
         body,
-      }),
-      // A double-click's duplicate waits for the first click's charge.
-      END_TRIAL_IN_PROGRESS_RETRY_DELAYS_MS,
-    );
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Stripe subscription update failed (${res.status}): ${text}`);
+        (idempotencyKey) =>
+          chargeFetch(subscriptionUrl, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Idempotency-Key': idempotencyKey,
+            },
+            body,
+            signal: budget.signal,
+          }),
+        // A double-click's duplicate waits for the first click's charge.
+        { inProgressRetryDelaysMs: END_TRIAL_IN_PROGRESS_RETRY_DELAYS_MS, signal: budget.signal },
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Stripe subscription update failed (${res.status}): ${text}`);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === 'TimeoutError') {
+        // Stripe may still finish: the re-click reads the subscription first
+        // and never ends the trial (or charges) twice.
+        throw new AppError(
+          'BILLING_PROVIDER_TIMEOUT',
+          "Stripe hasn't confirmed the trial end yet. It may still complete — wait a moment and try again; trying again will not charge twice.",
+          503,
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(budgetTimer);
     }
   }
 
