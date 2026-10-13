@@ -13,6 +13,7 @@ import {
 import { InMemoryInvoiceRepository, Invoice } from '../../src/invoices/invoice';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { Proposal } from '../../src/proposals/proposal';
+import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import {
   buildLineItem,
   calculateDocumentTotals,
@@ -149,6 +150,51 @@ describe('apply_late_fee execution handler', () => {
     expect(untouched!.lineItems.some((li) => li.id === lateFeeLineId(INVOICE_ID, 'initial'))).toBe(false);
   });
 
+  // Review M2 — a fully CREDITED invoice with nothing paid stays 'open' at $0
+  // due (product posture: a credit is not a payment). A late fee raised
+  // before that credit and approved after it must not resurrect a balance.
+  it('refuses a fee on an open invoice whose balance a credit already cleared ($0 due)', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    const lineItems: LineItem[] = [
+      buildLineItem('li-1', 'Labor', 1, 15000, 0, true, 'labor'),
+      buildLineItem('li-2', 'Credit — goodwill', 1, -15000, 1, false, 'other'),
+    ];
+    const totals = calculateDocumentTotals(lineItems, 0, 0);
+    await invoiceRepo.create(makeInvoice({ lineItems, totals, amountDueCents: 0 }));
+    handler = new ApplyLateFeeExecutionHandler(invoiceRepo, auditRepo);
+
+    const result = await handler.execute(makeProposal(), ctx);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/no balance/i);
+    const untouched = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(untouched!.lineItems).toHaveLength(2);
+    expect(untouched!.amountDueCents).toBe(0);
+  });
+
+  // Review M3 — the surcharge follows the chargeable amount at the stored
+  // rate: a fee raises the base, so the surcharge rises with it.
+  it('re-derives the processing-fee surcharge at the stored rate on the raised base', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    const lineItems: LineItem[] = [buildLineItem('li-1', 'Labor', 1, 10000, 0, true, 'labor')];
+    const totals = calculateDocumentTotals(lineItems, 0, 0, 300); // 10000 + 300 = 10300
+    await invoiceRepo.create(makeInvoice({ lineItems, totals, amountDueCents: totals.totalCents }));
+    handler = new ApplyLateFeeExecutionHandler(invoiceRepo, auditRepo);
+
+    const result = await handler.execute(makeProposal(), ctx); // +2500 fee
+
+    expect(result.success).toBe(true);
+    const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    // 3% of 12500 = 375 → total 12875.
+    expect(updated!.totals).toMatchObject({
+      subtotalCents: 12500,
+      processingFeeBps: 300,
+      processingFeeCents: 375,
+      totalCents: 12875,
+    });
+    expect(updated!.amountDueCents).toBe(12875);
+  });
+
   it('applies to a partially_paid invoice and nets against the amount already paid', async () => {
     invoiceRepo = new InMemoryInvoiceRepository();
     await invoiceRepo.create(makeInvoice({ status: 'partially_paid', amountPaidCents: 5000, amountDueCents: 10000 }));
@@ -191,4 +237,192 @@ describe('apply_late_fee execution handler', () => {
     expect(untouched!.lineItems.some((li) => li.id === lateFeeLineId(INVOICE_ID, 'initial'))).toBe(false);
     expect(untouched!.amountDueCents).toBe(15000);
   });
+
+  // #1288 guard × fee line — on a member-discount invoice (all lines
+  // taxable, discount > 0, tax > 0) the NON-taxable fee line used to trip the
+  // engine's mixed-taxability refusal inside execute(): an owner-approved
+  // fee threw, retried, and landed in execution_failed — and dunning had
+  // already advanced its step ledger, so it was never re-raised.
+  describe('discounted + taxed invoice', () => {
+    // $150.00 taxable labor, $10.00 discount, 10% tax on the discounted
+    // base: tax 1400, total 15000 − 1000 + 1400 = 15400.
+    function makeDiscountedTaxedInvoice(overrides: Partial<Invoice> = {}): Invoice {
+      const lineItems: LineItem[] = [buildLineItem('li-1', 'Labor', 1, 15000, 0, true, 'labor')];
+      const totals = calculateDocumentTotals(lineItems, 1000, 1000);
+      return makeInvoice({ lineItems, totals, amountDueCents: totals.totalCents, ...overrides });
+    }
+
+    it('applies the fee on an open invoice: total and due rise by exactly the fee, tax unchanged', async () => {
+      invoiceRepo = new InMemoryInvoiceRepository();
+      const seeded = await invoiceRepo.create(makeDiscountedTaxedInvoice());
+      expect(seeded.totals.totalCents).toBe(15400);
+      handler = new ApplyLateFeeExecutionHandler(invoiceRepo, auditRepo);
+
+      const result = await handler.execute(makeProposal(), ctx);
+
+      expect(result).toEqual({ success: true, resultEntityId: INVOICE_ID });
+      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+      expect(updated!.totals).toMatchObject({
+        subtotalCents: 17500,
+        discountCents: 1000,
+        taxRateBps: 1000,
+        taxableSubtotalCents: 15000,
+        taxCents: 1400,
+        totalCents: 17900,
+      });
+      expect(updated!.amountDueCents).toBe(17900);
+    });
+
+    it('applies the fee on a partially_paid invoice and nets the due against what was paid', async () => {
+      invoiceRepo = new InMemoryInvoiceRepository();
+      await invoiceRepo.create(
+        makeDiscountedTaxedInvoice({
+          status: 'partially_paid',
+          amountPaidCents: 4000,
+          amountDueCents: 11400,
+        }),
+      );
+      handler = new ApplyLateFeeExecutionHandler(invoiceRepo, auditRepo);
+
+      const result = await handler.execute(makeProposal(), ctx);
+
+      expect(result).toEqual({ success: true, resultEntityId: INVOICE_ID });
+      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+      expect(updated!.totals.taxCents).toBe(1400);
+      expect(updated!.totals.totalCents).toBe(17900);
+      // 17900 total − 4000 paid = 13900 owed.
+      expect(updated!.amountDueCents).toBe(13900);
+      expect(updated!.status).toBe('partially_paid');
+    });
+  });
+
+  // #10 — the write must derive the balance from the row's LIVE paid amount,
+  // never the handler's snapshot.
+  it('a payment committing between the read and the write is not lost (due = new total − LIVE paid)', async () => {
+    const racing = new PaymentLandsAfterRead();
+    await racing.create(makeInvoice()); // 15000 open, nothing paid
+    racing.armConcurrentPayment(5000);
+    handler = new ApplyLateFeeExecutionHandler(racing, auditRepo);
+
+    const result = await handler.execute(makeProposal(), ctx);
+
+    expect(result.success).toBe(true);
+    const row = await racing.findById(TENANT, INVOICE_ID);
+    expect(row!.totals.totalCents).toBe(17500);
+    expect(row!.amountPaidCents).toBe(5000);
+    // 17500 − 5000 — NOT the stale 17500 − 0 the snapshot would give.
+    expect(row!.amountDueCents).toBe(12500);
+  });
+
+  // Review L5 — two approvals of the SAME accrual step racing: the second
+  // write collides on the deterministic fee-line id (Pg primary key, 23505)
+  // and rolls back. The owner must see a plain sentence, not the raw
+  // "duplicate key value violates unique constraint" text.
+  it('a concurrent duplicate approval of the same step fails cleanly with a friendly message (fee charged once)', async () => {
+    const racing = new PaymentLandsAfterRead();
+    await racing.create(makeInvoice());
+    racing.armConcurrentDuplicateFee(2500, 'initial');
+    handler = new ApplyLateFeeExecutionHandler(racing, auditRepo);
+
+    const result = await handler.execute(makeProposal(), ctx);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/already applied/i);
+    expect(result.error).not.toMatch(/duplicate key/i);
+    const row = await racing.findById(TENANT, INVOICE_ID);
+    expect(row!.lineItems.filter((li) => li.id === lateFeeLineId(INVOICE_ID, 'initial'))).toHaveLength(1);
+    expect(row!.totals.totalCents).toBe(17500);
+  });
+
+  // Review H2 — a late fee RAISES the balance. A link or PaymentIntent
+  // minted before it is priced BELOW what is now owed: paying it can never
+  // overcharge (it records a partial payment and the fee stays due), while
+  // cancelling it would only break a customer mid-checkout — and a cancelled
+  // PI is what Stripe's idempotency replays if the balance later returns to
+  // that amount. So the fee leaves them alone (production wiring).
+  it('leaves an old-price payment link and PaymentIntents alone — they can only underpay', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    await invoiceRepo.create(
+      makeInvoice({
+        stripePaymentLinkId: 'plink_old',
+        stripePaymentLinkUrl: 'https://buy.stripe.test/plink_old',
+      }),
+    );
+    const { provider, deactivated, canceled } = makeFakeProvider({
+      intents: [{ id: 'pi_open', status: 'requires_payment_method' }],
+    });
+    const registry = createExecutionHandlerRegistry({
+      invoiceRepo,
+      auditRepo,
+      paymentLinkCleanup: { provider },
+    });
+
+    const result = await registry.get('apply_late_fee')!.execute(makeProposal(), ctx);
+
+    expect(result.success).toBe(true);
+    expect(deactivated).toEqual([]);
+    expect(canceled).toEqual([]);
+    const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(updated!.amountDueCents).toBe(17500);
+    expect(updated!.stripePaymentLinkId).toBe('plink_old');
+  });
 });
+
+/**
+ * Deterministic lost-update interleave: a webhook payment commits (through
+ * the same atomic increment the webhook path uses) AFTER the handler read
+ * its snapshot and BEFORE it writes.
+ */
+class PaymentLandsAfterRead extends InMemoryInvoiceRepository {
+  private pending: ((tenantId: string, id: string) => Promise<unknown>) | null = null;
+
+  armConcurrentPayment(cents: number): void {
+    this.pending = (tenantId, id) => this.incrementAmountPaidAtomic(tenantId, id, cents, new Date());
+  }
+
+  /** A second approval of the SAME accrual step lands its fee line first. */
+  armConcurrentDuplicateFee(feeCents: number, stepKey: string): void {
+    this.pending = (tenantId, id) =>
+      this.applyNonTaxableAdjustmentAtomic(
+        tenantId,
+        id,
+        buildLineItem(lateFeeLineId(id, stepKey), 'Late fee', 1, feeCents, 1, false, 'other'),
+        new Date(),
+      );
+  }
+
+  async findById(tenantId: string, id: string): Promise<Invoice | null> {
+    const snapshot = await super.findById(tenantId, id);
+    if (snapshot && this.pending) {
+      const write = this.pending;
+      this.pending = null;
+      await write(tenantId, id);
+    }
+    return snapshot;
+  }
+}
+
+/** Fake Stripe-side provider recording link deactivations and PI cancels. */
+function makeFakeProvider(opts: {
+  intents?: Array<{ id: string; status: string }>;
+  deactivateError?: Error;
+  cancelError?: Error;
+} = {}) {
+  const deactivated: string[] = [];
+  const canceled: string[] = [];
+  const provider = {
+    generateLink: async () => {
+      throw new Error('not used');
+    },
+    deactivateLink: async (linkId: string) => {
+      if (opts.deactivateError) throw opts.deactivateError;
+      deactivated.push(linkId);
+    },
+    listInvoicePaymentIntents: async () => opts.intents ?? [],
+    cancelPaymentIntent: async (paymentIntentId: string) => {
+      if (opts.cancelError) throw opts.cancelError;
+      canceled.push(paymentIntentId);
+    },
+  };
+  return { provider, deactivated, canceled };
+}
