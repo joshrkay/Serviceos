@@ -3,11 +3,13 @@
  * code belongs to, which IANA zones a state spans, and a normaliser for the
  * free-text state a service address carries.
  *
- * Every table here is used conservatively by `recipientQuietHours`: a state
+ * Every table here is used conservatively by `recipientQuietHours`: a place
  * only ever ADDS zones (the window must be open in all of them) and can only
- * tighten the closing hour. So an extra or misattributed entry narrows a
- * window; a missing one leaves the tenant's zone (and the fallbacks) to decide.
- * Keep the area codes current with NANPA.
+ * tighten the closing hour, and what cannot be placed (an area code missing
+ * from these tables, toll-free, a non-NANP number, an unreadable state) counts
+ * as anywhere in the US. So an extra, misattributed or missing entry can only
+ * narrow a window. Keep the area codes current with NANPA anyway: a missing
+ * code costs that recipient most of the day.
  */
 
 /**
@@ -183,10 +185,72 @@ const STATE_BY_AREA_CODE: ReadonlyMap<string, string> = new Map(
   ),
 );
 
-/** The state a +1 number's area code belongs to, or null when not recognised. */
-export function stateForUsPhone(phone: string): string | null {
+/**
+ * Every zone a US recipient of unknown location could be in, east to west.
+ * Requiring all of them leaves a daily window (≈14:00–20:00 Eastern) that is
+ * inside 08:00–20:00 for every one.
+ */
+export const ALL_US_ZONES: readonly string[] = [
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Phoenix',
+  'America/Los_Angeles',
+  'America/Anchorage',
+  'Pacific/Honolulu',
+];
+
+/**
+ * NANP area codes outside the US, by the zone(s) they span: Canada and the
+ * Caribbean. Mixed-zone codes list every zone (NW Ontario 807, Labrador in
+ * 709, eastern Quebec in 418/581/367, the BC Rockies, the territories 867).
+ */
+const NANP_FOREIGN_ZONES: Readonly<Record<string, readonly string[]>> = Object.fromEntries(
+  (
+    [
+      ['709 879', ['America/St_Johns', 'America/Halifax']],
+      ['902 782', ['America/Halifax']],
+      ['506 428', ['America/Moncton']],
+      ['416 647 437 905 289 365 742 613 343 753 705 249 683 519 226 548 382 514 438 263 450 579 354 819 873 468', ['America/Toronto']],
+      ['418 581 367', ['America/Toronto', 'America/Halifax']],
+      ['807', ['America/Toronto', 'America/Winnipeg']],
+      ['204 431 584', ['America/Winnipeg']],
+      ['306 639 474', ['America/Regina']],
+      ['403 587 780 825 368', ['America/Edmonton']],
+      ['604 778 236 672 250 257', ['America/Vancouver', 'America/Edmonton']],
+      ['867', ['America/Edmonton', 'America/Whitehorse', 'America/Winnipeg', 'America/Toronto']],
+      ['242', ['America/Nassau']],
+      ['345', ['America/Cayman']],
+      ['441', ['Atlantic/Bermuda']],
+      ['649', ['America/Grand_Turk']],
+      ['876 658', ['America/Jamaica']],
+      ['246 264 268 284 473 664 721 758 767 784 809 829 849 868 869', ['America/Puerto_Rico']],
+    ] as const
+  ).flatMap(([codes, zones]) => codes.split(' ').map((code) => [code, zones])),
+);
+
+/**
+ * Where a phone number can be, for the send window: the US state its area
+ * code belongs to (if any) and the zones it could be ringing in. A number
+ * that cannot be placed — toll-free, non-geographic, an area code missing
+ * from these tables, a non-NANP number — could be anywhere in the US, so it
+ * gets ALL_US_ZONES: unknown fails closed, not open.
+ */
+export function placePhone(phone: string): {
+  state: string | null;
+  zones: readonly string[];
+  placed: boolean;
+} {
+  const areaCode = nanpAreaCode(phone);
+  const state = areaCode ? STATE_BY_AREA_CODE.get(areaCode) : undefined;
+  if (state) return { state, zones: zonesForState(state), placed: true };
+  const foreign = areaCode ? NANP_FOREIGN_ZONES[areaCode] : undefined;
+  if (foreign) return { state: null, zones: foreign, placed: true };
+  return { state: null, zones: ALL_US_ZONES, placed: false };
+}
+
+function nanpAreaCode(phone: string): string | null {
   const digits = phone.replace(/\D/g, '');
   const national = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
-  if (national.length !== 10) return null;
-  return STATE_BY_AREA_CODE.get(national.slice(0, 3)) ?? null;
+  return national.length === 10 ? national.slice(0, 3) : null;
 }

@@ -3,7 +3,7 @@
  * address stored as "Florida" or "Fla." must still get Florida's 20:00 close.
  */
 import { describe, it, expect } from 'vitest';
-import { normalizeUsState, stateForUsPhone } from '../../src/compliance/us-geography';
+import { ALL_US_ZONES, normalizeUsState, placePhone } from '../../src/compliance/us-geography';
 
 describe('normalizeUsState', () => {
   it.each([
@@ -30,18 +30,31 @@ describe('normalizeUsState', () => {
   });
 });
 
-describe('stateForUsPhone', () => {
+describe('placePhone', () => {
   it.each([
-    ['+13055550100', 'FL'],
-    ['(206) 555-0100', 'WA'],
-    ['16025550100', 'AZ'],
-    ['+19155550100', 'TX'],
-    ['+17875550100', 'PR'],
-  ])('%s → %s', (phone, state) => {
-    expect(stateForUsPhone(phone)).toBe(state);
+    ['+13055550100', 'FL', ['America/New_York', 'America/Chicago']],
+    ['(206) 555-0100', 'WA', ['America/Los_Angeles']],
+    ['16025550100', 'AZ', ['America/Phoenix', 'America/Denver']],
+    ['+19155550100', 'TX', ['America/Chicago', 'America/Denver']],
+    ['+17875550100', 'PR', ['America/Puerto_Rico']],
+  ])('%s is in %s', (phone, state, zones) => {
+    expect(placePhone(phone)).toEqual({ state, zones, placed: true });
   });
 
-  it.each(['+15555550100', '+442071234567', '12345'])('%s has no US area-code state', (phone) => {
-    expect(stateForUsPhone(phone)).toBeNull();
+  it.each([
+    ['+14165550100', ['America/Toronto']],
+    ['+17095550100', ['America/St_Johns', 'America/Halifax']],
+    ['+16045550100', ['America/Vancouver', 'America/Edmonton']],
+    ['+18765550100', ['America/Jamaica']],
+    ['+18685550100', ['America/Puerto_Rico']],
+  ])('%s (Canada / Caribbean) rings in its own zones', (phone, zones) => {
+    expect(placePhone(phone)).toEqual({ state: null, zones, placed: true });
   });
+
+  it.each(['+18005550100', '+18885550100', '+15555550100', '+442071234567', '12345'])(
+    '%s cannot be placed, so it could be anywhere in the US',
+    (phone) => {
+      expect(placePhone(phone)).toEqual({ state: null, zones: ALL_US_ZONES, placed: false });
+    },
+  );
 });

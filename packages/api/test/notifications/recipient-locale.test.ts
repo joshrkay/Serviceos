@@ -65,7 +65,12 @@ describe('createRecipientLocaleResolver', () => {
 
     const locale = await resolve({ tenantId: TENANT, customerId: 'cust-1', to: '+15125550100' });
 
-    expect(locale).toEqual({ tenantTimezone: 'America/Chicago', serviceStates: ['TX'], areaCodeState: 'TX' });
+    expect(locale).toEqual({
+      tenantTimezone: 'America/Chicago',
+      serviceStates: ['TX'],
+      phone: '+15125550100',
+      tenantPhone: null,
+    });
   });
 
   it('reports an unknown zone as null when the tenant never chose one — never America/New_York', async () => {
@@ -84,14 +89,14 @@ describe('createRecipientLocaleResolver', () => {
     expect(locale.tenantTimezone).toBeNull();
   });
 
-  it("reports the state a phone's area code belongs to (Florida 305)", async () => {
+  it("passes the tenant's business number on as one more zone constraint", async () => {
     const resolve = await build({
-      settings: settings({ timezone: 'America/New_York' }),
+      settings: settings({ timezone: 'America/New_York', businessPhone: '+16025550111' }),
       locations: [location({ id: 'l1', state: 'GA' })],
     });
 
     const locale = await resolve({ tenantId: TENANT, customerId: 'cust-1', to: '+13055550100' });
 
-    expect(locale).toMatchObject({ serviceStates: ['GA'], areaCodeState: 'FL' });
+    expect(locale).toMatchObject({ serviceStates: ['GA'], phone: '+13055550100', tenantPhone: '+16025550111' });
   });
 });

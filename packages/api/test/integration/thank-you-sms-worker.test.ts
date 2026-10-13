@@ -319,7 +319,8 @@ describe('thank-you-sms worker — integration', () => {
       const completedAt = new Date('2026-10-14T03:00:00Z');
       const late = new Date('2026-10-14T05:30:00Z'); // 22:30 MST
       const morning = new Date('2026-10-14T15:30:00Z'); // 08:30 MST
-      const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours', completedAt });
+      // A Phoenix (602) number: an unplaceable one would need every US zone open.
+      const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours', completedAt, primaryPhone: '+16025550142' });
 
       const delivered: SmsMessage[] = [];
       const gated = (now: Date) =>

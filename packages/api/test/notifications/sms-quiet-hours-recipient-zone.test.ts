@@ -21,13 +21,14 @@ const TENANT = '11111111-1111-1111-1111-111111111111';
 const CUSTOMER = 'cust-1';
 const CREATED = new Date('2026-01-01T00:00:00Z');
 
-async function build(opts: { tenantZone: string; now: Date; locationState?: string }) {
+async function build(opts: { tenantZone: string; now: Date; locationState?: string; businessPhone?: string }) {
   const settingsRepo = new InMemorySettingsRepository();
   await settingsRepo.create({
     id: 's-1',
     tenantId: TENANT,
     businessName: 'Acme',
     timezone: opts.tenantZone,
+    ...(opts.businessPhone ? { businessPhone: opts.businessPhone } : {}),
     estimatePrefix: 'EST',
     invoicePrefix: 'INV',
     nextEstimateNumber: 1,
@@ -175,3 +176,71 @@ describe('free-text service-location states (M4)', () => {
     expect(base.sentSms).toHaveLength(1);
   });
 });
+
+describe('unrecognised places fail CLOSED (N1)', () => {
+  it('a New York tenant cannot text a Newfoundland (709) number at 19:30 EDT = 21:00 NDT', async () => {
+    const { gate, base } = await build({ tenantZone: 'America/New_York', now: new Date('2026-10-13T23:30:00Z') });
+
+    const err = await gate.sendSms(textTo('+17095550100')).catch((e: unknown) => e);
+
+    expect(base.sentSms).toHaveLength(0);
+    expect(err).toBeInstanceOf(SmsDeferredError);
+  });
+
+  it('a Los Angeles tenant cannot text a Toronto (416) number at 19:30 PT = 22:30 ET', async () => {
+    const { gate, base } = await build({ tenantZone: 'America/Los_Angeles', now: new Date('2026-10-14T02:30:00Z') });
+
+    await gate.sendSms(textTo('+14165550100')).catch(() => undefined);
+
+    expect(base.sentSms).toHaveLength(0);
+  });
+
+  it('a toll-free (800) number could be anywhere in the US: not at 19:30 PT = 22:30 ET', async () => {
+    const { gate, base } = await build({ tenantZone: 'America/Los_Angeles', now: new Date('2026-10-14T02:30:00Z') });
+
+    await gate.sendSms(textTo('+18005550100')).catch(() => undefined);
+
+    expect(base.sentSms).toHaveLength(0);
+  });
+
+  it('an area code missing from the tables counts as anywhere in the US (12:00 ET is 06:00 in Honolulu)', async () => {
+    const { gate, base } = await build({ tenantZone: 'America/New_York', now: new Date('2026-10-13T16:00:00Z') });
+
+    await gate.sendSms(textTo('+15555550100')).catch(() => undefined);
+
+    expect(base.sentSms).toHaveLength(0);
+  });
+
+  it('an unreadable service state ("Flordia") counts as any state, not none (12:00 ET)', async () => {
+    const { gate, base } = await build({
+      tenantZone: 'America/New_York',
+      now: new Date('2026-10-13T16:00:00Z'),
+      locationState: 'Flordia',
+    });
+
+    await gate.sendSms(textTo('+12125550100')).catch(() => undefined);
+
+    expect(base.sentSms).toHaveLength(0);
+  });
+
+  it("the tenant's own business number constrains a defaulted zone: Phoenix shop on the NY default, 917 customer, 05:00 MST", async () => {
+    const { gate, base } = await build({
+      tenantZone: 'America/New_York',
+      now: new Date('2026-10-13T12:00:00Z'),
+      businessPhone: '+16025550111',
+    });
+
+    await gate.sendSms(textTo('+19175550100')).catch(() => undefined);
+
+    expect(base.sentSms).toHaveLength(0);
+  });
+
+  it('still sends to a placed Canadian number once its zone is open (416 at 11:00 ET from a NY tenant)', async () => {
+    const { gate, base } = await build({ tenantZone: 'America/New_York', now: new Date('2026-10-13T15:00:00Z') });
+
+    await gate.sendSms(textTo('+14165550100'));
+
+    expect(base.sentSms).toHaveLength(1);
+  });
+});
+

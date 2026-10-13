@@ -788,7 +788,8 @@ describe('runThankYouSmsSweep', () => {
     it('defers a 22:30 thank-you — not sent, stamped, failed or claimed — and sends on the next in-window tick', async () => {
       const job = makeJob({});
       await jobRepo.create(job);
-      await customerRepo.create(makeCustomer());
+      // A Phoenix (602) number: an unplaceable one (555) would need every US zone open.
+      await customerRepo.create(makeCustomer({ primaryPhone: '+16025551234' }));
       const rows = [{ id: job.id, tenant_id: TENANT }];
       const { pool, claims } = claimAwarePool({ rows });
 

@@ -1,14 +1,12 @@
 /**
  * What the quiet-hours window knows about a customer text's recipient: the
- * tenant's zone (`tenant_settings.timezone`), the customer's service-location
- * states and the state of the phone's NANP area code. `recipientQuietHours`
+ * tenant's zone and business number (`tenant_settings`), the customer's
+ * service-location states and the recipient's number. `recipientQuietHours`
  * requires the window to be open in ALL of their zones, so a tenant zone left
  * at a pre-migration-263 default cannot open the window early for a recipient
- * the address or area code places elsewhere. Unknown stays unknown — a null
- * zone, no recognised state — and is answered conservatively there.
+ * placed elsewhere, and whatever cannot be placed counts as anywhere in the US.
  */
 import type { RecipientLocale } from '../compliance/jurisdiction';
-import { stateForUsPhone } from '../compliance/us-geography';
 import { isValidIanaTimezone, type SettingsRepository } from '../settings/settings';
 import type { LocationRepository } from '../locations/location';
 
@@ -35,7 +33,8 @@ export function createRecipientLocaleResolver(
       // Unknown stays unknown: the window then requires every US zone.
       tenantTimezone: zone && isValidIanaTimezone(zone) ? zone : null,
       serviceStates: locations.map((l) => l.state),
-      areaCodeState: stateForUsPhone(to),
+      phone: to || null,
+      tenantPhone: settings?.businessPhone ?? null,
     };
   };
 }

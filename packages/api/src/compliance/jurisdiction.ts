@@ -1,4 +1,4 @@
-import { normalizeUsState, zonesForState } from './us-geography';
+import { ALL_US_ZONES, normalizeUsState, placePhone, zonesForState } from './us-geography';
 
 const US_RECORDING_DISCLOSURE_STATES = new Set([
   'CA',
@@ -60,67 +60,72 @@ export function unsubscribeFooter(): string {
 export interface RecipientLocale {
   /**
    * The tenant's IANA zone, or null when unknown (never chosen, or invalid) —
-   * then the window must be open in every US zone at once
-   * (`US_RECIPIENT_ZONES`), never a guessed one.
+   * then the window must be open in every US zone at once (`ALL_US_ZONES`),
+   * never a guessed one.
    */
   tenantTimezone: string | null;
   /**
    * The customer's service-location states, as stored (free text: "FL",
    * "Florida", "Fla." all count). None recognised = residence unknown, which
-   * gets the strictest (20:00) close.
+   * gets the strictest (20:00) close; an unrecognisable one also adds every
+   * US zone.
    */
   serviceStates: readonly string[];
   /**
-   * The state the phone's NANP area code belongs to. Its zones join the
-   * window and an early-close state tightens the close (the Florida and
-   * Oklahoma acts presume an in-state area code is a resident); it never
-   * relaxes either, because a number travels with its owner.
+   * The recipient's number. Its NANP area code adds the zones it can ring in
+   * (and an early-close state tightens the close: the Florida and Oklahoma
+   * acts presume an in-state area code is a resident); a number that cannot
+   * be placed adds every US zone. It never relaxes the close. Null when no
+   * recipient is known (a tenant-level verdict).
    */
-  areaCodeState: string | null;
+  phone: string | null;
+  /**
+   * The tenant's own business number. When its area code places it, those
+   * zones are one more constraint — catching a tenant zone left at a
+   * pre-migration-263 default.
+   */
+  tenantPhone: string | null;
 }
 
 /**
  * US quiet hours — the send window for a NON-transactional customer text:
  * open 08:00 (inclusive) to 21:00 (exclusive), or 20:00 for an early-close
  * state or an unknown residence, in EVERY zone the text could land in: the
- * tenant's zone (all US zones when unknown) plus every zone of each
- * recognised service-location state and of the area-code state. Requiring
- * all of them can only shrink the window. Consumed by GatedMessageDelivery
- * for texts tagged `quietHours: 'defer'`.
+ * tenant's zone (all US zones when unknown) and its business number's, plus
+ * every zone of each service-location state and of the recipient's number.
+ * Whatever cannot be placed counts as anywhere in the US. Requiring all of
+ * them can only shrink the window. Consumed by GatedMessageDelivery for texts
+ * tagged `quietHours: 'defer'`.
  */
 export function recipientQuietHours(
   locale: RecipientLocale,
   now: Date = new Date(),
 ): QuietHoursResult {
-  const serviceStates = locale.serviceStates
-    .map(normalizeUsState)
-    .filter((code): code is string => code !== null);
-  const areaCodeState = locale.areaCodeState ? normalizeUsState(locale.areaCodeState) : null;
-  const residenceStates = [...serviceStates, ...(areaCodeState ? [areaCodeState] : [])];
+  const zones = new Set<string>(locale.tenantTimezone ? [locale.tenantTimezone] : ALL_US_ZONES);
+  const add = (list: readonly string[]) => list.forEach((zone) => zones.add(zone));
+
+  const serviceStates: string[] = [];
+  for (const raw of locale.serviceStates) {
+    const code = normalizeUsState(raw);
+    if (code) {
+      serviceStates.push(code);
+      add(zonesForState(code));
+    } else if (raw.trim().length > 0) {
+      add(ALL_US_ZONES); // a state we cannot read could be any state
+    }
+  }
+  const recipient = locale.phone ? placePhone(locale.phone) : null;
+  if (recipient) add(recipient.zones);
+  const tenantPhone = locale.tenantPhone ? placePhone(locale.tenantPhone) : null;
+  if (tenantPhone?.placed) add(tenantPhone.zones);
 
   // No recognised service address → assume the strictest close rather than guess.
   const earlyClose =
-    serviceStates.length === 0 || residenceStates.some((code) => EARLY_CLOSE_STATES.has(code));
+    serviceStates.length === 0 ||
+    [...serviceStates, recipient?.state].some((code) => code != null && EARLY_CLOSE_STATES.has(code));
   const endHour = earlyClose ? EARLY_CLOSE_END_HOUR : WINDOW_END_HOUR;
-  const zones = new Set<string>(locale.tenantTimezone ? [locale.tenantTimezone] : US_RECIPIENT_ZONES);
-  for (const code of residenceStates) for (const zone of zonesForState(code)) zones.add(zone);
   return sendWindow([...zones], now, endHour);
 }
-
-/**
- * Every zone a US recipient of unknown location could be in, east to west.
- * Requiring all of them leaves a daily window (≈14:00–20:00 Eastern) that is
- * inside 08:00–20:00 for every one.
- */
-const US_RECIPIENT_ZONES: readonly string[] = [
-  'America/New_York',
-  'America/Chicago',
-  'America/Denver',
-  'America/Phoenix',
-  'America/Los_Angeles',
-  'America/Anchorage',
-  'Pacific/Honolulu',
-];
 
 const WINDOW_START_HOUR = 8;
 /** Federal TCPA: no contact at or after 21:00 recipient-local. */

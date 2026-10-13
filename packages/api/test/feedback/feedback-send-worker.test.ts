@@ -226,10 +226,11 @@ describe('feedback_send worker — early returns', () => {
 });
 
 describe('feedback_send worker — recipient quiet hours (a review request is non-transactional)', () => {
-  // Tenant zone 'UTC' (setup); the 555 number and no service location leave the
-  // residence unknown, so the conservative 20:00 close applies.
+  // Tenant zone 'UTC' (setup). The 555 number cannot be placed and there is no
+  // service location, so the window needs every US zone open with the 20:00
+  // close: 19:00Z (15:00 ET … 09:00 HST) is open, 22:30Z is not.
   const LATE = new Date('2026-10-13T22:30:00Z');
-  const MORNING = new Date('2026-10-14T08:30:00Z');
+  const MORNING = new Date('2026-10-14T19:00:00Z');
 
   it('defers by handing the job back to the review sweep: nothing minted, nothing texted, the stamp cleared', async () => {
     const { worker, jobId, jobRepo, feedbackRequestRepo, rawProvider } = await setup({}, { now: () => LATE });

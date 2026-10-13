@@ -28,8 +28,8 @@ describe('requiresRecordingDisclosure', () => {
 describe('recipientQuietHours', () => {
   // Known non-early-close states in the tenant's own zone, so the federal
   // 08:00–21:00 window in that one zone applies.
-  const IL = { serviceStates: ['IL'], areaCodeState: null };
-  const NY = { serviceStates: ['NY'], areaCodeState: null };
+  const IL = { serviceStates: ['IL'], phone: null, tenantPhone: null };
+  const NY = { serviceStates: ['NY'], phone: null, tenantPhone: null };
 
   it('allows contact between 8am and 9pm recipient local time', () => {
     // 15:00 UTC = 10:00 America/Chicago
@@ -82,7 +82,7 @@ describe('recipientQuietHours — multi-zone states use every zone they span', (
     ['AK', 'America/Anchorage', '2026-10-13T16:30:00Z', '2026-10-13T17:00:00.000Z'],
   ])('%s: 08:30 in %s is still 07:30 in its western zone', (state, tenantTimezone, at, expectedNext) => {
     const verdict = recipientQuietHours(
-      { tenantTimezone, serviceStates: [state], areaCodeState: null },
+      { tenantTimezone, serviceStates: [state], phone: null, tenantPhone: null },
       new Date(at),
     );
 
@@ -92,7 +92,7 @@ describe('recipientQuietHours — multi-zone states use every zone they span', (
 });
 
 describe('recipientQuietHours — DST transition days (America/New_York)', () => {
-  const NY = { tenantTimezone: 'America/New_York', serviceStates: ['NY'], areaCodeState: null };
+  const NY = { tenantTimezone: 'America/New_York', serviceStates: ['NY'], phone: null, tenantPhone: null };
 
   it('spring-forward morning (Mar 8 2026): 01:30 EST waits until 08:00 EDT', () => {
     const verdict = recipientQuietHours(NY, new Date('2026-03-08T06:30:00Z'));
