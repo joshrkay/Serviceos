@@ -455,3 +455,46 @@ describe('H2 — the audio GET does not follow redirects', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('H2 review T2 — the timeout also covers reading the body', () => {
+  const servers: Server[] = [];
+  afterEach(async () => {
+    await Promise.all(
+      servers.splice(0).map((s) => {
+        s.closeAllConnections();
+        return new Promise((r) => s.close(r));
+      }),
+    );
+  });
+
+  it('storage that sends headers and then stalls mid-body fails with WhisperTimeoutError', async () => {
+    const storageHost = await listen((_req, res) => {
+      res.writeHead(200, { 'content-type': 'audio/mp4' });
+      res.write(new Uint8Array(64)); // headers + a first chunk, then nothing
+    });
+    servers.push(storageHost.server);
+    const storage = createStorageProvider({
+      NODE_ENV: 'test',
+      STORAGE_PUBLIC_URL: `${storageHost.origin}/storage-dev`,
+    });
+    const url = await storage.provider.generateDownloadUrl(storage.bucket, MINTED_KEY);
+    // Real fetch for the local server only — never the real Whisper API.
+    const fetchImpl = vi.fn<typeof fetch>((input, init) =>
+      String(input).startsWith('http://127.0.0.1')
+        ? fetch(input, init)
+        : Promise.reject(new Error('test: off-box fetch blocked')),
+    );
+    const provider = new WhisperTranscriptionProvider({
+      apiKey: 'sk_test',
+      fetchImpl,
+      timeoutMs: 200,
+      audioUrlPolicy: storage.downloadUrlPolicy,
+      logger: { warn: vi.fn() },
+    });
+
+    const outcome = await settleWithin(provider.transcribe(url), 3_000);
+
+    expect(outcome).toMatchObject({ name: 'WhisperTimeoutError', retriable: true });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
