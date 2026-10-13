@@ -471,11 +471,23 @@ export interface MediaStreamAdapterDeps {
    * unexpected mid-call Deepgram close) steers the call back to `<Gather>` via
    * the Gather-fallback webhook instead of hanging up. With `twiml`: the
    * realtime hand-off — the live call executes the parked `<Dial>`. Returns
-   * `true` when Twilio accepted the update; on `false`/absent the adapter
-   * falls back. Never throws. `accountSid` is the value Twilio sent in the
+   * `true` when Twilio accepted the update, `false` when it refused, and
+   * `'unknown'` when the request timed out (it may have been applied). Never
+   * throws. `accountSid` is the value Twilio sent in the
    * `start` frame (per-tenant subaccount).
    */
-  restRedirect?: (args: { callSid: string; accountSid?: string; twiml?: string }) => Promise<boolean>;
+  restRedirect?: (args: {
+    callSid: string;
+    accountSid?: string;
+    twiml?: string;
+  }) => Promise<boolean | 'unknown'>;
+  /**
+   * Upper bound (ms) on waiting for Twilio to end the stream after a hand-off
+   * update — after a 200 (Twilio releases the leg itself), or after a timed-out
+   * request (the stream ending is the evidence it was applied). Default
+   * {@link DEFAULT_HANDOFF_STREAM_END_WAIT_MS}.
+   */
+  handoffStreamEndWaitMs?: number;
 }
 
 const TWILIO_SURFACE = 'twilio_media_streams';
@@ -1049,6 +1061,16 @@ export const DEFAULT_TURN_HOLD_DEADLINE_MS = 4_500;
  * leave the caller waiting on a transfer indefinitely.
  */
 export const DEFAULT_HANDOFF_PLAYOUT_MAX_WAIT_MS = 4_000;
+
+/**
+ * L4 / M1 — how long a hand-off waits for Twilio to end the stream once it
+ * has (or may have) applied the hand-off update. Twilio interrupting the
+ * `<Connect><Stream>` is what proves the call left the stream: closing the
+ * socket ourselves before that would end the call (nothing follows
+ * `</Connect>`), and degrading after a mere timeout could tear down a `<Dial>`
+ * that is already ringing.
+ */
+export const DEFAULT_HANDOFF_STREAM_END_WAIT_MS = 3_000;
 
 /**
  * C1 — how long a hand-off waits, once an E1 hazard was heard, for the E1
@@ -1747,10 +1769,11 @@ export class TwilioMediaStreamAdapter {
     }
     let redirected = false;
     try {
-      redirected = await restRedirect({
-        callSid,
-        ...(this.state.accountSid ? { accountSid: this.state.accountSid } : {}),
-      });
+      redirected =
+        (await restRedirect({
+          callSid,
+          ...(this.state.accountSid ? { accountSid: this.state.accountSid } : {}),
+        })) === true;
     } catch {
       redirected = false;
     }
@@ -3888,7 +3911,7 @@ export class TwilioMediaStreamAdapter {
           callSid,
           ...(this.state.accountSid ? { accountSid: this.state.accountSid } : {}),
           twiml,
-        })) ?? false;
+        })) === true;
     } catch {
       corrected = false;
     }
@@ -3983,18 +4006,33 @@ export class TwilioMediaStreamAdapter {
 
     // Synchronous from the check above to the request: nothing can interleave.
     this.state.handoff = 'delivering';
-    let delivered = false;
+    let result: boolean | 'unknown' = false;
     if (restRedirect) {
       try {
-        delivered = await restRedirect({
+        result = await restRedirect({
           callSid,
           ...(this.state.accountSid ? { accountSid: this.state.accountSid } : {}),
           twiml,
         });
       } catch {
-        delivered = false;
+        result = false;
       }
     }
+    const streamEndWaitMs = this.deps.handoffStreamEndWaitMs ?? DEFAULT_HANDOFF_STREAM_END_WAIT_MS;
+    if (result === 'unknown') {
+      // M1 — the request timed out: Twilio may have applied it. Never answer
+      // that with a degrade (a second update would tear down the ringing
+      // Dial) or a hang-up stamp: confirm against the stream, which Twilio
+      // interrupts as soon as it runs the new TwiML.
+      logger.warn('realtime hand-off: transfer request timed out — confirming against the stream', {
+        callSid,
+        sessionId: session.id,
+        trigger,
+      });
+      await this.awaitLegClosed(streamEndWaitMs);
+      result = this.state.closed;
+    }
+    const delivered = result === true;
     const closedDuringDelivery = this.state.handoffDeferredCloseReason;
     if (!delivered) {
       this.state.handoff = 'failed';
@@ -4037,7 +4075,21 @@ export class TwilioMediaStreamAdapter {
       this.settleCloseOutcome('handoff_delivered');
       return;
     }
-    this.handleClose('handoff_delivered');
+    // L4 — let Twilio release the leg itself (its `stop` proves the call is
+    // running the new TwiML); close it ourselves only past the bound.
+    await this.awaitLegClosed(streamEndWaitMs);
+    if (!this.state.closed) this.handleClose('handoff_delivered');
+  }
+
+  /** Bounded wait for the leg to close (Twilio's `stop` / socket close). Never rejects. */
+  private async awaitLegClosed(maxWaitMs: number): Promise<void> {
+    const deadline = Date.now() + maxWaitMs;
+    while (!this.state.closed && Date.now() < deadline) {
+      await new Promise((r) => {
+        const t = setTimeout(r, 20);
+        if (typeof t.unref === 'function') t.unref();
+      });
+    }
   }
 
   /**
@@ -4129,7 +4181,9 @@ export class TwilioMediaStreamAdapter {
     if (this.state.handoff === 'delivering') {
       this.state.handoffDeferredCloseReason = reason;
     } else {
-      this.settleCloseOutcome(reason);
+      // Twilio ending the stream after a delivered hand-off is the hand-off
+      // taking effect, not the caller hanging up.
+      this.settleCloseOutcome(this.state.handoff === 'delivered' ? 'handoff_delivered' : reason);
     }
     if (this.state.audioIdleTimer) {
       clearTimeout(this.state.audioIdleTimer);

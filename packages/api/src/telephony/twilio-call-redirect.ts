@@ -15,8 +15,8 @@
  *
  * Mirrors the authenticated fetch + basic-auth pattern of
  * `outbound-call-service.ts` (no Twilio SDK call object). Best-effort: returns
- * `false` on any non-2xx, thrown error or timeout, and NEVER throws — the
- * caller decides the fallback.
+ * `false` on any non-2xx or thrown error, `'unknown'` on a timeout, and NEVER
+ * throws — the caller decides the fallback.
  */
 import { createLogger } from '../logging/logger';
 
@@ -47,6 +47,15 @@ export interface TwilioCallRedirectorDeps {
   timeoutMs?: number;
 }
 
+/**
+ * `true` — Twilio accepted the update; `false` — it was refused (non-2xx,
+ * network error, no credential), so it was NOT applied; `'unknown'` — the
+ * request timed out: Twilio may or may not have applied it (M1). A caller
+ * must not treat `'unknown'` as refused — on a hand-off a second update
+ * could tear down a `<Dial>` that is already ringing.
+ */
+export type CallUpdateResult = boolean | 'unknown';
+
 export type TwilioCallRedirector = (args: {
   callSid: string;
   accountSid?: string;
@@ -56,7 +65,7 @@ export type TwilioCallRedirector = (args: {
    * webhook (REST `Url=`) — the WS7 degrade.
    */
   twiml?: string;
-}) => Promise<boolean>;
+}) => Promise<CallUpdateResult>;
 
 export function createTwilioCallRedirector(deps: TwilioCallRedirectorDeps): TwilioCallRedirector {
   const apiBaseUrl = deps.apiBaseUrl ?? 'https://api.twilio.com/2010-04-01';
@@ -64,7 +73,7 @@ export function createTwilioCallRedirector(deps: TwilioCallRedirectorDeps): Twil
   const fetchImpl = deps.fetchImpl ?? fetch;
   const timeoutMs = deps.timeoutMs ?? TWILIO_CALL_UPDATE_TIMEOUT_MS;
 
-  return async ({ callSid, accountSid, twiml }): Promise<boolean> => {
+  return async ({ callSid, accountSid, twiml }): Promise<CallUpdateResult> => {
     const sid = accountSid ?? deps.defaultAccountSid;
     if (!sid || !callSid) return false;
 
@@ -102,12 +111,16 @@ export function createTwilioCallRedirector(deps: TwilioCallRedirectorDeps): Twil
       }
       return true;
     } catch (err) {
-      logger.warn('twilio call redirect: request failed', {
+      // AbortSignal.timeout rejects with a `TimeoutError`: the request may
+      // have reached Twilio and been applied — that is not a refusal.
+      const timedOut =
+        err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+      logger.warn(timedOut ? 'twilio call redirect: timed out — outcome unknown' : 'twilio call redirect: request failed', {
         callSid,
         kind,
         error: err instanceof Error ? err.message : String(err),
       });
-      return false;
+      return timedOut ? 'unknown' : false;
     }
   };
 }

@@ -190,6 +190,10 @@ async function harness(opts: {
   ttsFrames?: number;
   /** The whisper cache the turn host stores dispatcher whispers in. */
   whisperCache?: WhisperCache;
+  /** Per-request REST timeout of the Twilio client (default 3 s). */
+  restTimeoutMs?: number;
+  /** Whether fake Twilio ends the stream after applying an update (default true). */
+  twilioSendsStop?: boolean;
 } = {}) {
   const callSid = `CA-handoff-${++callSeq}`;
   const streamSid = `MZ-handoff-${callSeq}`;
@@ -222,16 +226,27 @@ async function harness(opts: {
   const session = store.findByCallSid(callSid)!;
 
   const twilio = opts.twilio ?? makeTwilioRest();
+  const ws = new FakeWs();
   const restRedirect = createTwilioCallRedirector({
     resolveAuthToken: async () => 'tok_secret',
     defaultAccountSid: 'AC_deploy',
     publicBaseUrl: PUBLIC_BASE_URL,
     apiBaseUrl: TWILIO_API,
-    fetchImpl: twilio.fetchImpl as unknown as typeof fetch,
+    ...(opts.restTimeoutMs !== undefined ? { timeoutMs: opts.restTimeoutMs } : {}),
+    // A1 — Twilio executing an accepted inline-TwiML update interrupts the
+    // <Connect><Stream>: it sends `stop` and closes the socket.
+    fetchImpl: (async (url: string, init: { body: string }) => {
+      const response = await twilio.fetchImpl(url, init);
+      if (response.ok && opts.twilioSendsStop !== false && new URLSearchParams(init.body).has('Twiml')) {
+        setImmediate(() => {
+          if (!ws.closed) ws.inboundJson({ event: 'stop', streamSid });
+        });
+      }
+      return response;
+    }) as unknown as typeof fetch,
   });
   const finalizeOnClose = vi.fn((s, reason: string, fx) => gather.finalizeTerminatedSession(s, fx, reason));
   const deepgram = makeStreamingProvider();
-  const ws = new FakeWs();
   const tts = makeTtsProvider(opts.ttsFrames);
   // Wired exactly as app.ts wires attachMediaStreamServer.
   const stream = new TwilioMediaStreamAdapter(
@@ -355,6 +370,63 @@ describe('realtime hand-off — escalation on a stream call reaches a human', ()
     // /dial-result — not this close — stamps the transferred call.
     expect(h.finalizeOnClose).not.toHaveBeenCalled();
     expect(h.session.terminalOutcome).toBeUndefined();
+  });
+
+  it('L4 — after Twilio accepts the transfer, the leg is released by Twilio, not closed by us first', async () => {
+    const h = await harness({ twilioSendsStop: false, extraDeps: () => ({ handoffStreamEndWaitMs: 150 }) });
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 40));
+    // Closing the socket before Twilio has switched the call to the new TwiML
+    // would end the call (nothing follows </Connect>).
+    expect(h.ws.closed).toBe(false);
+    // …but a missing `stop` cannot hold the leg open forever.
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+    expect(h.finalizeOnClose).not.toHaveBeenCalled();
+  });
+
+  /** A fetch that hangs until the client's timeout aborts it (a slow Twilio API). */
+  const hangUntilAborted = (_url: string, init: { signal?: AbortSignal }) =>
+    new Promise<{ ok: boolean; status: number }>((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(init.signal?.reason ?? new Error('aborted')));
+    });
+
+  it('M1 — a timed-out transfer that Twilio DID apply is not degraded, re-sent or stamped as a hang-up', async () => {
+    const twilio = makeTwilioRest();
+    twilio.fetchImpl.mockImplementationOnce(hangUntilAborted as never);
+    const h = await harness({ twilio, restTimeoutMs: 40, extraDeps: () => ({ handoffStreamEndWaitMs: 400 }) });
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+    // Twilio applied it, but its effect (the stream stopping) lands after our timeout.
+    setTimeout(() => h.ws.inboundJson({ event: 'stop', streamSid: h.streamSid }), 90);
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(h.twilio.degrades()).toHaveLength(0);
+    expect(h.twilio.transfers()).toHaveLength(1);
+    expect(h.finalizeOnClose).not.toHaveBeenCalled(); // /dial-result owns the stamp
+  });
+
+  it('M1 — a timed-out transfer that was NOT applied degrades only after confirming the stream is still ours', async () => {
+    const twilio = makeTwilioRest();
+    twilio.fetchImpl.mockImplementationOnce(hangUntilAborted as never);
+    const h = await harness({ twilio, restTimeoutMs: 40, extraDeps: () => ({ handoffStreamEndWaitMs: 200 }) });
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 100)); // past the timeout, inside the settle window
+    expect(h.twilio.degrades()).toHaveLength(0);
+
+    await vi.waitFor(() => expect(h.twilio.degrades()).toHaveLength(1));
+    expect(h.twilio.transfers()).toHaveLength(1); // never a second Dial update
   });
 
   it('caller silence while the transfer is in flight never triggers a reprompt over it', async () => {

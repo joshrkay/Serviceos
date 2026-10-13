@@ -158,13 +158,13 @@ describe('WS7 createTwilioCallRedirector', () => {
     expect(params.has('Url')).toBe(false);
   });
 
-  it('aborts a request Twilio does not answer within the timeout and returns false', async () => {
+  it("aborts a request Twilio does not answer within the timeout and reports 'unknown' (it may have been applied)", async () => {
     // A hung api.twilio.com must not hold a live caller: the request is
     // aborted at the bound and the caller's fallback runs.
     const fetchMock = vi.fn(
       (_url: string, init: { signal?: AbortSignal }) =>
         new Promise((_resolve, reject) => {
-          init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+          init.signal?.addEventListener('abort', () => reject(init.signal?.reason));
         }),
     );
     const redirect = createTwilioCallRedirector({
@@ -180,7 +180,7 @@ describe('WS7 createTwilioCallRedirector', () => {
       redirect({ callSid: CALL_SID, accountSid: ACCOUNT_SID, twiml: '<Response/>' }),
       new Promise((r) => setTimeout(() => r('still pending'), 1_000)),
     ]);
-    expect(outcome).toBe(false);
+    expect(outcome).toBe('unknown');
   });
 
   it('returns false (never throws) when resolveAuthToken throws', async () => {
