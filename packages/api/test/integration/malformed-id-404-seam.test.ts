@@ -163,7 +163,7 @@ describe('#1110 — malformed :id → 404 via notFoundOnMalformedId, at real Pos
       // marketing
       { router: 'marketing', method: 'post', path: (v) => `/api/marketing/campaigns/${v}/send`, body: {}, message: 'Campaign not found', unknownStatus: 404, technicianAllowed: false },
       // portal
-      { router: 'portal', method: 'delete', path: (v) => `/api/portal-sessions/${v}`, message: 'Portal session not found', unknownStatus: 404, technicianAllowed: true },
+      { router: 'portal', method: 'delete', path: (v) => `/api/portal-sessions/${v}`, message: 'Portal session not found', unknownStatus: 404, technicianAllowed: false },
       // recurring-jobs
       { router: 'recurring-jobs', method: 'get', path: (v) => `/api/recurring-jobs/${v}`, message: 'Recurring job not found', unknownStatus: 404, technicianAllowed: true },
       { router: 'recurring-jobs', method: 'get', path: (v) => `/api/recurring-jobs/${v}/occurrences`, message: 'Recurring job not found', unknownStatus: 404, technicianAllowed: true },
