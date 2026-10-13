@@ -357,6 +357,23 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
   }): Promise<void> => {
     logger.warn('Stripe capture exceeds recorded credit (unapplied capture)', { ...params });
     if (!deps.auditRepo) return;
+    // Review M1 — ONE unapplied-capture row per Stripe event. The capped
+    // branches audit BEFORE crediting, so a delivery that fails afterwards is
+    // redelivered by Stripe; that redelivery must not add a second (and, on
+    // the checkout path, wrong — "not_payable, credited 0") row for the same
+    // capture. Best-effort lookup: on a read failure we still audit.
+    const prior = await deps.auditRepo
+      .findByCorrelation(params.tenantId, params.providerReference)
+      .catch(() => []);
+    if (
+      prior.some(
+        (e) =>
+          e.eventType === 'payment.unapplied_capture' &&
+          (e.metadata as Record<string, unknown> | undefined)?.stripeEventId === params.eventId,
+      )
+    ) {
+      return;
+    }
     await deps.auditRepo
       .create(
         createAuditEvent({
@@ -1730,7 +1747,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 }
               } else {
                 const capped = invoice.amountDueCents;
-                const { invoice: creditedInvoice } = await recordPayment(
+                // Review M1 — audit the excess BEFORE the capped credit. The
+                // capped recordPayment COMMITS and then runs side effects
+                // whose failures bubble; Stripe's redelivery then never
+                // re-reaches this branch, so an audit written after it is
+                // lost and the excess sits at Stripe with no trail. The cap
+                // is already known here; the audit dedupes per Stripe event.
+                await auditUnappliedCapture({
+                  tenantId, invoiceId, eventId: event.id,
+                  providerReference: paymentIntentRef,
+                  capturedCents: amountTotal,
+                  creditedCents: capped,
+                  invoiceStatus: invoice.status,
+                  reason: 'capped_to_balance',
+                });
+                await recordPayment(
                   {
                     tenantId,
                     invoiceId,
@@ -1752,14 +1783,6 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 );
                 logger.info('Invoice paid at capped amount', {
                   tenantId, invoiceId, requested: amountTotal, paid: capped,
-                });
-                await auditUnappliedCapture({
-                  tenantId, invoiceId, eventId: event.id,
-                  providerReference: paymentIntentRef,
-                  capturedCents: amountTotal,
-                  creditedCents: capped,
-                  invoiceStatus: creditedInvoice.status,
-                  reason: 'capped_to_balance',
                 });
               }
             } else if (payErr.message.includes('status')) {
@@ -2098,7 +2121,19 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             // same intent-keyed reference, and audit the uncredited excess so
             // reconciliation can refund it.
             const capped = invoiceForCap.amountDueCents;
-            const { invoice: creditedInvoice } = await recordPayment(
+            // Review M1 — audit the excess BEFORE the capped credit: it
+            // COMMITS and then runs side effects whose failures bubble, and
+            // the redelivery short-circuits on the completed capped row, so an
+            // audit written afterwards would be lost. Dedupes per Stripe event.
+            await auditUnappliedCapture({
+              tenantId, invoiceId, eventId: event.id,
+              providerReference: piId,
+              capturedCents: amountCents,
+              creditedCents: capped,
+              invoiceStatus: invoiceForCap.status,
+              reason: 'capped_to_balance_payment_intent',
+            });
+            await recordPayment(
               {
                 tenantId,
                 invoiceId,
@@ -2120,14 +2155,6 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             );
             logger.info('Invoice paid at capped amount via payment_intent.succeeded', {
               tenantId, invoiceId, requested: amountCents, paid: capped, paymentIntentId: piId,
-            });
-            await auditUnappliedCapture({
-              tenantId, invoiceId, eventId: event.id,
-              providerReference: piId,
-              capturedCents: amountCents,
-              creditedCents: capped,
-              invoiceStatus: creditedInvoice.status,
-              reason: 'capped_to_balance_payment_intent',
             });
           } else if (
             payErr instanceof ValidationError &&
