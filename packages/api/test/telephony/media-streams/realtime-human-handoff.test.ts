@@ -351,6 +351,37 @@ describe('realtime hand-off — escalate_with_context', () => {
   });
 });
 
+// ─── (e) one hand-off per call ───────────────────────────────────────────────
+
+describe('realtime hand-off — idempotency', () => {
+  it('a second escalation turn while the first hand-off is pending never issues a second transfer', async () => {
+    const DIAL_A = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial action="${PUBLIC_BASE_URL}/api/telephony/dial-result?sid=x"><Number>+15125550111</Number></Dial></Response>`;
+    const DIAL_B = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial action="${PUBLIC_BASE_URL}/api/telephony/dial-result?sid=x"><Number>+15125550222</Number></Dial></Response>`;
+    const parked = [DIAL_A, DIAL_B];
+    let gatherRef: TwilioGatherAdapter | undefined;
+    const h = await harness({
+      // Each turn escalates and parks its own Dial (e.g. two immediate
+      // emergency dials walking the rotation), as the real producers do.
+      speechTurn: async ({ session }) => {
+        gatherRef!.setPendingTransferTwiml(session.id, parked.shift()!);
+        return [{ type: 'tts_play', payload: { text: 'Connecting you now.' } }];
+      },
+    });
+    gatherRef = h.gather;
+
+    h.say('gas is fine but the pipe burst');
+    await vi.waitFor(() => expect(h.ws.markNames().filter((n) => n.startsWith('silence-arm-'))).toHaveLength(1));
+    h.say('please hurry, the pipe burst');
+    await vi.waitFor(() => expect(h.ws.markNames().filter((n) => n.startsWith('silence-arm-'))).toHaveLength(2));
+    h.ws.ackAllMarks(h.streamSid);
+
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(h.twilio.transfers()).toHaveLength(1);
+    expect(h.twilio.transfers()[0].body.get('Twiml')).toBe(DIAL_A);
+  });
+});
+
 // ─── (d) the Gather transport keeps its own delivery ─────────────────────────
 
 describe('Gather transport — hand-off delivery unchanged', () => {
