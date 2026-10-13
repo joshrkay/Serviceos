@@ -41,6 +41,7 @@ import {
   GoogleBusinessAuthError,
   GoogleBusinessOAuthConfig,
   GoogleFetch,
+  boundedGoogleFetch,
   refreshAccessToken,
 } from './google-business-client';
 
@@ -206,7 +207,7 @@ export async function callWithGoogleBusinessAuthRetry<T>(
     const rotated = await refreshAccessToken(
       opts.config,
       opts.tokens.refreshToken,
-      opts.fetchFn ?? fetch,
+      opts.fetchFn ?? boundedGoogleFetch,
     );
     if (opts.store) {
       await opts.store.persistRotatedAccessToken(

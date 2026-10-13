@@ -29,8 +29,10 @@ export interface GoogleBusinessOAuthConfig {
 export type GoogleFetch = typeof fetch;
 
 /** Default when no fetch is injected: bounded at 10 s, so an unanswered
- *  Google call can't pin the request (see shared/timed-fetch). */
-const boundedGoogleFetch: GoogleFetch = timedFetch();
+ *  Google call can't pin the request (see shared/timed-fetch). Call sites
+ *  that thread a fetch through use this as THEIR default too — passing the
+ *  bare global `fetch` would bypass the bound. */
+export const boundedGoogleFetch: GoogleFetch = timedFetch();
 
 /** OAuth scope required for read access to GBP locations + reviews. */
 export const GOOGLE_BUSINESS_SCOPE = 'https://www.googleapis.com/auth/business.manage';
