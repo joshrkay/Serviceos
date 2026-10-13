@@ -95,7 +95,7 @@ describe('#1528 — estimate-reminder sweep channel', () => {
   it('emails the reminder to an email-only customer', async () => {
     const { result, delivery } = await sweepFor({ email: 'sam@example.com', primaryPhone: undefined });
 
-    expect(result).toEqual({ tenants: 1, reminders: 1, failed: 0 });
+    expect(result).toEqual({ tenants: 1, reminders: 1, failed: 0, deferred: 0 });
     expect(delivery.sentSms).toHaveLength(0);
     expect(delivery.sentEmails.map((m) => m.to)).toEqual(['sam@example.com']);
   });

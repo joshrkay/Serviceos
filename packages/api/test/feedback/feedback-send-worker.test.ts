@@ -24,6 +24,8 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import { createLogger } from '../../src/logging/logger';
 import { QueueMessage } from '../../src/queues/queue';
+import { createRecipientLocaleResolver } from '../../src/notifications/recipient-locale';
+import { InMemoryLocationRepository } from '../../src/locations/location';
 
 const TENANT = uuidv4();
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
@@ -54,7 +56,17 @@ function message(payload: FeedbackSendPayload): QueueMessage<FeedbackSendPayload
   };
 }
 
-async function setup(customerOverrides: Partial<Customer> = {}) {
+interface EnqueuedSend {
+  type: string;
+  payload: FeedbackSendPayload;
+  idempotencyKey: string | undefined;
+  options: { delaySeconds?: number } | undefined;
+}
+
+async function setup(
+  customerOverrides: Partial<Customer> = {},
+  opts: { now?: () => Date } = {},
+) {
   const customerRepo = new InMemoryCustomerRepository();
   const customerId = uuidv4();
   await customerRepo.create({
@@ -112,11 +124,24 @@ async function setup(customerOverrides: Partial<Customer> = {}) {
     dnc: dncRepo,
     auditRepo: new InMemoryAuditRepository(),
     enforcement: 'block',
+    ...(opts.now
+      ? {
+          quietHours: {
+            resolveRecipientLocale: createRecipientLocaleResolver({
+              settingsRepo,
+              locationRepo: new InMemoryLocationRepository(),
+            }),
+            now: opts.now,
+          },
+          logger: { info: () => undefined },
+        }
+      : {}),
   });
   const dispatcher = new GatingRecordingDispatcher(
     new MessageDeliveryFeedbackDispatcher(gated),
   );
 
+  const enqueued: EnqueuedSend[] = [];
   const worker = createFeedbackSendWorker({
     jobRepo,
     customerRepo,
@@ -124,9 +149,16 @@ async function setup(customerOverrides: Partial<Customer> = {}) {
     feedbackRequestRepo,
     dispatcher,
     publicBaseUrl: 'https://app.example.com/',
+    queue: {
+      send: async <T,>(type: string, payload: T, idempotencyKey?: string, options?: { delaySeconds?: number }) => {
+        enqueued.push({ type, payload: payload as FeedbackSendPayload, idempotencyKey, options });
+        return 'queued';
+      },
+    },
+    ...(opts.now ? { now: opts.now } : {}),
   });
 
-  return { worker, jobId, customerId, feedbackRequestRepo, dispatcher, dncRepo, rawProvider };
+  return { worker, jobId, customerId, feedbackRequestRepo, dispatcher, dncRepo, rawProvider, enqueued };
 }
 
 describe('feedback_send worker — happy path', () => {
@@ -201,5 +233,36 @@ describe('feedback_send worker — early returns', () => {
     const { worker, dispatcher } = await setup();
     await worker.handle(message({ tenantId: TENANT, jobId: uuidv4() }), logger);
     expect(dispatcher.sent).toHaveLength(0);
+  });
+});
+
+describe('feedback_send worker — recipient quiet hours (a review request is non-transactional)', () => {
+  // Tenant zone 'UTC' (setup); the 555 number and no service location leave the
+  // state unknown, so the conservative 20:00 close applies.
+  it('defers a 22:30 review request: nothing texted, the request kept, a delayed resume enqueued — which sends the same link', async () => {
+    let clock = new Date('2026-10-13T22:30:00Z');
+    const { worker, jobId, feedbackRequestRepo, rawProvider, enqueued } = await setup({}, { now: () => clock });
+
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger);
+
+    expect(rawProvider.sentSms).toHaveLength(0);
+    const kept = await feedbackRequestRepo.findByJob(TENANT, jobId);
+    expect(kept?.status).toBe('pending');
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toMatchObject({
+      type: 'feedback_send',
+      payload: { tenantId: TENANT, jobId, resumeRequestId: kept!.id },
+      // 08:00 the next morning, 9.5 h out.
+      options: { delaySeconds: 9.5 * 60 * 60 },
+    });
+    // A fresh key: the original message's key is still held until it completes.
+    expect(enqueued[0].idempotencyKey).not.toBe(`${TENANT}:${jobId}:feedback_send`);
+
+    clock = new Date('2026-10-14T08:00:00Z');
+    await worker.handle(message(enqueued[0].payload), logger);
+
+    expect(rawProvider.sentSms).toHaveLength(1);
+    expect(rawProvider.sentSms[0].body).toContain(`/feedback/${kept!.token}`);
+    expect((await feedbackRequestRepo.findByJob(TENANT, jobId))?.id).toBe(kept!.id);
   });
 });

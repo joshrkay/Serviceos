@@ -289,6 +289,7 @@ import { createSharpImageProcessor } from './files/image-processor';
 import { createImagePostProcessWorker } from './workers/image-post-process-worker';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
 import { PgQueue } from './queues/pg-queue';
+import { createRecipientLocaleResolver } from './notifications/recipient-locale';
 import { NoopFeedbackDispatcher, MessageDeliveryFeedbackDispatcher } from './feedback/dispatcher';
 import { MessageDeliveryProvider } from './notifications/delivery-provider';
 import { createMessageDeliveryProvider } from './notifications/delivery-provider-factory';
@@ -1562,6 +1563,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             : new InMemoryRecipientSmsVolumeLedger(),
           maxPerWindow: config.SMS_RECIPIENT_CAP_PER_WINDOW,
           windowHours: config.SMS_RECIPIENT_CAP_WINDOW_HOURS,
+        },
+        // Recipient-local quiet hours for NON-transactional customer texts
+        // (those tagged `quietHours: 'defer'` — thank-you, review request,
+        // automated estimate reminder): deferred, never dropped.
+        quietHours: {
+          resolveRecipientLocale: createRecipientLocaleResolver({ settingsRepo, locationRepo }),
         },
       })
     : null;
@@ -3010,6 +3017,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
     publicBaseUrl: config.publicOrigins.web,
+    // Re-schedules a review request deferred by recipient quiet hours.
+    queue,
   });
   workerRegistry.set(
     feedbackSendWorker.type,

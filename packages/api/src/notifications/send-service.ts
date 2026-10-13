@@ -10,8 +10,9 @@ import {
   EmailMessage,
   MessageDeliveryProvider,
   SmsMessage,
+  SmsQuietHoursPolicy,
 } from './delivery-provider';
-import { EmailSuppressedError, SmsSuppressedError } from './gated-message-delivery';
+import { EmailSuppressedError, SmsDeferredError, SmsSuppressedError } from './gated-message-delivery';
 import {
   renderEstimateEmail,
   renderEstimateSms,
@@ -64,6 +65,12 @@ export interface SendEstimateInput {
   recipientEmail?: string;
   customMessage?: string;
   idempotencyContext?: IdempotencyContext;
+  /**
+   * 'defer' for a non-transactional resend (the automatic reminder sweep).
+   * When every channel is held back by the recipient's quiet hours the send
+   * throws `SmsDeferredError` — nothing sent, nothing recorded.
+   */
+  quietHours?: SmsQuietHoursPolicy;
 }
 
 export interface SendInvoiceInput {
@@ -259,6 +266,7 @@ export class SendService {
           entityId: estimate.id,
           target,
           customerSmsConsent: customer.smsConsent,
+          ...(input.quietHours ? { quietHours: input.quietHours, customerId: customer.id } : {}),
           idempotencyKey: this.buildIdempotencyKey(
             'estimate',
             estimate.id,
@@ -305,6 +313,15 @@ export class SendService {
         );
       }
     });
+
+    // Every channel held back by quiet hours is "not sent yet", not a failure:
+    // surface the deferral itself so the caller keeps its work retryable.
+    const deferrals = results.flatMap((r) =>
+      r.status === 'rejected' && r.reason instanceof SmsDeferredError ? [r.reason] : [],
+    );
+    if (deferrals.length > 0 && deferrals.length === results.length) {
+      throw deferrals[0];
+    }
 
     if (sent.length === 0) {
       throw new ValidationError(
@@ -679,6 +696,10 @@ export class SendService {
      * true here. Undefined is treated as not-yet-asked — also blocked.
      */
     customerSmsConsent?: boolean;
+    /** Send-window policy for the SMS leg (see `SmsMessage.quietHours`). */
+    quietHours?: SmsQuietHoursPolicy;
+    /** Lets the gate resolve the recipient's service-location state. */
+    customerId?: string;
   }): Promise<SendResult['channelsSent'][number]> {
     // #1400 — a same-occasion retry (same entity, channel, recipient and
     // context inside the idempotency minute, e.g. a double-tapped Resend)
@@ -716,7 +737,11 @@ export class SendService {
           tenantId: args.tenantId,
           idempotencyKey: args.idempotencyKey,
           recipientClass: 'customer',
-          consent: { smsConsent: args.customerSmsConsent === true },
+          consent: {
+            smsConsent: args.customerSmsConsent === true,
+            ...(args.customerId ? { customerId: args.customerId } : {}),
+          },
+          ...(args.quietHours ? { quietHours: args.quietHours } : {}),
         });
         providerMessageId = result.providerMessageId;
         provider = result.provider;
@@ -730,6 +755,9 @@ export class SendService {
         provider = result.provider;
       }
     } catch (err) {
+      // A quiet-hours deferral is not an attempt: nothing went out and the
+      // same send is expected to succeed later, so no failed row.
+      if (err instanceof SmsDeferredError) throw err;
       // Audit the failed attempt before propagating, so support has a
       // record of every channel attempt (success or failure). A gate
       // suppression is recorded with provider='suppressed' (as before);

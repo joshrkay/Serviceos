@@ -223,6 +223,12 @@ describe('review-request sweep (US-345, DB-level)', () => {
       feedbackRequestRepo,
       dispatcher,
       publicBaseUrl: 'https://app.example.com',
+      // No quiet-hours window is wired on this gate, so nothing defers.
+      queue: {
+        send: async () => {
+          throw new Error('unexpected feedback_send resume');
+        },
+      },
     });
 
     // The sweep's own `queue.send` — wired to the REAL worker instead of a
