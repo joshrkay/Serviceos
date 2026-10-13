@@ -10,7 +10,7 @@
 import { Request, Response, Router } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { requireAuth, requireTenant } from '../middleware/auth';
+import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { CustomerRepository } from '../customers/customer';
 import { ContactRepository } from '../customers/contact';
 import { asyncRoute } from '../middleware/async-route';
@@ -119,7 +119,7 @@ export function createPortalRouter(deps: PortalRouterDeps): Router {
     return true;
   }
 
-  router.post('/', asyncRoute(async (req: Request, res: Response) => {
+  router.post('/', requirePermission('customers:update'), asyncRoute(async (req: Request, res: Response) => {
     const auth = (req as AuthenticatedRequest).auth!;
     const parsed = createSchema.parse(req.body ?? {});
     if (!(await validateMintTarget(res, auth.tenantId, parsed.customerId, parsed.contactId))) {
