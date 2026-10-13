@@ -5276,13 +5276,31 @@ export const MIGRATIONS = {
   // Backfill: pre-existing 'completed' jobs get review_request_sent_at =
   // COALESCE(completed_at, updated_at) so the first sweep after deploy doesn't
   // blast customers for jobs finished long ago.
+  //
+  // One-shot (2026-10-13): the runner has no ledger and re-runs every
+  // migration on every deploy, so the backfill originally ran on EVERY boot —
+  // stamping every job still in 'completed' and inside its 24h window as
+  // already-requested, silently suppressing its review request. It now runs
+  // only in the statement that first adds review_request_sent_at; identical
+  // on a fresh database, a no-op once the column exists. Pinned by
+  // test/integration/migration-replay-populated-db.test.ts.
   '214_review_request_sweep': `
-    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS review_request_sent_at TIMESTAMPTZ;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'jobs'
+           AND column_name = 'review_request_sent_at'
+      ) THEN
+        ALTER TABLE jobs ADD COLUMN review_request_sent_at TIMESTAMPTZ;
+        UPDATE jobs
+          SET review_request_sent_at = COALESCE(completed_at, updated_at)
+          WHERE status = 'completed'
+            AND review_request_sent_at IS NULL;
+      END IF;
+    END $$;
     ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS send_review_request BOOLEAN NOT NULL DEFAULT TRUE;
-    UPDATE jobs
-      SET review_request_sent_at = COALESCE(completed_at, updated_at)
-      WHERE status = 'completed'
-        AND review_request_sent_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_jobs_review_request_eligibility
       ON jobs (tenant_id, completed_at)
       WHERE review_request_sent_at IS NULL AND completed_at IS NOT NULL;

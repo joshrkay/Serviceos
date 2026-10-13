@@ -25,11 +25,16 @@ import { PgCallMeBackRepository } from '../../src/voice/call-me-back/pg-call-me-
 import { PgVoiceApprovalPinLockAlertRepository } from '../../src/settings/pg-voice-approval-pin-lock-alert';
 import { createPinLockAlertRetryWorker } from '../../src/workers/pin-lock-alert-retry';
 import { PgUserRepository } from '../../src/users/pg-user';
+import { PgJobRepository } from '../../src/jobs/pg-job';
+import { PgJobTimelineRepository } from '../../src/jobs/pg-job-lifecycle';
+import { transitionJobStatus } from '../../src/jobs/job-lifecycle';
+import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
 import type { QueueMessage } from '../../src/queues/queue';
 import { createLogger } from '../../src/logging/logger';
 import { createTestTenant, ensureRlsRuntimeRole, type TestTenant } from './shared';
 
 const silentLogger = createLogger({ service: 'test', environment: 'test', level: 'error' });
+const HOUR_MS = 60 * 60 * 1000;
 
 /**
  * Every invariant the corpus RELAXED after first creating it: a row the final
@@ -60,7 +65,7 @@ async function insertProposal(db: Pool, tenant: TestTenant, status = 'draft'): P
   return rows[0].id;
 }
 
-async function insertInvoice(db: Pool, tenant: TestTenant): Promise<string> {
+async function insertJob(db: Pool, tenant: TestTenant): Promise<string> {
   const n = crypto.randomUUID().slice(0, 8);
   const customer = await db.query<{ id: string }>(
     `INSERT INTO customers (tenant_id, display_name, created_by)
@@ -77,10 +82,15 @@ async function insertInvoice(db: Pool, tenant: TestTenant): Promise<string> {
      VALUES ($1, $2, $3, $4, 'Replay job', $5) RETURNING id`,
     [tenant.tenantId, customer.rows[0].id, location.rows[0].id, `J-${n}`, tenant.userId],
   );
+  return job.rows[0].id;
+}
+
+async function insertInvoice(db: Pool, tenant: TestTenant): Promise<string> {
+  const jobId = await insertJob(db, tenant);
   const invoice = await db.query<{ id: string }>(
     `INSERT INTO invoices (tenant_id, job_id, invoice_number, created_by)
      VALUES ($1, $2, $3, $4) RETURNING id`,
-    [tenant.tenantId, job.rows[0].id, `INV-${n}`, tenant.userId],
+    [tenant.tenantId, jobId, `INV-${crypto.randomUUID().slice(0, 8)}`, tenant.userId],
   );
   return invoice.rows[0].id;
 }
@@ -422,6 +432,43 @@ describe('Postgres integration — migration corpus replays over a populated dat
       const owner = await users.findById(tenant.tenantId, tenant.userId);
       expect(owner?.role).toBe('owner');
       expect(owner?.canFieldServe).toBe(false);
+    });
+
+    it('a job completed before a deploy still gets its 24h review request (214)', async () => {
+      const tenant = await createTestTenant(pool);
+      await pool.query(
+        `INSERT INTO tenant_settings (tenant_id, business_name) VALUES ($1, 'Replay Co')`,
+        [tenant.tenantId],
+      );
+      const jobId = await insertJob(pool, tenant);
+      const jobs = new PgJobRepository(pool);
+      const timeline = new PgJobTimelineRepository(pool);
+      // A tech works the job through the governed lifecycle and completes it.
+      for (const status of ['scheduled', 'in_progress', 'completed'] as const) {
+        await transitionJobStatus(tenant.tenantId, jobId, status, tenant.userId, 'owner', jobs, timeline);
+      }
+
+      // Deploy N+1 lands inside the 24h window.
+      await deploy(pool);
+
+      const enqueued: Array<{ type: string; payload: unknown }> = [];
+      await runReviewRequestSweep({
+        pool,
+        jobRepo: jobs,
+        queue: {
+          send: async (type: string, payload: unknown) => {
+            enqueued.push({ type, payload });
+            return 'queued';
+          },
+        },
+        logger: silentLogger,
+        now: () => new Date(Date.now() + 25 * HOUR_MS),
+      });
+
+      expect(enqueued).toContainEqual({
+        type: 'feedback_send',
+        payload: { tenantId: tenant.tenantId, jobId },
+      });
     });
   });
 });

@@ -366,7 +366,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // PRD US-340+US-341 — reminder cadence column default → [24, 2].
   ['213_tenant_settings_reminder_offsets_default', '451325d4c247a81f0b0d60b015b7af26329f38918bde6b579d40bb94e3a26668'],
   // PRD US-345 — 24h post-completion review-request sweep columns + backfill.
-  ['214_review_request_sweep', '3a843fa5148f8a2ce89fd5ea37647c2e29f0c0fa9d74d821c3f1b5a1afc37fc2'],
+  // Replay-clobber fix (2026-10-13): the review_request_sent_at backfill re-ran
+  // on every deploy (no ledger), suppressing the 24h request for every job still
+  // in 'completed'. It now runs only when the column is first added.
+  ['214_review_request_sweep', '94ea9fd29d9f895e2f8b098a1493acdd5a9ccd5af46214f6b69cba7d998591a0'],
   // Beta-verify fix — proposals.claimed_by UUID→TEXT (worker label, not a uuid);
   // the type mismatch broke proposal execution entirely.
   ['215_proposals_claimed_by_text', '35ffa973504fd016a63c3ef2e333de24070808889cf2c7159b34ee3c09857afa'],
