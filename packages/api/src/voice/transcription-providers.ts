@@ -1,5 +1,6 @@
 import NodeWebSocket from 'ws';
 import { TranscriptionProvider } from './voice-service';
+import type { DownloadUrlPolicy, DownloadUrlRejection } from '../files/download-url-policy';
 
 export type FetchLike = typeof fetch;
 
@@ -114,6 +115,38 @@ export class WhisperClientError extends Error {
   }
 }
 
+/**
+ * H2 — the audio URL is not one the configured storage provider mints, so it
+ * is never fetched. Non-retriable: the same URL is refused on every attempt.
+ * The message names the rule, never the URL (it becomes the recording's
+ * user-visible errorMessage).
+ */
+export class AudioUrlRejectedError extends Error {
+  readonly code = 'AUDIO_URL_REJECTED';
+  readonly retriable = false;
+  constructor(public readonly reason: DownloadUrlRejection) {
+    super(`Audio URL refused: not a download URL of the configured storage (${reason})`);
+    this.name = 'AudioUrlRejectedError';
+  }
+}
+
+export interface WhisperTranscriptionProviderOptions {
+  apiKey: string;
+  /**
+   * H2 — only URLs this policy accepts are fetched. Required, no default:
+   * production builds it from the storage config (createStorageProvider's
+   * `downloadUrlPolicy`), so a missing wire is a compile error, not an
+   * open fetch.
+   */
+  audioUrlPolicy: DownloadUrlPolicy;
+  model?: string;
+  fetchImpl?: FetchLike;
+  timeoutMs?: number;
+  maxBytes?: number;
+  /** Where audio-fetch diagnostics go (the URL never goes into an error). */
+  logger?: Pick<Console, 'warn'>;
+}
+
 export interface WhisperTranscribeOptions {
   /** Optional ISO-639-1 language hint. P11-002: 'en' / 'es' threaded
    *  through from the voice session's detected language. */
@@ -121,25 +154,51 @@ export interface WhisperTranscribeOptions {
 }
 
 export class WhisperTranscriptionProvider implements TranscriptionProvider {
-  constructor(
-    private readonly apiKey: string,
-    private readonly model: string = 'whisper-1',
-    private readonly fetchImpl: FetchLike = fetch,
-    private readonly timeoutMs: number = 30_000,
-    private readonly maxBytes: number = WHISPER_MAX_BYTES
-  ) {}
+  private readonly apiKey: string;
+  private readonly audioUrlPolicy: DownloadUrlPolicy;
+  private readonly model: string;
+  private readonly fetchImpl: FetchLike;
+  private readonly timeoutMs: number;
+  private readonly maxBytes: number;
+  private readonly logger: Pick<Console, 'warn'>;
+
+  constructor(options: WhisperTranscriptionProviderOptions) {
+    this.apiKey = options.apiKey;
+    this.audioUrlPolicy = options.audioUrlPolicy;
+    this.model = options.model ?? 'whisper-1';
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.timeoutMs = options.timeoutMs ?? 30_000;
+    this.maxBytes = options.maxBytes ?? WHISPER_MAX_BYTES;
+    this.logger = options.logger ?? console;
+  }
 
   async transcribe(
     audioUrl: string,
     options: WhisperTranscribeOptions = {}
   ): Promise<TranscriptionResult> {
-    // 1) Fetch audio bytes from the signed URL.
-    const audioRes = await this.fetchImpl(audioUrl);
+    // 0) H2 — never fetch a URL the configured storage did not mint.
+    const rejection = this.audioUrlPolicy.rejectionFor(audioUrl);
+    if (rejection) {
+      this.logger.warn('[transcription] audio URL refused by storage policy', {
+        reason: rejection,
+        audio: withoutQuery(audioUrl),
+      });
+      throw new AudioUrlRejectedError(rejection);
+    }
+
+    // 1) Fetch audio bytes from the signed URL — never redirected: the
+    //    policy vetted THIS URL, not wherever a 3xx points (storage
+    //    presigned GETs answer directly).
+    const audioRes = await this.fetchImpl(audioUrl, { redirect: 'error' });
     if (!audioRes.ok) {
-      throw new WhisperClientError(
-        audioRes.status,
-        `Failed to fetch audio from ${audioUrl}: HTTP ${audioRes.status}`
-      );
+      // H2 — never the URL: this message becomes the recording's
+      // user-visible errorMessage, and the URL is a presigned secret.
+      await audioRes.body?.cancel().catch(() => undefined);
+      this.logger.warn('[transcription] audio fetch failed', {
+        status: audioRes.status,
+        audio: withoutQuery(audioUrl),
+      });
+      throw new WhisperClientError(audioRes.status, `Failed to fetch audio: HTTP ${audioRes.status}`);
     }
     const audioBlob = await audioRes.blob();
 
@@ -206,6 +265,16 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
         processedAt: new Date().toISOString(),
       },
     };
+  }
+}
+
+/** H2 — origin + path only: a presigned URL's query string is its signature. */
+function withoutQuery(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return '<unparseable url>';
   }
 }
 
@@ -501,16 +570,22 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
  */
 export function createWhisperTranscriptionProvider(
   env: { OPENAI_API_KEY?: string; AI_PROVIDER_API_KEY?: string; WHISPER_MODEL?: string },
-  deps: { fetchImpl?: FetchLike; logger?: Pick<Console, 'warn'> } = {}
+  deps: {
+    /** H2 — createStorageProvider(...).downloadUrlPolicy in app.ts. */
+    audioUrlPolicy: DownloadUrlPolicy;
+    fetchImpl?: FetchLike;
+    logger?: Pick<Console, 'warn'>;
+  }
 ): TranscriptionProvider {
   const logger = deps.logger ?? console;
   const apiKey = env.OPENAI_API_KEY || env.AI_PROVIDER_API_KEY;
   if (apiKey) {
-    return new WhisperTranscriptionProvider(
+    return new WhisperTranscriptionProvider({
       apiKey,
-      env.WHISPER_MODEL ?? 'whisper-1',
-      deps.fetchImpl
-    );
+      audioUrlPolicy: deps.audioUrlPolicy,
+      model: env.WHISPER_MODEL ?? 'whisper-1',
+      fetchImpl: deps.fetchImpl,
+    });
   }
   logger.warn(
     '[transcription] Neither OPENAI_API_KEY nor AI_PROVIDER_API_KEY set — ' +

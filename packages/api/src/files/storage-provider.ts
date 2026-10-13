@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { ObjectMetadata, StorageProvider } from './file-service';
+import { createDownloadUrlPolicy, originOf, type DownloadUrlPolicy } from './download-url-policy';
 
 export interface S3StorageConfig {
   bucket: string;
@@ -401,6 +402,12 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
    * and the secret to verify its tokens with (#1273).
    */
   devStorageSecret?: string;
+  /**
+   * H2 — the allowlist of URLs `provider.generateDownloadUrl` mints, for
+   * the workers that GET a stored file by URL (transcription). Built here,
+   * from the same config as the provider, so the two cannot disagree.
+   */
+  downloadUrlPolicy: DownloadUrlPolicy;
 } {
   const {
     STORAGE_BUCKET,
@@ -432,6 +439,13 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
       }),
       bucket: STORAGE_BUCKET!,
       mode: 's3',
+      // generateDownloadUrl serves STORAGE_PUBLIC_URL when set, else a
+      // path-style presign on the endpoint host (pathStyle defaults to true
+      // and is not configurable from env).
+      downloadUrlPolicy: createDownloadUrlPolicy({
+        allowedOrigins: [originOf(STORAGE_PUBLIC_URL || STORAGE_ENDPOINT!) ?? ''],
+        productionLike: isProductionLikeEnv(NODE_ENV),
+      }),
     };
   }
 
@@ -455,5 +469,11 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
     bucket,
     mode: 'dev',
     devStorageSecret,
+    // In a prod-like env (STORAGE_ENABLED=false) the /storage-dev receiver
+    // is never mounted, so there is no legitimate dev URL to fetch at all.
+    downloadUrlPolicy: createDownloadUrlPolicy({
+      allowedOrigins: isProductionLikeEnv(NODE_ENV) ? [] : [originOf(publicUrlBase) ?? ''],
+      productionLike: isProductionLikeEnv(NODE_ENV),
+    }),
   };
 }
