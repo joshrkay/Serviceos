@@ -510,10 +510,14 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
   // R2_PUBLIC_URL is intentionally NOT required: S3StorageProvider
   // falls back to presigned GET URLs when publicUrlBase is unset
   // (see files/storage-provider.ts:159), so storage works without it.
-  if (storageEnabled && !resolveStorageConfig(env).ok) {
-    missing.push('R2_ACCOUNT_ID (or set STORAGE_ENABLED=false)');
-    missing.push('R2_ACCESS_KEY_ID (or set STORAGE_ENABLED=false)');
-    missing.push('R2_SECRET_ACCESS_KEY (or set STORAGE_ENABLED=false)');
+  if (storageEnabled) {
+    const storage = resolveStorageConfig(env);
+    if (!storage.ok) {
+      missing.push(
+        `object storage is not configured — missing ${storage.missing.join(', ')} ` +
+          '(or set STORAGE_ENABLED=false: uploads, recordings and MMS photos are then NOT persisted)'
+      );
+    }
   }
 
   // Voice Media Streams (Twilio bidirectional audio) require a raw-PCM-capable

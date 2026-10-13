@@ -38,7 +38,12 @@ export interface ResolvedStorageConfig {
 
 export type StorageConfigResolution =
   | { ok: true; config: ResolvedStorageConfig }
-  | { ok: false };
+  /**
+   * `missing` names only what is still unresolved, canonical name first with
+   * its alias in parentheses, in a stable bucket → endpoint → region → keys
+   * order — ready to splice into a boot error.
+   */
+  | { ok: false; missing: string[] };
 
 /** Mirrors the `R2_BUCKET` default in shared/config.ts's schema. */
 const DEFAULT_R2_BUCKET = 'serviceos-uploads';
@@ -56,7 +61,13 @@ export function resolveStorageConfig(env: StorageConfigEnv): StorageConfigResolu
   const secretAccessKey = env.STORAGE_SECRET_ACCESS_KEY || env.R2_SECRET_ACCESS_KEY;
 
   if (!bucket || !endpoint || !region || !accessKeyId || !secretAccessKey) {
-    return { ok: false };
+    const missing: string[] = [];
+    if (!bucket) missing.push('STORAGE_BUCKET (or R2_BUCKET)');
+    if (!endpoint) missing.push('STORAGE_ENDPOINT (or R2_ACCOUNT_ID)');
+    if (!region) missing.push('STORAGE_REGION');
+    if (!accessKeyId) missing.push('STORAGE_ACCESS_KEY_ID (or R2_ACCESS_KEY_ID)');
+    if (!secretAccessKey) missing.push('STORAGE_SECRET_ACCESS_KEY (or R2_SECRET_ACCESS_KEY)');
+    return { ok: false, missing };
   }
   return { ok: true, config: { bucket, endpoint, region, accessKeyId, secretAccessKey } };
 }

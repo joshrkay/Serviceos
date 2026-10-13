@@ -129,6 +129,59 @@ describe('object-storage env contract (validator and factory agree)', () => {
       expect(() => loadConfig({ ...PROD_BASE, ...both })).not.toThrow();
     });
   });
+
+  describe('slice 3 — nothing (or a partial set) configured and no opt-out', () => {
+    const failsBoot = (env: Record<string, string>): string => {
+      try {
+        loadConfig({ ...PROD_BASE, ...env });
+      } catch (e) {
+        return (e as Error).message;
+      }
+      throw new Error('expected loadConfig to throw');
+    };
+    const factoryFails = (env: Record<string, string>): string => {
+      try {
+        createStorageProvider({ NODE_ENV: 'production', ...env });
+      } catch (e) {
+        return (e as Error).message;
+      }
+      throw new Error('expected createStorageProvider to throw');
+    };
+
+    it('boot validation names every canonical variable, its R2 alias, and the opt-out', () => {
+      const msg = failsBoot({});
+      expect(msg).toMatch(
+        /STORAGE_BUCKET[\s\S]*STORAGE_ENDPOINT[\s\S]*STORAGE_REGION[\s\S]*STORAGE_ACCESS_KEY_ID[\s\S]*STORAGE_SECRET_ACCESS_KEY/
+      );
+      expect(msg).toMatch(/R2_ACCOUNT_ID[\s\S]*R2_ACCESS_KEY_ID[\s\S]*R2_SECRET_ACCESS_KEY/);
+      expect(msg).toContain('STORAGE_ENABLED=false');
+    });
+
+    it('the factory fails with the same names (validator and factory cannot disagree)', () => {
+      const msg = factoryFails({});
+      expect(msg).toMatch(/Storage configuration missing/);
+      expect(msg).toMatch(
+        /STORAGE_BUCKET[\s\S]*STORAGE_ENDPOINT[\s\S]*STORAGE_REGION[\s\S]*STORAGE_ACCESS_KEY_ID[\s\S]*STORAGE_SECRET_ACCESS_KEY/
+      );
+    });
+
+    it('a partial STORAGE_* set names only what is still missing', () => {
+      const partial = { STORAGE_BUCKET: 'b', STORAGE_ENDPOINT: 'https://s3.example.com' };
+      for (const msg of [failsBoot(partial), factoryFails(partial)]) {
+        expect(msg).toMatch(/STORAGE_REGION/);
+        expect(msg).toMatch(/STORAGE_ACCESS_KEY_ID/);
+        expect(msg).toMatch(/STORAGE_SECRET_ACCESS_KEY/);
+        expect(msg).not.toMatch(/STORAGE_BUCKET|STORAGE_ENDPOINT/);
+      }
+    });
+
+    it('an R2 account id alone names only the missing key pair', () => {
+      const msg = failsBoot({ R2_ACCOUNT_ID: 'acct123' });
+      expect(msg).toMatch(/STORAGE_ACCESS_KEY_ID/);
+      expect(msg).toMatch(/STORAGE_SECRET_ACCESS_KEY/);
+      expect(msg).not.toMatch(/STORAGE_BUCKET|STORAGE_ENDPOINT|STORAGE_REGION|R2_ACCOUNT_ID/);
+    });
+  });
 });
 
 // Referenced by later slices; imported here so each slice only adds `it`s.

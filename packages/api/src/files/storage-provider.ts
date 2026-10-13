@@ -422,7 +422,8 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
   const storageOptedOut = STORAGE_ENABLED === 'false';
   if (isProductionLikeEnv(NODE_ENV) && !storageOptedOut) {
     throw new Error(
-      'Storage configuration missing: set STORAGE_BUCKET, STORAGE_ENDPOINT, STORAGE_REGION, STORAGE_ACCESS_KEY_ID, STORAGE_SECRET_ACCESS_KEY'
+      `Storage configuration missing: set ${resolved.missing.join(', ')} ` +
+        '(or STORAGE_ENABLED=false to run without persisted uploads and recordings)'
     );
   }
 
