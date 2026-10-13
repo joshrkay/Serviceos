@@ -9,7 +9,7 @@
  * secret is confirmed browser-side in Stripe Elements.
  */
 import { StripeFetch, boundedStripeFetch } from './stripe-payment-intent';
-import { deterministicIdempotencyKey } from '../shared/idempotency-key';
+import { sendIdempotentCreate } from '../shared/idempotency-key';
 
 export interface StripeAccountConfig {
   apiKey: string;
@@ -89,20 +89,21 @@ export async function createSetupIntent(
     if (input.name) customerParams.name = input.name;
     const customerBody = new URLSearchParams(customerParams).toString();
     // A create whose response is lost leaves the portal with no customer id;
-    // the retry replays the same Stripe customer instead of minting another.
-    // Scoped by account too: the customer lives on the connected account.
+    // the retry replays the same Stripe customer instead of minting another
+    // (key policy: sendIdempotentCreate). Scoped by account too: the customer
+    // lives on the connected account. A retry in a later key window mints a
+    // second, card-less customer — harmless; only the card's customer is kept.
     const accountScope = config.stripeAccountId || 'platform';
-    const res = await fetcher('https://api.stripe.com/v1/customers', {
-      method: 'POST',
-      headers: buildHeaders(
-        config,
-        deterministicIdempotencyKey(
-          `customer:${input.tenantId}:saved-card:${input.customerId}:${accountScope}`,
-          customerBody,
-        ),
-      ),
-      body: customerBody,
-    });
+    const res = await sendIdempotentCreate(
+      `customer:${input.tenantId}:saved-card:${input.customerId}:${accountScope}`,
+      customerBody,
+      (idempotencyKey) =>
+        fetcher('https://api.stripe.com/v1/customers', {
+          method: 'POST',
+          headers: buildHeaders(config, idempotencyKey),
+          body: customerBody,
+        }),
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new Error(`Stripe customers.create failed (${res.status}): ${text}`);

@@ -1,7 +1,7 @@
 import type { Pool } from 'pg';
 import { AppError, ValidationError, NotFoundError } from '../shared/errors';
 import { timedFetch } from '../shared/timed-fetch';
-import { deterministicIdempotencyKey } from '../shared/idempotency-key';
+import { sendIdempotentCreate } from '../shared/idempotency-key';
 import { CALL_PLAN_USAGE, OVERAGE_CENTS_PER_MINUTE } from './call-usage-pricing';
 
 /**
@@ -899,14 +899,13 @@ export class BillingService {
    *
    * Race-tolerant: when two callers see stripe_customer_id IS NULL at
    * the same time, only the first UPDATE wins; the losing caller
-   * re-reads the winner's id and uses it. The create carries a
-   * deterministic Idempotency-Key (tenant + parameters), so a retry
-   * after a lost response — or a duplicate from the same owner — gets
-   * the SAME Stripe customer back (Stripe answers a duplicate that
-   * overlaps the first in flight with 409, which surfaces as a failed
-   * create). Callers with different emails still mint distinct
-   * customers; the loser's is a no-op orphan — no subscription, no
-   * payment method, and Stripe doesn't bill empty customers.
+   * re-reads the winner's id and uses it. The create carries an
+   * Idempotency-Key (tenant + parameters + 10-minute window), so a retry
+   * after a lost response — or a double-click from the same owner —
+   * gets the SAME Stripe customer back. Callers with different emails,
+   * or a retry in a later window, mint distinct customers; the loser's
+   * is a no-op orphan — no subscription, no payment method, and Stripe
+   * doesn't bill empty customers.
    */
   private async getOrCreateStripeCustomer(
     tenantId: string,
@@ -932,21 +931,26 @@ export class BillingService {
       email: ownerEmail,
       'metadata[tenant_id]': tenantId,
     });
-    const customerRes = await fetchFn('https://api.stripe.com/v1/customers', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        // A create whose response is lost (timeout, dropped socket) leaves no
-        // id on the tenant row; the retry replays the same customer rather
-        // than minting a second one.
-        'Idempotency-Key': deterministicIdempotencyKey(
-          `customer:${tenantId}:subscription`,
-          customerParams,
-        ),
-      },
-      body: customerParams,
-    });
+    // A create whose response is lost (timeout, dropped socket) leaves no id
+    // on the tenant row; the retry replays the same customer rather than
+    // minting a second one (see sendIdempotentCreate for the key policy). A
+    // retry in a later key window can mint a second customer: the guarded
+    // claim below keeps the first persisted one, the other stays an empty
+    // orphan.
+    const customerRes = await sendIdempotentCreate(
+      `customer:${tenantId}:subscription`,
+      customerParams,
+      (idempotencyKey) =>
+        fetchFn('https://api.stripe.com/v1/customers', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Idempotency-Key': idempotencyKey,
+          },
+          body: customerParams,
+        }),
+    );
     if (!customerRes.ok) {
       const body = await customerRes.text();
       throw new Error(`Stripe customer creation failed (${customerRes.status}): ${body}`);

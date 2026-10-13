@@ -1,7 +1,7 @@
 import type { Pool } from 'pg';
 import { ValidationError, NotFoundError, AppError } from '../shared/errors';
 import { timedFetch } from '../shared/timed-fetch';
-import { deterministicIdempotencyKey } from '../shared/idempotency-key';
+import { sendIdempotentCreate } from '../shared/idempotency-key';
 
 /**
  * Tier 4 (Payment methods — PR 1). Stripe Connect onboarding service.
@@ -269,21 +269,26 @@ export class StripeConnectService {
         'capabilities[transfers][requested]': 'true',
         'metadata[tenant_id]': input.tenantId,
       });
-      const accountRes = await fetchFn('https://api.stripe.com/v1/accounts', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-          // A create whose response is lost (timeout, dropped socket) persists
-          // nothing; the retry must get the SAME Express account back, or the
-          // owner can finish KYC on an account no tenant row points at.
-          'Idempotency-Key': deterministicIdempotencyKey(
-            `connect-account:${input.tenantId}`,
-            accountParams,
-          ),
-        },
-        body: accountParams,
-      });
+      // A create whose response is lost (timeout, dropped socket) persists
+      // nothing; the retry gets the SAME Express account back (key policy:
+      // sendIdempotentCreate). A retry in a later key window can create a
+      // second account; the guarded claim below keeps the first persisted
+      // one and every onboarding link points at it, so the other is never
+      // onboarded.
+      const accountRes = await sendIdempotentCreate(
+        `connect-account:${input.tenantId}`,
+        accountParams,
+        (idempotencyKey) =>
+          fetchFn('https://api.stripe.com/v1/accounts', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Idempotency-Key': idempotencyKey,
+            },
+            body: accountParams,
+          }),
+      );
       if (!accountRes.ok) {
         throw connectStripeFailure('account create', accountRes.status, await accountRes.text());
       }

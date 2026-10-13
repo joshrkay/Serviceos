@@ -17,6 +17,8 @@ import {
   fetchConnectAccountBusinessAddress,
 } from '../../src/payments/stripe-terminal';
 import { createSetupIntent, retrievePaymentMethod } from '../../src/payments/stripe-saved-card';
+import type { StripeFetch } from '../../src/payments/stripe-payment-intent';
+import { fakeStripe } from '../helpers/fake-stripe';
 import { fakeJson, hangingFetch, settleWithin, useProviderClock } from '../helpers/hanging-fetch';
 
 const TENANT = '55555555-5555-4555-8555-555555555555';
@@ -98,39 +100,65 @@ describe('Stripe payment wrappers — bounded when no fetcher is passed', () => 
 });
 
 describe('createSetupIntent — the Stripe customer create is idempotent per customer', () => {
-  /** The customer create succeeded at Stripe but its response was lost. */
-  const lostCustomerCreate = () =>
-    vi.fn(async (input: string, _init?: { headers: Record<string, string> }) =>
-      input.endsWith('/v1/customers') ? fakeJson({ error: { message: 'lost' } }, 500) : fakeJson({}),
-    );
-  const customerKeys = (fetchFn: ReturnType<typeof lostCustomerCreate>) =>
-    fetchFn.mock.calls
-      .filter(([url]) => url.endsWith('/v1/customers'))
-      .map(([, init]) => init?.headers['Idempotency-Key']);
-  const setup = (fetchFn: ReturnType<typeof lostCustomerCreate>, customerId: string, stripeAccountId?: string) =>
+  beforeEach(() => useProviderClock());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  /** Stripe with documented idempotency; the first customer create can be slow or fail. */
+  function stripeForCardSetup(firstCustomer: { status?: number; delayMs?: number } = {}) {
+    let n = 0;
+    return fakeStripe((call) => {
+      if (call.path === '/v1/customers') {
+        n += 1;
+        if (n === 1 && firstCustomer.status) return { status: firstCustomer.status, body: { error: { message: 'boom' } } };
+        return { body: { id: `cus_${n}` }, delayMs: n === 1 ? firstCustomer.delayMs : undefined };
+      }
+      return { body: { id: 'seti_1', client_secret: 'seti_1_secret' } };
+    });
+  }
+  const setup = (customerId: string, stripeAccountId?: string, fetcher?: StripeFetch) =>
     createSetupIntent(
       { apiKey: 'sk_test', stripeAccountId },
       { tenantId: TENANT, customerId, email: 'pat@x.com', name: 'Pat' },
-      fetchFn,
-    ).catch(() => undefined);
+      fetcher,
+    );
 
-  it('a retried card setup sends the same Idempotency-Key, scoped to the tenant and customer', async () => {
-    const fetchFn = lostCustomerCreate();
-    await setup(fetchFn, 'c_1', 'acct_t');
-    await setup(fetchFn, 'c_1', 'acct_t');
+  it('a card setup whose customer create answer was lost is retried onto the same Stripe customer', async () => {
+    const stripe = stripeForCardSetup({ delayMs: 15_000 });
+    vi.stubGlobal('fetch', stripe.fetchFn);
 
-    const [first, retry] = customerKeys(fetchFn);
-    expect(first).toMatch(new RegExp(`^customer:${TENANT}:saved-card:c_1:`));
-    expect(retry).toBe(first);
+    const first = await settleWithin(setup('c_1', 'acct_t'), 15_000);
+    const retry = await settleWithin(setup('c_1', 'acct_t'), 0);
+
+    expect(first.status).toBe('rejected');
+    expect(retry).toMatchObject({ status: 'fulfilled', value: { stripeCustomerId: 'cus_1' } });
+    expect(stripe.executedOn('POST', '/v1/customers')).toHaveLength(1);
+    expect(stripe.executedOn('POST', '/v1/customers')[0].key).toMatch(
+      new RegExp(`^customer:${TENANT}:saved-card:c_1:acct_t:`),
+    );
+  });
+
+  it('a Stripe error on the customer create does not stick to the next card setup', async () => {
+    const stripe = stripeForCardSetup({ status: 500 });
+    vi.stubGlobal('fetch', stripe.fetchFn);
+
+    const first = await settleWithin(setup('c_1', 'acct_t'), 0);
+    const retry = await settleWithin(setup('c_1', 'acct_t'), 0);
+
+    expect(first.status).toBe('rejected');
+    expect(retry).toMatchObject({ status: 'fulfilled', value: { stripeCustomerId: 'cus_2' } });
   });
 
   it('another customer, or another connected account, gets a different key', async () => {
-    const fetchFn = lostCustomerCreate();
-    await setup(fetchFn, 'c_1', 'acct_t');
-    await setup(fetchFn, 'c_2', 'acct_t');
-    await setup(fetchFn, 'c_1', undefined);
+    const stripe = stripeForCardSetup();
+    const fetcher = stripe.fetchFn as unknown as StripeFetch;
+    await setup('c_1', 'acct_t', fetcher);
+    await setup('c_2', 'acct_t', fetcher);
+    await setup('c_1', undefined, fetcher);
 
-    const [base, otherCustomer, platform] = customerKeys(fetchFn);
+    const [base, otherCustomer, platform] = stripe.executedOn('POST', '/v1/customers').map((c) => c.key);
     expect(base).toBeDefined();
     expect(otherCustomer).not.toBe(base);
     expect(platform).not.toBe(base);

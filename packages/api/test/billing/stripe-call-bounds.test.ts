@@ -6,8 +6,11 @@
  * and fails the same way a network failure does (the raw fetch rejection).
  *
  * Stripe requests whose response can be lost after Stripe acted (customer and
- * Express-account creates) carry a deterministic Idempotency-Key so a retry
- * replays the first object instead of minting a second one.
+ * Express-account creates) carry an Idempotency-Key so a retry replays the
+ * first object instead of minting a second one. Stripe caches a key's result
+ * INCLUDING errors, so the tests below use a fake Stripe with that real replay
+ * behaviour (test/helpers/fake-stripe.ts): a cached error must not stick to
+ * the tenant's next attempt.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BillingService } from '../../src/billing/subscription';
@@ -19,6 +22,7 @@ import {
   settleWithin,
   useProviderClock,
 } from '../helpers/hanging-fetch';
+import { fakeStripe } from '../helpers/fake-stripe';
 
 const TENANT = '33333333-3333-4333-8333-333333333333';
 const STRIPE_TIMEOUT_MS = 10_000;
@@ -109,49 +113,105 @@ describe('BillingService — Stripe calls are bounded when no fetch is injected'
   });
 });
 
-/** Idempotency-Key sent on each POST to `path`, in call order. */
-function keysSentTo(fetchMock: ReturnType<typeof vi.fn>, path: string): Array<string | undefined> {
-  return fetchMock.mock.calls
-    .filter(([url]) => String(url).endsWith(path))
-    .map(([, init]) => ((init as RequestInit).headers as Record<string, string>)['Idempotency-Key']);
+/** A tenant row whose stripe_customer_id claim behaves like Postgres. */
+function customerPool(state: { customerId: string | null }) {
+  return fakePool((sql, params) => {
+    if (sql.includes('UPDATE tenants') && sql.includes('stripe_customer_id IS NULL')) {
+      if (state.customerId) return { rows: [] };
+      state.customerId = params[0] as string;
+      return { rows: [{ stripe_customer_id: state.customerId }] };
+    }
+    if (sql.includes('FROM tenants')) return { rows: [{ stripe_customer_id: state.customerId }] };
+    return { rows: [] };
+  });
 }
 
 describe('BillingService — Stripe customer create is idempotent per tenant', () => {
-  /** The customer-create response is lost (500 after Stripe acted), so the
-   *  tenant row never gets the id and the owner retries. */
-  function lostCustomerCreate() {
-    return vi.fn(async (input: string | URL | Request) =>
-      String(input).endsWith('/v1/customers') ? fakeJson({ error: { message: 'lost' } }, 500) : fakeJson({}),
-    );
-  }
+  beforeEach(() => useProviderClock());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
-  async function openPortal(fetchFn: ReturnType<typeof vi.fn>, tenantId: string, ownerEmail: string) {
-    const svc = new BillingService({
-      pool: billingPool({ stripe_customer_id: null }),
-      config: { apiKey: 'sk_test' },
-      fetchFn: fetchFn as unknown as typeof fetch,
+  const portal = (svc: BillingService, ownerEmail = 'owner@x.com') =>
+    svc.getOrCreatePortalUrl({ tenantId: TENANT, ownerEmail, returnUrl: 'https://app/settings' });
+
+  function stripeMintingCustomers(firstCustomer: { status?: number; delayMs?: number } = {}) {
+    let n = 0;
+    return fakeStripe((call) => {
+      if (call.path === '/v1/customers') {
+        n += 1;
+        if (n === 1 && firstCustomer.status) {
+          return { status: firstCustomer.status, body: { error: { message: 'Stripe had a problem' } } };
+        }
+        return { body: { id: `cus_${n}` }, delayMs: n === 1 ? firstCustomer.delayMs : undefined };
+      }
+      return { body: { url: 'https://billing.stripe.com/session/x' } };
     });
-    await svc.getOrCreatePortalUrl({ tenantId, ownerEmail, returnUrl: 'https://app/settings' }).catch(() => undefined);
   }
 
-  it('a retry after a lost response sends the same tenant-scoped Idempotency-Key', async () => {
-    const fetchFn = lostCustomerCreate();
-    await openPortal(fetchFn, TENANT, 'owner@x.com');
-    await openPortal(fetchFn, TENANT, 'owner@x.com');
+  it('a create whose answer was lost (timeout) is replayed on the retry: one Stripe customer', async () => {
+    const stripe = stripeMintingCustomers({ delayMs: 15_000 });
+    vi.stubGlobal('fetch', stripe.fetchFn);
+    const state = { customerId: null as string | null };
+    const svc = new BillingService({ pool: customerPool(state), config: { apiKey: 'sk_test' } });
 
-    const [first, retry] = keysSentTo(fetchFn, '/v1/customers');
-    expect(first).toMatch(new RegExp(`^customer:${TENANT}:subscription:`));
-    expect(retry).toBe(first);
+    const first = await settleWithin(portal(svc), 15_000); // gave up at 10 s; Stripe finished at 15 s
+    const retry = await settleWithin(portal(svc), 0);
+
+    expect(first.status).toBe('rejected');
+    expect(retry.status).toBe('fulfilled');
+    expect(state.customerId).toBe('cus_1');
+    expect(stripe.executedOn('POST', '/v1/customers')).toHaveLength(1);
+  });
+
+  it('a Stripe error on the customer create does not stick to the next attempt', async () => {
+    // Stripe caches the 500 under the key; the retry must not get it back.
+    const stripe = stripeMintingCustomers({ status: 500 });
+    vi.stubGlobal('fetch', stripe.fetchFn);
+    const state = { customerId: null as string | null };
+    const svc = new BillingService({ pool: customerPool(state), config: { apiKey: 'sk_test' } });
+
+    const first = await settleWithin(portal(svc), 0);
+    const retry = await settleWithin(portal(svc), 0);
+
+    expect(first.status).toBe('rejected');
+    expect(retry).toMatchObject({ status: 'fulfilled', value: { url: 'https://billing.stripe.com/session/x' } });
+    expect(state.customerId).toBe('cus_2');
+  });
+
+  it('a double click (two creates in flight) gets the same customer for both, not an error', async () => {
+    const stripe = stripeMintingCustomers({ delayMs: 1_000 });
+    vi.stubGlobal('fetch', stripe.fetchFn);
+    const state = { customerId: null as string | null };
+    const svc = new BillingService({ pool: customerPool(state), config: { apiKey: 'sk_test' } });
+
+    const both = await settleWithin(Promise.all([portal(svc), portal(svc)]), 5_000);
+
+    expect(both.status).toBe('fulfilled');
+    expect(state.customerId).toBe('cus_1');
+    expect(stripe.executedOn('POST', '/v1/customers')).toHaveLength(1);
   });
 
   it('another tenant, or a different owner email, gets a different key', async () => {
-    const fetchFn = lostCustomerCreate();
-    await openPortal(fetchFn, TENANT, 'owner@x.com');
-    await openPortal(fetchFn, '44444444-4444-4444-8444-444444444444', 'owner@x.com');
-    await openPortal(fetchFn, TENANT, 'admin@x.com');
+    const stripe = stripeMintingCustomers();
+    const keys: Array<string | undefined> = [];
+    for (const [tenantId, email] of [
+      [TENANT, 'owner@x.com'],
+      ['44444444-4444-4444-8444-444444444444', 'owner@x.com'],
+      [TENANT, 'admin@x.com'],
+    ]) {
+      const svc = new BillingService({
+        pool: customerPool({ customerId: null }),
+        config: { apiKey: 'sk_test' },
+        fetchFn: stripe.fetchFn as unknown as typeof fetch,
+      });
+      await svc.getOrCreatePortalUrl({ tenantId, ownerEmail: email, returnUrl: 'https://app/settings' });
+      keys.push(stripe.executedOn('POST', '/v1/customers').at(-1)?.key);
+    }
 
-    const [base, otherTenant, otherEmail] = keysSentTo(fetchFn, '/v1/customers');
-    expect(base).toBeDefined();
+    const [base, otherTenant, otherEmail] = keys;
+    expect(base).toMatch(new RegExp(`^customer:${TENANT}:subscription:`));
     expect(otherTenant).not.toBe(base);
     // Stripe rejects a reused key whose parameters changed, so a different
     // email must not collide with the first attempt's key.
@@ -205,23 +265,71 @@ describe('StripeConnectService — Stripe calls are bounded when no fetch is inj
 });
 
 describe('StripeConnectService — Express account create is idempotent per tenant', () => {
-  it('a retry after a lost account-create response sends the same tenant-scoped Idempotency-Key', async () => {
-    // Stripe created the account but the response never arrived: nothing is
-    // persisted, and the owner presses "Connect Stripe" again.
-    const fetchFn = vi.fn(async (input: string | URL | Request) =>
-      String(input).endsWith('/v1/accounts') ? fakeJson({ error: { message: 'lost' } }, 500) : fakeJson({}),
-    );
-    const svc = new StripeConnectService({
-      pool: connectPool({ accountId: null }),
-      config: { apiKey: 'sk_test' },
-      fetchFn: fetchFn as unknown as typeof fetch,
-    });
-    await svc.createOnboardingLink(onboarding).catch(() => undefined);
-    await svc.createOnboardingLink(onboarding).catch(() => undefined);
+  beforeEach(() => useProviderClock());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
-    const [first, retry] = keysSentTo(fetchFn, '/v1/accounts');
-    expect(first).toMatch(new RegExp(`^connect-account:${TENANT}:`));
-    expect(retry).toBe(first);
+  function stripeMintingAccounts(first: { status?: number; message?: string; delayMs?: number } = {}) {
+    let n = 0;
+    return fakeStripe((call) => {
+      if (call.path === '/v1/accounts') {
+        n += 1;
+        if (n === 1 && first.status) return { status: first.status, body: { error: { message: first.message } } };
+        return { body: { id: `acct_${n}` }, delayMs: n === 1 ? first.delayMs : undefined };
+      }
+      return { body: { url: `https://connect.stripe.com/setup/${call.params.get('account')}` } };
+    });
+  }
+
+  it('an account create whose answer was lost (timeout) is replayed on the retry: one Express account', async () => {
+    const stripe = stripeMintingAccounts({ delayMs: 15_000 });
+    vi.stubGlobal('fetch', stripe.fetchFn);
+    const state = { accountId: null as string | null };
+    const svc = new StripeConnectService({ pool: connectPool(state), config: { apiKey: 'sk_test' } });
+
+    const first = await settleWithin(svc.createOnboardingLink(onboarding), 15_000);
+    const retry = await settleWithin(svc.createOnboardingLink(onboarding), 0);
+
+    expect(first.status).toBe('rejected');
+    expect(retry).toMatchObject({ status: 'fulfilled', value: { accountId: 'acct_1' } });
+    expect(stripe.executedOn('POST', '/v1/accounts')).toHaveLength(1);
+    expect(stripe.executedOn('POST', '/v1/accounts')[0].key).toMatch(new RegExp(`^connect-account:${TENANT}:`));
+  });
+
+  it("a cached 'complete your platform profile' rejection does not block onboarding once ops fixed it", async () => {
+    const stripe = stripeMintingAccounts({
+      status: 400,
+      message: 'Please complete your platform profile before creating accounts.',
+    });
+    vi.stubGlobal('fetch', stripe.fetchFn);
+    const state = { accountId: null as string | null };
+    const svc = new StripeConnectService({ pool: connectPool(state), config: { apiKey: 'sk_test' } });
+
+    const first = await settleWithin(svc.createOnboardingLink(onboarding), 0);
+    const retry = await settleWithin(svc.createOnboardingLink(onboarding), 0);
+
+    expect(first.status).toBe('rejected');
+    expect(retry).toMatchObject({ status: 'fulfilled', value: { accountId: 'acct_2' } });
+    expect(state.accountId).toBe('acct_2');
+  });
+
+  it('a double click on "Connect Stripe" returns the same account to both clicks, not a 502', async () => {
+    const stripe = stripeMintingAccounts({ delayMs: 1_000 });
+    vi.stubGlobal('fetch', stripe.fetchFn);
+    const state = { accountId: null as string | null };
+    const svc = new StripeConnectService({ pool: connectPool(state), config: { apiKey: 'sk_test' } });
+
+    const both = await settleWithin(
+      Promise.all([svc.createOnboardingLink(onboarding), svc.createOnboardingLink(onboarding)]),
+      5_000,
+    );
+
+    expect(both.status).toBe('fulfilled');
+    const [a, b] = (both as { value: Array<{ accountId: string }> }).value;
+    expect([a.accountId, b.accountId]).toEqual(['acct_1', 'acct_1']);
+    expect(stripe.executedOn('POST', '/v1/accounts')).toHaveLength(1);
   });
 });
 
