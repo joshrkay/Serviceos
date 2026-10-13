@@ -90,7 +90,10 @@ describe('Postgres integration — apply_credit / apply_late_fee are atomic agai
   let locationRepo: PgLocationRepository;
   let jobRepo: PgJobRepository;
 
-  async function seedOpenInvoice(amountCents: number): Promise<Seeded> {
+  async function seedOpenInvoice(
+    amountCents: number,
+    pricing: { discountCents?: number; taxRateBps?: number; processingFeeBps?: number } = {},
+  ): Promise<Seeded> {
     const { tenantId, userId } = await createTestTenant(pool);
     const customerId = uuidv4();
     await customerRepo.create({
@@ -138,7 +141,12 @@ describe('Postgres integration — apply_credit / apply_late_fee are atomic agai
     });
     const invoiceId = uuidv4();
     const lineItems = [buildLineItem(uuidv4(), 'Labor', 1, amountCents, 0, true, 'labor')];
-    const totals = calculateDocumentTotals(lineItems, 0, 0);
+    const totals = calculateDocumentTotals(
+      lineItems,
+      pricing.discountCents ?? 0,
+      pricing.taxRateBps ?? 0,
+      pricing.processingFeeBps ?? 0,
+    );
     await readRepo.create({
       id: invoiceId,
       tenantId,
@@ -281,6 +289,45 @@ describe('Postgres integration — apply_credit / apply_late_fee are atomic agai
       expect(row!.lineItems).toHaveLength(1);
     },
   );
+
+  // Review L6 / M3 — the SQL on a discounted + taxed + processing-fee,
+  // partially-paid invoice, to the cent. $200 taxable labor, $20 discount,
+  // 10% tax on the discounted base (1800), 2.5% surcharge on the 19800
+  // chargeable amount (495) → 20295. $50 paid → 15295 due. A $29.80 credit
+  // takes the chargeable amount to 16820, whose surcharge is 420.5 → 421
+  // (round half up, same as applyBps) → total 17241, due 12241.
+  it('apply_credit on a discounted + taxed + surcharged, partly-paid invoice moves every column to the cent', async () => {
+    const seeded = await seedOpenInvoice(20000, {
+      discountCents: 2000,
+      taxRateBps: 1000,
+      processingFeeBps: 250,
+    });
+    const paid = await readRepo.incrementAmountPaidAtomic(seeded.tenantId, seeded.invoiceId, 5000, new Date());
+    expect(paid!.totals.totalCents).toBe(20295);
+    expect(paid!.amountDueCents).toBe(15295);
+    const handler = new ApplyCreditExecutionHandler(readRepo, auditRepo);
+
+    const result = await handler.execute(creditProposal(seeded, 2980), {
+      tenantId: seeded.tenantId,
+      executedBy: seeded.userId,
+    });
+
+    expect(result.success).toBe(true);
+    const row = await readRepo.findById(seeded.tenantId, seeded.invoiceId);
+    expect(row!.totals).toMatchObject({
+      subtotalCents: 17020,
+      discountCents: 2000,
+      taxRateBps: 1000,
+      taxableSubtotalCents: 20000,
+      taxCents: 1800,
+      processingFeeBps: 250,
+      processingFeeCents: 421,
+      totalCents: 17241,
+    });
+    expect(row!.amountPaidCents).toBe(5000);
+    expect(row!.amountDueCents).toBe(12241);
+    expect(row!.status).toBe('partially_paid');
+  });
 
   // Review M2 — the atomic UPDATE derives status.
   it('apply_credit: clearing the remaining balance of a partly-paid invoice settles it as paid', async () => {

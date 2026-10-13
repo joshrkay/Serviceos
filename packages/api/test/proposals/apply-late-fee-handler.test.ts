@@ -172,6 +172,29 @@ describe('apply_late_fee execution handler', () => {
     expect(untouched!.amountDueCents).toBe(0);
   });
 
+  // Review M3 — the surcharge follows the chargeable amount at the stored
+  // rate: a fee raises the base, so the surcharge rises with it.
+  it('re-derives the processing-fee surcharge at the stored rate on the raised base', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    const lineItems: LineItem[] = [buildLineItem('li-1', 'Labor', 1, 10000, 0, true, 'labor')];
+    const totals = calculateDocumentTotals(lineItems, 0, 0, 300); // 10000 + 300 = 10300
+    await invoiceRepo.create(makeInvoice({ lineItems, totals, amountDueCents: totals.totalCents }));
+    handler = new ApplyLateFeeExecutionHandler(invoiceRepo, auditRepo);
+
+    const result = await handler.execute(makeProposal(), ctx); // +2500 fee
+
+    expect(result.success).toBe(true);
+    const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    // 3% of 12500 = 375 → total 12875.
+    expect(updated!.totals).toMatchObject({
+      subtotalCents: 12500,
+      processingFeeBps: 300,
+      processingFeeCents: 375,
+      totalCents: 12875,
+    });
+    expect(updated!.amountDueCents).toBe(12875);
+  });
+
   it('applies to a partially_paid invoice and nets against the amount already paid', async () => {
     invoiceRepo = new InMemoryInvoiceRepository();
     await invoiceRepo.create(makeInvoice({ status: 'partially_paid', amountPaidCents: 5000, amountDueCents: 10000 }));

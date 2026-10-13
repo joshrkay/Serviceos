@@ -419,9 +419,9 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     return this.withTenantTransaction(tenantId, async (client) => {
       // #10 — one UPDATE deriving the new subtotal/total/due from the row's
       // OWN current values (the SQL mirror of applyNonTaxableAdjustment: a
-      // non-taxable line moves subtotal and total by its amount and nothing
-      // else), so a payment committed by incrementAmountPaidAtomic between
-      // the caller's read and this write is reflected in amount_due instead
+      // non-taxable line moves the subtotal by its amount, leaves tax and
+      // discount alone and re-derives the surcharge), so a payment committed
+      // by incrementAmountPaidAtomic between the caller's read and this write is reflected in amount_due instead
       // of being overwritten by a snapshot-derived figure, and two
       // concurrent adjustments both apply. Column references on the right
       // side read the PRE-update row. Both predicates are evaluated against
@@ -438,19 +438,31 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       // pinned in apply-credit-handler.test.ts). The line insert rides the
       // same transaction, so the ledger (Σ lines == subtotal, L2) moves
       // together.
+      //
+      // Review M3 — the processing-fee surcharge is re-derived at the stored
+      // processing_fee_bps on the new chargeable amount (subtotal' − discount
+      // + tax), mirroring applyBps' round-half-up (ROUND(numeric) rounds half
+      // away from zero; the base is clamped ≥ 0, so they agree). The new
+      // total is the old total + the adjustment + the surcharge change.
+      const newFee = `CASE WHEN COALESCE(processing_fee_bps, 0) > 0
+          THEN ROUND(GREATEST(0, subtotal_cents + $3 - discount_cents + tax_cents)::numeric
+                     * processing_fee_bps / 10000)::integer
+          ELSE processing_fee_cents END`;
+      const newTotal = `(total_cents + $3 + COALESCE(${newFee}, 0) - COALESCE(processing_fee_cents, 0))`;
       const { rows } = await client.query<{ id: string }>(
         `UPDATE invoices
-         SET subtotal_cents   = subtotal_cents + $3,
-             total_cents      = total_cents + $3,
-             amount_due_cents = GREATEST(0, total_cents + $3 - amount_paid_cents),
+         SET subtotal_cents       = subtotal_cents + $3,
+             processing_fee_cents = ${newFee},
+             total_cents          = ${newTotal},
+             amount_due_cents     = GREATEST(0, ${newTotal} - amount_paid_cents),
              status = CASE
-               WHEN amount_paid_cents > 0 AND total_cents + $3 - amount_paid_cents <= 0 THEN 'paid'
+               WHEN amount_paid_cents > 0 AND ${newTotal} - amount_paid_cents <= 0 THEN 'paid'
                ELSE status
              END,
-             updated_at       = $4
+             updated_at           = $4
          WHERE id = $2 AND tenant_id = $1
            AND status IN ('open', 'partially_paid')
-           AND amount_paid_cents <= total_cents + $3
+           AND amount_paid_cents <= ${newTotal}
            AND ($3 < 0 OR total_cents - amount_paid_cents > 0)
          RETURNING id`,
         [tenantId, id, line.totalCents, now],

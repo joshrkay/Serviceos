@@ -545,7 +545,12 @@ describe('apply_credit execution handler', () => {
     });
   });
 
-  it('keeps the invoice’s processing-fee surcharge: the total moves by exactly the approved credit', async () => {
+  // Review M3 — the surcharge is processing_fee_bps of the chargeable amount
+  // (subtotal − discount + tax). Freezing its CENTS after a credit (300 on an
+  // 8000 base = 375 bps) would surcharge above the configured rate — above
+  // the card-network cap for a tenant set at it. Recompute it at the stored
+  // bps on the new base.
+  it('re-derives the processing-fee surcharge at the stored rate on the reduced base', async () => {
     // $100.00 labor + 3% processing fee (300) = 10300.
     const lineItems: LineItem[] = [buildLineItem('li-1', 'Labor', 1, 10000, 0, true, 'labor')];
     const totals = calculateDocumentTotals(lineItems, 0, 0, 300);
@@ -563,13 +568,14 @@ describe('apply_credit execution handler', () => {
 
     expect(result.success).toBe(true);
     const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    // 3% of the new 8000 chargeable amount = 240 → total 8240.
     expect(updated!.totals).toMatchObject({
       subtotalCents: 8000,
       processingFeeBps: 300,
-      processingFeeCents: 300,
-      totalCents: 8300,
+      processingFeeCents: 240,
+      totalCents: 8240,
     });
-    expect(updated!.amountDueCents).toBe(8300);
+    expect(updated!.amountDueCents).toBe(8240);
   });
 
   // #10 — the write must derive the balance from the row's LIVE paid amount,

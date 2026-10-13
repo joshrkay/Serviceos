@@ -193,24 +193,41 @@ export function calculateDocumentTotals(
 /**
  * Move an ISSUED document's totals by ONE non-taxable adjustment line — an
  * owner-approved credit (negative) or late fee (positive) appended after the
- * fact. The adjustment shifts subtotal and total by exactly its own amount
- * and nothing else: it is non-taxable, so the taxable subtotal and tax (and
- * the discount and processing fee the document was issued with) cannot
- * move. This is what `calculateDocumentTotals` would compute for the
- * appended line — without its #1288 mixed-taxability refusal, which exists
- * to stop a discount being mis-allocated across lines at CREATION time. The
- * discount here was already allocated (and taxed) when the document was
- * totalled; a non-taxable adjustment never re-opens that allocation, so a
- * discounted, taxed invoice stays creditable without weakening the guard.
+ * fact. The subtotal moves by exactly the adjustment. Being non-taxable, it
+ * cannot move the taxable subtotal or the tax, and the discount stays as
+ * issued. The processing-fee surcharge (if the document carries one) is
+ * re-derived at its stored `processingFeeBps` on the new chargeable amount
+ * (subtotal − discount + tax), exactly as `calculateDocumentTotals` defines
+ * it, so the surcharge rate never drifts from the configured bps (review M3).
+ * The total moves by the adjustment plus that surcharge change.
+ *
+ * This equals `calculateDocumentTotals` over the appended line — without its
+ * #1288 mixed-taxability refusal, which exists to stop a discount being
+ * mis-allocated across lines at CREATION time (the discount here was already
+ * allocated and taxed when the document was totalled; a non-taxable
+ * adjustment never re-opens that allocation, so a discounted, taxed invoice
+ * stays creditable without weakening the guard). The Pg mirror is
+ * `PgInvoiceRepository.applyNonTaxableAdjustmentAtomic`'s SQL.
  */
 export function applyNonTaxableAdjustment(
   totals: DocumentTotals,
   adjustmentCents: number,
 ): DocumentTotals {
+  const subtotalCents = totals.subtotalCents + adjustmentCents;
+  const feeBps = totals.processingFeeBps ?? 0;
+  if (feeBps <= 0) {
+    return { ...totals, subtotalCents, totalCents: totals.totalCents + adjustmentCents };
+  }
+  const processingFeeCents = applyBps(
+    Math.max(0, subtotalCents - totals.discountCents + totals.taxCents),
+    feeBps,
+  );
+  const feeDeltaCents = processingFeeCents - (totals.processingFeeCents ?? 0);
   return {
     ...totals,
-    subtotalCents: totals.subtotalCents + adjustmentCents,
-    totalCents: totals.totalCents + adjustmentCents,
+    subtotalCents,
+    processingFeeCents,
+    totalCents: totals.totalCents + adjustmentCents + feeDeltaCents,
   };
 }
 

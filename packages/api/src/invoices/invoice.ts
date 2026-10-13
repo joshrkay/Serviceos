@@ -219,9 +219,10 @@ export interface InvoiceRepository {
   /**
    * #10 — append ONE non-taxable adjustment line (an owner-approved credit
    * (negative) or late fee (positive)) to an issued invoice in a single
-   * guarded write. Subtotal and total move by exactly `line.totalCents`
-   * (the `applyNonTaxableAdjustment` semantics: tax, taxable subtotal,
-   * discount and processing fee untouched) and amount_due is re-derived
+   * guarded write, with the `applyNonTaxableAdjustment` semantics: the
+   * subtotal moves by exactly `line.totalCents`, tax / taxable subtotal /
+   * discount stay as issued, the processing-fee surcharge is re-derived at
+   * its stored bps, and the total follows. amount_due is re-derived
    * from the row's OWN live amount_paid — never a caller snapshot. The
    * handlers used to read-modify-write absolute totals/amount_due, so a
    * webhook payment committing between their read and write left the row
