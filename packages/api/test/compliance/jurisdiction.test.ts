@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  quietHours,
+  recipientQuietHours,
   requires10dlcRegistration,
   requiresRecordingDisclosure,
   smsOptInLanguage,
@@ -25,26 +25,36 @@ describe('requiresRecordingDisclosure', () => {
   });
 });
 
-describe('quietHours', () => {
+describe('recipientQuietHours', () => {
+  // A known non-early-close state, so the federal 08:00–21:00 window applies.
+  const IL = { states: ['IL'] };
+
   it('allows contact between 8am and 9pm recipient local time', () => {
     // 15:00 UTC = 10:00 America/Chicago
-    const withinWindow = quietHours('America/Chicago', new Date('2026-04-28T15:00:00Z'));
+    const withinWindow = recipientQuietHours(
+      { ...IL, timezone: 'America/Chicago' },
+      new Date('2026-04-28T15:00:00Z'),
+    );
     expect(withinWindow.isAllowedNow).toBe(true);
-    expect(withinWindow.localHour).toBe(10);
   });
 
-  it('blocks contact before 8am recipient local time', () => {
-    // 11:30 UTC = 06:30 America/New_York
-    const beforeWindow = quietHours('America/New_York', new Date('2026-04-28T10:30:00Z'));
+  it('blocks contact before 8am recipient local time, until 8am', () => {
+    // 10:30 UTC = 06:30 America/New_York (EDT)
+    const beforeWindow = recipientQuietHours(
+      { ...IL, timezone: 'America/New_York' },
+      new Date('2026-04-28T10:30:00Z'),
+    );
     expect(beforeWindow.isAllowedNow).toBe(false);
-    expect(beforeWindow.localHour).toBe(6);
+    expect(beforeWindow.nextAllowedAt.toISOString()).toBe('2026-04-28T12:00:00.000Z');
   });
 
   it('blocks contact at/after 9pm recipient local time', () => {
-    // 02:00 UTC next day = 21:00 America/New_York
-    const afterWindow = quietHours('America/New_York', new Date('2026-04-29T01:00:00Z'));
+    // 01:00 UTC next day = 21:00 America/New_York (EDT)
+    const afterWindow = recipientQuietHours(
+      { ...IL, timezone: 'America/New_York' },
+      new Date('2026-04-29T01:00:00Z'),
+    );
     expect(afterWindow.isAllowedNow).toBe(false);
-    expect(afterWindow.localHour).toBe(21);
   });
 });
 

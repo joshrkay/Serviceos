@@ -421,10 +421,10 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
    * text when no window is wired, pass straight through.
    */
   private async deferOutsideSendWindow(message: SmsMessage): Promise<void> {
-    const window = this.deps.quietHours;
-    if (message.quietHours !== 'defer' || !window) return;
-    const now = window.now ? window.now() : new Date();
-    const locale = await window.resolveRecipientLocale({
+    const sendWindow = this.deps.quietHours;
+    if (message.quietHours !== 'defer' || !sendWindow) return;
+    const now = sendWindow.now ? sendWindow.now() : new Date();
+    const locale = await sendWindow.resolveRecipientLocale({
       tenantId: message.tenantId,
       customerId: message.consent?.customerId,
       to: message.to,

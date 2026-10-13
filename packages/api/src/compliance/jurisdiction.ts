@@ -19,8 +19,8 @@ const UNSUBSCRIBE_FOOTER =
 
 export interface QuietHoursResult {
   isAllowedNow: boolean;
+  /** The first instant a send is allowed — `now` itself when allowed now. */
   nextAllowedAt: Date;
-  localHour: number;
 }
 
 function getLocalHour(now: Date, recipientTimezone: string): number {
@@ -53,20 +53,6 @@ export function unsubscribeFooter(): string {
 }
 
 /**
- * US quiet-hours compliance helper.
- *
- * Enforces 8:00–21:00 recipient-local contact window (inclusive of 8:00,
- * exclusive of 21:00). Returns a contract callers can use for queueing logic.
- */
-export function quietHours(
-  recipientTimezone: string,
-  now: Date = new Date()
-): QuietHoursResult {
-  const localHour = getLocalHour(now, recipientTimezone);
-  return { ...sendWindow([recipientTimezone], now), localHour };
-}
-
-/**
  * Who a customer text is going to, as far as the send window cares.
  */
 export interface RecipientLocale {
@@ -80,14 +66,15 @@ export interface RecipientLocale {
 }
 
 /**
- * The recipient-local send window for a NON-transactional customer text.
- * `nextAllowedAt` is the first instant the text may go out (`now` itself when
- * it may go out now).
+ * US quiet hours — the recipient-local send window for a NON-transactional
+ * customer text: 08:00 (inclusive) to 21:00 (exclusive), or 20:00 for an
+ * early-close state (see EARLY_CLOSE_STATES) or an unknown one. Consumed by
+ * GatedMessageDelivery for texts tagged `quietHours: 'defer'`.
  */
 export function recipientQuietHours(
   locale: RecipientLocale,
   now: Date = new Date(),
-): Omit<QuietHoursResult, 'localHour'> {
+): QuietHoursResult {
   // No known state → assume the strictest close rather than guess.
   const earlyClose =
     locale.states.length === 0 ||
@@ -170,8 +157,8 @@ function inWindow(now: Date, zones: readonly string[], endHour: number): boolean
 function sendWindow(
   zones: readonly string[],
   now: Date,
-  endHour: number = WINDOW_END_HOUR,
-): Omit<QuietHoursResult, 'localHour'> {
+  endHour: number,
+): QuietHoursResult {
   if (inWindow(now, zones, endHour)) {
     return { isAllowedNow: true, nextAllowedAt: new Date(now) };
   }
