@@ -14,6 +14,7 @@
  * or any header derived from it.
  */
 import { createLogger } from '../logging/logger';
+import { timedFetch } from '../shared/timed-fetch';
 
 const logger = createLogger({
   service: 'telephony.recording-control',
@@ -25,26 +26,50 @@ export interface RecordingControl {
   pauseRecording(callSid: string): Promise<void>;
 }
 
+/**
+ * The pause is awaited on the live voice turn before the acknowledgement is
+ * spoken, so an unanswered Twilio call would leave the caller in dead air.
+ */
+export const PAUSE_RECORDING_TIMEOUT_MS = 3_000;
+
 export class TwilioRecordingControl implements RecordingControl {
+  private readonly fetchImpl: typeof fetch;
+
   constructor(
     private readonly accountSid: string,
     private readonly authToken: string,
-    private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
+    fetchImpl?: typeof fetch,
+  ) {
+    this.fetchImpl = timedFetch(PAUSE_RECORDING_TIMEOUT_MS, fetchImpl);
+  }
 
   async pauseRecording(callSid: string): Promise<void> {
     const url =
       `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(this.accountSid)}` +
       `/Calls/${encodeURIComponent(callSid)}/Recordings/Twilio.CURRENT.json`;
     const basic = Buffer.from(`${this.accountSid}:${this.authToken}`).toString('base64');
-    const res = await this.fetchImpl(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${basic}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({ Status: 'paused' }).toString(),
-    });
+    let res: Response;
+    try {
+      res = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${basic}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ Status: 'paused' }).toString(),
+      });
+    } catch (err) {
+      // Same failure semantics as a rejected pause: log and throw. Other
+      // transport errors propagate unchanged, as before.
+      if (err instanceof Error && err.name === 'TimeoutError') {
+        logger.warn('pauseRecording: provider timed out', {
+          callSid,
+          timeoutMs: PAUSE_RECORDING_TIMEOUT_MS,
+        });
+        throw new Error('pauseRecording failed: timeout');
+      }
+      throw err;
+    }
     if (!res.ok) {
       const bodyText = await res.text().catch(() => '');
       logger.warn('pauseRecording: provider rejected', {
