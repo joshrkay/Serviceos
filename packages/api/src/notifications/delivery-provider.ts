@@ -55,7 +55,22 @@ export interface SmsMessage {
    * makes the gate fail closed (missing_consent_context). Ignored for 'owner'.
    */
   consent?: SmsConsentContext;
+  /**
+   * Send-window policy for a CUSTOMER send (ignored for 'owner').
+   *
+   *   - absent  → sent now. Transactional and conversational texts — estimate
+   *     / invoice sends, appointment confirmations and reminders, replies to a
+   *     customer who just texted or called, one-time links — must not wait.
+   *   - 'defer' → NON-transactional (thank-you, review request, automated
+   *     reminder). Outside the recipient-local window the gate throws
+   *     `SmsDeferredError` instead of sending; the caller keeps the work
+   *     retryable and sends on a later in-window attempt.
+   */
+  quietHours?: SmsQuietHoursPolicy;
 }
+
+/** See `SmsMessage.quietHours`. */
+export type SmsQuietHoursPolicy = 'defer';
 
 export interface EmailMessage {
   to: string;

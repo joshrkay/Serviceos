@@ -74,6 +74,7 @@ import {
   resolveOutboundConsent,
   type ConsentLedgerEventLike,
 } from '../compliance/resolve-outbound-consent';
+import { recipientQuietHours, type RecipientLocale } from '../compliance/jurisdiction';
 import type { RecipientSmsVolumeLedger } from './recipient-sms-volume';
 import {
   DeliveryResult,
@@ -140,6 +141,25 @@ export class SmsSuppressedError extends Error {
 }
 
 /**
+ * Thrown for a customer text tagged `quietHours: 'defer'` that would land
+ * outside the recipient-local send window. NOT SENT YET — not a suppression:
+ * nothing reached the provider, the suppression audit or the volume cap, and
+ * the same send is expected to succeed at or after `nextAllowedAt`.
+ *
+ * Deliberately not a subclass of `SmsSuppressedError`: callers treat a
+ * suppression as terminal (stamp the row, record a `suppressed` dispatch), and
+ * a deferral must do neither — the caller leaves its work retryable.
+ */
+export class SmsDeferredError extends Error {
+  readonly deferred = true;
+  readonly reason = 'quiet_hours' as const;
+  constructor(readonly nextAllowedAt: Date) {
+    super(`SMS deferred until ${nextAllowedAt.toISOString()}: recipient quiet hours`);
+    this.name = 'SmsDeferredError';
+  }
+}
+
+/**
  * Email counterpart of `SmsSuppressedError`, thrown when the EMAIL_ENABLED
  * kill switch is off.
  *
@@ -194,8 +214,23 @@ export interface GatedMessageDeliveryDeps {
     windowHours: number;
   };
   /**
-   * Sink for kill-switch suppression logs. Optional so existing construction
-   * sites and tests are unchanged; defaults to a module-scoped logger.
+   * Recipient-local send window for customer texts tagged
+   * `quietHours: 'defer'`. Optional so existing construction sites keep their
+   * behaviour; app.ts wires it for production.
+   */
+  quietHours?: {
+    resolveRecipientLocale(input: {
+      tenantId: string | undefined;
+      customerId: string | undefined;
+      to: string;
+    }): Promise<RecipientLocale>;
+    /** Clock seam; defaults to `new Date()`. */
+    now?: () => Date;
+  };
+  /**
+   * Sink for kill-switch suppression and quiet-hours deferral logs. Optional
+   * so existing construction sites and tests are unchanged; defaults to a
+   * module-scoped logger.
    */
   logger?: Pick<Logger, 'info'>;
   /**
@@ -322,6 +357,8 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
    * control, not the TCPA consent observation `warn` mode exists for.
    */
   private async sendWithinVolumeCap(message: SmsMessage): Promise<DeliveryResult> {
+    // The send window comes first: a deferred text must not reserve a slot.
+    await this.deferOutsideSendWindow(message);
     const cap = this.deps.recipientVolumeCap;
     if (!cap || cap.maxPerWindow <= 0 || !message.tenantId) {
       return this.deps.base.sendSms(message);
@@ -350,6 +387,32 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
       }
       throw err;
     }
+  }
+
+  /**
+   * Throws `SmsDeferredError` for a `quietHours: 'defer'` customer text that
+   * would land outside the recipient-local window. Untagged texts, and every
+   * text when no window is wired, pass straight through.
+   */
+  private async deferOutsideSendWindow(message: SmsMessage): Promise<void> {
+    const window = this.deps.quietHours;
+    if (message.quietHours !== 'defer' || !window) return;
+    const now = window.now ? window.now() : new Date();
+    const locale = await window.resolveRecipientLocale({
+      tenantId: message.tenantId,
+      customerId: message.consent?.customerId,
+      to: message.to,
+    });
+    const verdict = recipientQuietHours(locale, now);
+    if (verdict.isAllowedNow) return;
+    const logger = this.deps.logger ?? defaultKillSwitchLogger();
+    logger.info('Customer SMS deferred to the recipient-local send window', {
+      reason: 'quiet_hours',
+      tenantId: message.tenantId ?? 'unknown',
+      phoneLast4: normalizePhone(message.to).slice(-4),
+      nextAllowedAt: verdict.nextAllowedAt.toISOString(),
+    });
+    throw new SmsDeferredError(verdict.nextAllowedAt);
   }
 
   async sendEmail(message: EmailMessage): Promise<DeliveryResult> {
