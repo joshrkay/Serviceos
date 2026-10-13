@@ -416,6 +416,11 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     line: LineItem,
     now: Date,
   ): Promise<Invoice | null> {
+    // Review L2 — this write never re-derives taxable_subtotal / tax, so a
+    // taxable line would silently leave tax stale: refuse it before any write.
+    if (line.taxable) {
+      throw new Error('applyNonTaxableAdjustmentAtomic requires a non-taxable line (tax is not re-derived)');
+    }
     return this.withTenantTransaction(tenantId, async (client) => {
       // #10 — one UPDATE deriving the new subtotal/total/due from the row's
       // OWN current values (the SQL mirror of applyNonTaxableAdjustment: a

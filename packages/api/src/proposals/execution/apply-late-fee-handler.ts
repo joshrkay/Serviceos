@@ -167,6 +167,15 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
         new Date(),
       );
     } catch (err) {
+      // Review L5 — two approvals of the same accrual step raced: the other
+      // one's fee line (same deterministic id) won the primary key and this
+      // write rolled back. Deterministic and already satisfied — say so.
+      if ((err as { code?: unknown } | null)?.code === '23505') {
+        return {
+          success: false,
+          error: `A late fee for this step was already applied to invoice ${invoice.invoiceNumber} by another approval — not charged twice.`,
+        };
+      }
       return {
         success: false,
         error: err instanceof Error ? err.message : 'Failed to apply late fee',

@@ -314,6 +314,26 @@ describe('apply_late_fee execution handler', () => {
     expect(row!.amountDueCents).toBe(12500);
   });
 
+  // Review L5 — two approvals of the SAME accrual step racing: the second
+  // write collides on the deterministic fee-line id (Pg primary key, 23505)
+  // and rolls back. The owner must see a plain sentence, not the raw
+  // "duplicate key value violates unique constraint" text.
+  it('a concurrent duplicate approval of the same step fails cleanly with a friendly message (fee charged once)', async () => {
+    const racing = new PaymentLandsAfterRead();
+    await racing.create(makeInvoice());
+    racing.armConcurrentDuplicateFee(2500, 'initial');
+    handler = new ApplyLateFeeExecutionHandler(racing, auditRepo);
+
+    const result = await handler.execute(makeProposal(), ctx);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/already applied/i);
+    expect(result.error).not.toMatch(/duplicate key/i);
+    const row = await racing.findById(TENANT, INVOICE_ID);
+    expect(row!.lineItems.filter((li) => li.id === lateFeeLineId(INVOICE_ID, 'initial'))).toHaveLength(1);
+    expect(row!.totals.totalCents).toBe(17500);
+  });
+
   // Review H2 — a late fee RAISES the balance. A link or PaymentIntent
   // minted before it is priced BELOW what is now owed: paying it can never
   // overcharge (it records a partial payment and the fee stays due), while
@@ -354,18 +374,29 @@ describe('apply_late_fee execution handler', () => {
  * its snapshot and BEFORE it writes.
  */
 class PaymentLandsAfterRead extends InMemoryInvoiceRepository {
-  private pendingPaymentCents: number | null = null;
+  private pending: ((tenantId: string, id: string) => Promise<unknown>) | null = null;
 
   armConcurrentPayment(cents: number): void {
-    this.pendingPaymentCents = cents;
+    this.pending = (tenantId, id) => this.incrementAmountPaidAtomic(tenantId, id, cents, new Date());
+  }
+
+  /** A second approval of the SAME accrual step lands its fee line first. */
+  armConcurrentDuplicateFee(feeCents: number, stepKey: string): void {
+    this.pending = (tenantId, id) =>
+      this.applyNonTaxableAdjustmentAtomic(
+        tenantId,
+        id,
+        buildLineItem(lateFeeLineId(id, stepKey), 'Late fee', 1, feeCents, 1, false, 'other'),
+        new Date(),
+      );
   }
 
   async findById(tenantId: string, id: string): Promise<Invoice | null> {
     const snapshot = await super.findById(tenantId, id);
-    if (snapshot && this.pendingPaymentCents !== null) {
-      const cents = this.pendingPaymentCents;
-      this.pendingPaymentCents = null;
-      await this.incrementAmountPaidAtomic(tenantId, id, cents, new Date());
+    if (snapshot && this.pending) {
+      const write = this.pending;
+      this.pending = null;
+      await write(tenantId, id);
     }
     return snapshot;
   }

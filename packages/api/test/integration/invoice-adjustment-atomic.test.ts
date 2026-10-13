@@ -329,6 +329,53 @@ describe('Postgres integration — apply_credit / apply_late_fee are atomic agai
     expect(row!.status).toBe('partially_paid');
   });
 
+  // Review L2 — the write never touches taxable_subtotal / tax, so a taxable
+  // line is a programming error refused before any row moves.
+  it('refuses a taxable adjustment line before writing anything', async () => {
+    const seeded = await seedOpenInvoice(10000);
+    const taxable = buildLineItem(uuidv4(), 'Fee', 1, 500, 1, true, 'other');
+
+    await expect(
+      readRepo.applyNonTaxableAdjustmentAtomic(seeded.tenantId, seeded.invoiceId, taxable, new Date()),
+    ).rejects.toThrow(/non-taxable/);
+    const row = await readRepo.findById(seeded.tenantId, seeded.invoiceId);
+    expect(row!.totals.totalCents).toBe(10000);
+    expect(row!.lineItems).toHaveLength(1);
+  });
+
+  // Review L5 — two approvals of the SAME accrual step racing: the real
+  // primary key on invoice_line_items rolls the second write back; the owner
+  // sees a plain sentence, not the raw constraint text.
+  it('apply_late_fee: a concurrent duplicate of the same step rolls back with a friendly message (fee charged once)', async () => {
+    const seeded = await seedOpenInvoice(15000);
+    invoiceRepo.arm(async (repo, tenantId, id) => {
+      await repo.applyNonTaxableAdjustmentAtomic(
+        tenantId,
+        id,
+        buildLineItem(lateFeeLineId(id, 'initial'), 'Late fee', 1, 2500, 1, false, 'other'),
+        new Date(),
+      );
+    });
+    const handler = new ApplyLateFeeExecutionHandler(invoiceRepo, auditRepo);
+
+    const result = await handler.execute(
+      {
+        ...creditProposal(seeded, 0),
+        proposalType: 'apply_late_fee',
+        payload: { invoiceId: seeded.invoiceId, feeCents: 2500, stepKey: 'initial' },
+      },
+      { tenantId: seeded.tenantId, executedBy: seeded.userId },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/already applied/i);
+    expect(result.error).not.toMatch(/duplicate key/i);
+    const row = await readRepo.findById(seeded.tenantId, seeded.invoiceId);
+    expect(row!.lineItems.map((li) => li.totalCents)).toEqual([15000, 2500]);
+    expect(row!.totals.totalCents).toBe(17500);
+    expect(row!.amountDueCents).toBe(17500);
+  });
+
   // Review M2 — the atomic UPDATE derives status.
   it('apply_credit: clearing the remaining balance of a partly-paid invoice settles it as paid', async () => {
     const seeded = await seedOpenInvoice(30000);

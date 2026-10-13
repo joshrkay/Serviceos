@@ -196,6 +196,14 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
         new Date(),
       );
     } catch (err) {
+      // Review L5 — a concurrent run of this same proposal won the primary
+      // key on its deterministic credit line; this write rolled back.
+      if ((err as { code?: unknown } | null)?.code === '23505') {
+        return {
+          success: false,
+          error: `This credit was already applied to invoice ${invoice.invoiceNumber} by a concurrent run — not applied twice.`,
+        };
+      }
       return {
         success: false,
         error: err instanceof Error ? err.message : 'Failed to apply credit',

@@ -878,6 +878,10 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     line: LineItem,
     now: Date,
   ): Promise<Invoice | null> {
+    // Mirror the Pg contract (review L2): a taxable line is refused up front.
+    if (line.taxable) {
+      throw new Error('applyNonTaxableAdjustmentAtomic requires a non-taxable line (tax is not re-derived)');
+    }
     const i = this.invoices.get(id);
     if (!i || i.tenantId !== tenantId) return null;
     // Mirror the Pg WHERE guard: only an issued invoice still carrying a
@@ -893,6 +897,17 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     // credit can never push amount paid past the total).
     if (i.amountPaidCents > totals.totalCents) return null;
     const amountDueCents = Math.max(0, totals.totalCents - i.amountPaidCents);
+    // Mirror the Pg primary key on invoice_line_items.id (review L5): a line
+    // id already on ANY invoice fails like Postgres' 23505 and, as the Pg
+    // transaction rolls back, nothing is written.
+    for (const other of this.invoices.values()) {
+      if (other.lineItems.some((li) => li.id === line.id)) {
+        throw Object.assign(
+          new Error('duplicate key value violates unique constraint "invoice_line_items_pkey"'),
+          { code: '23505' },
+        );
+      }
+    }
     // Mirror the Pg status CASE (review M2): cleared with money paid → paid.
     const status: InvoiceStatus =
       i.amountPaidCents > 0 && amountDueCents === 0 ? 'paid' : i.status;
