@@ -105,17 +105,22 @@ class FakeWs implements WsLike {
 function makeStreamingProvider(): {
   provider: StreamingTranscriptionProvider;
   emit: (evt: StreamingTranscriptEvent) => void;
+  /** Deepgram dropping the socket mid-call. */
+  fail: () => void;
 } {
   let cb: StreamingTranscriptCallback | null = null;
+  let onClose: (() => void) | null = null;
   const session: StreamingSession = { send: vi.fn(), finish: vi.fn(), destroy: vi.fn() };
   return {
     provider: {
-      openSession: vi.fn((onEvent: StreamingTranscriptCallback) => {
+      openSession: vi.fn((onEvent: StreamingTranscriptCallback, _onError: unknown, close: () => void) => {
         cb = onEvent;
+        onClose = close;
         return Promise.resolve(session);
       }),
     },
     emit: (evt) => cb?.(evt),
+    fail: () => onClose?.(),
   };
 }
 
@@ -866,6 +871,50 @@ describe('realtime hand-off — Twilio refuses the transfer', () => {
     expect(res.text).toContain(DISPATCHER);
     expect(res.text).toContain(`/api/telephony/dial-result?sid=${encodeURIComponent(h.session.id)}`);
     expect(res.text).not.toContain('<Stream');
+  });
+
+  it('M4 — a Deepgram failure while the hand-off line plays runs ONE update: the degrade claims the hand-off', async () => {
+    let finishDegrade!: (r: { ok: boolean; status: number }) => void;
+    const twilioRest = makeTwilioRest();
+    const h = await harness({ twilio: twilioRest });
+    twilioRest.fetchImpl.mockImplementation(async (_url: string, init: { body: string }) => {
+      const body = new URLSearchParams(init.body);
+      if (body.has('Url')) {
+        return new Promise<{ ok: boolean; status: number }>((resolve) => { finishDegrade = resolve; });
+      }
+      return { ok: true, status: 200 };
+    });
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.deepgram.fail(); // the degrade request is now in flight…
+    await vi.waitFor(() => expect(h.twilio.degrades()).toHaveLength(1));
+    h.ws.ackAllMarks(h.streamSid); // …and the hand-off line finishes playing
+    await new Promise((r) => setTimeout(r, 30));
+    finishDegrade({ ok: true, status: 200 });
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+
+    expect(h.twilio.transfers()).toHaveLength(0); // never a second, conflicting update
+    const res = await signedPost(telephonyApp(h), '/api/telephony/voice/gather-fallback', {
+      CallSid: h.callSid,
+      From: CALLER,
+      To: '+15125550999',
+    });
+    expect(res.text).toContain('<Dial'); // the Gather fallback still bridges
+  });
+
+  it('M4 — if that claiming degrade is refused, the hand-off is still delivered over REST', async () => {
+    const twilioRest = makeTwilioRest((body) => (body.has('Url') ? { ok: false, status: 500 } : { ok: true, status: 200 }));
+    const h = await harness({ twilio: twilioRest });
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.deepgram.fail();
+    await vi.waitFor(() => expect(h.twilio.degrades()).toHaveLength(1));
+    h.ws.ackAllMarks(h.streamSid);
+
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+    expect(h.twilio.transfers()[0].body.get('Twiml')).toContain(DISPATCHER);
   });
 
   it('when the transfer AND the Gather degrade are both refused, the caller is told and the call ends', async () => {

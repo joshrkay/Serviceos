@@ -1725,6 +1725,17 @@ export class TwilioMediaStreamAdapter {
     if (!restRedirect || !callSid || this.state.wsCloseInitiated || this.state.closed) {
       return false;
     }
+    // M4 — never a second, conflicting update: a hand-off transfer already in
+    // flight (or applied) owns the call. If it is refused, its own recovery
+    // runs this degrade afterwards.
+    if (this.state.handoff === 'delivering' || this.state.handoff === 'delivered') {
+      return false;
+    }
+    // M4 — a hand-off still waiting for its line to play is CLAIMED by this
+    // degrade (it carries the TwiML to the Gather fallback below), so the
+    // waiting hand-off cannot also POST its own update when the line ends.
+    const claimedHandoff = this.state.handoff === 'awaiting_playout';
+    if (claimedHandoff) this.state.handoff = 'failed';
     // Realtime hand-off — a hand-off taken but not yet delivered goes back
     // where the Gather-fallback webhook looks for it BEFORE Twilio is told to
     // request that webhook, so the degraded call is bridged rather than
@@ -1744,6 +1755,14 @@ export class TwilioMediaStreamAdapter {
       redirected = false;
     }
     if (!redirected) {
+      if (claimedHandoff) {
+        // The degrade failed but the call is still on the stream: give the
+        // hand-off back (its TwiML stays parked) and deliver it over REST.
+        this.state.handoff = 'none';
+        this.state.handoffTwiml = null;
+        void this.maybeHandOffToHuman('degrade_refused');
+        return false;
+      }
       if (undeliveredHandoff && session) this.deps.takePendingTransferTwiml?.(session.id);
       return false;
     }
@@ -3929,6 +3948,8 @@ export class TwilioMediaStreamAdapter {
 
     await this.awaitPlayout(this.deps.handoffPlayoutMaxWaitMs ?? DEFAULT_HANDOFF_PLAYOUT_MAX_WAIT_MS);
     if (this.state.closed || this.state.wsCloseInitiated) return;
+    // M4 — a degrade claimed this hand-off while the line played.
+    if (this.state.handoff !== 'awaiting_playout') return;
     // E1 life safety supersedes the hand-off: the caller reported a hazard
     // ("…and I smell gas"). E1 never bridges to the dispatcher — the E1 turn
     // speaks the 911 script and ends the call. The latch is set the instant
