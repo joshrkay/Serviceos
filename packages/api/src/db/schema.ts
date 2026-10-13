@@ -3891,15 +3891,26 @@ export const MIGRATIONS = {
       ON call_me_back_tasks (tenant_id) WHERE status = 'pending';
   `,
 
-  // Idempotency for the failed-transfer callback. A Twilio retry of
-  // /callback-message carries the same session id (?sid), so one pending
-  // callback per session lets create() no-op + return the existing row
-  // instead of inserting a duplicate that would notify the CSR twice. Partial
-  // (session_id IS NOT NULL) so non-session-originated rows are unconstrained.
+  // Idempotency for the failed-transfer callback (a Twilio retry of
+  // /callback-message carries the same session id) — originally a partial
+  // UNIQUE index idx_cmb_session_unique ON call_me_back_tasks
+  // (tenant_id, session_id) WHERE session_id IS NOT NULL.
+  //
+  // DELIBERATE NO-OP (deploy-blocker fix, 2026-10-13). Migration 268 drops
+  // that index and replaces it with idx_cmb_session_reason_unique
+  // (tenant_id, session_id, reason), because one call session now legitimately
+  // files several tasks with different reasons. The runner has no ledger and
+  // replays every migration on every deploy, so the original body re-built the
+  // OLD, stricter index over live data before 268 could drop it again: the
+  // first session with two reasons failed that build (SQLSTATE 23505), rolled
+  // back the whole corpus, and blocked every later deploy. 268 alone produces
+  // the final state on a fresh database AND is a no-op on an already-migrated
+  // one, so this body is intentionally empty. The KEY stays (never rename or
+  // delete a shipped key). Pinned by
+  // test/integration/migration-replay-populated-db.test.ts.
   '154_call_me_back_session_idempotency': `
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_cmb_session_unique
-      ON call_me_back_tasks (tenant_id, session_id)
-      WHERE session_id IS NOT NULL;
+    -- Superseded by 268_call_me_back_session_reason_idempotency; see the
+    -- comment above. Intentionally no SQL.
   `,
 
   '155_tenant_integrations_google_business': `
