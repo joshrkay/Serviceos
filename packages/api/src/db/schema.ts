@@ -4873,15 +4873,34 @@ export const MIGRATIONS = {
   // thank_you_sms_sent_at = updated_at, so the first sweep after deploy
   // doesn't blast everyone with a thanks for jobs they finished months
   // ago.
+  //
+  // One-shot (2026-10-13): the runner has no ledger and re-runs every
+  // migration on every deploy, so the backfill originally ran on EVERY boot —
+  // giving any job put into 'completed' by a raw status write (update_job /
+  // PUT /api/jobs/:id, which stamp no completed_at) a fabricated completion
+  // time and a thank-you stamp, so a later governed completion never thanked.
+  // It now runs only in the statement that first adds thank_you_sms_sent_at;
+  // identical on a fresh database, a no-op once the column exists. Pinned by
+  // test/integration/migration-replay-populated-db.test.ts.
   '194_thank_you_sms': `
-    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
-    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS thank_you_sms_sent_at TIMESTAMPTZ;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'jobs'
+           AND column_name = 'thank_you_sms_sent_at'
+      ) THEN
+        ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+        ALTER TABLE jobs ADD COLUMN thank_you_sms_sent_at TIMESTAMPTZ;
+        UPDATE jobs
+          SET completed_at = updated_at,
+              thank_you_sms_sent_at = updated_at
+          WHERE status = 'completed'
+            AND completed_at IS NULL;
+      END IF;
+    END $$;
     ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS send_thank_you_sms BOOLEAN NOT NULL DEFAULT TRUE;
-    UPDATE jobs
-      SET completed_at = updated_at,
-          thank_you_sms_sent_at = updated_at
-      WHERE status = 'completed'
-        AND completed_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_jobs_thank_you_eligibility
       ON jobs (tenant_id, completed_at)
       WHERE thank_you_sms_sent_at IS NULL AND completed_at IS NOT NULL;

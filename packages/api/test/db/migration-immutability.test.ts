@@ -317,7 +317,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // U2 (PRD gap closure): 2hr post-job thank-you SMS — jobs.completed_at,
   // jobs.thank_you_sms_sent_at, tenant_settings.send_thank_you_sms, backfill,
   // partial index on the sweep-eligibility predicate.
-  ['194_thank_you_sms', '2a1b55639fd1e9f78b69ceb0074bdddb1ba702a812a7b3a71292457f27ed0552'],
+  // Replay-clobber fix (2026-10-13): the completed_at / thank_you_sms_sent_at
+  // backfill re-ran on every deploy (no ledger), stamping raw-status-completed
+  // jobs as thanked. It now runs only when thank_you_sms_sent_at is first added.
+  ['194_thank_you_sms', '02cf14482c3fa9b325943b802462680b542844a627f2bf7893519188bc2e8359'],
   // U1 (PRD gap closure): onboarding_session table for the conversational
   // FSM (ENABLE + FORCE RLS per gemini-code-assist review on PR #594).
   ['195_onboarding_session', '4ca725aa5bd1d9e3c516282f67349e3fc5f47f0228bdc0a5e2ee6ed995d2834d'],

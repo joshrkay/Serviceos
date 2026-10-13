@@ -470,5 +470,21 @@ describe('Postgres integration — migration corpus replays over a populated dat
         payload: { tenantId: tenant.tenantId, jobId },
       });
     });
+
+    it('a job marked completed by a raw status write is not stamped completed-and-thanked by the next deploy (194)', async () => {
+      // The approved update_job correction / PUT /api/jobs/:id status write:
+      // status only, no completion timestamp, no thank-you yet.
+      const tenant = await createTestTenant(pool);
+      const jobId = await insertJob(pool, tenant);
+      const jobs = new PgJobRepository(pool);
+      await jobs.update(tenant.tenantId, jobId, { status: 'completed' });
+
+      await deploy(pool);
+
+      const job = await jobs.findById(tenant.tenantId, jobId);
+      expect(job?.status).toBe('completed');
+      expect(job?.completedAt).toBeUndefined();
+      expect(job?.thankYouSmsSentAt).toBeUndefined();
+    });
   });
 });
