@@ -561,7 +561,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['289_tenant_settings_default_tax_rate', '3e065ee911220c16d7f42a2da35cfc659b10aa8b00162e174c59565e5eb61694'],
   ['290_backfill_appointment_assignments_from_jobs', 'cd2d08fa8c0404df320d8a498f384e9822ba3a602355a2bae78f9b9c7e4c88bb'],
   ['291_tenant_settings_notify_technicians_by_sms', 'f5f7b81000e4bbff1e7941484798c722aea49e99e8d026cd02745bc1fe872daf'],
-  ['292_voice_approval_pin_lock_alerts_sent_at', 'b2682e45bffbc26193870e0da80e7f2a2bcde3b8bb52abe4a54ee1bfad8c617a'],
+  // Replay-clobber fix (2026-10-13): the settle-as-sent UPDATE re-ran on every
+  // deploy (no ledger) and marked alerts claimed-but-undelivered at deploy time
+  // as sent. It now runs only when sent_at is first added; same fresh-DB result.
+  ['292_voice_approval_pin_lock_alerts_sent_at', '5510223a858455661c8b30bae42c26c299a2ba8e449647fd976f902ed8afcea4'],
   // #1386 / O-2 — E1 reviewer attestation columns (NEW migration).
   ['293_tenant_settings_e1_script_attestation', '4db0f349da1c004770878534c24f4d07fc84d8c48470b8650ff8254ebcafda70'],
   // #1401 — service_locations.service_types (customers-directory chips).

@@ -22,7 +22,13 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { applyMigrations } from '../../src/db/migrate';
 import { PgCallMeBackRepository } from '../../src/voice/call-me-back/pg-call-me-back';
+import { PgVoiceApprovalPinLockAlertRepository } from '../../src/settings/pg-voice-approval-pin-lock-alert';
+import { createPinLockAlertRetryWorker } from '../../src/workers/pin-lock-alert-retry';
+import type { QueueMessage } from '../../src/queues/queue';
+import { createLogger } from '../../src/logging/logger';
 import { createTestTenant, ensureRlsRuntimeRole, type TestTenant } from './shared';
+
+const silentLogger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
 /**
  * Every invariant the corpus RELAXED after first creating it: a row the final
@@ -354,5 +360,52 @@ describe('Postgres integration — migration corpus replays over a populated dat
           'USING btree (tenant_id, session_id, reason) WHERE (session_id IS NOT NULL)',
       },
     ]);
+  });
+
+  /**
+   * The same no-ledger replay re-executes every one-off DATA backfill
+   * (UPDATE / INSERT … SELECT written to settle pre-migration rows ONCE) on
+   * every deploy, against rows users and workers wrote since. Each case
+   * below is production traffic between deploy N and deploy N+1 that a
+   * re-run backfill would overwrite.
+   */
+  describe('one-shot backfills do not re-run against data written since', () => {
+    it('a PIN-lock owner alert claimed but not yet delivered is still sent after the next deploy (292)', async () => {
+      // The tenant-wide PIN lock engaged and the alert was claimed, but the
+      // first SMS failed, so the durable retry is queued with sent_at NULL.
+      const tenant = await createTestTenant(pool);
+      const alerts = new PgVoiceApprovalPinLockAlertRepository(pool);
+      const episodeKey = `episode-${crypto.randomUUID()}`;
+      expect(await alerts.claim({ tenantId: tenant.tenantId, episodeKey, strikeCount: 5 })).toBe(true);
+
+      // Deploy N+1 lands before the retry fires.
+      await deploy(pool);
+
+      const texted: string[] = [];
+      const retry = createPinLockAlertRetryWorker({
+        queue: { send: async () => 'queued' },
+        alertRepo: alerts,
+        sendSms: async (to) => {
+          texted.push(to);
+        },
+        resolveOwnerPhone: async () => '+15125550142',
+      });
+      await retry.handle(
+        {
+          id: 'm-1',
+          type: retry.type,
+          payload: { tenantId: tenant.tenantId, episodeKey, strikeCount: 5, attempt: 1 },
+          attempts: 0,
+          maxAttempts: 3,
+          idempotencyKey: `pin-lock-retry:${episodeKey}:1`,
+          createdAt: new Date().toISOString(),
+        } as QueueMessage<unknown>,
+        silentLogger,
+      );
+
+      // The owner is told their PIN was brute-forced into a lock.
+      expect(texted).toEqual(['+15125550142']);
+      expect(await alerts.isSent(tenant.tenantId, episodeKey)).toBe(true);
+    });
   });
 });

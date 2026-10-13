@@ -7177,10 +7177,28 @@ export const MIGRATIONS = {
   // stamped once on a successful send. Claims that predate this migration
   // are settled as-is (their delivery outcome is unknown and they must not
   // be re-sent days later). Additive, idempotent; drops nothing.
+  //
+  // One-shot (2026-10-13): the runner has no ledger and re-runs every
+  // migration on every deploy, so the settle-as-sent UPDATE originally ran on
+  // EVERY boot — stamping any alert claimed-but-not-yet-delivered at deploy
+  // time as sent, so the retry worker's isSent() dropped it and the owner was
+  // never told about the PIN lock. The UPDATE now runs only in the same
+  // statement that first adds sent_at (the 290/277 catalog-guard idiom):
+  // identical on a fresh database, a no-op once the column exists. Pinned by
+  // test/integration/migration-replay-populated-db.test.ts.
   '292_voice_approval_pin_lock_alerts_sent_at': `
-    ALTER TABLE voice_approval_pin_lock_alerts
-      ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
-    UPDATE voice_approval_pin_lock_alerts SET sent_at = created_at WHERE sent_at IS NULL;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'voice_approval_pin_lock_alerts'
+           AND column_name = 'sent_at'
+      ) THEN
+        ALTER TABLE voice_approval_pin_lock_alerts ADD COLUMN sent_at TIMESTAMPTZ;
+        UPDATE voice_approval_pin_lock_alerts SET sent_at = created_at WHERE sent_at IS NULL;
+      END IF;
+    END $$;
   `,
   // #1386 / O-2 — the reviewer attestation stored alongside the reviewed E1
   // life-safety script (migration 267). Written ONLY by the owner-only
