@@ -4151,9 +4151,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           return null;
         }
       },
+      // #8b — the dispatcher answering (live flag / durable audit event from
+      // /dial-answered) resolves the ladder while the bridged call is live.
       isResolved: createEmergencyPageResolvedCheck({
         store: voiceSessionStore,
         voiceSessionRepo,
+        auditRepo,
       }),
       callMeBackRepo,
       auditRepo,

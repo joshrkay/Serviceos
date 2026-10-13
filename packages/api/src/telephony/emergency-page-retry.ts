@@ -169,30 +169,48 @@ const LADDER_RESOLVED_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * #8b — audit event recorded (by POST /api/telephony/dial-answered) the
+ * moment the dialled human leg of a hand-off ANSWERS. The durable form of
+ * `VoiceSession.transferAnsweredAt`: the ladder worker may run in a process
+ * that never held the call (PROCESS_ROLE=worker), and `ended_reason` is only
+ * stamped when the bridged call ENDS.
+ */
+export const TRANSFER_ANSWERED_EVENT = 'escalation.transfer_answered';
+
+/**
  * Production `isResolved` wiring: prefer the live in-process session (fast
- * path when this replica still holds it), then the persisted
- * voice_sessions row — the cross-replica / post-restart source of truth.
- * Any failure is indeterminate → unresolved → keep paging.
+ * path when this replica still holds it — a terminal stamp, or the human leg
+ * having answered), then the persisted voice_sessions row and the durable
+ * transfer-answered audit event — the cross-process / post-restart sources of
+ * truth. Any failure is indeterminate → unresolved → keep paging.
  */
 export function createEmergencyPageResolvedCheck(deps: {
   store?: {
-    peek(sessionId: string): { terminalReason?: string } | undefined;
+    peek(sessionId: string): { terminalReason?: string; transferAnsweredAt?: number } | undefined;
   };
   voiceSessionRepo?: Pick<VoiceSessionRepository, 'findById'>;
+  auditRepo?: Pick<AuditRepository, 'findByEntity'>;
 }): (tenantId: string, sessionId: string) => Promise<boolean> {
   return async (tenantId, sessionId) => {
     try {
-      const liveReason = deps.store?.peek(sessionId)?.terminalReason;
-      if (liveReason !== undefined && LADDER_RESOLVED_REASONS.has(liveReason)) {
+      const live = deps.store?.peek(sessionId);
+      if (live?.terminalReason !== undefined && LADDER_RESOLVED_REASONS.has(live.terminalReason)) {
         return true;
       }
+      if (live?.transferAnsweredAt !== undefined) return true;
       if (deps.voiceSessionRepo) {
         const row = await deps.voiceSessionRepo.findById(tenantId, sessionId);
-        return (
+        if (
           row?.endedReason !== undefined &&
           row.endedReason !== null &&
           LADDER_RESOLVED_REASONS.has(row.endedReason)
-        );
+        ) {
+          return true;
+        }
+      }
+      if (deps.auditRepo) {
+        const events = await deps.auditRepo.findByEntity(tenantId, 'voice_session', sessionId);
+        if (events.some((e) => e.eventType === TRANSFER_ANSWERED_EVENT)) return true;
       }
     } catch {
       /* indeterminate — bias toward paging on an emergency */

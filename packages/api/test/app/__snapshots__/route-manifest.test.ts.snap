@@ -110,6 +110,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
 042  authenticated use    /api/telephony    [router: router]
          └─ GET /health
          └─ POST /callback-message
+         └─ POST /dial-answered
          └─ POST /dial-result
          └─ POST /gather
          └─ POST /voice
