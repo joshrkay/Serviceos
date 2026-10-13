@@ -1,6 +1,7 @@
 import {
   MessageDeliveryProvider,
   SmsConsentContext,
+  SmsQuietHoursPolicy,
 } from '../notifications/delivery-provider';
 
 export interface FeedbackDispatchInput {
@@ -10,6 +11,8 @@ export interface FeedbackDispatchInput {
   tenantId?: string;
   /** Customer consent snapshot for the central gate (customer-class send). */
   consent?: SmsConsentContext;
+  /** Send-window policy forwarded to the gate (see `SmsMessage.quietHours`). */
+  quietHours?: SmsQuietHoursPolicy;
 }
 
 export interface FeedbackDispatcher {
@@ -40,6 +43,7 @@ export class MessageDeliveryFeedbackDispatcher implements FeedbackDispatcher {
       ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       recipientClass: 'customer',
       ...(input.consent ? { consent: input.consent } : {}),
+      ...(input.quietHours ? { quietHours: input.quietHours } : {}),
     });
   }
 }

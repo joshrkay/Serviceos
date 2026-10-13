@@ -22,6 +22,8 @@ import { MessageDeliveryFeedbackDispatcher } from '../../src/feedback/dispatcher
 import { createFeedbackSendWorker } from '../../src/workers/feedback-send';
 import { createLogger } from '../../src/logging/logger';
 import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
+import { createRecipientLocaleResolver } from '../../src/notifications/recipient-locale';
+import { PgLocationRepository } from '../../src/locations/pg-location';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 const NOW = new Date('2026-06-25T12:00:00.000Z');
@@ -223,6 +225,8 @@ describe('review-request sweep (US-345, DB-level)', () => {
       feedbackRequestRepo,
       dispatcher,
       publicBaseUrl: 'https://app.example.com',
+      // No quiet-hours window is wired on this gate, so it is always open.
+      sendWindow: gated,
     });
 
     // The sweep's own `queue.send` — wired to the REAL worker instead of a
@@ -261,5 +265,138 @@ describe('review-request sweep (US-345, DB-level)', () => {
       [jobId],
     );
     expect(stamped.rows[0].review_request_sent_at).not.toBeNull();
+  });
+
+  it('never asks for a review of a job completed 30 days ago, even with the toggle just enabled (recency floor)', async () => {
+    const tenant = await createTestTenant(pool);
+    await pool.query(
+      `INSERT INTO tenant_settings (id, tenant_id, business_name) VALUES (gen_random_uuid(), $1, 'Stale Co')`,
+      [tenant.tenantId],
+    );
+    const ids = await seedCustomerLocation(pool, tenant.tenantId, tenant.userId);
+    const staleJob = await seedCompletedJob(pool, tenant.tenantId, ids, hoursAgo(30 * 24));
+    const send = vi.fn(async () => 'msg');
+
+    await runReviewRequestSweep({ pool, jobRepo, queue: { send }, logger, now });
+
+    const ours = send.mock.calls.filter(
+      ([, payload]: [unknown, { tenantId: string }]) => payload.tenantId === tenant.tenantId,
+    );
+    expect(ours).toHaveLength(0);
+    // Outside eligibility, like an opted-out tenant: never selected, never stamped.
+    const row = await pool.query<{ review_request_sent_at: Date | null }>(
+      `SELECT review_request_sent_at FROM jobs WHERE id = $1`,
+      [staleJob],
+    );
+    expect(row.rows[0].review_request_sent_at).toBeNull();
+  });
+
+  it("a closed recipient window hands the job back (stamp cleared at real Postgres) and the sweep sends it in-window", async () => {
+    // NY tenant; the customer's 206 (Seattle) number puts them on Pacific time.
+    const tenant = await createTestTenant(pool);
+    await pool.query(
+      `INSERT INTO tenant_settings (id, tenant_id, business_name, timezone) VALUES (gen_random_uuid(), $1, 'Window Co', 'America/New_York')`,
+      [tenant.tenantId],
+    );
+    const customerId = crypto.randomUUID();
+    const phone = '+12065550188';
+    await pool.query(
+      `INSERT INTO customers (id, tenant_id, first_name, last_name, display_name, primary_phone, preferred_channel, sms_consent, created_by)
+       VALUES ($1, $2, 'Wen', 'Dow', 'Wen Dow', $3, 'sms', TRUE, $4)`,
+      [customerId, tenant.tenantId, phone, tenant.userId],
+    );
+    const locationId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO service_locations (id, tenant_id, customer_id, street1, city, state, postal_code)
+       VALUES ($1, $2, $3, '1 Main', 'Seattle', 'WA', '98101')`,
+      [locationId, tenant.tenantId, customerId],
+    );
+    let clock = new Date('2026-10-13T14:00:00Z'); // 10:00 EDT, 07:00 PDT
+    const jobId = await seedCompletedJob(
+      pool,
+      tenant.tenantId,
+      { customerId, locationId },
+      new Date(clock.getTime() - 30 * 60 * 60 * 1000),
+    );
+
+    const settingsRepo = new PgSettingsRepository(pool);
+    const base = new InMemoryDeliveryProvider();
+    const gate = new GatedMessageDelivery({
+      base,
+      dnc: new PgDncRepository(pool),
+      auditRepo: new PgAuditRepository(pool),
+      enforcement: 'block',
+      env: { ...process.env, TELEPHONY_ENABLED: 'true' },
+      quietHours: {
+        resolveRecipientLocale: createRecipientLocaleResolver({
+          settingsRepo,
+          locationRepo: new PgLocationRepository(pool),
+        }),
+        now: () => clock,
+      },
+      logger: { info: () => undefined },
+    });
+    const feedbackRequestRepo = new PgFeedbackRequestRepository(pool);
+    const worker = createFeedbackSendWorker({
+      jobRepo,
+      customerRepo: new PgCustomerRepository(pool),
+      settingsRepo,
+      feedbackRequestRepo,
+      dispatcher: new MessageDeliveryFeedbackDispatcher(gate),
+      publicBaseUrl: 'https://app.example.com',
+      sendWindow: gate,
+    });
+    // Like PgQueue + the poll loop: the sweep enqueues (and stamps) first, the
+    // worker runs afterwards.
+    const sweep = async () => {
+      const queued: Array<{ payload: { tenantId: string; jobId: string }; key: string }> = [];
+      await runReviewRequestSweep({
+        pool,
+        jobRepo,
+        queue: {
+          send: async (_kind, payload: unknown, idemKey?: string) => {
+            queued.push({ payload: payload as { tenantId: string; jobId: string }, key: idemKey ?? '' });
+            return 'msg';
+          },
+        },
+        logger,
+        now: () => clock,
+        sendWindow: gate,
+      });
+      for (const q of queued.filter((m) => m.payload.tenantId === tenant.tenantId)) {
+        await worker.handle(
+          {
+            id: uuidv4(),
+            type: 'feedback_send',
+            payload: q.payload,
+            attempts: 1,
+            maxAttempts: 3,
+            idempotencyKey: q.key,
+            createdAt: new Date().toISOString(),
+          },
+          logger,
+        );
+      }
+    };
+    const stamp = async () =>
+      (
+        await pool.query<{ review_request_sent_at: Date | null }>(
+          `SELECT review_request_sent_at FROM jobs WHERE id = $1`,
+          [jobId],
+        )
+      ).rows[0].review_request_sent_at;
+
+    await sweep();
+
+    expect(base.sentSms.filter((m) => m.to === phone)).toHaveLength(0);
+    expect(await stamp()).toBeNull();
+    expect(await feedbackRequestRepo.findByJob(tenant.tenantId, jobId)).toBeNull();
+
+    clock = new Date('2026-10-13T16:00:00Z'); // 12:00 EDT, 09:00 PDT
+    await sweep();
+
+    expect(base.sentSms.filter((m) => m.to === phone)).toHaveLength(1);
+    expect(await stamp()).not.toBeNull();
+    expect(await feedbackRequestRepo.findByJob(tenant.tenantId, jobId)).not.toBeNull();
   });
 });

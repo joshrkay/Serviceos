@@ -60,7 +60,7 @@ Sentry→Slack/DM rules in `docs/runbooks/alerting.md`) and, optionally,
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `ALERT_SMS_TO` | unset (SMS channel off) | Operator phone (E.164); sent owner-class, never consent-suppressed |
+| `ALERT_SMS_TO` | unset (SMS channel off) | Operator phone (E.164); sent owner-class with `alertClass: 'operator'` — never consent/DNC-suppressed and NOT stopped by `TELEPHONY_ENABLED=false`. Still needs the Twilio SMS credentials (no delivery provider → no SMS) and is best-effort: a provider/carrier failure is logged, not retried. With neither this nor `SENTRY_DSN` set (or this set without the Twilio SMS credentials), prod/staging boot logs a `configuration warning` |
 | `SLO_CALL_COMPLETION_MIN` | `0.85` | Min completion rate, trailing 60 min |
 | `SLO_CALL_COMPLETION_MIN_SAMPLE` | `5` | Sample floor before completion rule can breach |
 | `SLO_QUEUE_STALE_MIN` | `15` | Pending job age (min) that counts as a stuck queue |

@@ -268,4 +268,27 @@ describe('Postgres integration — PgQueue', () => {
       expect(ours?.error).toMatch(/orphaned: attempts exhausted without completion/);
     });
   });
+
+  describe('WS15 — stalePendingCount counts due-and-unclaimed messages, not old rows', () => {
+    it('ignores a long-created row that is still delayed into the future', async () => {
+      // An overnight delayed job (durable timer, A2P poll) is scheduled work.
+      const id = await queue.send('timer.job', {}, 'stale-delayed', { delaySeconds: 6 * 60 * 60 });
+      await pool.query(
+        "UPDATE _queue_messages SET created_at = NOW() - INTERVAL '2 hours' WHERE id = $1",
+        [id],
+      );
+
+      expect(await queue.stalePendingCount(15 * 60)).toBe(0);
+    });
+
+    it('counts a message that has been due and unclaimed for longer than the window', async () => {
+      const id = await queue.send('stuck.job', {}, 'stale-due');
+      await pool.query(
+        "UPDATE _queue_messages SET created_at = NOW() - INTERVAL '20 minutes', visible_at = NOW() - INTERVAL '20 minutes' WHERE id = $1",
+        [id],
+      );
+
+      expect(await queue.stalePendingCount(15 * 60)).toBe(1);
+    });
+  });
 });

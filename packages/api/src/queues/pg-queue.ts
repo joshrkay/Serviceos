@@ -329,9 +329,12 @@ export class PgQueue extends PgBaseRepository implements Queue {
   }
 
   /**
-   * WS15 — pending messages older than `olderThanSeconds` (see Queue
-   * interface). Filters on created_at, not visible_at: a message mid-backoff
-   * is still "sitting in the queue" from the SLO's point of view.
+   * WS15 — messages due (visible) and unclaimed for longer than
+   * `olderThanSeconds` (see Queue interface). Filters on visible_at, not
+   * created_at: a delayed message is not stuck before it falls due (counting
+   * by creation paged an operator every night for each overnight delay), and
+   * a claimed message's visible_at is pushed into the future until its
+   * visibility lapses.
    */
   async stalePendingCount(olderThanSeconds: number): Promise<number> {
     return this.withClient(async (client) => {
@@ -339,7 +342,7 @@ export class PgQueue extends PgBaseRepository implements Queue {
       const res = await client.query<{ stale: string }>(
         `SELECT COUNT(*) AS stale
            FROM _queue_messages
-          WHERE created_at < NOW() - ($1 || ' seconds')::interval`,
+          WHERE visible_at < NOW() - ($1 || ' seconds')::interval`,
         [String(Math.max(0, olderThanSeconds))],
       );
       return Number(res.rows[0].stale);
