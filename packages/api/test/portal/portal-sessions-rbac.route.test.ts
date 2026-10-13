@@ -157,6 +157,35 @@ describe('portal sessions — owner and dispatcher keep working exactly as befor
     expect(events).toHaveLength(1);
     expect(events[0].actorRole).toBe('dispatcher');
   });
+
+  it('dispatcher: POST /send mints and delivers the link (202)', async () => {
+    const h = await build('dispatcher');
+    const res = await request(h.app)
+      .post('/api/portal-sessions/send')
+      .send({ customerId: h.customer.id, channel: 'sms' });
+
+    expect(res.status).toBe(202);
+    expect(res.body.channelsSent).toHaveLength(1);
+    expect(h.delivery.sentSms).toHaveLength(1);
+    expect(h.delivery.sentSms[0].body).toContain(res.body.url);
+  });
+
+  it('dispatcher: DELETE /:id revokes the session (200) and audits it', async () => {
+    const h = await build('dispatcher');
+    const minted = await request(h.app)
+      .post('/api/portal-sessions')
+      .send({ customerId: h.customer.id });
+    expect(minted.status).toBe(201);
+
+    const res = await request(h.app).delete(`/api/portal-sessions/${minted.body.id}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(minted.body.id);
+    expect(res.body.revokedAt).toBeTruthy();
+    const revoked = h.auditRepo.getAll().filter((e) => e.eventType === 'portal_session.revoked');
+    expect(revoked).toHaveLength(1);
+    expect(revoked[0].actorRole).toBe('dispatcher');
+  });
 });
 
 describe('portal sessions — technician is refused (no customers:update)', () => {
