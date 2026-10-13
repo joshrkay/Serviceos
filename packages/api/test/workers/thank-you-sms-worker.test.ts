@@ -760,6 +760,31 @@ describe('runThankYouSmsSweep', () => {
       return { dispatcher: new MessageDeliveryFeedbackDispatcher(gate), sentSms };
     }
 
+    it("skips a closed-window tenant's jobs without per-job work — nothing claimed, sent or stamped", async () => {
+      // Overnight, every deferred job would otherwise be re-read, re-claimed
+      // and re-released every 10 minutes.
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      const rows = [{ id: job.id, tenant_id: TENANT }];
+      const { pool, claims } = claimAwarePool({ rows });
+
+      const result = await runThankYouSmsSweep(
+        deps(rows, {
+          pool,
+          now: () => LATE,
+          sendWindow: {
+            sendWindowVerdict: async () => ({ isAllowedNow: false, nextAllowedAt: MORNING }),
+          },
+        }),
+      );
+
+      expect(send).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ sent: 0, failed: 0, deferred: 1 });
+      expect(claims.size).toBe(0);
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toBeFalsy();
+    });
+
     it('defers a 22:30 thank-you — not sent, stamped, failed or claimed — and sends on the next in-window tick', async () => {
       const job = makeJob({});
       await jobRepo.create(job);

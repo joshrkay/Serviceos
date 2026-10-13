@@ -48,6 +48,7 @@ import { DncRepository, normalizePhone } from '../compliance/dnc';
 import {
   SmsDeferredError,
   SmsSuppressedError,
+  type GatedMessageDelivery,
   type SmsSuppressionReason,
 } from '../notifications/gated-message-delivery';
 
@@ -125,6 +126,13 @@ export interface ThankYouSmsWorkerDeps {
    * recently-completed jobs without sleeping.
    */
   delayHours?: number;
+  /**
+   * The gate's send-window verdict. A tenant whose window is closed (its
+   * zone, strictest close) has its jobs counted `deferred` with no per-job
+   * work — they stay unstamped for an in-window tick. Absent → no check
+   * (the gate still defers each send).
+   */
+  sendWindow?: Pick<GatedMessageDelivery, 'sendWindowVerdict'>;
 }
 
 export interface ThankYouSmsSweepResult {
@@ -246,6 +254,11 @@ async function sweepTenant(
   // with the toggle off shouldn't appear. Defense-in-depth in case the
   // settings row was updated between the SELECT and now.
   if (settings && settings.sendThankYouSms === false) return;
+
+  if (deps.sendWindow && !(await deps.sendWindow.sendWindowVerdict({ tenantId })).isAllowedNow) {
+    result.deferred += jobIds.length;
+    return;
+  }
 
   const businessName = settings?.businessName ?? 'our team';
 

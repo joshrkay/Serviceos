@@ -7155,6 +7155,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           dispatcher: feedbackDispatcher,
           auditRepo,
           logger: thankYouSmsLogger,
+          ...(messageDelivery ? { sendWindow: messageDelivery } : {}),
         });
       }).catch((err) => {
         thankYouSmsLogger.error('Thank-you SMS sweep failed', {
