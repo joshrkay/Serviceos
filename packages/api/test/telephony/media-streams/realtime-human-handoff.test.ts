@@ -12,6 +12,10 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import express from 'express';
+import request from 'supertest';
+import twilio from 'twilio';
+import { createTelephonyRouter } from '../../../src/routes/telephony';
 import {
   TwilioMediaStreamAdapter,
   type WsLike,
@@ -30,6 +34,7 @@ import type {
   StreamingTranscriptEvent,
 } from '../../../src/voice/transcription-providers';
 import type { TtsProvider } from '../../../src/ai/tts/tts-provider';
+import { HANDOFF_UNAVAILABLE_COPY } from '../../../src/ai/agents/customer-calling/tts-copy';
 
 const TENANT = 'tenant-handoff';
 const PUBLIC_BASE_URL = 'https://api.test';
@@ -176,12 +181,13 @@ async function harness(opts: {
   const finalizeOnClose = vi.fn((s, reason: string, fx) => gather.finalizeTerminatedSession(s, fx, reason));
   const deepgram = makeStreamingProvider();
   const ws = new FakeWs();
+  const tts = makeTtsProvider();
   // Wired exactly as app.ts wires attachMediaStreamServer.
   const stream = new TwilioMediaStreamAdapter(
     {
       store,
       streamingProvider: deepgram.provider,
-      ttsProvider: makeTtsProvider(),
+      ttsProvider: tts,
       speechTurn: ({ session: s, speechResult, callSid: cs, tenantId }) =>
         gather.processCallerUtterance({ sessionId: s.id, callSid: cs, speechResult, tenantId }),
       interimEmergencyScan: ({ session: s, speechResult, tenantId }) =>
@@ -205,7 +211,7 @@ async function harness(opts: {
   const say = (transcript: string) =>
     deepgram.emit({ type: 'final', transcript, confidence: 0.95, isFinal: true });
 
-  return { callSid, streamSid, store, session, gather, twilio, ws, deepgram, say, finalizeOnClose, auditRepo };
+  return { callSid, streamSid, store, session, gather, twilio, ws, deepgram, tts, say, finalizeOnClose, auditRepo };
 }
 
 // ─── (a) escalation on a stream call is delivered to Twilio ──────────────────
@@ -288,5 +294,87 @@ describe('realtime hand-off — escalation on a stream call reaches a human', ()
     expect(twiml).toContain('<Dial');
     expect(twiml).toContain(DISPATCHER);
     await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+  });
+});
+
+// ─── (b) a refused transfer never leaves the caller in dead air ──────────────
+
+const WEBHOOK_TOKEN = 'webhook-token';
+
+function signedPost(app: express.Application, path: string, params: Record<string, string>) {
+  const sig = twilio.getExpectedTwilioSignature(WEBHOOK_TOKEN, `${PUBLIC_BASE_URL}${path}`, params);
+  return request(app).post(path).set('X-Twilio-Signature', sig).type('form').send(params);
+}
+
+function telephonyApp(h: Awaited<ReturnType<typeof harness>>) {
+  const app = express();
+  app.use(
+    '/api/telephony',
+    createTelephonyRouter({
+      adapter: h.gather,
+      authTokenGetter: () => WEBHOOK_TOKEN,
+      publicBaseUrl: PUBLIC_BASE_URL,
+      resolveTenantId: () => TENANT,
+      voiceSessionStore: h.store,
+    }),
+  );
+  return app;
+}
+
+describe('realtime hand-off — Twilio refuses the transfer', () => {
+  it('falls back to the Gather degrade, and the fallback webhook bridges the call to the dispatcher', async () => {
+    const twilioRest = makeTwilioRest((body) =>
+      body.has('Twiml') ? { ok: false, status: 400 } : { ok: true, status: 200 },
+    );
+    const h = await harness({ twilio: twilioRest });
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+
+    await vi.waitFor(() => expect(h.twilio.degrades()).toHaveLength(1));
+    expect(h.twilio.transfers()).toHaveLength(1);
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+    expect(h.ws.closeReason).toBe('degraded_to_gather');
+
+    // Twilio now re-requests TwiML from the fallback webhook for this call.
+    const res = await signedPost(telephonyApp(h), '/api/telephony/voice/gather-fallback', {
+      CallSid: h.callSid,
+      From: CALLER,
+      To: '+15125550999',
+    });
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Dial');
+    expect(res.text).toContain(DISPATCHER);
+    expect(res.text).toContain(`/api/telephony/dial-result?sid=${encodeURIComponent(h.session.id)}`);
+    expect(res.text).not.toContain('<Stream');
+  });
+
+  it('when the transfer AND the Gather degrade are both refused, the caller is told and the call ends', async () => {
+    // e.g. a broken tenant credential: every Calls REST update is refused.
+    const twilioRest = makeTwilioRest(() => ({ ok: false, status: 401 }));
+    const h = await harness({ twilio: twilioRest });
+    const spoken = () =>
+      (h.tts.synthesize as ReturnType<typeof vi.fn>).mock.calls.map(([input]) => (input as { text: string }).text);
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+
+    await vi.waitFor(() => expect(h.twilio.degrades()).toHaveLength(1));
+    await vi.waitFor(() => expect(spoken()).toContain(HANDOFF_UNAVAILABLE_COPY));
+    await vi.waitFor(() => expect(h.ws.markNames().filter((n) => n.startsWith('silence-arm-'))).toHaveLength(2));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(h.ws.closed).toBe(false); // the apology is still playing
+    h.ws.ackAllMarks(h.streamSid);
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+    expect(h.finalizeOnClose).toHaveBeenCalledTimes(1);
+    const [, , effects] = h.finalizeOnClose.mock.calls[0];
+    expect(effects).toEqual([
+      expect.objectContaining({
+        type: 'end_session',
+        payload: expect.objectContaining({ reason: 'system_failure:handoff_undeliverable' }),
+      }),
+    ]);
   });
 });

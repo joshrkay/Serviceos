@@ -82,6 +82,7 @@ import {
   LANGUAGE_SWITCH_ACK,
   SPEECH_TURN_FAILURE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  HANDOFF_UNAVAILABLE_COPY,
   TURN_HOLD_COPY,
   MAX_CALL_DURATION_WRAP_UP_COPY,
   type SessionLanguage,
@@ -1648,7 +1649,9 @@ export class TwilioMediaStreamAdapter {
     eventType:
       | 'voice.realtime.session_failed'
       | 'voice.disclosure.init_failed'
-      | 'voice.realtime.degraded_to_gather',
+      | 'voice.realtime.degraded_to_gather'
+      | 'voice.realtime.handoff_delivered'
+      | 'voice.realtime.handoff_failed',
     args: { callSid: string; tenantId: string; reason: string },
   ): Promise<void> {
     if (!this.deps.auditRepo) return;
@@ -1693,6 +1696,15 @@ export class TwilioMediaStreamAdapter {
     if (!restRedirect || !callSid || this.state.wsCloseInitiated || this.state.closed) {
       return false;
     }
+    // Realtime hand-off — a hand-off taken but not yet delivered goes back
+    // where the Gather-fallback webhook looks for it BEFORE Twilio is told to
+    // request that webhook, so the degraded call is bridged rather than
+    // continued on an `escalating` FSM that ignores speech.
+    const undeliveredHandoff = this.state.handoffTwiml;
+    const session = this.state.session;
+    if (undeliveredHandoff && session && this.deps.setPendingTransferTwiml) {
+      this.deps.setPendingTransferTwiml(session.id, undeliveredHandoff);
+    }
     let redirected = false;
     try {
       redirected = await restRedirect({
@@ -1702,7 +1714,11 @@ export class TwilioMediaStreamAdapter {
     } catch {
       redirected = false;
     }
-    if (!redirected) return false;
+    if (!redirected) {
+      if (undeliveredHandoff && session) this.deps.takePendingTransferTwiml?.(session.id);
+      return false;
+    }
+    this.state.handoffTwiml = null;
     if (this.state.session) {
       await this.emitRealtimeResilienceAudit('voice.realtime.degraded_to_gather', {
         callSid,
@@ -3749,9 +3765,16 @@ export class TwilioMediaStreamAdapter {
       if (closedDuringDelivery !== null) {
         this.state.handoffTwiml = null;
         this.settleCloseOutcome(closedDuringDelivery);
+        return;
       }
+      await this.recoverFromRefusedHandoff(session, callSid, trigger);
       return;
     }
+    void this.emitRealtimeResilienceAudit('voice.realtime.handoff_delivered', {
+      callSid,
+      tenantId: session.tenantId,
+      reason: trigger,
+    });
     this.state.handoff = 'delivered';
     this.state.handoffTwiml = null;
     this.state.handoffFinalizedByDialResult = twimlFinalizesViaDialResult(twiml);
@@ -3768,6 +3791,66 @@ export class TwilioMediaStreamAdapter {
       return;
     }
     this.handleClose('handoff_delivered');
+  }
+
+  /**
+   * Realtime hand-off — Twilio refused (or timed out) the inline-TwiML update.
+   * Loud (error log + `handoff_delivery_failed` voice error + audit), then the
+   * existing WS7 degrade: `attemptDegradeToGather` re-parks the hand-off and
+   * the Gather-fallback webhook bridges the call with it. The realtime
+   * transport itself was healthy (it carried the call to this point), so the
+   * leg votes success rather than letting the degrade's socket close read as a
+   * transport failure.
+   */
+  private async recoverFromRefusedHandoff(
+    session: VoiceSession,
+    callSid: string,
+    trigger: string,
+  ): Promise<void> {
+    logger.error('realtime hand-off: Twilio refused the transfer — degrading to Gather', {
+      callSid,
+      sessionId: session.id,
+      trigger,
+    });
+    recordVoiceError({
+      errorKind: 'handoff_delivery_failed',
+      channel: 'media_streams',
+      callSid,
+      tenantId: session.tenantId,
+    });
+    void this.emitRealtimeResilienceAudit('voice.realtime.handoff_failed', {
+      callSid,
+      tenantId: session.tenantId,
+      reason: trigger,
+    });
+    this.recordCircuitOutcomeOnce('success', 'handoff_degraded');
+    if (await this.attemptDegradeToGather('handoff_delivery_failed')) return;
+    if (this.state.closed) return;
+
+    // Neither REST update was accepted, so nothing can change what Twilio does
+    // with this call: the caller would otherwise sit in silence on an
+    // `escalating` FSM. Tell them, then end the leg through the end_session
+    // path so the session is finalized with a specific terminal reason.
+    this.state.handoffTwiml = null;
+    logger.error('realtime hand-off undeliverable: transfer and Gather degrade both refused', {
+      callSid,
+      sessionId: session.id,
+      trigger,
+    });
+    recordVoiceError({
+      errorKind: 'handoff_undeliverable',
+      channel: 'media_streams',
+      callSid,
+      tenantId: session.tenantId,
+    });
+    await this.speakRecoveryLine(session, HANDOFF_UNAVAILABLE_COPY);
+    // Closing the stream drops audio Twilio has not played yet.
+    await this.awaitPlayout(this.deps.handoffPlayoutMaxWaitMs ?? DEFAULT_HANDOFF_PLAYOUT_MAX_WAIT_MS);
+    if (this.state.closed) return;
+    this.state.pendingFinalizeEffects = [
+      { type: 'end_session', payload: { reason: 'system_failure:handoff_undeliverable' } },
+    ];
+    this.handleClose('end_session');
   }
 
   private clearSilenceRepromptTimer(): void {

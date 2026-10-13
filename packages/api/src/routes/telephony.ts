@@ -632,6 +632,21 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     }
 
     if (session) {
+      // Realtime hand-off — the stream leg degraded with a human hand-off
+      // still undelivered (Twilio refused the inline-TwiML update, or the
+      // stream failed while the hand-off line was playing). The session's FSM
+      // is `escalating`, which ignores every further utterance, so continuing
+      // on a bare Gather would strand the caller: bridge them instead, exactly
+      // as the Gather transport's own next webhook response would have.
+      const transferTwiml = deps.adapter.takePendingTransferTwiml(session.id);
+      if (transferTwiml) {
+        logger.info('telephony/gather-fallback: delivering undelivered realtime hand-off', {
+          callSid,
+          sessionId: session.id,
+        });
+        res.status(200).type('text/xml').send(transferTwiml);
+        return;
+      }
       const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
       const action = `${base}/api/telephony/gather?sid=${encodeURIComponent(session.id)}`;
       const lang: Language = session.language === 'es' ? 'es' : 'en';

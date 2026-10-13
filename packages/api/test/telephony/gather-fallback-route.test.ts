@@ -29,6 +29,7 @@ function makeFakeAdapter() {
       handleInbound,
       handleInboundForStream: vi.fn(),
       handleGather: vi.fn(),
+      takePendingTransferTwiml: vi.fn(() => undefined),
     } as unknown as Parameters<typeof createTelephonyRouter>[0]['adapter'],
     handleInbound,
   };
