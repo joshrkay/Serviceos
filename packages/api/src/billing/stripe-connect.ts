@@ -314,6 +314,16 @@ export class StripeConnectService {
         if (!winner) {
           throw new Error('createOnboardingLink: account claim lost but no account persisted');
         }
+        if (winner !== account.id) {
+          // The other request's account won; this one is never onboarded.
+          // Logged so ops can delete it (Express, zero balance) if wanted.
+          // eslint-disable-next-line no-console
+          console.warn('[stripe-connect] account claim lost; unused Express account', {
+            tenantId: input.tenantId,
+            unusedAccountId: account.id,
+            keptAccountId: winner,
+          });
+        }
         accountId = winner;
       }
     }

@@ -904,6 +904,8 @@ export class PublicEstimateService {
       headers['Stripe-Account'] = connect.accountId;
     }
 
+    // #1110 — a customer-facing route never answers a bare 500: a mint that
+    // times out or never reaches Stripe gets the same mapped error as a refusal.
     const res = await fetchFn('https://api.stripe.com/v1/payment_links', {
       method: 'POST',
       headers,
@@ -916,6 +918,11 @@ export class PublicEstimateService {
         'metadata[deposit_for_job_id]': job.id,
         'metadata[estimate_id]': estimate.id,
       }),
+    }).catch((err: unknown) => {
+      logger.error('Deposit payment link: Stripe unreachable', {
+        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
+      throw new AppError('PAYMENT_PROVIDER_ERROR', 'The payment provider could not create a checkout link', 502);
     });
     if (!res.ok) {
       // #1110 — a customer-facing route: map the refusal, log the detail, and

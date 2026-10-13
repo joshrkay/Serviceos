@@ -7,6 +7,7 @@
  * are always created on the tenant Connect account (Stripe-Account header).
  */
 import { StripeFetch, boundedStripeFetch } from './stripe-payment-intent';
+import { sendIdempotentCreate } from '../shared/idempotency-key';
 
 export interface StripeTerminalConfig {
   apiKey: string;
@@ -91,11 +92,21 @@ export async function ensureTerminalLocation(
   if (input.address.line2) body.set('address[line2]', input.address.line2);
   if (input.address.state) body.set('address[state]', input.address.state);
 
-  const res = await fetcher('https://api.stripe.com/v1/terminal/locations', {
-    method: 'POST',
-    headers: buildHeaders(config),
-    body: body.toString(),
-  });
+  // The location id is only persisted after the connection token succeeds
+  // (routes/terminal.ts), so a lost answer here used to leave one more
+  // Location on the connected account per retry. Keyed per account + params
+  // (policy: sendIdempotentCreate); a retry in a later key window can still
+  // add one.
+  const res = await sendIdempotentCreate(
+    `terminal-location:${config.stripeAccountId.trim()}`,
+    body,
+    (idempotencyKey) =>
+      fetcher('https://api.stripe.com/v1/terminal/locations', {
+        method: 'POST',
+        headers: buildHeaders(config, idempotencyKey),
+        body: body.toString(),
+      }),
+  );
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`Stripe terminal.locations.create failed (${res.status}): ${text}`);

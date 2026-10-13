@@ -86,9 +86,15 @@ export async function inviteTeamMember(
         const data = (await clerkRes.json()) as { id?: string };
         clerkInvitationId = data.id ?? null;
       }
-    } catch {
+    } catch (err) {
       // Best-effort. Local row stays; UI surfaces "Invited" on it
       // regardless. Re-send is via Clerk dashboard.
+      // eslint-disable-next-line no-console
+      console.warn('[invite-team-member] Clerk invitation failed; local invitation kept', {
+        tenantId: input.tenantId,
+        invitationId: invitation.id,
+        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
     }
   }
 

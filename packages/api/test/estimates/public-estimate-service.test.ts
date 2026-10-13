@@ -965,14 +965,14 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
       return fakeJson({ id: `plink_${mints}`, url: `https://checkout.stripe.com/c/plink_${mints}` });
     };
 
-    it('a deposit-link mint that never answers fails like a network failure', async () => {
+    it('a deposit-link mint that never answers gets the mapped provider error, not a bare 500 (#1110)', async () => {
       const est = await seedEstimateWithTotal(100000);
       vi.stubGlobal('fetch', hangingFetch((url) => url.endsWith('/payment_links')));
 
       const outcome = await settleWithin(liveService().getOrCreateDepositCheckoutUrl(est.viewToken!), 10_000);
 
       expect(outcome.status).toBe('rejected');
-      expect((outcome as { reason: Error }).reason.name).toBe('TimeoutError');
+      expect((outcome as { reason: unknown }).reason).toMatchObject({ statusCode: 502, code: 'PAYMENT_PROVIDER_ERROR' });
     });
 
     it('a hung deactivation of an expired link still hands the customer a fresh link', async () => {

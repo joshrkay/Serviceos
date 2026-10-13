@@ -19,4 +19,22 @@ describe('timedFetch', () => {
     expect(outcome.status).toBe('rejected');
     expect((outcome as { reason: Error }).reason.message).toBe('caller gave up');
   });
+
+  it('the deadline also covers reading the body (headers arrive, the body stalls)', async () => {
+    // Like undici: the response resolves, then the body read rejects when the signal aborts.
+    const base = (async (_input: unknown, init?: RequestInit) => ({
+      ok: true,
+      status: 200,
+      json: () =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+        }),
+    })) as unknown as typeof fetch;
+
+    const res = await timedFetch(10_000, base)('https://api.example/x');
+    const outcome = await settleWithin(res.json(), 10_000);
+
+    expect(outcome.status).toBe('rejected');
+    expect((outcome as { reason: Error }).reason.name).toBe('TimeoutError');
+  });
 });

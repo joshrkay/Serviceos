@@ -7,11 +7,13 @@
  * until the 60 s idle-in-transaction guard kills it — and ~20 such requests
  * exhaust the pool for everyone.
  *
- * `timedFetch(ms)` returns a fetch that aborts after `ms` (the deadline also
- * covers reading the body). A timeout rejects exactly where a network failure
- * does — from the fetch call, with a DOMException named "TimeoutError", the
- * same shape `AbortSignal.timeout` produces — so callers keep their existing
- * failure handling. A caller-supplied `signal` still aborts the request.
+ * `timedFetch(ms)` returns a fetch that aborts after `ms`; the deadline also
+ * covers reading the body. A timeout rejects where a network failure would:
+ * from the fetch call when the headers never arrive, or from `res.json()` /
+ * `res.text()` when the body stalls (like a mid-body socket reset) — with a
+ * DOMException named "TimeoutError", the shape `AbortSignal.timeout` produces
+ * — so callers keep their existing failure handling. A caller-supplied
+ * `signal` still aborts the request.
  *
  * The deadline is armed with `setTimeout` (unref'd) rather than
  * `AbortSignal.timeout` so tests can drive it with fake timers. Services use

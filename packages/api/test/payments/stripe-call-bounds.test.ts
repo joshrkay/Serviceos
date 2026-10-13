@@ -13,6 +13,7 @@ import {
 import {
   createTerminalConnectionToken,
   createTerminalPaymentIntent,
+  createTerminalSession,
   ensureTerminalLocation,
   fetchConnectAccountBusinessAddress,
 } from '../../src/payments/stripe-terminal';
@@ -162,5 +163,36 @@ describe('createSetupIntent — the Stripe customer create is idempotent per cus
     expect(base).toBeDefined();
     expect(otherCustomer).not.toBe(base);
     expect(platform).not.toBe(base);
+  });
+});
+
+describe('createTerminalSession — the Terminal location create is idempotent per connected account', () => {
+  beforeEach(() => useProviderClock());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('a session retried after a lost location-create answer reuses the same location (no pile-up)', async () => {
+    let locations = 0;
+    const stripe = fakeStripe((call) => {
+      if (call.path === '/v1/accounts/acct_t') {
+        return { body: { company: { address: { line1: '1 Main', city: 'Phoenix', postal_code: '85001', country: 'US' } } } };
+      }
+      if (call.path === '/v1/terminal/locations') {
+        locations += 1;
+        return { body: { id: `tml_${locations}` }, delayMs: locations === 1 ? 15_000 : undefined };
+      }
+      return { body: { secret: 'pst_secret' } };
+    });
+    vi.stubGlobal('fetch', stripe.fetchFn);
+    const session = () => createTerminalSession(terminal, { displayName: 'Van 1' });
+
+    const first = await settleWithin(session(), 15_000); // gave up at 10 s; Stripe made the location at 15 s
+    const retry = await settleWithin(session(), 0);
+
+    expect(first.status).toBe('rejected');
+    expect(retry).toMatchObject({ status: 'fulfilled', value: { locationId: 'tml_1' } });
+    expect(stripe.executedOn('POST', '/v1/terminal/locations')).toHaveLength(1);
   });
 });
