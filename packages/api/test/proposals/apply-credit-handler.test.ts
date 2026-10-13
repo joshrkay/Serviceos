@@ -589,6 +589,43 @@ describe('apply_credit execution handler', () => {
     expect(row!.totals.totalCents).toBe(3000);
   });
 
+  // H1 — the handler performs Stripe I/O, so the executor runs it OUTSIDE its
+  // transaction: the credit commits on its own, and a crash before the
+  // executor's idempotency marker re-runs the SAME proposal. That re-run must
+  // be an idempotent success (never a second credit) and must still finish
+  // the stale-link cleanup the crash may have cut off.
+  it('re-executing the SAME approved credit (executor crash-retry) never credits twice and still kills a stale link', async () => {
+    const proposal = makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 1000 } });
+    const first = await handler.execute(proposal, ctx); // 3000 → 2000
+    expect(first.success).toBe(true);
+    // The crash hit before cleanup ran: a link priced at the old balance is
+    // still stored on the invoice.
+    await invoiceRepo.update(TENANT, INVOICE_ID, {
+      stripePaymentLinkId: 'plink_stale',
+      stripePaymentLinkUrl: 'https://buy.stripe.test/plink_stale',
+    });
+    const { provider, deactivated } = makeFakeProvider();
+    const retryHandler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo, undefined, { provider });
+
+    const retry = await retryHandler.execute(proposal, ctx);
+
+    expect(retry).toEqual({ success: true, resultEntityId: INVOICE_ID });
+    const row = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(row!.lineItems.map((li) => li.totalCents)).toEqual([3000, -1000]);
+    expect(row!.totals.totalCents).toBe(2000);
+    expect(row!.amountDueCents).toBe(2000);
+    expect(deactivated).toEqual(['plink_stale']);
+  });
+
+  it('two DIFFERENT approved credits on the same invoice both apply (the line id is per proposal)', async () => {
+    await handler.execute(makeProposal({ id: 'prop-a', payload: { invoiceId: INVOICE_ID, amountCents: 500 } }), ctx);
+    await handler.execute(makeProposal({ id: 'prop-b', payload: { invoiceId: INVOICE_ID, amountCents: 500 } }), ctx);
+
+    const row = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(row!.lineItems.map((li) => li.totalCents)).toEqual([3000, -500, -500]);
+    expect(row!.amountDueCents).toBe(2000);
+  });
+
   it('production registry wiring threads paymentLinkCleanup into apply_credit AND apply_late_fee', async () => {
     invoiceRepo = new InMemoryInvoiceRepository();
     await invoiceRepo.create(

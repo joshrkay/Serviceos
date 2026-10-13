@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
+import { v5 as uuidv5 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { Invoice, InvoiceRepository } from '../../invoices/invoice';
@@ -15,6 +15,19 @@ import {
   deactivateInvoicePaymentLink,
 } from '../../invoices/invoice-payment-link';
 import { formatUsdCentsPlain } from '@ai-service-os/shared';
+
+/** Fixed namespace for credit-line ids (a real UUID, so pg-invoice keeps it). */
+const CREDIT_LINE_ID_NAMESPACE = '3f6d2b8e-7a41-4c9d-b2e5-8c1f0a9d4e73';
+
+/**
+ * Deterministic, persistence-stable id for the credit line a given approved
+ * proposal appends to a given invoice — a re-run of the SAME proposal maps to
+ * the SAME line (idempotent), a different proposal to a different line. A
+ * valid UUID, because pg-invoice insertLineItems rewrites non-UUID ids.
+ */
+export function creditLineId(invoiceId: string, proposalId: string): string {
+  return uuidv5(`${invoiceId}:credit:${proposalId}`, CREDIT_LINE_ID_NAMESPACE);
+}
 
 /**
  * Executes an approved `apply_credit` proposal (Tradesperson wave 1, Task 4).
@@ -44,22 +57,17 @@ import { formatUsdCentsPlain } from '@ai-service-os/shared';
  * Money-class: this only ever runs after explicit owner approval (money
  * proposals never auto-approve).
  *
- * ── No stepKey-style dedup id (deliberate divergence from apply_late_fee) ──
- * `ApplyLateFeeExecutionHandler` keys its line's id on `(invoiceId, stepKey)`
- * because the PERIODIC DUNNING SWEEP can mint a fresh, DISTINCT proposal for
- * the same accrual step on the same invoice — without a deterministic id,
- * two such proposals could double-charge the same fee. `apply_credit` has no
- * sweep and no `stepKey`: each credit is a one-off, human-approved voice
- * action, and re-execution of the SAME proposal is already deduped
- * upstream by `ProposalExecutor`'s `IdempotencyGuard` (proposals/execution/
- * idempotency.ts). Inventing a stepKey-shaped field here to force the same
- * pattern would (a) require a phantom extraction field this contract has no
- * use for, and (b) wrongly collapse two DIFFERENT, separately-approved
- * credits on the same invoice (e.g. two distinct goodwill gestures) into a
- * single line — the deterministic-id pattern solves a problem this type
- * doesn't have. The credit line's id is therefore a plain `uuidv4()`, same
- * as any other newly-appended invoice line (see e.g.
- * invoice-schedule-handler.ts).
+ * ── Per-PROPOSAL deterministic line id (see creditLineId) ──
+ * The handler calls Stripe (stale link / PaymentIntent cleanup), so it is
+ * `performsExternalIo`: the executor runs it OUTSIDE its transaction and the
+ * credit commits on its own, BEFORE the executor's idempotency marker. A
+ * crash in that window re-runs the SAME proposal, which `IdempotencyGuard`
+ * cannot dedupe (no marker yet). The credit line's id is therefore derived
+ * from (invoiceId, proposalId): a re-run finds its own line already present
+ * and returns an idempotent success instead of crediting twice. Keying on the
+ * PROPOSAL (not a stepKey, as `apply_late_fee` does for its dunning sweep)
+ * keeps two DIFFERENT, separately-approved credits on the same invoice (two
+ * distinct goodwill gestures) as two lines.
  *
  * Same status precondition as `apply_late_fee`: only an ISSUED invoice still
  * carrying a balance (`open` / `partially_paid`) can be credited — never a
@@ -85,6 +93,14 @@ import { formatUsdCentsPlain } from '@ai-service-os/shared';
  */
 export class ApplyCreditExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'apply_credit';
+  // H1 — the stale link / PaymentIntent cleanup calls Stripe. Run OUTSIDE the
+  // executor transaction (Path B) so the credit commits and releases its
+  // invoice row lock before any network round trip (a webhook payment would
+  // otherwise block on that lock for the whole call), and so a later rollback
+  // can never undo a credit whose old-price link Stripe already killed. Safe
+  // to re-run after a crash before the executor's marker: creditLineId makes
+  // the re-run an idempotent success. Same posture as record_payment.
+  performsExternalIo = true;
 
   constructor(
     private readonly invoiceRepo?: InvoiceRepository,
@@ -128,6 +144,17 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
       return { success: false, error: `Invoice ${invoiceId} not found in this tenant` };
     }
 
+    // Idempotency (H1): this proposal's credit line is already on the invoice
+    // — a re-run after a crash between the committed credit and the
+    // executor's marker. Never credit twice; DO finish the stale-link cleanup
+    // the crash may have cut off (it is idempotent: no stored link → no-op,
+    // and only PaymentIntents priced above the balance are cancelled).
+    const lineId = creditLineId(invoice.id, proposal.id);
+    if (invoice.lineItems.some((li) => li.id === lineId)) {
+      await this.killStaleChargeVectors(invoice, context);
+      return { success: true, resultEntityId: invoice.id };
+    }
+
     // Only an issued invoice still carrying a balance can be credited —
     // same open/partially_paid precondition as apply_late_fee.
     if (invoice.status !== 'open' && invoice.status !== 'partially_paid') {
@@ -148,7 +175,7 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
     }
 
     const creditLine = buildLineItem(
-      uuidv4(),
+      lineId,
       reason ? `Credit — ${reason}` : 'Credit',
       1,
       -amountCents,
@@ -199,32 +226,7 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
       };
     }
 
-    // P0-9 — the stored link and any minted PaymentIntent were priced at the
-    // pre-credit balance; left live they would charge the customer more than
-    // is now owed. Both helpers are best-effort and audit every outcome
-    // (never throw), so a Stripe failure can't unwind the approved credit.
-    if (this.paymentLinkCleanup) {
-      const actor = { actorId: context.executedBy, actorRole: 'voice_agent' };
-      await deactivateInvoicePaymentLink({
-        tenantId: context.tenantId,
-        invoice: updated,
-        reason: 'repriced',
-        invoiceRepo: this.invoiceRepo,
-        provider: this.paymentLinkCleanup.provider,
-        connectAccountResolver: this.paymentLinkCleanup.connectAccountResolver,
-        auditRepo: this.auditRepo,
-        actor,
-      });
-      await cancelInvoicePaymentIntents({
-        tenantId: context.tenantId,
-        invoice: updated,
-        reason: 'repriced',
-        provider: this.paymentLinkCleanup.provider,
-        connectAccountResolver: this.paymentLinkCleanup.connectAccountResolver,
-        auditRepo: this.auditRepo,
-        actor,
-      });
-    }
+    await this.killStaleChargeVectors(updated, context);
 
     // §6 Time-to-Cash. Best-effort job money-state rollup.
     if (this.moneyStateDeps) {
@@ -263,5 +265,35 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
     }
 
     return { success: true, resultEntityId: updated.id };
+  }
+
+  /**
+   * P0-9 — the stored link and any minted PaymentIntent were priced at the
+   * pre-credit balance; left live they would charge the customer more than
+   * is now owed. Both helpers are best-effort and audit every outcome (never
+   * throw), so a Stripe failure can't unwind the approved credit.
+   */
+  private async killStaleChargeVectors(invoice: Invoice, context: ExecutionContext): Promise<void> {
+    if (!this.paymentLinkCleanup || !this.invoiceRepo) return;
+    const actor = { actorId: context.executedBy, actorRole: 'voice_agent' };
+    await deactivateInvoicePaymentLink({
+      tenantId: context.tenantId,
+      invoice,
+      reason: 'repriced',
+      invoiceRepo: this.invoiceRepo,
+      provider: this.paymentLinkCleanup.provider,
+      connectAccountResolver: this.paymentLinkCleanup.connectAccountResolver,
+      auditRepo: this.auditRepo,
+      actor,
+    });
+    await cancelInvoicePaymentIntents({
+      tenantId: context.tenantId,
+      invoice,
+      reason: 'repriced',
+      provider: this.paymentLinkCleanup.provider,
+      connectAccountResolver: this.paymentLinkCleanup.connectAccountResolver,
+      auditRepo: this.auditRepo,
+      actor,
+    });
   }
 }

@@ -33,7 +33,19 @@ import {
   ApplyLateFeeExecutionHandler,
   lateFeeLineId,
 } from '../../src/proposals/execution/apply-late-fee-handler';
-import { Proposal } from '../../src/proposals/proposal';
+import {
+  Proposal,
+  ProposalRepository,
+  ProposalType,
+  createProposal,
+} from '../../src/proposals/proposal';
+import { transitionProposal } from '../../src/proposals/lifecycle';
+import { PgProposalRepository } from '../../src/proposals/pg-proposal';
+import { PgProposalExecutionRepository } from '../../src/proposals/pg-proposal-execution';
+import { ProposalExecutor } from '../../src/proposals/execution/executor';
+import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
+import { PgIdempotencyLockProvider } from '../../src/proposals/execution/idempotency-lock';
+import { ExecutionHandler } from '../../src/proposals/execution/handlers';
 
 type ConcurrentMutation = (repo: PgInvoiceRepository, tenantId: string, id: string) => Promise<void>;
 
@@ -269,4 +281,162 @@ describe('Postgres integration — apply_credit / apply_late_fee are atomic agai
       expect(row!.lineItems).toHaveLength(1);
     },
   );
+
+  // H1 — apply_credit calls Stripe (stale link / PI cleanup). Through the REAL
+  // executor + PgIdempotencyLockProvider (production wiring) that cleanup must
+  // run AFTER the credit committed and released its row lock — never inside
+  // the executor's transaction — and the executor's crash-retry must not
+  // credit twice.
+  describe('through the ProposalExecutor (production lock provider)', () => {
+    let proposalRepo: PgProposalRepository;
+    let executionRepo: PgProposalExecutionRepository;
+
+    beforeAll(() => {
+      proposalRepo = new PgProposalRepository(pool);
+      executionRepo = new PgProposalExecutionRepository(pool);
+    });
+
+    /** What a Stripe call observed about the invoice row, from a SEPARATE connection. */
+    interface StripeCallObservation {
+      committedTotalCents: number;
+      rowLockedByAnotherTx: boolean;
+    }
+
+    async function observeInvoiceRow(tenantId: string, invoiceId: string): Promise<StripeCallObservation> {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+        const { rows } = await client.query<{ total_cents: string }>(
+          'SELECT total_cents FROM invoices WHERE id = $1 AND tenant_id = $2',
+          [invoiceId, tenantId],
+        );
+        let rowLockedByAnotherTx = false;
+        try {
+          await client.query('SAVEPOINT probe_lock');
+          await client.query('SELECT id FROM invoices WHERE id = $1 AND tenant_id = $2 FOR UPDATE NOWAIT', [
+            invoiceId,
+            tenantId,
+          ]);
+        } catch (err) {
+          if ((err as { code?: string }).code !== '55P03') throw err;
+          rowLockedByAnotherTx = true;
+          await client.query('ROLLBACK TO SAVEPOINT probe_lock');
+        }
+        return { committedTotalCents: Number(rows[0].total_cents), rowLockedByAnotherTx };
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+        client.release();
+      }
+    }
+
+    function probingStripeProvider(tenantId: string, invoiceId: string) {
+      const observations: StripeCallObservation[] = [];
+      const provider = {
+        generateLink: async () => {
+          throw new Error('not used');
+        },
+        deactivateLink: async () => {
+          observations.push(await observeInvoiceRow(tenantId, invoiceId));
+        },
+        listInvoicePaymentIntents: async () => {
+          observations.push(await observeInvoiceRow(tenantId, invoiceId));
+          return [];
+        },
+        cancelPaymentIntent: async () => undefined,
+      };
+      return { provider, observations };
+    }
+
+    async function approvedCreditProposal(seeded: Seeded, amountCents: number): Promise<Proposal> {
+      let proposal = createProposal({
+        tenantId: seeded.tenantId,
+        proposalType: 'apply_credit',
+        payload: { invoiceId: seeded.invoiceId, amountCents },
+        summary: 'Apply credit (executor path)',
+        createdBy: seeded.userId,
+        idempotencyKey: `apply-credit-h1-${uuidv4()}`,
+      });
+      proposal = transitionProposal(proposal, 'ready_for_review', 'test');
+      proposal = transitionProposal(proposal, 'approved', 'test');
+      // Past the undo window so the executor runs immediately.
+      proposal = { ...proposal, approvedAt: new Date(Date.now() - 10_000) };
+      return proposalRepo.create(proposal);
+    }
+
+    function executorWith(handler: ExecutionHandler, repo: ProposalRepository = proposalRepo): ProposalExecutor {
+      const guard = new IdempotencyGuard(executionRepo, proposalRepo, new PgIdempotencyLockProvider(pool));
+      return new ProposalExecutor(
+        new Map<ProposalType, ExecutionHandler>([['apply_credit', handler]]),
+        repo,
+        guard,
+        auditRepo,
+        { executionRepo },
+      );
+    }
+
+    async function seedWithStoredLink(amountCents: number): Promise<Seeded> {
+      const seeded = await seedOpenInvoice(amountCents);
+      await readRepo.update(seeded.tenantId, seeded.invoiceId, {
+        stripePaymentLinkId: 'plink_old_balance',
+        stripePaymentLinkUrl: 'https://buy.stripe.test/plink_old_balance',
+      });
+      return seeded;
+    }
+
+    it('runs the Stripe cleanup only after the credit committed and released the invoice row lock', async () => {
+      const seeded = await seedWithStoredLink(30000);
+      const { provider, observations } = probingStripeProvider(seeded.tenantId, seeded.invoiceId);
+      const handler = new ApplyCreditExecutionHandler(readRepo, auditRepo, undefined, { provider });
+      const proposal = await approvedCreditProposal(seeded, 5000);
+
+      const { proposal: after } = await executorWith(handler).execute(proposal, {
+        tenantId: seeded.tenantId,
+        executedBy: seeded.userId,
+      });
+
+      expect(after.status).toBe('executed');
+      expect(observations.length).toBeGreaterThan(0);
+      for (const seen of observations) {
+        // Inside the executor's transaction a separate connection would still
+        // read 30000 and find the row locked for the whole Stripe round trip.
+        expect(seen).toEqual({ committedTotalCents: 25000, rowLockedByAnotherTx: false });
+      }
+    });
+
+    it('a crash after the credit committed but before the idempotency marker does not credit twice on retry', async () => {
+      const seeded = await seedOpenInvoice(30000);
+      const handler = new ApplyCreditExecutionHandler(readRepo, auditRepo);
+      let failStatusWrite = true;
+      const flakyProposalRepo = new Proxy(proposalRepo, {
+        get(target, prop, receiver) {
+          if (prop === 'updateStatus' && failStatusWrite) {
+            return async () => {
+              throw new Error('injected updateStatus failure (crash after commit)');
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      }) as ProposalRepository;
+      const executor = executorWith(handler, flakyProposalRepo);
+      const proposal = await approvedCreditProposal(seeded, 5000);
+      const ctx = { tenantId: seeded.tenantId, executedBy: seeded.userId };
+
+      await expect(executor.execute(proposal, ctx)).rejects.toThrow(/crash after commit/);
+
+      failStatusWrite = false;
+      const reloaded = (await proposalRepo.findById(seeded.tenantId, proposal.id)) ?? proposal;
+      const { proposal: after } = await executor.execute(
+        { ...reloaded, approvedAt: new Date(Date.now() - 10_000) },
+        ctx,
+      );
+
+      expect(after.status).toBe('executed');
+      const row = await readRepo.findById(seeded.tenantId, seeded.invoiceId);
+      expect(row!.lineItems.map((li) => li.totalCents)).toEqual([30000, -5000]);
+      expect(row!.totals.totalCents).toBe(25000);
+      expect(row!.amountDueCents).toBe(25000);
+    });
+  });
 });
