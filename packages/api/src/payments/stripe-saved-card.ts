@@ -152,7 +152,8 @@ export async function retrievePaymentMethod(
   if (!paymentMethodId) throw new Error('paymentMethodId is required');
   const res = await fetcher(
     `https://api.stripe.com/v1/payment_methods/${encodeURIComponent(paymentMethodId)}`,
-    { method: 'GET', headers: buildHeaders(config), body: '' },
+    // No `body` key: the platform fetch rejects a GET carrying one, even ''.
+    { method: 'GET', headers: buildHeaders(config) },
   );
   if (!res.ok) {
     const text = await res.text().catch(() => '');

@@ -113,12 +113,12 @@ export async function fetchConnectAccountBusinessAddress(
   accountId: string,
   fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<TerminalLocationAddress | null> {
+  // No `body` key: the platform fetch rejects a GET carrying one, even ''.
   const res = await fetcher(`https://api.stripe.com/v1/accounts/${accountId}`, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${apiKey}`,
     },
-    body: '',
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
