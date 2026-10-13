@@ -584,6 +584,45 @@ function h0SessionId(gather: TwilioGatherAdapter, callSid: string): string {
   return gather.getDeps().store.findByCallSid(callSid)!.id;
 }
 
+describe('realtime hand-off — an E1 life-safety close supersedes a pending transfer', () => {
+  it('a hazard reported while the hand-off line plays cancels the Dial (E1 never bridges)', async () => {
+    let releaseE1Turn!: () => void;
+    let turn = 0;
+    const h = await harness({
+      speechTurn: async ({ session }) => {
+        turn += 1;
+        if (turn === 1) {
+          session.machine.dispatch({ type: 'frustration_detected', source: 'keyword', detail: 'real person' });
+          // (as handleNotifyOncall does)
+          h.gather.setPendingTransferTwiml(session.id, PARKED_DIAL_FOR_E1);
+          return [{ type: 'tts_play', payload: { text: 'Let me get a person on the line.' } }];
+        }
+        // "…and I smell gas": the FSM terminates at dispatch, before the E1
+        // turn's bounded audit write lets it return its script.
+        session.machine.dispatch({ type: 'emergency_detected', keyword: 'gas', utterance: 'I smell gas', tier: 'E1' });
+        await new Promise<void>((resolve) => { releaseE1Turn = resolve; });
+        return [
+          { type: 'tts_play', payload: { text: 'Leave the house now and call 911 from outside.' } },
+          { type: 'end_session', payload: { reason: 'life_safety_e1' } },
+        ];
+      },
+    });
+
+    h.say('I want a real person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.say('and I smell gas');
+    await vi.waitFor(() => expect(h.session.machine.currentState).toBe('terminated'));
+    h.ws.ackAllMarks(h.streamSid); // the hand-off line finished mid-E1-turn
+    await new Promise((r) => setTimeout(r, 30));
+    releaseE1Turn();
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+
+    expect(h.twilio.transfers()).toHaveLength(0);
+  });
+});
+
+const PARKED_DIAL_FOR_E1 = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial action="${PUBLIC_BASE_URL}/api/telephony/dial-result?sid=s"><Number>${DISPATCHER}</Number></Dial></Response>`;
+
 // ─── (d) the Gather transport keeps its own delivery ─────────────────────────
 
 describe('Gather transport — hand-off delivery unchanged', () => {

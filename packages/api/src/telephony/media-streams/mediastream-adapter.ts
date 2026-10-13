@@ -3770,9 +3770,21 @@ export class TwilioMediaStreamAdapter {
    *      line's end-of-utterance mark ack);
    *   3. updates the live call with the TwiML inline over REST, then releases
    *      the stream leg. `/dial-result` owns the terminal stamp of a `<Dial>`.
-   * Never throws.
+   * Never throws (every call site is fire-and-forget).
    */
   private async maybeHandOffToHuman(trigger: string): Promise<void> {
+    try {
+      await this.handOffToHuman(trigger);
+    } catch (err) {
+      logger.error('realtime hand-off threw', {
+        callSid: this.state.callSid,
+        trigger,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  private async handOffToHuman(trigger: string): Promise<void> {
     const { takePendingTransferTwiml, restRedirect } = this.deps;
     const session = this.state.session;
     const callSid = this.state.callSid;
@@ -3785,6 +3797,20 @@ export class TwilioMediaStreamAdapter {
 
     await this.awaitPlayout(this.deps.handoffPlayoutMaxWaitMs ?? DEFAULT_HANDOFF_PLAYOUT_MAX_WAIT_MS);
     if (this.state.closed || this.state.wsCloseInitiated) return;
+    // E1 life safety supersedes the hand-off: the caller reported a hazard
+    // while the line played ("…and I smell gas"), the FSM terminated, and the
+    // E1 turn is speaking the 911 script and ending the call. E1 never
+    // bridges to the dispatcher — do not pull the call into a <Dial>.
+    if (session.machine.currentState === 'terminated') {
+      this.state.handoff = 'failed';
+      this.state.handoffTwiml = null;
+      logger.info('realtime hand-off superseded by a life-safety close', {
+        callSid,
+        sessionId: session.id,
+        trigger,
+      });
+      return;
+    }
 
     this.state.handoff = 'delivering';
     let delivered = false;
