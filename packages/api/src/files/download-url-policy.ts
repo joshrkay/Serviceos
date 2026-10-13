@@ -10,13 +10,7 @@
  */
 import { isIP } from 'node:net';
 
-export type DownloadUrlRejection =
-  | 'unparseable'
-  | 'userinfo'
-  | 'scheme'
-  | 'port'
-  | 'ip_literal'
-  | 'origin';
+export type DownloadUrlRejection = 'unparseable' | 'userinfo' | 'origin';
 
 export interface DownloadUrlPolicy {
   /** Why `url` is not a download URL of the configured storage, or null when it is. */
@@ -40,17 +34,30 @@ function isIpLiteral(hostname: string): boolean {
 export function createDownloadUrlPolicy(input: {
   allowedOrigins: readonly string[];
   /**
-   * prod/production/staging: on top of the origin allowlist, only https on
-   * the default port to a DNS name — even if storage is misconfigured to an
-   * http, IP-literal or odd-port endpoint. Outside production those are
-   * allowed (localhost dev storage, a local MinIO) but the origin must still
-   * be the configured one.
+   * prod/production/staging. An operator-configured origin is NEVER refused
+   * (refusing what storage itself mints would silently fail every
+   * transcription — H2 review M1); instead a configured origin that is not
+   * https, or whose host is an IP literal, is reported once, here, at boot.
    */
   productionLike: boolean;
+  logger?: Pick<Console, 'warn'>;
 }): DownloadUrlPolicy {
   const allowed = new Set(
     input.allowedOrigins.map(originOf).filter((o): o is string => o !== null && o !== 'null'),
   );
+  if (input.productionLike) {
+    const insecure = [...allowed].filter((origin) => {
+      const { protocol, hostname } = new URL(origin);
+      return protocol !== 'https:' || isIpLiteral(hostname);
+    });
+    if (insecure.length > 0) {
+      (input.logger ?? console).warn(
+        '[storage] configured storage origin is not https on a DNS name; stored-file ' +
+          'fetches (transcription audio) will still use it',
+        { origins: insecure },
+      );
+    }
+  }
   return {
     rejectionFor(url: string): DownloadUrlRejection | null {
       let parsed: URL;
@@ -62,11 +69,6 @@ export function createDownloadUrlPolicy(input: {
       // `origin` drops userinfo, so check it explicitly: a URL carrying
       // credentials is never one the storage provider minted.
       if (parsed.username || parsed.password) return 'userinfo';
-      if (parsed.protocol !== 'https:' && (input.productionLike || parsed.protocol !== 'http:')) {
-        return 'scheme';
-      }
-      if (input.productionLike && parsed.port !== '') return 'port';
-      if (input.productionLike && isIpLiteral(parsed.hostname)) return 'ip_literal';
       if (!allowed.has(parsed.origin)) return 'origin';
       return null;
     },

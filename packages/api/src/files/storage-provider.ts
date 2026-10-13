@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { ObjectMetadata, StorageProvider } from './file-service';
-import { createDownloadUrlPolicy, originOf, type DownloadUrlPolicy } from './download-url-policy';
+import { createDownloadUrlPolicy, type DownloadUrlPolicy } from './download-url-policy';
 
 export interface S3StorageConfig {
   bucket: string;
@@ -404,8 +404,10 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
   devStorageSecret?: string;
   /**
    * H2 — the allowlist of URLs `provider.generateDownloadUrl` mints, for
-   * the workers that GET a stored file by URL (transcription). Built here,
-   * from the same config as the provider, so the two cannot disagree.
+   * the workers that GET a stored file by URL (transcription). Built from
+   * the same config as the provider; across processes (web mints, worker
+   * fetches) keep the STORAGE_* env identical, or a URL minted from an
+   * origin the worker does not know is refused.
    */
   downloadUrlPolicy: DownloadUrlPolicy;
 } {
@@ -441,9 +443,11 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
       mode: 's3',
       // generateDownloadUrl serves STORAGE_PUBLIC_URL when set, else a
       // path-style presign on the endpoint host (pathStyle defaults to true
-      // and is not configurable from env).
+      // and is not configurable from env). Both are allowed: the process
+      // that mints the URL (web) and the worker that fetches it may not
+      // carry the same STORAGE_PUBLIC_URL (H2 review M1).
       downloadUrlPolicy: createDownloadUrlPolicy({
-        allowedOrigins: [originOf(STORAGE_PUBLIC_URL || STORAGE_ENDPOINT!) ?? ''],
+        allowedOrigins: [STORAGE_ENDPOINT!, STORAGE_PUBLIC_URL ?? ''],
         productionLike: isProductionLikeEnv(NODE_ENV),
       }),
     };
@@ -472,7 +476,7 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
     // In a prod-like env (STORAGE_ENABLED=false) the /storage-dev receiver
     // is never mounted, so there is no legitimate dev URL to fetch at all.
     downloadUrlPolicy: createDownloadUrlPolicy({
-      allowedOrigins: isProductionLikeEnv(NODE_ENV) ? [] : [originOf(publicUrlBase) ?? ''],
+      allowedOrigins: isProductionLikeEnv(NODE_ENV) ? [] : [publicUrlBase],
       productionLike: isProductionLikeEnv(NODE_ENV),
     }),
   };

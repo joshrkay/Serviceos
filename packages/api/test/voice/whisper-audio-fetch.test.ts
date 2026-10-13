@@ -104,7 +104,22 @@ describe('H2 — Whisper audio fetch only reaches the configured storage origin'
   });
 });
 
-async function fetchesMinted(storage: ReturnType<typeof createStorageProvider>) {
+describe('H2 review M1 — the minting process and the fetching worker may not share every env var', () => {
+  it('a worker that also has STORAGE_PUBLIC_URL still fetches an endpoint presign minted where it is unset', async () => {
+    const web = prodStorage();
+    const worker = prodStorage({ STORAGE_PUBLIC_URL: 'https://media.example-cdn.test/voice/' });
+
+    expect(await fetchesMinted(web, worker.downloadUrlPolicy)).toEqual({
+      outcome: 'fetched',
+      fetched: true,
+    });
+  });
+});
+
+async function fetchesMinted(
+  storage: ReturnType<typeof createStorageProvider>,
+  policy = storage.downloadUrlPolicy,
+) {
   const minted = await storage.provider.generateDownloadUrl(storage.bucket, 'tenant-1/file-1/memo.m4a');
   const fetchImpl = vi
     .fn<typeof fetch>()
@@ -114,7 +129,8 @@ async function fetchesMinted(storage: ReturnType<typeof createStorageProvider>) 
   const provider = new WhisperTranscriptionProvider({
     apiKey: 'sk_test',
     fetchImpl,
-    audioUrlPolicy: storage.downloadUrlPolicy,
+    audioUrlPolicy: policy,
+    logger: { warn: vi.fn() },
   });
   const outcome = await provider.transcribe(minted).then(
     () => 'fetched' as const,
@@ -159,14 +175,50 @@ describe('H2 — dev/local storage origins are fetchable outside production only
     // its /storage-dev receiver is never mounted there: nothing to fetch.
     ['DevStorageProvider in production', { NODE_ENV: 'production', STORAGE_ENABLED: 'false', PUBLIC_API_URL: 'https://api.example.test' }],
     ['DevStorageProvider in staging', { NODE_ENV: 'staging', STORAGE_ENABLED: 'false' }],
-    ['an http storage endpoint in prod', s3('http://minio.internal:9000', 'prod')],
-    ['an IP-literal storage endpoint in production', s3('https://10.0.0.5', 'production')],
-    ['a non-default-port storage endpoint in staging', s3('https://storage.example.test:8443', 'staging')],
   ])('refuses %s even though that storage minted it', async (_label, env) => {
     expect(await fetchesMinted(createStorageProvider(env))).toEqual({
       outcome: 'AudioUrlRejectedError',
       fetched: false,
     });
+  });
+
+  // H2 review M1 — an operator-configured storage origin is never refused
+  // (that would silently fail every transcription); boot warns instead.
+  it.each([
+    ['an http storage endpoint in prod', s3('http://bucket.railway.internal:9000', 'prod')],
+    ['an IP-literal storage endpoint in production', s3('https://10.0.0.5', 'production')],
+    ['a non-default-port storage endpoint in staging', s3('https://storage.example.test:8443', 'staging')],
+    [
+      'a non-default-port STORAGE_PUBLIC_URL in production',
+      { ...s3('https://acct123.r2.cloudflarestorage.com', 'production'), STORAGE_PUBLIC_URL: 'https://cdn.example.com:8443/media' },
+    ],
+  ])('fetches its own minted URL from %s', async (_label, env) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await fetchesMinted(createStorageProvider(env))).toEqual({
+      outcome: 'fetched',
+      fetched: true,
+    });
+  });
+
+  it.each([
+    'http://bucket.railway.internal:9001/b/x.m4a',
+    'http://api.railway.internal:8080/health',
+    'http://10.0.0.5:9000/b/x.m4a',
+    'https://bucket.railway.internal:9000/b/x.m4a',
+  ])('still refuses the non-configured origin %s next to an http endpoint in prod', async (url) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { downloadUrlPolicy } = createStorageProvider(s3('http://bucket.railway.internal:9000', 'prod'));
+    const fetchImpl = vi.fn<typeof fetch>();
+    vi.stubGlobal('fetch', fetchImpl);
+    const provider = new WhisperTranscriptionProvider({
+      apiKey: 'sk_test',
+      fetchImpl,
+      audioUrlPolicy: downloadUrlPolicy,
+      logger: { warn: vi.fn() },
+    });
+
+    await expect(provider.transcribe(url)).rejects.toMatchObject({ name: 'AudioUrlRejectedError' });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 
@@ -322,7 +374,7 @@ describe('H2 — audio fetch diagnostics go to the log, minus the signature', ()
 
     expect(warn).toHaveBeenCalledTimes(1);
     const logged = JSON.stringify(warn.mock.calls[0]);
-    expect(logged).toContain('scheme');
+    expect(logged).toContain('origin');
     expect(logged).toContain('http://169.254.169.254/latest/meta-data/');
     expect(logged).not.toContain('x=1');
   });
