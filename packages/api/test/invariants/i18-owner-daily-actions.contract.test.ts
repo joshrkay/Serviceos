@@ -764,6 +764,10 @@ describe('I18: owner daily actions ↔ code contract', () => {
       // owner-only action. Both occurrences listed; a third must be classified.
       "packages/api/src/routes/users.ts :: if (targetId !== actor.id && req.auth!.role !== 'owner') {",
       "packages/api/src/routes/users.ts :: if (targetId !== actor.id && req.auth!.role !== 'owner') {",
+      // Creation default, not a gate on any caller: an owner row is created
+      // field-capable unless the creator said otherwise (mirrors the users
+      // BEFORE INSERT trigger from migration 309).
+      "packages/api/src/users/user.ts :: canFieldServe: user.canFieldServe ?? user.role === 'owner',",
       // Domain rules on the target user (role changes, last-owner protection
       // on self-deletion and on #1402 deactivation — one pair each).
       "packages/api/src/users/user.ts :: if (target?.role === 'owner') {",
