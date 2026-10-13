@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { resolveStorageConfig } from './storage-config';
 
 const configSchema = z.object({
   NODE_ENV: z
@@ -505,14 +506,22 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     }
   }
 
-  // Object storage — voice recordings, file/job uploads via Cloudflare R2.
-  // R2_PUBLIC_URL is intentionally NOT required: S3StorageProvider
-  // falls back to presigned GET URLs when publicUrlBase is unset
-  // (see files/storage-provider.ts:159), so storage works without it.
+  // Object storage — voice recordings, file/job uploads, inbound MMS photos.
+  // Validates the RESOLVED config — the same shared/storage-config.ts resolver
+  // createStorageProvider() builds the provider from (STORAGE_* canonical,
+  // R2_* alias) — so the validator and the factory cannot demand different
+  // variable families. STORAGE_PUBLIC_URL is intentionally NOT required:
+  // S3StorageProvider falls back to presigned GET URLs when it is unset.
+  // STORAGE_ENABLED=false is the explicit opt-out; the factory then runs the
+  // dev provider (uploads/recordings/MMS NOT persisted) and logs a boot WARN.
   if (storageEnabled) {
-    if (!env.R2_ACCOUNT_ID) missing.push('R2_ACCOUNT_ID (or set STORAGE_ENABLED=false)');
-    if (!env.R2_ACCESS_KEY_ID) missing.push('R2_ACCESS_KEY_ID (or set STORAGE_ENABLED=false)');
-    if (!env.R2_SECRET_ACCESS_KEY) missing.push('R2_SECRET_ACCESS_KEY (or set STORAGE_ENABLED=false)');
+    const storage = resolveStorageConfig(env);
+    if (!storage.ok) {
+      missing.push(
+        `object storage is not configured — missing ${storage.missing.join(', ')} ` +
+          '(or set STORAGE_ENABLED=false: uploads, recordings and MMS photos are then NOT persisted)'
+      );
+    }
   }
 
   // Voice Media Streams (Twilio bidirectional audio) require a raw-PCM-capable

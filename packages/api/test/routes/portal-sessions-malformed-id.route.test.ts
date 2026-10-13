@@ -9,9 +9,11 @@
  * `500 INTERNAL_ERROR`.
  *
  * This router gates with a router-level `router.use(requireAuth,
- * requireTenant)` and no per-route permission, so the guard sits directly in
- * front of the handler and the ordering assertions below use the two gates the
- * route actually has (401 unauthenticated, 403 no tenant context).
+ * requireTenant)` plus a per-route `requirePermission('customers:update')`
+ * (the technician refusal is pinned in test/portal/portal-sessions-rbac.route.test.ts),
+ * and the malformed-id guard sits after that gate. The ordering assertions
+ * below use the router-level gates (401 unauthenticated, 403 no tenant
+ * context); the harness caller is an owner, who holds the permission.
  *
  * The PgLike subclass throws exactly what Postgres would (pattern:
  * users-malformed-id.route.test.ts); the real-Postgres leg is
