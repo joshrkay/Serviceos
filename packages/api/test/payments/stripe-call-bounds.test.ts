@@ -38,7 +38,7 @@ describe('Stripe payment wrappers — bounded when no fetcher is passed', () => 
     {
       name: 'PaymentIntent create',
       hangOn: '/v1/payment_intents',
-      run: () => createPaymentIntent(config, { amount: 5000, currency: 'usd', invoiceId: 'inv_1', tenantId: TENANT }),
+      run: () => createPaymentIntent(config, { amount: 5000, currency: 'usd', invoiceId: 'inv_1', tenantId: TENANT, repricingNonce: 1 }),
     },
     {
       name: 'PaymentIntent search',
@@ -70,7 +70,7 @@ describe('Stripe payment wrappers — bounded when no fetcher is passed', () => 
       hangOn: '/v1/payment_intents',
       run: () =>
         createTerminalPaymentIntent(terminal, {
-          amount: 5000, currency: 'usd', tenantId: TENANT, purpose: 'invoice', invoiceId: 'inv_1',
+          amount: 5000, currency: 'usd', tenantId: TENANT, purpose: 'invoice', invoiceId: 'inv_1', repricingNonce: 1,
         }),
     },
     {
