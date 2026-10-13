@@ -209,6 +209,28 @@ function PaidScreen({ customerName, invoiceNumber, totalCents, businessPhone, pa
   );
 }
 
+// ─── Processing notice ─────────────────────────────────────────────────────
+
+// Shown in place of the payment form while a payment is in flight but not
+// settled (inline ACH / capture-later, or a redirect that returned
+// `redirect_status=processing`). The form is withheld so the customer
+// can't pay a second time; polling flips the page to "Payment received"
+// when the webhook lands.
+function ProcessingNotice() {
+  return (
+    <div
+      role="status"
+      className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5"
+    >
+      <p className="text-sm text-slate-700">
+        We've received your payment instructions and they're processing
+        with your bank. You'll get a confirmation email when the funds
+        settle. You can close this window.
+      </p>
+    </div>
+  );
+}
+
 // ─── Stripe payment form ───────────────────────────────────────────────────
 
 type PayStatus =
@@ -313,18 +335,7 @@ function PaymentForm({
     // ACH / capture-later flows where the intent has cleared the
     // submit step but isn't yet `succeeded`. Webhook reconciliation
     // will mark the invoice paid when Stripe finishes.
-    return (
-      <div
-        role="status"
-        className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5"
-      >
-        <p className="text-sm text-slate-700">
-          We've received your payment instructions and they're processing
-          with your bank. You'll get a confirmation email when the funds
-          settle. You can close this window.
-        </p>
-      </div>
-    );
+    return <ProcessingNotice />;
   }
 
   return (
@@ -367,6 +378,28 @@ function PaymentForm({
   );
 }
 
+// ─── Return-URL outcome ────────────────────────────────────────────────────
+//
+// `success=true` is only OUR marker: it is set by the confirmPayment
+// return_url and by the inline-success path, so on its own it proves
+// nothing (a failed redirect-based payment comes back with it too). When
+// Stripe bounces the customer back from a redirect-based method it
+// appends `redirect_status`, which is the only signal of how that attempt
+// ended. Anything other than `succeeded` is therefore "not paid".
+
+type ReturnOutcome =
+  | 'none'        // normal page load, nothing to report
+  | 'paid'        // inline success (no redirect_status) or redirect_status=succeeded
+  | 'processing'  // redirect returned while the payment is still settling
+  | 'failed';     // the redirect attempt did not go through — offer a retry
+
+function readReturnOutcome(params: URLSearchParams): ReturnOutcome {
+  const redirectStatus = params.get('redirect_status');
+  if (redirectStatus === 'processing') return 'processing';
+  if (redirectStatus && redirectStatus !== 'succeeded') return 'failed';
+  return params.get('success') === 'true' ? 'paid' : 'none';
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────
 
 export function InvoicePaymentPage() {
@@ -398,8 +431,9 @@ export function InvoicePaymentPage() {
     return loadStripeForAccount(key, stripeAccountId);
   }, [clientSecret, stripeAccountId]);
 
-  // Stripe redirects back with ?success=true after a completed checkout.
-  const paymentSucceeded = searchParams.get('success') === 'true';
+  // See readReturnOutcome: ?success=true alone is not proof of payment.
+  const returnOutcome = readReturnOutcome(searchParams);
+  const paymentSucceeded = returnOutcome === 'paid';
 
   useEffect(() => {
     if (!token) { setError('Invalid payment link'); setLoading(false); return; }
@@ -435,10 +469,12 @@ export function InvoicePaymentPage() {
   }, [clientSecret, stripePromise]);
 
   // After the invoice loads, request a PaymentIntent client_secret for
-  // payable invoices. Skip when already paid or success-redirect.
+  // payable invoices. Skip when already paid, on a success-redirect, or
+  // while a redirect payment is still processing (no second payment).
   useEffect(() => {
     if (!invoice || !token) return;
     if (invoice.isPaid || invoice.amountDueCents <= 0 || paymentSucceeded) return;
+    if (returnOutcome === 'processing') return;
     if (stripeNotConfigured) return;
     let cancelled = false;
     createPaymentIntent(invoice.id, token)
@@ -456,7 +492,7 @@ export function InvoicePaymentPage() {
         }
       });
     return () => { cancelled = true; };
-  }, [invoice, token, paymentSucceeded, stripeNotConfigured]);
+  }, [invoice, token, paymentSucceeded, returnOutcome, stripeNotConfigured]);
 
   const elementsOptions = useMemo(
     () => (clientSecret ? { clientSecret, appearance: { theme: 'stripe' as const } } : undefined),
@@ -471,7 +507,8 @@ export function InvoicePaymentPage() {
   // prior tick). Without the second clause the hook keeps firing 5s
   // requests on the success screen forever.
   const [polledPaid, setPolledPaid] = useState(false);
-  const pollEnabled = processingAsync && !!invoice && !invoice.isPaid && !polledPaid;
+  const awaitingSettlement = processingAsync || returnOutcome === 'processing';
+  const pollEnabled = awaitingSettlement && !!invoice && !invoice.isPaid && !polledPaid;
   const { status: polledStatus } = useInvoiceStatus(
     invoice?.id ?? null,
     token ?? null,
@@ -566,6 +603,23 @@ export function InvoicePaymentPage() {
             <div>
               <p className="text-sm text-red-800">This invoice is overdue</p>
               <p className="text-xs text-red-600 mt-0.5">Was due {formatDate(inv.dueDate)}. Please pay as soon as possible.</p>
+            </div>
+          </div>
+        )}
+
+        {/* The customer came back from a redirect-based method that failed:
+            say so plainly and let the (re-mounted) form below retry. */}
+        {returnOutcome === 'failed' && !processingAsync && (
+          <div
+            role="alert"
+            className="flex items-start gap-3 rounded-2xl bg-amber-50 border border-amber-200 px-4 py-3.5 mb-5"
+          >
+            <AlertCircle size={16} className="text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm text-amber-900">Your payment didn't go through.</p>
+              <p className="text-xs text-amber-800 mt-0.5">
+                You can try again below, with the same or a different payment method.
+              </p>
             </div>
           </div>
         )}
@@ -696,7 +750,9 @@ export function InvoicePaymentPage() {
         </div>
 
         {/* Stripe Elements payment form */}
-        {stripeNotConfigured ? (
+        {returnOutcome === 'processing' ? (
+          <ProcessingNotice />
+        ) : stripeNotConfigured ? (
           <div
             data-testid="stripe-not-configured"
             className="rounded-2xl bg-amber-50 border border-amber-200 px-4 py-4 mb-5 text-sm text-amber-800"

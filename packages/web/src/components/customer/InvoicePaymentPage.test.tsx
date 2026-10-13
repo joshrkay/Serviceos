@@ -431,3 +431,106 @@ describe('InvoicePaymentPage — #1402 §13 business address', () => {
     expect(screen.queryByTestId('business-address')).toBeNull();
   });
 });
+
+// ─── H1 — `?success=true` is NOT proof of payment ───────────────────────────
+//
+// confirmPayment's return_url is `…?success=true`, and Stripe appends
+// `payment_intent`, `payment_intent_client_secret` and `redirect_status` on
+// the way back. A redirect-based method that FAILS comes back with
+// `redirect_status=failed`; the page must never tell that customer they paid.
+describe('InvoicePaymentPage — Stripe redirect return outcome', () => {
+  const PAY_PATH = '/pay/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    confirmPaymentMock.mockReset();
+    process.env.VITE_STRIPE_PUBLISHABLE_KEY = 'pk_test_unit_test_key';
+    const stripeJs = await import('@stripe/stripe-js');
+    vi.mocked(stripeJs.loadStripe).mockReturnValue(Promise.resolve({} as never));
+  });
+
+  afterEach(() => {
+    delete process.env.VITE_STRIPE_PUBLISHABLE_KEY;
+  });
+
+  it('redirect_status=failed — says the payment did not go through and re-mounts the payment form, NOT "Payment received!"', async () => {
+    const fetchSpy = mockFetch({});
+    renderPage(`${PAY_PATH}?success=true&payment_intent=pi_failed&redirect_status=failed`);
+
+    expect(await screen.findByText(/didn.t go through/i)).toBeInTheDocument();
+    expect(screen.queryByText(/payment received/i)).not.toBeInTheDocument();
+
+    // Retry path: a fresh PaymentIntent is minted and the Stripe form
+    // is back, with the real amount still due.
+    expect(await screen.findByRole('button', { name: /pay \$425\.00 securely/i })).toBeInTheDocument();
+    const calls = fetchSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((u) => u.includes('create-payment-intent'))).toBe(true);
+  });
+
+  it('redirect_status=failed — a retry that succeeds inline flips to "Payment received!" and drops the failed state', async () => {
+    mockFetch({});
+    confirmPaymentMock.mockResolvedValue({ paymentIntent: { id: 'pi_retry', status: 'succeeded' } });
+    renderPage(`${PAY_PATH}?success=true&payment_intent=pi_failed&redirect_status=failed`);
+
+    fireEvent.click(await screen.findByRole('button', { name: /pay.*securely/i }));
+
+    expect(await screen.findByText('Payment received!')).toBeInTheDocument();
+    expect(screen.queryByText(/didn.t go through/i)).not.toBeInTheDocument();
+  });
+
+  it('redirect_status=succeeded — still shows "Payment received!" (the webhook may not have landed yet)', async () => {
+    mockFetch({});
+    renderPage(`${PAY_PATH}?success=true&payment_intent=pi_ok&redirect_status=succeeded`);
+
+    expect(await screen.findByText('Payment received!')).toBeInTheDocument();
+    expect(screen.queryByText(/didn.t go through/i)).not.toBeInTheDocument();
+  });
+
+  it('redirect_status=failed — an invoice the server already reports as paid still shows the paid screen', async () => {
+    mockFetch({
+      invoice: { ...baseInvoice, isPaid: true, amountPaidCents: 42500, amountDueCents: 0 },
+    });
+    renderPage(`${PAY_PATH}?success=true&payment_intent=pi_failed&redirect_status=failed`);
+
+    expect(await screen.findByText('Payment received!')).toBeInTheDocument();
+    expect(screen.queryByText(/didn.t go through/i)).not.toBeInTheDocument();
+  });
+
+  it('redirect_status=failed — a retry that lands in processing replaces the failed notice with the processing state', async () => {
+    mockFetch({});
+    confirmPaymentMock.mockResolvedValue({ paymentIntent: { id: 'pi_retry', status: 'processing' } });
+    renderPage(`${PAY_PATH}?success=true&payment_intent=pi_failed&redirect_status=failed`);
+
+    fireEvent.click(await screen.findByRole('button', { name: /pay.*securely/i }));
+
+    expect(await screen.findByText(/processing with your bank/i)).toBeInTheDocument();
+    expect(screen.queryByText(/didn.t go through/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/payment received/i)).not.toBeInTheDocument();
+  });
+
+  it('redirect_status=processing — shows the processing state, not "Payment received!", and does not offer a second payment', async () => {
+    const fetchSpy = mockFetch({});
+    renderPage(`${PAY_PATH}?success=true&payment_intent=pi_slow&redirect_status=processing`);
+
+    expect(await screen.findByText(/processing with your bank/i)).toBeInTheDocument();
+    expect(screen.queryByText(/payment received/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/didn.t go through/i)).not.toBeInTheDocument();
+
+    // A payment is already in flight: no form, and no new PaymentIntent.
+    expect(screen.queryByRole('button', { name: /pay.*securely/i })).not.toBeInTheDocument();
+    const calls = fetchSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((u) => u.includes('create-payment-intent'))).toBe(false);
+  });
+
+  it('redirect_status=processing — polls the status endpoint and flips to "Payment received!" once the invoice is paid', async () => {
+    mockFetch({
+      statusResponses: [
+        { ok: true, status: 200, body: { status: 'paid', amountDueCents: 0, amountPaidCents: 42500, paidAt: '2026-04-29T12:00:00Z' } },
+      ],
+    });
+    renderPage(`${PAY_PATH}?success=true&payment_intent=pi_slow&redirect_status=processing`);
+
+    expect(await screen.findByText('Payment received!', {}, { timeout: 10_000 })).toBeInTheDocument();
+    expect(screen.getByText('Paid on')).toBeInTheDocument();
+  }, 15_000);
+});
