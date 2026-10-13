@@ -25,8 +25,14 @@ const PROD_ENV = {
   TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
 };
 
+const TWILIO_SMS = {
+  TWILIO_ACCOUNT_SID: 'ACdummydummydummydummydummydummy00',
+  TWILIO_AUTH_TOKEN: 'dummy_auth_token',
+  TWILIO_FROM_NUMBER: '+15550001111',
+};
+
 const pagingWarnings = (warnings: string[]) =>
-  warnings.filter((w) => w.includes('SENTRY_DSN') && w.includes('ALERT_SMS_TO'));
+  warnings.filter((w) => w.startsWith('No operator paging channel'));
 
 describe('config — no human-paging channel in production', () => {
   beforeEach(() => resetConfig());
@@ -43,10 +49,18 @@ describe('config — no human-paging channel in production', () => {
     expect(pagingWarnings(config.warnings)).toHaveLength(0);
   });
 
-  it('does not warn once ALERT_SMS_TO is set', () => {
-    const config = loadConfig({ ...PROD_ENV, ALERT_SMS_TO: '+15551230000' });
+  it('does not warn once ALERT_SMS_TO is set and SMS delivery is configured', () => {
+    const config = loadConfig({ ...PROD_ENV, ...TWILIO_SMS, ALERT_SMS_TO: '+15551230000' });
 
     expect(pagingWarnings(config.warnings)).toHaveLength(0);
+    expect(config.warnings.filter((w) => w.startsWith('ALERT_SMS_TO is set'))).toHaveLength(0);
+  });
+
+  it('ALERT_SMS_TO without Twilio SMS credentials pages nobody: both warnings, still no throw', () => {
+    const config = loadConfig({ ...PROD_ENV, ALERT_SMS_TO: '+15551230000' });
+
+    expect(config.warnings.filter((w) => w.startsWith('ALERT_SMS_TO is set'))).toHaveLength(1);
+    expect(pagingWarnings(config.warnings)).toHaveLength(1);
   });
 
   it('does not warn outside prod/staging', () => {

@@ -322,9 +322,19 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (cachedConfig.NODE_ENV === 'prod' || cachedConfig.NODE_ENV === 'staging') {
     validateProductionConfig(cachedConfig);
     validateFeatureRequiredConfig(env);
-    // Deliberately a WARNING, never a boot failure: production runs without
-    // SENTRY_DSN today, and refusing to boot would take it down.
-    if (!cachedConfig.SENTRY_DSN && !cachedConfig.ALERT_SMS_TO) {
+    // Deliberately WARNINGS, never a boot failure: production runs without
+    // SENTRY_DSN today, and refusing to boot would take it down. ALERT_SMS_TO
+    // only pages when SMS delivery is configured (the same three variables
+    // delivery-provider-factory.ts requires).
+    const smsDeliveryConfigured = !!(
+      normalized.TWILIO_ACCOUNT_SID &&
+      normalized.TWILIO_AUTH_TOKEN &&
+      normalized.TWILIO_FROM_NUMBER
+    );
+    if (cachedConfig.ALERT_SMS_TO && !smsDeliveryConfigured) {
+      cachedConfig.warnings.push(ALERT_SMS_TO_UNDELIVERABLE_WARNING);
+    }
+    if (!cachedConfig.SENTRY_DSN && !(cachedConfig.ALERT_SMS_TO && smsDeliveryConfigured)) {
       cachedConfig.warnings.push(NO_HUMAN_PAGING_WARNING);
     }
   }
@@ -338,8 +348,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
  * operator SMS (ALERT_SMS_TO). With neither, a breach is a log line nobody
  * reads.
  */
+const ALERT_SMS_TO_UNDELIVERABLE_WARNING =
+  'ALERT_SMS_TO is set but SMS delivery is not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, ' +
+  'TWILIO_FROM_NUMBER), so the operator SMS can never be sent.';
+
 const NO_HUMAN_PAGING_WARNING =
-  'No operator paging channel: neither SENTRY_DSN nor ALERT_SMS_TO is set, so SLO breaches, ' +
+  'No operator paging channel: neither SENTRY_DSN nor a deliverable ALERT_SMS_TO is set, so SLO breaches, ' +
   'failure-rate alerts and dropped-call drain alarms reach only the logs. Set SENTRY_DSN ' +
   '(with the Sentry alert rules) and/or ALERT_SMS_TO (needs Twilio SMS credentials).';
 
