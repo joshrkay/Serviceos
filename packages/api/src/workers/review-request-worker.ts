@@ -11,7 +11,8 @@
  * For each tenant with `tenant_settings.send_review_request = TRUE`, the sweep
  * finds jobs that:
  *   1. Have a completion timestamp (completed_at IS NOT NULL),
- *   2. Are at least `delayHours` past completion (default 24),
+ *   2. Are at least `delayHours` past completion (default 24) and at most
+ *      REVIEW_REQUEST_MAX_AGE_DAYS (the recency floor),
  *   3. Have not already had a review request handled
  *      (review_request_sent_at IS NULL).
  *
@@ -36,6 +37,19 @@ import { JobRepository } from '../jobs/job';
 import { Queue } from '../queues/queue';
 
 const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * Recency floor: no review ask for a job completed more than this many days
+ * ago — after the toggle is switched back on, or a sweep outage, asking about
+ * a visit from weeks back is a stale solicitation. Such jobs fall outside the
+ * eligibility query, exactly like an opted-out tenant's: never selected, so
+ * never stamped and never re-evaluated.
+ *
+ * The normal ask goes at 24 h, and a quiet-hours hold happens downstream in
+ * feedback_send (after this sweep has stamped and enqueued), so a deferral
+ * can never age a job out of this floor.
+ */
+export const REVIEW_REQUEST_MAX_AGE_DAYS = 7;
 
 export interface ReviewRequestWorkerDeps {
   /** Source of truth for the eligibility query (jobs ⋈ tenant_settings). */
@@ -75,6 +89,7 @@ const ELIGIBLE_SQL = `
      AND j.completed_at IS NOT NULL
      AND j.review_request_sent_at IS NULL
      AND j.completed_at <= $1
+     AND j.completed_at >= $2
    ORDER BY j.completed_at ASC
    LIMIT 500
 `;
@@ -96,11 +111,13 @@ export async function runReviewRequestSweep(
     return result;
   }
 
-  const completedBefore = new Date(now().getTime() - delayHours * HOUR_MS);
+  const asOf = now();
+  const completedBefore = new Date(asOf.getTime() - delayHours * HOUR_MS);
+  const completedAfter = new Date(asOf.getTime() - REVIEW_REQUEST_MAX_AGE_DAYS * 24 * HOUR_MS);
 
   let rows: EligibleRow[];
   try {
-    const queryResult = await deps.pool.query<EligibleRow>(ELIGIBLE_SQL, [completedBefore]);
+    const queryResult = await deps.pool.query<EligibleRow>(ELIGIBLE_SQL, [completedBefore, completedAfter]);
     rows = queryResult.rows;
   } catch (err) {
     deps.logger.error('Review-request sweep: eligibility query failed', {

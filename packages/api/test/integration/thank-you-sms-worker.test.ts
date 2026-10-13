@@ -9,6 +9,11 @@ import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { createLogger } from '../../src/logging/logger';
 import type { FeedbackDispatcher } from '../../src/feedback/dispatcher';
 import { runThankYouSmsSweep } from '../../src/workers/thank-you-sms-worker';
+import { MessageDeliveryFeedbackDispatcher } from '../../src/feedback/dispatcher';
+import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
+import type { SmsMessage } from '../../src/notifications/delivery-provider';
+import { createRecipientLocaleResolver } from '../../src/notifications/recipient-locale';
+import { PgLocationRepository } from '../../src/locations/pg-location';
 import {
   transitionJobStatus,
   JOB_TIMELINE_EVENT_TYPES,
@@ -73,6 +78,8 @@ describe('thank-you-sms worker — integration', () => {
     primaryPhone?: string;
     smsConsent?: boolean;
     completedAtAgo: 'four_hours' | 'one_hour';
+    /** Overrides completedAtAgo with an exact instant. */
+    completedAt?: Date;
   }): Promise<{ customerId: string; jobId: string; locationId: string; phone: string }> {
     const customerId = uuidv4();
     // Unique-per-call phone so a test that runs the sweep across all
@@ -101,7 +108,8 @@ describe('thank-you-sms worker — integration', () => {
     // a single test against the same tenant must use distinct numbers.
     const jobNumber = `JOB-${jobId.slice(0, 8)}`;
     const completedAt =
-      opts.completedAtAgo === 'four_hours' ? FOUR_HOURS_AGO : new Date(NOW.getTime() - 60 * 60 * 1000);
+      opts.completedAt ??
+      (opts.completedAtAgo === 'four_hours' ? FOUR_HOURS_AGO : new Date(NOW.getTime() - 60 * 60 * 1000));
     await pool.query(
       `INSERT INTO jobs (id, tenant_id, customer_id, location_id, job_number, summary,
         status, priority, created_by, completed_at, created_at, updated_at)
@@ -281,6 +289,78 @@ describe('thank-you-sms worker — integration', () => {
       ]);
 
       expect(calls.filter((c) => c.to === seed.phone)).toHaveLength(1);
+    });
+  });
+
+  describe('recency floor + recipient quiet hours (real Postgres)', () => {
+    it('never thanks a customer for a job completed 30 days ago, even with the toggle just enabled', async () => {
+      // The toggle was off for a month and is now on (tenant_settings default
+      // TRUE); the job from back then must not get a "thanks for today" text.
+      const stale = await seedCustomerAndJob({
+        completedAtAgo: 'four_hours',
+        completedAt: new Date(NOW.getTime() - 30 * 24 * 60 * 60 * 1000),
+      });
+
+      const { dispatcher, calls } = makeCapturingDispatcher();
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        now: () => NOW,
+      });
+
+      expect(calls.some((c) => c.to === stale.phone)).toBe(false);
+      // Outside eligibility, exactly like a toggled-off tenant: never selected,
+      // so never stamped and never re-evaluated.
+      const row = await pool.query(`SELECT thank_you_sms_sent_at FROM jobs WHERE id = $1`, [stale.jobId]);
+      expect(row.rows[0].thank_you_sms_sent_at).toBeNull();
+    });
+
+    it('a job deferred overnight by quiet hours is still inside the floor and sends the next morning', async () => {
+      // Tenant zone America/Phoenix (UTC-7). Completed 20:00 MST → due 22:00.
+      const completedAt = new Date('2026-10-14T03:00:00Z');
+      const late = new Date('2026-10-14T05:30:00Z'); // 22:30 MST
+      const morning = new Date('2026-10-14T15:30:00Z'); // 08:30 MST
+      const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours', completedAt });
+
+      const delivered: SmsMessage[] = [];
+      const gated = (now: Date) =>
+        new MessageDeliveryFeedbackDispatcher(
+          new GatedMessageDelivery({
+            base: {
+              sendSms: async (m) => {
+                delivered.push(m);
+                return { providerMessageId: 'sid', provider: 'test', channel: 'sms' };
+              },
+              sendEmail: async () => ({ providerMessageId: 'eid', provider: 'test', channel: 'email' }),
+            },
+            dnc: dncRepo,
+            auditRepo,
+            enforcement: 'block',
+            env: { ...process.env, TELEPHONY_ENABLED: 'true' },
+            quietHours: {
+              resolveRecipientLocale: createRecipientLocaleResolver({
+                settingsRepo,
+                locationRepo: new PgLocationRepository(pool),
+              }),
+              now: () => now,
+            },
+          }),
+        );
+
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher: gated(late), auditRepo, logger,
+        now: () => late,
+      });
+      expect(delivered.some((m) => m.to === seed.phone)).toBe(false);
+      const night = await pool.query(`SELECT thank_you_sms_sent_at FROM jobs WHERE id = $1`, [seed.jobId]);
+      expect(night.rows[0].thank_you_sms_sent_at).toBeNull();
+
+      await runThankYouSmsSweep({
+        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher: gated(morning), auditRepo, logger,
+        now: () => morning,
+      });
+      expect(delivered.filter((m) => m.to === seed.phone)).toHaveLength(1);
+      const sent = await pool.query(`SELECT thank_you_sms_sent_at FROM jobs WHERE id = $1`, [seed.jobId]);
+      expect(sent.rows[0].thank_you_sms_sent_at).toEqual(morning);
     });
   });
 });

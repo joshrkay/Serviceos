@@ -268,4 +268,28 @@ describe('review-request sweep (US-345, DB-level)', () => {
     );
     expect(stamped.rows[0].review_request_sent_at).not.toBeNull();
   });
+
+  it('never asks for a review of a job completed 30 days ago, even with the toggle just enabled (recency floor)', async () => {
+    const tenant = await createTestTenant(pool);
+    await pool.query(
+      `INSERT INTO tenant_settings (id, tenant_id, business_name) VALUES (gen_random_uuid(), $1, 'Stale Co')`,
+      [tenant.tenantId],
+    );
+    const ids = await seedCustomerLocation(pool, tenant.tenantId, tenant.userId);
+    const staleJob = await seedCompletedJob(pool, tenant.tenantId, ids, hoursAgo(30 * 24));
+    const send = vi.fn(async () => 'msg');
+
+    await runReviewRequestSweep({ pool, jobRepo, queue: { send }, logger, now });
+
+    const ours = send.mock.calls.filter(
+      ([, payload]: [unknown, { tenantId: string }]) => payload.tenantId === tenant.tenantId,
+    );
+    expect(ours).toHaveLength(0);
+    // Outside eligibility, like an opted-out tenant: never selected, never stamped.
+    const row = await pool.query<{ review_request_sent_at: Date | null }>(
+      `SELECT review_request_sent_at FROM jobs WHERE id = $1`,
+      [staleJob],
+    );
+    expect(row.rows[0].review_request_sent_at).toBeNull();
+  });
 });

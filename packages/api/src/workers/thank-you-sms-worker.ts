@@ -10,7 +10,8 @@
  * that:
  *
  *   1. Have transitioned to 'completed' (completed_at IS NOT NULL),
- *   2. Are at least `delayHours` past completion (default 2),
+ *   2. Are at least `delayHours` past completion (default 2) and at most
+ *      THANK_YOU_MAX_LATENESS_HOURS past that (the recency floor),
  *   3. Have not already had thank-you SMS handled
  *      (thank_you_sms_sent_at IS NULL).
  *
@@ -82,6 +83,21 @@ import { FeedbackDispatcher } from '../feedback/dispatcher';
 import { withSendClaim, readSendClaimStatus } from '../notifications/send-claim-ledger';
 
 const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * Recency floor: a thank-you more than this many hours past its intended send
+ * time (completed_at + delayHours) is never sent — after a toggle is switched
+ * back on, or a sweep outage, "thanks for today" days later is a stale
+ * solicitation, not a courtesy. Such jobs fall outside the eligibility query,
+ * exactly like a toggled-off tenant's: never selected, so never stamped and
+ * never re-evaluated.
+ *
+ * 24 h is far above the longest quiet-hours hold, so a deferred thank-you is
+ * never aged out: ≤ 12 h for a known zone (20:00 → 08:00), ≈ 18 h for a
+ * tenant with no zone (an Eastern 14:00–20:00 window).
+ */
+export const THANK_YOU_MAX_LATENESS_HOURS = 24;
+
 const THANK_YOU_ACTOR = 'system:thank_you_sms';
 const THANK_YOU_SENT_EVENT = 'notification.thank_you_sms.sent';
 
@@ -142,6 +158,7 @@ const ELIGIBLE_SQL = `
      AND j.completed_at IS NOT NULL
      AND j.thank_you_sms_sent_at IS NULL
      AND j.completed_at <= $1
+     AND j.completed_at >= $2
    ORDER BY j.completed_at ASC
    LIMIT 500
 `;
@@ -174,10 +191,13 @@ export async function runThankYouSmsSweep(
   const pool = deps.pool; // narrowed non-null for the rest of this sweep
   const asOf = now();
   const completedBefore = new Date(asOf.getTime() - delayHours * HOUR_MS);
+  const completedAfter = new Date(
+    completedBefore.getTime() - THANK_YOU_MAX_LATENESS_HOURS * HOUR_MS,
+  );
 
   let rows: EligibleRow[];
   try {
-    const queryResult = await pool.query<EligibleRow>(ELIGIBLE_SQL, [completedBefore]);
+    const queryResult = await pool.query<EligibleRow>(ELIGIBLE_SQL, [completedBefore, completedAfter]);
     rows = queryResult.rows;
   } catch (err) {
     deps.logger.error('Thank-you SMS sweep: eligibility query failed', {
