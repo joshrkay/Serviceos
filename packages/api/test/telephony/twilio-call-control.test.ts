@@ -49,7 +49,10 @@ describe('P8-013 DefaultTwilioCallControl.dialDispatcher', () => {
     expect(xml).toContain('<Dial timeout="20"');
     expect(xml).toContain('action="https://api.test/api/telephony/dial-result?sid=abc"');
     expect(xml).toContain('method="POST"');
-    expect(xml).toContain('<Number>+15125550100</Number>');
+    // H1-R — a /dial-result leg is always screened (generic screen here).
+    expect(xml).toContain(
+      '<Number url="https://api.test/api/telephony/whisper/screen?sid=abc" method="GET">+15125550100</Number>',
+    );
     expect(xml).toContain('</Dial>');
     expect(xml).toContain('</Response>');
   });
@@ -143,6 +146,36 @@ describe('P8-013 DefaultTwilioCallControl rotation cursor', () => {
     const a = cc.getCursor('s-x');
     a.index = 99;
     expect(cc.getCursor('s-x').index).toBe(0);
+  });
+});
+
+describe('dialDispatcher — every /dial-result leg is screened (H1-R)', () => {
+  const ctrl = new DefaultTwilioCallControl();
+
+  it("a producer's whisper becomes that leg's screen, bound to the session", () => {
+    const xml = ctrl.dialDispatcher('CA-1', '+15551234567', {
+      actionUrl: 'https://api.test/api/telephony/dial-result?sid=sess-1',
+      whisperUrl: 'https://api.test/api/telephony/whisper/esc_abc',
+    });
+    expect(xml).toContain(
+      '<Number url="https://api.test/api/telephony/whisper/esc_abc?sid=sess-1" method="GET">',
+    );
+  });
+
+  it('a leg with no whisper text (cascade, P12-004, business line, patches) gets the generic screen', () => {
+    const xml = ctrl.dialDispatcher('CA-1', '+15551234567', {
+      actionUrl: 'https://api.test/api/telephony/dial-result?sid=sess%2F2',
+    });
+    expect(xml).toContain(
+      '<Number url="https://api.test/api/telephony/whisper/screen?sid=sess%2F2" method="GET">',
+    );
+  });
+
+  it('a relative action keeps the screen relative to the same host', () => {
+    const xml = ctrl.dialDispatcher('CA-1', '+15551234567', {
+      actionUrl: '/api/telephony/dial-result?sid=s3',
+    });
+    expect(xml).toContain('<Number url="/api/telephony/whisper/screen?sid=s3" method="GET">');
   });
 });
 

@@ -158,6 +158,32 @@ export function maskPhone(phone: string | null | undefined): string {
   return `***${trimmed.slice(-4)}`;
 }
 
+const DIAL_RESULT_PATH = '/api/telephony/dial-result';
+const GENERIC_SCREEN_PATH = '/api/telephony/whisper/screen';
+
+/**
+ * H1-R (round-2 review of #1676) — the `<Number url>` of a Dial leg.
+ *
+ * A carrier voicemail answering looks exactly like a person to Twilio, so a
+ * hand-off only counts as answered once a person presses 1 on the screen the
+ * whisper route serves. EVERY leg whose action is `/dial-result` (rotation,
+ * transfer number, business line, P12-004 immediate dial, the /dial-result
+ * cascade, the vulnerable-caller and owner-cell patches) is screened: the
+ * producer's whisper when it has one, else the generic screen — both carrying
+ * the session (`sid`) the press-1 acceptance belongs to. Derived here, the one
+ * place every Dial is built, so no producer can ship an unscreened leg. Any
+ * other action keeps the producer's whisper (or none).
+ */
+function screenUrlFor(actionUrl: string, whisperUrl: string | undefined): string | undefined {
+  const queryAt = actionUrl.indexOf('?');
+  const path = queryAt === -1 ? actionUrl : actionUrl.slice(0, queryAt);
+  if (!path.endsWith(DIAL_RESULT_PATH)) return whisperUrl;
+  const sid = new URLSearchParams(queryAt === -1 ? '' : actionUrl.slice(queryAt + 1)).get('sid');
+  if (!sid) return whisperUrl;
+  const base = whisperUrl ?? `${path.slice(0, -DIAL_RESULT_PATH.length)}${GENERIC_SCREEN_PATH}`;
+  return `${base}${base.includes('?') ? '&' : '?'}sid=${encodeURIComponent(sid)}`;
+}
+
 // ─── Default implementation ──────────────────────────────────────────────────
 
 /**
@@ -186,9 +212,10 @@ export class DefaultTwilioCallControl implements TwilioCallControl {
     // Twilio fetches `<Number url>` with POST unless told otherwise; the
     // whisper route is served for GET, and a failed fetch at the moment the
     // dispatcher answers risks dropping the call — so the method is explicit.
-    const whisperAttr = opts.whisperUrl
-      ? ` url="${xmlEscape(opts.whisperUrl)}" method="GET"`
-      : '';
+    // H1-R — every /dial-result leg gets the press-1 SCREEN (the whisper, or a
+    // generic one when the producer had no whisper text), bound to its session.
+    const screenUrl = screenUrlFor(opts.actionUrl, opts.whisperUrl);
+    const whisperAttr = screenUrl ? ` url="${xmlEscape(screenUrl)}" method="GET"` : '';
 
     // The dispatcher number is wrapped in <Number> so Twilio's verb
     // parser handles E.164 cleanly. Both `dispatcherPhone` and

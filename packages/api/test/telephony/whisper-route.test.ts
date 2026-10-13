@@ -26,13 +26,16 @@ describe('GET /api/telephony/whisper/:escalationId', () => {
     expect(res.text).toContain('Incoming call from Sarah Chen.');
   });
 
-  it('returns 200 with empty <Response> when escalationId is unknown (caller still connects)', async () => {
+  it('an unknown escalationId (expired, other process) still gets the generic press-1 screen — never a 404 (H1-R)', async () => {
     const cache = new WhisperCache();
     const app = express();
     app.use('/api/telephony', whisperRouter({ whisperCache: cache }));
-    const res = await request(app).get('/api/telephony/whisper/nonexistent');
+    const res = await request(app).get('/api/telephony/whisper/nonexistent?sid=sess-9');
     expect(res.status).toBe(200);
-    expect(res.text).toContain('<Response/>');
+    expect(res.text).toContain('<Gather numDigits="1"');
+    expect(res.text).toContain('Press 1 to accept this call.');
+    expect(res.text).toContain('/api/telephony/whisper/nonexistent/accept?sid=sess-9');
+    expect(res.text).toContain('<Hangup/>');
   });
 
   it('escapes XML in the whisper text', async () => {
@@ -87,13 +90,13 @@ describe('GET /api/telephony/whisper/:escalationId — tenant check (#1084)', ()
     return request(app).get(path).set('X-Twilio-Signature', sig);
   }
 
-  it("tenant A's own credential fetching tenant B's escalation gets the empty whisper", async () => {
+  it("tenant A's own credential fetching tenant B's escalation gets only the generic screen", async () => {
     const cache = new WhisperCache();
     cache.set('esc_b', 'Incoming call from a B customer.', TENANT_B);
     const res = await signedGet(build(cache), 'esc_b', 'ACaaaa', 'token-a');
 
     expect(res.status).toBe(200);
-    expect(res.text).toContain('<Response/>');
+    expect(res.text).toContain('Press 1 to accept this call.');
     expect(res.text).not.toContain('B customer');
   });
 
@@ -212,8 +215,12 @@ describe('whisper screen — press 1 to accept (H1)', () => {
   function build(
     cache: WhisperCache,
     hooks: {
-      onScreenOffered?: (args: { sessionId: string; tenantId: string }) => void;
-      onAccepted?: (args: { sessionId: string; tenantId: string; childCallSid?: string }) => void | Promise<void>;
+      onAccepted?: (args: {
+        sessionId: string;
+        tenantId?: string;
+        verifiedTenantId?: string;
+        childCallSid?: string;
+      }) => void | Promise<void>;
     } = {},
   ) {
     const app = express();
@@ -221,7 +228,6 @@ describe('whisper screen — press 1 to accept (H1)', () => {
       whisperCache: cache,
       credentialView: getter,
       publicBaseUrl: () => PUBLIC_BASE_URL,
-      ...(hooks.onScreenOffered ? { onScreenOffered: hooks.onScreenOffered } : {}),
       ...(hooks.onAccepted ? { onAccepted: hooks.onAccepted } : {}),
     });
     return app;
@@ -232,20 +238,38 @@ describe('whisper screen — press 1 to accept (H1)', () => {
     return request(app).post(path).set('X-Twilio-Signature', sig).type('form').send(params);
   }
 
-  it('the whisper asks the dialled party to press 1, and hangs the leg up when nobody does', async () => {
+  it('the screen prompts FIRST, gives the summary, re-prompts once, and only then hangs the leg up (M-a)', async () => {
     const cache = new WhisperCache();
     cache.set('esc_s', 'Emergency call: basement flooding.', TENANT_A, { sessionId: 'sess-1' });
-    const onScreenOffered = vi.fn();
-    const res = await signed(build(cache, { onScreenOffered }), '/api/telephony/whisper/esc_s', {
+    const res = await signed(build(cache), '/api/telephony/whisper/esc_s', {
       AccountSid: 'ACaaaa',
       CallSid: 'CA-child',
     });
 
     expect(res.status).toBe(200);
-    expect(res.text).toMatch(
-      /<Response><Gather numDigits="1" timeout="\d+" action="https:\/\/api\.test\/api\/telephony\/whisper\/esc_s\/accept" method="POST"><Say>Emergency call: basement flooding\. Press 1 to accept this call\.<\/Say><\/Gather><Hangup\/><\/Response>/,
+    const accept = 'action="https://api.test/api/telephony/whisper/esc_s/accept?sid=sess-1" method="POST"';
+    expect(res.text).toBe(
+      '<?xml version="1.0" encoding="UTF-8"?><Response>' +
+        `<Gather numDigits="1" timeout="10" ${accept}>` +
+        '<Say>Incoming call from your answering service. Press 1 to accept this call.</Say>' +
+        '<Say>Emergency call: basement flooding.</Say>' +
+        '<Say>Press 1 to accept this call.</Say>' +
+        '</Gather>' +
+        `<Gather numDigits="1" timeout="10" ${accept}><Say>Press 1 to accept this call.</Say></Gather>` +
+        '<Hangup/></Response>',
     );
-    expect(onScreenOffered).toHaveBeenCalledWith({ sessionId: 'sess-1', tenantId: TENANT_A });
+  });
+
+  it('the generic screen (a leg with no whisper text) accepts for the session named in the URL (H1-R)', async () => {
+    const onAccepted = vi.fn(async () => undefined);
+    const res = await signed(build(new WhisperCache(), { onAccepted }), '/api/telephony/whisper/screen/accept?sid=sess-7', {
+      AccountSid: 'ACaaaa',
+      CallSid: 'CA-child',
+      Digits: '1',
+    });
+
+    expect(res.text).toContain('<Response/>');
+    expect(onAccepted).toHaveBeenCalledWith({ sessionId: 'sess-7', verifiedTenantId: TENANT_A, childCallSid: 'CA-child' });
   });
 
   it('pressing 1 connects the call and marks the hand-off answered', async () => {
@@ -261,7 +285,12 @@ describe('whisper screen — press 1 to accept (H1)', () => {
     expect(res.status).toBe(200);
     expect(res.text).toContain('<Response/>');
     expect(res.text).not.toContain('Hangup');
-    expect(onAccepted).toHaveBeenCalledWith({ sessionId: 'sess-1', tenantId: TENANT_A, childCallSid: 'CA-child' });
+    expect(onAccepted).toHaveBeenCalledWith({
+      sessionId: 'sess-1',
+      tenantId: TENANT_A,
+      verifiedTenantId: TENANT_A,
+      childCallSid: 'CA-child',
+    });
   });
 
   it('any other key declines: the dialled leg hangs up and nothing is marked answered', async () => {

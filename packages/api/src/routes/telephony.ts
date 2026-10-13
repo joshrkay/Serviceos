@@ -889,22 +889,20 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     // mark the session ended, and return an empty Response so Twilio
     // hangs up the original caller leg cleanly.
     const successStatuses = new Set(['completed', 'answered']);
-    // H1 — a screened leg (the whisper's press-1 screen played) that nobody
-    // accepted was not answered by a person, whatever Twilio reports: a carrier
-    // voicemail picking up the dispatcher's phone is `completed` too.
-    // Stamping it `transferred` would silence the emergency page ladder for a
-    // real unanswered emergency and strand the caller in a mailbox — continue
-    // the cascade instead. The flag is per dialled leg: cleared for the next.
-    const screenNotAccepted =
-      session.transferScreenOffered === true && session.transferAnsweredAt === undefined;
-    session.transferScreenOffered = false;
-    if (screenNotAccepted && successStatuses.has(dialStatus)) {
-      logger.info('telephony/dial-result: screened leg was never accepted — not a transfer', {
+    // H1 / H1-R — every Dial leg is screened (press 1 to accept), and only a
+    // person's keypress proves the hand-off was answered: a carrier voicemail
+    // picking up the dispatcher's phone is `completed` too, as is a leg whose
+    // screen fetch failed. Stamping either `transferred` would silence the
+    // emergency page ladder for a real unanswered emergency and strand the
+    // caller in a mailbox — continue the cascade instead.
+    const accepted = session.transferAnsweredAt !== undefined;
+    if (!accepted && successStatuses.has(dialStatus)) {
+      logger.info('telephony/dial-result: leg never accepted by a person — not a transfer', {
         sessionId,
         dialStatus,
       });
     }
-    if (successStatuses.has(dialStatus) && !screenNotAccepted) {
+    if (successStatuses.has(dialStatus) && accepted) {
       try {
         // Synthetic proposal_queued event so the FSM follows its
         // documented escalating → closing transition. We don't emit
@@ -935,6 +933,8 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         .send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
       return;
     }
+    // The next leg (cascade) must earn its own acceptance.
+    session.transferAnsweredAt = undefined;
 
     // Voice-parity (Feature 7) — single-line transfer model. When the tenant
     // configured a `transfer_number`, the transfer dialed that one line; a

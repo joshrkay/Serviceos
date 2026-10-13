@@ -342,7 +342,7 @@ describe('realtime hand-off — escalation on a stream call reaches a human', ()
     await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
 
     const twiml = h.twilio.transfers()[0].body.get('Twiml')!;
-    const escalationId = /\/api\/telephony\/whisper\/([^"]+)" method="GET"/.exec(twiml)?.[1];
+    const escalationId = /\/api\/telephony\/whisper\/([^"?]+)\?sid=[^"]+" method="GET"/.exec(twiml)?.[1];
     expect(escalationId).toBeDefined();
     expect(whisperCache.get(escalationId!)).toMatchObject({ tenantId: TENANT, sessionId: h.session.id });
   });

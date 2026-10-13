@@ -473,12 +473,6 @@ export interface VoiceSession {
    * the call. Never set by a mere pickup: a carrier voicemail "answers" too.
    */
   transferAnsweredAt?: number;
-  /**
-   * H1 — the whisper screen was played on the current dialled leg. From then
-   * on only `transferAnsweredAt` proves a person took the call; /dial-result
-   * does not stamp `transferred` for a screened leg nobody accepted.
-   */
-  transferScreenOffered?: boolean;
   createdAt: Date;
   lastActivityAt: Date;
   events: EventEmitter;

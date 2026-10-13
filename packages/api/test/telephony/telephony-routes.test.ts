@@ -12,6 +12,7 @@ import twilio from 'twilio';
 import { createTelephonyRouter } from '../../src/routes/telephony';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
+import { createTransferScreenHooks } from '../../src/telephony/transfer-screening';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { DefaultTwilioCallControl } from '../../src/telephony/twilio-call-control';
 import {
@@ -535,7 +536,7 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
     expect(audits.some((e) => e.eventType === 'customer_callback_required')).toBe(true);
   });
 
-  it('on completed dial, hangs up our IVR leg without queueing a callback', async () => {
+  it('on completed dial of a leg a person ACCEPTED (pressed 1), hangs up our IVR leg without queueing a callback', async () => {
     const { app, store, proposalRepo } = buildDialHarness({
       rotation: [{ id: 'r1', userId: 'u1', orderIndex: 0 }],
       phones: { u1: '+15125550101' },
@@ -549,6 +550,8 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       tenantId: TENANT_ID,
     });
     session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
+    // H1 — only a person's press-1 on the screen makes a completed Dial a transfer.
+    await createTransferScreenHooks({ store }).onAccepted({ sessionId: session.id });
 
     const res = await signDialResult(app, session.id, {
       CallSid: 'CA-ok',
@@ -617,7 +620,7 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
     );
   });
 
-  it('B2: dial completed → stamps voice_sessions.outcome=completed', async () => {
+  it('B2: dial completed (accepted leg) → stamps voice_sessions.outcome=completed', async () => {
     const { app, store, voiceSessionRepo } = buildDialHarness({
       rotation: [{ id: 'r1', userId: 'u1', orderIndex: 0 }],
       phones: { u1: '+15125550101' },
@@ -638,6 +641,7 @@ describe('P8-013 POST /api/telephony/dial-result', () => {
       tenantId: TENANT_ID,
     });
     session.machine.dispatch({ type: 'caller_identification_failed', reason: 'x' });
+    await createTransferScreenHooks({ store }).onAccepted({ sessionId: session.id });
 
     await signDialResult(app, session.id, {
       CallSid: 'CA-stamp-ok',

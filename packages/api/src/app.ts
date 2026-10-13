@@ -4287,7 +4287,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     whisperCache: sharedWhisperCache,
     credentialView: subaccountCredentialView,
     publicBaseUrl: () => process.env.PUBLIC_API_URL,
-    onScreenOffered: transferScreenHooks.onScreenOffered,
     onAccepted: transferScreenHooks.onAccepted,
   });
 

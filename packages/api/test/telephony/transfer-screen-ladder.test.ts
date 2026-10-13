@@ -37,6 +37,9 @@ import type { TwilioAuthTokenGetter } from '../../src/telephony/twilio-signature
 import type { QueueMessage } from '../../src/queues/queue';
 import type { LLMGateway } from '../../src/ai/gateway/gateway';
 import { createLogger } from '../../src/logging/logger';
+import { escalateToHuman } from '../../src/ai/skills/escalate-to-human';
+import { DefaultTwilioCallControl } from '../../src/telephony/twilio-call-control';
+import { InMemoryOnCallRepository } from '../../src/oncall/rotation';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 const TENANT = 'tenant-ladder';
@@ -87,7 +90,6 @@ async function harness() {
     whisperCache,
     credentialView: accountSidView,
     publicBaseUrl: () => PUBLIC_BASE_URL,
-    onScreenOffered: hooks.onScreenOffered,
     onAccepted: hooks.onAccepted,
   });
   app.use(
@@ -153,7 +155,39 @@ async function harness() {
       To: TENANT_DID,
     });
 
-  return { session, sendSms, queue, runLadderStep, pickUp, press, dialResult };
+  /** Twilio fetching (GET, params in the query) the `<Number url>` of a Dial leg. */
+  const fetchScreen = (numberUrl: string) => {
+    const url = new URL(numberUrl);
+    const path = `${url.pathname}${url.search}&AccountSid=AC_sub&CallSid=CA-child-2`;
+    const sig = twilio.getExpectedTwilioSignature(TOKEN, `${PUBLIC_BASE_URL}${path}`, {});
+    return request(app).get(path).set('X-Twilio-Signature', sig);
+  };
+  /** Pressing a key on whatever screen a fetched leg returned. */
+  const pressOn = (screenTwiml: string, digit: string) => {
+    const action = /<Gather [^>]*action="([^"]+)"/.exec(screenTwiml)?.[1]?.replace(/&amp;/g, '&');
+    if (!action) throw new Error('no screen on this leg');
+    return signedPost(new URL(action).pathname + new URL(action).search, { ...childLeg, Digits: digit });
+  };
+
+  return { session, sendSms, queue, runLadderStep, pickUp, press, dialResult, fetchScreen, pressOn };
+}
+
+/** A Dial leg exactly as the cascade / P12-004 / business-line producers build it: no whisper text. */
+async function unscreenedProducerDial(sessionId: string): Promise<string> {
+  const result = await escalateToHuman({
+    tenantId: TENANT,
+    sessionId,
+    reason: 'emergency_dispatch',
+    channel: 'telephony',
+    callSid: 'CA-parent',
+    onCallRepo: new InMemoryOnCallRepository(new Map([[TENANT, [{ id: 'r2', userId: 'u2', orderIndex: 0 }]]])),
+    callControl: new DefaultTwilioCallControl(),
+    dispatcherPhoneResolver: async () => '+15125550102',
+    dialActionUrl: `${PUBLIC_BASE_URL}/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
+  });
+  const numberUrl = /<Number url="([^"]+)"/.exec(result.transfer!.fallbackTwiml!)?.[1]?.replace(/&amp;/g, '&');
+  if (!numberUrl) throw new Error(`leg is not screened: ${result.transfer!.fallbackTwiml}`);
+  return numberUrl;
 }
 
 describe('#8b/H1 emergency page ladder × screened hand-off', () => {
@@ -194,6 +228,48 @@ describe('#8b/H1 emergency page ladder × screened hand-off', () => {
     expect(res.status).toBe(200);
     expect(h.session.terminalReason).not.toBe('transferred');
     expect(res.text).not.toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+    await h.runLadderStep();
+    expect(h.sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it('H1-R — a leg built without a whisper (cascade / P12-004 / business line) is screened too', async () => {
+    const h = await harness();
+    const numberUrl = await unscreenedProducerDial(h.session.id);
+    const screen = await h.fetchScreen(numberUrl);
+    expect(screen.status).toBe(200);
+    expect(screen.text).toContain('<Gather numDigits="1"');
+    expect(screen.text).toContain('<Hangup/>');
+  });
+
+  it("H1-R — dispatcher B's voicemail on an unscripted leg does not count as transferred; the ladder pages", async () => {
+    const h = await harness();
+    const numberUrl = await unscreenedProducerDial(h.session.id);
+    await h.fetchScreen(numberUrl); // the mailbox "answers"; nobody presses 1
+    await h.dialResult('completed');
+
+    expect(h.session.terminalReason).not.toBe('transferred');
+    await h.runLadderStep();
+    expect(h.sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it('H1-R — a person pressing 1 on that generic screen accepts the hand-off and stops the pages', async () => {
+    const h = await harness();
+    const numberUrl = await unscreenedProducerDial(h.session.id);
+    const screen = await h.fetchScreen(numberUrl);
+    const res = await h.pressOn(screen.text, '1');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Response/>');
+
+    await h.runLadderStep();
+    expect(h.sendSms).not.toHaveBeenCalled();
+  });
+
+  it('M-b — a leg whose screen was never fetched (the fetch failed) is not stamped transferred', async () => {
+    const h = await harness();
+    // No screen fetch reached us at all; Twilio still reports the Dial completed.
+    await h.dialResult('completed');
+
+    expect(h.session.terminalReason).not.toBe('transferred');
     await h.runLadderStep();
     expect(h.sendSms).toHaveBeenCalledTimes(1);
   });
