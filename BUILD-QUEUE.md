@@ -7,7 +7,7 @@ Rule: judgment → Claude, volume → Codex, hands-on → Cursor, non-code → K
 
 | Task | Routed to | Status | Notes |
 |---|---|---|---|
-| SEND NOW: customer #1 onboarding email via Twilio email | Claude | in_progress | Josh: send from Twilio (already wired — TWILIO_EMAIL_FROM_ADDRESS). NOT Resend (not wired), NOT Josh's Gmail (declined). To: kapokapokepo@gmail.com. Subject: `your Rivet line — let's get it set up`. Body: `hey — josh here, founder of rivet. saw you signed up yesterday — appreciate it.` / blank / `here's how this goes: 20 minutes on the phone, i set the whole thing up for you. your greeting, your services, your calendar — you don't touch anything. then it's live on your real number.` / blank / `what's a good 20 for you tomorrow?` Plain text. Confirm sent. |
+| Customer #1 onboarding email (HELD — do not send) | Kai | queued | Josh reversed the send 2026-10-12 21:09 MST — focus is the NEXT customer, not onboarding #1. Copy stays approved on file; reactivate only on his word.
 | Owner visibility into tenant usage (signup date, setup state, billable minutes per customer) | Claude | in_progress | Handoff filed: KAI-HANDOFF-2026-10-11-FIRST-CUSTOMER.md (pushed to main). Arose from customer #1 — owner couldn't see anything. |
 | Finish-setup UX for ACCOUNT_SETUP_INCOMPLETE | Claude | queued | From Sep 28 handoff. User hitting incomplete setup needs to see WHAT is incomplete and HOW to finish. |
 | In-app onboarding checklist (productized setup) | Claude | queued | Needed before ~20 accounts — founder-led onboarding won't scale past that. |
