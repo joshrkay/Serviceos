@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { ObjectMetadata, StorageProvider } from './file-service';
 import { resolveStorageConfig, type StorageConfigEnv } from '../shared/storage-config';
+import { createDownloadUrlPolicy, type DownloadUrlPolicy } from './download-url-policy';
 
 export interface S3StorageConfig {
   bucket: string;
@@ -441,7 +442,7 @@ export function createStorageProvider(
       // that mints the URL (web) and the worker that fetches it may not
       // carry the same STORAGE_PUBLIC_URL (H2 review M1).
       downloadUrlPolicy: createDownloadUrlPolicy({
-        allowedOrigins: [STORAGE_ENDPOINT!, STORAGE_PUBLIC_URL ?? ''],
+        allowedOrigins: [endpoint, STORAGE_PUBLIC_URL ?? ''],
         productionLike: isProductionLikeEnv(NODE_ENV),
       }),
     };

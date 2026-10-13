@@ -1251,6 +1251,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     bucket: storageBucket,
     mode: storageMode,
     devStorageSecret,
+    downloadUrlPolicy: storageDownloadUrlPolicy,
   } = createStorageProvider(process.env as NodeJS.ProcessEnv, {
     logger: createLogger({
       service: 'api-boot',
