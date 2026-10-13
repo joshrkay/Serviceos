@@ -71,7 +71,7 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
  * returns for the invoice (platform scope).
  */
 function makeFakeProvider(opts: {
-  intents?: Array<{ id: string; status: string }>;
+  intents?: Array<{ id: string; status: string; amount?: number }>;
   deactivateError?: Error;
   cancelError?: Error;
 } = {}) {
@@ -397,6 +397,25 @@ describe('apply_credit execution handler', () => {
       });
     });
 
+    it('cancels only PaymentIntents priced ABOVE the new balance — one at or below it cannot overcharge', async () => {
+      const { provider, canceled } = makeFakeProvider({
+        intents: [
+          { id: 'pi_old_balance', status: 'requires_payment_method', amount: 3000 },
+          { id: 'pi_within_balance', status: 'requires_payment_method', amount: 800 },
+          { id: 'pi_exact_balance', status: 'requires_payment_method', amount: 1000 },
+        ],
+      });
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo, undefined, { provider });
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }), // 3000 → 1000 due
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      expect(canceled).toEqual(['pi_old_balance']);
+    });
+
     it('a Stripe failure to kill the link/PI never fails or unwinds the approved credit — it is audited instead', async () => {
       invoiceRepo = new InMemoryInvoiceRepository();
       await invoiceRepo.create(
@@ -626,7 +645,7 @@ describe('apply_credit execution handler', () => {
     expect(row!.amountDueCents).toBe(2000);
   });
 
-  it('production registry wiring threads paymentLinkCleanup into apply_credit AND apply_late_fee', async () => {
+  it('production registry wiring threads paymentLinkCleanup into apply_credit (a late fee leaves the link alone — review H2)', async () => {
     invoiceRepo = new InMemoryInvoiceRepository();
     await invoiceRepo.create(
       makeInvoice({
@@ -660,7 +679,7 @@ describe('apply_credit execution handler', () => {
       ctx,
     );
     expect(fee.success).toBe(true);
-    expect(deactivated).toEqual(['plink_credit', 'plink_fee']);
+    expect(deactivated).toEqual(['plink_credit']);
   });
 
   it('emits a credit.applied audit event carrying proposalId/amountCents/reason', async () => {

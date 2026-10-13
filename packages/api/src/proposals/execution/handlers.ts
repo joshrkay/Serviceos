@@ -1656,18 +1656,19 @@ export function createExecutionHandlerRegistry(deps?: {
     ));
     // Collections cadence — apply_late_fee: appends a non-taxable late-fee
     // line to an overdue invoice and refreshes the money-state rollup.
-    // Money-class: only runs after explicit owner approval. P0-9 — the fee
-    // re-prices the invoice, so paymentLinkCleanup kills the stale link/PIs.
+    // Money-class: only runs after explicit owner approval. No stale-link
+    // cleanup: a fee raises the balance, so an old-price link/PI can only
+    // underpay (review H2 — see the handler's doc comment).
     handlers.push(new ApplyLateFeeExecutionHandler(
       deps.invoiceRepo,
       deps.auditRepo,
       moneyStateDeps,
-      deps.paymentLinkCleanup,
     ));
     // Tradesperson wave 1, Task 4 — apply_credit: appends a non-taxable,
     // NEGATIVE, floor-guarded line to an issued invoice and refreshes the
     // money-state rollup. Money-class: only runs after explicit owner
-    // approval. P0-9 — same stale link/PI cleanup as apply_late_fee.
+    // approval. P0-9 — a credit LOWERS the balance, so paymentLinkCleanup
+    // kills the stale link and the PaymentIntents priced above it.
     handlers.push(new ApplyCreditExecutionHandler(
       deps.invoiceRepo,
       deps.auditRepo,

@@ -37,6 +37,13 @@ export interface CreateTerminalPaymentIntentInput {
   jobId?: string;
   /** Discriminator for webhook / ledger routing. */
   purpose: 'invoice' | 'deposit';
+  /**
+   * Review H2 — required for `purpose: 'invoice'`: the invoice's line-item
+   * count, folded into the idempotency key. Every credit / late fee appends a
+   * line, so a re-priced invoice whose balance returns to an earlier amount
+   * never gets a credit-cancelled Terminal PI replayed by Stripe.
+   */
+  repricingNonce?: number;
 }
 
 export interface CreateTerminalPaymentIntentResult {
@@ -253,12 +260,19 @@ export async function createTerminalPaymentIntent(
   if (input.purpose === 'deposit' && !input.jobId) {
     throw new Error('jobId is required for deposit purpose');
   }
+  if (
+    input.purpose === 'invoice' &&
+    (!Number.isInteger(input.repricingNonce) || (input.repricingNonce as number) < 0)
+  ) {
+    throw new Error('repricingNonce (the invoice line-item count) is required for invoice purpose');
+  }
 
   const scopeKey =
     input.purpose === 'invoice'
       ? `inv_${input.invoiceId}`
       : `dep_${input.jobId}`;
-  const idempotencyKey = `term_pi_${scopeKey}_${input.amount}_${config.stripeAccountId}`;
+  const repricingSuffix = input.purpose === 'invoice' ? `_r${input.repricingNonce}` : '';
+  const idempotencyKey = `term_pi_${scopeKey}_${input.amount}_${config.stripeAccountId}${repricingSuffix}`;
 
   const body = new URLSearchParams({
     amount: String(input.amount),

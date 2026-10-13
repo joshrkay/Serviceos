@@ -13,6 +13,7 @@ import {
 import { InMemoryInvoiceRepository, Invoice } from '../../src/invoices/invoice';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { Proposal } from '../../src/proposals/proposal';
+import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import {
   buildLineItem,
   calculateDocumentTotals,
@@ -268,56 +269,37 @@ describe('apply_late_fee execution handler', () => {
     expect(row!.amountDueCents).toBe(12500);
   });
 
-  // P0-9 — the fee RE-PRICES the invoice: a link or PaymentIntent minted at
-  // the pre-fee balance no longer prices what is owed and must die so the
-  // pay-now flows mint a fresh one at the current balance.
-  describe('stale charge vectors die when the fee re-prices the invoice', () => {
-    it('deactivates the stored payment link, clears its columns, and audits it as repriced', async () => {
-      invoiceRepo = new InMemoryInvoiceRepository();
-      await invoiceRepo.create(
-        makeInvoice({
-          stripePaymentLinkId: 'plink_old',
-          stripePaymentLinkUrl: 'https://buy.stripe.test/plink_old',
-        }),
-      );
-      const { provider, deactivated } = makeFakeProvider();
-      handler = new ApplyLateFeeExecutionHandler(invoiceRepo, auditRepo, undefined, { provider });
-
-      const result = await handler.execute(makeProposal(), ctx);
-
-      expect(result.success).toBe(true);
-      expect(deactivated).toEqual(['plink_old']);
-      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
-      expect(updated!.amountDueCents).toBe(17500);
-      expect(updated!.stripePaymentLinkId).toBeUndefined();
-      expect(updated!.stripePaymentLinkUrl).toBeUndefined();
-      const events = await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID);
-      const killed = events.find((e) => e.eventType === 'invoice.payment_link_deactivated');
-      expect(killed).toBeDefined();
-      expect(killed!.metadata).toMatchObject({ stripePaymentLinkId: 'plink_old', reason: 'repriced' });
+  // Review H2 — a late fee RAISES the balance. A link or PaymentIntent
+  // minted before it is priced BELOW what is now owed: paying it can never
+  // overcharge (it records a partial payment and the fee stays due), while
+  // cancelling it would only break a customer mid-checkout — and a cancelled
+  // PI is what Stripe's idempotency replays if the balance later returns to
+  // that amount. So the fee leaves them alone (production wiring).
+  it('leaves an old-price payment link and PaymentIntents alone — they can only underpay', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    await invoiceRepo.create(
+      makeInvoice({
+        stripePaymentLinkId: 'plink_old',
+        stripePaymentLinkUrl: 'https://buy.stripe.test/plink_old',
+      }),
+    );
+    const { provider, deactivated, canceled } = makeFakeProvider({
+      intents: [{ id: 'pi_open', status: 'requires_payment_method' }],
+    });
+    const registry = createExecutionHandlerRegistry({
+      invoiceRepo,
+      auditRepo,
+      paymentLinkCleanup: { provider },
     });
 
-    it('cancels still-confirmable PaymentIntents minted at the old balance and audits each', async () => {
-      const { provider, canceled } = makeFakeProvider({
-        intents: [
-          { id: 'pi_open', status: 'requires_payment_method' },
-          { id: 'pi_gone', status: 'canceled' },
-        ],
-      });
-      handler = new ApplyLateFeeExecutionHandler(invoiceRepo, auditRepo, undefined, { provider });
+    const result = await registry.get('apply_late_fee')!.execute(makeProposal(), ctx);
 
-      const result = await handler.execute(makeProposal(), ctx);
-
-      expect(result.success).toBe(true);
-      expect(canceled).toEqual(['pi_open']);
-      const events = await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID);
-      const cancelEvents = events.filter((e) => e.eventType === 'invoice.payment_intent_canceled');
-      expect(cancelEvents).toHaveLength(1);
-      expect(cancelEvents[0].metadata).toMatchObject({
-        stripePaymentIntentId: 'pi_open',
-        reason: 'repriced',
-      });
-    });
+    expect(result.success).toBe(true);
+    expect(deactivated).toEqual([]);
+    expect(canceled).toEqual([]);
+    const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(updated!.amountDueCents).toBe(17500);
+    expect(updated!.stripePaymentLinkId).toBe('plink_old');
   });
 });
 

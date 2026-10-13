@@ -8,11 +8,6 @@ import {
 } from '../../jobs/job-money-state';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { applyLateFeePayloadSchema } from '../contracts/apply-late-fee';
-import type { PaymentLinkCleanupDeps } from '../../invoices/payment';
-import {
-  cancelInvoicePaymentIntents,
-  deactivateInvoicePaymentLink,
-} from '../../invoices/invoice-payment-link';
 import { v5 as uuidv5 } from 'uuid';
 
 /**
@@ -66,10 +61,19 @@ export function lateFeeLineId(invoiceId: string, stepKey: string): string {
  * The append-line-and-adjust write itself is shared with
  * `ApplyCreditExecutionHandler`: both call
  * `InvoiceRepository.applyNonTaxableAdjustmentAtomic` (one guarded write
- * deriving amount due from the LIVE amount paid and re-checking status), then
- * run the same P0-9 stale link / PaymentIntent cleanup. Guards (idempotency,
- * status precondition, floor checks) and audit emission stay per-handler —
- * they differ enough that folding them in would obscure more than it'd save.
+ * deriving amount due from the LIVE amount paid and re-checking status).
+ * Guards (idempotency, status precondition, floor checks) and audit emission
+ * stay per-handler — they differ enough that folding them in would obscure
+ * more than it'd save.
+ *
+ * ── No stale-link / PaymentIntent cleanup (unlike apply_credit; review H2) ──
+ * A fee RAISES the balance, so a hosted link or PaymentIntent minted before
+ * it is priced BELOW what is now owed. Paying one can never overcharge — it
+ * records a partial payment and the fee stays due. Cancelling them would
+ * only break a customer mid-checkout, and a cancelled PI is exactly what
+ * Stripe's idempotency key replays if the balance later returns to that
+ * amount. This handler therefore performs no external I/O: it stays a
+ * DB-only handler the executor runs fully atomically (Path A).
  */
 export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'apply_late_fee';
@@ -78,11 +82,6 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
     private readonly invoiceRepo?: InvoiceRepository,
     private readonly auditRepo?: AuditRepository,
     private readonly moneyStateDeps?: RefreshJobMoneyStateDeps,
-    /**
-     * P0-9 — the fee re-prices the invoice, so a hosted payment link minted
-     * at the pre-fee balance must die (a fresh one is minted on demand).
-     */
-    private readonly paymentLinkCleanup?: PaymentLinkCleanupDeps,
   ) {}
 
   // U8 — degrades to an echo passthrough (charges nothing) without the
@@ -174,33 +173,6 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
         success: false,
         error: `Invoice ${live.invoiceNumber} became '${live.status}' while the late fee was being applied — late fee not applied.`,
       };
-    }
-
-    // P0-9 — the stored link and any minted PaymentIntent were priced at the
-    // pre-fee balance and no longer price what is owed. Both helpers are
-    // best-effort and audit every outcome (never throw), so a Stripe failure
-    // can't unwind the already-approved fee.
-    if (this.paymentLinkCleanup) {
-      const actor = { actorId: context.executedBy, actorRole: 'system' };
-      await deactivateInvoicePaymentLink({
-        tenantId: context.tenantId,
-        invoice: updated,
-        reason: 'repriced',
-        invoiceRepo: this.invoiceRepo,
-        provider: this.paymentLinkCleanup.provider,
-        connectAccountResolver: this.paymentLinkCleanup.connectAccountResolver,
-        auditRepo: this.auditRepo,
-        actor,
-      });
-      await cancelInvoicePaymentIntents({
-        tenantId: context.tenantId,
-        invoice: updated,
-        reason: 'repriced',
-        provider: this.paymentLinkCleanup.provider,
-        connectAccountResolver: this.paymentLinkCleanup.connectAccountResolver,
-        auditRepo: this.auditRepo,
-        actor,
-      });
     }
 
     // §6 Time-to-Cash. Best-effort job money-state rollup.
