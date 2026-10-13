@@ -248,6 +248,35 @@ describe('object-storage env contract (validator and factory agree)', () => {
       expect(() => loadConfig({ ...PROD_BASE, ...optOut })).not.toThrow();
     });
   });
+
+  describe('slice 4b — an access-key pair never mixes the two families', () => {
+    const base = {
+      STORAGE_BUCKET: 'b',
+      STORAGE_ENDPOINT: 'https://s3.example.com',
+      STORAGE_REGION: 'us-east-1',
+    };
+
+    it('STORAGE_ACCESS_KEY_ID with only R2_SECRET_ACCESS_KEY is rejected at boot, not a runtime 403', () => {
+      const mixed = { ...base, STORAGE_ACCESS_KEY_ID: 'st-key', R2_SECRET_ACCESS_KEY: 'r2-secret' };
+
+      expect(() => createStorageProvider({ NODE_ENV: 'production', ...mixed })).toThrow(
+        /key pair[\s\S]*cannot be mixed/
+      );
+      expect(() => loadConfig({ ...PROD_BASE, ...mixed })).toThrow(/key pair[\s\S]*cannot be mixed/);
+    });
+
+    it('a complete R2 key pair completes a STORAGE_* bucket/endpoint/region set', async () => {
+      const { mode, provider, bucket } = createStorageProvider({
+        NODE_ENV: 'production',
+        ...base,
+        R2_ACCESS_KEY_ID: 'r2-key',
+        R2_SECRET_ACCESS_KEY: 'r2-secret',
+      });
+      expect(mode).toBe('s3');
+      const url = new URL(await provider.generateUploadUrl(bucket, 'k', 'audio/webm', 1));
+      expect(url.searchParams.get('X-Amz-Credential')).toMatch(/^r2-key\//);
+    });
+  });
 });
 
 // (imports used by every slice)
