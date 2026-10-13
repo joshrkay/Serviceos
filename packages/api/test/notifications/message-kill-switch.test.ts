@@ -177,6 +177,28 @@ describe('kill switch — owner-class is NOT exempt (consent-bypass regression g
   });
 });
 
+describe('kill switch — life-safety and operator alerts still reach a human', () => {
+  // TELEPHONY_ENABLED=false is the CUSTOMER-facing switch. With it off, inbound
+  // voice AI stays live — so an E1/E2 emergency page to the owner must still go.
+  it('sends a life-safety owner page with TELEPHONY_ENABLED=false', async () => {
+    const { gate, base } = build({ TELEPHONY_ENABLED: 'false' });
+
+    await gate.sendSms(ownerSms({ body: 'EMERGENCY (E1 life-safety) call', alertClass: 'life_safety' }));
+
+    expect(base.sentSms).toHaveLength(1);
+  });
+
+  it('still suppresses a customer text, even one tagged as a life-safety alert', async () => {
+    const { gate, base } = build({ TELEPHONY_ENABLED: 'false' });
+
+    await expect(gate.sendSms(customerSms({ alertClass: 'life_safety' }))).rejects.toMatchObject({
+      reason: 'channel_disabled',
+      recipientClass: 'customer',
+    });
+    expect(base.sentSms).toHaveLength(0);
+  });
+});
+
 describe('kill switch — unset flags change nothing', () => {
   it('customer SMS, owner SMS and email all behave exactly as before', async () => {
     const { gate, base, auditRepo, logs } = build({});

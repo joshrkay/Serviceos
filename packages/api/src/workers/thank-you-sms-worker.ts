@@ -10,7 +10,8 @@
  * that:
  *
  *   1. Have transitioned to 'completed' (completed_at IS NOT NULL),
- *   2. Are at least `delayHours` past completion (default 2),
+ *   2. Are at least `delayHours` past completion (default 2) and at most
+ *      THANK_YOU_MAX_LATENESS_HOURS past that (the recency floor),
  *   3. Have not already had thank-you SMS handled
  *      (thank_you_sms_sent_at IS NULL).
  *
@@ -22,7 +23,10 @@
  * phone, DNC list, smsConsent=false) also set `thank_you_sms_sent_at`
  * with a `notification.thank_you_sms.suppressed` audit event so the
  * sweep doesn't re-evaluate the same row forever. Transient errors
- * (dispatcher throws) leave the stamp null so the next sweep retries.
+ * (dispatcher throws) leave the stamp null so the next sweep retries. A
+ * thank-you is non-transactional (`quietHours: 'defer'`): outside the
+ * recipient-local window the gate defers it, and the job likewise stays
+ * unstamped (counted `deferred`) until an in-window sweep sends it.
  *
  * Sweep cadence is owned by app.ts (a setInterval driver). Tests
  * exercise this function directly with in-memory repos and a fixed
@@ -42,7 +46,9 @@ import { SettingsRepository } from '../settings/settings';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { DncRepository, normalizePhone } from '../compliance/dnc';
 import {
+  SmsDeferredError,
   SmsSuppressedError,
+  type GatedMessageDelivery,
   type SmsSuppressionReason,
 } from '../notifications/gated-message-delivery';
 
@@ -78,6 +84,21 @@ import { FeedbackDispatcher } from '../feedback/dispatcher';
 import { withSendClaim, readSendClaimStatus } from '../notifications/send-claim-ledger';
 
 const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * Recency floor: a thank-you more than this many hours past its intended send
+ * time (completed_at + delayHours) is never sent — after a toggle is switched
+ * back on, or a sweep outage, "thanks for today" days later is a stale
+ * solicitation, not a courtesy. Such jobs fall outside the eligibility query,
+ * exactly like a toggled-off tenant's: never selected, so never stamped and
+ * never re-evaluated.
+ *
+ * 24 h is far above the longest quiet-hours hold, so a deferred thank-you is
+ * never aged out: ≤ 12 h for a known zone (20:00 → 08:00), ≈ 18 h for a
+ * tenant with no zone (an Eastern 14:00–20:00 window).
+ */
+export const THANK_YOU_MAX_LATENESS_HOURS = 24;
+
 const THANK_YOU_ACTOR = 'system:thank_you_sms';
 const THANK_YOU_SENT_EVENT = 'notification.thank_you_sms.sent';
 
@@ -105,6 +126,13 @@ export interface ThankYouSmsWorkerDeps {
    * recently-completed jobs without sleeping.
    */
   delayHours?: number;
+  /**
+   * The gate's send-window verdict. A tenant whose window is closed (its
+   * zone, strictest close) has its jobs counted `deferred` with no per-job
+   * work — they stay unstamped for an in-window tick. Absent → no check
+   * (the gate still defers each send).
+   */
+  sendWindow?: Pick<GatedMessageDelivery, 'sendWindowVerdict'>;
 }
 
 export interface ThankYouSmsSweepResult {
@@ -118,6 +146,11 @@ export interface ThankYouSmsSweepResult {
   suppressed: number;
   /** Transient errors that left thank_you_sms_sent_at null for retry. */
   failed: number;
+  /**
+   * Held back by the recipient's quiet hours: not sent, not stamped, claim
+   * released — a later in-window sweep sends it.
+   */
+  deferred: number;
 }
 
 /**
@@ -133,6 +166,7 @@ const ELIGIBLE_SQL = `
      AND j.completed_at IS NOT NULL
      AND j.thank_you_sms_sent_at IS NULL
      AND j.completed_at <= $1
+     AND j.completed_at >= $2
    ORDER BY j.completed_at ASC
    LIMIT 500
 `;
@@ -153,6 +187,7 @@ export async function runThankYouSmsSweep(
     sent: 0,
     suppressed: 0,
     failed: 0,
+    deferred: 0,
   };
 
   if (!deps.pool) {
@@ -164,10 +199,13 @@ export async function runThankYouSmsSweep(
   const pool = deps.pool; // narrowed non-null for the rest of this sweep
   const asOf = now();
   const completedBefore = new Date(asOf.getTime() - delayHours * HOUR_MS);
+  const completedAfter = new Date(
+    completedBefore.getTime() - THANK_YOU_MAX_LATENESS_HOURS * HOUR_MS,
+  );
 
   let rows: EligibleRow[];
   try {
-    const queryResult = await pool.query<EligibleRow>(ELIGIBLE_SQL, [completedBefore]);
+    const queryResult = await pool.query<EligibleRow>(ELIGIBLE_SQL, [completedBefore, completedAfter]);
     rows = queryResult.rows;
   } catch (err) {
     deps.logger.error('Thank-you SMS sweep: eligibility query failed', {
@@ -217,6 +255,11 @@ async function sweepTenant(
   // settings row was updated between the SELECT and now.
   if (settings && settings.sendThankYouSms === false) return;
 
+  if (deps.sendWindow && !(await deps.sendWindow.sendWindowVerdict({ tenantId })).isAllowedNow) {
+    result.deferred += jobIds.length;
+    return;
+  }
+
   const businessName = settings?.businessName ?? 'our team';
 
   for (const jobId of jobIds) {
@@ -224,6 +267,7 @@ async function sweepTenant(
       const outcome = await sendOneThankYou(deps, pool, tenantId, jobId, businessName);
       if (outcome === 'sent') result.sent++;
       else if (outcome === 'suppressed') result.suppressed++;
+      else result.deferred++;
     } catch (err) {
       // Transient: leave thank_you_sms_sent_at null so the next sweep retries.
       result.failed++;
@@ -236,7 +280,7 @@ async function sweepTenant(
   }
 }
 
-type SendOutcome = 'sent' | 'suppressed';
+type SendOutcome = 'sent' | 'suppressed' | 'deferred';
 
 /** T4-F01 claim key — at-most-once per job, matching thankYouSmsSentAt's own scope. */
 function thankYouClaimKey(jobId: string): string {
@@ -334,9 +378,22 @@ async function sendOneThankYou(
         body,
         tenantId,
         consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
+        // A thank-you is non-transactional: it waits for the recipient's
+        // daytime window rather than landing at 22:30.
+        quietHours: 'defer',
       }),
     );
   } catch (err) {
+    if (err instanceof SmsDeferredError) {
+      // Not sent yet. withSendClaim already released the claim; leaving the
+      // stamp null re-selects the job, and an in-window sweep sends it.
+      deps.logger.info('Thank-you SMS sweep: deferred to the recipient send window', {
+        tenantId,
+        jobId,
+        nextAllowedAt: err.nextAllowedAt.toISOString(),
+      });
+      return 'deferred';
+    }
     if (err instanceof SmsSuppressedError && PERMANENT_GATE_REASONS.has(err.reason)) {
       // Terminal, not transient. The gate consults the consent ledger, which
       // this worker does not read, so a cross-channel revocation can suppress a

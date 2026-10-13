@@ -1207,11 +1207,15 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
     pool = await getSharedTestDb();
   });
 
-  // Both sweeps below select `ORDER BY j.completed_at ASC LIMIT 500`. In a
-  // full-suite run the shared container holds other files' completed jobs, so
-  // these fixtures are dated far in the past to sort first and stay inside the
-  // limit deterministically.
-  const FIXTURE_EPOCH = Date.parse('2020-01-01T00:00:00.000Z');
+  // Both sweeps below select `ORDER BY j.completed_at ASC LIMIT 500` and only
+  // jobs inside their recency floor (thank-you: due ≤ 24 h ago; review: ≤ 7
+  // days after completion). In a full-suite run the shared container holds
+  // other files' completed jobs, so both sweeps run on their own far-future
+  // clock and these fixtures are completed 25 h before it — eligible for both,
+  // and the only rows inside that window, so they stay inside the limit
+  // deterministically.
+  const FANOUT_NOW = new Date('2031-01-02T00:00:00.000Z');
+  const FIXTURE_EPOCH = FANOUT_NOW.getTime() - 25 * 60 * 60 * 1000;
   // ...and each fixture gets its OWN timestamp, one second apart, so the sweep
   // processes them in the order they were seeded.
   //
@@ -1329,6 +1333,7 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
           },
         } as never,
         logger,
+        now: () => FANOUT_NOW,
       });
       return { visited, dispatched, failed: result.failed, tenants: result.tenants, sent: result.sent };
     };
@@ -1400,6 +1405,7 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
           },
         } as never,
         logger,
+        now: () => FANOUT_NOW,
       });
       return { enqueued, failed: result.failed };
     };

@@ -61,7 +61,7 @@ describe('runReviewRequestSweep (US-345)', () => {
       now,
     });
 
-    expect(result).toEqual({ candidates: 2, enqueued: 2, failed: 0 });
+    expect(result).toEqual({ candidates: 2, enqueued: 2, failed: 0, deferred: 0 });
     // Reuses feedback_send with the canonical idempotency key.
     expect(send).toHaveBeenCalledTimes(2);
     expect(send).toHaveBeenCalledWith(
@@ -102,7 +102,7 @@ describe('runReviewRequestSweep (US-345)', () => {
       logger,
       now,
     });
-    expect(result).toEqual({ candidates: 0, enqueued: 0, failed: 0 });
+    expect(result).toEqual({ candidates: 0, enqueued: 0, failed: 0, deferred: 0 });
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -119,6 +119,76 @@ describe('runReviewRequestSweep (US-345)', () => {
       logger,
       now,
     });
-    expect(result).toEqual({ candidates: 0, enqueued: 0, failed: 0 });
+    expect(result).toEqual({ candidates: 0, enqueued: 0, failed: 0, deferred: 0 });
+  });
+
+  it("leaves a closed-window tenant's jobs for a later tick — not enqueued, not stamped", async () => {
+    // The sweep is the review request's retry loop: a job it skips stays
+    // eligible (and re-checked against the toggle and recency floor) until
+    // the tenant's window opens.
+    const jobRepo = new InMemoryJobRepository();
+    await seedCompletedJob(jobRepo, 't-closed', 'job-1');
+    await seedCompletedJob(jobRepo, 't-open', 'job-2');
+    const send = vi.fn(async () => 'msg-id');
+
+    const result = await runReviewRequestSweep({
+      pool: fakePool([
+        { id: 'job-1', tenant_id: 't-closed' },
+        { id: 'job-2', tenant_id: 't-open' },
+      ]),
+      jobRepo,
+      queue: { send },
+      logger,
+      now,
+      sendWindow: {
+        sendWindowVerdict: async ({ tenantId }) => ({
+          isAllowedNow: tenantId === 't-open',
+          nextAllowedAt: NOW,
+        }),
+      },
+    });
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith('feedback_send', { tenantId: 't-open', jobId: 'job-2' }, 't-open:job-2:feedback_send');
+    expect((await jobRepo.findById('t-closed', 'job-1'))!.reviewRequestSentAt).toBeFalsy();
+    expect(result).toMatchObject({ enqueued: 1, deferred: 1, failed: 0 });
+  });
+
+  it('stamps before enqueueing, so a worker that hands the job back first is not overwritten (N2)', async () => {
+    // A fast poller can run feedback_send (which clears the stamp on a closed
+    // recipient window) before the sweep's own write lands. With the stamp
+    // written after the enqueue, that hand-back was overwritten and the job
+    // was never re-selected — the request lost for good.
+    const jobRepo = new InMemoryJobRepository();
+    await seedCompletedJob(jobRepo, 't1', 'job-1');
+    const send = vi.fn(async () => {
+      await jobRepo.update('t1', 'job-1', { reviewRequestSentAt: undefined }); // the worker's hand-back
+      return 'msg-id';
+    });
+
+    await runReviewRequestSweep({ pool: fakePool([{ id: 'job-1', tenant_id: 't1' }]), jobRepo, queue: { send }, logger, now });
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect((await jobRepo.findById('t1', 'job-1'))!.reviewRequestSentAt).toBeFalsy();
+  });
+
+  it('clears its stamp again when the enqueue fails, so the next tick retries the job', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    await seedCompletedJob(jobRepo, 't1', 'job-1');
+    const send = vi.fn(async () => {
+      throw new Error('queue down');
+    });
+
+    const result = await runReviewRequestSweep({
+      pool: fakePool([{ id: 'job-1', tenant_id: 't1' }]),
+      jobRepo,
+      queue: { send },
+      logger,
+      now,
+    });
+
+    expect(result).toMatchObject({ enqueued: 0, failed: 1 });
+    expect((await jobRepo.findById('t1', 'job-1'))!.reviewRequestSentAt).toBeFalsy();
   });
 });
+

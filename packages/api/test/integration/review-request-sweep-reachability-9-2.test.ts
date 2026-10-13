@@ -120,6 +120,8 @@ describe('9.2 reachability — review-request sweep, one call, two tenants, thro
       feedbackRequestRepo,
       dispatcher,
       publicBaseUrl: 'https://app.example.com',
+      // No quiet-hours window is wired on this gate, so it is always open.
+      sendWindow: gate,
     });
 
     const runOnce = () =>
