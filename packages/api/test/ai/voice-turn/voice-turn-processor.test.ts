@@ -2498,6 +2498,23 @@ describe('ANS-001 — E1 tenant alert (owner cell, durable fallback, push fan-ou
     expect(reasons).toContain('life_safety_e1');
   });
 
+  it('a replayed E1 turn whose texts were accepted still files ONE task (keyed on session + reason)', async () => {
+    // The task is now filed on every E1 alert attempt, so a webhook retry of
+    // the same turn must reuse it — call_me_back is idempotent on
+    // (tenant, session, reason) (migration 268), and the task carries both.
+    const { processor, session, callMeBackRepo } = await makeE1Ctx({
+      settings: { ownerPhone: '+15125550111', transferNumber: '+15125550999' },
+      deliveryProvider: { sendSms: async () => ({}) },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    const tasks = await callMeBackRepo.listPending('tenant-e1');
+    expect(tasks.filter((t) => t.reason === 'life_safety_e1')).toHaveLength(1);
+    expect(tasks[0].sessionId).toBe(session.id);
+  });
+
   it('files the durable task when EVERY configured number fails', async () => {
     const { processor, session, callMeBackRepo } = await makeE1Ctx({
       settings: { ownerPhone: '+15125550111', transferNumber: '+15125550999' },
