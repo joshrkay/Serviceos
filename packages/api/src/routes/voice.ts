@@ -56,6 +56,8 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 
 const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
 const JOB_ID_SCHEMA = z.guid();
+/** H2 review — files.id is uuid: a malformed fileId is a 400, not a Postgres 22P02 → 500. */
+const FILE_ID_SCHEMA = z.guid();
 /** #1603 — one spoken clip's text; same ceiling as a voice-session turn. */
 const TTS_BODY_SCHEMA = z.object({ text: z.string().trim().min(1).max(2000) });
 
@@ -537,6 +539,10 @@ export function createVoiceRouter(
       });
       if (errors.length > 0) {
         res.status(400).json({ error: 'VALIDATION_ERROR', message: errors.join(', ') });
+        return;
+      }
+      if (!FILE_ID_SCHEMA.safeParse(body.fileId).success) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'fileId must be a valid UUID' });
         return;
       }
 

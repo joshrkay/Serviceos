@@ -161,6 +161,24 @@ describe('H2 — POST /api/voice/recordings selects audio from server-owned reco
     expect(await queue.receiveBatch(10)).toHaveLength(0);
   });
 
+  it.each(['not-a-uuid', 42, ['6b1f3c9e-1d2b-4c7a-8e6f-1248000000a2']])(
+    '400s before any lookup when fileId is the malformed %j (Postgres would 500 on the uuid cast)',
+    async (fileId) => {
+      const { app, queue, voiceRepo, generateDownloadUrl } = await harness();
+      const create = vi.spyOn(voiceRepo, 'create');
+
+      const response = await request(app)
+        .post('/api/voice/recordings')
+        .send({ fileId, audioUrl: 'https://storage.example.test/memo.m4a' });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('VALIDATION_ERROR');
+      expect(create).not.toHaveBeenCalled();
+      expect(generateDownloadUrl).not.toHaveBeenCalled();
+      expect(await queue.receiveBatch(10)).toHaveLength(0);
+    },
+  );
+
   it('503s and enqueues nothing when no storage is wired to mint the URL', async () => {
     const voiceRepo = new InMemoryVoiceRepository();
     const create = vi.spyOn(voiceRepo, 'create');
