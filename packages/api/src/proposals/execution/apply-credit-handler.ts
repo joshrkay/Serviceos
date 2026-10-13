@@ -2,10 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { Invoice, InvoiceRepository } from '../../invoices/invoice';
-import {
-  applyNonTaxableAdjustment,
-  buildLineItem,
-} from '../../shared/billing-engine';
+import { buildLineItem } from '../../shared/billing-engine';
 import {
   RefreshJobMoneyStateDeps,
   refreshJobMoneyStateSafe,
@@ -77,18 +74,14 @@ import { formatUsdCentsPlain } from '@ai-service-os/shared';
  * (never throws through), and emits a failure-soft audit event
  * (`credit.applied`, entityType `invoice`).
  *
- * DRY threshold breadcrumb: the append-line-then-adjust block below
- * (build the line, append it, `applyNonTaxableAdjustment`, derive
- * `amountDueCents`) is mechanically identical to
- * `ApplyLateFeeExecutionHandler`'s (proposals/execution/
- * apply-late-fee-handler.ts, ~lines 144-150) — only the line's sign and
- * description differ. Left duplicated for these two; if a THIRD
- * append-a-line-to-invoice sibling shows up (e.g. a hypothetical
- * `apply_discount`), extract an `appendInvoiceLineAndRecompute(invoice,
- * line)` helper into the shared billing engine for this exact block.
- * Guards (idempotency, status precondition, floor checks) and audit
- * emission stay per-handler — they differ enough that folding them in
- * would obscure more than it'd save.
+ * The append-line-and-adjust write itself is shared with
+ * `ApplyLateFeeExecutionHandler`: both call
+ * `InvoiceRepository.applyNonTaxableAdjustmentAtomic` (one guarded write
+ * deriving amount due from the LIVE amount paid, re-checking status and —
+ * for a credit — that it still fits the live balance), then run the same
+ * P0-9 stale link / PaymentIntent cleanup. Guards (idempotency, status
+ * precondition, floor checks) and audit emission stay per-handler — they
+ * differ enough that folding them in would obscure more than it'd save.
  */
 export class ApplyCreditExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'apply_credit';
@@ -163,18 +156,18 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
       false, // non-taxable: a credit is not itself subject to sales tax
       'other',
     );
-    const lineItems = [...invoice.lineItems, creditLine];
-    const totals = applyNonTaxableAdjustment(invoice.totals, creditLine.totalCents);
-    const amountDueCents = Math.max(0, totals.totalCents - invoice.amountPaidCents);
-
+    // #10 — one atomic write: the repo appends the line, moves the totals by
+    // its amount (applyNonTaxableAdjustment semantics) and derives amount
+    // due from the row's LIVE amount paid, so a webhook payment committing
+    // after the read above is never overwritten by a snapshot figure.
     let updated: Invoice | null;
     try {
-      updated = await this.invoiceRepo.update(context.tenantId, invoice.id, {
-        lineItems,
-        totals,
-        amountDueCents,
-        updatedAt: new Date(),
-      });
+      updated = await this.invoiceRepo.applyNonTaxableAdjustmentAtomic(
+        context.tenantId,
+        invoice.id,
+        creditLine,
+        new Date(),
+      );
     } catch (err) {
       return {
         success: false,
@@ -182,7 +175,28 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
       };
     }
     if (!updated) {
-      return { success: false, error: `Invoice ${invoiceId} not found in this tenant` };
+      // The atomic write's live guards refused it: the invoice changed after
+      // the read above (voided / settled, or a payment shrank the due below
+      // this credit) — or vanished. Nothing was written.
+      const live = await this.invoiceRepo.findById(context.tenantId, invoice.id);
+      if (!live) {
+        return { success: false, error: `Invoice ${invoiceId} not found in this tenant` };
+      }
+      if ((live.status === 'open' || live.status === 'partially_paid') && amountCents > live.amountDueCents) {
+        return {
+          success: false,
+          error:
+            `Credit (${formatUsdCentsPlain(amountCents)}) exceeds amount due ` +
+            `(${formatUsdCentsPlain(live.amountDueCents)}) — a payment landed while it was being applied; ` +
+            `record a refund instead`,
+        };
+      }
+      return {
+        success: false,
+        error:
+          `Invoice ${live.invoiceNumber} changed while the credit was being applied ` +
+          `(now '${live.status}', ${formatUsdCentsPlain(live.amountDueCents)} due) — no credit was applied.`,
+      };
     }
 
     // P0-9 — the stored link and any minted PaymentIntent were priced at the
@@ -238,7 +252,7 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
               proposalId: proposal.id,
               proposalType: 'apply_credit',
               amountCents,
-              newAmountDueCents: amountDueCents,
+              newAmountDueCents: updated.amountDueCents,
               ...(reason ? { reason } : {}),
             },
           }),

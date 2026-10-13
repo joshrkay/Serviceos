@@ -410,6 +410,46 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     });
   }
 
+  async applyNonTaxableAdjustmentAtomic(
+    tenantId: string,
+    id: string,
+    line: LineItem,
+    now: Date,
+  ): Promise<Invoice | null> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      // #10 — one UPDATE deriving the new subtotal/total/due from the row's
+      // OWN current values (the SQL mirror of applyNonTaxableAdjustment: a
+      // non-taxable line moves subtotal and total by its amount and nothing
+      // else), so a payment committed by incrementAmountPaidAtomic between
+      // the caller's read and this write is reflected in amount_due instead
+      // of being overwritten by a snapshot-derived figure, and two
+      // concurrent adjustments both apply. Column references on the right
+      // side read the PRE-update row. Both predicates are evaluated against
+      // the LIVE row: the status guard means a void/settle committing after
+      // the caller's status check matches 0 rows instead of re-pricing a
+      // dead invoice; the balance guard means a credit that no longer fits
+      // the live amount due (a payment landed first) matches 0 rows instead
+      // of pushing amount_paid past total_cents (L4). The line insert rides
+      // the same transaction, so the ledger (Σ lines == subtotal, L2) moves
+      // together.
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET subtotal_cents   = subtotal_cents + $3,
+             total_cents      = total_cents + $3,
+             amount_due_cents = GREATEST(0, total_cents + $3 - amount_paid_cents),
+             updated_at       = $4
+         WHERE id = $2 AND tenant_id = $1
+           AND status IN ('open', 'partially_paid')
+           AND amount_paid_cents <= total_cents + $3
+         RETURNING id`,
+        [tenantId, id, line.totalCents, now],
+      );
+      if (rows.length === 0) return null;
+      await this.insertLineItems(client, tenantId, id, [line]);
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
   async decrementAmountPaidAtomic(
     tenantId: string,
     id: string,

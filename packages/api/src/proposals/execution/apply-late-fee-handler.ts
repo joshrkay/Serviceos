@@ -1,10 +1,7 @@
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { Invoice, InvoiceRepository } from '../../invoices/invoice';
-import {
-  applyNonTaxableAdjustment,
-  buildLineItem,
-} from '../../shared/billing-engine';
+import { buildLineItem } from '../../shared/billing-engine';
 import {
   RefreshJobMoneyStateDeps,
   refreshJobMoneyStateSafe,
@@ -66,18 +63,13 @@ export function lateFeeLineId(invoiceId: string, stepKey: string): string {
  * passthrough when no invoiceRepo is wired, returns failed ExecutionResults
  * (never throws through), and emits a failure-soft audit event.
  *
- * DRY threshold breadcrumb: the append-line-then-adjust block below
- * (build the line, append it, `applyNonTaxableAdjustment`, derive
- * `amountDueCents`) is mechanically identical to
- * `ApplyCreditExecutionHandler`'s (proposals/execution/
- * apply-credit-handler.ts) — only the line's sign and
- * description differ. Left duplicated for these two; if a THIRD
- * append-a-line-to-invoice sibling shows up (e.g. a hypothetical
- * `apply_discount`), extract an `appendInvoiceLineAndRecompute(invoice,
- * line)` helper into the shared billing engine for this exact block.
- * Guards (idempotency, status precondition, floor checks) and audit
- * emission stay per-handler — they differ enough that folding them in
- * would obscure more than it'd save.
+ * The append-line-and-adjust write itself is shared with
+ * `ApplyCreditExecutionHandler`: both call
+ * `InvoiceRepository.applyNonTaxableAdjustmentAtomic` (one guarded write
+ * deriving amount due from the LIVE amount paid and re-checking status), then
+ * run the same P0-9 stale link / PaymentIntent cleanup. Guards (idempotency,
+ * status precondition, floor checks) and audit emission stay per-handler —
+ * they differ enough that folding them in would obscure more than it'd save.
  */
 export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'apply_late_fee';
@@ -153,18 +145,18 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
       false, // non-taxable: a late fee is not subject to sales tax
       'other',
     );
-    const lineItems = [...invoice.lineItems, feeLine];
-    const totals = applyNonTaxableAdjustment(invoice.totals, feeLine.totalCents);
-    const amountDueCents = Math.max(0, totals.totalCents - invoice.amountPaidCents);
-
+    // #10 — one atomic write: the repo appends the fee line, moves the totals
+    // by its amount (applyNonTaxableAdjustment semantics) and derives amount
+    // due from the row's LIVE amount paid, so a webhook payment committing
+    // after the read above is never overwritten by a snapshot figure.
     let updated: Invoice | null;
     try {
-      updated = await this.invoiceRepo.update(context.tenantId, invoice.id, {
-        lineItems,
-        totals,
-        amountDueCents,
-        updatedAt: new Date(),
-      });
+      updated = await this.invoiceRepo.applyNonTaxableAdjustmentAtomic(
+        context.tenantId,
+        invoice.id,
+        feeLine,
+        new Date(),
+      );
     } catch (err) {
       return {
         success: false,
@@ -172,7 +164,16 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
       };
     }
     if (!updated) {
-      return { success: false, error: `Invoice ${invoiceId} not found in this tenant` };
+      // The atomic write's live status guard refused it: the invoice was
+      // paid / voided after the read above (or vanished). Nothing written.
+      const live = await this.invoiceRepo.findById(context.tenantId, invoice.id);
+      if (!live) {
+        return { success: false, error: `Invoice ${invoiceId} not found in this tenant` };
+      }
+      return {
+        success: false,
+        error: `Invoice ${live.invoiceNumber} became '${live.status}' while the late fee was being applied — late fee not applied.`,
+      };
     }
 
     // P0-9 — the stored link and any minted PaymentIntent were priced at the
@@ -229,7 +230,7 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
               proposalType: 'apply_late_fee',
               stepKey,
               feeCents,
-              newAmountDueCents: amountDueCents,
+              newAmountDueCents: updated.amountDueCents,
             },
           }),
         );

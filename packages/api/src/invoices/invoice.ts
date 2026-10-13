@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   LineItem,
   DocumentTotals,
+  applyNonTaxableAdjustment,
   calculateDocumentTotals,
   normalizeLineItemTotals,
 } from '../shared/billing-engine';
@@ -213,6 +214,30 @@ export interface InvoiceRepository {
     tenantId: string,
     id: string,
     creditCents: number,
+    now: Date,
+  ): Promise<Invoice | null>;
+  /**
+   * #10 — append ONE non-taxable adjustment line (an owner-approved credit
+   * (negative) or late fee (positive)) to an issued invoice in a single
+   * guarded write. Subtotal and total move by exactly `line.totalCents`
+   * (the `applyNonTaxableAdjustment` semantics: tax, taxable subtotal,
+   * discount and processing fee untouched) and amount_due is re-derived
+   * from the row's OWN live amount_paid — never a caller snapshot. The
+   * handlers used to read-modify-write absolute totals/amount_due, so a
+   * webhook payment committing between their read and write left the row
+   * paid-but-still-owing (the P0-6 lost-update class). Guarded in the same
+   * statement against the LIVE row: applies only while the status is 'open'
+   * / 'partially_paid' (a void or settle committing after the caller's
+   * status check is never re-priced) AND the adjusted total still covers
+   * amount_paid (a credit that no longer fits the live due — a payment
+   * landed first — is refused instead of overpaying, L4). Returns the
+   * updated invoice, or null when the row is missing or a guard refused it
+   * (callers re-read to explain).
+   */
+  applyNonTaxableAdjustmentAtomic(
+    tenantId: string,
+    id: string,
+    line: LineItem,
     now: Date,
   ): Promise<Invoice | null>;
   /**
@@ -836,6 +861,35 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
       amountPaidCents: newPaid,
       amountDueCents: newDue,
       status,
+      updatedAt: now,
+    };
+    this.invoices.set(id, updated);
+    return { ...updated, lineItems: [...updated.lineItems] };
+  }
+
+  async applyNonTaxableAdjustmentAtomic(
+    tenantId: string,
+    id: string,
+    line: LineItem,
+    now: Date,
+  ): Promise<Invoice | null> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return null;
+    // Mirror the Pg WHERE guard: only an issued invoice still carrying a
+    // balance is adjusted; a void/paid/draft row returns null.
+    if (i.status !== 'open' && i.status !== 'partially_paid') return null;
+    // …and only while the adjusted total still covers what was paid (a
+    // credit can never push amount paid past the total).
+    if (i.amountPaidCents > i.totals.totalCents + line.totalCents) return null;
+    // JS is single-threaded, so this read-modify-write is already atomic; the
+    // Pg impl uses a single UPDATE for the same guarantee. Derive from the
+    // STORED row (live amount paid), never a caller snapshot.
+    const totals = applyNonTaxableAdjustment(i.totals, line.totalCents);
+    const updated: Invoice = {
+      ...i,
+      lineItems: [...i.lineItems, line],
+      totals,
+      amountDueCents: Math.max(0, totals.totalCents - i.amountPaidCents),
       updatedAt: now,
     };
     this.invoices.set(id, updated);

@@ -250,6 +250,24 @@ describe('apply_late_fee execution handler', () => {
     });
   });
 
+  // #10 — the write must derive the balance from the row's LIVE paid amount,
+  // never the handler's snapshot.
+  it('a payment committing between the read and the write is not lost (due = new total − LIVE paid)', async () => {
+    const racing = new PaymentLandsAfterRead();
+    await racing.create(makeInvoice()); // 15000 open, nothing paid
+    racing.armConcurrentPayment(5000);
+    handler = new ApplyLateFeeExecutionHandler(racing, auditRepo);
+
+    const result = await handler.execute(makeProposal(), ctx);
+
+    expect(result.success).toBe(true);
+    const row = await racing.findById(TENANT, INVOICE_ID);
+    expect(row!.totals.totalCents).toBe(17500);
+    expect(row!.amountPaidCents).toBe(5000);
+    // 17500 − 5000 — NOT the stale 17500 − 0 the snapshot would give.
+    expect(row!.amountDueCents).toBe(12500);
+  });
+
   // P0-9 — the fee RE-PRICES the invoice: a link or PaymentIntent minted at
   // the pre-fee balance no longer prices what is owed and must die so the
   // pay-now flows mint a fresh one at the current balance.
@@ -302,6 +320,29 @@ describe('apply_late_fee execution handler', () => {
     });
   });
 });
+
+/**
+ * Deterministic lost-update interleave: a webhook payment commits (through
+ * the same atomic increment the webhook path uses) AFTER the handler read
+ * its snapshot and BEFORE it writes.
+ */
+class PaymentLandsAfterRead extends InMemoryInvoiceRepository {
+  private pendingPaymentCents: number | null = null;
+
+  armConcurrentPayment(cents: number): void {
+    this.pendingPaymentCents = cents;
+  }
+
+  async findById(tenantId: string, id: string): Promise<Invoice | null> {
+    const snapshot = await super.findById(tenantId, id);
+    if (snapshot && this.pendingPaymentCents !== null) {
+      const cents = this.pendingPaymentCents;
+      this.pendingPaymentCents = null;
+      await this.incrementAmountPaidAtomic(tenantId, id, cents, new Date());
+    }
+    return snapshot;
+  }
+}
 
 /** Fake Stripe-side provider recording link deactivations and PI cancels. */
 function makeFakeProvider(opts: {

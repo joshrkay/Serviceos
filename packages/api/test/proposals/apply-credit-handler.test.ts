@@ -94,6 +94,33 @@ function makeFakeProvider(opts: {
   return { provider, deactivated, canceled };
 }
 
+/**
+ * Deterministic interleave: a concurrent write (a Stripe webhook payment via
+ * the same atomic increment the webhook path uses, or a void) commits AFTER
+ * the handler has read its invoice snapshot and BEFORE the handler writes.
+ */
+class ConcurrentWriteAfterRead extends InMemoryInvoiceRepository {
+  private pending: ((tenantId: string, id: string) => Promise<unknown>) | null = null;
+
+  armConcurrentPayment(cents: number): void {
+    this.pending = (tenantId, id) => this.incrementAmountPaidAtomic(tenantId, id, cents, new Date());
+  }
+
+  armConcurrentVoid(): void {
+    this.pending = (tenantId, id) => this.update(tenantId, id, { status: 'void' });
+  }
+
+  async findById(tenantId: string, id: string): Promise<Invoice | null> {
+    const snapshot = await super.findById(tenantId, id);
+    if (snapshot && this.pending) {
+      const write = this.pending;
+      this.pending = null;
+      await write(tenantId, id);
+    }
+    return snapshot;
+  }
+}
+
 describe('apply_credit proposal type', () => {
   it('is a valid proposal type classified as money', () => {
     expect(VALID_PROPOSAL_TYPES).toContain('apply_credit');
@@ -496,6 +523,70 @@ describe('apply_credit execution handler', () => {
       totalCents: 8300,
     });
     expect(updated!.amountDueCents).toBe(8300);
+  });
+
+  // #10 — the write must derive the balance from the row's LIVE paid amount,
+  // never the handler's snapshot (same bug class P0-6 closed for payments).
+  describe('a payment that commits between the read and the write', () => {
+    it('is not lost: amount due is the new total minus the LIVE amount paid', async () => {
+      const racing = new ConcurrentWriteAfterRead();
+      await racing.create(makeInvoice()); // 3000 open, nothing paid
+      racing.armConcurrentPayment(1000);
+      handler = new ApplyCreditExecutionHandler(racing, auditRepo);
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 500 } }),
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      const row = await racing.findById(TENANT, INVOICE_ID);
+      expect(row!.totals.totalCents).toBe(2500);
+      expect(row!.amountPaidCents).toBe(1000);
+      // 2500 − 1000 — NOT the stale 2500 − 0 the snapshot would give.
+      expect(row!.amountDueCents).toBe(1500);
+      expect(row!.status).toBe('partially_paid');
+    });
+  });
+
+  it('a payment that shrinks the LIVE due below the credit mid-execution refuses it (never paid > total)', async () => {
+    const racing = new ConcurrentWriteAfterRead();
+    await racing.create(makeInvoice()); // 3000 open — the snapshot floor guard passes 2000
+    racing.armConcurrentPayment(2500); // live due drops to 500
+    handler = new ApplyCreditExecutionHandler(racing, auditRepo);
+
+    const result = await handler.execute(
+      makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }),
+      ctx,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/exceeds amount due/i);
+    expect(result.error).toMatch(/record a refund/i);
+    const row = await racing.findById(TENANT, INVOICE_ID);
+    expect(row!.lineItems).toHaveLength(1);
+    expect(row!.totals.totalCents).toBe(3000);
+    expect(row!.amountPaidCents).toBe(2500);
+    expect(row!.amountDueCents).toBe(500);
+  });
+
+  it('a void that commits between the read and the write refuses the credit — nothing written to the dead invoice', async () => {
+    const racing = new ConcurrentWriteAfterRead();
+    await racing.create(makeInvoice());
+    racing.armConcurrentVoid();
+    handler = new ApplyCreditExecutionHandler(racing, auditRepo);
+
+    const result = await handler.execute(
+      makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 500 } }),
+      ctx,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/void/);
+    const row = await racing.findById(TENANT, INVOICE_ID);
+    expect(row!.status).toBe('void');
+    expect(row!.lineItems).toHaveLength(1);
+    expect(row!.totals.totalCents).toBe(3000);
   });
 
   it('production registry wiring threads paymentLinkCleanup into apply_credit AND apply_late_fee', async () => {
