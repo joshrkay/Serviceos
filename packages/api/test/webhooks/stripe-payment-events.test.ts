@@ -203,6 +203,87 @@ describe('payment_intent.succeeded — async (ACH/bank) settlement', () => {
     expect(res.body.skipped).toBe(true);
     expect(await paymentRepo.findByInvoice(TENANT, INVOICE_ID)).toHaveLength(0);
   });
+
+  // P0-9 parity with checkout.session.completed — a PaymentIntent minted at
+  // a balance that has since SHRUNK (an approved credit, a partial cash
+  // payment) captures more than is owed. Crediting nothing would leave the
+  // customer's money unrecorded AND the invoice open, inviting a second
+  // charge; the invoice credit is capped to the live balance and the excess
+  // is audited as unapplied money instead.
+  it('a capture above the remaining balance settles the invoice at the balance and audits the excess', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    await invoiceRepo.create(makeOpenInvoice(7000)); // $100 invoice after a $30 credit
+    app = buildApp({ invoiceRepo, paymentRepo, auditRepo, stripeWebhookSecret: STRIPE_SECRET });
+
+    const res = await postSigned(
+      app,
+      piSucceeded({ piId: 'pi_old_balance', amount: 10000, methodType: 'card' }),
+    );
+    expect(res.status).toBe(200);
+
+    const inv = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(inv!.status).toBe('paid');
+    expect(inv!.amountPaidCents).toBe(7000);
+    expect(inv!.amountDueCents).toBe(0);
+    const payments = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(payments).toHaveLength(1);
+    expect(payments[0]).toMatchObject({
+      amountCents: 7000,
+      providerReference: 'pi_old_balance',
+      status: 'completed',
+    });
+    const unapplied = auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture');
+    expect(unapplied).toHaveLength(1);
+    expect(unapplied[0].metadata).toMatchObject({
+      capturedCents: 10000,
+      creditedCents: 7000,
+      unappliedCents: 3000,
+      reason: 'capped_to_balance_payment_intent',
+    });
+  });
+
+  // Review M1 — recordPayment COMMITS the capped credit, then runs its
+  // post-payment side effects, whose failures intentionally bubble. Stripe
+  // then redelivers, the redelivery hits the completed capped row and
+  // short-circuits as a duplicate — so an audit written only AFTER the
+  // capped recordPayment is never written, and the excess sits at Stripe
+  // with no trail.
+  it('M1 — the excess is audited exactly once even when the capped credit commits and a later side effect fails', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    await invoiceRepo.create(makeOpenInvoice(7000));
+    let receiptDown = true;
+    app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      paymentReceiptNotifier: {
+        notifyPaymentReceived: async () => {
+          if (receiptDown) {
+            receiptDown = false;
+            throw new Error('receipt provider down');
+          }
+        },
+      },
+    });
+    const evt = piSucceeded({ piId: 'pi_old_balance', amount: 10000, methodType: 'card' });
+
+    const first = await postSigned(app, evt);
+    expect(first.status).toBeGreaterThanOrEqual(500);
+    const redelivered = await postSigned(app, evt);
+    expect(redelivered.status).toBe(200);
+
+    const payments = await paymentRepo.findByInvoice(TENANT, INVOICE_ID);
+    expect(payments.map((p) => [p.amountCents, p.status])).toEqual([[7000, 'completed']]);
+    const unapplied = auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture');
+    expect(unapplied).toHaveLength(1);
+    expect(unapplied[0].metadata).toMatchObject({
+      capturedCents: 10000,
+      creditedCents: 7000,
+      unappliedCents: 3000,
+      reason: 'capped_to_balance_payment_intent',
+    });
+  });
 });
 
 // U6 — Connect direct charges settle through the SAME webhook ledger.

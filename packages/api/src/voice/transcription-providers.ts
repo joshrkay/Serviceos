@@ -1,5 +1,6 @@
 import NodeWebSocket from 'ws';
 import { TranscriptionProvider } from './voice-service';
+import type { DownloadUrlPolicy, DownloadUrlRejection } from '../files/download-url-policy';
 
 export type FetchLike = typeof fetch;
 
@@ -106,12 +107,44 @@ export class WhisperServerError extends Error {
 }
 
 export class WhisperClientError extends Error {
-  readonly code = 'WHISPER_CLIENT_ERROR';
-  readonly retriable = false;
+  readonly code: string = 'WHISPER_CLIENT_ERROR';
+  readonly retriable: boolean = false;
   constructor(public readonly status: number, public readonly body: string) {
     super(`Whisper client error ${status}: ${body}`);
     this.name = 'WhisperClientError';
   }
+}
+
+/**
+ * H2 — the audio URL is not one the configured storage provider mints, so it
+ * is never fetched. Non-retriable: the same URL is refused on every attempt.
+ * The message names the rule, never the URL (it becomes the recording's
+ * user-visible errorMessage).
+ */
+export class AudioUrlRejectedError extends Error {
+  readonly code = 'AUDIO_URL_REJECTED';
+  readonly retriable = false;
+  constructor(public readonly reason: DownloadUrlRejection) {
+    super(`Audio URL refused: not a download URL of the configured storage (${reason})`);
+    this.name = 'AudioUrlRejectedError';
+  }
+}
+
+export interface WhisperTranscriptionProviderOptions {
+  apiKey: string;
+  /**
+   * H2 — only URLs this policy accepts are fetched. Required, no default:
+   * production builds it from the storage config (createStorageProvider's
+   * `downloadUrlPolicy`), so a missing wire is a compile error, not an
+   * open fetch.
+   */
+  audioUrlPolicy: DownloadUrlPolicy;
+  model?: string;
+  fetchImpl?: FetchLike;
+  timeoutMs?: number;
+  maxBytes?: number;
+  /** Where audio-fetch diagnostics go (the URL never goes into an error). */
+  logger?: Pick<Console, 'warn'>;
 }
 
 export interface WhisperTranscribeOptions {
@@ -121,32 +154,87 @@ export interface WhisperTranscribeOptions {
 }
 
 export class WhisperTranscriptionProvider implements TranscriptionProvider {
-  constructor(
-    private readonly apiKey: string,
-    private readonly model: string = 'whisper-1',
-    private readonly fetchImpl: FetchLike = fetch,
-    private readonly timeoutMs: number = 30_000,
-    private readonly maxBytes: number = WHISPER_MAX_BYTES
-  ) {}
+  private readonly apiKey: string;
+  private readonly audioUrlPolicy: DownloadUrlPolicy;
+  private readonly model: string;
+  private readonly fetchImpl: FetchLike;
+  private readonly timeoutMs: number;
+  private readonly maxBytes: number;
+  private readonly logger: Pick<Console, 'warn'>;
+
+  constructor(options: WhisperTranscriptionProviderOptions) {
+    this.apiKey = options.apiKey;
+    this.audioUrlPolicy = options.audioUrlPolicy;
+    this.model = options.model ?? 'whisper-1';
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.timeoutMs = options.timeoutMs ?? 30_000;
+    this.maxBytes = options.maxBytes ?? WHISPER_MAX_BYTES;
+    this.logger = options.logger ?? console;
+  }
 
   async transcribe(
     audioUrl: string,
     options: WhisperTranscribeOptions = {}
   ): Promise<TranscriptionResult> {
-    // 1) Fetch audio bytes from the signed URL.
-    const audioRes = await this.fetchImpl(audioUrl);
-    if (!audioRes.ok) {
-      throw new WhisperClientError(
-        audioRes.status,
-        `Failed to fetch audio from ${audioUrl}: HTTP ${audioRes.status}`
-      );
+    // 0) H2 — never fetch a URL the configured storage did not mint.
+    const rejection = this.audioUrlPolicy.rejectionFor(audioUrl);
+    if (rejection) {
+      this.logger.warn('[transcription] audio URL refused by storage policy', {
+        reason: rejection,
+        audio: withoutQuery(audioUrl),
+      });
+      throw new AudioUrlRejectedError(rejection);
     }
-    const audioBlob = await audioRes.blob();
 
-    // 2) Pre-flight size guard — reject before upload to save bandwidth and
-    //    return a clear error rather than letting OpenAI return a 413.
-    if (audioBlob.size > this.maxBytes) {
-      throw new WhisperFileTooLargeError(audioBlob.size, this.maxBytes);
+    // 1) Fetch audio bytes from the signed URL — bounded in time (H2: fetch
+    //    has no default timeout; a stalled GET would pin the worker) and
+    //    never redirected: the policy vetted THIS URL, not wherever a 3xx
+    //    points (storage presigned GETs answer directly).
+    const audioSignal = AbortSignal.timeout(this.timeoutMs);
+    let audioRes: Response;
+    try {
+      audioRes = await this.fetchImpl(audioUrl, { signal: audioSignal, redirect: 'error' });
+    } catch (err) {
+      if (audioSignal.aborted) {
+        throw new WhisperTimeoutError(this.timeoutMs);
+      }
+      throw err;
+    }
+    if (!audioRes.ok) {
+      // H2 — never the URL: this message becomes the recording's
+      // user-visible errorMessage, and the URL is a presigned secret.
+      await audioRes.body?.cancel().catch(() => undefined);
+      this.logger.warn('[transcription] audio fetch failed', {
+        status: audioRes.status,
+        audio: withoutQuery(audioUrl),
+      });
+      const message = `Failed to fetch audio: HTTP ${audioRes.status}`;
+      // Storage 5xx / 429 is transient (retriable); any other status is not.
+      if (audioRes.status >= 500 || audioRes.status === 429) {
+        throw new WhisperServerError(audioRes.status, message);
+      }
+      throw new WhisperClientError(audioRes.status, message);
+    }
+    // H2 — a declared length over the cap is refused before a byte is read.
+    const declaredBytes = Number(audioRes.headers.get('content-length'));
+    if (Number.isFinite(declaredBytes) && declaredBytes > this.maxBytes) {
+      await audioRes.body?.cancel().catch(() => undefined);
+      throw new WhisperFileTooLargeError(declaredBytes, this.maxBytes);
+    }
+
+    // 2) Read the body under a byte cap — rejects (and cancels the stream)
+    //    on the chunk that crosses the cap, so neither a lying nor a missing
+    //    Content-Length can make the process buffer an unbounded response.
+    //    The cap is Whisper's own upload limit, so this also stands in for
+    //    the old post-download size check.
+    let audioBlob: Blob;
+    try {
+      audioBlob = await readBodyCapped(audioRes, this.maxBytes);
+    } catch (err) {
+      if (audioSignal.aborted) {
+        throw new WhisperTimeoutError(this.timeoutMs);
+      }
+      throw err;
     }
 
     // 3) Build multipart form. Field names are required by Whisper.
@@ -194,6 +282,9 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
       if (res.status >= 500) {
         throw new WhisperServerError(res.status, body);
       }
+      if (res.status === 401 || res.status === 403) {
+        throw new WhisperAuthError(res.status, body);
+      }
       throw new WhisperClientError(res.status, body);
     }
 
@@ -207,6 +298,56 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
       },
     };
   }
+}
+
+/**
+ * H2 review round 2 (N1) — Whisper rejected OUR credentials (401/403: a
+ * revoked or rotated OpenAI key). Not input-determined, so not terminal:
+ * marked retriable so the transcription worker hands it to the queue's
+ * retry → dead-letter path, where a key outage shows up in the DLQ depth
+ * gauge instead of vanishing as acked jobs. Still a WhisperClientError.
+ */
+export class WhisperAuthError extends WhisperClientError {
+  readonly code = 'WHISPER_AUTH_FAILED';
+  readonly retriable = true;
+  constructor(status: number, body: string) {
+    super(status, body);
+    this.name = 'WhisperAuthError';
+  }
+}
+
+/** H2 — origin + path only: a presigned URL's query string is its signature. */
+function withoutQuery(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return '<unparseable url>';
+  }
+}
+
+/**
+ * H2 — drain `res.body` into a Blob typed by its Content-Type, throwing
+ * {@link WhisperFileTooLargeError} (after cancelling the stream) as soon as
+ * more than `maxBytes` have arrived.
+ */
+async function readBodyCapped(res: Response, maxBytes: number): Promise<Blob> {
+  const type = res.headers.get('content-type') ?? '';
+  if (!res.body) return new Blob([], { type });
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new WhisperFileTooLargeError(received, maxBytes);
+    }
+    chunks.push(value);
+  }
+  return new Blob(chunks, { type });
 }
 
 async function safeReadText(res: Response): Promise<string> {
@@ -501,16 +642,22 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
  */
 export function createWhisperTranscriptionProvider(
   env: { OPENAI_API_KEY?: string; AI_PROVIDER_API_KEY?: string; WHISPER_MODEL?: string },
-  deps: { fetchImpl?: FetchLike; logger?: Pick<Console, 'warn'> } = {}
+  deps: {
+    /** H2 — createStorageProvider(...).downloadUrlPolicy in app.ts. */
+    audioUrlPolicy: DownloadUrlPolicy;
+    fetchImpl?: FetchLike;
+    logger?: Pick<Console, 'warn'>;
+  }
 ): TranscriptionProvider {
   const logger = deps.logger ?? console;
   const apiKey = env.OPENAI_API_KEY || env.AI_PROVIDER_API_KEY;
   if (apiKey) {
-    return new WhisperTranscriptionProvider(
+    return new WhisperTranscriptionProvider({
       apiKey,
-      env.WHISPER_MODEL ?? 'whisper-1',
-      deps.fetchImpl
-    );
+      audioUrlPolicy: deps.audioUrlPolicy,
+      model: env.WHISPER_MODEL ?? 'whisper-1',
+      fetchImpl: deps.fetchImpl,
+    });
   }
   logger.warn(
     '[transcription] Neither OPENAI_API_KEY nor AI_PROVIDER_API_KEY set — ' +

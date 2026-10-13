@@ -1251,6 +1251,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     bucket: storageBucket,
     mode: storageMode,
     devStorageSecret,
+    downloadUrlPolicy: storageDownloadUrlPolicy,
   } = createStorageProvider(process.env as NodeJS.ProcessEnv, {
     logger: createLogger({
       service: 'api-boot',
@@ -1455,7 +1456,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const transcribeAudio = createTranscribeAudioFn(process.env.AI_PROVIDER_API_KEY);
 
   // URL-based provider for the queue worker pipeline.
-  const transcriptionProvider = createWhisperTranscriptionProvider(process.env);
+  // H2 — the Whisper audio GET only reaches URLs this storage mints.
+  const transcriptionProvider = createWhisperTranscriptionProvider(process.env, {
+    audioUrlPolicy: storageDownloadUrlPolicy,
+  });
 
   // P2-030 — shadow comparison store.
   // PgShadowComparisonStore when DATABASE_URL + SHADOW_LLM_ENABLED=true;

@@ -24,6 +24,13 @@ import {
   DevNoopTranscriptionProvider,
   whisperUploadFilename,
 } from '../../src/voice/transcription-providers';
+import { createDownloadUrlPolicy } from '../../src/files/download-url-policy';
+
+// H2 — the provider only fetches URLs its storage policy accepts.
+const CDN_POLICY = createDownloadUrlPolicy({
+  allowedOrigins: ['https://cdn.example'],
+  productionLike: true,
+});
 
 function audioOk(sizeBytes = 1024, type = 'audio/webm'): Response {
   const bytes = new Uint8Array(sizeBytes);
@@ -74,7 +81,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         .mockResolvedValueOnce(audioOk(2048))
         .mockResolvedValueOnce(jsonRes({ text: 'hello world' }));
 
-      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+      const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
       const result = await provider.transcribe('https://cdn.example/audio.webm');
 
       expect(result.transcript).toBe('hello world');
@@ -108,7 +115,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
           .mockResolvedValueOnce(audioOk(2048, 'audio/mp4'))
           .mockResolvedValueOnce(jsonRes({ text: 'reschedule the Tuesday job' }));
 
-        const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+        const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
         await provider.transcribe('https://cdn.example/voice.m4a');
 
         const fd = (fetchMock.mock.calls[1] as [string, RequestInit])[1].body as FormData;
@@ -122,7 +129,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         .mockResolvedValueOnce(audioOk(512))
         .mockResolvedValueOnce(jsonRes({ text: 'bonjour' }));
 
-      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-large-v3', fetchMock);
+      const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-large-v3', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
       const result = await provider.transcribe('https://cdn.example/fr.webm', { language: 'fr' });
 
       expect(result.metadata.model).toBe('whisper-large-v3');
@@ -136,7 +143,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         .fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>()
         .mockResolvedValueOnce(audioOk(64))
         .mockResolvedValueOnce(jsonRes({}));
-      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+      const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
       const result = await provider.transcribe('https://cdn.example/silence.webm');
       expect(result.transcript).toBe('');
     });
@@ -166,7 +173,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
           });
         });
 
-      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock, 25);
+      const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, timeoutMs: 25, audioUrlPolicy: CDN_POLICY });
       await expect(provider.transcribe('https://cdn.example/audio.webm')).rejects.toBeInstanceOf(
         WhisperTimeoutError
       );
@@ -182,7 +189,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
             headers: new Headers({ 'retry-after': '5' }),
           })
         );
-      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+      const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
       await expect(
         provider.transcribe('https://cdn.example/audio.webm')
@@ -198,7 +205,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         .fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>()
         .mockResolvedValueOnce(audioOk(64))
         .mockResolvedValueOnce(new Response('slow down', { status: 429 }));
-      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+      const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
       const errRaw = await provider
         .transcribe('https://cdn.example/audio.webm')
@@ -213,7 +220,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         .fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>()
         .mockResolvedValueOnce(audioOk(64))
         .mockResolvedValueOnce(new Response('boom', { status: 503 }));
-      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+      const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
       const errRaw = await provider
         .transcribe('https://cdn.example/audio.webm')
@@ -229,7 +236,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         .fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>()
         .mockResolvedValueOnce(audioOk(64))
         .mockResolvedValueOnce(new Response('Invalid file format', { status: 400 }));
-      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+      const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
       const errRaw = await provider
         .transcribe('https://cdn.example/audio.webm')
@@ -241,12 +248,14 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
       expect(err.message).toContain('Invalid file format');
     });
 
-    it('throws a non-retriable WhisperClientError on 401 (bad API key)', async () => {
+    // H2 review round 2 (N1) — a bad/revoked key is a config failure, not an
+    // input one: retriable, so the worker lets it reach the dead-letter queue.
+    it('throws a retriable WhisperClientError (WhisperAuthError) on 401 (bad API key)', async () => {
       const fetchMock = vi
         .fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>()
         .mockResolvedValueOnce(audioOk(64))
         .mockResolvedValueOnce(new Response('invalid key', { status: 401 }));
-      const provider = new WhisperTranscriptionProvider('bad', 'whisper-1', fetchMock);
+      const provider = new WhisperTranscriptionProvider({ apiKey: 'bad', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
       const errRaw = await provider
         .transcribe('https://cdn.example/audio.webm')
@@ -254,13 +263,15 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
       expect(errRaw).toBeInstanceOf(WhisperClientError);
       const err = errRaw as WhisperClientError;
       expect(err.status).toBe(401);
+      expect(err.name).toBe('WhisperAuthError');
+      expect(err.retriable).toBe(true);
     });
 
     it('throws WhisperClientError when the audio URL itself fails to fetch', async () => {
       const fetchMock = vi
         .fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>()
         .mockResolvedValueOnce(new Response('not found', { status: 404 }));
-      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+      const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
       await expect(
         provider.transcribe('https://cdn.example/missing.webm')
@@ -275,7 +286,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
       const fetchMock = vi
         .fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>()
         .mockResolvedValueOnce(audioOk(WHISPER_MAX_BYTES + 1));
-      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+      const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
       const errRaw = await provider
         .transcribe('https://cdn.example/huge.webm')
@@ -293,7 +304,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
         .fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>()
         .mockResolvedValueOnce(audioOk(WHISPER_MAX_BYTES))
         .mockResolvedValueOnce(jsonRes({ text: 'ok' }));
-      const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+      const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
       const result = await provider.transcribe('https://cdn.example/edge.webm');
       expect(result.transcript).toBe('ok');
     });
@@ -303,7 +314,7 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
 describe('P0-027 createWhisperTranscriptionProvider factory', () => {
   it('returns DevNoopTranscriptionProvider and logs a warning when OPENAI_API_KEY is missing', () => {
     const warn = vi.fn();
-    const provider = createWhisperTranscriptionProvider({}, { logger: { warn } });
+    const provider = createWhisperTranscriptionProvider({}, { audioUrlPolicy: CDN_POLICY, logger: { warn } });
     expect(provider).toBeInstanceOf(DevNoopTranscriptionProvider);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0][0]).toMatch(/AI_PROVIDER_API_KEY/);
@@ -313,7 +324,7 @@ describe('P0-027 createWhisperTranscriptionProvider factory', () => {
     const warn = vi.fn();
     const provider = createWhisperTranscriptionProvider(
       { OPENAI_API_KEY: 'sk_live' },
-      { logger: { warn } }
+      { audioUrlPolicy: CDN_POLICY, logger: { warn } }
     );
     expect(provider).toBeInstanceOf(WhisperTranscriptionProvider);
     expect(warn).not.toHaveBeenCalled();
@@ -326,7 +337,7 @@ describe('P0-027 createWhisperTranscriptionProvider factory', () => {
       .mockResolvedValueOnce(jsonRes({ text: 'x' }));
     const provider = createWhisperTranscriptionProvider(
       { OPENAI_API_KEY: 'sk_live', WHISPER_MODEL: 'whisper-large-v3' },
-      { fetchImpl: fetchMock }
+      { audioUrlPolicy: CDN_POLICY, fetchImpl: fetchMock }
     );
     const result = await provider.transcribe('https://cdn.example/audio.webm');
     expect(result.metadata.model).toBe('whisper-large-v3');

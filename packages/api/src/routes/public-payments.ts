@@ -131,6 +131,10 @@ export function createPublicPaymentsRouter(deps: PublicPaymentsDeps): Router {
         currency: deps.defaultCurrency ?? 'usd',
         invoiceId: invoice.id,
         tenantId: invoice.tenantId,
+        // Review H2 — every credit/late fee appends a line, so the count
+        // changes exactly on repricing: a balance that returns to an earlier
+        // amount never gets a credit-cancelled PI replayed by Stripe.
+        repricingNonce: invoice.lineItems.length,
         ...(stripeAccountId ? { stripeAccountId } : {}),
       },
       deps.stripeFetch,
