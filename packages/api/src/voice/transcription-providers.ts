@@ -208,7 +208,12 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
         status: audioRes.status,
         audio: withoutQuery(audioUrl),
       });
-      throw new WhisperClientError(audioRes.status, `Failed to fetch audio: HTTP ${audioRes.status}`);
+      const message = `Failed to fetch audio: HTTP ${audioRes.status}`;
+      // Storage 5xx / 429 is transient (retriable); any other status is not.
+      if (audioRes.status >= 500 || audioRes.status === 429) {
+        throw new WhisperServerError(audioRes.status, message);
+      }
+      throw new WhisperClientError(audioRes.status, message);
     }
     // H2 — a declared length over the cap is refused before a byte is read.
     const declaredBytes = Number(audioRes.headers.get('content-length'));

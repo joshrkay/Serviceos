@@ -336,6 +336,29 @@ describe('H2 — the audio GET is bounded in bytes', () => {
   });
 });
 
+describe('H2 review — a failed storage GET is retriable only when storage says so', () => {
+  it.each([
+    [503, true],
+    [500, true],
+    [429, true],
+    [403, false],
+    [404, false],
+  ])('storage answering %i fails with retriable=%s', async (status, retriable) => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response('x', { status }));
+    const { provider, url } = await prodProvider({ fetchImpl });
+
+    const err = (await provider.transcribe(url).catch((e: unknown) => e)) as Error & {
+      retriable?: boolean;
+    };
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err.retriable).toBe(retriable);
+    expect(err.message).toContain(String(status));
+    expect(err.message).not.toContain(url);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('H2 — audio fetch diagnostics go to the log, minus the signature', () => {
   it('logs a failed storage GET at warn with the status and the URL without its query', async () => {
     const warn = vi.fn();
