@@ -248,7 +248,9 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
       expect(err.message).toContain('Invalid file format');
     });
 
-    it('throws a non-retriable WhisperClientError on 401 (bad API key)', async () => {
+    // H2 review round 2 (N1) — a bad/revoked key is a config failure, not an
+    // input one: retriable, so the worker lets it reach the dead-letter queue.
+    it('throws a retriable WhisperClientError (WhisperAuthError) on 401 (bad API key)', async () => {
       const fetchMock = vi
         .fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>()
         .mockResolvedValueOnce(audioOk(64))
@@ -261,6 +263,8 @@ describe('P0-027 WhisperTranscriptionProvider', () => {
       expect(errRaw).toBeInstanceOf(WhisperClientError);
       const err = errRaw as WhisperClientError;
       expect(err.status).toBe(401);
+      expect(err.name).toBe('WhisperAuthError');
+      expect(err.retriable).toBe(true);
     });
 
     it('throws WhisperClientError when the audio URL itself fails to fetch', async () => {

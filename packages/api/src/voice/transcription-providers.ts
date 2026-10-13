@@ -107,8 +107,8 @@ export class WhisperServerError extends Error {
 }
 
 export class WhisperClientError extends Error {
-  readonly code = 'WHISPER_CLIENT_ERROR';
-  readonly retriable = false;
+  readonly code: string = 'WHISPER_CLIENT_ERROR';
+  readonly retriable: boolean = false;
   constructor(public readonly status: number, public readonly body: string) {
     super(`Whisper client error ${status}: ${body}`);
     this.name = 'WhisperClientError';
@@ -282,6 +282,9 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
       if (res.status >= 500) {
         throw new WhisperServerError(res.status, body);
       }
+      if (res.status === 401 || res.status === 403) {
+        throw new WhisperAuthError(res.status, body);
+      }
       throw new WhisperClientError(res.status, body);
     }
 
@@ -294,6 +297,22 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
         processedAt: new Date().toISOString(),
       },
     };
+  }
+}
+
+/**
+ * H2 review round 2 (N1) — Whisper rejected OUR credentials (401/403: a
+ * revoked or rotated OpenAI key). Not input-determined, so not terminal:
+ * marked retriable so the transcription worker hands it to the queue's
+ * retry → dead-letter path, where a key outage shows up in the DLQ depth
+ * gauge instead of vanishing as acked jobs. Still a WhisperClientError.
+ */
+export class WhisperAuthError extends WhisperClientError {
+  readonly code = 'WHISPER_AUTH_FAILED';
+  readonly retriable = true;
+  constructor(status: number, body: string) {
+    super(status, body);
+    this.name = 'WhisperAuthError';
   }
 }
 
