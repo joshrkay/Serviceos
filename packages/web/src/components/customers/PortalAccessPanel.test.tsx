@@ -12,6 +12,23 @@ vi.mock('sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
 
+// The panel gates its controls on the real backend permission
+// (customers:update — what POST /api/portal-sessions[/send] and DELETE
+// require), read from /api/me. Default to a permission holder; the gate
+// describe below overrides it per test.
+const meRef: { current: { role: string; permissions: string[] } | null } = {
+  current: { role: 'owner', permissions: ['customers:update'] },
+};
+vi.mock('../../hooks/useMe', () => ({
+  useMe: () => ({
+    me: meRef.current,
+    isLoading: false,
+    error: null,
+    switchMode: vi.fn(),
+    refetch: vi.fn(),
+  }),
+}));
+
 import { apiFetch } from '../../utils/api-fetch';
 import { expectAllTapTargets } from '../../test-utils/tap-target';
 
@@ -156,5 +173,42 @@ describe('PortalAccessPanel — send link', () => {
 
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('SMS suppressed: no_consent');
+  });
+});
+
+describe('PortalAccessPanel — permission gate (customers:update)', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+    meRef.current = { role: 'owner', permissions: ['customers:update'] };
+  });
+  afterEach(() => {
+    meRef.current = { role: 'owner', permissions: ['customers:update'] };
+  });
+
+  it('technician: no mint/send controls, a plain explanation instead, and no API call', () => {
+    meRef.current = { role: 'technician', permissions: ['customers:view', 'jobs:view'] };
+
+    render(<PortalAccessPanel customerId="1" />);
+
+    expect(screen.queryByRole('button', { name: 'Generate portal link' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send portal link' })).toBeNull();
+    expect(screen.queryByLabelText('Send channel')).toBeNull();
+    expect(screen.getByTestId('portal-access-restricted').textContent).toContain(
+      'office',
+    );
+    expect(vi.mocked(apiFetch)).not.toHaveBeenCalled();
+  });
+
+  it('dispatcher: holds customers:update, so both controls are present', () => {
+    meRef.current = {
+      role: 'dispatcher',
+      permissions: ['customers:view', 'customers:update'],
+    };
+
+    render(<PortalAccessPanel customerId="1" />);
+
+    expect(screen.getByRole('button', { name: 'Generate portal link' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send portal link' })).toBeInTheDocument();
+    expect(screen.queryByTestId('portal-access-restricted')).toBeNull();
   });
 });
