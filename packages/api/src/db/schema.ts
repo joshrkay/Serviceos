@@ -1818,12 +1818,32 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
 
     -- users: field-capable + current mode
+    --
+    -- One-shot owner backfill (2026-10-13): the runner has no ledger and
+    -- re-runs every migration on every deploy, so a bare
+    --   UPDATE users SET can_field_serve = true WHERE role = 'owner' ...
+    -- re-flipped every owner who had turned field-serving off
+    -- (PUT /api/users/:id) on every boot, and flipped every owner created
+    -- since the last deploy. It now runs only in the statement that first
+    -- adds the column; identical on a fresh database, a no-op once it exists.
+    -- Pinned by test/integration/migration-replay-populated-db.test.ts.
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'users'
+           AND column_name = 'can_field_serve'
+      ) THEN
+        ALTER TABLE users ADD COLUMN can_field_serve BOOLEAN NOT NULL DEFAULT false;
+        UPDATE users SET can_field_serve = true WHERE role = 'owner' AND can_field_serve = false;
+      END IF;
+    END $$;
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS can_field_serve BOOLEAN NOT NULL DEFAULT false,
       ADD COLUMN IF NOT EXISTS current_mode TEXT NOT NULL DEFAULT 'supervisor'
         CHECK (current_mode IN ('supervisor','tech','both')),
       ADD COLUMN IF NOT EXISTS mode_changed_at TIMESTAMPTZ;
-    UPDATE users SET can_field_serve = true WHERE role = 'owner' AND can_field_serve = false;
 
     -- tenant_settings: backup supervisor + unsupervised routing
     ALTER TABLE tenant_settings
@@ -4853,15 +4873,34 @@ export const MIGRATIONS = {
   // thank_you_sms_sent_at = updated_at, so the first sweep after deploy
   // doesn't blast everyone with a thanks for jobs they finished months
   // ago.
+  //
+  // One-shot (2026-10-13): the runner has no ledger and re-runs every
+  // migration on every deploy, so the backfill originally ran on EVERY boot —
+  // giving any job put into 'completed' by a raw status write (update_job /
+  // PUT /api/jobs/:id, which stamp no completed_at) a fabricated completion
+  // time and a thank-you stamp, so a later governed completion never thanked.
+  // It now runs only in the statement that first adds thank_you_sms_sent_at;
+  // identical on a fresh database, a no-op once the column exists. Pinned by
+  // test/integration/migration-replay-populated-db.test.ts.
   '194_thank_you_sms': `
-    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
-    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS thank_you_sms_sent_at TIMESTAMPTZ;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'jobs'
+           AND column_name = 'thank_you_sms_sent_at'
+      ) THEN
+        ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+        ALTER TABLE jobs ADD COLUMN thank_you_sms_sent_at TIMESTAMPTZ;
+        UPDATE jobs
+          SET completed_at = updated_at,
+              thank_you_sms_sent_at = updated_at
+          WHERE status = 'completed'
+            AND completed_at IS NULL;
+      END IF;
+    END $$;
     ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS send_thank_you_sms BOOLEAN NOT NULL DEFAULT TRUE;
-    UPDATE jobs
-      SET completed_at = updated_at,
-          thank_you_sms_sent_at = updated_at
-      WHERE status = 'completed'
-        AND completed_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_jobs_thank_you_eligibility
       ON jobs (tenant_id, completed_at)
       WHERE thank_you_sms_sent_at IS NULL AND completed_at IS NOT NULL;
@@ -5256,13 +5295,31 @@ export const MIGRATIONS = {
   // Backfill: pre-existing 'completed' jobs get review_request_sent_at =
   // COALESCE(completed_at, updated_at) so the first sweep after deploy doesn't
   // blast customers for jobs finished long ago.
+  //
+  // One-shot (2026-10-13): the runner has no ledger and re-runs every
+  // migration on every deploy, so the backfill originally ran on EVERY boot —
+  // stamping every job still in 'completed' and inside its 24h window as
+  // already-requested, silently suppressing its review request. It now runs
+  // only in the statement that first adds review_request_sent_at; identical
+  // on a fresh database, a no-op once the column exists. Pinned by
+  // test/integration/migration-replay-populated-db.test.ts.
   '214_review_request_sweep': `
-    ALTER TABLE jobs ADD COLUMN IF NOT EXISTS review_request_sent_at TIMESTAMPTZ;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'jobs'
+           AND column_name = 'review_request_sent_at'
+      ) THEN
+        ALTER TABLE jobs ADD COLUMN review_request_sent_at TIMESTAMPTZ;
+        UPDATE jobs
+          SET review_request_sent_at = COALESCE(completed_at, updated_at)
+          WHERE status = 'completed'
+            AND review_request_sent_at IS NULL;
+      END IF;
+    END $$;
     ALTER TABLE tenant_settings ADD COLUMN IF NOT EXISTS send_review_request BOOLEAN NOT NULL DEFAULT TRUE;
-    UPDATE jobs
-      SET review_request_sent_at = COALESCE(completed_at, updated_at)
-      WHERE status = 'completed'
-        AND review_request_sent_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_jobs_review_request_eligibility
       ON jobs (tenant_id, completed_at)
       WHERE review_request_sent_at IS NULL AND completed_at IS NOT NULL;
@@ -7177,10 +7234,28 @@ export const MIGRATIONS = {
   // stamped once on a successful send. Claims that predate this migration
   // are settled as-is (their delivery outcome is unknown and they must not
   // be re-sent days later). Additive, idempotent; drops nothing.
+  //
+  // One-shot (2026-10-13): the runner has no ledger and re-runs every
+  // migration on every deploy, so the settle-as-sent UPDATE originally ran on
+  // EVERY boot — stamping any alert claimed-but-not-yet-delivered at deploy
+  // time as sent, so the retry worker's isSent() dropped it and the owner was
+  // never told about the PIN lock. The UPDATE now runs only in the same
+  // statement that first adds sent_at (the 290/277 catalog-guard idiom):
+  // identical on a fresh database, a no-op once the column exists. Pinned by
+  // test/integration/migration-replay-populated-db.test.ts.
   '292_voice_approval_pin_lock_alerts_sent_at': `
-    ALTER TABLE voice_approval_pin_lock_alerts
-      ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
-    UPDATE voice_approval_pin_lock_alerts SET sent_at = created_at WHERE sent_at IS NULL;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'voice_approval_pin_lock_alerts'
+           AND column_name = 'sent_at'
+      ) THEN
+        ALTER TABLE voice_approval_pin_lock_alerts ADD COLUMN sent_at TIMESTAMPTZ;
+        UPDATE voice_approval_pin_lock_alerts SET sent_at = created_at WHERE sent_at IS NULL;
+      END IF;
+    END $$;
   `,
   // #1386 / O-2 — the reviewer attestation stored alongside the reviewed E1
   // life-safety script (migration 267). Written ONLY by the owner-only
@@ -7547,6 +7622,43 @@ export const MIGRATIONS = {
     ALTER TABLE oauth_states DROP CONSTRAINT IF EXISTS oauth_states_provider_check;
     ALTER TABLE oauth_states ADD CONSTRAINT oauth_states_provider_check
       CHECK (provider IN ('google', 'google_business', 'quickbooks', 'xero')) NOT VALID;
+  `,
+
+  // New owners are field-capable by default. Migration 066's owner backfill
+  // used to re-run on every deploy (no ledger) and so flipped every owner
+  // created since the previous deploy to can_field_serve = true; now that it
+  // is one-shot, the INSERT must supply that default itself, or a solo
+  // owner-operator is never counted as sendable crew (lookup-crew-schedule).
+  // The default lives on the table because the production creation paths —
+  // the Clerk user.created owner insert and the invitation join in
+  // webhooks/routes.ts, plus 249's backfill and the seed/QA scripts — write
+  // raw SQL and never reach PgUserRepository.create.
+  //
+  // The column DEFAULT (false) is dropped so an omitted value reaches the
+  // BEFORE INSERT trigger as NULL: NULL → (role = 'owner'); an explicit
+  // true/false is always kept, and NOT NULL still holds after the trigger.
+  // Existing rows and UPDATEs are untouched. Re-run safe: no data statement,
+  // CREATE OR REPLACE + DROP/CREATE TRIGGER, and DROP DEFAULT is a no-op once
+  // dropped. Rollback-safe: older code that omits the column still gets the
+  // trigger's default. Pinned by test/integration/users-field-serve-default.test.ts
+  // and migration-replay-populated-db.test.ts.
+  '309_users_owner_can_field_serve_default': `
+    CREATE OR REPLACE FUNCTION users_default_can_field_serve()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF NEW.can_field_serve IS NULL THEN
+        NEW.can_field_serve := (NEW.role = 'owner');
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_users_default_can_field_serve ON users;
+    CREATE TRIGGER trg_users_default_can_field_serve
+      BEFORE INSERT ON users
+      FOR EACH ROW EXECUTE FUNCTION users_default_can_field_serve();
+
+    ALTER TABLE users ALTER COLUMN can_field_serve DROP DEFAULT;
   `,
 };
 

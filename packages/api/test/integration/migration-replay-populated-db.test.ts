@@ -18,11 +18,33 @@
  * legal under the final schema (production traffic), applies the corpus again
  * (deploy N+1), and requires it to succeed.
  */
+import { createHmac } from 'crypto';
+import express from 'express';
+import request from 'supertest';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { applyMigrations } from '../../src/db/migrate';
+import { createWebhookRouter } from '../../src/webhooks/routes';
+import { InMemoryWebhookRepository } from '../../src/webhooks/webhook-handler';
+import { PgTenantRepository } from '../../src/auth/pg-tenant';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
+import type { AppConfig } from '../../src/shared/config';
+import { createUsersRouter } from '../../src/routes/users';
+import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import { PgCallMeBackRepository } from '../../src/voice/call-me-back/pg-call-me-back';
+import { PgVoiceApprovalPinLockAlertRepository } from '../../src/settings/pg-voice-approval-pin-lock-alert';
+import { createPinLockAlertRetryWorker } from '../../src/workers/pin-lock-alert-retry';
+import { PgUserRepository } from '../../src/users/pg-user';
+import { PgJobRepository } from '../../src/jobs/pg-job';
+import { PgJobTimelineRepository } from '../../src/jobs/pg-job-lifecycle';
+import { transitionJobStatus } from '../../src/jobs/job-lifecycle';
+import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
+import type { QueueMessage } from '../../src/queues/queue';
+import { createLogger } from '../../src/logging/logger';
 import { createTestTenant, ensureRlsRuntimeRole, type TestTenant } from './shared';
+
+const silentLogger = createLogger({ service: 'test', environment: 'test', level: 'error' });
+const HOUR_MS = 60 * 60 * 1000;
 
 /**
  * Every invariant the corpus RELAXED after first creating it: a row the final
@@ -53,7 +75,7 @@ async function insertProposal(db: Pool, tenant: TestTenant, status = 'draft'): P
   return rows[0].id;
 }
 
-async function insertInvoice(db: Pool, tenant: TestTenant): Promise<string> {
+async function insertJob(db: Pool, tenant: TestTenant): Promise<string> {
   const n = crypto.randomUUID().slice(0, 8);
   const customer = await db.query<{ id: string }>(
     `INSERT INTO customers (tenant_id, display_name, created_by)
@@ -70,10 +92,15 @@ async function insertInvoice(db: Pool, tenant: TestTenant): Promise<string> {
      VALUES ($1, $2, $3, $4, 'Replay job', $5) RETURNING id`,
     [tenant.tenantId, customer.rows[0].id, location.rows[0].id, `J-${n}`, tenant.userId],
   );
+  return job.rows[0].id;
+}
+
+async function insertInvoice(db: Pool, tenant: TestTenant): Promise<string> {
+  const jobId = await insertJob(db, tenant);
   const invoice = await db.query<{ id: string }>(
     `INSERT INTO invoices (tenant_id, job_id, invoice_number, created_by)
      VALUES ($1, $2, $3, $4) RETURNING id`,
-    [tenant.tenantId, job.rows[0].id, `INV-${n}`, tenant.userId],
+    [tenant.tenantId, jobId, `INV-${crypto.randomUUID().slice(0, 8)}`, tenant.userId],
   );
   return invoice.rows[0].id;
 }
@@ -251,6 +278,69 @@ const RELAXED_SINCE: RelaxedInvariant[] = [
   },
 ];
 
+const CLERK_WEBHOOK_SECRET = 'whsec_dGVzdC1zZWNyZXQ='; // base64("test-secret")
+
+/**
+ * A real owner signup: a signed Clerk `user.created` through the production
+ * `/webhooks/clerk` route, which bootstraps the tenant and inserts the owner's
+ * membership row.
+ */
+async function signUpOwner(db: Pool): Promise<TestTenant> {
+  const app = express();
+  app.use(express.json());
+  app.use(
+    '/webhooks',
+    createWebhookRouter(
+      { CLERK_WEBHOOK_SECRET, CLERK_SECRET_KEY: undefined } as unknown as AppConfig,
+      {
+        tenantRepo: new PgTenantRepository(db),
+        pool: db,
+        webhookRepo: new InMemoryWebhookRepository(),
+        auditRepo: new PgAuditRepository(db),
+      },
+    ),
+  );
+  const clerkUserId = `user_owner_${crypto.randomUUID()}`;
+  const payload = {
+    type: 'user.created',
+    data: { id: clerkUserId, email_addresses: [{ email_address: `${crypto.randomUUID()}@example.com` }] },
+  };
+  const svixId = `evt_${crypto.randomUUID()}`;
+  const ts = String(Math.floor(Date.now() / 1000));
+  const signed = `${svixId}.${ts}.${JSON.stringify(payload)}`;
+  const secret = Buffer.from(CLERK_WEBHOOK_SECRET.replace(/^whsec_/, ''), 'base64');
+  const res = await request(app)
+    .post('/webhooks/clerk')
+    .set('svix-id', svixId)
+    .set('svix-timestamp', ts)
+    .set('svix-signature', `v1,${createHmac('sha256', secret).update(signed).digest('base64')}`)
+    .send(payload);
+  expect(res.status).toBe(200);
+
+  const tenant = await new PgTenantRepository(db).findByOwner(clerkUserId);
+  if (!tenant) throw new Error('signup did not bootstrap a tenant');
+  const [owner] = await new PgUserRepository(db).findByTenant(tenant.id, { role: 'owner' });
+  if (!owner) throw new Error('signup did not create the owner membership row');
+  return { tenantId: tenant.id, userId: owner.id };
+}
+
+/** The production /api/users router, acting as `actor` (an owner of its tenant). */
+function usersApi(db: Pool, actor: TestTenant): express.Express {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as AuthenticatedRequest).auth = {
+      userId: actor.userId,
+      sessionId: 'sess-replay',
+      tenantId: actor.tenantId,
+      role: 'owner',
+    };
+    next();
+  });
+  app.use('/api/users', createUsersRouter(new PgUserRepository(db), {}, new PgAuditRepository(db)));
+  return app;
+}
+
 /** One deploy: the exact entrypoint the Railway preDeployCommand runs. */
 async function deploy(pool: Pool): Promise<void> {
   const client = await pool.connect();
@@ -354,5 +444,133 @@ describe('Postgres integration — migration corpus replays over a populated dat
           'USING btree (tenant_id, session_id, reason) WHERE (session_id IS NOT NULL)',
       },
     ]);
+  });
+
+  /**
+   * The same no-ledger replay re-executes every one-off DATA backfill
+   * (UPDATE / INSERT … SELECT written to settle pre-migration rows ONCE) on
+   * every deploy, against rows users and workers wrote since. Each case
+   * below is production traffic between deploy N and deploy N+1 that a
+   * re-run backfill would overwrite.
+   */
+  describe('one-shot backfills do not re-run against data written since', () => {
+    it('a PIN-lock owner alert claimed but not yet delivered is still sent after the next deploy (292)', async () => {
+      // The tenant-wide PIN lock engaged and the alert was claimed, but the
+      // first SMS failed, so the durable retry is queued with sent_at NULL.
+      const tenant = await createTestTenant(pool);
+      const alerts = new PgVoiceApprovalPinLockAlertRepository(pool);
+      const episodeKey = `episode-${crypto.randomUUID()}`;
+      expect(await alerts.claim({ tenantId: tenant.tenantId, episodeKey, strikeCount: 5 })).toBe(true);
+
+      // Deploy N+1 lands before the retry fires.
+      await deploy(pool);
+
+      const texted: string[] = [];
+      const retry = createPinLockAlertRetryWorker({
+        queue: { send: async () => 'queued' },
+        alertRepo: alerts,
+        sendSms: async (to) => {
+          texted.push(to);
+        },
+        resolveOwnerPhone: async () => '+15125550142',
+      });
+      await retry.handle(
+        {
+          id: 'm-1',
+          type: retry.type,
+          payload: { tenantId: tenant.tenantId, episodeKey, strikeCount: 5, attempt: 1 },
+          attempts: 0,
+          maxAttempts: 3,
+          idempotencyKey: `pin-lock-retry:${episodeKey}:1`,
+          createdAt: new Date().toISOString(),
+        } as QueueMessage<unknown>,
+        silentLogger,
+      );
+
+      // The owner is told their PIN was brute-forced into a lock.
+      expect(texted).toEqual(['+15125550142']);
+      expect(await alerts.isSent(tenant.tenantId, episodeKey)).toBe(true);
+    });
+
+    it('an owner created by Clerk signup is field-capable, and still is after the next deploy (066 + 309)', async () => {
+      // 066's owner backfill no longer re-runs, so it no longer quietly
+      // turns new owners field-capable at the next deploy — creation must.
+      const owner = await signUpOwner(pool);
+      const users = new PgUserRepository(pool);
+      expect((await users.findById(owner.tenantId, owner.userId))?.canFieldServe).toBe(true);
+
+      await deploy(pool);
+
+      expect((await users.findById(owner.tenantId, owner.userId))?.canFieldServe).toBe(true);
+    });
+
+    it("an owner who turned field-serving off keeps it off across the next deploy (066)", async () => {
+      // PATCH /api/users/:id { canFieldServe: false } — an office-only owner
+      // opting out of being counted as a sendable field tech.
+      const owner = await signUpOwner(pool);
+      const res = await request(usersApi(pool, owner))
+        .patch(`/api/users/${owner.userId}`)
+        .send({ canFieldServe: false });
+      expect(res.status).toBe(200);
+
+      await deploy(pool);
+
+      const after = await new PgUserRepository(pool).findById(owner.tenantId, owner.userId);
+      expect(after?.role).toBe('owner');
+      expect(after?.canFieldServe).toBe(false);
+    });
+
+    it('a job completed before a deploy still gets its 24h review request (214)', async () => {
+      const tenant = await createTestTenant(pool);
+      await pool.query(
+        `INSERT INTO tenant_settings (tenant_id, business_name) VALUES ($1, 'Replay Co')`,
+        [tenant.tenantId],
+      );
+      const jobId = await insertJob(pool, tenant);
+      const jobs = new PgJobRepository(pool);
+      const timeline = new PgJobTimelineRepository(pool);
+      // A tech works the job through the governed lifecycle and completes it.
+      for (const status of ['scheduled', 'in_progress', 'completed'] as const) {
+        await transitionJobStatus(tenant.tenantId, jobId, status, tenant.userId, 'owner', jobs, timeline);
+      }
+
+      // Deploy N+1 lands inside the 24h window.
+      await deploy(pool);
+
+      const enqueued: Array<{ type: string; payload: unknown }> = [];
+      await runReviewRequestSweep({
+        pool,
+        jobRepo: jobs,
+        queue: {
+          send: async (type: string, payload: unknown) => {
+            enqueued.push({ type, payload });
+            return 'queued';
+          },
+        },
+        logger: silentLogger,
+        now: () => new Date(Date.now() + 25 * HOUR_MS),
+      });
+
+      expect(enqueued).toContainEqual({
+        type: 'feedback_send',
+        payload: { tenantId: tenant.tenantId, jobId },
+      });
+    });
+
+    it('a job marked completed by a raw status write is not stamped completed-and-thanked by the next deploy (194)', async () => {
+      // The approved update_job correction / PUT /api/jobs/:id status write:
+      // status only, no completion timestamp, no thank-you yet.
+      const tenant = await createTestTenant(pool);
+      const jobId = await insertJob(pool, tenant);
+      const jobs = new PgJobRepository(pool);
+      await jobs.update(tenant.tenantId, jobId, { status: 'completed' });
+
+      await deploy(pool);
+
+      const job = await jobs.findById(tenant.tenantId, jobId);
+      expect(job?.status).toBe('completed');
+      expect(job?.completedAt).toBeUndefined();
+      expect(job?.thankYouSmsSentAt).toBeUndefined();
+    });
   });
 });
