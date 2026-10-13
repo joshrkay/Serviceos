@@ -1564,8 +1564,13 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       });
 
       // #1084 — tagged with the live session's tenant ('t'), which outranks the
-      // payload's own tenantId field.
-      expect(whisperCache.get('esc_xyz')).toEqual({ text: 'Test whisper', tenantId: 't' });
+      // payload's own tenantId field; H1 — and with its session, so the
+      // whisper screen's press-1 acceptance marks THIS hand-off answered.
+      expect(whisperCache.get('esc_xyz')).toEqual({
+        text: 'Test whisper',
+        tenantId: 't',
+        sessionId: session!.id,
+      });
       expect(sendSms).toHaveBeenCalledWith(
         expect.objectContaining({ to: '+15125550999', body: 'Test SMS esc_xyz' }),
       );

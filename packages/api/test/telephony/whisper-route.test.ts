@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import twilio from 'twilio';
@@ -188,5 +188,133 @@ describe('whisper mount — POST is served with the same verification (#4)', () 
 
     expect(res.status).toBe(200);
     expect(res.text).toContain('Incoming call from Sarah Chen.');
+  });
+});
+
+/**
+ * H1 (review of #1676) — a carrier voicemail answering the dispatcher leg
+ * looks exactly like a human to Twilio (`answered` / DialCallStatus
+ * completed). The whisper is therefore a SCREEN: only a human pressing 1
+ * accepts the call; anything else hangs up the dialled leg so the Dial
+ * reports not-connected and the cascade continues. Only the keypress marks
+ * the hand-off answered (which is what resolves the emergency page ladder).
+ */
+describe('whisper screen — press 1 to accept (H1)', () => {
+  const PUBLIC_BASE_URL = 'https://api.test';
+  const TOKEN = 'token-a';
+  const getter: TwilioAuthTokenGetter = () => ({
+    outcome: 'verify',
+    authToken: TOKEN,
+    path: 'subaccount_lookup',
+    tenantId: TENANT_A,
+  });
+
+  function build(cache: WhisperCache, hooks: { onScreenOffered?: ReturnType<typeof vi.fn>; onAccepted?: ReturnType<typeof vi.fn> } = {}) {
+    const app = express();
+    mountWhisperRoute(app, {
+      whisperCache: cache,
+      credentialView: getter,
+      publicBaseUrl: () => PUBLIC_BASE_URL,
+      ...(hooks.onScreenOffered ? { onScreenOffered: hooks.onScreenOffered } : {}),
+      ...(hooks.onAccepted ? { onAccepted: hooks.onAccepted } : {}),
+    });
+    return app;
+  }
+
+  function signed(app: express.Application, path: string, params: Record<string, string>, token = TOKEN) {
+    const sig = twilio.getExpectedTwilioSignature(token, `${PUBLIC_BASE_URL}${path}`, params);
+    return request(app).post(path).set('X-Twilio-Signature', sig).type('form').send(params);
+  }
+
+  it('the whisper asks the dialled party to press 1, and hangs the leg up when nobody does', async () => {
+    const cache = new WhisperCache();
+    cache.set('esc_s', 'Emergency call: basement flooding.', TENANT_A, { sessionId: 'sess-1' });
+    const onScreenOffered = vi.fn();
+    const res = await signed(build(cache, { onScreenOffered }), '/api/telephony/whisper/esc_s', {
+      AccountSid: 'ACaaaa',
+      CallSid: 'CA-child',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toMatch(
+      /<Response><Gather numDigits="1" timeout="\d+" action="https:\/\/api\.test\/api\/telephony\/whisper\/esc_s\/accept" method="POST"><Say>Emergency call: basement flooding\. Press 1 to accept this call\.<\/Say><\/Gather><Hangup\/><\/Response>/,
+    );
+    expect(onScreenOffered).toHaveBeenCalledWith({ sessionId: 'sess-1', tenantId: TENANT_A });
+  });
+
+  it('pressing 1 connects the call and marks the hand-off answered', async () => {
+    const cache = new WhisperCache();
+    cache.set('esc_s', 'Emergency call.', TENANT_A, { sessionId: 'sess-1' });
+    const onAccepted = vi.fn(async () => undefined);
+    const res = await signed(build(cache, { onAccepted }), '/api/telephony/whisper/esc_s/accept', {
+      AccountSid: 'ACaaaa',
+      CallSid: 'CA-child',
+      Digits: '1',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Response/>');
+    expect(res.text).not.toContain('Hangup');
+    expect(onAccepted).toHaveBeenCalledWith({ sessionId: 'sess-1', tenantId: TENANT_A, childCallSid: 'CA-child' });
+  });
+
+  it('any other key declines: the dialled leg hangs up and nothing is marked answered', async () => {
+    const cache = new WhisperCache();
+    cache.set('esc_s', 'Emergency call.', TENANT_A, { sessionId: 'sess-1' });
+    const onAccepted = vi.fn(async () => undefined);
+    const res = await signed(build(cache, { onAccepted }), '/api/telephony/whisper/esc_s/accept', {
+      AccountSid: 'ACaaaa',
+      CallSid: 'CA-child',
+      Digits: '9',
+    });
+
+    expect(res.text).toContain('<Hangup/>');
+    expect(onAccepted).not.toHaveBeenCalled();
+  });
+
+  it('a failure while recording the acceptance still connects the human (never drop the call)', async () => {
+    const cache = new WhisperCache();
+    cache.set('esc_s', 'Emergency call.', TENANT_A, { sessionId: 'sess-1' });
+    const onAccepted = vi.fn(() => {
+      throw new Error('store exploded');
+    });
+    const res = await signed(build(cache, { onAccepted }), '/api/telephony/whisper/esc_s/accept', {
+      AccountSid: 'ACaaaa',
+      CallSid: 'CA-child',
+      Digits: '1',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Response/>');
+  });
+
+  it('the accept action is signature-verified like the whisper itself', async () => {
+    const cache = new WhisperCache();
+    cache.set('esc_s', 'Emergency call.', TENANT_A, { sessionId: 'sess-1' });
+    const onAccepted = vi.fn(async () => undefined);
+    const app = build(cache, { onAccepted });
+
+    const unsigned = await request(app)
+      .post('/api/telephony/whisper/esc_s/accept')
+      .type('form')
+      .send({ AccountSid: 'ACaaaa', Digits: '1' });
+    expect(unsigned.status).toBe(403);
+    const forged = await signed(app, '/api/telephony/whisper/esc_s/accept', { AccountSid: 'ACaaaa', Digits: '1' }, 'wrong');
+    expect(forged.status).toBe(403);
+    expect(onAccepted).not.toHaveBeenCalled();
+  });
+
+  it("another tenant's credential cannot accept this tenant's escalation", async () => {
+    const cache = new WhisperCache();
+    cache.set('esc_s', 'Emergency call.', TENANT_B, { sessionId: 'sess-b' });
+    const onAccepted = vi.fn(async () => undefined);
+    // The getter verifies as TENANT_A; the escalation belongs to TENANT_B.
+    const res = await signed(build(cache, { onAccepted }), '/api/telephony/whisper/esc_s/accept', {
+      AccountSid: 'ACaaaa',
+      Digits: '1',
+    });
+
+    expect(res.status).toBe(200); // never a 403 on the live leg
+    expect(onAccepted).not.toHaveBeenCalled();
   });
 });

@@ -169,8 +169,9 @@ const LADDER_RESOLVED_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * #8b — audit event recorded (by POST /api/telephony/dial-answered) the
- * moment the dialled human leg of a hand-off ANSWERS. The durable form of
+ * #8b / H1 — audit event recorded the moment a PERSON accepts the hand-off
+ * (pressed 1 on the whisper screen; telephony/transfer-screening.ts). A bare
+ * pickup never records it: carrier voicemail answers too. The durable form of
  * `VoiceSession.transferAnsweredAt`: the ladder worker may run in a process
  * that never held the call (PROCESS_ROLE=worker), and `ended_reason` is only
  * stamped when the bridged call ENDS.

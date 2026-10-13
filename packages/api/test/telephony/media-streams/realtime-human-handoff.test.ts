@@ -40,6 +40,7 @@ import {
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
 } from '../../../src/ai/agents/customer-calling/tts-copy';
 import { patchOwnerThrough } from '../../../src/ai/skills/patch-owner-through';
+import { WhisperCache } from '../../../src/telephony/whisper-cache';
 import { DEFAULT_ESCALATION_SETTINGS, type SettingsRepository } from '../../../src/settings/settings';
 import type { VoiceSession } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
@@ -182,6 +183,8 @@ async function harness(opts: {
   settingsLookupDelayMs?: number;
   /** Length of every spoken line, in 20 ms frames (long lines pace on mark acks). */
   ttsFrames?: number;
+  /** The whisper cache the turn host stores dispatcher whispers in. */
+  whisperCache?: WhisperCache;
 } = {}) {
   const callSid = `CA-handoff-${++callSeq}`;
   const streamSid = `MZ-handoff-${callSeq}`;
@@ -198,6 +201,7 @@ async function harness(opts: {
     auditRepo,
     callControl: new DefaultTwilioCallControl(),
     dispatcherPhoneResolver: async () => DISPATCHER,
+    ...(opts.whisperCache ? { whisperCache: opts.whisperCache } : {}),
     ...(opts.settingsLookupDelayMs !== undefined
       ? {
           settingsRepo: {
@@ -306,6 +310,21 @@ describe('realtime hand-off — escalation on a stream call reaches a human', ()
     expect(h.ws.closeCode).toBe(1000);
     expect(h.finalizeOnClose).not.toHaveBeenCalled();
     expect(h.session.terminalOutcome).toBeUndefined();
+  });
+
+  it("the delivered Dial's whisper screen is tied to this session (H1: its press-1 marks THIS hand-off)", async () => {
+    const whisperCache = new WhisperCache();
+    const h = await harness({ whisperCache });
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+
+    const twiml = h.twilio.transfers()[0].body.get('Twiml')!;
+    const escalationId = /\/api\/telephony\/whisper\/([^"]+)" method="GET"/.exec(twiml)?.[1];
+    expect(escalationId).toBeDefined();
+    expect(whisperCache.get(escalationId!)).toMatchObject({ tenantId: TENANT, sessionId: h.session.id });
   });
 
   it('Twilio ending the stream while the transfer request is in flight is not stamped as a hang-up', async () => {

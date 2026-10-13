@@ -49,8 +49,7 @@ describe('P8-013 DefaultTwilioCallControl.dialDispatcher', () => {
     expect(xml).toContain('<Dial timeout="20"');
     expect(xml).toContain('action="https://api.test/api/telephony/dial-result?sid=abc"');
     expect(xml).toContain('method="POST"');
-    // (#8b — a /dial-result action also carries the answered status callback.)
-    expect(xml).toMatch(/<Number[^>]*>\+15125550100<\/Number>/);
+    expect(xml).toContain('<Number>+15125550100</Number>');
     expect(xml).toContain('</Dial>');
     expect(xml).toContain('</Response>');
   });
@@ -112,35 +111,6 @@ describe('P8-013 DefaultTwilioCallControl.dialDispatcher', () => {
   });
 });
 
-describe('dialDispatcher — answered status callback (#8b)', () => {
-  it('asks Twilio to report the dialled party ANSWERING to /dial-answered for the same session', () => {
-    // /dial-result only fires when the bridged call ENDS; the page ladder
-    // needs to know the moment a human picks up.
-    const xml = new DefaultTwilioCallControl().dialDispatcher('CA-1', '+15125550100', {
-      actionUrl: 'https://api.test/api/telephony/dial-result?sid=sess-1',
-    });
-    expect(xml).toContain(
-      '<Number statusCallbackEvent="answered" statusCallback="https://api.test/api/telephony/dial-answered?sid=sess-1" statusCallbackMethod="POST">+15125550100</Number>',
-    );
-  });
-
-  it('keeps the whisper url alongside the status callback', () => {
-    const xml = new DefaultTwilioCallControl().dialDispatcher('CA-1', '+15125550100', {
-      actionUrl: 'https://api.test/api/telephony/dial-result?sid=sess-1',
-      whisperUrl: 'https://api.test/api/telephony/whisper/esc_1',
-    });
-    expect(xml).toContain('url="https://api.test/api/telephony/whisper/esc_1" method="GET"');
-    expect(xml).toContain('statusCallback="https://api.test/api/telephony/dial-answered?sid=sess-1"');
-  });
-
-  it('adds no status callback for an action that is not the /dial-result route', () => {
-    const xml = new DefaultTwilioCallControl().dialDispatcher('CA-1', '+15125550100', {
-      actionUrl: 'https://api.test/some/other/action',
-    });
-    expect(xml).not.toContain('statusCallback');
-  });
-});
-
 describe('P8-013 DefaultTwilioCallControl rotation cursor', () => {
   it('returns {0,0} for an unknown session', () => {
     const cc = new DefaultTwilioCallControl();
@@ -177,6 +147,14 @@ describe('P8-013 DefaultTwilioCallControl rotation cursor', () => {
 });
 
 describe('dialDispatcher with whisper', () => {
+  it('asks Twilio for no answered status callback — a pickup is not proof a person answered (H1)', () => {
+    const xml = ctrl.dialDispatcher('CA-1', '+15551234567', {
+      actionUrl: 'https://example.com/api/telephony/dial-result?sid=s',
+      whisperUrl: 'https://example.com/api/telephony/whisper/esc_abc',
+    });
+    expect(xml).not.toContain('statusCallback');
+  });
+
   const ctrl = new DefaultTwilioCallControl();
 
   it('omits url attribute when no whisperUrl is supplied (no regression)', () => {

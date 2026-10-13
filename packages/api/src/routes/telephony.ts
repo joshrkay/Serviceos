@@ -64,7 +64,6 @@ import type { GateReason } from '../voice/trial-limits';
 import { t, type Language } from '../ai/i18n/i18n';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import { createAuditEvent } from '../audit/audit';
-import { TRANSFER_ANSWERED_EVENT } from '../telephony/emergency-page-retry';
 import { isValidTenantId } from '../db/schema';
 import { recordVoiceError } from '../analytics/posthog';
 import { isCredentialFailure, type TtsHealthCheck, type TtsHealthState } from '../ai/tts/tts-health';
@@ -820,90 +819,6 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
    * Query: ?sid=<sessionId>  (set by the adapter when emitting the
    *                           initial `<Dial action="...">` verb)
    */
-  /**
-   * #8b — POST /api/telephony/dial-answered?sid=<sessionId>
-   *
-   * Twilio's `answered` status callback for the dialled (child) leg of a
-   * hand-off `<Dial>` — every `<Number>` the call control emits for a
-   * `/dial-result` action asks for it. `/dial-result` itself only fires when
-   * the bridged call ENDS, so without this the emergency page ladder kept
-   * paging "transfer unanswered" (and landed an URGENT emergency_unanswered
-   * callback task) while a dispatcher was on the line with the caller.
-   *
-   * Records the answer on the live session and durably (the
-   * TRANSFER_ANSWERED_EVENT audit row the ladder reads from any process). It
-   * does NOT stamp the session's terminal outcome — /dial-result stays the one
-   * writer of `ended_reason = 'transferred'`. A status callback never steers
-   * the call, so every no-op answers 204. Note: the dialled party's voicemail
-   * picking up is indistinguishable from a human here (no AMD) — a known
-   * residual shared with /dial-result's own 'completed'.
-   */
-  router.post('/dial-answered', async (req: Request, res: Response) => {
-    const body = req.body as Record<string, string | undefined>;
-    const sessionId = (req.query.sid as string | undefined) ?? '';
-    const adapterDeps = deps.adapter.getDeps();
-    const session = sessionId ? adapterDeps.store.get(sessionId) : undefined;
-
-    // #1072 — the verifying credential's tenant must own the call named by
-    // ?sid=. The child leg's `To` is the dispatcher's number (not a DID), so
-    // no tenant is resolved from the payload: the session's own tenant is the
-    // fallback, making the check stand down under the deployment-wide token.
-    if (sessionBelongsToAnotherTenant(req, session, session?.tenantId ?? '')) {
-      logger.warn('telephony/dial-answered: session belongs to another tenant — refusing', {
-        sessionId,
-      });
-      res.status(403).end();
-      return;
-    }
-    if (!session) {
-      res.status(204).end();
-      return;
-    }
-    const answered = body.CallStatus === 'in-progress' || body.CallStatus === 'answered';
-    // The callback must be for a leg of THIS session's call.
-    const ofThisCall = Boolean(session.callSid) && body.ParentCallSid === session.callSid;
-    if (!answered || !ofThisCall) {
-      if (answered) {
-        logger.warn('telephony/dial-answered: ParentCallSid does not match the session call — ignoring', {
-          sessionId,
-        });
-      }
-      res.status(204).end();
-      return;
-    }
-    if (session.transferAnsweredAt === undefined) {
-      session.transferAnsweredAt = Date.now();
-      logger.info('telephony/dial-answered: hand-off answered by a human', { sessionId });
-      if (adapterDeps.auditRepo) {
-        try {
-          await adapterDeps.auditRepo.create(
-            createAuditEvent({
-              tenantId: session.tenantId,
-              actorId: 'system:telephony',
-              actorRole: 'system',
-              eventType: TRANSFER_ANSWERED_EVENT,
-              entityType: 'voice_session',
-              entityId: session.id,
-              correlationId: session.id,
-              metadata: {
-                ...(body.CallSid ? { childCallSid: body.CallSid } : {}),
-                ...(session.callSid ? { callSid: session.callSid } : {}),
-              },
-            }),
-          );
-        } catch (err) {
-          // The live flag still resolves the ladder on this process; only a
-          // ladder step running elsewhere would keep paging (fail-safe side).
-          logger.warn('telephony/dial-answered: transfer-answered audit write failed', {
-            sessionId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-    }
-    res.status(204).end();
-  });
-
   router.post('/dial-result', async (req: Request, res: Response) => {
     const body = req.body as Record<string, string | undefined>;
     const callSid = body.CallSid ?? '';
@@ -974,7 +889,22 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     // mark the session ended, and return an empty Response so Twilio
     // hangs up the original caller leg cleanly.
     const successStatuses = new Set(['completed', 'answered']);
-    if (successStatuses.has(dialStatus)) {
+    // H1 — a screened leg (the whisper's press-1 screen played) that nobody
+    // accepted was not answered by a person, whatever Twilio reports: a carrier
+    // voicemail picking up the dispatcher's phone is `completed` too.
+    // Stamping it `transferred` would silence the emergency page ladder for a
+    // real unanswered emergency and strand the caller in a mailbox — continue
+    // the cascade instead. The flag is per dialled leg: cleared for the next.
+    const screenNotAccepted =
+      session.transferScreenOffered === true && session.transferAnsweredAt === undefined;
+    session.transferScreenOffered = false;
+    if (screenNotAccepted && successStatuses.has(dialStatus)) {
+      logger.info('telephony/dial-result: screened leg was never accepted — not a transfer', {
+        sessionId,
+        dialStatus,
+      });
+    }
+    if (successStatuses.has(dialStatus) && !screenNotAccepted) {
       try {
         // Synthetic proposal_queued event so the FSM follows its
         // documented escalating → closing transition. We don't emit

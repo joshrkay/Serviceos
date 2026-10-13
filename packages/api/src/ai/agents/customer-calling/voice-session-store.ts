@@ -466,13 +466,19 @@ export interface VoiceSession {
    */
   terminalReason?: string;
   /**
-   * #8b — epoch ms at which the dialled human leg of a `<Dial>` hand-off
-   * ANSWERED (Twilio's answered status callback → /dial-answered). Set while
-   * the bridged call is still live — long before /dial-result stamps
-   * `terminalReason = 'transferred'` at its end — so the emergency page
-   * ladder stops paging a dispatcher who is already on the call.
+   * #8b / H1 — epoch ms at which a PERSON accepted the hand-off (pressed 1 on
+   * the whisper screen). Set while the bridged call is still live — long
+   * before /dial-result stamps `terminalReason = 'transferred'` at its end —
+   * so the emergency page ladder stops paging a dispatcher who is already on
+   * the call. Never set by a mere pickup: a carrier voicemail "answers" too.
    */
   transferAnsweredAt?: number;
+  /**
+   * H1 — the whisper screen was played on the current dialled leg. From then
+   * on only `transferAnsweredAt` proves a person took the call; /dial-result
+   * does not stamp `transferred` for a screened leg nobody accepted.
+   */
+  transferScreenOffered?: boolean;
   createdAt: Date;
   lastActivityAt: Date;
   events: EventEmitter;

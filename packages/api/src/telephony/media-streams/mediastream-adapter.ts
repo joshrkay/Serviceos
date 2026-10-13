@@ -2766,6 +2766,7 @@ export class TwilioMediaStreamAdapter {
         escalationId,
         summary.whisper,
         this.state.tenantId ?? payload.tenantId,
+        this.state.session ? { sessionId: this.state.session.id } : {},
       );
     }
 

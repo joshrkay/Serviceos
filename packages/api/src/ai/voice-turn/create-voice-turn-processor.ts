@@ -3194,7 +3194,10 @@ export function createVoiceTurnProcessor(
           channelPreferences.whisper &&
           deps.whisperCache
         ) {
-          deps.whisperCache.set(escalationId, summary.whisper, tenantId);
+          deps.whisperCache.set(escalationId, summary.whisper, tenantId, {
+            sessionId: session.id,
+            language: dispatcherLanguage,
+          });
         }
 
         if (

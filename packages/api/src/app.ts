@@ -432,6 +432,7 @@ import { createVoiceSessionsRouter } from './routes/voice-sessions';
 import { escalationOutcomeRouter } from './escalations/outcome-route';
 import { escalationEventsRouter } from './escalations/events-route';
 import { mountWhisperRoute } from './telephony/whisper-route';
+import { createTransferScreenHooks } from './telephony/transfer-screening';
 import { WhisperCache } from './telephony/whisper-cache';
 import {
   createTwilioWebhookCredentialResolver,
@@ -4151,8 +4152,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           return null;
         }
       },
-      // #8b — the dispatcher answering (live flag / durable audit event from
-      // /dial-answered) resolves the ladder while the bridged call is live.
+      // #8b / H1 — a person accepting the hand-off (live flag / durable audit
+      // event from the whisper screen's keypress) resolves the ladder while
+      // the bridged call is live; a voicemail pickup never does.
       isResolved: createEmergencyPageResolvedCheck({
         store: voiceSessionStore,
         voiceSessionRepo,
@@ -4277,10 +4279,16 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // so a POST to /voice does not pay a second, weaker signature check on its
   // way past. #4 — the mount parses a POST's form body before verifying it, so
   // a whisper fetched with Twilio's default POST verifies and is served too.
+  // H1 — the whisper is a press-1 screen; only the keypress marks the
+  // hand-off answered (live + durable), which is what resolves the emergency
+  // page ladder. A voicemail pickup never does.
+  const transferScreenHooks = createTransferScreenHooks({ store: voiceSessionStore, auditRepo });
   mountWhisperRoute(app, {
     whisperCache: sharedWhisperCache,
     credentialView: subaccountCredentialView,
     publicBaseUrl: () => process.env.PUBLIC_API_URL,
+    onScreenOffered: transferScreenHooks.onScreenOffered,
+    onAccepted: transferScreenHooks.onAccepted,
   });
 
   app.use(

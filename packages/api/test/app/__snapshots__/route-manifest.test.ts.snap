@@ -107,10 +107,10 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
 041  authenticated use    /api/telephony    [router: router]
          └─ GET /whisper/:escalationId
          └─ POST /whisper/:escalationId
+         └─ POST /whisper/:escalationId/accept
 042  authenticated use    /api/telephony    [router: router]
          └─ GET /health
          └─ POST /callback-message
-         └─ POST /dial-answered
          └─ POST /dial-result
          └─ POST /gather
          └─ POST /voice

@@ -158,26 +158,6 @@ export function maskPhone(phone: string | null | undefined): string {
   return `***${trimmed.slice(-4)}`;
 }
 
-const DIAL_RESULT_PATH = '/api/telephony/dial-result';
-const DIAL_ANSWERED_PATH = '/api/telephony/dial-answered';
-
-/**
- * #8b — the answered status-callback URL for a Dial whose action is the
- * `/dial-result` route: the same origin and the same `?sid=` query, on
- * `/dial-answered`. Derived here — the one place every `<Dial>` is built —
- * so every producer (rotation, transfer number, business line, P12-004
- * immediate dial, vulnerable-caller patch, the /dial-result cascade) gets it
- * without threading a second URL through each of them. Any other action
- * gets none.
- */
-function dialAnsweredUrlFor(actionUrl: string): string | undefined {
-  const queryAt = actionUrl.indexOf('?');
-  const path = queryAt === -1 ? actionUrl : actionUrl.slice(0, queryAt);
-  if (!path.endsWith(DIAL_RESULT_PATH)) return undefined;
-  const query = queryAt === -1 ? '' : actionUrl.slice(queryAt);
-  return `${path.slice(0, -DIAL_RESULT_PATH.length)}${DIAL_ANSWERED_PATH}${query}`;
-}
-
 // ─── Default implementation ──────────────────────────────────────────────────
 
 /**
@@ -209,14 +189,6 @@ export class DefaultTwilioCallControl implements TwilioCallControl {
     const whisperAttr = opts.whisperUrl
       ? ` url="${xmlEscape(opts.whisperUrl)}" method="GET"`
       : '';
-    // #8b — `/dial-result` (the Dial action) only fires when the bridged call
-    // ENDS, so "answered" was unknowable while a dispatcher was on the line
-    // and the emergency page ladder paged them as "unanswered". Ask Twilio to
-    // report the dialled party answering, for the same session.
-    const answeredUrl = dialAnsweredUrlFor(opts.actionUrl);
-    const answeredAttr = answeredUrl
-      ? ` statusCallbackEvent="answered" statusCallback="${xmlEscape(answeredUrl)}" statusCallbackMethod="POST"`
-      : '';
 
     // The dispatcher number is wrapped in <Number> so Twilio's verb
     // parser handles E.164 cleanly. Both `dispatcherPhone` and
@@ -226,7 +198,7 @@ export class DefaultTwilioCallControl implements TwilioCallControl {
       `<?xml version="1.0" encoding="UTF-8"?>` +
       `<Response>` +
       `<Dial timeout="${timeout}" action="${xmlEscape(opts.actionUrl)}" method="POST"${callerIdAttr}>` +
-      `<Number${answeredAttr}${whisperAttr}>${xmlEscape(dispatcherPhone)}</Number>` +
+      `<Number${whisperAttr}>${xmlEscape(dispatcherPhone)}</Number>` +
       `</Dial>` +
       `</Response>`
     );
