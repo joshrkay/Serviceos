@@ -545,9 +545,18 @@ export function InvoicePaymentPage() {
   //   • Stripe redirected back with ?success=true (webhook may not have fired yet)
   //   • P5-018: async polling observed the status flipping to paid
   if (inv.isPaid || inv.amountDueCents <= 0 || paymentSucceeded || polledPaid) {
-    const paidAmountCents = polledPaid && polledStatus
-      ? polledStatus.amountPaidCents
-      : inv.amountPaidCents > 0 ? inv.amountPaidCents : inv.totalCents;
+    // The amount shown is what THIS payment charged. While the invoice
+    // is still unsettled in our snapshot, that is the balance that was
+    // due when the page loaded (what the Pay button said and the
+    // PaymentIntent was minted for) — `amountPaidCents` here is only
+    // what was paid BEFORE (a deposit credit, a partial payment), and the
+    // polled status reports the invoice's cumulative paid amount, so
+    // neither is this payment. Once the server reports the invoice
+    // settled at load, the best figure available is the total paid.
+    const settledOnServer = inv.isPaid || inv.amountDueCents <= 0;
+    const paidAmountCents = settledOnServer
+      ? (inv.amountPaidCents > 0 ? inv.amountPaidCents : inv.totalCents)
+      : inv.amountDueCents;
     return (
       <PaidScreen
         customerName={inv.customerName}
