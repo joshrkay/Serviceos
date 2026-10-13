@@ -22,7 +22,10 @@
  * phone, DNC list, smsConsent=false) also set `thank_you_sms_sent_at`
  * with a `notification.thank_you_sms.suppressed` audit event so the
  * sweep doesn't re-evaluate the same row forever. Transient errors
- * (dispatcher throws) leave the stamp null so the next sweep retries.
+ * (dispatcher throws) leave the stamp null so the next sweep retries. A
+ * thank-you is non-transactional (`quietHours: 'defer'`): outside the
+ * recipient-local window the gate defers it, and the job likewise stays
+ * unstamped (counted `deferred`) until an in-window sweep sends it.
  *
  * Sweep cadence is owned by app.ts (a setInterval driver). Tests
  * exercise this function directly with in-memory repos and a fixed
@@ -42,6 +45,7 @@ import { SettingsRepository } from '../settings/settings';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { DncRepository, normalizePhone } from '../compliance/dnc';
 import {
+  SmsDeferredError,
   SmsSuppressedError,
   type SmsSuppressionReason,
 } from '../notifications/gated-message-delivery';
@@ -118,6 +122,11 @@ export interface ThankYouSmsSweepResult {
   suppressed: number;
   /** Transient errors that left thank_you_sms_sent_at null for retry. */
   failed: number;
+  /**
+   * Held back by the recipient's quiet hours: not sent, not stamped, claim
+   * released — a later in-window sweep sends it.
+   */
+  deferred: number;
 }
 
 /**
@@ -153,6 +162,7 @@ export async function runThankYouSmsSweep(
     sent: 0,
     suppressed: 0,
     failed: 0,
+    deferred: 0,
   };
 
   if (!deps.pool) {
@@ -224,6 +234,7 @@ async function sweepTenant(
       const outcome = await sendOneThankYou(deps, pool, tenantId, jobId, businessName);
       if (outcome === 'sent') result.sent++;
       else if (outcome === 'suppressed') result.suppressed++;
+      else result.deferred++;
     } catch (err) {
       // Transient: leave thank_you_sms_sent_at null so the next sweep retries.
       result.failed++;
@@ -236,7 +247,7 @@ async function sweepTenant(
   }
 }
 
-type SendOutcome = 'sent' | 'suppressed';
+type SendOutcome = 'sent' | 'suppressed' | 'deferred';
 
 /** T4-F01 claim key — at-most-once per job, matching thankYouSmsSentAt's own scope. */
 function thankYouClaimKey(jobId: string): string {
@@ -334,9 +345,22 @@ async function sendOneThankYou(
         body,
         tenantId,
         consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
+        // A thank-you is non-transactional: it waits for the recipient's
+        // daytime window rather than landing at 22:30.
+        quietHours: 'defer',
       }),
     );
   } catch (err) {
+    if (err instanceof SmsDeferredError) {
+      // Not sent yet. withSendClaim already released the claim; leaving the
+      // stamp null re-selects the job, and an in-window sweep sends it.
+      deps.logger.info('Thank-you SMS sweep: deferred to the recipient send window', {
+        tenantId,
+        jobId,
+        nextAllowedAt: err.nextAllowedAt.toISOString(),
+      });
+      return 'deferred';
+    }
     if (err instanceof SmsSuppressedError && PERMANENT_GATE_REASONS.has(err.reason)) {
       // Terminal, not transient. The gate consults the consent ledger, which
       // this worker does not read, so a cross-channel revocation can suppress a

@@ -20,6 +20,8 @@ import {
   runThankYouSmsSweep,
   type ThankYouSmsWorkerDeps,
 } from '../../src/workers/thank-you-sms-worker';
+import { createRecipientLocaleResolver } from '../../src/notifications/recipient-locale';
+import { InMemoryLocationRepository } from '../../src/locations/location';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
@@ -221,7 +223,7 @@ describe('runThankYouSmsSweep', () => {
       logger,
       now: () => NOW,
     });
-    expect(result).toEqual({ tenants: 0, candidates: 0, sent: 0, suppressed: 0, failed: 0 });
+    expect(result).toEqual({ tenants: 0, candidates: 0, sent: 0, suppressed: 0, failed: 0, deferred: 0 });
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -232,7 +234,7 @@ describe('runThankYouSmsSweep', () => {
 
     const result = await runThankYouSmsSweep(deps([{ id: job.id, tenant_id: TENANT }]));
 
-    expect(result).toEqual({ tenants: 1, candidates: 1, sent: 1, suppressed: 0, failed: 0 });
+    expect(result).toEqual({ tenants: 1, candidates: 1, sent: 1, suppressed: 0, failed: 0, deferred: 0 });
     expect(send).toHaveBeenCalledTimes(1);
     // The full payload the production gate needs. This assertion used to stop
     // at { to, body } — an exact-match on the defect, which is why no unit
@@ -242,6 +244,7 @@ describe('runThankYouSmsSweep', () => {
       body: expect.stringContaining('Acme Plumbing'),
       tenantId: TENANT,
       consent: { smsConsent: true, customerId: 'cust-1' },
+      quietHours: 'defer',
     });
 
     const stamped = await jobRepo.findById(TENANT, job.id);
@@ -719,6 +722,71 @@ describe('runThankYouSmsSweep', () => {
       expect(result.suppressed).toBe(0);
       const stamped = await jobRepo.findById(TENANT, job.id);
       expect(stamped?.thankYouSmsSentAt).toBeFalsy();
+    });
+  });
+
+  /**
+   * A thank-you is non-transactional: outside the recipient-local window it is
+   * DEFERRED, never dropped. Through the real dispatcher → gate → resolver
+   * chain (tenant zone America/Phoenix, UTC-7, from baseSettings).
+   */
+  describe('recipient quiet hours', () => {
+    const LATE = new Date('2026-10-14T05:30:00Z'); // 22:30 MST, Oct 13
+    const MORNING = new Date('2026-10-14T17:00:00Z'); // 10:00 MST, Oct 14
+
+    function windowedDispatcher(now: Date): { dispatcher: FeedbackDispatcher; sentSms: SmsMessage[] } {
+      const sentSms: SmsMessage[] = [];
+      const base: MessageDeliveryProvider = {
+        sendSms: async (message) => {
+          sentSms.push(message);
+          return { id: 'sid-1', status: 'sent' } as never;
+        },
+        sendEmail: async () => ({ id: 'eid-1', status: 'sent' }) as never,
+      };
+      const gate = new GatedMessageDelivery({
+        base,
+        dnc: dncRepo,
+        auditRepo,
+        enforcement: 'block',
+        quietHours: {
+          resolveRecipientLocale: createRecipientLocaleResolver({
+            settingsRepo,
+            locationRepo: new InMemoryLocationRepository(),
+          }),
+          now: () => now,
+        },
+        logger: { info: () => undefined },
+      });
+      return { dispatcher: new MessageDeliveryFeedbackDispatcher(gate), sentSms };
+    }
+
+    it('defers a 22:30 thank-you — not sent, stamped, failed or claimed — and sends on the next in-window tick', async () => {
+      const job = makeJob({});
+      await jobRepo.create(job);
+      await customerRepo.create(makeCustomer());
+      const rows = [{ id: job.id, tenant_id: TENANT }];
+      const { pool, claims } = claimAwarePool({ rows });
+
+      const late = windowedDispatcher(LATE);
+      const night = await runThankYouSmsSweep(
+        deps(rows, { pool, dispatcher: late.dispatcher, now: () => LATE }),
+      );
+
+      expect(late.sentSms).toHaveLength(0);
+      expect(night).toMatchObject({ sent: 0, suppressed: 0, failed: 0, deferred: 1 });
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toBeFalsy();
+      expect(claims.has(`${TENANT}::thank_you_sms:${job.id}`)).toBe(false);
+      const nightEvents = await auditRepo.findByEntity(TENANT, 'job', job.id);
+      expect(nightEvents.some((e) => e.eventType === 'notification.thank_you_sms.suppressed')).toBe(false);
+
+      const morning = windowedDispatcher(MORNING);
+      const next = await runThankYouSmsSweep(
+        deps(rows, { pool, dispatcher: morning.dispatcher, now: () => MORNING }),
+      );
+
+      expect(morning.sentSms).toHaveLength(1);
+      expect(next).toMatchObject({ sent: 1, deferred: 0 });
+      expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toEqual(MORNING);
     });
   });
 });
