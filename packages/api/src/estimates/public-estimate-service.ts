@@ -18,6 +18,7 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { estimateApprovedProps } from '../analytics/estimate-event-props';
 import { publicActorFromToken } from '../feedback/feedback-response';
 import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
+import { timedFetch } from '../shared/timed-fetch';
 import type { CatalogUnitValue } from '@ai-service-os/shared';
 
 const logger = createLogger({ service: 'public-estimates', environment: process.env.NODE_ENV || 'development' });
@@ -211,9 +212,13 @@ export interface DepositStripeConfig {
 /**
  * Tier 4 (Deposit rules — PR 3b). Override-able fetch for unit tests so
  * we don't actually hit api.stripe.com. Mirrors the pattern used by
- * `public-payments` route. Defaults to global fetch.
+ * `public-payments` route. Defaults to the bounded global fetch below.
  */
 export type DepositStripeFetch = typeof fetch;
+
+/** Default when no fetch is injected: bounded at 10 s, so a Stripe call that
+ *  never answers can't hang the public approve/pay page (see timed-fetch). */
+const boundedStripeFetch: DepositStripeFetch = timedFetch();
 
 export interface PublicEstimateServiceDeps {
   estimateRepo: EstimateRepository;
@@ -814,7 +819,7 @@ export class PublicEstimateService {
     }
     const remaining = required - paid;
 
-    const fetchFn = this.deps.stripeFetch ?? fetch;
+    const fetchFn = this.deps.stripeFetch ?? boundedStripeFetch;
 
     // A persisted link is reusable only while it's inside its expiry
     // window. Stripe Payment Links have no native expiry, so we own the
