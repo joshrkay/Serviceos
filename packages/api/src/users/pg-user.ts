@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import {
+  CreateUserInput,
   User,
   UpdateUserInput,
   UserListOptions,
@@ -37,8 +38,12 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
     super(pool);
   }
 
-  /** Dev/test bootstrap parity with InMemoryUserRepository. */
-  async create(user: Omit<User, 'createdAt' | 'updatedAt'>): Promise<User> {
+  /**
+   * Dev/test bootstrap parity with InMemoryUserRepository. An omitted
+   * canFieldServe goes in as NULL so the users INSERT trigger (migration 309)
+   * applies the role default — the one place every creation path shares.
+   */
+  async create(user: CreateUserInput): Promise<User> {
     return this.withTenant(user.tenantId, async (client) => {
       const result = await client.query(
         `INSERT INTO users
@@ -47,7 +52,7 @@ export class PgUserRepository extends PgBaseRepository implements UserRepository
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          RETURNING *`,
         [user.id, user.tenantId, user.clerkUserId ?? null, user.email, user.role,
-          user.firstName ?? null, user.lastName ?? null, user.canFieldServe,
+          user.firstName ?? null, user.lastName ?? null, user.canFieldServe ?? null,
           user.mobileNumber ?? null, user.status ?? 'active', user.deletedAt ?? null],
       );
       return mapRow(result.rows[0] as Record<string, unknown>);

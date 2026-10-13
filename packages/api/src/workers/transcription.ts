@@ -555,11 +555,17 @@ export function createTranscriptionWorker(
         // Queue attempts are 1-based when delivered. Until the final attempt,
         // return the recording to pending so polling clients do not stop while
         // the queue is about to redeliver it.
-        const retryable = message.attempts < message.maxAttempts;
+        // H2 review L1 — an error that declares itself non-retriable (a refused
+        // audio URL, a 4xx, an oversized file) fails identically on every
+        // attempt: fail the recording now and ack, instead of re-running it
+        // and leaving clients polling 'pending' until they time out.
+        const nonRetriable = (err as { retriable?: unknown } | null)?.retriable === false;
+        const retryable = !nonRetriable && message.attempts < message.maxAttempts;
         await voiceRepository.updateStatus(tenantId, recordingId, retryable ? 'pending' : 'failed', {
           error: error.message,
         });
 
+        if (nonRetriable) return;
         throw err;
       }
     },

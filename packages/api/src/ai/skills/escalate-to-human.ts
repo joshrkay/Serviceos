@@ -228,6 +228,14 @@ export interface EscalateToHumanInput {
    * completes. Required when `callControl` is set.
    */
   dialActionUrl?: string;
+  /**
+   * Round-3 review of #1676 — press-1 screen the dialled leg (default OFF).
+   * Set ONLY by emergency-class producers (an `emergency_dispatch`
+   * notify_oncall, the P12-004 immediate dial, the /dial-result cascade of a
+   * screened leg): see `DialDispatcherOptions.screen`. Every other transfer
+   * is built exactly as before.
+   */
+  screenHandoff?: boolean;
   /** P11-002: spoken-message language. Defaults to 'en'. */
   language?: Language;
   /**
@@ -372,6 +380,31 @@ function buildEscalationAudit(opts: {
   });
 }
 
+/**
+ * #7 — every audit write in this skill is BEST-EFFORT. They run after the
+ * dispatcher has been chosen and before the transfer is returned, so an
+ * awaited write that throws (pool saturation, a DB blip) used to throw the
+ * whole escalation away: no `<Dial>`, the caller stranded in `escalating` —
+ * on an emergency. The event is still attempted every time; a failure is
+ * logged loudly and the transfer proceeds (patch-owner-through.ts precedent).
+ */
+async function recordAuditBestEffort(
+  auditRepo: AuditRepository | undefined,
+  event: ReturnType<typeof createAuditEvent>,
+): Promise<void> {
+  if (!auditRepo) return;
+  try {
+    await auditRepo.create(event);
+  } catch (err) {
+    logger.warn('[escalate] audit write failed — proceeding with the escalation', {
+      tenantId: event.tenantId,
+      eventType: event.eventType,
+      entityId: event.entityId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 export async function escalateToHuman(input: EscalateToHumanInput): Promise<EscalationResult> {
   const {
     tenantId,
@@ -386,6 +419,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     businessPhoneFallbackResolver,
     callSid,
     dialActionUrl,
+    screenHandoff,
     session,
     buildSummary,
     callerContext,
@@ -454,22 +488,22 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
             dialActionUrl ??
             `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
           ...(whisperUrl ? { whisperUrl } : {}),
+          ...(screenHandoff ? { screen: true } : {}),
         })
       : undefined;
 
-    if (auditRepo) {
-      await auditRepo.create(
-        buildEscalationAudit({
-          tenantId,
-          sessionId,
-          reason,
-          // No rotation user — the number IS the destination.
-          assignedUserId: null,
-          outcome: 'transfer_initiated',
-          rotationIndex: 0,
-        }),
-      );
-    }
+    await recordAuditBestEffort(
+      auditRepo,
+      buildEscalationAudit({
+        tenantId,
+        sessionId,
+        reason,
+        // No rotation user — the number IS the destination.
+        assignedUserId: null,
+        outcome: 'transfer_initiated',
+        rotationIndex: 0,
+      }),
+    );
 
     let message = transferringText;
     if (reason === 'emergency_dispatch') {
@@ -573,20 +607,20 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
               actionUrl:
                 dialActionUrl ??
                 `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
+              ...(screenHandoff ? { screen: true } : {}),
             })
           : undefined;
-        if (auditRepo) {
-          await auditRepo.create(
-            buildEscalationAudit({
-              tenantId,
-              sessionId,
-              reason,
-              assignedUserId: null,
-              outcome: 'transfer_initiated',
-              rotationIndex: 0,
-            }),
-          );
-        }
+        await recordAuditBestEffort(
+          auditRepo,
+          buildEscalationAudit({
+            tenantId,
+            sessionId,
+            reason,
+            assignedUserId: null,
+            outcome: 'transfer_initiated',
+            rotationIndex: 0,
+          }),
+        );
         if (session) {
           session.events.emit(VOICE_EVENT_CHANNEL, escalationTriggeredEvent(recordedReason));
         }
@@ -618,17 +652,16 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
       // Rotation exhausted AND no business line — give up. Audit + fall
       // through to the no-dispatcher path so the route can queue the
       // customer callback proposal.
-      if (auditRepo) {
-        await auditRepo.create(
-          buildEscalationAudit({
-            tenantId,
-            sessionId,
-            reason,
-            assignedUserId: null,
-            outcome: 'no_dispatcher_available',
-          }),
-        );
-      }
+      await recordAuditBestEffort(
+        auditRepo,
+        buildEscalationAudit({
+          tenantId,
+          sessionId,
+          reason,
+          assignedUserId: null,
+          outcome: 'no_dispatcher_available',
+        }),
+      );
       return {
         escalated: false,
         message: "No dispatcher available. We'll follow up shortly.",
@@ -707,22 +740,22 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
           {
             actionUrl: dialActionUrl ?? `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
             ...(whisperUrl ? { whisperUrl } : {}),
+            ...(screenHandoff ? { screen: true } : {}),
           },
         )
       : undefined;
 
-    if (auditRepo) {
-      await auditRepo.create(
-        buildEscalationAudit({
-          tenantId,
-          sessionId,
-          reason,
-          assignedUserId: chosen.entry.userId,
-          outcome: 'transfer_initiated',
-          rotationIndex: chosen.index,
-        }),
-      );
-    }
+    await recordAuditBestEffort(
+      auditRepo,
+      buildEscalationAudit({
+        tenantId,
+        sessionId,
+        reason,
+        assignedUserId: chosen.entry.userId,
+        outcome: 'transfer_initiated',
+        rotationIndex: chosen.index,
+      }),
+    );
 
     let message = transferringText;
     if (reason === 'emergency_dispatch') {
@@ -761,17 +794,16 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
 
   if (!entry) {
     // Emit audit event even when no dispatcher is available
-    if (auditRepo) {
-      await auditRepo.create(
-        buildEscalationAudit({
-          tenantId,
-          sessionId,
-          reason,
-          assignedUserId: null,
-          outcome: 'no_dispatcher_available',
-        }),
-      );
-    }
+    await recordAuditBestEffort(
+      auditRepo,
+      buildEscalationAudit({
+        tenantId,
+        sessionId,
+        reason,
+        assignedUserId: null,
+        outcome: 'no_dispatcher_available',
+      }),
+    );
 
     return {
       escalated: false,
@@ -780,17 +812,16 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
   }
 
   // Emit audit event for successful escalation
-  if (auditRepo) {
-    await auditRepo.create(
-      buildEscalationAudit({
-        tenantId,
-        sessionId,
-        reason,
-        assignedUserId: entry.userId,
-        outcome: 'escalated',
-      }),
-    );
-  }
+  await recordAuditBestEffort(
+    auditRepo,
+    buildEscalationAudit({
+      tenantId,
+      sessionId,
+      reason,
+      assignedUserId: entry.userId,
+      outcome: 'escalated',
+    }),
+  );
 
   // Build the result message
   let message = transferringText;
@@ -874,28 +905,29 @@ export async function emergencyImmediateDial(
   const escalation = await escalateToHuman({
     ...escalateInput,
     reason: 'emergency_dispatch',
+    // An emergency: a voicemail must never "answer" it (press-1 screen).
+    screenHandoff: true,
   });
 
   // Audit — every immediate-Dial decision is recorded, regardless of
   // whether a dispatcher was ultimately reachable.
-  if (input.auditRepo) {
-    await input.auditRepo.create(
-      createAuditEvent({
-        tenantId: input.tenantId,
-        actorId: input.sessionId,
-        actorRole: 'system',
-        eventType: 'emergency_immediate_dial',
-        entityType: 'session',
-        entityId: input.sessionId,
-        metadata: {
-          intent,
-          channel: escalateInput.channel,
-          escalated: escalation.escalated,
-          transferInitiated: escalation.transfer !== undefined,
-        },
-      }),
-    );
-  }
+  await recordAuditBestEffort(
+    input.auditRepo,
+    createAuditEvent({
+      tenantId: input.tenantId,
+      actorId: input.sessionId,
+      actorRole: 'system',
+      eventType: 'emergency_immediate_dial',
+      entityType: 'session',
+      entityId: input.sessionId,
+      metadata: {
+        intent,
+        channel: escalateInput.channel,
+        escalated: escalation.escalated,
+        transferInitiated: escalation.transfer !== undefined,
+      },
+    }),
+  );
 
   return { dialed: true, escalation };
 }

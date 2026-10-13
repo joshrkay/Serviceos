@@ -323,5 +323,31 @@ describe('P0-009 — Async job processing with SQS', () => {
     it('returns 0 on an empty queue', async () => {
       expect(await queue.stalePendingCount(0)).toBe(0);
     });
+
+    it('does not count a message delayed into the future, however old the row is', async () => {
+      // A delayed job (a durable timer, a 6 h A2P poll) is scheduled work,
+      // not a stuck queue — counting it paged an operator every night.
+      vi.useFakeTimers();
+      try {
+        await queue.send('test.job', { n: 1 }, 'delayed', { delaySeconds: 11 * 60 * 60 });
+        vi.advanceTimersByTime(2 * 60 * 60 * 1000);
+
+        expect(await queue.stalePendingCount(15 * 60)).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('counts a delayed message once it has been DUE and unclaimed for the window', async () => {
+      vi.useFakeTimers();
+      try {
+        await queue.send('test.job', { n: 1 }, 'delayed', { delaySeconds: 60 * 60 });
+        vi.advanceTimersByTime(60 * 60 * 1000 + 20 * 60 * 1000); // due 20 min ago
+
+        expect(await queue.stalePendingCount(15 * 60)).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

@@ -6,6 +6,7 @@ import {
   CalendarProvider,
 } from './calendar-integration';
 import { GoogleOAuthConfig, GoogleFetch, getValidAccessToken } from './google-calendar';
+import { timedFetch } from '../shared/timed-fetch';
 
 /**
  * Tier 4 (Calendar sync — PR 2). Pushes appointments into each
@@ -80,6 +81,8 @@ export interface CalendarSyncResult {
   failed: string[];    // tech userIds where push failed
 }
 
+const boundedGoogleFetch: GoogleFetch = timedFetch();
+
 export class CalendarSyncService {
   constructor(
     private readonly deps: {
@@ -148,7 +151,9 @@ export class CalendarSyncService {
         },
       };
 
-      const fetchFn = this.deps.googleFetch ?? fetch;
+      // The token refresh above already carries its own 15 s bound
+      // (google-calendar.ts); the events insert gets the shared 10 s one.
+      const fetchFn = this.deps.googleFetch ?? boundedGoogleFetch;
       const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(integration.calendarId)}/events`;
       const res = await fetchFn(url, {
         method: 'POST',

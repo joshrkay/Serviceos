@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { loadConfig, resetConfig } from '../../src/shared/config';
 import { inviteTeamMember } from '../../src/users/invite-team-member';
 import { InMemoryPendingInvitationRepository } from '../../src/users/pending-invitation';
+import { hangingFetch, settleWithin, useProviderClock } from '../helpers/hanging-fetch';
 
 describe('inviteTeamMember', () => {
   beforeEach(() => {
@@ -36,5 +37,37 @@ describe('inviteTeamMember', () => {
     expect(body.redirect_url).toBe(
       `https://app.example.com/accept-invitation?invitation_id=${encodeURIComponent(result.invitation.id)}`,
     );
+  });
+});
+
+describe('inviteTeamMember — bounded Clerk call (reliability #5)', () => {
+  beforeEach(() => {
+    resetConfig();
+    loadConfig({ NODE_ENV: 'dev', WEB_URL: 'https://app.example.com' });
+    useProviderClock();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    resetConfig();
+  });
+
+  it('a Clerk invitation call that never answers is given up at 10 s; the local invitation stands', async () => {
+    const repo = new InMemoryPendingInvitationRepository();
+    vi.stubGlobal('fetch', hangingFetch((url) => url === 'https://api.clerk.com/v1/invitations'));
+
+    const outcome = await settleWithin(
+      inviteTeamMember(
+        { tenantId: 'tenant-1', email: 'tech@example.com', role: 'technician', invitedBy: 'owner-1' },
+        repo,
+        { clerkSecretKey: 'sk_test' },
+      ),
+      10_000,
+    );
+
+    expect(outcome.status).toBe('fulfilled');
+    const result = (outcome as { value: Awaited<ReturnType<typeof inviteTeamMember>> }).value;
+    expect(result.clerkInvitationId).toBeNull();
+    expect(result.invitation.email).toBe('tech@example.com');
   });
 });

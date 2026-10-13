@@ -35,6 +35,11 @@ import { routeParam } from '../shared/route-params';
 interface CreateVoiceRecordingBody {
   fileId: string;
   conversationId?: string;
+  /**
+   * Still required for contract stability (web + mobile send the upload's
+   * downloadUrl), but NEVER used: H2 — the transcription audio URL is minted
+   * server-side from the tenant-scoped files row named by `fileId`.
+   */
   audioUrl: string;
   jobId?: string;
   /**
@@ -51,6 +56,8 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 
 const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
 const JOB_ID_SCHEMA = z.guid();
+/** H2 review — files.id is uuid: a malformed fileId is a 400, not a Postgres 22P02 → 500. */
+const FILE_ID_SCHEMA = z.guid();
 /** #1603 — one spoken clip's text; same ceiling as a voice-session turn. */
 const TTS_BODY_SCHEMA = z.object({ text: z.string().trim().min(1).max(2000) });
 
@@ -534,6 +541,10 @@ export function createVoiceRouter(
         res.status(400).json({ error: 'VALIDATION_ERROR', message: errors.join(', ') });
         return;
       }
+      if (!FILE_ID_SCHEMA.safeParse(body.fileId).success) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'fileId must be a valid UUID' });
+        return;
+      }
 
       let verifiedJobId: string | undefined;
       if (body.jobId !== undefined) {
@@ -565,18 +576,65 @@ export function createVoiceRouter(
       // key is a no-op if the original job is still queued, but rescues a
       // create-then-crash (row written, request died before enqueue) — the
       // queue's own idempotency makes the re-send safe.
-      const enqueueTranscription = (recordingId: string, conversationId?: string) =>
+      const enqueueTranscription = (
+        recordingId: string,
+        audioUrl: string,
+        conversationId?: string,
+      ) =>
         queue.send(
           'transcription',
           {
             tenantId: req.auth!.tenantId,
             recordingId,
-            audioUrl: body.audioUrl,
+            audioUrl,
             conversationId,
             ...(verifiedJobId ? { jobId: verifiedJobId } : {}),
           },
           `${req.auth!.tenantId}:${recordingId}:transcription:create`,
         );
+
+      // H2 — the transcription audio is server-selected, exactly like the
+      // #1248 retry path: enqueueing the client's audioUrl let any caller
+      // with files:upload make the worker fetch an arbitrary URL from inside
+      // the API process (SSRF, with the HTTP status echoed back through the
+      // recording's errorMessage). Resolve the tenant-scoped files row and
+      // mint the download URL here; body.audioUrl is never enqueued. Answers
+      // the error response itself and returns null when no URL can be minted.
+      const serverAudioUrl = async (fileId: string | undefined): Promise<string | null> => {
+        if (!opts?.fileRepo || !opts.storage) {
+          res.status(503).json({
+            error: 'NOT_CONFIGURED',
+            message: 'Recording storage is not configured',
+          });
+          return null;
+        }
+        const file = fileId ? await opts.fileRepo.findById(req.auth!.tenantId, fileId) : null;
+        if (!file) {
+          res.status(404).json({ error: 'NOT_FOUND', message: 'Recording audio file not found' });
+          return null;
+        }
+        // H2 review M2 — only the caller's own memo upload (what web and
+        // mobile request via /api/files/upload-url: entityType
+        // 'voice_recording', uploadedBy = this user). The Twilio webhooks
+        // write voice_recording files too; re-posting one would launder
+        // caller audio into a trusted 'inapp_voice' operator memo and skip
+        // the voicemail caller-ID / STIR gate.
+        if (file.entityType !== 'voice_recording' || file.uploadedBy !== req.auth!.userId) {
+          res.status(403).json({
+            error: 'RECORDING_FILE_NOT_OWNED',
+            message: 'Recording file must be your own voice memo upload',
+          });
+          return null;
+        }
+        if (!isAllowedMimeType(file.contentType)) {
+          res.status(409).json({
+            error: 'INVALID_RECORDING_AUDIO',
+            message: 'Recording file is not audio',
+          });
+          return null;
+        }
+        return opts.storage.generateDownloadUrl(file.storageBucket, file.storageKey);
+      };
 
       // U11 — replay guard. A repeated create carrying an idempotency key that
       // already resolves to a recording in this tenant MUST return the ORIGINAL
@@ -584,15 +642,19 @@ export function createVoiceRouter(
       // request died between voiceRepo.create and the enqueue, the row would
       // otherwise be stranded in 'pending' forever (the ~90s client poll times
       // out). The re-send is dedupe-safe. Not a fresh create, so nothing new to
-      // audit here.
+      // audit here. The audio comes from the ORIGINAL recording's file — the
+      // replayed body is not trusted to name it.
       if (idempotencyKey) {
         const existing = await voiceRepo.findByIdempotencyKey(
           req.auth!.tenantId,
           idempotencyKey,
         );
         if (existing) {
+          const audioUrl = await serverAudioUrl(existing.fileId);
+          if (audioUrl === null) return;
           const queueMessageId = await enqueueTranscription(
             existing.id,
+            audioUrl,
             existing.conversationId,
           );
           res.status(202).json({
@@ -602,6 +664,9 @@ export function createVoiceRouter(
           return;
         }
       }
+
+      const audioUrl = await serverAudioUrl(body.fileId);
+      if (audioUrl === null) return;
 
       const recording = await voiceRepo.create(
         createVoiceRecording({
@@ -613,7 +678,11 @@ export function createVoiceRouter(
         })
       );
 
-      const queueMessageId = await enqueueTranscription(recording.id, body.conversationId);
+      const queueMessageId = await enqueueTranscription(
+        recording.id,
+        audioUrl,
+        body.conversationId,
+      );
 
       res.status(202).json({
         recording,

@@ -7,6 +7,7 @@ import { SettingsRepository } from '../settings/settings';
 import { ValidationError, NotFoundError } from '../shared/errors';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { publicActorFromToken } from '../feedback/feedback-response';
+import { timedFetch } from '../shared/timed-fetch';
 import type { CatalogUnitValue } from '@ai-service-os/shared';
 
 export interface StripeConfig {
@@ -76,6 +77,8 @@ export interface ConnectAccountResolver {
   } | null>;
 }
 
+const boundedStripeFetch: typeof fetch = timedFetch();
+
 export interface PublicInvoiceServiceDeps {
   /**
    * QA-2026-06-05 (PORT-02): dev-grade fallback. When Stripe isn't
@@ -105,7 +108,8 @@ export interface PublicInvoiceServiceDeps {
    * charges-enabled. Optional so legacy harnesses don't need it.
    */
   connectAccountResolver?: ConnectAccountResolver;
-  /** Override-able fetch for unit tests. */
+  /** Override-able fetch for unit tests. Defaults to the global fetch
+   *  bounded at 10 s (see shared/timed-fetch). */
   stripeFetch?: typeof fetch;
   /**
    * D2-1d — audit logging for the first-mint checkout link creation.
@@ -268,7 +272,7 @@ export class PublicInvoiceService {
       headers['Stripe-Account'] = connect.accountId;
     }
 
-    const fetchFn = this.deps.stripeFetch ?? fetch;
+    const fetchFn = this.deps.stripeFetch ?? boundedStripeFetch;
     const res = await fetchFn('https://api.stripe.com/v1/payment_links', {
       method: 'POST',
       headers,

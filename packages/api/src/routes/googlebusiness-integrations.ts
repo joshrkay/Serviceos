@@ -7,6 +7,7 @@ import { OAuthStateRepository } from '../integrations/calendar-integration';
 import {
   GoogleBusinessOAuthConfig,
   GoogleFetch,
+  boundedGoogleFetch,
   buildGoogleBusinessAuthUrl,
   exchangeAuthorizationCode,
   listAccounts,
@@ -143,7 +144,7 @@ export function createGoogleBusinessOAuthCallbackRouter(
         throw new ValidationError('Invalid or expired OAuth state');
       }
 
-      const fetchFn = deps.googleFetch ?? fetch;
+      const fetchFn = deps.googleFetch ?? boundedGoogleFetch;
       const tokens = await exchangeAuthorizationCode(
         deps.googleConfig,
         code,

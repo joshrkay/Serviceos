@@ -8,14 +8,17 @@
  * from the customer's browser into Stripe's iframe (`<PaymentElement>`),
  * never through our server.
  *
- * Idempotency is enforced per (invoiceId, amount, account-scope) so duplicate
- * POSTs from the public payment page don't create multiple intents, and a
- * tenant that later enables Connect does not collide with a prior platform
- * intent key.
+ * Idempotency is enforced per (invoiceId, amount, account-scope, repricing
+ * nonce) so duplicate POSTs from the public payment page don't create multiple
+ * intents, a tenant that later enables Connect does not collide with a prior
+ * platform intent key, and a credit-repriced invoice never gets a cancelled
+ * intent replayed.
  *
  * When `stripeAccountId` is set, the request is a Connect direct charge
  * (`Stripe-Account` header) so funds settle on the tenant's Express account.
  */
+
+import { timedFetch } from '../shared/timed-fetch';
 
 export interface StripePaymentIntentConfig {
   apiKey: string;
@@ -28,6 +31,15 @@ export interface CreatePaymentIntentInput {
   tenantId: string;
   /** Connected account id for direct charges; omit for platform. */
   stripeAccountId?: string;
+  /**
+   * Review H2 — repricing nonce in the idempotency key: the invoice's
+   * line-item count. Every owner-approved credit / late fee appends a line,
+   * so it changes exactly when the invoice is re-priced and is stable across
+   * page views and payments. Without it, a balance that returns to an earlier
+   * amount after a credit cancelled the PI minted at that amount would get
+   * the CANCELLED PI replayed by Stripe (~24h key retention).
+   */
+  repricingNonce: number;
 }
 
 export interface CreatePaymentIntentResult {
@@ -57,6 +69,15 @@ export interface StripeFetch {
 }
 
 /**
+ * Default fetcher for every wrapper here and in stripe-terminal.ts /
+ * stripe-saved-card.ts: the global fetch bounded at 10 s. These calls run on
+ * public pay pages and inside the /api request transaction, where an
+ * unanswered Stripe call would otherwise pin a pooled connection. A timeout
+ * rejects like a network failure, so callers' handling is unchanged.
+ */
+export const boundedStripeFetch: StripeFetch = timedFetch();
+
+/**
  * Create a Stripe PaymentIntent and return the client secret.
  *
  * @param config Stripe API config (live or test secret key).
@@ -66,7 +87,7 @@ export interface StripeFetch {
 export async function createPaymentIntent(
   config: StripePaymentIntentConfig,
   input: CreatePaymentIntentInput,
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<CreatePaymentIntentResult> {
   if (!config.apiKey) {
     throw new Error('createPaymentIntent requires a Stripe API key');
@@ -83,6 +104,9 @@ export async function createPaymentIntent(
   if (!input.tenantId) {
     throw new Error('tenantId is required');
   }
+  if (!Number.isInteger(input.repricingNonce) || input.repricingNonce < 0) {
+    throw new Error('repricingNonce must be a non-negative integer (the invoice line-item count)');
+  }
 
   const body = new URLSearchParams({
     amount: String(input.amount),
@@ -98,8 +122,10 @@ export async function createPaymentIntent(
     'Content-Type': 'application/x-www-form-urlencoded',
     // Idempotency-Key prevents duplicate intents when the customer
     // double-taps the pay button or the page remounts on iOS Safari.
-    // Account scope keeps platform vs Connect intents distinct.
-    'Idempotency-Key': `pi_${input.invoiceId}_${input.amount}_${accountScope}`,
+    // Account scope keeps platform vs Connect intents distinct; the
+    // repricing nonce keeps a re-priced invoice from replaying a PI that a
+    // credit cancelled (see CreatePaymentIntentInput.repricingNonce).
+    'Idempotency-Key': `pi_${input.invoiceId}_${input.amount}_${accountScope}_r${input.repricingNonce}`,
   };
   if (input.stripeAccountId?.trim()) {
     headers['Stripe-Account'] = input.stripeAccountId.trim();
@@ -140,10 +166,12 @@ export async function createPaymentIntent(
 export interface PaymentIntentSummary {
   id: string;
   status: string;
+  /** Integer cents the PI will charge (lets a repricing sweep keep PIs priced within the balance). */
+  amount?: number;
 }
 
 interface StripeSearchResponse {
-  data?: Array<{ id?: string; status?: string }>;
+  data?: Array<{ id?: string; status?: string; amount?: number }>;
   has_more?: boolean;
   next_page?: string;
 }
@@ -162,7 +190,7 @@ const MAX_SEARCH_PAGES = 10;
 export async function searchPaymentIntentsByInvoice(
   config: StripePaymentIntentConfig,
   input: { tenantId: string; invoiceId: string; stripeAccountId?: string },
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<PaymentIntentSummary[]> {
   if (!config.apiKey) {
     throw new Error('searchPaymentIntentsByInvoice requires a Stripe API key');
@@ -198,7 +226,13 @@ export async function searchPaymentIntentsByInvoice(
     }
     const data = (await res.json()) as StripeSearchResponse;
     for (const pi of data.data ?? []) {
-      if (pi.id) results.push({ id: pi.id, status: pi.status ?? 'unknown' });
+      if (pi.id) {
+        results.push({
+          id: pi.id,
+          status: pi.status ?? 'unknown',
+          ...(typeof pi.amount === 'number' ? { amount: pi.amount } : {}),
+        });
+      }
     }
     if (!data.has_more || !data.next_page) break;
     page = data.next_page;
@@ -216,7 +250,7 @@ export async function cancelPaymentIntent(
   config: StripePaymentIntentConfig,
   paymentIntentId: string,
   stripeAccountId?: string,
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<void> {
   if (!config.apiKey) throw new Error('cancelPaymentIntent requires a Stripe API key');
   if (!paymentIntentId) throw new Error('paymentIntentId is required');

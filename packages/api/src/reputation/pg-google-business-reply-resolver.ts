@@ -40,7 +40,7 @@ import type {
   GoogleBusinessOAuthConfig,
   GoogleFetch,
 } from './google-business-client';
-import { refreshAccessToken } from './google-business-client';
+import { boundedGoogleFetch, refreshAccessToken } from './google-business-client';
 import {
   GoogleBusinessCredentialStore,
   resolveGoogleBusinessLocation,
@@ -143,7 +143,7 @@ export class PgGoogleBusinessReplyResolver implements GoogleBusinessReplyResolve
         const rotated = await refreshAccessToken(
           this.opts.googleConfig,
           tokens.refreshToken,
-          this.opts.fetchFn ?? fetch,
+          this.opts.fetchFn ?? boundedGoogleFetch,
         );
         if (this.opts.credentialStore) {
           await this.opts.credentialStore.persistRotatedAccessToken(

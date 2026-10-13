@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { resolveStorageConfig } from './storage-config';
 
 const configSchema = z.object({
   NODE_ENV: z
@@ -322,10 +323,40 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (cachedConfig.NODE_ENV === 'prod' || cachedConfig.NODE_ENV === 'staging') {
     validateProductionConfig(cachedConfig);
     validateFeatureRequiredConfig(env);
+    // Deliberately WARNINGS, never a boot failure: production runs without
+    // SENTRY_DSN today, and refusing to boot would take it down. ALERT_SMS_TO
+    // only pages when SMS delivery is configured (the same three variables
+    // delivery-provider-factory.ts requires).
+    const smsDeliveryConfigured = !!(
+      normalized.TWILIO_ACCOUNT_SID &&
+      normalized.TWILIO_AUTH_TOKEN &&
+      normalized.TWILIO_FROM_NUMBER
+    );
+    if (cachedConfig.ALERT_SMS_TO && !smsDeliveryConfigured) {
+      cachedConfig.warnings.push(ALERT_SMS_TO_UNDELIVERABLE_WARNING);
+    }
+    if (!cachedConfig.SENTRY_DSN && !(cachedConfig.ALERT_SMS_TO && smsDeliveryConfigured)) {
+      cachedConfig.warnings.push(NO_HUMAN_PAGING_WARNING);
+    }
   }
 
   return cachedConfig;
 }
+
+/**
+ * The SLO / failure-rate monitors, the orphaned-number sweeper and the
+ * drain-abandonment alarm page a human only through Sentry (SENTRY_DSN) or the
+ * operator SMS (ALERT_SMS_TO). With neither, a breach is a log line nobody
+ * reads.
+ */
+const ALERT_SMS_TO_UNDELIVERABLE_WARNING =
+  'ALERT_SMS_TO is set but SMS delivery is not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, ' +
+  'TWILIO_FROM_NUMBER), so the operator SMS can never be sent.';
+
+const NO_HUMAN_PAGING_WARNING =
+  'No operator paging channel: neither SENTRY_DSN nor a deliverable ALERT_SMS_TO is set, so SLO breaches, ' +
+  'failure-rate alerts and dropped-call drain alarms reach only the logs. Set SENTRY_DSN ' +
+  '(with the Sentry alert rules) and/or ALERT_SMS_TO (needs Twilio SMS credentials).';
 
 /**
  * Validates that all required production configuration is present.
@@ -505,14 +536,22 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     }
   }
 
-  // Object storage — voice recordings, file/job uploads via Cloudflare R2.
-  // R2_PUBLIC_URL is intentionally NOT required: S3StorageProvider
-  // falls back to presigned GET URLs when publicUrlBase is unset
-  // (see files/storage-provider.ts:159), so storage works without it.
+  // Object storage — voice recordings, file/job uploads, inbound MMS photos.
+  // Validates the RESOLVED config — the same shared/storage-config.ts resolver
+  // createStorageProvider() builds the provider from (STORAGE_* canonical,
+  // R2_* alias) — so the validator and the factory cannot demand different
+  // variable families. STORAGE_PUBLIC_URL is intentionally NOT required:
+  // S3StorageProvider falls back to presigned GET URLs when it is unset.
+  // STORAGE_ENABLED=false is the explicit opt-out; the factory then runs the
+  // dev provider (uploads/recordings/MMS NOT persisted) and logs a boot WARN.
   if (storageEnabled) {
-    if (!env.R2_ACCOUNT_ID) missing.push('R2_ACCOUNT_ID (or set STORAGE_ENABLED=false)');
-    if (!env.R2_ACCESS_KEY_ID) missing.push('R2_ACCESS_KEY_ID (or set STORAGE_ENABLED=false)');
-    if (!env.R2_SECRET_ACCESS_KEY) missing.push('R2_SECRET_ACCESS_KEY (or set STORAGE_ENABLED=false)');
+    const storage = resolveStorageConfig(env);
+    if (!storage.ok) {
+      missing.push(
+        `object storage is not configured — missing ${storage.missing.join(', ')} ` +
+          '(or set STORAGE_ENABLED=false: uploads, recordings and MMS photos are then NOT persisted)'
+      );
+    }
   }
 
   // Voice Media Streams (Twilio bidirectional audio) require a raw-PCM-capable

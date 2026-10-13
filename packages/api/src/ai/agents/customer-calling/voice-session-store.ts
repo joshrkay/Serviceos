@@ -465,6 +465,14 @@ export interface VoiceSession {
    * alongside outcome on the voice_sessions row as a breadcrumb.
    */
   terminalReason?: string;
+  /**
+   * #8b / H1 — epoch ms at which a PERSON accepted the hand-off (pressed 1 on
+   * the whisper screen). Set while the bridged call is still live — long
+   * before /dial-result stamps `terminalReason = 'transferred'` at its end —
+   * so the emergency page ladder stops paging a dispatcher who is already on
+   * the call. Never set by a mere pickup: a carrier voicemail "answers" too.
+   */
+  transferAnsweredAt?: number;
   createdAt: Date;
   lastActivityAt: Date;
   events: EventEmitter;

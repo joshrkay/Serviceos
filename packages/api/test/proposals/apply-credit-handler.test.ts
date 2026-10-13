@@ -16,12 +16,16 @@
  * check), dev-wiring passthrough, and tenant isolation.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ApplyCreditExecutionHandler } from '../../src/proposals/execution/apply-credit-handler';
+import { ApplyCreditExecutionHandler, creditLineId } from '../../src/proposals/execution/apply-credit-handler';
+import { InMemoryJobRepository } from '../../src/jobs/job';
+import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
+import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import { InMemoryInvoiceRepository, Invoice } from '../../src/invoices/invoice';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { Proposal, VALID_PROPOSAL_TYPES, actionClassForProposalType } from '../../src/proposals/proposal';
 import { validateProposalPayload } from '../../src/proposals/contracts';
 import { buildLineItem, calculateDocumentTotals, LineItem } from '../../src/shared/billing-engine';
+import { evaluateInvoiceGates } from '../../src/workers/money-reconciliation';
 
 const TENANT = 't-1';
 const OTHER_TENANT = 't-2';
@@ -63,6 +67,110 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
     ...overrides,
   };
 }
+
+/**
+ * Fake Stripe-side provider: records which links were deactivated and which
+ * PaymentIntents were cancelled. `intents` are what the metadata search
+ * returns for the invoice (platform scope).
+ */
+function makeFakeProvider(opts: {
+  intents?: Array<{ id: string; status: string; amount?: number }>;
+  deactivateError?: Error;
+  cancelError?: Error;
+} = {}) {
+  const deactivated: string[] = [];
+  const canceled: string[] = [];
+  const provider = {
+    generateLink: async () => {
+      throw new Error('not used');
+    },
+    deactivateLink: async (linkId: string) => {
+      if (opts.deactivateError) throw opts.deactivateError;
+      deactivated.push(linkId);
+    },
+    listInvoicePaymentIntents: async () => opts.intents ?? [],
+    cancelPaymentIntent: async (paymentIntentId: string) => {
+      if (opts.cancelError) throw opts.cancelError;
+      canceled.push(paymentIntentId);
+    },
+  };
+  return { provider, deactivated, canceled };
+}
+
+/**
+ * Deterministic interleave: a concurrent write (a Stripe webhook payment via
+ * the same atomic increment the webhook path uses, or a void) commits AFTER
+ * the handler has read its invoice snapshot and BEFORE the handler writes.
+ */
+class ConcurrentWriteAfterRead extends InMemoryInvoiceRepository {
+  private pending: ((tenantId: string, id: string) => Promise<unknown>) | null = null;
+
+  armConcurrentPayment(cents: number): void {
+    this.pending = (tenantId, id) => this.incrementAmountPaidAtomic(tenantId, id, cents, new Date());
+  }
+
+  armConcurrentVoid(): void {
+    this.pending = (tenantId, id) => this.update(tenantId, id, { status: 'void' });
+  }
+
+  armConcurrentWrite(write: (tenantId: string, id: string) => Promise<unknown>): void {
+    this.pending = write;
+  }
+
+  async findById(tenantId: string, id: string): Promise<Invoice | null> {
+    const snapshot = await super.findById(tenantId, id);
+    if (snapshot && this.pending) {
+      const write = this.pending;
+      this.pending = null;
+      await write(tenantId, id);
+    }
+    return snapshot;
+  }
+}
+
+/**
+ * Review N1 — what a credit means on a surcharged invoice. The owner credits
+ * $X against the amount due the customer sees (surcharge-inclusive) and may
+ * credit up to exactly that. The credit is a −$X non-taxable line; the
+ * processing-fee surcharge follows the reduced base at its stored rate. When
+ * that would take the total below what has been paid, the credit CLEARS the
+ * invoice: total = paid, due = $0 (status per M2), and the surcharge keeps
+ * only the remainder that makes the totals add up (never more than it was).
+ * More than the amount due is refused as "exceeds amount due" — never the
+ * misleading "changed while applying". Expected cents are hand-computed.
+ */
+interface CreditCase {
+  name: string;
+  labor: number;
+  discount?: number;
+  taxBps?: number;
+  feeBps?: number;
+  paid?: number;
+  credit: number;
+  expect:
+    | { refused: RegExp }
+    | { subtotal: number; fee: number | undefined; total: number; due: number; status: string };
+}
+
+const CREDIT_CASES: CreditCase[] = [
+  // No surcharge — a credit takes exactly $X off.
+  { name: 'no fee: credit == due clears', labor: 10000, credit: 10000, expect: { subtotal: 0, fee: 0, total: 0, due: 0, status: 'open' } },
+  { name: 'no fee: credit == due − 1¢ leaves 1¢', labor: 10000, credit: 9999, expect: { subtotal: 1, fee: 0, total: 1, due: 1, status: 'open' } },
+  { name: 'no fee: credit == due + 1¢ is refused', labor: 10000, credit: 10001, expect: { refused: /exceeds amount due/i } },
+  // $100 + 3% surcharge = $103 due, nothing paid.
+  { name: '3% fee: credit == due ($103) clears', labor: 10000, feeBps: 300, credit: 10300, expect: { subtotal: -300, fee: 300, total: 0, due: 0, status: 'open' } },
+  { name: '3% fee: credit == due − 1¢ clears (its surcharge share covers the cent)', labor: 10000, feeBps: 300, credit: 10299, expect: { subtotal: -299, fee: 299, total: 0, due: 0, status: 'open' } },
+  { name: '3% fee: credit == due + 1¢ is refused', labor: 10000, feeBps: 300, credit: 10301, expect: { refused: /exceeds amount due/i } },
+  // Same invoice, $50 paid → $53 due.
+  { name: '3% fee, partly paid: credit == due ($53) clears to paid', labor: 10000, feeBps: 300, paid: 5000, credit: 5300, expect: { subtotal: 4700, fee: 300, total: 5000, due: 0, status: 'paid' } },
+  { name: '3% fee, partly paid: credit == due − 1¢ clears to paid', labor: 10000, feeBps: 300, paid: 5000, credit: 5299, expect: { subtotal: 4701, fee: 299, total: 5000, due: 0, status: 'paid' } },
+  { name: '3% fee, partly paid: credit == due + 1¢ is refused', labor: 10000, feeBps: 300, paid: 5000, credit: 5301, expect: { refused: /exceeds amount due/i } },
+  { name: '3% fee, partly paid: a $10 credit carries its surcharge share', labor: 10000, feeBps: 300, paid: 5000, credit: 1000, expect: { subtotal: 9000, fee: 270, total: 9270, due: 4270, status: 'partially_paid' } },
+  // $200 taxable, $20 discount, 10% tax (1800), 2.5% fee on 19800 (495) → 20295; $50 paid → 15295 due.
+  { name: 'discounted + taxed + 2.5% fee, partly paid: credit == due clears to paid', labor: 20000, discount: 2000, taxBps: 1000, feeBps: 250, paid: 5000, credit: 15295, expect: { subtotal: 4705, fee: 495, total: 5000, due: 0, status: 'paid' } },
+  { name: 'discounted + taxed + 2.5% fee, partly paid: credit == due − 1¢ clears to paid', labor: 20000, discount: 2000, taxBps: 1000, feeBps: 250, paid: 5000, credit: 15294, expect: { subtotal: 4706, fee: 494, total: 5000, due: 0, status: 'paid' } },
+  { name: 'discounted + taxed + 2.5% fee, partly paid: credit == due + 1¢ is refused', labor: 20000, discount: 2000, taxBps: 1000, feeBps: 250, paid: 5000, credit: 15296, expect: { refused: /exceeds amount due/i } },
+];
 
 describe('apply_credit proposal type', () => {
   it('is a valid proposal type classified as money', () => {
@@ -144,6 +252,34 @@ describe('apply_credit execution handler', () => {
     // future 'credited'/closed status). Pinned so a future status-flip
     // change breaks loudly instead of silently.
     expect(updated!.status).toBe('open');
+  });
+
+  // Review M2 — the atomic write derives status. A credit that clears the
+  // balance of an invoice the customer has PARTLY paid leaves it fully paid
+  // (paid == the reduced total): it must read 'paid', not a payable status
+  // with $0 due that dunning keeps sweeping and a pending late fee can land on.
+  it('a credit that clears the remaining balance of a partly-paid invoice settles it as paid', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    await invoiceRepo.create(
+      makeInvoice({ status: 'partially_paid', amountPaidCents: 1000, amountDueCents: 2000 }),
+    );
+    handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo);
+
+    const result = await handler.execute(
+      makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }),
+      ctx,
+    );
+
+    expect(result.success).toBe(true);
+    const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(updated!.totals.totalCents).toBe(1000);
+    expect(updated!.amountPaidCents).toBe(1000);
+    expect(updated!.amountDueCents).toBe(0);
+    expect(updated!.status).toBe('paid');
+    const applied = (await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID)).find(
+      (e) => e.eventType === 'credit.applied',
+    );
+    expect(applied!.metadata).toMatchObject({ oldStatus: 'partially_paid', newStatus: 'paid' });
   });
 
   it('appends a non-taxable credit line with the reason folded into the description', async () => {
@@ -279,6 +415,487 @@ describe('apply_credit execution handler', () => {
     const untouched = await invoiceRepo.findById(TENANT, INVOICE_ID);
     expect(untouched!.lineItems).toHaveLength(1);
     expect(untouched!.amountDueCents).toBe(3000);
+  });
+
+  // P0-9 — a credit RE-PRICES the invoice. A hosted payment link (or a
+  // minted PaymentIntent) priced at the OLD balance would otherwise still
+  // charge the customer the pre-credit amount, with the excess landing as
+  // audit-only unapplied money.
+  describe('stale charge vectors die when the credit re-prices the invoice', () => {
+    it('deactivates the stored payment link, clears its columns, and audits it as repriced', async () => {
+      invoiceRepo = new InMemoryInvoiceRepository();
+      await invoiceRepo.create(
+        makeInvoice({
+          stripePaymentLinkId: 'plink_old',
+          stripePaymentLinkUrl: 'https://buy.stripe.test/plink_old',
+        }),
+      );
+      const { provider, deactivated } = makeFakeProvider();
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo, undefined, { provider });
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }),
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      expect(deactivated).toEqual(['plink_old']);
+      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+      expect(updated!.amountDueCents).toBe(1000);
+      expect(updated!.stripePaymentLinkId).toBeUndefined();
+      expect(updated!.stripePaymentLinkUrl).toBeUndefined();
+      const events = await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID);
+      const killed = events.find((e) => e.eventType === 'invoice.payment_link_deactivated');
+      expect(killed).toBeDefined();
+      expect(killed!.metadata).toMatchObject({ stripePaymentLinkId: 'plink_old', reason: 'repriced' });
+    });
+
+    it('cancels still-confirmable PaymentIntents minted at the old balance and audits each', async () => {
+      const { provider, canceled } = makeFakeProvider({
+        intents: [
+          { id: 'pi_open', status: 'requires_payment_method' },
+          { id: 'pi_done', status: 'succeeded' },
+        ],
+      });
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo, undefined, { provider });
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }),
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      // A succeeded PI is already settled money — never cancelled.
+      expect(canceled).toEqual(['pi_open']);
+      const events = await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID);
+      const cancelEvents = events.filter((e) => e.eventType === 'invoice.payment_intent_canceled');
+      expect(cancelEvents).toHaveLength(1);
+      expect(cancelEvents[0].metadata).toMatchObject({
+        stripePaymentIntentId: 'pi_open',
+        reason: 'repriced',
+      });
+    });
+
+    it('cancels only PaymentIntents priced ABOVE the new balance — one at or below it cannot overcharge', async () => {
+      const { provider, canceled } = makeFakeProvider({
+        intents: [
+          { id: 'pi_old_balance', status: 'requires_payment_method', amount: 3000 },
+          { id: 'pi_within_balance', status: 'requires_payment_method', amount: 800 },
+          { id: 'pi_exact_balance', status: 'requires_payment_method', amount: 1000 },
+        ],
+      });
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo, undefined, { provider });
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }), // 3000 → 1000 due
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      expect(canceled).toEqual(['pi_old_balance']);
+    });
+
+    it('a Stripe failure to kill the link/PI never fails or unwinds the approved credit — it is audited instead', async () => {
+      invoiceRepo = new InMemoryInvoiceRepository();
+      await invoiceRepo.create(
+        makeInvoice({
+          stripePaymentLinkId: 'plink_old',
+          stripePaymentLinkUrl: 'https://buy.stripe.test/plink_old',
+        }),
+      );
+      const { provider } = makeFakeProvider({
+        intents: [{ id: 'pi_open', status: 'requires_payment_method' }],
+        deactivateError: new Error('stripe 500 on deactivate'),
+        cancelError: new Error('stripe 500 on cancel'),
+      });
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo, undefined, { provider });
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }),
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+      expect(updated!.amountDueCents).toBe(1000);
+      expect(updated!.totals.totalCents).toBe(1000);
+      // The link is still live at Stripe, so its columns are KEPT (a cleared
+      // column would hide the exposure) and the miss is on the audit trail.
+      expect(updated!.stripePaymentLinkId).toBe('plink_old');
+      const types = (await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID)).map((e) => e.eventType);
+      expect(types).toContain('invoice.payment_link_deactivation_failed');
+      expect(types).toContain('invoice.payment_intent_cancel_failed');
+      expect(types).toContain('credit.applied');
+    });
+  });
+
+  // #1288 guard × credit line — a member-discount invoice (every line
+  // taxable, discount > 0, tax > 0) plus the NON-taxable credit line used to
+  // trip the engine's mixed-taxability refusal inside execute(), so an
+  // owner-APPROVED credit threw, retried and landed in execution_failed.
+  // The credit adjusts the existing totals instead: total − credit, tax
+  // untouched (a non-taxable adjustment cannot move the tax base).
+  describe('discounted + taxed invoice', () => {
+    // $200.00 taxable labor, $20.00 discount, 10% tax on the discounted
+    // base: tax 1800, total 20000 − 2000 + 1800 = 19800.
+    function makeDiscountedTaxedInvoice(overrides: Partial<Invoice> = {}): Invoice {
+      const lineItems: LineItem[] = [buildLineItem('li-1', 'Labor', 1, 20000, 0, true, 'labor')];
+      const totals = calculateDocumentTotals(lineItems, 2000, 1000);
+      return makeInvoice({ lineItems, totals, amountDueCents: totals.totalCents, ...overrides });
+    }
+
+    it('applies the credit on an open invoice: total and due drop by exactly the credit, tax unchanged', async () => {
+      invoiceRepo = new InMemoryInvoiceRepository();
+      const seeded = await invoiceRepo.create(makeDiscountedTaxedInvoice());
+      expect(seeded.totals.totalCents).toBe(19800);
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo);
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 3000 } }),
+        ctx,
+      );
+
+      expect(result).toEqual({ success: true, resultEntityId: INVOICE_ID });
+      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+      expect(updated!.totals).toMatchObject({
+        subtotalCents: 17000,
+        discountCents: 2000,
+        taxRateBps: 1000,
+        taxableSubtotalCents: 20000,
+        taxCents: 1800,
+        totalCents: 16800,
+      });
+      expect(updated!.amountDueCents).toBe(16800);
+      expect(updated!.lineItems.map((li) => li.totalCents)).toEqual([20000, -3000]);
+    });
+
+    it('applies the credit on a partially_paid invoice and nets the due against what was paid', async () => {
+      invoiceRepo = new InMemoryInvoiceRepository();
+      await invoiceRepo.create(
+        makeDiscountedTaxedInvoice({
+          status: 'partially_paid',
+          amountPaidCents: 5000,
+          amountDueCents: 14800,
+        }),
+      );
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo);
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 3000 } }),
+        ctx,
+      );
+
+      expect(result).toEqual({ success: true, resultEntityId: INVOICE_ID });
+      const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+      expect(updated!.totals.taxCents).toBe(1800);
+      expect(updated!.totals.totalCents).toBe(16800);
+      // 16800 total − 5000 paid = 11800 still owed.
+      expect(updated!.amountDueCents).toBe(11800);
+      expect(updated!.amountPaidCents).toBe(5000);
+      expect(updated!.status).toBe('partially_paid');
+    });
+  });
+
+  // Review M3 — the surcharge is processing_fee_bps of the chargeable amount
+  // (subtotal − discount + tax). Freezing its CENTS after a credit (300 on an
+  // 8000 base = 375 bps) would surcharge above the configured rate — above
+  // the card-network cap for a tenant set at it. Recompute it at the stored
+  // bps on the new base.
+  it('re-derives the processing-fee surcharge at the stored rate on the reduced base', async () => {
+    // $100.00 labor + 3% processing fee (300) = 10300.
+    const lineItems: LineItem[] = [buildLineItem('li-1', 'Labor', 1, 10000, 0, true, 'labor')];
+    const totals = calculateDocumentTotals(lineItems, 0, 0, 300);
+    invoiceRepo = new InMemoryInvoiceRepository();
+    const seeded = await invoiceRepo.create(
+      makeInvoice({ lineItems, totals, amountDueCents: totals.totalCents }),
+    );
+    expect(seeded.totals.totalCents).toBe(10300);
+    handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo);
+
+    const result = await handler.execute(
+      makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }),
+      ctx,
+    );
+
+    expect(result.success).toBe(true);
+    const updated = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    // 3% of the new 8000 chargeable amount = 240 → total 8240.
+    expect(updated!.totals).toMatchObject({
+      subtotalCents: 8000,
+      processingFeeBps: 300,
+      processingFeeCents: 240,
+      totalCents: 8240,
+    });
+    expect(updated!.amountDueCents).toBe(8240);
+  });
+
+  // #10 — the write must derive the balance from the row's LIVE paid amount,
+  // never the handler's snapshot (same bug class P0-6 closed for payments).
+  describe('a payment that commits between the read and the write', () => {
+    it('is not lost: amount due is the new total minus the LIVE amount paid', async () => {
+      const racing = new ConcurrentWriteAfterRead();
+      await racing.create(makeInvoice()); // 3000 open, nothing paid
+      racing.armConcurrentPayment(1000);
+      handler = new ApplyCreditExecutionHandler(racing, auditRepo);
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 500 } }),
+        ctx,
+      );
+
+      expect(result.success).toBe(true);
+      const row = await racing.findById(TENANT, INVOICE_ID);
+      expect(row!.totals.totalCents).toBe(2500);
+      expect(row!.amountPaidCents).toBe(1000);
+      // 2500 − 1000 — NOT the stale 2500 − 0 the snapshot would give.
+      expect(row!.amountDueCents).toBe(1500);
+      expect(row!.status).toBe('partially_paid');
+    });
+  });
+
+  it('a payment that shrinks the LIVE due below the credit mid-execution refuses it (never paid > total)', async () => {
+    const racing = new ConcurrentWriteAfterRead();
+    await racing.create(makeInvoice()); // 3000 open — the snapshot floor guard passes 2000
+    racing.armConcurrentPayment(2500); // live due drops to 500
+    handler = new ApplyCreditExecutionHandler(racing, auditRepo);
+
+    const result = await handler.execute(
+      makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } }),
+      ctx,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/exceeds amount due/i);
+    expect(result.error).toMatch(/record a refund/i);
+    const row = await racing.findById(TENANT, INVOICE_ID);
+    expect(row!.lineItems).toHaveLength(1);
+    expect(row!.totals.totalCents).toBe(3000);
+    expect(row!.amountPaidCents).toBe(2500);
+    expect(row!.amountDueCents).toBe(500);
+  });
+
+  it('a void that commits between the read and the write refuses the credit — nothing written to the dead invoice', async () => {
+    const racing = new ConcurrentWriteAfterRead();
+    await racing.create(makeInvoice());
+    racing.armConcurrentVoid();
+    handler = new ApplyCreditExecutionHandler(racing, auditRepo);
+
+    const result = await handler.execute(
+      makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 500 } }),
+      ctx,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/void/);
+    const row = await racing.findById(TENANT, INVOICE_ID);
+    expect(row!.status).toBe('void');
+    expect(row!.lineItems).toHaveLength(1);
+    expect(row!.totals.totalCents).toBe(3000);
+  });
+
+  describe.each(CREDIT_CASES)('N1 — $name', (c) => {
+    it('lands exactly the hand-computed cents, refuses only above the amount due, and keeps L2a/L2b/L3/L4', async () => {
+      const lineItems: LineItem[] = [buildLineItem('li-1', 'Labor', 1, c.labor, 0, true, 'labor')];
+      const totals = calculateDocumentTotals(lineItems, c.discount ?? 0, c.taxBps ?? 0, c.feeBps ?? 0);
+      const paid = c.paid ?? 0;
+      invoiceRepo = new InMemoryInvoiceRepository();
+      await invoiceRepo.create(
+        makeInvoice({
+          lineItems,
+          totals,
+          status: paid > 0 ? 'partially_paid' : 'open',
+          amountPaidCents: paid,
+          amountDueCents: totals.totalCents - paid,
+        }),
+      );
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo);
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: c.credit } }),
+        ctx,
+      );
+
+      const row = (await invoiceRepo.findById(TENANT, INVOICE_ID))!;
+      if ('refused' in c.expect) {
+        expect(result.success).toBe(false);
+        expect(result.error).toMatch(c.expect.refused);
+        expect(row.totals.totalCents).toBe(totals.totalCents);
+        expect(row.lineItems).toHaveLength(1);
+      } else {
+        expect(result).toEqual({ success: true, resultEntityId: INVOICE_ID });
+        expect({
+          subtotal: row.totals.subtotalCents,
+          fee: row.totals.processingFeeCents,
+          total: row.totals.totalCents,
+          due: row.amountDueCents,
+          status: row.status,
+        }).toEqual(c.expect);
+        expect(row.amountPaidCents).toBe(paid);
+      }
+      expect(
+        evaluateInvoiceGates({
+          invoiceId: INVOICE_ID,
+          subtotalCents: row.totals.subtotalCents,
+          discountCents: row.totals.discountCents,
+          taxCents: row.totals.taxCents,
+          processingFeeCents: row.totals.processingFeeCents ?? 0,
+          totalCents: row.totals.totalCents,
+          amountPaidCents: row.amountPaidCents,
+          lineTotalSumCents: row.lineItems.reduce((sum, li) => sum + li.totalCents, 0),
+          activePaymentSumCents: paid, // the payment ledger is untouched by a credit
+        }),
+      ).toEqual([]);
+    });
+  });
+
+  // H1 — the handler performs Stripe I/O, so the executor runs it OUTSIDE its
+  // transaction: the credit commits on its own, and a crash before the
+  // executor's idempotency marker re-runs the SAME proposal. That re-run must
+  // be an idempotent success (never a second credit) and must still finish
+  // the stale-link cleanup the crash may have cut off.
+  it('re-executing the SAME approved credit (executor crash-retry) never credits twice and still kills a stale link', async () => {
+    const proposal = makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 1000 } });
+    const first = await handler.execute(proposal, ctx); // 3000 → 2000
+    expect(first.success).toBe(true);
+    // The crash hit before cleanup ran: a link priced at the old balance is
+    // still stored on the invoice.
+    await invoiceRepo.update(TENANT, INVOICE_ID, {
+      stripePaymentLinkId: 'plink_stale',
+      stripePaymentLinkUrl: 'https://buy.stripe.test/plink_stale',
+    });
+    const { provider, deactivated } = makeFakeProvider();
+    const retryHandler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo, undefined, { provider });
+
+    const retry = await retryHandler.execute(proposal, ctx);
+
+    expect(retry).toEqual({ success: true, resultEntityId: INVOICE_ID });
+    const row = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(row!.lineItems.map((li) => li.totalCents)).toEqual([3000, -1000]);
+    expect(row!.totals.totalCents).toBe(2000);
+    expect(row!.amountDueCents).toBe(2000);
+    expect(deactivated).toEqual(['plink_stale']);
+  });
+
+  // Review N4 — the credit's line id is per PROPOSAL, so a duplicate key on
+  // it proves THIS credit is already on the invoice (a concurrent run of the
+  // same proposal won). That is an idempotent success, not a failure that
+  // would invite the owner to approve a second, distinct credit.
+  it('N4 — a duplicate key on its own deterministic line is an idempotent success, and the cleanup still runs', async () => {
+    const racing = new ConcurrentWriteAfterRead();
+    await racing.create(
+      makeInvoice({
+        stripePaymentLinkId: 'plink_old',
+        stripePaymentLinkUrl: 'https://buy.stripe.test/plink_old',
+      }),
+    );
+    const proposal = makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 500 } });
+    racing.armConcurrentWrite((tenantId, id) =>
+      racing.applyNonTaxableAdjustmentAtomic(
+        tenantId,
+        id,
+        buildLineItem(creditLineId(id, proposal.id), 'Credit', 1, -500, 1, false, 'other'),
+        new Date(),
+      ),
+    );
+    const { provider, deactivated } = makeFakeProvider();
+    handler = new ApplyCreditExecutionHandler(racing, auditRepo, undefined, { provider });
+
+    const result = await handler.execute(proposal, ctx);
+
+    expect(result).toEqual({ success: true, resultEntityId: INVOICE_ID });
+    const row = await racing.findById(TENANT, INVOICE_ID);
+    expect(row!.lineItems.map((li) => li.totalCents)).toEqual([3000, -500]);
+    expect(row!.amountDueCents).toBe(2500);
+    expect(deactivated).toEqual(['plink_old']);
+  });
+
+  // Review N5 — a re-run that finds its credit already applied (crash after
+  // the commit, before the executor's marker) must finish what the crash cut
+  // off: the credit.applied domain event (exactly once, keyed by proposal) and
+  // the job money-state rollup (a credit that settled the invoice must move
+  // the job off 'invoiced').
+  it('N5 — a crash-retry writes credit.applied exactly once and refreshes the job money state', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create({
+      id: 'job-1',
+      tenantId: TENANT,
+      customerId: 'cust-1',
+      locationId: 'loc-1',
+      jobNumber: 'JOB-1',
+      summary: 'Leak repair',
+      status: 'completed',
+      priority: 'normal',
+      moneyState: 'invoiced',
+      createdBy: 'u-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    invoiceRepo = new InMemoryInvoiceRepository();
+    await invoiceRepo.create(
+      makeInvoice({ status: 'partially_paid', amountPaidCents: 1000, amountDueCents: 2000 }),
+    );
+    const proposal = makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } });
+    // The first run committed the credit (settling the invoice) and then died
+    // before its domain audit and rollup — modelled by a handler without them.
+    expect((await new ApplyCreditExecutionHandler(invoiceRepo).execute(proposal, ctx)).success).toBe(true);
+    const moneyStateDeps = { jobRepo, estimateRepo: new InMemoryEstimateRepository(), invoiceRepo };
+    const retry = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo, moneyStateDeps);
+
+    expect((await retry.execute(proposal, ctx)).success).toBe(true);
+    expect((await retry.execute(proposal, ctx)).success).toBe(true);
+
+    const applied = (await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID)).filter(
+      (e) => e.eventType === 'credit.applied' && e.metadata?.proposalId === proposal.id,
+    );
+    expect(applied).toHaveLength(1);
+    expect(applied[0].metadata).toMatchObject({ amountCents: 2000, newAmountDueCents: 0, newStatus: 'paid' });
+    expect((await jobRepo.findById(TENANT, 'job-1'))!.moneyState).toBe('paid');
+  });
+
+  it('two DIFFERENT approved credits on the same invoice both apply (the line id is per proposal)', async () => {
+    await handler.execute(makeProposal({ id: 'prop-a', payload: { invoiceId: INVOICE_ID, amountCents: 500 } }), ctx);
+    await handler.execute(makeProposal({ id: 'prop-b', payload: { invoiceId: INVOICE_ID, amountCents: 500 } }), ctx);
+
+    const row = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(row!.lineItems.map((li) => li.totalCents)).toEqual([3000, -500, -500]);
+    expect(row!.amountDueCents).toBe(2000);
+  });
+
+  it('production registry wiring threads paymentLinkCleanup into apply_credit (a late fee leaves the link alone — review H2)', async () => {
+    invoiceRepo = new InMemoryInvoiceRepository();
+    await invoiceRepo.create(
+      makeInvoice({
+        stripePaymentLinkId: 'plink_credit',
+        stripePaymentLinkUrl: 'https://buy.stripe.test/plink_credit',
+      }),
+    );
+    const { provider, deactivated } = makeFakeProvider();
+    const registry = createExecutionHandlerRegistry({
+      invoiceRepo,
+      auditRepo,
+      paymentLinkCleanup: { provider },
+    });
+
+    const credit = await registry.get('apply_credit')!.execute(
+      makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 500 } }),
+      ctx,
+    );
+    expect(credit.success).toBe(true);
+    expect(deactivated).toEqual(['plink_credit']);
+
+    await invoiceRepo.update(TENANT, INVOICE_ID, {
+      stripePaymentLinkId: 'plink_fee',
+      stripePaymentLinkUrl: 'https://buy.stripe.test/plink_fee',
+    });
+    const fee = await registry.get('apply_late_fee')!.execute(
+      makeProposal({
+        proposalType: 'apply_late_fee',
+        payload: { invoiceId: INVOICE_ID, feeCents: 700, stepKey: 'initial' },
+      }),
+      ctx,
+    );
+    expect(fee.success).toBe(true);
+    expect(deactivated).toEqual(['plink_credit']);
   });
 
   it('emits a credit.applied audit event carrying proposalId/amountCents/reason', async () => {

@@ -289,6 +289,8 @@ import { createSharpImageProcessor } from './files/image-processor';
 import { createImagePostProcessWorker } from './workers/image-post-process-worker';
 import { PgWebhookRepository } from './webhooks/pg-webhook';
 import { PgQueue } from './queues/pg-queue';
+import { createRecipientLocaleResolver } from './notifications/recipient-locale';
+import { ownerSmsSender } from './notifications/owner-sms-sender';
 import { NoopFeedbackDispatcher, MessageDeliveryFeedbackDispatcher } from './feedback/dispatcher';
 import { MessageDeliveryProvider } from './notifications/delivery-provider';
 import { createMessageDeliveryProvider } from './notifications/delivery-provider-factory';
@@ -431,9 +433,9 @@ import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-ev
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
 import { escalationOutcomeRouter } from './escalations/outcome-route';
 import { escalationEventsRouter } from './escalations/events-route';
-import { whisperRouter } from './telephony/whisper-route';
+import { mountWhisperRoute } from './telephony/whisper-route';
+import { createTransferScreenHooks } from './telephony/transfer-screening';
 import { WhisperCache } from './telephony/whisper-cache';
-import { requireTwilioSignature } from './telephony/twilio-signature';
 import {
   createTwilioWebhookCredentialResolver,
   createSubaccountCredentialView,
@@ -1251,7 +1253,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     bucket: storageBucket,
     mode: storageMode,
     devStorageSecret,
-  } = createStorageProvider(process.env as NodeJS.ProcessEnv);
+    downloadUrlPolicy: storageDownloadUrlPolicy,
+  } = createStorageProvider(process.env as NodeJS.ProcessEnv, {
+    logger: createLogger({
+      service: 'api-boot',
+      environment: process.env.NODE_ENV || 'development',
+    }),
+  });
 
   // Dev-only storage PUT/GET receiver for DevStorageProvider upload URLs.
   // Mounted before /api Clerk auth so a plain unauthenticated-looking PUT
@@ -1450,7 +1458,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const transcribeAudio = createTranscribeAudioFn(process.env.AI_PROVIDER_API_KEY);
 
   // URL-based provider for the queue worker pipeline.
-  const transcriptionProvider = createWhisperTranscriptionProvider(process.env);
+  // H2 — the Whisper audio GET only reaches URLs this storage mints.
+  const transcriptionProvider = createWhisperTranscriptionProvider(process.env, {
+    audioUrlPolicy: storageDownloadUrlPolicy,
+  });
 
   // P2-030 — shadow comparison store.
   // PgShadowComparisonStore when DATABASE_URL + SHADOW_LLM_ENABLED=true;
@@ -1562,6 +1573,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             : new InMemoryRecipientSmsVolumeLedger(),
           maxPerWindow: config.SMS_RECIPIENT_CAP_PER_WINDOW,
           windowHours: config.SMS_RECIPIENT_CAP_WINDOW_HOURS,
+        },
+        // Recipient-local quiet hours for NON-transactional customer texts
+        // (those tagged `quietHours: 'defer'` — thank-you, review request,
+        // automated estimate reminder): deferred, never dropped.
+        quietHours: {
+          resolveRecipientLocale: createRecipientLocaleResolver({ settingsRepo, locationRepo }),
         },
       })
     : null;
@@ -3010,6 +3027,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
     publicBaseUrl: config.publicOrigins.web,
+    // Recipient quiet hours: a closed window hands the job back to the review
+    // sweep. Without a delivery provider nothing is sent, so always open.
+    sendWindow: messageDelivery ?? {
+      sendWindowVerdict: async () => ({ isAllowedNow: true, nextAllowedAt: new Date() }),
+    },
   });
   workerRegistry.set(
     feedbackSendWorker.type,
@@ -3856,8 +3878,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       ? {
           deliveryProvider: {
             // Owner/dispatcher patch + on-call notify SMS — never customer-gated.
-            sendSms: (args: { to: string; body: string }) =>
-              messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
+            // Forwards the E1 alert's per-message life-safety tag, so only that
+            // alert passes the TELEPHONY_ENABLED=false kill switch.
+            sendSms: ownerSmsSender(messageDelivery),
           },
         }
       : {}),
@@ -4141,9 +4164,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   if (messageDelivery) {
     const emergencyPageWorker = createEmergencyPageWorker({
       queue,
-      // Emergency page → owner / on-call. Never customer-gated.
-      sendSms: (args: { to: string; body: string }) =>
-        messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
+      // Emergency page → owner / on-call. Never customer-gated, and
+      // life-safety: it still goes with the outbound kill switch off.
+      sendSms: ownerSmsSender(messageDelivery, { alertClass: 'life_safety' }),
       resolvePagePhone: async (tenantId: string) => {
         try {
           const settings = await settingsRepo.findByTenant(tenantId);
@@ -4152,9 +4175,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           return null;
         }
       },
+      // #8b / H1 — a person accepting the hand-off (live flag / durable audit
+      // event from the whisper screen's keypress) resolves the ladder while
+      // the bridged call is live; a voicemail pickup never does.
       isResolved: createEmergencyPageResolvedCheck({
         store: voiceSessionStore,
         voiceSessionRepo,
+        auditRepo,
       }),
       callMeBackRepo,
       auditRepo,
@@ -4273,14 +4300,18 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   //
   // The middleware is scoped to the whisper path rather than the router mount
   // so a POST to /voice does not pay a second, weaker signature check on its
-  // way past.
-  app.use(
-    '/api/telephony/whisper',
-    requireTwilioSignature(subaccountCredentialView, {
-      publicBaseUrl: () => process.env.PUBLIC_API_URL,
-    }),
-  );
-  app.use('/api/telephony', whisperRouter({ whisperCache: sharedWhisperCache }));
+  // way past. #4 — the mount parses a POST's form body before verifying it, so
+  // a whisper fetched with Twilio's default POST verifies and is served too.
+  // H1 — the whisper is a press-1 screen; only the keypress marks the
+  // hand-off answered (live + durable), which is what resolves the emergency
+  // page ladder. A voicemail pickup never does.
+  const transferScreenHooks = createTransferScreenHooks({ store: voiceSessionStore, auditRepo });
+  mountWhisperRoute(app, {
+    whisperCache: sharedWhisperCache,
+    credentialView: subaccountCredentialView,
+    publicBaseUrl: () => process.env.PUBLIC_API_URL,
+    onAccepted: transferScreenHooks.onAccepted,
+  });
 
   app.use(
     '/api/telephony',
@@ -4382,10 +4413,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       },
       getHealth: () => {
         const { ttsEnabled, sttEnabled } = realtimeCapabilities();
+        // Recording persists only when the storage factory resolved a real S3
+        // backend (STORAGE_* or the R2_* alias — the same resolver the boot
+        // validator uses). A bare STORAGE_BUCKET is not enough: with the rest
+        // unset the app runs on the dev provider, whose writes are discarded.
         const recordingEnabled =
           !!process.env.TWILIO_ACCOUNT_SID &&
           !!process.env.TWILIO_AUTH_TOKEN &&
-          !!process.env.STORAGE_BUCKET;
+          storageMode === 's3';
         const messageDeliveryEnabled = !!sendService;
         const databaseEnabled = !!pool;
         const llmGatewayEnabled = !!config.AI_PROVIDER_API_KEY;
@@ -4395,7 +4430,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         if (!process.env.PUBLIC_API_URL) warnings.push('PUBLIC_API_URL unset — Stream URL will be invalid');
         if (!process.env.TWILIO_BUSINESS_NAME) warnings.push("TWILIO_BUSINESS_NAME unset — greeting says 'our team'");
         if (!databaseEnabled) warnings.push('DATABASE_URL unset — proposals/outcomes will not persist');
-        if (!recordingEnabled) warnings.push('Recording disabled — STORAGE_* or TWILIO_* missing');
+        if (!recordingEnabled) warnings.push('Recording disabled — object storage (STORAGE_* / R2_*) or TWILIO_* missing');
         if (!messageDeliveryEnabled) warnings.push('send_invoice disabled — TWILIO_FROM_NUMBER / SENDGRID_* missing');
         const ok =
           (!mediaStreamsEnabled || (sttEnabled && ttsEnabled)) &&
@@ -4644,9 +4679,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // urgent callers straight through to the owner (fallback ladder:
       // owner → on-call → voicemail + urgent SMS + call_me_back).
       const mediaStreamPublicBase = (process.env.PUBLIC_API_URL ?? '').replace(/\/+$/, '');
-      // WS7 — mid-call REST redirector: on a terminal realtime failure the
-      // mediastream adapter steers the LIVE call back to the Gather-fallback
-      // webhook instead of hanging up. Wired only when PUBLIC_API_URL is set
+      // WS7 — mid-call REST update of the LIVE call: on a terminal realtime
+      // failure the mediastream adapter steers it back to the Gather-fallback
+      // webhook instead of hanging up, and a human hand-off is delivered
+      // through it as inline TwiML. Wired only when PUBLIC_API_URL is set
       // (Twilio must POST an absolute URL); absent → adapter keeps 1011-close.
       const twilioCallRedirector = process.env.PUBLIC_API_URL
         ? createTwilioCallRedirector({
@@ -4702,9 +4738,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                   businessPhoneFallbackResolver: createBusinessPhoneFallback(settingsRepo),
                   ...(messageDelivery
                     ? {
-                        // Patch-owner-through page → owner. Never customer-gated.
-                        sendSms: (args: { to: string; body: string }) =>
-                          messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
+                        // Patch-owner-through page → owner (a vulnerable,
+                        // urgent caller the patch could not reach). Never
+                        // customer-gated; life-safety, so it still goes with
+                        // the outbound kill switch off.
+                        sendSms: ownerSmsSender(messageDelivery, { alertClass: 'life_safety' }),
                       }
                     : {}),
                   callMeBackRepo,
@@ -4870,12 +4908,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // Resolve the account bound by the verified inbound webhook.
             authTokenGetter: resolveTwilioWebhookCredential,
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
-            // Section 7 (CRITICAL): wire the gather adapter's shared Map so
-            // Dial TwiML built inside handleEscalateWithContext is visible to
-            // the route layer via takePendingTransferTwiml(sessionId). Without
-            // this the caller stays on hold forever — the dispatcher gets SMS
-            // but the call never bridges.
+            // Realtime hand-off: every escalation producer parks its <Dial>
+            // (or no-one-available TwiML) in the gather adapter's shared Map.
+            // A <Connect><Stream> call has no next webhook to return it in, so
+            // the stream adapter TAKES it after the turn's line has played and
+            // delivers it to the live call over REST (twilioCallRedirector
+            // with inline Twiml). `set` re-parks an undelivered hand-off before
+            // a degrade so /voice/gather-fallback bridges the call instead.
             setPendingTransferTwiml: twilioAdapter.setPendingTransferTwiml.bind(twilioAdapter),
+            takePendingTransferTwiml: twilioAdapter.takePendingTransferTwiml.bind(twilioAdapter),
             // F6b: Wire the shared whisper cache so the MediaStream adapter
             // stores whisper TwiML after handleEscalateWithContext runs.
             whisperCache: sharedWhisperCache,
@@ -7139,6 +7180,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           dispatcher: feedbackDispatcher,
           auditRepo,
           logger: thankYouSmsLogger,
+          ...(messageDelivery ? { sendWindow: messageDelivery } : {}),
         });
       }).catch((err) => {
         thankYouSmsLogger.error('Thank-you SMS sweep failed', {
@@ -7163,6 +7205,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           jobRepo,
           queue,
           logger: reviewRequestLogger,
+          ...(messageDelivery ? { sendWindow: messageDelivery } : {}),
         });
       }).catch((err) => {
         reviewRequestLogger.error('Review-request sweep failed', {

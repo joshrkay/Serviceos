@@ -147,10 +147,12 @@ describe('BillingService — trial flows', () => {
 
   describe('endTrialNow', () => {
     it('calls Stripe Update Subscription with trial_end=now', async () => {
-      const fetchMock = vi.fn().mockResolvedValue({
+      // #1677 H1 — endTrialNow reads the subscription first (still trialing),
+      // then updates it.
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => ({
         ok: true,
-        json: async () => ({ id: 'sub_1', status: 'active' }),
-      } as Response);
+        json: async () => ({ id: 'sub_1', status: init?.method === 'POST' ? 'active' : 'trialing' }),
+      }) as Response);
       const svc = new BillingService({ pool, config: { apiKey: 'sk_test_x' }, fetchFn: fetchMock as unknown as typeof fetch });
       const tenant = await createTestTenant(pool);
       await pool.query(
@@ -163,9 +165,8 @@ describe('BillingService — trial flows', () => {
         'https://api.stripe.com/v1/subscriptions/sub_1',
         expect.objectContaining({ method: 'POST' }),
       );
-      const body = (
-        (fetchMock.mock.calls[0][1] as RequestInit).body as URLSearchParams
-      ).toString();
+      const update = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')!;
+      const body = ((update[1] as RequestInit).body as URLSearchParams).toString();
       expect(body).toContain('trial_end=now');
       expect(body).toContain('proration_behavior=create_prorations');
     });

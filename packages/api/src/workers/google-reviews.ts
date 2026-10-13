@@ -40,6 +40,7 @@ import {
   GoogleBusinessQuotaError,
   GoogleFetch,
   GoogleReviewPayload,
+  boundedGoogleFetch,
   listReviews,
   parseStarRating,
 } from '../reputation/google-business-client';
@@ -222,7 +223,7 @@ export async function runGoogleReviewsSweep(
   let proposalsEmitted = 0;
   let proposalEmissionFailed = 0;
 
-  const fetchFn = deps.fetchFn ?? fetch;
+  const fetchFn = deps.fetchFn ?? boundedGoogleFetch;
   const encKey = process.env.TENANT_ENCRYPTION_KEY;
 
   for (const tenantId of tenantIds) {

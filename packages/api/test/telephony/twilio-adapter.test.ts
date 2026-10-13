@@ -3289,3 +3289,25 @@ describe('C5 — pending consent commits do not outlive their sessions', () => {
     expect(adapter._pendingConsentCommitSize).toBe(1);
   });
 });
+
+// ─── L1 (review of #1676) — parked hand-off TwiML does not leak ──────────────
+
+describe('parked hand-off TwiML is bounded by live sessions (L1)', () => {
+  it('an entry whose session the store has reaped is evicted on the next park', () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{}'),
+      businessName: 'Acme Plumbing',
+    });
+    const gone = store.create('t', 'telephony', { callSid: 'CA-gone' });
+    const live = store.create('t', 'telephony', { callSid: 'CA-live' });
+    adapter.setPendingTransferTwiml(gone.id, '<Response><Dial>+1</Dial></Response>');
+    store.delete(gone.id); // the call ended / was reaped with the TwiML never taken
+
+    adapter.setPendingTransferTwiml(live.id, '<Response><Dial>+2</Dial></Response>');
+
+    expect(adapter._pendingTransferTwimlSize).toBe(1);
+    expect(adapter.takePendingTransferTwiml(live.id)).toContain('+2');
+  });
+});

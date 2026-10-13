@@ -139,8 +139,18 @@ export interface UserRepository {
    */
   deactivateMember(tenantId: string, id: string): Promise<User | null>;
   /** Test/dev helper. Production user creation goes through the Clerk webhook. */
-  create?(user: Omit<User, 'createdAt' | 'updatedAt'>): Promise<User>;
+  create?(user: CreateUserInput): Promise<User>;
 }
+
+/**
+ * A new users row. `canFieldServe` omitted = the insert default: owners are
+ * field-capable, every other role opts in (Postgres: migration 309's users
+ * INSERT trigger, which every creation path — including the raw-SQL Clerk
+ * webhook inserts — goes through). An explicit value is always kept.
+ */
+export type CreateUserInput = Omit<User, 'createdAt' | 'updatedAt' | 'canFieldServe'> & {
+  canFieldServe?: boolean;
+};
 
 export function validateUpdateUserInput(input: UpdateUserInput): string[] {
   const errors: string[] = [];
@@ -401,9 +411,14 @@ export class InMemoryUserRepository implements UserRepository {
     return { ...next };
   }
 
-  async create(user: Omit<User, 'createdAt' | 'updatedAt'>): Promise<User> {
+  async create(user: CreateUserInput): Promise<User> {
     const now = new Date();
-    const created: User = { ...user, createdAt: now, updatedAt: now };
+    const created: User = {
+      ...user,
+      canFieldServe: user.canFieldServe ?? user.role === 'owner',
+      createdAt: now,
+      updatedAt: now,
+    };
     this.users.set(created.id, created);
     return { ...created };
   }

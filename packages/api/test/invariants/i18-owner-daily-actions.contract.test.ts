@@ -741,6 +741,10 @@ describe('I18: owner daily actions ↔ code contract', () => {
       "packages/api/src/ai/agents/customer-calling/inapp-adapter.ts :: const ownerSession = role === 'owner';",
       // Recipient CLASS on an outbound message — not a caller role at all.
       "packages/api/src/notifications/gated-message-delivery.ts :: if (message.recipientClass === 'owner') {",
+      // Same field: the outbound kill-switch bypass admits an OWNER-class message
+      // only when it is tagged life-safety/operator — a message attribute, not a
+      // caller role.
+      "packages/api/src/notifications/gated-message-delivery.ts :: message.recipientClass === 'owner' &&",
       // Proposal-level gate for the `adopt_entity_alias` manual type (§5.2),
       // enforced in the approval path, not on an HTTP route.
       "packages/api/src/proposals/actions.ts :: if (proposal.proposalType === 'adopt_entity_alias' && actorRole !== 'owner') {",
@@ -764,6 +768,10 @@ describe('I18: owner daily actions ↔ code contract', () => {
       // owner-only action. Both occurrences listed; a third must be classified.
       "packages/api/src/routes/users.ts :: if (targetId !== actor.id && req.auth!.role !== 'owner') {",
       "packages/api/src/routes/users.ts :: if (targetId !== actor.id && req.auth!.role !== 'owner') {",
+      // Creation default, not a gate on any caller: an owner row is created
+      // field-capable unless the creator said otherwise (mirrors the users
+      // BEFORE INSERT trigger from migration 309).
+      "packages/api/src/users/user.ts :: canFieldServe: user.canFieldServe ?? user.role === 'owner',",
       // Domain rules on the target user (role changes, last-owner protection
       // on self-deletion and on #1402 deactivation — one pair each).
       "packages/api/src/users/user.ts :: if (target?.role === 'owner') {",

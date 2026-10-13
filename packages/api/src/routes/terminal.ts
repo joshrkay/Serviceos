@@ -222,6 +222,9 @@ export function createTerminalRouter(deps: TerminalRouterDeps): Router {
           tenantId,
           invoiceId: invoice.id,
           purpose: 'invoice',
+          // Review H2 — changes exactly on credit/late-fee repricing, so a
+          // credit-cancelled Terminal PI is never replayed by Stripe.
+          repricingNonce: invoice.lineItems.length,
         },
         deps.stripeFetch,
       );
