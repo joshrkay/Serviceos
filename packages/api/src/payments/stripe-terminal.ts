@@ -95,8 +95,7 @@ export async function ensureTerminalLocation(
   // The location id is only persisted after the connection token succeeds
   // (routes/terminal.ts), so a lost answer here used to leave one more
   // Location on the connected account per retry. Keyed per account + params
-  // (policy: sendIdempotentCreate); a retry in a later key window can still
-  // add one.
+  // (policy: sendIdempotentCreate), so a retry gets the same Location back.
   const res = await sendIdempotentCreate(
     `terminal-location:${config.stripeAccountId.trim()}`,
     body,

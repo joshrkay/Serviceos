@@ -6,36 +6,27 @@ import { createHash, randomUUID } from 'crypto';
  *
  * Stripe caches a key's RESULT — success OR error — for at least 24 h and
  * replays it (`Idempotent-Replayed: true`) to every later request with that
- * key. A key that never changes would therefore pin one Stripe 500, or one
- * "complete your platform profile" 400, onto every retry for a day. So:
+ * key. So:
  *
- *   - the key is `<scope>:<parameter digest>:w<window>`. The scope names the
- *     tenant and purpose; the digest keeps it valid under Stripe's rule that a
- *     reused key must carry identical parameters; the window rotates it every
- *     IDEMPOTENCY_KEY_WINDOW_MS (UTC-aligned).
+ *   - the key is `<scope>:<parameter digest>`. The scope names the tenant and
+ *     purpose; the digest keeps it valid under Stripe's rule that a reused key
+ *     must carry identical parameters. It never rotates on its own, so a
+ *     lost-response retry gets the first object back however long it waits
+ *     (within Stripe's 24 h).
  *   - a replayed ERROR is Stripe's answer to an EARLIER attempt, so the
- *     request is sent once more under a fresh key: a lost-response retry or a
- *     double-click still gets the first object back, but a cached error never
- *     blocks the next real attempt. If Stripe did not flag the replay, the next
- *     window's key ends the block.
+ *     request is sent once more under a fresh key: a cached error never blocks
+ *     the next real attempt. That includes a replayed 5xx, which Stripe calls
+ *     indeterminate; accepted here because every call site absorbs a duplicate
+ *     (conditional persist, a pre-read, or an object nobody uses).
  *   - 409 means another request with the same key is still executing (the
  *     double-click): wait briefly and resend the same key, so the second click
  *     gets the first one's result.
- *
- * Exposure: a create that timed out but succeeded and is retried in a LATER
- * window gets a new key and Stripe creates a second object. Each call site
- * says how it absorbs that (conditional persist, pre-check, harmless orphan).
  */
-export const IDEMPOTENCY_KEY_WINDOW_MS = 10 * 60_000;
 const IN_PROGRESS_RETRY_DELAYS_MS = [500, 1_000];
 
-export function deterministicIdempotencyKey(
-  scope: string,
-  params: URLSearchParams | string,
-  now: number = Date.now(),
-): string {
+export function deterministicIdempotencyKey(scope: string, params: URLSearchParams | string): string {
   const digest = createHash('sha256').update(String(params)).digest('hex').slice(0, 24);
-  return `${scope}:${digest}:w${Math.floor(now / IDEMPOTENCY_KEY_WINDOW_MS)}`;
+  return `${scope}:${digest}`;
 }
 
 /** The parts of a fetch response the retry policy reads. */

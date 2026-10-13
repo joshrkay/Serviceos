@@ -7,7 +7,11 @@
  *     cached result back with `Idempotent-Replayed: true`;
  *   - a request whose key is still executing gets 409 (idempotency_key_in_use);
  *   - execution finishes even when the client gave up (aborted): the effect
- *     lands and the result is cached, the client just never sees it.
+ *     lands and the result is cached, the client just never sees it;
+ *   - a key reused with different parameters gets 400 idempotency_error.
+ *
+ * Not modelled: Stripe skips caching some errors (pre-execution validation,
+ * 401, 429), scopes keys per Stripe-Account, and a real 500 may have acted.
  *
  * `answer` decides the outcome of each request that actually executes;
  * `executed` lists those requests (what Stripe really did).
@@ -43,6 +47,7 @@ export function fakeStripe(answer: (call: StripeCall) => StripeOutcome) {
   const cache = new Map<string, { status: number; body: unknown }>();
   const inFlight = new Set<string>();
   const executed: StripeCall[] = [];
+  const paramsByKey = new Map<string, string>();
 
   const fetchFn = vi.fn((input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -56,6 +61,12 @@ export function fakeStripe(answer: (call: StripeCall) => StripeOutcome) {
       account: headers['Stripe-Account'],
     };
     const { key } = call;
+    const firstParams = key ? paramsByKey.get(key) : undefined;
+    if (key && firstParams !== undefined && firstParams !== String(call.params)) {
+      const message = 'Keys for idempotent requests can only be used with the same parameters they were first used with.';
+      return Promise.resolve(respond(400, { error: { type: 'idempotency_error', message } }, false));
+    }
+    if (key) paramsByKey.set(key, String(call.params));
     const cached = key ? cache.get(key) : undefined;
     if (cached) return Promise.resolve(respond(cached.status, cached.body, true));
     if (key && inFlight.has(key)) {

@@ -271,10 +271,9 @@ export class StripeConnectService {
       });
       // A create whose response is lost (timeout, dropped socket) persists
       // nothing; the retry gets the SAME Express account back (key policy:
-      // sendIdempotentCreate). A retry in a later key window can create a
-      // second account; the guarded claim below keeps the first persisted
-      // one and every onboarding link points at it, so the other is never
-      // onboarded.
+      // sendIdempotentCreate). Two creates with different parameters (two
+      // admins' emails) still make two accounts; the guarded claim below keeps
+      // the first persisted one and every onboarding link points at it.
       const accountRes = await sendIdempotentCreate(
         `connect-account:${input.tenantId}`,
         accountParams,

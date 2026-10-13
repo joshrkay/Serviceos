@@ -91,8 +91,7 @@ export async function createSetupIntent(
     // A create whose response is lost leaves the portal with no customer id;
     // the retry replays the same Stripe customer instead of minting another
     // (key policy: sendIdempotentCreate). Scoped by account too: the customer
-    // lives on the connected account. A retry in a later key window mints a
-    // second, card-less customer — harmless; only the card's customer is kept.
+    // lives on the connected account.
     const accountScope = config.stripeAccountId || 'platform';
     const res = await sendIdempotentCreate(
       `customer:${input.tenantId}:saved-card:${input.customerId}:${accountScope}`,

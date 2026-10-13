@@ -3,17 +3,16 @@ import { deterministicIdempotencyKey } from '../../src/shared/idempotency-key';
 
 describe('deterministicIdempotencyKey', () => {
   const params = new URLSearchParams({ email: 'o@x.com', 'metadata[tenant_id]': 't-1' });
-  const at = (iso: string) => Date.parse(iso);
 
-  it('the same create inside one 10-minute window gets the same key', () => {
-    expect(deterministicIdempotencyKey('customer:t-1:subscription', params, at('2026-10-13T12:00:05Z'))).toBe(
-      deterministicIdempotencyKey('customer:t-1:subscription', params, at('2026-10-13T12:09:55Z')),
+  it('the same create always gets the same key (a lost-response retry dedupes however late it comes)', () => {
+    expect(deterministicIdempotencyKey('customer:t-1:subscription', params)).toBe(
+      deterministicIdempotencyKey('customer:t-1:subscription', new URLSearchParams(params)),
     );
   });
 
-  it('the next window gets a new key, so a cached Stripe error cannot outlive it', () => {
-    expect(deterministicIdempotencyKey('customer:t-1:subscription', params, at('2026-10-13T12:09:55Z'))).not.toBe(
-      deterministicIdempotencyKey('customer:t-1:subscription', params, at('2026-10-13T12:10:05Z')),
+  it('different parameters get a different key (Stripe rejects a reused key whose parameters changed)', () => {
+    expect(deterministicIdempotencyKey('customer:t-1:subscription', params)).not.toBe(
+      deterministicIdempotencyKey('customer:t-1:subscription', new URLSearchParams({ email: 'a@x.com', 'metadata[tenant_id]': 't-1' })),
     );
   });
 });

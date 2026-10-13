@@ -182,6 +182,25 @@ describe('BillingService — Stripe customer create is idempotent per tenant', (
     expect(stripe.executedOn('POST', '/v1/customers')).toHaveLength(1);
   });
 
+  it('a lost-response retry that crosses a 10-minute boundary still gets the same customer', async () => {
+    // Review round 2 (N1): attempt at 12:09:52 times out after Stripe made
+    // cus_1; the retry lands at 12:10:07. A time-windowed key minted cus_2.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(new Date('2026-10-13T12:09:52Z'));
+    const stripe = stripeMintingCustomers({ delayMs: 15_000 });
+    vi.stubGlobal('fetch', stripe.fetchFn);
+    const state = { customerId: null as string | null };
+    const svc = new BillingService({ pool: customerPool(state), config: { apiKey: 'sk_test' } });
+
+    const first = await settleWithin(portal(svc), 15_000);
+    const retry = await settleWithin(portal(svc), 0);
+
+    expect(first.status).toBe('rejected');
+    expect(retry.status).toBe('fulfilled');
+    expect(stripe.executedOn('POST', '/v1/customers').map((c) => c.key)).toHaveLength(1);
+    expect(state.customerId).toBe('cus_1');
+  });
+
   it('a Stripe error on the customer create does not stick to the next attempt', async () => {
     // Stripe caches the 500 under the key; the retry must not get it back.
     const stripe = stripeMintingCustomers({ status: 500 });

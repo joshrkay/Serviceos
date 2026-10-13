@@ -756,9 +756,9 @@ export class BillingService {
     const subscriptionUrl = `https://api.stripe.com/v1/subscriptions/${subId}`;
 
     // A re-click after the trial already ended (the first answer was lost, or
-    // the re-click lands in a later idempotency window) must not end it — and
-    // charge — again. Best-effort: if the read fails, the keyed update below
-    // still dedupes a retry inside its window.
+    // Stripe ended it on its own) must not end it — and charge — again. A
+    // re-click after a timeout recovers here: the read sees the trial ended.
+    // Best-effort: if the read fails, the keyed update below still dedupes.
     const current = await (this.deps.fetchFn ?? boundedStripeFetch)(subscriptionUrl, {
       method: 'GET',
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -935,12 +935,11 @@ export class BillingService {
    * Race-tolerant: when two callers see stripe_customer_id IS NULL at
    * the same time, only the first UPDATE wins; the losing caller
    * re-reads the winner's id and uses it. The create carries an
-   * Idempotency-Key (tenant + parameters + 10-minute window), so a retry
-   * after a lost response — or a double-click from the same owner —
-   * gets the SAME Stripe customer back. Callers with different emails,
-   * or a retry in a later window, mint distinct customers; the loser's
-   * is a no-op orphan — no subscription, no payment method, and Stripe
-   * doesn't bill empty customers.
+   * Idempotency-Key (tenant + parameters), so a retry after a lost
+   * response — or a double-click from the same owner — gets the SAME
+   * Stripe customer back. Callers with different emails mint distinct
+   * customers; the loser's is a no-op orphan (logged) — no subscription,
+   * no payment method, and Stripe doesn't bill empty customers.
    */
   private async getOrCreateStripeCustomer(
     tenantId: string,
@@ -968,10 +967,7 @@ export class BillingService {
     });
     // A create whose response is lost (timeout, dropped socket) leaves no id
     // on the tenant row; the retry replays the same customer rather than
-    // minting a second one (see sendIdempotentCreate for the key policy). A
-    // retry in a later key window can mint a second customer: the guarded
-    // claim below keeps the first persisted one, the other stays an empty
-    // orphan.
+    // minting a second one (see sendIdempotentCreate for the key policy).
     const customerRes = await sendIdempotentCreate(
       `customer:${tenantId}:subscription`,
       customerParams,
@@ -1016,6 +1012,15 @@ export class BillingService {
     const winner = reread.rows[0]?.stripe_customer_id;
     if (!winner) {
       throw new Error('getOrCreateStripeCustomer: lost race but no winner persisted');
+    }
+    if (winner !== customer.id) {
+      // The other request's customer won; this one is an empty orphan.
+      // eslint-disable-next-line no-console
+      console.warn('[billing-subscription] customer claim lost; unused Stripe customer', {
+        tenantId,
+        unusedCustomerId: customer.id,
+        keptCustomerId: winner,
+      });
     }
     return winner;
   }
