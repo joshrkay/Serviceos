@@ -1,5 +1,7 @@
 import type { Pool } from 'pg';
 import { ValidationError, NotFoundError, AppError } from '../shared/errors';
+import { timedFetch } from '../shared/timed-fetch';
+import { deterministicIdempotencyKey } from '../shared/idempotency-key';
 
 /**
  * Tier 4 (Payment methods — PR 1). Stripe Connect onboarding service.
@@ -41,8 +43,12 @@ export interface ConnectAccountView {
 export interface StripeConnectServiceDeps {
   pool: Pool;
   config?: ConnectConfig | null;
+  /** Stub-able for tests. Defaults to the global fetch bounded at 10 s
+   *  (onboarding runs inside the request transaction). */
   fetchFn?: ConnectFetch;
 }
+
+const boundedStripeFetch: ConnectFetch = timedFetch();
 
 export interface CreateOnboardingLinkInput {
   tenantId: string;
@@ -248,42 +254,63 @@ export class StripeConnectService {
       throw new ValidationError('returnUrl and refreshUrl are required');
     }
 
-    const fetchFn = this.deps.fetchFn ?? fetch;
+    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
     const apiKey = this.deps.config.apiKey;
 
     // Lazily create the Account if we don't already have one.
     const view = await this.getAccount(input.tenantId);
     let accountId = view.accountId;
     if (!accountId) {
+      const accountParams = new URLSearchParams({
+        type: 'express',
+        email: input.ownerEmail,
+        country: input.country ?? 'US',
+        'capabilities[card_payments][requested]': 'true',
+        'capabilities[transfers][requested]': 'true',
+        'metadata[tenant_id]': input.tenantId,
+      });
       const accountRes = await fetchFn('https://api.stripe.com/v1/accounts', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/x-www-form-urlencoded',
+          // A create whose response is lost (timeout, dropped socket) persists
+          // nothing; the retry must get the SAME Express account back, or the
+          // owner can finish KYC on an account no tenant row points at.
+          'Idempotency-Key': deterministicIdempotencyKey(
+            `connect-account:${input.tenantId}`,
+            accountParams,
+          ),
         },
-        body: new URLSearchParams({
-          type: 'express',
-          email: input.ownerEmail,
-          country: input.country ?? 'US',
-          'capabilities[card_payments][requested]': 'true',
-          'capabilities[transfers][requested]': 'true',
-          'metadata[tenant_id]': input.tenantId,
-        }),
+        body: accountParams,
       });
       if (!accountRes.ok) {
         throw connectStripeFailure('account create', accountRes.status, await accountRes.text());
       }
       const account = (await accountRes.json()) as { id?: string };
       if (!account.id) throw new Error('Stripe Connect returned no account id');
-      accountId = account.id;
-      await this.deps.pool.query(
+      // Claim the column only while it is still NULL: a concurrent onboarding
+      // request (double-click, two admins) that persisted first keeps its
+      // account, and this request continues with THAT one — so the link the
+      // owner follows always points at the account the tenant row stores.
+      const claimed = await this.deps.pool.query<{ stripe_connect_account_id: string }>(
         `UPDATE tenants
          SET stripe_connect_account_id = $1,
              stripe_connect_status = 'pending',
              updated_at = NOW()
-         WHERE id = $2`,
-        [accountId, input.tenantId],
+         WHERE id = $2 AND stripe_connect_account_id IS NULL
+         RETURNING stripe_connect_account_id`,
+        [account.id, input.tenantId],
       );
+      if (claimed.rows.length > 0) {
+        accountId = claimed.rows[0].stripe_connect_account_id;
+      } else {
+        const winner = (await this.getAccount(input.tenantId)).accountId;
+        if (!winner) {
+          throw new Error('createOnboardingLink: account claim lost but no account persisted');
+        }
+        accountId = winner;
+      }
     }
 
     // Mint the Account Link.

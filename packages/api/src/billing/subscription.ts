@@ -1,5 +1,7 @@
 import type { Pool } from 'pg';
 import { AppError, ValidationError, NotFoundError } from '../shared/errors';
+import { timedFetch } from '../shared/timed-fetch';
+import { deterministicIdempotencyKey } from '../shared/idempotency-key';
 import { CALL_PLAN_USAGE, OVERAGE_CENTS_PER_MINUTE } from './call-usage-pricing';
 
 /**
@@ -124,9 +126,12 @@ export interface BillingSubscriptionView {
 export interface BillingServiceDeps {
   pool: Pool;
   config?: BillingConfig | null;
-  /** Stub-able for tests. Defaults to global fetch. */
+  /** Stub-able for tests. Defaults to the global fetch bounded at 10 s
+   *  (these calls run inside the request transaction). */
   fetchFn?: BillingFetch;
 }
+
+const boundedStripeFetch: BillingFetch = timedFetch();
 
 /**
  * Turns a failed "open the billing portal" Stripe REST call into an
@@ -278,7 +283,7 @@ export class BillingService {
       throw new ValidationError('returnUrl is required');
     }
 
-    const fetchFn = this.deps.fetchFn ?? fetch;
+    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
     const apiKey = this.deps.config.apiKey;
 
     // Reuse the tenant's single canonical Stripe customer so the portal
@@ -343,7 +348,7 @@ export class BillingService {
   ): Promise<{ priceId: string; productId: string; name: string; amountCents: number }> {
     const spec = PLAN_SPECS[planId];
     const apiKey = this.deps.config!.apiKey;
-    const fetchFn = this.deps.fetchFn ?? fetch;
+    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
     const res = await fetchFn(
       `https://api.stripe.com/v1/prices/${encodeURIComponent(priceId)}?expand[]=product`,
       {
@@ -492,7 +497,7 @@ export class BillingService {
       }
       priceId = legacy;
     }
-    const fetchFn = this.deps.fetchFn ?? fetch;
+    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
 
     // Serialize trial checkout per tenant via a Postgres advisory
     // transaction lock. Without this, two callers that ran the
@@ -699,7 +704,7 @@ export class BillingService {
     sessionId: string,
     planId: BillingPlanId | undefined,
   ): Promise<{ url: string } | 'released' | 'unknown'> {
-    const fetchFn = this.deps.fetchFn ?? fetch;
+    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
     const auth = { Authorization: `Bearer ${this.deps.config!.apiKey}` };
     const base = `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`;
     const res = await fetchFn(base, { method: 'GET', headers: auth });
@@ -738,7 +743,7 @@ export class BillingService {
     if (!subId) {
       throw new NotFoundError('Subscription', tenantId);
     }
-    const fetchFn = this.deps.fetchFn ?? fetch;
+    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
     const body = new URLSearchParams();
     body.set('trial_end', 'now');
     body.set('proration_behavior', 'create_prorations');
@@ -859,7 +864,7 @@ export class BillingService {
     const sessionId = rows[0]?.pending_checkout_session_id ?? null;
 
     if (sessionId && this.deps.config?.apiKey) {
-      const fetchFn = this.deps.fetchFn ?? fetch;
+      const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
       const res = await fetchFn(
         `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}/expire`,
         {
@@ -893,11 +898,15 @@ export class BillingService {
    * which would carry a subscription invisible to the in-app portal).
    *
    * Race-tolerant: when two callers see stripe_customer_id IS NULL at
-   * the same time, each POSTs a new Stripe customer, but only the
-   * first UPDATE wins. The losing caller re-reads the winner's id and
-   * uses it. The losing call's Stripe customer becomes a no-op orphan
-   * — it has no subscription, no payment method, and Stripe doesn't
-   * bill empty customers.
+   * the same time, only the first UPDATE wins; the losing caller
+   * re-reads the winner's id and uses it. The create carries a
+   * deterministic Idempotency-Key (tenant + parameters), so a retry
+   * after a lost response — or a duplicate from the same owner — gets
+   * the SAME Stripe customer back (Stripe answers a duplicate that
+   * overlaps the first in flight with 409, which surfaces as a failed
+   * create). Callers with different emails still mint distinct
+   * customers; the loser's is a no-op orphan — no subscription, no
+   * payment method, and Stripe doesn't bill empty customers.
    */
   private async getOrCreateStripeCustomer(
     tenantId: string,
@@ -907,7 +916,7 @@ export class BillingService {
       throw new ValidationError('Subscription billing is not configured');
     }
     const apiKey = this.deps.config.apiKey;
-    const fetchFn = this.deps.fetchFn ?? fetch;
+    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
 
     const { rows } = await this.deps.pool.query(
       `SELECT stripe_customer_id FROM tenants WHERE id = $1`,
@@ -919,16 +928,24 @@ export class BillingService {
       | null;
     if (existing) return existing;
 
+    const customerParams = new URLSearchParams({
+      email: ownerEmail,
+      'metadata[tenant_id]': tenantId,
+    });
     const customerRes = await fetchFn('https://api.stripe.com/v1/customers', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/x-www-form-urlencoded',
+        // A create whose response is lost (timeout, dropped socket) leaves no
+        // id on the tenant row; the retry replays the same customer rather
+        // than minting a second one.
+        'Idempotency-Key': deterministicIdempotencyKey(
+          `customer:${tenantId}:subscription`,
+          customerParams,
+        ),
       },
-      body: new URLSearchParams({
-        email: ownerEmail,
-        'metadata[tenant_id]': tenantId,
-      }),
+      body: customerParams,
     });
     if (!customerRes.ok) {
       const body = await customerRes.text();
