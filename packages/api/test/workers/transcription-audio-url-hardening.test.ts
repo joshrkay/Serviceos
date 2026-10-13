@@ -31,6 +31,15 @@ function prodStorage() {
 }
 
 async function failedRecordingAfter(audioUrl: string, fetchImpl: typeof fetch) {
+  return (await runJob(audioUrl, fetchImpl, { attempts: 3, maxAttempts: 3 })).recording;
+}
+
+/** One delivery of a transcription job: the stored recording, and whether the queue would redeliver. */
+async function runJob(
+  audioUrl: string,
+  fetchImpl: typeof fetch,
+  delivery: { attempts: number; maxAttempts: number },
+) {
   vi.stubGlobal('fetch', fetchImpl);
   const voiceRepo = new InMemoryVoiceRepository();
   await voiceRepo.create({
@@ -47,21 +56,24 @@ async function failedRecordingAfter(audioUrl: string, fetchImpl: typeof fetch) {
     apiKey: 'sk_test',
     fetchImpl,
     audioUrlPolicy: prodStorage().downloadUrlPolicy,
+    logger: { warn: vi.fn() },
   });
   const message = {
     id: 'msg-h2',
     type: 'transcription',
     payload: { tenantId: TENANT, recordingId: RECORDING, audioUrl },
-    attempts: 3,
-    maxAttempts: 3,
+    ...delivery,
     idempotencyKey: `${TENANT}:${RECORDING}:transcription:create`,
     createdAt: new Date().toISOString(),
   } as unknown as QueueMessage<TranscriptionJobPayload>;
 
-  await createTranscriptionWorker(voiceRepo, provider)
+  const threw = await createTranscriptionWorker(voiceRepo, provider)
     .handle(message, logger)
-    .catch(() => undefined);
-  return voiceRepo.findById(TENANT, RECORDING);
+    .then(
+      () => false,
+      () => true,
+    );
+  return { recording: await voiceRepo.findById(TENANT, RECORDING), redelivered: threw };
 }
 
 afterEach(() => {
@@ -94,5 +106,33 @@ describe('H2 — a failed audio fetch never puts the URL in the recording errorM
     expect(recording?.status).toBe('failed');
     expect(recording?.errorMessage).toBeTruthy();
     expect(recording?.errorMessage).not.toContain('169.254.169.254');
+  });
+});
+
+describe('H2 review L1 — a non-retriable failure is not redelivered', () => {
+  it('a refused URL on the FIRST of 3 attempts fails the recording now and acks the job', async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+
+    const { recording, redelivered } = await runJob(
+      'http://169.254.169.254/latest/meta-data/',
+      fetchImpl,
+      { attempts: 1, maxAttempts: 3 },
+    );
+
+    expect(redelivered).toBe(false);
+    expect(recording?.status).toBe('failed');
+    expect(recording?.errorMessage).toMatch(/refused/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('a transient storage 503 on the first attempt is still redelivered, recording back to pending', async () => {
+    const storage = prodStorage();
+    const presigned = await storage.provider.generateDownloadUrl(storage.bucket, `${TENANT}/f/memo.m4a`);
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response('busy', { status: 503 }));
+
+    const { recording, redelivered } = await runJob(presigned, fetchImpl, { attempts: 1, maxAttempts: 3 });
+
+    expect(redelivered).toBe(true);
+    expect(recording?.status).toBe('pending');
   });
 });
