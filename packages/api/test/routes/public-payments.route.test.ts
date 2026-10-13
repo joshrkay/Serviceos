@@ -110,6 +110,42 @@ describe('P5-016 routes/public-payments — POST /create-payment-intent', () => 
     expect(res.body.stripeAccountId).toBeNull();
   });
 
+  // Review H2 — the pay page mints a PI on every load, keyed by Stripe
+  // idempotency. A credit cancels the PI priced above the new balance; when
+  // the balance later returns to that amount (credit, then a fee) the key
+  // must differ, or Stripe replays the CANCELLED intent for ~24h.
+  it('keys the PaymentIntent on the invoice line-item count, so a re-priced balance never replays a cancelled intent', async () => {
+    const keys: string[] = [];
+    const fetcher: StripeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      keys.push(((init?.headers ?? {}) as Record<string, string>)['Idempotency-Key']);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+        json: async () => ({ id: 'pi_k', client_secret: 'pi_k_secret' }),
+      };
+    }) as unknown as StripeFetch;
+    const { app, invoice, invoiceRepo } = await build({ stripeFetch: fetcher });
+
+    await request(app)
+      .post('/api/public-payments/create-payment-intent')
+      .send({ invoiceId: invoice.id, viewToken: VIEW_TOKEN })
+      .expect(200);
+    // A $25 credit then a $25 late fee: back at 12500 owed, two lines later.
+    const credit = { ...invoice.lineItems[0], id: crypto.randomUUID(), unitPriceCents: -2500, totalCents: -2500, sortOrder: 1 };
+    const fee = { ...invoice.lineItems[0], id: crypto.randomUUID(), unitPriceCents: 2500, totalCents: 2500, sortOrder: 2 };
+    await invoiceRepo.update(TENANT, invoice.id, { lineItems: [...invoice.lineItems, credit, fee] });
+    await request(app)
+      .post('/api/public-payments/create-payment-intent')
+      .send({ invoiceId: invoice.id, viewToken: VIEW_TOKEN })
+      .expect(200);
+
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toMatch(/_r1$/);
+    expect(keys[1]).toMatch(/_r3$/);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
   it('routes PaymentIntent to Connect when charges are enabled', async () => {
     const seenHeaders: Array<Record<string, string>> = [];
     const fetcher: StripeFetch = (async (_url: string | URL | Request, init?: RequestInit) => {

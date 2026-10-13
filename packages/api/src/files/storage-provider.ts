@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { ObjectMetadata, StorageProvider } from './file-service';
 import { resolveStorageConfig, type StorageConfigEnv } from '../shared/storage-config';
+import { createDownloadUrlPolicy, type DownloadUrlPolicy } from './download-url-policy';
 
 export interface S3StorageConfig {
   bucket: string;
@@ -410,6 +411,14 @@ export function createStorageProvider(
    * and the secret to verify its tokens with (#1273).
    */
   devStorageSecret?: string;
+  /**
+   * H2 — the allowlist of URLs `provider.generateDownloadUrl` mints, for
+   * the workers that GET a stored file by URL (transcription). Built from
+   * the same config as the provider; across processes (web mints, worker
+   * fetches) keep the STORAGE_* env identical, or a URL minted from an
+   * origin the worker does not know is refused.
+   */
+  downloadUrlPolicy: DownloadUrlPolicy;
 } {
   const { STORAGE_PUBLIC_URL, STORAGE_ENABLED, NODE_ENV } = env;
 
@@ -427,6 +436,15 @@ export function createStorageProvider(
       }),
       bucket,
       mode: 's3',
+      // generateDownloadUrl serves STORAGE_PUBLIC_URL when set, else a
+      // path-style presign on the endpoint host (pathStyle defaults to true
+      // and is not configurable from env). Both are allowed: the process
+      // that mints the URL (web) and the worker that fetches it may not
+      // carry the same STORAGE_PUBLIC_URL (H2 review M1).
+      downloadUrlPolicy: createDownloadUrlPolicy({
+        allowedOrigins: [endpoint, STORAGE_PUBLIC_URL ?? ''],
+        productionLike: isProductionLikeEnv(NODE_ENV),
+      }),
     };
   }
 
@@ -474,5 +492,11 @@ export function createStorageProvider(
     bucket,
     mode: 'dev',
     devStorageSecret,
+    // In a prod-like env (STORAGE_ENABLED=false) the /storage-dev receiver
+    // is never mounted, so there is no legitimate dev URL to fetch at all.
+    downloadUrlPolicy: createDownloadUrlPolicy({
+      allowedOrigins: isProductionLikeEnv(NODE_ENV) ? [] : [publicUrlBase],
+      productionLike: isProductionLikeEnv(NODE_ENV),
+    }),
   };
 }

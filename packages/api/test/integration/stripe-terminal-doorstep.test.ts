@@ -609,8 +609,10 @@ describe('Postgres integration — 5.5 doorstep card (Stripe Terminal)', () => {
     expect(sent.get('metadata[invoice_id]')).toBe(invoiceId);
     expect(sent.get('metadata[collection]')).toBe('terminal');
     expect(intentCall!.headers['Stripe-Account']).toBe(CONNECT_ACCOUNT_ID);
+    // Review H2 — the key carries the invoice's line-item count (one line
+    // here) so a credit-repriced balance never replays a cancelled intent.
     expect(intentCall!.headers['Idempotency-Key']).toBe(
-      `term_pi_inv_${invoiceId}_${AMOUNT_CENTS}_${CONNECT_ACCOUNT_ID}`,
+      `term_pi_inv_${invoiceId}_${AMOUNT_CENTS}_${CONNECT_ACCOUNT_ID}_r1`,
     );
 
     // The intent audit row is at real Postgres…

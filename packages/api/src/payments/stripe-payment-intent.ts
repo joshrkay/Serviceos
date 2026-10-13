@@ -8,10 +8,11 @@
  * from the customer's browser into Stripe's iframe (`<PaymentElement>`),
  * never through our server.
  *
- * Idempotency is enforced per (invoiceId, amount, account-scope) so duplicate
- * POSTs from the public payment page don't create multiple intents, and a
- * tenant that later enables Connect does not collide with a prior platform
- * intent key.
+ * Idempotency is enforced per (invoiceId, amount, account-scope, repricing
+ * nonce) so duplicate POSTs from the public payment page don't create multiple
+ * intents, a tenant that later enables Connect does not collide with a prior
+ * platform intent key, and a credit-repriced invoice never gets a cancelled
+ * intent replayed.
  *
  * When `stripeAccountId` is set, the request is a Connect direct charge
  * (`Stripe-Account` header) so funds settle on the tenant's Express account.
@@ -30,6 +31,15 @@ export interface CreatePaymentIntentInput {
   tenantId: string;
   /** Connected account id for direct charges; omit for platform. */
   stripeAccountId?: string;
+  /**
+   * Review H2 — repricing nonce in the idempotency key: the invoice's
+   * line-item count. Every owner-approved credit / late fee appends a line,
+   * so it changes exactly when the invoice is re-priced and is stable across
+   * page views and payments. Without it, a balance that returns to an earlier
+   * amount after a credit cancelled the PI minted at that amount would get
+   * the CANCELLED PI replayed by Stripe (~24h key retention).
+   */
+  repricingNonce: number;
 }
 
 export interface CreatePaymentIntentResult {
@@ -94,6 +104,9 @@ export async function createPaymentIntent(
   if (!input.tenantId) {
     throw new Error('tenantId is required');
   }
+  if (!Number.isInteger(input.repricingNonce) || input.repricingNonce < 0) {
+    throw new Error('repricingNonce must be a non-negative integer (the invoice line-item count)');
+  }
 
   const body = new URLSearchParams({
     amount: String(input.amount),
@@ -109,8 +122,10 @@ export async function createPaymentIntent(
     'Content-Type': 'application/x-www-form-urlencoded',
     // Idempotency-Key prevents duplicate intents when the customer
     // double-taps the pay button or the page remounts on iOS Safari.
-    // Account scope keeps platform vs Connect intents distinct.
-    'Idempotency-Key': `pi_${input.invoiceId}_${input.amount}_${accountScope}`,
+    // Account scope keeps platform vs Connect intents distinct; the
+    // repricing nonce keeps a re-priced invoice from replaying a PI that a
+    // credit cancelled (see CreatePaymentIntentInput.repricingNonce).
+    'Idempotency-Key': `pi_${input.invoiceId}_${input.amount}_${accountScope}_r${input.repricingNonce}`,
   };
   if (input.stripeAccountId?.trim()) {
     headers['Stripe-Account'] = input.stripeAccountId.trim();
@@ -151,10 +166,12 @@ export async function createPaymentIntent(
 export interface PaymentIntentSummary {
   id: string;
   status: string;
+  /** Integer cents the PI will charge (lets a repricing sweep keep PIs priced within the balance). */
+  amount?: number;
 }
 
 interface StripeSearchResponse {
-  data?: Array<{ id?: string; status?: string }>;
+  data?: Array<{ id?: string; status?: string; amount?: number }>;
   has_more?: boolean;
   next_page?: string;
 }
@@ -209,7 +226,13 @@ export async function searchPaymentIntentsByInvoice(
     }
     const data = (await res.json()) as StripeSearchResponse;
     for (const pi of data.data ?? []) {
-      if (pi.id) results.push({ id: pi.id, status: pi.status ?? 'unknown' });
+      if (pi.id) {
+        results.push({
+          id: pi.id,
+          status: pi.status ?? 'unknown',
+          ...(typeof pi.amount === 'number' ? { amount: pi.amount } : {}),
+        });
+      }
     }
     if (!data.has_more || !data.next_page) break;
     page = data.next_page;

@@ -24,6 +24,8 @@ export interface PaymentLinkResult {
 export interface InvoicePaymentIntentSummary {
   id: string;
   status: string;
+  /** Integer cents the PI will charge, when the provider reports it. */
+  amount?: number;
 }
 
 export interface PaymentLinkProvider {
