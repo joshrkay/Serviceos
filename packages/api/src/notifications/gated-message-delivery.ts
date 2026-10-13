@@ -12,7 +12,12 @@
  *   - recipientClass 'owner'  → bypass the gate entirely. Owner / operator /
  *     on-call sends (digests, one-tap approval links, emergency pages,
  *     dispatcher patches) are NEVER blocked by customer consent or DNC — even
- *     if the owner's own number happens to be on a DNC list.
+ *     if the owner's own number happens to be on a DNC list — nor delayed by
+ *     quiet hours.
+ *   - recipientClass 'customer' tagged `quietHours: 'defer'` (non-
+ *     transactional: thank-you, review request, automated reminder) → outside
+ *     the recipient-local send window, `SmsDeferredError` (not sent yet; the
+ *     caller retries) before any cap slot or audit row.
  *   - recipientClass 'customer':
  *       · enforcement 'off'   → send; audit nothing (byte-for-byte legacy).
  *       · enforcement 'warn'  → if the send WOULD block, audit
@@ -54,9 +59,13 @@
  *   - any other value       → channel ENABLED
  *
  * Unlike the consent gate, the kill switch is checked BEFORE the
- * `recipientClass: 'owner'` bypass. That is deliberate: the promise is "no
- * outbound traffic at all", not "no customer traffic". An owner digest is
- * still an outbound message on a real carrier/ESP account.
+ * `recipientClass: 'owner'` bypass, so ordinary owner traffic (digests,
+ * approval links, transfer context) stops too. The one exception: an
+ * owner-class send tagged `alertClass` 'life_safety' (E1 alerts, the E2 page
+ * ladder, the patch-through miss page) or 'operator' (ALERT_SMS_TO). The
+ * switch does not stop inbound voice AI, so the pages that call raises — and
+ * the operator alert that is the only human channel when SENTRY_DSN is unset —
+ * must not go dark with it. No customer send ever passes the switch.
  *
  * Observability: a disabled channel must not be indistinguishable from no
  * traffic. Every suppression emits an info log with the greppable
@@ -74,6 +83,11 @@ import {
   resolveOutboundConsent,
   type ConsentLedgerEventLike,
 } from '../compliance/resolve-outbound-consent';
+import {
+  recipientQuietHours,
+  type QuietHoursResult,
+  type RecipientLocale,
+} from '../compliance/jurisdiction';
 import type { RecipientSmsVolumeLedger } from './recipient-sms-volume';
 import {
   DeliveryResult,
@@ -90,7 +104,10 @@ export type SmsSuppressionReason =
   | 'missing_consent_context'
   /** WS12 — standing cross-channel (sms/marketing) revocation in the ledger. */
   | 'revoked'
-  /** Runtime kill switch — TELEPHONY_ENABLED=false. Applies to owner sends too. */
+  /**
+   * Runtime kill switch — TELEPHONY_ENABLED=false. Applies to owner sends too,
+   * except life-safety / operator alerts (`SmsMessage.alertClass`).
+   */
   | 'channel_disabled'
   /** #1402 §18 — the number already got the per-window maximum of customer texts. */
   | 'recipient_volume_cap';
@@ -118,6 +135,18 @@ export function isOutboundChannelEnabled(
   return env[KILL_SWITCH_ENV_VAR[channel]] !== 'false';
 }
 
+/**
+ * An owner-class life-safety page or operator alert — the only sends the SMS
+ * kill switch lets through. A customer send never qualifies, whatever it is
+ * tagged with.
+ */
+function isKillSwitchExemptAlert(message: SmsMessage): boolean {
+  return (
+    message.recipientClass === 'owner' &&
+    (message.alertClass === 'life_safety' || message.alertClass === 'operator')
+  );
+}
+
 /** Narrow DNC seam — satisfied by DncRepository and test stubs. */
 export interface DncLookup {
   isOnDnc(tenantId: string, normalizedPhone: string): Promise<boolean>;
@@ -136,6 +165,25 @@ export class SmsSuppressedError extends Error {
   ) {
     super(`SMS suppressed: ${reason}`);
     this.name = 'SmsSuppressedError';
+  }
+}
+
+/**
+ * Thrown for a customer text tagged `quietHours: 'defer'` that would land
+ * outside the recipient-local send window. NOT SENT YET — not a suppression:
+ * nothing reached the provider, the suppression audit or the volume cap, and
+ * the same send is expected to succeed at or after `nextAllowedAt`.
+ *
+ * Deliberately not a subclass of `SmsSuppressedError`: callers treat a
+ * suppression as terminal (stamp the row, record a `suppressed` dispatch), and
+ * a deferral must do neither — the caller leaves its work retryable.
+ */
+export class SmsDeferredError extends Error {
+  readonly deferred = true;
+  readonly reason = 'quiet_hours' as const;
+  constructor(readonly nextAllowedAt: Date) {
+    super(`SMS deferred until ${nextAllowedAt.toISOString()}: recipient quiet hours`);
+    this.name = 'SmsDeferredError';
   }
 }
 
@@ -194,8 +242,23 @@ export interface GatedMessageDeliveryDeps {
     windowHours: number;
   };
   /**
-   * Sink for kill-switch suppression logs. Optional so existing construction
-   * sites and tests are unchanged; defaults to a module-scoped logger.
+   * Recipient-local send window for customer texts tagged
+   * `quietHours: 'defer'`. Optional so existing construction sites keep their
+   * behaviour; app.ts wires it for production.
+   */
+  quietHours?: {
+    resolveRecipientLocale(input: {
+      tenantId: string | undefined;
+      customerId: string | undefined;
+      to: string;
+    }): Promise<RecipientLocale>;
+    /** Clock seam; defaults to `new Date()`. */
+    now?: () => Date;
+  };
+  /**
+   * Sink for kill-switch suppression and quiet-hours deferral logs. Optional
+   * so existing construction sites and tests are unchanged; defaults to a
+   * module-scoped logger.
    */
   logger?: Pick<Logger, 'info'>;
   /**
@@ -245,10 +308,12 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
   }
 
   async sendSms(message: SmsMessage): Promise<DeliveryResult> {
-    // Kill switch FIRST — deliberately ahead of the owner bypass below. The
-    // guarantee is "no outbound SMS at all", so an owner digest is stopped
-    // too; the consent gate's owner carve-out does not apply here.
-    if (!isOutboundChannelEnabled('sms', this.deps.env)) {
+    // Kill switch FIRST — deliberately ahead of the owner bypass below, so an
+    // ordinary owner send (digest, approval link) is stopped too. The one
+    // exception is an owner-class alert that must reach a human: a life-safety
+    // page or an operator alert (`alertClass`). Inbound voice AI stays live
+    // with the switch off, so its emergency pages cannot go dark with it.
+    if (!isOutboundChannelEnabled('sms', this.deps.env) && !isKillSwitchExemptAlert(message)) {
       this.logKillSwitchSuppression('sms', message.tenantId, message.recipientClass, {
         // Same redaction shape as the suppression audit below: last 4 only.
         phoneLast4: normalizePhone(message.to).slice(-4),
@@ -269,7 +334,10 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
     const reason = await this.evaluate(message);
     if (reason) {
       if (this.deps.enforcement === 'warn') {
-        // Would block, but warn mode only observes — audit then send.
+        // Would block, but warn mode only observes — audit then send. A send
+        // the window defers is not a send: check it first, so a text retried
+        // all night is audited once, when it actually goes.
+        await this.deferOutsideSendWindow(message);
         await this.audit('sms.suppressed-would-block', reason, message);
         return this.sendWithinVolumeCap(message);
       }
@@ -322,6 +390,8 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
    * control, not the TCPA consent observation `warn` mode exists for.
    */
   private async sendWithinVolumeCap(message: SmsMessage): Promise<DeliveryResult> {
+    // The send window comes first: a deferred text must not reserve a slot.
+    await this.deferOutsideSendWindow(message);
     const cap = this.deps.recipientVolumeCap;
     if (!cap || cap.maxPerWindow <= 0 || !message.tenantId) {
       return this.deps.base.sendSms(message);
@@ -350,6 +420,54 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
       }
       throw err;
     }
+  }
+
+  /**
+   * The same send-window verdict `quietHours: 'defer'` sends get, asked ahead
+   * of time by a worker that must decide before it creates anything (the
+   * review request mints its link row only once the window is open). With
+   * only a tenant it answers for ANY recipient of that tenant: the tenant's
+   * zone with the strictest close — a necessary condition, so a sweep can
+   * skip a closed tenant without per-recipient work. Allowed-now when no
+   * window is wired.
+   */
+  async sendWindowVerdict(input: {
+    tenantId?: string;
+    customerId?: string;
+    to?: string;
+  }): Promise<QuietHoursResult> {
+    const sendWindow = this.deps.quietHours;
+    const now = sendWindow?.now ? sendWindow.now() : new Date();
+    if (!sendWindow) return { isAllowedNow: true, nextAllowedAt: now };
+    const locale = await sendWindow.resolveRecipientLocale({
+      tenantId: input.tenantId,
+      customerId: input.customerId,
+      to: input.to ?? '',
+    });
+    return recipientQuietHours(locale, now);
+  }
+
+  /**
+   * Throws `SmsDeferredError` for a `quietHours: 'defer'` customer text that
+   * would land outside the recipient-local window. Untagged texts, and every
+   * text when no window is wired, pass straight through.
+   */
+  private async deferOutsideSendWindow(message: SmsMessage): Promise<void> {
+    if (message.quietHours !== 'defer' || !this.deps.quietHours) return;
+    const verdict = await this.sendWindowVerdict({
+      tenantId: message.tenantId,
+      customerId: message.consent?.customerId,
+      to: message.to,
+    });
+    if (verdict.isAllowedNow) return;
+    const logger = this.deps.logger ?? defaultKillSwitchLogger();
+    logger.info('Customer SMS deferred to the recipient-local send window', {
+      reason: 'quiet_hours',
+      tenantId: message.tenantId ?? 'unknown',
+      phoneLast4: normalizePhone(message.to).slice(-4),
+      nextAllowedAt: verdict.nextAllowedAt.toISOString(),
+    });
+    throw new SmsDeferredError(verdict.nextAllowedAt);
   }
 
   async sendEmail(message: EmailMessage): Promise<DeliveryResult> {

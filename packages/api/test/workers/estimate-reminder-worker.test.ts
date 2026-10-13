@@ -52,7 +52,7 @@ describe('runEstimateReminderSweep', () => {
 
   it('returns zeroed result when there are no tenants', async () => {
     const result = await runEstimateReminderSweep(deps({ listTenantIds: async () => [] }));
-    expect(result).toEqual({ tenants: 0, reminders: 0, failed: 0 });
+    expect(result).toEqual({ tenants: 0, reminders: 0, failed: 0, deferred: 0 });
     expect(sendEstimate).not.toHaveBeenCalled();
   });
 

@@ -129,7 +129,8 @@ describe('publicOrigins — resolved once by loadConfig()', () => {
         api: 'https://api.example.com',
         marketing: 'https://therivetapp.com',
       });
-      expect(config.warnings).toHaveLength(1);
+      // The alias's own warning (prod also warns when nothing pages a human).
+      expect(config.warnings.filter((w) => w.includes('APP_PUBLIC_URL'))).toHaveLength(1);
     });
   });
 });

@@ -155,12 +155,14 @@ export interface Queue {
    */
   depth(): Promise<QueueDepth>;
   /**
-   * WS15 (SLO monitor) — count of pending messages older than
-   * `olderThanSeconds`. The poll loop drains every second, so an old pending
-   * row means the queue is STUCK (dead poller, wedged handler, poison-retry
-   * loop) — the staleness signal the queue_staleness SLO alerts on, distinct
-   * from raw depth (which a healthy burst can also raise). Cheap COUNT on an
-   * interval — never called on the hot path.
+   * WS15 (SLO monitor) — count of messages that have been DUE (visible) and
+   * unclaimed for longer than `olderThanSeconds`. The poll loop drains every
+   * second, so a long-due row means the queue is STUCK (dead poller, wedged
+   * handler) — the staleness signal the queue_staleness SLO alerts on,
+   * distinct from raw depth (which a healthy burst can also raise). Measured
+   * from visibility, not creation: a delayed message (durable timer, A2P
+   * poll) is scheduled work until it falls due, and an in-flight one is
+   * invisible. Cheap COUNT on an interval — never called on the hot path.
    */
   stalePendingCount(olderThanSeconds: number): Promise<number>;
   getConfig(): QueueConfig;
@@ -323,10 +325,10 @@ export class InMemoryQueue implements Queue {
     return { pending: this.messages.length, deadLetter: this.dlq.length };
   }
 
-  /** WS15 — mirror of PgQueue.stalePendingCount (created_at age filter). */
+  /** WS15 — mirror of PgQueue.stalePendingCount (due-and-unclaimed age). */
   async stalePendingCount(olderThanSeconds: number): Promise<number> {
     const cutoff = Date.now() - Math.max(0, olderThanSeconds) * 1000;
-    return this.messages.filter((m) => new Date(m.createdAt).getTime() < cutoff).length;
+    return this.messages.filter((m) => m.visibleAt < cutoff).length;
   }
 }
 

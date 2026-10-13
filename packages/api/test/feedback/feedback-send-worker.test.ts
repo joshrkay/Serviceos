@@ -24,6 +24,8 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import { createLogger } from '../../src/logging/logger';
 import { QueueMessage } from '../../src/queues/queue';
+import { createRecipientLocaleResolver } from '../../src/notifications/recipient-locale';
+import { InMemoryLocationRepository } from '../../src/locations/location';
 
 const TENANT = uuidv4();
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
@@ -54,7 +56,10 @@ function message(payload: FeedbackSendPayload): QueueMessage<FeedbackSendPayload
   };
 }
 
-async function setup(customerOverrides: Partial<Customer> = {}) {
+async function setup(
+  customerOverrides: Partial<Customer> = {},
+  opts: { now?: () => Date; reviewToggle?: boolean } = {},
+) {
   const customerRepo = new InMemoryCustomerRepository();
   const customerId = uuidv4();
   await customerRepo.create({
@@ -85,6 +90,8 @@ async function setup(customerOverrides: Partial<Customer> = {}) {
     status: 'completed',
     priority: 'normal',
     createdBy: 'u1',
+    // The review sweep stamps the job when it enqueues feedback_send.
+    reviewRequestSentAt: new Date('2026-10-13T12:00:00Z'),
     createdAt: new Date(),
     updatedAt: new Date(),
   });
@@ -100,6 +107,7 @@ async function setup(customerOverrides: Partial<Customer> = {}) {
     nextEstimateNumber: 1,
     nextInvoiceNumber: 1,
     defaultPaymentTermDays: 30,
+    ...(opts.reviewToggle === undefined ? {} : { sendReviewRequest: opts.reviewToggle }),
     createdAt: new Date(),
     updatedAt: new Date(),
   });
@@ -112,6 +120,18 @@ async function setup(customerOverrides: Partial<Customer> = {}) {
     dnc: dncRepo,
     auditRepo: new InMemoryAuditRepository(),
     enforcement: 'block',
+    ...(opts.now
+      ? {
+          quietHours: {
+            resolveRecipientLocale: createRecipientLocaleResolver({
+              settingsRepo,
+              locationRepo: new InMemoryLocationRepository(),
+            }),
+            now: opts.now,
+          },
+          logger: { info: () => undefined },
+        }
+      : {}),
   });
   const dispatcher = new GatingRecordingDispatcher(
     new MessageDeliveryFeedbackDispatcher(gated),
@@ -124,9 +144,10 @@ async function setup(customerOverrides: Partial<Customer> = {}) {
     feedbackRequestRepo,
     dispatcher,
     publicBaseUrl: 'https://app.example.com/',
+    sendWindow: gated,
   });
 
-  return { worker, jobId, customerId, feedbackRequestRepo, dispatcher, dncRepo, rawProvider };
+  return { worker, jobId, customerId, jobRepo, feedbackRequestRepo, dispatcher, dncRepo, rawProvider };
 }
 
 describe('feedback_send worker — happy path', () => {
@@ -201,5 +222,71 @@ describe('feedback_send worker — early returns', () => {
     const { worker, dispatcher } = await setup();
     await worker.handle(message({ tenantId: TENANT, jobId: uuidv4() }), logger);
     expect(dispatcher.sent).toHaveLength(0);
+  });
+});
+
+describe('feedback_send worker — recipient quiet hours (a review request is non-transactional)', () => {
+  // Tenant zone 'UTC' (setup). The 555 number cannot be placed and there is no
+  // service location, so the window needs every US zone open with the 20:00
+  // close: 19:00Z (15:00 ET … 09:00 HST) is open, 22:30Z is not.
+  const LATE = new Date('2026-10-13T22:30:00Z');
+  const MORNING = new Date('2026-10-14T19:00:00Z');
+
+  it('defers by handing the job back to the review sweep: nothing minted, nothing texted, the stamp cleared', async () => {
+    const { worker, jobId, jobRepo, feedbackRequestRepo, rawProvider } = await setup({}, { now: () => LATE });
+
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger);
+
+    expect(rawProvider.sentSms).toHaveLength(0);
+    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).toBeNull();
+    // Unstamped = eligible again: the sweep re-enqueues it on an in-window tick.
+    expect((await jobRepo.findById(TENANT, jobId))?.reviewRequestSentAt).toBeFalsy();
+  });
+
+  it('the in-window message the sweep re-enqueues sends once — and a duplicate delivery does not send again', async () => {
+    let clock = LATE;
+    const { worker, jobId, rawProvider, feedbackRequestRepo } = await setup({}, { now: () => clock });
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger); // deferred, handed back
+
+    clock = MORNING;
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger);
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger); // redelivered
+
+    expect(rawProvider.sentSms).toHaveLength(1);
+    const saved = await feedbackRequestRepo.findByJob(TENANT, jobId);
+    expect(rawProvider.sentSms[0].body).toContain(`/feedback/${saved!.token}`);
+  });
+
+  it('does not send a review request the owner switched off after it was queued', async () => {
+    const { worker, jobId, rawProvider, feedbackRequestRepo } = await setup(
+      {},
+      { now: () => MORNING, reviewToggle: false },
+    );
+
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger);
+
+    expect(rawProvider.sentSms).toHaveLength(0);
+    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).toBeNull();
+  });
+
+  it('a failed hand-back is safe to retry: nothing was minted, so the retry defers it again', async () => {
+    const { worker, jobId, jobRepo, feedbackRequestRepo, rawProvider } = await setup({}, { now: () => LATE });
+    const update = jobRepo.update.bind(jobRepo);
+    let failNext = true;
+    jobRepo.update = async (...args: Parameters<typeof jobRepo.update>) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error('db blip');
+      }
+      return update(...args);
+    };
+
+    await expect(worker.handle(message({ tenantId: TENANT, jobId }), logger)).rejects.toThrow('db blip');
+    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).toBeNull();
+
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger); // the queue's retry
+
+    expect(rawProvider.sentSms).toHaveLength(0);
+    expect((await jobRepo.findById(TENANT, jobId))?.reviewRequestSentAt).toBeFalsy();
   });
 });

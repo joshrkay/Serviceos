@@ -115,6 +115,32 @@ describe('createAlertOperator — channel fan-out', () => {
     expect(base.sentSms[0].recipientClass).toBe('owner');
   });
 
+  it('the operator page still goes out with the outbound SMS kill switch off (TELEPHONY_ENABLED=false)', async () => {
+    // The documented launch posture: telephony SMS off, no SENTRY_DSN. The
+    // operator SMS is then the only channel that can reach a human.
+    const base = new InMemoryDeliveryProvider();
+    const gated = new GatedMessageDelivery({
+      base,
+      dnc: { isOnDnc: vi.fn().mockResolvedValue(false) } as never,
+      auditRepo: { create: vi.fn() } as never,
+      enforcement: 'block',
+      env: { TELEPHONY_ENABLED: 'false' },
+      logger: { info: () => undefined },
+    });
+    const op = createAlertOperator({
+      sentry: fakeSentry(),
+      delivery: gated,
+      alertSmsTo: '+15551230000',
+      cooldownMs: HOUR,
+      logger: noopLogger,
+    });
+
+    await op(alert);
+
+    expect(base.sentSms).toHaveLength(1);
+    expect(base.sentSms[0].to).toBe('+15551230000');
+  });
+
   it('skips SMS when ALERT_SMS_TO is unset', async () => {
     const delivery = new InMemoryDeliveryProvider();
     const op = createAlertOperator({
