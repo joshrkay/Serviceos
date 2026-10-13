@@ -16,10 +16,11 @@
  *   3. Have not already had a review request handled
  *      (review_request_sent_at IS NULL).
  *
- * For each it enqueues `feedback_send` with the SAME idempotency key the old
+ * For each it stamps `review_request_sent_at = NOW()` and then enqueues
+ * `feedback_send` with the SAME idempotency key the old
  * immediate-on-completion enqueue used (`<tenant>:<job>:feedback_send`) so the
- * PgQueue's UNIQUE(idempotency_key) dedup collapses any overlap, then stamps
- * `review_request_sent_at = NOW()` — the stamp is the sweep's idempotency gate,
+ * PgQueue's UNIQUE(idempotency_key) dedup collapses any overlap (a failed
+ * enqueue clears the stamp again) — the stamp is the sweep's idempotency gate,
  * set whether feedback_send ultimately sends or suppresses (no phone / DNC /
  * no consent), so the sweep never re-checks the row.
  *
@@ -155,14 +156,22 @@ export async function runReviewRequestSweep(
           continue;
         }
       }
-      await deps.queue.send(
-        'feedback_send',
-        { tenantId: row.tenant_id, jobId: row.id },
-        `${row.tenant_id}:${row.id}:feedback_send`,
-      );
       // Stamp regardless of whether feedback_send sends or suppresses, so the
-      // sweep doesn't re-evaluate this job forever.
+      // sweep doesn't re-evaluate this job forever — and BEFORE enqueueing:
+      // feedback_send clears the stamp to hand a quiet-hours deferral back,
+      // and a fast worker's clear must land after this write, never under it.
       await deps.jobRepo.update(row.tenant_id, row.id, { reviewRequestSentAt: now() });
+      try {
+        await deps.queue.send(
+          'feedback_send',
+          { tenantId: row.tenant_id, jobId: row.id },
+          `${row.tenant_id}:${row.id}:feedback_send`,
+        );
+      } catch (err) {
+        // Nothing was enqueued: clear the stamp so the next sweep retries.
+        await deps.jobRepo.update(row.tenant_id, row.id, { reviewRequestSentAt: undefined });
+        throw err;
+      }
       result.enqueued++;
     } catch (err) {
       // Transient: leave review_request_sent_at null so the next sweep retries.
