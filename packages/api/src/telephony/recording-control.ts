@@ -15,6 +15,7 @@
  */
 import { createLogger } from '../logging/logger';
 import { timedFetch } from '../shared/timed-fetch';
+import { getSentryClient } from '../monitoring/sentry';
 
 const logger = createLogger({
   service: 'telephony.recording-control',
@@ -40,6 +41,29 @@ export interface RecordingControl {
  */
 export const PAUSE_ACK_WAIT_MS = 3_000;
 export const PAUSE_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * The caller already heard the acknowledgement, yet the pause failed: the
+ * recording may still be running after a consent revocation. Alert-level so
+ * ops can act on the call (error log + Sentry when configured); the spoken
+ * line is unchanged.
+ */
+function alertPauseFailedAfterAck(callSid: string, reason: string): void {
+  logger.error('ALERT: recording pause failed after the caller was told it was paused', {
+    alert: 'recording_pause_failed_after_ack',
+    callSid,
+    reason,
+  });
+  try {
+    getSentryClient().withScope((scope) => {
+      scope.setTag('alert', 'recording_pause_failed_after_ack');
+      scope.setTag('call_sid', callSid);
+      scope.captureException(new Error(`recording pause failed after acknowledgement: ${reason}`));
+    });
+  } catch {
+    /* monitoring must never break the voice path */
+  }
+}
 
 export class TwilioRecordingControl implements RecordingControl {
   private readonly fetchImpl: typeof fetch;
@@ -105,13 +129,11 @@ export class TwilioRecordingControl implements RecordingControl {
           timeoutMs: PAUSE_REQUEST_TIMEOUT_MS,
           afterTurnMovedOn: turnMovedOn(),
         });
+        if (turnMovedOn()) alertPauseFailedAfterAck(callSid, `no answer within ${PAUSE_REQUEST_TIMEOUT_MS}ms`);
         throw new Error('pauseRecording failed: timeout');
       }
       if (turnMovedOn()) {
-        logger.error('pauseRecording: transport failed after the turn moved on; recording may NOT be paused', {
-          callSid,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        alertPauseFailedAfterAck(callSid, err instanceof Error ? err.message : String(err));
       }
       throw err;
     }
@@ -124,6 +146,7 @@ export class TwilioRecordingControl implements RecordingControl {
         body: bodyText.slice(0, 200),
         afterTurnMovedOn: turnMovedOn(),
       });
+      if (turnMovedOn()) alertPauseFailedAfterAck(callSid, `Twilio answered ${res.status}`);
       throw new Error(`pauseRecording failed: ${res.status}`);
     }
     logger.info('pauseRecording: recording paused', {

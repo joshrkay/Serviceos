@@ -11,6 +11,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TwilioRecordingControl } from '../../src/telephony/recording-control';
+import { resetSentryClient, setSentryClient } from '../../src/monitoring/sentry';
 import { advance, fakeJson, hangingFetch, settleWithin, track, useProviderClock } from '../helpers/hanging-fetch';
 
 /** Twilio applies the pause when it answers, unless the request was aborted first. */
@@ -74,6 +75,45 @@ describe('TwilioRecordingControl.pauseRecording', () => {
     expect(twilio.aborted).toBe(false);
     await advance(1_000);
     expect(twilio.aborted).toBe(true);
+  });
+
+  describe('a pause that fails after the caller already heard "paused" alerts ops (review round 2, N5)', () => {
+    let captured: Array<{ tags: Record<string, string>; error: Error }>;
+    beforeEach(() => {
+      captured = [];
+      setSentryClient({
+        withScope: (cb: (scope: { setTag(k: string, v: string): void; captureException(e: Error): string }) => unknown) => {
+          const tags: Record<string, string> = {};
+          return cb({ setTag: (k, v) => { tags[k] = v; }, captureException: (error) => { captured.push({ tags, error }); return 'id'; } });
+        },
+      } as never);
+    });
+    afterEach(() => resetSentryClient());
+
+    /** Twilio answers with `status` after `answersAfterMs`. */
+    const twilioAnswering = (status: number, answersAfterMs: number) =>
+      new TwilioRecordingControl(
+        'AC1',
+        'tok',
+        vi.fn(() => new Promise((resolve) => setTimeout(() => resolve(fakeJson({ message: 'x' }, status)), answersAfterMs))) as unknown as typeof fetch,
+      );
+
+    it('a late Twilio rejection is captured with the callSid', async () => {
+      const turn = track(twilioAnswering(500, 5_000).pauseRecording('CA-late-fail'));
+      await advance(5_000);
+
+      expect(turn.state.status).toBe('rejected');
+      expect(captured).toHaveLength(1);
+      expect(captured[0].tags).toMatchObject({ call_sid: 'CA-late-fail', alert: 'recording_pause_failed_after_ack' });
+    });
+
+    it('a late success, or a failure the turn saw itself, raises no alert', async () => {
+      track(twilioAnswering(200, 5_000).pauseRecording('CA-late-ok'));
+      track(twilioAnswering(500, 1_000).pauseRecording('CA-fast-fail'));
+      await advance(5_000);
+
+      expect(captured).toEqual([]);
+    });
   });
 
   it('a rejected pause keeps failing with its status', async () => {
