@@ -150,6 +150,8 @@ let callSeq = 0;
 async function harness(opts: {
   twilio?: ReturnType<typeof makeTwilioRest>;
   rotation?: OnCallEntry[];
+  /** Replace the real turn host (for effects no production producer emits yet). */
+  speechTurn?: ConstructorParameters<typeof TwilioMediaStreamAdapter>[0]['speechTurn'];
 } = {}) {
   const callSid = `CA-handoff-${++callSeq}`;
   const streamSid = `MZ-handoff-${callSeq}`;
@@ -188,8 +190,11 @@ async function harness(opts: {
       store,
       streamingProvider: deepgram.provider,
       ttsProvider: tts,
-      speechTurn: ({ session: s, speechResult, callSid: cs, tenantId }) =>
-        gather.processCallerUtterance({ sessionId: s.id, callSid: cs, speechResult, tenantId }),
+      speechTurn:
+        opts.speechTurn ??
+        (({ session: s, speechResult, callSid: cs, tenantId }) =>
+          gather.processCallerUtterance({ sessionId: s.id, callSid: cs, speechResult, tenantId })),
+      callControl: new DefaultTwilioCallControl(),
       interimEmergencyScan: ({ session: s, speechResult, tenantId }) =>
         gather.scanInterimForEmergency({ sessionId: s.id, speechResult, tenantId }),
       finalizeOnClose,
@@ -294,6 +299,55 @@ describe('realtime hand-off — escalation on a stream call reaches a human', ()
     expect(twiml).toContain('<Dial');
     expect(twiml).toContain(DISPATCHER);
     await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+  });
+});
+
+// ─── (c) the Dial's no-answer cascade lands on a route that exists ───────────
+
+describe('realtime hand-off — escalate_with_context', () => {
+  it('builds the Dial action as /api/telephony/dial-result?sid=<session> (the route that cascades no-answer)', async () => {
+    let sessionId = '';
+    const h = await harness({
+      speechTurn: async ({ session, callSid, tenantId }) => {
+        sessionId = session.id;
+        return [
+          { type: 'tts_play', payload: { text: 'Connecting you now.' } },
+          {
+            type: 'escalate_with_context',
+            payload: {
+              escalationId: 'esc_ctx',
+              summary: {
+                whisper: 'Caller needs help.',
+                sms: 'Escalation <escalationId>',
+                panel: {
+                  header: { title: 'Escalation', callerName: 'Sam', callerPhone: CALLER },
+                  customer: { name: 'Sam', phone: CALLER, tags: [] },
+                  lastInteraction: null,
+                  intent: { summary: 'wants a person', entities: [] },
+                  reason: { code: 'operator_request', humanReadable: 'asked for a person' },
+                  transcriptSnapshot: [],
+                },
+              },
+              dispatcher: { userId: 'u1', phone: DISPATCHER },
+              callSid,
+              tenantId,
+              channelPreferences: { sms: false, in_app: false, whisper: false },
+            },
+          },
+        ];
+      },
+    });
+
+    h.say('get me a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+    const twiml = h.twilio.transfers()[0].body.get('Twiml')!;
+    expect(twiml).toContain(
+      `action="${PUBLIC_BASE_URL}/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}"`,
+    );
+    expect(twiml).not.toContain('/api/telephony/dial-action');
   });
 });
 

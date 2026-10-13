@@ -1675,7 +1675,7 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       const callControl = { dialDispatcher: vi.fn(() => '<Response/>') };
       const setPendingTransferTwiml = vi.fn();
 
-      const { adapter, ws } = setupAdapter({
+      const { adapter, ws, session } = setupAdapter({
         publicBaseUrl: 'https://api.example.com/', // trailing slash
         callControl,
         setPendingTransferTwiml,
@@ -1706,8 +1706,11 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       expect(callControl.dialDispatcher).toHaveBeenCalledOnce();
       const callArgs = callControl.dialDispatcher.mock.calls[0];
       const dialOpts = callArgs[2] as { actionUrl: string; whisperUrl?: string };
-      // URL must not contain double slashes from a trailing-slash base.
-      expect(dialOpts.actionUrl).toBe('https://api.example.com/api/telephony/dial-action');
+      // URL must not contain double slashes from a trailing-slash base, and
+      // must target the route that exists (/dial-result keyed on the session).
+      expect(dialOpts.actionUrl).toBe(
+        `https://api.example.com/api/telephony/dial-result?sid=${encodeURIComponent(session!.id)}`,
+      );
       expect(dialOpts.whisperUrl).toBe('https://api.example.com/api/telephony/whisper/esc_slash');
     });
 

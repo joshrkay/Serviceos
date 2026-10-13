@@ -2758,9 +2758,13 @@ export class TwilioMediaStreamAdapter {
         channelPreferences.whisper && baseUrl
           ? `${baseUrl}/api/telephony/whisper/${escalationId}`
           : undefined;
-      const dialActionUrl = baseUrl
-        ? `${baseUrl}/api/telephony/dial-action`
-        : '/api/telephony/dial-action';
+      // The Dial's action is the ONE route that handles its outcome
+      // (/dial-result: answered → 'transferred', no-answer → rotation cascade
+      // / voicemail), keyed on the session id like every other producer's.
+      const dialResultPath = `/api/telephony/dial-result?sid=${encodeURIComponent(
+        this.state.session?.id ?? '',
+      )}`;
+      const dialActionUrl = baseUrl ? `${baseUrl}${dialResultPath}` : dialResultPath;
       const dialTwiml = this.deps.callControl.dialDispatcher(
         callSid,
         dispatcher.phone,
