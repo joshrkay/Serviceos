@@ -216,7 +216,13 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['151_tenant_settings_bill_labor_from_time_entries', 'a33ab626d1b807c19dfd62180a9462c7cbdb41c8b358e89249fb2213f93ac145'],
   ['152_voice_parity_transfer_and_languages', '437c19e7db82a2a1ec8c04d62d433b13ec609dd55315b3fe859fee39bad680a0'],
   ['153_create_call_me_back_tasks', '9b9d430535e2f9d35c71de35e7389198a71ed8946f8262527ed9378535952abe'],
-  ['154_call_me_back_session_idempotency', 'a08d1ad3f4a42adb17e2fd5ea464b52fb87721d3dd5fe534c662dd787228c65e'],
+  // Deploy-blocker fix (2026-10-13): 154's body is now a deliberate no-op. The
+  // runner replays every migration on every deploy (no ledger), so 154's
+  // CREATE UNIQUE INDEX idx_cmb_session_unique (tenant_id, session_id) re-built
+  // the index that 268 drops over live data, and the first session with two
+  // call-me-back reasons failed it (23505), blocking every later deploy. 268
+  // alone yields the final state; pinned by migration-replay-populated-db.test.ts.
+  ['154_call_me_back_session_idempotency', 'c77b7234f9e1e318ebdebe9d6d50c547130ad10be3f34308467a16f19a455e5c'],
   // QA-2026-06-10: credentials column + google_business provider missing from tenant_integrations
   ['155_tenant_integrations_google_business', '58ba921c46731601640f6079796407fd4e06bfa51097b986c61c90b645331ae2'],
   // P2-034: SMS approval transport — proposal_sms_events
