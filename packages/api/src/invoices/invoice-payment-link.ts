@@ -295,7 +295,15 @@ export async function deactivateInvoicePaymentLink(params: {
 export async function cancelInvoicePaymentIntents(params: {
   tenantId: string;
   invoice: Invoice;
-  reason: 'voided' | 'canceled';
+  /**
+   * voided/canceled — the invoice left the payable world (P0-1);
+   * repriced — an owner-approved credit LOWERED the balance a minted PI was
+   * priced at (P0-9), so its client secret would capture more than is owed.
+   * Only PIs priced above the new balance are cancelled. The pay page mints
+   * a fresh PI at the current balance (its idempotency key carries the
+   * invoice's line-item count, so it never replays a cancelled one).
+   */
+  reason: 'voided' | 'canceled' | 'repriced';
   provider: PaymentLinkProvider;
   connectAccountResolver?: ConnectAccountResolver;
   auditRepo?: AuditRepository;
@@ -358,6 +366,18 @@ export async function cancelInvoicePaymentIntents(params: {
     }
     for (const intent of intents) {
       if (TERMINAL_PI_STATUSES.has(intent.status)) continue;
+      // Repriced (a credit LOWERED the balance): only a PI priced ABOVE what
+      // is now owed can overcharge. One at or below the balance just records
+      // a (partial) payment, so leave it confirmable — cancelling it would
+      // only break a customer mid-checkout. A PI whose amount the provider
+      // did not report is cancelled (fail safe toward never overcharging).
+      if (
+        reason === 'repriced' &&
+        typeof intent.amount === 'number' &&
+        intent.amount <= invoice.amountDueCents
+      ) {
+        continue;
+      }
       try {
         await cancel(intent.id, scope);
         canceled.push(intent.id);

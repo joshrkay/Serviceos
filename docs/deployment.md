@@ -130,6 +130,7 @@ pre-split behavior.
 
 Notes:
 
+- Web and worker must share the same `STORAGE_*` env (`STORAGE_ENDPOINT` and `STORAGE_PUBLIC_URL` especially): web mints transcription audio URLs and the worker only fetches URLs on the storage origins in its own env, so a `STORAGE_PUBLIC_URL` set on web but not on the worker fails every transcription (`Audio URL refused … (origin)`).
 - Both roles still call `app.listen` on `$PORT` (the worker's `/health`
   backs Railway's deploy gate); Railway networking decides exposure. The
   worker does **not** need a public domain.

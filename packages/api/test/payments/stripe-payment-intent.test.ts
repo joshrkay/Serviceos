@@ -29,6 +29,7 @@ describe('P5-016 stripe-payment-intent — createPaymentIntent', () => {
     currency: 'usd',
     invoiceId: 'inv-1',
     tenantId: 'tenant-1',
+    repricingNonce: 1,
   };
 
   it('returns clientSecret + paymentIntentId on success', async () => {
@@ -62,7 +63,7 @@ describe('P5-016 stripe-payment-intent — createPaymentIntent', () => {
     expect(init.body).toContain('tenant_id');
   });
 
-  it('uses an idempotency key derived from invoiceId+amount+platform', async () => {
+  it('uses an idempotency key derived from invoiceId+amount+platform+repricing nonce', async () => {
     const spy = vi.fn() as MockedFunction<StripeFetch>;
     spy.mockResolvedValue({
       ok: true,
@@ -72,7 +73,7 @@ describe('P5-016 stripe-payment-intent — createPaymentIntent', () => {
     });
     await createPaymentIntent({ apiKey: 'sk_test' }, validInput, spy);
     const [, init] = spy.mock.calls[0];
-    expect(init.headers['Idempotency-Key']).toBe('pi_inv-1_12500_platform');
+    expect(init.headers['Idempotency-Key']).toBe('pi_inv-1_12500_platform_r1');
     expect(init.headers['Stripe-Account']).toBeUndefined();
   });
 
@@ -91,7 +92,39 @@ describe('P5-016 stripe-payment-intent — createPaymentIntent', () => {
     );
     const [, init] = spy.mock.calls[0];
     expect(init.headers['Stripe-Account']).toBe('acct_tenant_1');
-    expect(init.headers['Idempotency-Key']).toBe('pi_inv-1_12500_acct_tenant_1');
+    expect(init.headers['Idempotency-Key']).toBe('pi_inv-1_12500_acct_tenant_1_r1');
+  });
+
+  // Review H2 — Stripe replays a stored response (same id + client_secret)
+  // for a reused key for ~24h. A credit cancels PIs priced above the new
+  // balance; if the balance later returns to an earlier amount, a key of
+  // invoice+amount alone would hand the customer that CANCELLED intent back.
+  // The repricing nonce (the invoice's line-item count — every credit/fee
+  // appends a line) makes the post-repricing key fresh.
+  it('a re-priced invoice back at an earlier amount gets a fresh key, never the cancelled intent', async () => {
+    const spy = vi.fn() as MockedFunction<StripeFetch>;
+    spy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({ id: 'pi_1', client_secret: 'pi_1_secret_xyz' }),
+    });
+    await createPaymentIntent({ apiKey: 'sk_test' }, { ...validInput, repricingNonce: 1 }, spy);
+    await createPaymentIntent({ apiKey: 'sk_test' }, { ...validInput, repricingNonce: 3 }, spy);
+    const keys = spy.mock.calls.map(([, init]) => init.headers['Idempotency-Key']);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it('rejects a missing or non-integer repricing nonce (a key without it could replay a cancelled intent)', async () => {
+    const spy = vi.fn() as MockedFunction<StripeFetch>;
+    const { repricingNonce: _omit, ...withoutNonce } = validInput;
+    await expect(
+      createPaymentIntent({ apiKey: 'sk_test' }, withoutNonce as typeof validInput, spy),
+    ).rejects.toThrow(/repricingNonce/);
+    await expect(
+      createPaymentIntent({ apiKey: 'sk_test' }, { ...validInput, repricingNonce: 1.5 }, spy),
+    ).rejects.toThrow(/repricingNonce/);
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it('throws when Stripe returns non-2xx', async () => {
@@ -174,6 +207,23 @@ describe('P0-1 completion — searchPaymentIntentsByInvoice', () => {
     expect(init.method).toBe('GET');
     expect(init.headers.Authorization).toBe('Bearer sk_test');
     expect(init.headers['Stripe-Account']).toBeUndefined();
+  });
+
+  it('carries each PI\'s amount so a repricing sweep can keep PIs priced within the balance', async () => {
+    const spy = vi.fn() as MockedFunction<StripeFetch>;
+    spy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({
+        data: [{ id: 'pi_a', status: 'requires_payment_method', amount: 12500 }],
+        has_more: false,
+      }),
+    });
+
+    const result = await searchPaymentIntentsByInvoice({ apiKey: 'sk_test' }, input, spy);
+
+    expect(result).toEqual([{ id: 'pi_a', status: 'requires_payment_method', amount: 12500 }]);
   });
 
   it('sets Stripe-Account when scoped to a Connect account', async () => {
