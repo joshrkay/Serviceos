@@ -826,6 +826,11 @@ export class TwilioGatherAdapter {
     return this.pendingConsentCommit.size;
   }
 
+  /** Test-only view of the parked hand-off TwiML count (L1 leak regression). */
+  get _pendingTransferTwimlSize(): number {
+    return this.pendingTransferTwiml.size;
+  }
+
   /**
    * A3 — consecutive-low-Gather-`Confidence`-turn streak, keyed by
    * sessionId. Each `/gather` POST is a stateless HTTP request, so this
@@ -3392,7 +3397,22 @@ export class TwilioGatherAdapter {
   takePendingTransferTwiml(sessionId: string): string | undefined {
     const twiml = this.pendingTransferTwiml.get(sessionId);
     if (twiml) this.pendingTransferTwiml.delete(sessionId);
+    this.sweepPendingTransferTwiml();
     return twiml;
+  }
+
+  /**
+   * L1 — drop hand-off TwiML parked for sessions the store no longer holds
+   * (the call ended / was reaped before anything took it: a second escalation
+   * parked behind the once-per-leg latch, a hand-off parked after the leg
+   * closed). Runs on every park and take — both transports take after every
+   * turn — so the Map stays bounded by live sessions. `peek`, not `get`: a
+   * sweep must not refresh the activity clock of the sessions it inspects.
+   */
+  private sweepPendingTransferTwiml(): void {
+    for (const sessionId of this.pendingTransferTwiml.keys()) {
+      if (!this.deps.store.peek(sessionId)) this.pendingTransferTwiml.delete(sessionId);
+    }
   }
 
   /**
@@ -3403,6 +3423,7 @@ export class TwilioGatherAdapter {
    * before a degrade to Gather).
    */
   setPendingTransferTwiml(sessionId: string, twiml: string): void {
+    this.sweepPendingTransferTwiml();
     this.pendingTransferTwiml.set(sessionId, twiml);
   }
 

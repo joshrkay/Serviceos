@@ -4106,11 +4106,12 @@ export class TwilioMediaStreamAdapter {
     callSid: string,
     trigger: string,
   ): Promise<void> {
-    logger.error('realtime hand-off: Twilio refused the transfer — degrading to Gather', {
-      callSid,
-      sessionId: session.id,
-      trigger,
-    });
+    logger.error(
+      this.deps.restRedirect
+        ? 'realtime hand-off: Twilio refused the transfer — degrading to Gather'
+        : 'realtime hand-off: no REST redirector wired (PUBLIC_API_URL unset) — cannot deliver',
+      { callSid, sessionId: session.id, trigger },
+    );
     recordVoiceError({
       errorKind: 'handoff_delivery_failed',
       channel: 'media_streams',
