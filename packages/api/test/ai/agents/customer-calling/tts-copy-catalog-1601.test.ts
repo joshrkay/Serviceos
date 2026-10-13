@@ -48,6 +48,11 @@ const SNAPSHOT: Record<string, Pinned> = {
     en: "I'm having trouble completing that. Let me connect you with a team member.",
     es: 'Tengo dificultades para completar eso. Le comunico con un miembro del equipo.',
   },
+  // Realtime hand-off — new copy (transfer and Gather degrade both refused).
+  handoff_unavailable: {
+    en: "I'm sorry, I wasn't able to connect you to a team member. Please try calling again in a few minutes.",
+    es: 'Lo siento, no pude comunicarle con un miembro del equipo. Por favor, vuelva a llamar en unos minutos.',
+  },
   low_stt_confidence_reprompt: {
     en: "I didn't quite catch that — could you say that again?",
     es: 'No alcancé a escuchar bien eso — ¿podría repetirlo, por favor?',
