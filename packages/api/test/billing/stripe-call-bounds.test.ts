@@ -233,7 +233,7 @@ describe('StripeConnectService — the first persisted Express account wins', ()
     let arrived = 0;
     let releaseCreates: () => void = () => {};
     const bothArrived = new Promise<void>((resolve) => { releaseCreates = resolve; });
-    const fetchFn = vi.fn(async (input: string | URL | Request) => {
+    const fetchFn = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith('/v1/accounts')) {
         const id = arrived === 0 ? 'acct_first' : 'acct_second';

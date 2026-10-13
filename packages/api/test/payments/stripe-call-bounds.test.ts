@@ -100,13 +100,13 @@ describe('Stripe payment wrappers — bounded when no fetcher is passed', () => 
 describe('createSetupIntent — the Stripe customer create is idempotent per customer', () => {
   /** The customer create succeeded at Stripe but its response was lost. */
   const lostCustomerCreate = () =>
-    vi.fn(async (input: string) =>
+    vi.fn(async (input: string, _init?: { headers: Record<string, string> }) =>
       input.endsWith('/v1/customers') ? fakeJson({ error: { message: 'lost' } }, 500) : fakeJson({}),
     );
   const customerKeys = (fetchFn: ReturnType<typeof lostCustomerCreate>) =>
     fetchFn.mock.calls
       .filter(([url]) => url.endsWith('/v1/customers'))
-      .map(([, init]) => (init as { headers: Record<string, string> }).headers['Idempotency-Key']);
+      .map(([, init]) => init?.headers['Idempotency-Key']);
   const setup = (fetchFn: ReturnType<typeof lostCustomerCreate>, customerId: string, stripeAccountId?: string) =>
     createSetupIntent(
       { apiKey: 'sk_test', stripeAccountId },
