@@ -4644,9 +4644,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // urgent callers straight through to the owner (fallback ladder:
       // owner → on-call → voicemail + urgent SMS + call_me_back).
       const mediaStreamPublicBase = (process.env.PUBLIC_API_URL ?? '').replace(/\/+$/, '');
-      // WS7 — mid-call REST redirector: on a terminal realtime failure the
-      // mediastream adapter steers the LIVE call back to the Gather-fallback
-      // webhook instead of hanging up. Wired only when PUBLIC_API_URL is set
+      // WS7 — mid-call REST update of the LIVE call: on a terminal realtime
+      // failure the mediastream adapter steers it back to the Gather-fallback
+      // webhook instead of hanging up, and a human hand-off is delivered
+      // through it as inline TwiML. Wired only when PUBLIC_API_URL is set
       // (Twilio must POST an absolute URL); absent → adapter keeps 1011-close.
       const twilioCallRedirector = process.env.PUBLIC_API_URL
         ? createTwilioCallRedirector({
@@ -4870,12 +4871,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // Resolve the account bound by the verified inbound webhook.
             authTokenGetter: resolveTwilioWebhookCredential,
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
-            // Section 7 (CRITICAL): wire the gather adapter's shared Map so
-            // Dial TwiML built inside handleEscalateWithContext is visible to
-            // the route layer via takePendingTransferTwiml(sessionId). Without
-            // this the caller stays on hold forever — the dispatcher gets SMS
-            // but the call never bridges.
+            // Realtime hand-off: every escalation producer parks its <Dial>
+            // (or no-one-available TwiML) in the gather adapter's shared Map.
+            // A <Connect><Stream> call has no next webhook to return it in, so
+            // the stream adapter TAKES it after the turn's line has played and
+            // delivers it to the live call over REST (twilioCallRedirector
+            // with inline Twiml). `set` re-parks an undelivered hand-off before
+            // a degrade so /voice/gather-fallback bridges the call instead.
             setPendingTransferTwiml: twilioAdapter.setPendingTransferTwiml.bind(twilioAdapter),
+            takePendingTransferTwiml: twilioAdapter.takePendingTransferTwiml.bind(twilioAdapter),
             // F6b: Wire the shared whisper cache so the MediaStream adapter
             // stores whisper TwiML after handleEscalateWithContext runs.
             whisperCache: sharedWhisperCache,

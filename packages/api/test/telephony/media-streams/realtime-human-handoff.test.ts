@@ -1,0 +1,292 @@
+/**
+ * Realtime (Media Streams) human hand-off delivery.
+ *
+ * A stream call is `<Connect><Stream>` with no follow-on verb, so a `<Dial>`
+ * parked for "the next webhook response" is never read — there is no next
+ * webhook on a stream call. These tests drive the PRODUCTION composition
+ * (real TwilioGatherAdapter as the turn host, the real Twilio REST client from
+ * `createTwilioCallRedirector`) and fake only the boundaries: the Twilio WS,
+ * Deepgram, TTS and the HTTP `fetch` to api.twilio.com. Every assertion is on
+ * an observable effect — the REST request Twilio would receive, the WS close,
+ * the TwiML a webhook returns — never on an internal Map.
+ */
+
+import { describe, it, expect, vi } from 'vitest';
+import {
+  TwilioMediaStreamAdapter,
+  type WsLike,
+} from '../../../src/telephony/media-streams/mediastream-adapter';
+import { TwilioGatherAdapter } from '../../../src/telephony/twilio-adapter';
+import { DefaultTwilioCallControl } from '../../../src/telephony/twilio-call-control';
+import { createTwilioCallRedirector } from '../../../src/telephony/twilio-call-redirect';
+import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
+import { InMemoryOnCallRepository, type OnCallEntry } from '../../../src/oncall/rotation';
+import { InMemoryAuditRepository } from '../../../src/audit/audit';
+import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
+import type {
+  StreamingSession,
+  StreamingTranscriptionProvider,
+  StreamingTranscriptCallback,
+  StreamingTranscriptEvent,
+} from '../../../src/voice/transcription-providers';
+import type { TtsProvider } from '../../../src/ai/tts/tts-provider';
+
+const TENANT = 'tenant-handoff';
+const PUBLIC_BASE_URL = 'https://api.test';
+const TWILIO_API = 'https://twilio.test/2010-04-01';
+const CALLER = '+15125550100';
+const DISPATCHER = '+15125550101';
+const START_ACCOUNT_SID = 'AC_start_frame';
+
+// ─── Boundary fakes ──────────────────────────────────────────────────────────
+
+class FakeWs implements WsLike {
+  sent: Array<Record<string, unknown>> = [];
+  closed = false;
+  closeCode: number | undefined;
+  closeReason: string | undefined;
+  private acked = new Set<string>();
+  private listeners: Record<string, Array<(...args: unknown[]) => void>> = {};
+  send(data: string): void {
+    this.sent.push(JSON.parse(data) as Record<string, unknown>);
+  }
+  close(code?: number, reason?: string): void {
+    this.closed = true;
+    this.closeCode = code;
+    this.closeReason = reason;
+    this.fire('close');
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  on(event: string, listener: (...args: any[]) => void): void {
+    (this.listeners[event] ??= []).push(listener);
+  }
+  fire(event: string, ...args: unknown[]): void {
+    for (const l of this.listeners[event] ?? []) l(...args);
+  }
+  inboundJson(obj: unknown): void {
+    this.fire('message', JSON.stringify(obj));
+  }
+  /** Names of every `mark` frame the adapter has sent so far. */
+  markNames(): string[] {
+    return this.sent
+      .filter((f) => f.event === 'mark')
+      .map((f) => (f.mark as { name: string }).name);
+  }
+  /** Twilio echoing every outstanding mark = the queued audio finished playing. */
+  ackAllMarks(streamSid: string): void {
+    for (const name of this.markNames()) {
+      if (this.acked.has(name)) continue;
+      this.acked.add(name);
+      this.inboundJson({ event: 'mark', streamSid, mark: { name } });
+    }
+  }
+}
+
+function makeStreamingProvider(): {
+  provider: StreamingTranscriptionProvider;
+  emit: (evt: StreamingTranscriptEvent) => void;
+} {
+  let cb: StreamingTranscriptCallback | null = null;
+  const session: StreamingSession = { send: vi.fn(), finish: vi.fn(), destroy: vi.fn() };
+  return {
+    provider: {
+      openSession: vi.fn((onEvent: StreamingTranscriptCallback) => {
+        cb = onEvent;
+        return Promise.resolve(session);
+      }),
+    },
+    emit: (evt) => cb?.(evt),
+  };
+}
+
+function makeTtsProvider(): TtsProvider {
+  return {
+    synthesize: vi.fn(async () => ({
+      audio: Buffer.alloc(640),
+      contentType: 'audio/pcm',
+      provider: 'test',
+    })),
+  };
+}
+
+function makeGateway(): LLMGateway {
+  const response: LLMResponse = {
+    content: '{"intentType":"unknown","confidence":0,"reasoning":"x"}',
+    model: 'mock',
+    provider: 'mock',
+    tokenUsage: { input: 1, output: 1, total: 2 },
+    latencyMs: 1,
+  };
+  return { complete: vi.fn().mockResolvedValue(response) } as unknown as LLMGateway;
+}
+
+/** The fake api.twilio.com: records every Calls/{sid}.json update. */
+function makeTwilioRest(respond: (body: URLSearchParams) => { ok: boolean; status: number } = () => ({ ok: true, status: 200 })) {
+  const fetchImpl = vi.fn(async (_url: string, init: { body: string }) => respond(new URLSearchParams(init.body)));
+  return {
+    fetchImpl,
+    /** REST updates that carried inline TwiML (the hand-off). */
+    transfers: () =>
+      fetchImpl.mock.calls
+        .map(([url, init]) => ({ url, body: new URLSearchParams(init.body) }))
+        .filter((c) => c.body.has('Twiml')),
+    /** REST updates that redirected the call to the Gather fallback webhook. */
+    degrades: () =>
+      fetchImpl.mock.calls
+        .map(([url, init]) => ({ url, body: new URLSearchParams(init.body) }))
+        .filter((c) => c.body.get('Url')?.endsWith('/api/telephony/voice/gather-fallback')),
+  };
+}
+
+// ─── Production-shaped composition ───────────────────────────────────────────
+
+let callSeq = 0;
+
+async function harness(opts: {
+  twilio?: ReturnType<typeof makeTwilioRest>;
+  rotation?: OnCallEntry[];
+} = {}) {
+  const callSid = `CA-handoff-${++callSeq}`;
+  const streamSid = `MZ-handoff-${callSeq}`;
+  const store = new VoiceSessionStore({ startInterval: false });
+  const auditRepo = new InMemoryAuditRepository();
+  const gather = new TwilioGatherAdapter({
+    store,
+    gateway: makeGateway(),
+    businessName: 'Acme Plumbing',
+    publicBaseUrl: PUBLIC_BASE_URL,
+    onCallRepo: new InMemoryOnCallRepository(
+      new Map([[TENANT, opts.rotation ?? [{ id: 'r1', userId: 'u1', orderIndex: 0 }]]]),
+    ),
+    auditRepo,
+    callControl: new DefaultTwilioCallControl(),
+    dispatcherPhoneResolver: async () => DISPATCHER,
+  });
+  await gather.handleInboundForStream({ callSid, from: CALLER, tenantId: TENANT });
+  const session = store.findByCallSid(callSid)!;
+
+  const twilio = opts.twilio ?? makeTwilioRest();
+  const restRedirect = createTwilioCallRedirector({
+    resolveAuthToken: async () => 'tok_secret',
+    defaultAccountSid: 'AC_deploy',
+    publicBaseUrl: PUBLIC_BASE_URL,
+    apiBaseUrl: TWILIO_API,
+    fetchImpl: twilio.fetchImpl as unknown as typeof fetch,
+  });
+  const finalizeOnClose = vi.fn((s, reason: string, fx) => gather.finalizeTerminatedSession(s, fx, reason));
+  const deepgram = makeStreamingProvider();
+  const ws = new FakeWs();
+  // Wired exactly as app.ts wires attachMediaStreamServer.
+  const stream = new TwilioMediaStreamAdapter(
+    {
+      store,
+      streamingProvider: deepgram.provider,
+      ttsProvider: makeTtsProvider(),
+      speechTurn: ({ session: s, speechResult, callSid: cs, tenantId }) =>
+        gather.processCallerUtterance({ sessionId: s.id, callSid: cs, speechResult, tenantId }),
+      interimEmergencyScan: ({ session: s, speechResult, tenantId }) =>
+        gather.scanInterimForEmergency({ sessionId: s.id, speechResult, tenantId }),
+      finalizeOnClose,
+      publicBaseUrl: PUBLIC_BASE_URL,
+      setPendingTransferTwiml: gather.setPendingTransferTwiml.bind(gather),
+      takePendingTransferTwiml: gather.takePendingTransferTwiml.bind(gather),
+      restRedirect,
+    },
+    ws,
+  );
+  stream.start();
+  ws.inboundJson({
+    event: 'start',
+    streamSid,
+    start: { callSid, accountSid: START_ACCOUNT_SID, streamSid, tracks: ['inbound'] },
+  });
+  await vi.waitFor(() => expect(deepgram.provider.openSession).toHaveBeenCalled());
+
+  const say = (transcript: string) =>
+    deepgram.emit({ type: 'final', transcript, confidence: 0.95, isFinal: true });
+
+  return { callSid, streamSid, store, session, gather, twilio, ws, deepgram, say, finalizeOnClose, auditRepo };
+}
+
+// ─── (a) escalation on a stream call is delivered to Twilio ──────────────────
+
+describe('realtime hand-off — escalation on a stream call reaches a human', () => {
+  it('issues the REST transfer with the Dial TwiML only after the "connecting you" line has played', async () => {
+    const h = await harness();
+
+    h.say('I want to speak to a person');
+
+    // The spoken hand-off line is queued (its end-of-utterance mark is out)…
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    await new Promise((r) => setTimeout(r, 30));
+    // …but the call is not pulled off the stream while the caller is still hearing it.
+    expect(h.twilio.transfers()).toHaveLength(0);
+
+    // Twilio reports the line finished playing.
+    h.ws.ackAllMarks(h.streamSid);
+
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+    const [transfer] = h.twilio.transfers();
+    // Same account resolution as the WS7 degrade: the start frame's AccountSid.
+    expect(transfer.url).toBe(`${TWILIO_API}/Accounts/${START_ACCOUNT_SID}/Calls/${h.callSid}.json`);
+    const twiml = transfer.body.get('Twiml')!;
+    expect(twiml).toContain('<Dial');
+    expect(twiml).toContain(DISPATCHER);
+    expect(twiml).toContain(
+      `action="${PUBLIC_BASE_URL}/api/telephony/dial-result?sid=${encodeURIComponent(h.session.id)}"`,
+    );
+
+    // The stream leg is released cleanly; the Dial's /dial-result owns the
+    // session's terminal stamp (ended_reason 'transferred' on answer), so the
+    // close does NOT finalize the session here.
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+    expect(h.ws.closeCode).toBe(1000);
+    expect(h.finalizeOnClose).not.toHaveBeenCalled();
+    expect(h.session.terminalOutcome).toBeUndefined();
+  });
+
+  it('Twilio ending the stream while the transfer request is in flight is not stamped as a hang-up', async () => {
+    // Twilio stops the <Stream> (stop frame + socket close) as soon as it
+    // starts executing the new TwiML — often before our REST response lands.
+    let accept!: (r: { ok: boolean; status: number }) => void;
+    const twilio = makeTwilioRest();
+    twilio.fetchImpl.mockImplementationOnce(
+      () => new Promise<{ ok: boolean; status: number }>((resolve) => { accept = resolve; }),
+    );
+    const h = await harness({ twilio });
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+
+    h.ws.inboundJson({ event: 'stop', streamSid: h.streamSid });
+    await new Promise((r) => setTimeout(r, 10));
+    accept({ ok: true, status: 200 });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // /dial-result — not this close — stamps the transferred call.
+    expect(h.finalizeOnClose).not.toHaveBeenCalled();
+    expect(h.session.terminalOutcome).toBeUndefined();
+  });
+
+  it('an E2 emergency caught on an INTERIM transcript is transferred to the dispatcher', async () => {
+    const h = await harness();
+
+    // Interims precede finals, so the interim scan is where E2 usually fires.
+    h.deepgram.emit({
+      type: 'partial',
+      transcript: 'my basement is flooding',
+      confidence: 0.9,
+      isFinal: false,
+    });
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+    const twiml = h.twilio.transfers()[0].body.get('Twiml')!;
+    expect(twiml).toContain('<Dial');
+    expect(twiml).toContain(DISPATCHER);
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+  });
+});
