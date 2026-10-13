@@ -10,8 +10,10 @@
  *   - SMS: when ALERT_SMS_TO is configured AND a MessageDeliveryProvider is
  *     wired, send an SMS with recipientClass 'owner' — the operator/on-call
  *     class that BYPASSES the GatedMessageDelivery consent+DNC gate (see
- *     notifications/delivery-provider.ts). A 'customer'-class send would fail
- *     closed (missing_consent_context) and silently suppress the page.
+ *     notifications/delivery-provider.ts) — tagged alertClass 'operator', which
+ *     also passes the TELEPHONY_ENABLED=false kill switch. A 'customer'-class
+ *     send would fail closed (missing_consent_context) and silently suppress
+ *     the page.
  *
  * Failure posture: NEVER throws into the caller (the SLO sweep / shutdown
  * path) — every channel failure is swallowed and logged, same posture as the
@@ -99,13 +101,16 @@ export function createAlertOperator(deps: AlertOperatorDeps): AlertOperatorFn {
       // Channel 2 — operator SMS (only when configured + provider wired).
       // recipientClass 'owner' is REQUIRED: it bypasses the consent+DNC gate
       // (GatedMessageDelivery) so an operator page can never be suppressed as
-      // an unconsented customer send.
+      // an unconsented customer send. alertClass 'operator' lets it through
+      // the customer-facing TELEPHONY_ENABLED=false kill switch too — with
+      // SENTRY_DSN unset this SMS is the only channel that reaches a human.
       if (deps.alertSmsTo && deps.delivery) {
         try {
           await deps.delivery.sendSms({
             to: deps.alertSmsTo,
             body: message.slice(0, 320),
             recipientClass: 'owner',
+            alertClass: 'operator',
             idempotencyKey: `slo-alert-${alert.rule}-${t}`,
           });
           sloAlertsSentTotal.inc({ rule: alert.rule, channel: 'sms' });

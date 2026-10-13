@@ -2404,6 +2404,24 @@ describe('ANS-001 — E1 booking revocation (conditional write + compensation)',
 });
 
 describe('ANS-001 — E1 tenant alert (owner cell, durable fallback, push fan-out)', () => {
+  it('tags every E1 text life-safety, so the outbound SMS kill switch cannot silence it', async () => {
+    const sent: Array<{ to: string; body: string; alertClass?: string }> = [];
+    const { processor, session } = await makeE1Ctx({
+      settings: { ownerPhone: '+15125550111', transferNumber: '+15125550999' },
+      deliveryProvider: {
+        sendSms: async (args: { to: string; body: string; alertClass?: string }) => {
+          sent.push(args);
+          return {};
+        },
+      },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    expect(sent).toHaveLength(2);
+    expect(sent.every((s) => s.alertClass === 'life_safety')).toBe(true);
+  });
+
   it('texts EVERY configured number — owner cell AND transfer line (S2: no preference chain)', async () => {
     // ownerPhone can be a stale identity field, and a Twilio-ACCEPTED send to
     // a stale number throws nothing — a preference chain can silently alert

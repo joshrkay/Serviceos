@@ -12,7 +12,12 @@
  *   - recipientClass 'owner'  → bypass the gate entirely. Owner / operator /
  *     on-call sends (digests, one-tap approval links, emergency pages,
  *     dispatcher patches) are NEVER blocked by customer consent or DNC — even
- *     if the owner's own number happens to be on a DNC list.
+ *     if the owner's own number happens to be on a DNC list — nor delayed by
+ *     quiet hours.
+ *   - recipientClass 'customer' tagged `quietHours: 'defer'` (non-
+ *     transactional: thank-you, review request, automated reminder) → outside
+ *     the recipient-local send window, `SmsDeferredError` (not sent yet; the
+ *     caller retries) before any cap slot or audit row.
  *   - recipientClass 'customer':
  *       · enforcement 'off'   → send; audit nothing (byte-for-byte legacy).
  *       · enforcement 'warn'  → if the send WOULD block, audit
@@ -54,9 +59,13 @@
  *   - any other value       → channel ENABLED
  *
  * Unlike the consent gate, the kill switch is checked BEFORE the
- * `recipientClass: 'owner'` bypass. That is deliberate: the promise is "no
- * outbound traffic at all", not "no customer traffic". An owner digest is
- * still an outbound message on a real carrier/ESP account.
+ * `recipientClass: 'owner'` bypass, so ordinary owner traffic (digests,
+ * approval links, transfer context) stops too. The one exception: an
+ * owner-class send tagged `alertClass` 'life_safety' (E1 alerts, the E2 page
+ * ladder, the patch-through miss page) or 'operator' (ALERT_SMS_TO). The
+ * switch does not stop inbound voice AI, so the pages that call raises — and
+ * the operator alert that is the only human channel when SENTRY_DSN is unset —
+ * must not go dark with it. No customer send ever passes the switch.
  *
  * Observability: a disabled channel must not be indistinguishable from no
  * traffic. Every suppression emits an info log with the greppable
@@ -91,7 +100,10 @@ export type SmsSuppressionReason =
   | 'missing_consent_context'
   /** WS12 — standing cross-channel (sms/marketing) revocation in the ledger. */
   | 'revoked'
-  /** Runtime kill switch — TELEPHONY_ENABLED=false. Applies to owner sends too. */
+  /**
+   * Runtime kill switch — TELEPHONY_ENABLED=false. Applies to owner sends too,
+   * except life-safety / operator alerts (`SmsMessage.alertClass`).
+   */
   | 'channel_disabled'
   /** #1402 §18 — the number already got the per-window maximum of customer texts. */
   | 'recipient_volume_cap';
@@ -117,6 +129,18 @@ export function isOutboundChannelEnabled(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   return env[KILL_SWITCH_ENV_VAR[channel]] !== 'false';
+}
+
+/**
+ * An owner-class life-safety page or operator alert — the only sends the SMS
+ * kill switch lets through. A customer send never qualifies, whatever it is
+ * tagged with.
+ */
+function isKillSwitchExemptAlert(message: SmsMessage): boolean {
+  return (
+    message.recipientClass === 'owner' &&
+    (message.alertClass === 'life_safety' || message.alertClass === 'operator')
+  );
 }
 
 /** Narrow DNC seam — satisfied by DncRepository and test stubs. */
@@ -280,10 +304,12 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
   }
 
   async sendSms(message: SmsMessage): Promise<DeliveryResult> {
-    // Kill switch FIRST — deliberately ahead of the owner bypass below. The
-    // guarantee is "no outbound SMS at all", so an owner digest is stopped
-    // too; the consent gate's owner carve-out does not apply here.
-    if (!isOutboundChannelEnabled('sms', this.deps.env)) {
+    // Kill switch FIRST — deliberately ahead of the owner bypass below, so an
+    // ordinary owner send (digest, approval link) is stopped too. The one
+    // exception is an owner-class alert that must reach a human: a life-safety
+    // page or an operator alert (`alertClass`). Inbound voice AI stays live
+    // with the switch off, so its emergency pages cannot go dark with it.
+    if (!isOutboundChannelEnabled('sms', this.deps.env) && !isKillSwitchExemptAlert(message)) {
       this.logKillSwitchSuppression('sms', message.tenantId, message.recipientClass, {
         // Same redaction shape as the suppression audit below: last 4 only.
         phoneLast4: normalizePhone(message.to).slice(-4),

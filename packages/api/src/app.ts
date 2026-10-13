@@ -290,6 +290,7 @@ import { createImagePostProcessWorker } from './workers/image-post-process-worke
 import { PgWebhookRepository } from './webhooks/pg-webhook';
 import { PgQueue } from './queues/pg-queue';
 import { createRecipientLocaleResolver } from './notifications/recipient-locale';
+import { ownerSmsSender } from './notifications/owner-sms-sender';
 import { NoopFeedbackDispatcher, MessageDeliveryFeedbackDispatcher } from './feedback/dispatcher';
 import { MessageDeliveryProvider } from './notifications/delivery-provider';
 import { createMessageDeliveryProvider } from './notifications/delivery-provider-factory';
@@ -3865,8 +3866,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       ? {
           deliveryProvider: {
             // Owner/dispatcher patch + on-call notify SMS — never customer-gated.
-            sendSms: (args: { to: string; body: string }) =>
-              messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
+            // Forwards the E1 alert's per-message life-safety tag, so only that
+            // alert passes the TELEPHONY_ENABLED=false kill switch.
+            sendSms: ownerSmsSender(messageDelivery),
           },
         }
       : {}),
@@ -4150,9 +4152,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   if (messageDelivery) {
     const emergencyPageWorker = createEmergencyPageWorker({
       queue,
-      // Emergency page → owner / on-call. Never customer-gated.
-      sendSms: (args: { to: string; body: string }) =>
-        messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
+      // Emergency page → owner / on-call. Never customer-gated, and
+      // life-safety: it still goes with the outbound kill switch off.
+      sendSms: ownerSmsSender(messageDelivery, { alertClass: 'life_safety' }),
       resolvePagePhone: async (tenantId: string) => {
         try {
           const settings = await settingsRepo.findByTenant(tenantId);
@@ -4711,9 +4713,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
                   businessPhoneFallbackResolver: createBusinessPhoneFallback(settingsRepo),
                   ...(messageDelivery
                     ? {
-                        // Patch-owner-through page → owner. Never customer-gated.
-                        sendSms: (args: { to: string; body: string }) =>
-                          messageDelivery.sendSms({ to: args.to, body: args.body, recipientClass: 'owner' }),
+                        // Patch-owner-through page → owner (a vulnerable,
+                        // urgent caller the patch could not reach). Never
+                        // customer-gated; life-safety, so it still goes with
+                        // the outbound kill switch off.
+                        sendSms: ownerSmsSender(messageDelivery, { alertClass: 'life_safety' }),
                       }
                     : {}),
                   callMeBackRepo,

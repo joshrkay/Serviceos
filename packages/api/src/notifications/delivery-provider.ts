@@ -67,10 +67,25 @@ export interface SmsMessage {
    *     retryable and sends on a later in-window attempt.
    */
   quietHours?: SmsQuietHoursPolicy;
+  /**
+   * Marks an OWNER-class send that must reach a human even while the
+   * customer-facing outbound kill switch (`TELEPHONY_ENABLED=false`) is off —
+   * inbound voice AI stays live then, so its emergency pages must too.
+   *
+   *   - 'life_safety' — E1 life-safety alerts, the E2 emergency page ladder,
+   *     the vulnerable-caller patch-miss page.
+   *   - 'operator'    — platform operator alerts (ALERT_SMS_TO).
+   *
+   * Ignored on 'customer' sends: no customer text ever bypasses the switch.
+   */
+  alertClass?: SmsAlertClass;
 }
 
 /** See `SmsMessage.quietHours`. */
 export type SmsQuietHoursPolicy = 'defer';
+
+/** See `SmsMessage.alertClass`. */
+export type SmsAlertClass = 'life_safety' | 'operator';
 
 export interface EmailMessage {
   to: string;
