@@ -29,6 +29,13 @@ describe('Postgres integration — PgQueue', () => {
   });
 
   afterAll(async () => {
+    // The shared test database outlives this file (later files in the same run
+    // reuse it), and PgQueue.receive() is NOT type-filtered: a due row left
+    // behind here — e.g. the WS15 'stuck.job' fixture — would be claimed by the
+    // next file's receive() (voice-recording-provenance saw it first and failed
+    // 'Invalid tenant ID format'). Leave the queue empty.
+    await pool.query('DELETE FROM _queue_messages');
+    await pool.query('DELETE FROM _queue_dlq');
     await closeSharedTestDb();
   });
 
