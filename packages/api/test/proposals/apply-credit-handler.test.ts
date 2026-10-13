@@ -16,7 +16,9 @@
  * check), dev-wiring passthrough, and tenant isolation.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ApplyCreditExecutionHandler } from '../../src/proposals/execution/apply-credit-handler';
+import { ApplyCreditExecutionHandler, creditLineId } from '../../src/proposals/execution/apply-credit-handler';
+import { InMemoryJobRepository } from '../../src/jobs/job';
+import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import { InMemoryInvoiceRepository, Invoice } from '../../src/invoices/invoice';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -109,6 +111,10 @@ class ConcurrentWriteAfterRead extends InMemoryInvoiceRepository {
 
   armConcurrentVoid(): void {
     this.pending = (tenantId, id) => this.update(tenantId, id, { status: 'void' });
+  }
+
+  armConcurrentWrite(write: (tenantId: string, id: string) => Promise<unknown>): void {
+    this.pending = write;
   }
 
   async findById(tenantId: string, id: string): Promise<Invoice | null> {
@@ -768,6 +774,82 @@ describe('apply_credit execution handler', () => {
     expect(row!.totals.totalCents).toBe(2000);
     expect(row!.amountDueCents).toBe(2000);
     expect(deactivated).toEqual(['plink_stale']);
+  });
+
+  // Review N4 — the credit's line id is per PROPOSAL, so a duplicate key on
+  // it proves THIS credit is already on the invoice (a concurrent run of the
+  // same proposal won). That is an idempotent success, not a failure that
+  // would invite the owner to approve a second, distinct credit.
+  it('N4 — a duplicate key on its own deterministic line is an idempotent success, and the cleanup still runs', async () => {
+    const racing = new ConcurrentWriteAfterRead();
+    await racing.create(
+      makeInvoice({
+        stripePaymentLinkId: 'plink_old',
+        stripePaymentLinkUrl: 'https://buy.stripe.test/plink_old',
+      }),
+    );
+    const proposal = makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 500 } });
+    racing.armConcurrentWrite((tenantId, id) =>
+      racing.applyNonTaxableAdjustmentAtomic(
+        tenantId,
+        id,
+        buildLineItem(creditLineId(id, proposal.id), 'Credit', 1, -500, 1, false, 'other'),
+        new Date(),
+      ),
+    );
+    const { provider, deactivated } = makeFakeProvider();
+    handler = new ApplyCreditExecutionHandler(racing, auditRepo, undefined, { provider });
+
+    const result = await handler.execute(proposal, ctx);
+
+    expect(result).toEqual({ success: true, resultEntityId: INVOICE_ID });
+    const row = await racing.findById(TENANT, INVOICE_ID);
+    expect(row!.lineItems.map((li) => li.totalCents)).toEqual([3000, -500]);
+    expect(row!.amountDueCents).toBe(2500);
+    expect(deactivated).toEqual(['plink_old']);
+  });
+
+  // Review N5 — a re-run that finds its credit already applied (crash after
+  // the commit, before the executor's marker) must finish what the crash cut
+  // off: the credit.applied domain event (exactly once, keyed by proposal) and
+  // the job money-state rollup (a credit that settled the invoice must move
+  // the job off 'invoiced').
+  it('N5 — a crash-retry writes credit.applied exactly once and refreshes the job money state', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create({
+      id: 'job-1',
+      tenantId: TENANT,
+      customerId: 'cust-1',
+      locationId: 'loc-1',
+      jobNumber: 'JOB-1',
+      summary: 'Leak repair',
+      status: 'completed',
+      priority: 'normal',
+      moneyState: 'invoiced',
+      createdBy: 'u-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    invoiceRepo = new InMemoryInvoiceRepository();
+    await invoiceRepo.create(
+      makeInvoice({ status: 'partially_paid', amountPaidCents: 1000, amountDueCents: 2000 }),
+    );
+    const proposal = makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: 2000 } });
+    // The first run committed the credit (settling the invoice) and then died
+    // before its domain audit and rollup — modelled by a handler without them.
+    expect((await new ApplyCreditExecutionHandler(invoiceRepo).execute(proposal, ctx)).success).toBe(true);
+    const moneyStateDeps = { jobRepo, estimateRepo: new InMemoryEstimateRepository(), invoiceRepo };
+    const retry = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo, moneyStateDeps);
+
+    expect((await retry.execute(proposal, ctx)).success).toBe(true);
+    expect((await retry.execute(proposal, ctx)).success).toBe(true);
+
+    const applied = (await auditRepo.findByEntity(TENANT, 'invoice', INVOICE_ID)).filter(
+      (e) => e.eventType === 'credit.applied' && e.metadata?.proposalId === proposal.id,
+    );
+    expect(applied).toHaveLength(1);
+    expect(applied[0].metadata).toMatchObject({ amountCents: 2000, newAmountDueCents: 0, newStatus: 'paid' });
+    expect((await jobRepo.findById(TENANT, 'job-1'))!.moneyState).toBe('paid');
   });
 
   it('two DIFFERENT approved credits on the same invoice both apply (the line id is per proposal)', async () => {

@@ -151,8 +151,7 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
     // and only PaymentIntents priced above the balance are cancelled).
     const lineId = creditLineId(invoice.id, proposal.id);
     if (invoice.lineItems.some((li) => li.id === lineId)) {
-      await this.killStaleChargeVectors(invoice, context);
-      return { success: true, resultEntityId: invoice.id };
+      return this.finishAlreadyAppliedCredit(invoice, proposal, context, amountCents, reason);
     }
 
     // Only an issued invoice still carrying a balance can be credited —
@@ -196,12 +195,18 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
         new Date(),
       );
     } catch (err) {
-      // Review L5 — a concurrent run of this same proposal won the primary
-      // key on its deterministic credit line; this write rolled back.
+      // Review L5 / N4 — the line id is per PROPOSAL, so a duplicate key on
+      // it proves THIS credit is already on the invoice (a concurrent run of
+      // the same proposal won; this write rolled back). That is an idempotent
+      // success — reporting failure would invite a second, distinct credit.
       if ((err as { code?: unknown } | null)?.code === '23505') {
+        const live = await this.invoiceRepo.findById(context.tenantId, invoice.id);
+        if (live && live.lineItems.some((li) => li.id === lineId)) {
+          return this.finishAlreadyAppliedCredit(live, proposal, context, amountCents, reason);
+        }
         return {
           success: false,
-          error: `This credit was already applied to invoice ${invoice.invoiceNumber} by a concurrent run — not applied twice.`,
+          error: `This credit collided with an existing line on invoice ${invoice.invoiceNumber} — not applied.`,
         };
       }
       return {
@@ -277,6 +282,62 @@ export class ApplyCreditExecutionHandler implements ExecutionHandler {
     }
 
     return { success: true, resultEntityId: updated.id };
+  }
+
+  /**
+   * Review N4 / N5 — this proposal's credit is already on the invoice: a
+   * re-run after a crash between the committed credit and the executor's
+   * marker, or a concurrent run of the same proposal that won the line's
+   * primary key. Never credit again; finish what the earlier run may not
+   * have reached — the stale-charge cleanup, the job money-state rollup, and
+   * the `credit.applied` event (written only when none exists for this
+   * proposal, so a re-run never double-audits) — and report success.
+   */
+  private async finishAlreadyAppliedCredit(
+    invoice: Invoice,
+    proposal: Proposal,
+    context: ExecutionContext,
+    amountCents: number,
+    reason: string | undefined,
+  ): Promise<ExecutionResult> {
+    await this.killStaleChargeVectors(invoice, context);
+    if (this.moneyStateDeps) {
+      await refreshJobMoneyStateSafe(context.tenantId, invoice.jobId, 'system', this.moneyStateDeps);
+    }
+    if (this.auditRepo) {
+      try {
+        const prior = await this.auditRepo.findByEntity(context.tenantId, 'invoice', invoice.id);
+        const alreadyAudited = prior.some(
+          (e) =>
+            e.eventType === 'credit.applied' &&
+            (e.metadata as Record<string, unknown> | undefined)?.proposalId === proposal.id,
+        );
+        if (!alreadyAudited) {
+          await this.auditRepo.create(
+            createAuditEvent({
+              tenantId: context.tenantId,
+              actorId: context.executedBy,
+              actorRole: 'voice_agent',
+              eventType: 'credit.applied',
+              entityType: 'invoice',
+              entityId: invoice.id,
+              metadata: {
+                proposalId: proposal.id,
+                proposalType: 'apply_credit',
+                amountCents,
+                newAmountDueCents: invoice.amountDueCents,
+                newStatus: invoice.status,
+                recoveredOnRetry: true,
+                ...(reason ? { reason } : {}),
+              },
+            }),
+          );
+        }
+      } catch {
+        // swallow — audit must never fail the execution
+      }
+    }
+    return { success: true, resultEntityId: invoice.id };
   }
 
   /**
