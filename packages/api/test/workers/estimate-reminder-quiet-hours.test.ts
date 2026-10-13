@@ -35,81 +35,95 @@ const LATE = new Date('2026-10-14T05:30:00Z'); // 22:30 MST, Oct 13
 const MORNING = new Date('2026-10-14T17:00:00Z'); // 10:00 MST, Oct 14
 const SENT_AT = new Date('2026-10-08T17:00:00Z');
 
+async function world(opts: { email?: string; channel?: 'both' }) {
+  const customerRepo = new InMemoryCustomerRepository();
+  const jobRepo = new InMemoryJobRepository();
+  const estimateRepo = new InMemoryEstimateRepository();
+  await customerRepo.create(
+    buildCustomer({
+      id: CUSTOMER,
+      tenantId: TENANT,
+      displayName: 'Pat Phone',
+      primaryPhone: '+16025550142',
+      email: opts.email,
+      smsConsent: true,
+    }),
+  );
+  await jobRepo.create(buildJob({ id: JOB, tenantId: TENANT, customerId: CUSTOMER }));
+  await estimateRepo.create(
+    buildEstimate({
+      id: ESTIMATE,
+      tenantId: TENANT,
+      jobId: JOB,
+      estimateNumber: 'EST-7001',
+      status: 'sent',
+      sentAt: SENT_AT,
+    }),
+  );
+  const settingsRepo = new InMemorySettingsRepository();
+  await settingsRepo.create({
+    id: '66666666-6666-4666-8666-666666667001',
+    tenantId: TENANT,
+    businessName: 'Acme HVAC',
+    timezone: 'America/Phoenix',
+    estimatePrefix: 'EST',
+    invoicePrefix: 'INV',
+    nextEstimateNumber: 1000,
+    nextInvoiceNumber: 2000,
+    defaultPaymentTermDays: 30,
+    createdAt: SENT_AT,
+    updatedAt: SENT_AT,
+  });
+  const dispatchRepo = new InMemoryDispatchRepository();
+  const delivery = new InMemoryDeliveryProvider();
+  let clock = LATE;
+  const sendService = new SendService({
+    delivery: new GatedMessageDelivery({
+      base: delivery,
+      dnc: new InMemoryDncRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      enforcement: 'block',
+      quietHours: {
+        resolveRecipientLocale: createRecipientLocaleResolver({
+          settingsRepo,
+          locationRepo: new InMemoryLocationRepository(),
+        }),
+        now: () => clock,
+      },
+      logger: { info: () => undefined },
+    }),
+    estimateRepo,
+    invoiceRepo: new InMemoryInvoiceRepository(),
+    jobRepo,
+    customerRepo,
+    settingsRepo,
+    dispatchRepo,
+    publicBaseUrl: 'https://app.example.com',
+  });
+  const sweep = () =>
+    runEstimateReminderSweep({
+      estimateRepo,
+      sendService,
+      pool: null,
+      listTenantIds: async () => [TENANT],
+      logger: createLogger({ service: 'test', environment: 'test', level: 'error' }),
+      now: () => clock,
+      ...(opts.channel ? { channel: opts.channel } : {}),
+    });
+  return {
+    sweep,
+    delivery,
+    dispatchRepo,
+    estimateRepo,
+    setClock: (d: Date) => {
+      clock = d;
+    },
+  };
+}
+
 describe('estimate-reminder sweep — recipient quiet hours', () => {
   it('defers a 22:30 reminder — no text, no failed dispatch, count unchanged — and sends it on the next in-window sweep', async () => {
-    const customerRepo = new InMemoryCustomerRepository();
-    const jobRepo = new InMemoryJobRepository();
-    const estimateRepo = new InMemoryEstimateRepository();
-    await customerRepo.create(
-      buildCustomer({
-        id: CUSTOMER,
-        tenantId: TENANT,
-        displayName: 'Pat Phone',
-        primaryPhone: '+16025550142',
-        email: undefined,
-        smsConsent: true,
-      }),
-    );
-    await jobRepo.create(buildJob({ id: JOB, tenantId: TENANT, customerId: CUSTOMER }));
-    await estimateRepo.create(
-      buildEstimate({
-        id: ESTIMATE,
-        tenantId: TENANT,
-        jobId: JOB,
-        estimateNumber: 'EST-7001',
-        status: 'sent',
-        sentAt: SENT_AT,
-      }),
-    );
-    const settingsRepo = new InMemorySettingsRepository();
-    await settingsRepo.create({
-      id: '66666666-6666-4666-8666-666666667001',
-      tenantId: TENANT,
-      businessName: 'Acme HVAC',
-      timezone: 'America/Phoenix',
-      estimatePrefix: 'EST',
-      invoicePrefix: 'INV',
-      nextEstimateNumber: 1000,
-      nextInvoiceNumber: 2000,
-      defaultPaymentTermDays: 30,
-      createdAt: SENT_AT,
-      updatedAt: SENT_AT,
-    });
-    const dispatchRepo = new InMemoryDispatchRepository();
-    const delivery = new InMemoryDeliveryProvider();
-    let clock = LATE;
-    const sendService = new SendService({
-      delivery: new GatedMessageDelivery({
-        base: delivery,
-        dnc: new InMemoryDncRepository(),
-        auditRepo: new InMemoryAuditRepository(),
-        enforcement: 'block',
-        quietHours: {
-          resolveRecipientLocale: createRecipientLocaleResolver({
-            settingsRepo,
-            locationRepo: new InMemoryLocationRepository(),
-          }),
-          now: () => clock,
-        },
-        logger: { info: () => undefined },
-      }),
-      estimateRepo,
-      invoiceRepo: new InMemoryInvoiceRepository(),
-      jobRepo,
-      customerRepo,
-      settingsRepo,
-      dispatchRepo,
-      publicBaseUrl: 'https://app.example.com',
-    });
-    const sweep = () =>
-      runEstimateReminderSweep({
-        estimateRepo,
-        sendService,
-        pool: null,
-        listTenantIds: async () => [TENANT],
-        logger: createLogger({ service: 'test', environment: 'test', level: 'error' }),
-        now: () => clock,
-      });
+    const { sweep, delivery, dispatchRepo, estimateRepo, setClock } = await world({});
 
     const night = await sweep();
 
@@ -118,11 +132,28 @@ describe('estimate-reminder sweep — recipient quiet hours', () => {
     expect(await dispatchRepo.findByEntity(TENANT, 'estimate', ESTIMATE)).toHaveLength(0);
     expect((await estimateRepo.findById(TENANT, ESTIMATE))?.reminderCount ?? 0).toBe(0);
 
-    clock = MORNING;
+    setClock(MORNING);
     const next = await sweep();
 
     expect(next).toEqual({ tenants: 1, reminders: 1, failed: 0, deferred: 0 });
     expect(delivery.sentSms.map((m) => m.to)).toEqual(['+16025550142']);
     expect((await estimateRepo.findById(TENANT, ESTIMATE))?.reminderCount).toBe(1);
+  });
+
+  it("a two-channel reminder is deferred whole: no email goes out alone while its text waits", async () => {
+    const { sweep, delivery, estimateRepo, setClock } = await world({ email: 'pat@example.com', channel: 'both' });
+
+    const night = await sweep();
+
+    expect(delivery.sentEmails).toHaveLength(0);
+    expect(delivery.sentSms).toHaveLength(0);
+    expect(night).toMatchObject({ reminders: 0, deferred: 1 });
+    expect((await estimateRepo.findById(TENANT, ESTIMATE))?.reminderCount ?? 0).toBe(0);
+
+    setClock(MORNING);
+    await sweep();
+
+    expect(delivery.sentSms).toHaveLength(1);
+    expect(delivery.sentEmails).toHaveLength(1);
   });
 });

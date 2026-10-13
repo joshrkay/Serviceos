@@ -254,50 +254,67 @@ export class SendService {
     // propagates out un-caught and aborts the send before any channel is hit.
     await options?.onProviderStarting?.();
 
-    // Run all channels in parallel — halves p50 latency for channel: 'both'.
     // Any individual channel failure is recorded as a failed dispatch row in
     // the audit table without aborting the others (Promise.allSettled).
     const sendStartedAt = Date.now();
-    const results = await Promise.allSettled(
-      channels.map((target) =>
-        this.dispatchOne({
-          tenantId: input.tenantId,
-          entityType: 'estimate',
-          entityId: estimate.id,
-          target,
-          customerSmsConsent: customer.smsConsent,
-          ...(input.quietHours ? { quietHours: input.quietHours, customerId: customer.id } : {}),
-          idempotencyKey: this.buildIdempotencyKey(
-            'estimate',
-            estimate.id,
-            target.channel,
-            target.recipient,
-            input.idempotencyContext ?? 'default',
-            sendStartedAt
-          ),
-          render: () =>
-            target.channel === 'sms'
-              ? this.renderEstimateSmsMessage(target.recipient, {
-                  customerName: customer.displayName,
-                  estimateNumber: estimate.estimateNumber,
-                  totalCents: estimate.totals.totalCents,
-                  businessName,
-                  viewUrl,
-                  customMessage: input.customMessage,
-                  language,
-                })
-              : this.renderEstimateEmailMessage(target.recipient, {
-                  customerName: customer.displayName,
-                  estimateNumber: estimate.estimateNumber,
-                  totalCents: estimate.totals.totalCents,
-                  businessName,
-                  viewUrl,
-                  customMessage: input.customMessage,
-                  language,
-                }),
-        })
-      )
-    );
+    const dispatchTo = (target: ChannelTarget) =>
+      this.dispatchOne({
+        tenantId: input.tenantId,
+        entityType: 'estimate',
+        entityId: estimate.id,
+        target,
+        customerSmsConsent: customer.smsConsent,
+        ...(input.quietHours ? { quietHours: input.quietHours, customerId: customer.id } : {}),
+        idempotencyKey: this.buildIdempotencyKey(
+          'estimate',
+          estimate.id,
+          target.channel,
+          target.recipient,
+          input.idempotencyContext ?? 'default',
+          sendStartedAt
+        ),
+        render: () =>
+          target.channel === 'sms'
+            ? this.renderEstimateSmsMessage(target.recipient, {
+                customerName: customer.displayName,
+                estimateNumber: estimate.estimateNumber,
+                totalCents: estimate.totals.totalCents,
+                businessName,
+                viewUrl,
+                customMessage: input.customMessage,
+                language,
+              })
+            : this.renderEstimateEmailMessage(target.recipient, {
+                customerName: customer.displayName,
+                estimateNumber: estimate.estimateNumber,
+                totalCents: estimate.totals.totalCents,
+                businessName,
+                viewUrl,
+                customMessage: input.customMessage,
+                language,
+              }),
+      });
+    // Run all channels in parallel — halves p50 latency for channel: 'both'.
+    // Except a deferrable multi-channel send, which waits whole: its text goes
+    // first and, if quiet hours hold it back, nothing is sent — never the
+    // email alone while its text is dropped.
+    const smsTarget =
+      input.quietHours === 'defer' && channels.length > 1
+        ? channels.find((t) => t.channel === 'sms')
+        : undefined;
+    const smsFirst = async (sms: ChannelTarget) => {
+      const [smsResult] = await Promise.allSettled([dispatchTo(sms)]);
+      if (smsResult.status === 'rejected' && smsResult.reason instanceof SmsDeferredError) {
+        throw smsResult.reason;
+      }
+      const rest = await Promise.allSettled(
+        channels.filter((t) => t !== sms).map((t) => dispatchTo(t)),
+      );
+      return channels.map((t) => (t === sms ? smsResult : rest.shift()!));
+    };
+    const results = smsTarget
+      ? await smsFirst(smsTarget)
+      : await Promise.allSettled(channels.map((t) => dispatchTo(t)));
 
     const sent: SendResult['channelsSent'] = [];
     const errors: string[] = [];
