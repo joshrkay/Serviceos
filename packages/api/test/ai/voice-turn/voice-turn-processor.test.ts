@@ -2483,22 +2483,19 @@ describe('ANS-001 — E1 tenant alert (owner cell, durable fallback, push fan-ou
     expect(sent).toHaveLength(1);
   });
 
-  it('does NOT file the durable task when at least one of the two texts delivered', async () => {
+  it('files the durable task even when every text was ACCEPTED by the provider', async () => {
+    // Acceptance is not delivery: with the from-number's A2P registration
+    // incomplete, Twilio accepts and carriers silently drop. The task is the
+    // one channel that cannot be filtered, so it is filed whatever the SMS did.
     const { processor, session, callMeBackRepo } = await makeE1Ctx({
       settings: { ownerPhone: '+15125550111', transferNumber: '+15125550999' },
-      deliveryProvider: {
-        sendSms: async ({ to }) => {
-          if (to === '+15125550111') throw new Error('unreachable');
-          return {};
-        },
-      },
+      deliveryProvider: { sendSms: async () => ({}) },
     });
 
     await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
 
     const reasons = (await callMeBackRepo.listPending('tenant-e1')).map((t) => t.reason);
-    // One delivered alert = a notified tenant; the fallback is for total failure.
-    expect(reasons).not.toContain('life_safety_e1');
+    expect(reasons).toContain('life_safety_e1');
   });
 
   it('files the durable task when EVERY configured number fails', async () => {

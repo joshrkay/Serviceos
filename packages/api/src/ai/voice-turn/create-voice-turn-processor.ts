@@ -3681,11 +3681,10 @@ export function createVoiceTurnProcessor(
           sessionId: session.id,
         });
       }
-      // The durable fallback fires only when NO text went out at all — one
-      // delivered alert is a notified tenant.
-      if (failures.length === sends.length) {
-        await createE1FollowUpTask(session, tenantId, 'life_safety_e1', body);
-      }
+      // Filed whatever the SMS did: a Twilio-ACCEPTED text can still be
+      // dropped by carriers (A2P incomplete) without any signal, so an
+      // accepted send is not a notified tenant.
+      await createE1FollowUpTask(session, tenantId, 'life_safety_e1', body);
     })();
     await Promise.allSettled([push, sms]);
   }
