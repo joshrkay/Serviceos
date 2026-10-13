@@ -3018,8 +3018,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     feedbackRequestRepo,
     dispatcher: feedbackDispatcher,
     publicBaseUrl: config.publicOrigins.web,
-    // Re-schedules a review request deferred by recipient quiet hours.
-    queue,
+    // Recipient quiet hours: a closed window hands the job back to the review
+    // sweep. Without a delivery provider nothing is sent, so always open.
+    sendWindow: messageDelivery ?? {
+      sendWindowVerdict: async () => ({ isAllowedNow: true, nextAllowedAt: new Date() }),
+    },
   });
   workerRegistry.set(
     feedbackSendWorker.type,
@@ -7176,6 +7179,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           jobRepo,
           queue,
           logger: reviewRequestLogger,
+          ...(messageDelivery ? { sendWindow: messageDelivery } : {}),
         });
       }).catch((err) => {
         reviewRequestLogger.error('Review-request sweep failed', {

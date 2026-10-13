@@ -56,16 +56,9 @@ function message(payload: FeedbackSendPayload): QueueMessage<FeedbackSendPayload
   };
 }
 
-interface EnqueuedSend {
-  type: string;
-  payload: FeedbackSendPayload;
-  idempotencyKey: string | undefined;
-  options: { delaySeconds?: number } | undefined;
-}
-
 async function setup(
   customerOverrides: Partial<Customer> = {},
-  opts: { now?: () => Date } = {},
+  opts: { now?: () => Date; reviewToggle?: boolean } = {},
 ) {
   const customerRepo = new InMemoryCustomerRepository();
   const customerId = uuidv4();
@@ -97,6 +90,8 @@ async function setup(
     status: 'completed',
     priority: 'normal',
     createdBy: 'u1',
+    // The review sweep stamps the job when it enqueues feedback_send.
+    reviewRequestSentAt: new Date('2026-10-13T12:00:00Z'),
     createdAt: new Date(),
     updatedAt: new Date(),
   });
@@ -112,6 +107,7 @@ async function setup(
     nextEstimateNumber: 1,
     nextInvoiceNumber: 1,
     defaultPaymentTermDays: 30,
+    ...(opts.reviewToggle === undefined ? {} : { sendReviewRequest: opts.reviewToggle }),
     createdAt: new Date(),
     updatedAt: new Date(),
   });
@@ -141,7 +137,6 @@ async function setup(
     new MessageDeliveryFeedbackDispatcher(gated),
   );
 
-  const enqueued: EnqueuedSend[] = [];
   const worker = createFeedbackSendWorker({
     jobRepo,
     customerRepo,
@@ -149,16 +144,10 @@ async function setup(
     feedbackRequestRepo,
     dispatcher,
     publicBaseUrl: 'https://app.example.com/',
-    queue: {
-      send: async <T,>(type: string, payload: T, idempotencyKey?: string, options?: { delaySeconds?: number }) => {
-        enqueued.push({ type, payload: payload as FeedbackSendPayload, idempotencyKey, options });
-        return 'queued';
-      },
-    },
-    ...(opts.now ? { now: opts.now } : {}),
+    sendWindow: gated,
   });
 
-  return { worker, jobId, customerId, feedbackRequestRepo, dispatcher, dncRepo, rawProvider, enqueued };
+  return { worker, jobId, customerId, jobRepo, feedbackRequestRepo, dispatcher, dncRepo, rawProvider };
 }
 
 describe('feedback_send worker — happy path', () => {
@@ -238,31 +227,65 @@ describe('feedback_send worker — early returns', () => {
 
 describe('feedback_send worker — recipient quiet hours (a review request is non-transactional)', () => {
   // Tenant zone 'UTC' (setup); the 555 number and no service location leave the
-  // state unknown, so the conservative 20:00 close applies.
-  it('defers a 22:30 review request: nothing texted, the request kept, a delayed resume enqueued — which sends the same link', async () => {
-    let clock = new Date('2026-10-13T22:30:00Z');
-    const { worker, jobId, feedbackRequestRepo, rawProvider, enqueued } = await setup({}, { now: () => clock });
+  // residence unknown, so the conservative 20:00 close applies.
+  const LATE = new Date('2026-10-13T22:30:00Z');
+  const MORNING = new Date('2026-10-14T08:30:00Z');
+
+  it('defers by handing the job back to the review sweep: nothing minted, nothing texted, the stamp cleared', async () => {
+    const { worker, jobId, jobRepo, feedbackRequestRepo, rawProvider } = await setup({}, { now: () => LATE });
 
     await worker.handle(message({ tenantId: TENANT, jobId }), logger);
 
     expect(rawProvider.sentSms).toHaveLength(0);
-    const kept = await feedbackRequestRepo.findByJob(TENANT, jobId);
-    expect(kept?.status).toBe('pending');
-    expect(enqueued).toHaveLength(1);
-    expect(enqueued[0]).toMatchObject({
-      type: 'feedback_send',
-      payload: { tenantId: TENANT, jobId, resumeRequestId: kept!.id },
-      // 08:00 the next morning, 9.5 h out.
-      options: { delaySeconds: 9.5 * 60 * 60 },
-    });
-    // A fresh key: the original message's key is still held until it completes.
-    expect(enqueued[0].idempotencyKey).not.toBe(`${TENANT}:${jobId}:feedback_send`);
+    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).toBeNull();
+    // Unstamped = eligible again: the sweep re-enqueues it on an in-window tick.
+    expect((await jobRepo.findById(TENANT, jobId))?.reviewRequestSentAt).toBeFalsy();
+  });
 
-    clock = new Date('2026-10-14T08:00:00Z');
-    await worker.handle(message(enqueued[0].payload), logger);
+  it('the in-window message the sweep re-enqueues sends once — and a duplicate delivery does not send again', async () => {
+    let clock = LATE;
+    const { worker, jobId, rawProvider, feedbackRequestRepo } = await setup({}, { now: () => clock });
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger); // deferred, handed back
+
+    clock = MORNING;
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger);
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger); // redelivered
 
     expect(rawProvider.sentSms).toHaveLength(1);
-    expect(rawProvider.sentSms[0].body).toContain(`/feedback/${kept!.token}`);
-    expect((await feedbackRequestRepo.findByJob(TENANT, jobId))?.id).toBe(kept!.id);
+    const saved = await feedbackRequestRepo.findByJob(TENANT, jobId);
+    expect(rawProvider.sentSms[0].body).toContain(`/feedback/${saved!.token}`);
+  });
+
+  it('does not send a review request the owner switched off after it was queued', async () => {
+    const { worker, jobId, rawProvider, feedbackRequestRepo } = await setup(
+      {},
+      { now: () => MORNING, reviewToggle: false },
+    );
+
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger);
+
+    expect(rawProvider.sentSms).toHaveLength(0);
+    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).toBeNull();
+  });
+
+  it('a failed hand-back is safe to retry: nothing was minted, so the retry defers it again', async () => {
+    const { worker, jobId, jobRepo, feedbackRequestRepo, rawProvider } = await setup({}, { now: () => LATE });
+    const update = jobRepo.update.bind(jobRepo);
+    let failNext = true;
+    jobRepo.update = async (...args: Parameters<typeof jobRepo.update>) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error('db blip');
+      }
+      return update(...args);
+    };
+
+    await expect(worker.handle(message({ tenantId: TENANT, jobId }), logger)).rejects.toThrow('db blip');
+    expect(await feedbackRequestRepo.findByJob(TENANT, jobId)).toBeNull();
+
+    await worker.handle(message({ tenantId: TENANT, jobId }), logger); // the queue's retry
+
+    expect(rawProvider.sentSms).toHaveLength(0);
+    expect((await jobRepo.findById(TENANT, jobId))?.reviewRequestSentAt).toBeFalsy();
   });
 });

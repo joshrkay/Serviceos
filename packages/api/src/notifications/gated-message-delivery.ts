@@ -83,7 +83,11 @@ import {
   resolveOutboundConsent,
   type ConsentLedgerEventLike,
 } from '../compliance/resolve-outbound-consent';
-import { recipientQuietHours, type RecipientLocale } from '../compliance/jurisdiction';
+import {
+  recipientQuietHours,
+  type QuietHoursResult,
+  type RecipientLocale,
+} from '../compliance/jurisdiction';
 import type { RecipientSmsVolumeLedger } from './recipient-sms-volume';
 import {
   DeliveryResult,
@@ -416,20 +420,42 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
   }
 
   /**
+   * The same send-window verdict `quietHours: 'defer'` sends get, asked ahead
+   * of time by a worker that must decide before it creates anything (the
+   * review request mints its link row only once the window is open). With
+   * only a tenant it answers for ANY recipient of that tenant: the tenant's
+   * zone with the strictest close — a necessary condition, so a sweep can
+   * skip a closed tenant without per-recipient work. Allowed-now when no
+   * window is wired.
+   */
+  async sendWindowVerdict(input: {
+    tenantId?: string;
+    customerId?: string;
+    to?: string;
+  }): Promise<QuietHoursResult> {
+    const sendWindow = this.deps.quietHours;
+    const now = sendWindow?.now ? sendWindow.now() : new Date();
+    if (!sendWindow) return { isAllowedNow: true, nextAllowedAt: now };
+    const locale = await sendWindow.resolveRecipientLocale({
+      tenantId: input.tenantId,
+      customerId: input.customerId,
+      to: input.to ?? '',
+    });
+    return recipientQuietHours(locale, now);
+  }
+
+  /**
    * Throws `SmsDeferredError` for a `quietHours: 'defer'` customer text that
    * would land outside the recipient-local window. Untagged texts, and every
    * text when no window is wired, pass straight through.
    */
   private async deferOutsideSendWindow(message: SmsMessage): Promise<void> {
-    const sendWindow = this.deps.quietHours;
-    if (message.quietHours !== 'defer' || !sendWindow) return;
-    const now = sendWindow.now ? sendWindow.now() : new Date();
-    const locale = await sendWindow.resolveRecipientLocale({
+    if (message.quietHours !== 'defer' || !this.deps.quietHours) return;
+    const verdict = await this.sendWindowVerdict({
       tenantId: message.tenantId,
       customerId: message.consent?.customerId,
       to: message.to,
     });
-    const verdict = recipientQuietHours(locale, now);
     if (verdict.isAllowedNow) return;
     const logger = this.deps.logger ?? defaultKillSwitchLogger();
     logger.info('Customer SMS deferred to the recipient-local send window', {
