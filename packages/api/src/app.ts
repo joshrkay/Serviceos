@@ -1251,7 +1251,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     bucket: storageBucket,
     mode: storageMode,
     devStorageSecret,
-  } = createStorageProvider(process.env as NodeJS.ProcessEnv);
+  } = createStorageProvider(process.env as NodeJS.ProcessEnv, {
+    logger: createLogger({
+      service: 'api-boot',
+      environment: process.env.NODE_ENV || 'development',
+    }),
+  });
 
   // Dev-only storage PUT/GET receiver for DevStorageProvider upload URLs.
   // Mounted before /api Clerk auth so a plain unauthenticated-looking PUT

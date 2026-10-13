@@ -10,13 +10,20 @@
  *     boot when no config resolves and the operator has not opted out.
  *
  * Canonical variables (STORAGE_*) always win. The documented Cloudflare R2
- * variables (R2_*) are an alias, used for whatever STORAGE_* did not supply.
+ * variables (R2_*) are an alias, used for whatever STORAGE_* did not supply —
+ * except under the explicit opt-out STORAGE_ENABLED=false, where the alias is
+ * not consulted: an operator who turned storage off (typically leaving the R2_*
+ * they had set while following the checklist) must not see that environment
+ * silently start writing to a bucket on the next deploy. A COMPLETE STORAGE_*
+ * set still resolves under the opt-out, exactly as the factory always did.
  *
  * Dependency-free on purpose: shared/config.ts runs before most modules are
  * wired and must not grow imports.
  */
 
 export interface StorageConfigEnv {
+  /** Explicit opt-out; only the literal 'false' counts (unset = enabled). */
+  STORAGE_ENABLED?: string;
   STORAGE_BUCKET?: string;
   STORAGE_ENDPOINT?: string;
   STORAGE_REGION?: string;
@@ -49,16 +56,20 @@ export type StorageConfigResolution =
 const DEFAULT_R2_BUCKET = 'serviceos-uploads';
 
 export function resolveStorageConfig(env: StorageConfigEnv): StorageConfigResolution {
-  const r2Account = env.R2_ACCOUNT_ID || undefined;
+  const optedOut = env.STORAGE_ENABLED === 'false';
+  const r2Account = optedOut ? undefined : env.R2_ACCOUNT_ID || undefined;
+  const r2AccessKeyId = optedOut ? undefined : env.R2_ACCESS_KEY_ID;
+  const r2SecretAccessKey = optedOut ? undefined : env.R2_SECRET_ACCESS_KEY;
+  const r2Bucket = optedOut ? undefined : env.R2_BUCKET;
 
-  const bucket = env.STORAGE_BUCKET || env.R2_BUCKET || (r2Account ? DEFAULT_R2_BUCKET : undefined);
+  const bucket = env.STORAGE_BUCKET || r2Bucket || (r2Account ? DEFAULT_R2_BUCKET : undefined);
   const endpoint =
     env.STORAGE_ENDPOINT ||
     (r2Account ? `https://${r2Account}.r2.cloudflarestorage.com` : undefined);
   const region =
     env.STORAGE_REGION || (!env.STORAGE_ENDPOINT && r2Account ? 'auto' : undefined);
-  const accessKeyId = env.STORAGE_ACCESS_KEY_ID || env.R2_ACCESS_KEY_ID;
-  const secretAccessKey = env.STORAGE_SECRET_ACCESS_KEY || env.R2_SECRET_ACCESS_KEY;
+  const accessKeyId = env.STORAGE_ACCESS_KEY_ID || r2AccessKeyId;
+  const secretAccessKey = env.STORAGE_SECRET_ACCESS_KEY || r2SecretAccessKey;
 
   if (!bucket || !endpoint || !region || !accessKeyId || !secretAccessKey) {
     const missing: string[] = [];

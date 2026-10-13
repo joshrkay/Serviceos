@@ -317,8 +317,14 @@ export class S3StorageProvider implements StorageProvider {
 // URL points at the API's own /storage-dev receiver which accepts PUTs
 // and discards the payload — enough for the voice pipeline to exercise
 // the happy path in local development, where the dev transcription
-// provider does not fetch audio bytes anyway. In prod the factory
-// refuses to return this provider.
+// provider does not fetch audio bytes anyway.
+//
+// In prod/staging the factory returns this provider ONLY under the explicit
+// opt-out STORAGE_ENABLED=false (every other unconfigured prod env throws).
+// That posture is real, and then putObject() below is a no-op: uploads,
+// recordings and inbound MMS photos are NOT persisted. createStorageProvider
+// logs a boot WARN saying so, and app.ts keeps the /storage-dev receiver
+// dark there, so the download URLs this provider mints 404.
 export class DevStorageProvider implements StorageProvider {
   private readonly secret: string;
 
@@ -331,9 +337,9 @@ export class DevStorageProvider implements StorageProvider {
   }
 
   // sizeBytes is accepted for interface parity but not enforced: the dev
-  // receiver discards uploaded bytes, and this provider is never active in
-  // prod/staging (createStorageProvider throws, and app.ts keeps the
-  // /storage-dev receiver dark there).
+  // receiver discards uploaded bytes. In prod/staging this provider is only
+  // active under the STORAGE_ENABLED=false opt-out (see the class comment),
+  // where app.ts keeps the /storage-dev receiver dark.
   async generateUploadUrl(
     _bucket: string,
     key: string,
@@ -370,7 +376,7 @@ export class DevStorageProvider implements StorageProvider {
 
 // Production environments canonicalize NODE_ENV to 'prod'/'staging' but
 // the raw value 'production' is a common accident; treat both as prod
-// so a missing STORAGE_* credential fails fast instead of silently
+// so a missing storage credential fails fast instead of silently
 // returning a dev provider.
 function isProductionLikeEnv(nodeEnv: string | undefined): boolean {
   return nodeEnv === 'prod' || nodeEnv === 'production' || nodeEnv === 'staging';
@@ -387,7 +393,16 @@ function defaultDevPublicUrl(env: StorageProviderEnv): string {
   return `http://localhost:${port}/storage-dev`;
 }
 
-export function createStorageProvider(env: StorageProviderEnv = process.env): {
+export interface StorageProviderDeps {
+  // Optional so the factory stays usable where the structured logger isn't
+  // wired (unit tests); defaults to console.
+  logger?: { warn: (message: string, meta?: Record<string, unknown>) => void };
+}
+
+export function createStorageProvider(
+  env: StorageProviderEnv = process.env,
+  deps: StorageProviderDeps = {}
+): {
   provider: StorageProvider;
   bucket: string;
   mode: 's3' | 'dev';
@@ -417,13 +432,36 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
     };
   }
 
-  // Match validateFeatureRequiredConfig: STORAGE_ENABLED=false opts out of
-  // object storage in prod/staging (recordings/uploads stay unavailable).
+  // Same resolver as validateFeatureRequiredConfig: STORAGE_ENABLED=false is
+  // the one way to run prod/staging without object storage.
   const storageOptedOut = STORAGE_ENABLED === 'false';
   if (isProductionLikeEnv(NODE_ENV) && !storageOptedOut) {
     throw new Error(
       `Storage configuration missing: set ${resolved.missing.join(', ')} ` +
         '(or STORAGE_ENABLED=false to run without persisted uploads and recordings)'
+    );
+  }
+
+  // Reaching the dev provider in a production-like env means the operator
+  // opted out (STORAGE_ENABLED=false) — the throw above covers everything
+  // else. It is a legitimate posture but not a quiet one: putObject() on
+  // this provider is a no-op, so inbound MMS photos, recordings and uploads
+  // are "saved" to nowhere. Say so once, at boot.
+  if (isProductionLikeEnv(NODE_ENV)) {
+    const logger = deps.logger ?? {
+      warn: (msg: string, meta?: Record<string, unknown>) => {
+        // eslint-disable-next-line no-console
+        console.warn(msg, meta ?? '');
+      },
+    };
+    logger.warn(
+      'OBJECT STORAGE DISABLED (STORAGE_ENABLED=false) in a production-like environment: ' +
+        'customer uploads, call recordings and inbound MMS photos are NOT persisted — ' +
+        'the dev provider discards every write and its download URLs 404. ' +
+        'To enable storage set STORAGE_BUCKET, STORAGE_ENDPOINT, STORAGE_REGION, ' +
+        'STORAGE_ACCESS_KEY_ID and STORAGE_SECRET_ACCESS_KEY (or the R2_ACCOUNT_ID / ' +
+        'R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY alias) and remove STORAGE_ENABLED=false.',
+      { nodeEnv: NODE_ENV, storageMode: 'dev', persisted: false }
     );
   }
 

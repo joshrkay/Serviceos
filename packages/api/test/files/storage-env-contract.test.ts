@@ -182,8 +182,74 @@ describe('object-storage env contract (validator and factory agree)', () => {
       expect(msg).not.toMatch(/STORAGE_BUCKET|STORAGE_ENDPOINT|STORAGE_REGION|R2_ACCOUNT_ID/);
     });
   });
+
+  describe('slice 4 — STORAGE_ENABLED=false (explicit opt-out) is loud, not silent', () => {
+    const optOut = { STORAGE_ENABLED: 'false' };
+
+    it('still returns the DevStorageProvider, and emits exactly one WARN saying nothing is persisted', () => {
+      const warn = vi.fn();
+      const { provider, mode } = createStorageProvider(
+        { NODE_ENV: 'production', ...optOut },
+        { logger: { warn } }
+      );
+
+      expect(mode).toBe('dev');
+      expect(provider).toBeInstanceOf(DevStorageProvider);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const [message] = warn.mock.calls[0] as [string];
+      expect(message).toContain('STORAGE_ENABLED=false');
+      expect(message).toMatch(/uploads/i);
+      expect(message).toMatch(/recordings/i);
+      expect(message).toMatch(/MMS/);
+      expect(message).toMatch(/not persisted/i);
+    });
+
+    it.each(['prod', 'production', 'staging'])('warns in NODE_ENV=%s', (nodeEnv) => {
+      const warn = vi.fn();
+      createStorageProvider({ NODE_ENV: nodeEnv, ...optOut }, { logger: { warn } });
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('stays quiet in dev, where the dev provider is the expected backend', () => {
+      const warn = vi.fn();
+      createStorageProvider({ NODE_ENV: 'development' }, { logger: { warn } });
+      createStorageProvider({ NODE_ENV: 'development', ...optOut }, { logger: { warn } });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('stays quiet when a complete STORAGE_* set resolves, even with the flag still set', () => {
+      // The factory has always let a complete STORAGE_* set win over the
+      // flag; live prod may be running exactly this. It must keep resolving
+      // to S3 and must not claim that nothing is persisted.
+      const warn = vi.fn();
+      const { mode } = createStorageProvider(
+        { NODE_ENV: 'production', ...optOut, ...STORAGE_FULL },
+        { logger: { warn } }
+      );
+      expect(mode).toBe('s3');
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('is authoritative over the R2_* alias: an opted-out env that still carries R2_* does not silently flip to real writes', () => {
+      // The documented failure scenario leaves operators with R2_* set AND
+      // STORAGE_ENABLED=false. That env boots on the dev provider today;
+      // honouring the alias here would change live behaviour on deploy.
+      const warn = vi.fn();
+      const { mode, provider } = createStorageProvider(
+        { NODE_ENV: 'production', ...optOut, ...R2_ONLY },
+        { logger: { warn } }
+      );
+      expect(mode).toBe('dev');
+      expect(provider).toBeInstanceOf(DevStorageProvider);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('the boot validator accepts the opt-out with nothing configured', () => {
+      expect(() => loadConfig({ ...PROD_BASE, ...optOut })).not.toThrow();
+    });
+  });
 });
 
-// Referenced by later slices; imported here so each slice only adds `it`s.
+// (imports used by every slice)
 void DevStorageProvider;
 void vi;
