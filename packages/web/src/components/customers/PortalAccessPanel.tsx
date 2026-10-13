@@ -3,6 +3,7 @@ import { Copy, Link2, Send } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button, Field, Input, Select } from '../ui';
 import { apiFetch } from '../../utils/api-fetch';
+import { useMe } from '../../hooks/useMe';
 
 /**
  * Customer-portal access panel for the customer detail page.
@@ -18,6 +19,11 @@ import { apiFetch } from '../../utils/api-fetch';
  *      consent/DNC-gated send machinery as estimate/invoice sends. A
  *      suppressed or failed send surfaces the API's message verbatim
  *      (e.g. no SMS consent) so the operator knows why nothing went out.
+ *
+ * Both routes (and revoke) require `customers:update` — a portal token reads
+ * billing data the technician role is denied — so the controls are only
+ * rendered for a viewer who holds it. The API stays the real gate; this just
+ * keeps a technician from being offered buttons that can only answer 403.
  */
 
 interface MintedLink {
@@ -43,6 +49,8 @@ function formatExpiry(iso: string): string {
 }
 
 export function PortalAccessPanel({ customerId }: { customerId: string }) {
+  const { me, isLoading: meLoading } = useMe();
+  const canManage = (me?.permissions ?? []).includes('customers:update');
   const [link, setLink] = useState<MintedLink | null>(null);
   const [mintLoading, setMintLoading] = useState(false);
   const [mintError, setMintError] = useState<string | null>(null);
@@ -105,6 +113,21 @@ export function PortalAccessPanel({ customerId }: { customerId: string }) {
       setSendLoading(false);
     }
   }, [channel, customerId]);
+
+  // `/api/me` still loading → render nothing rather than flash the notice.
+  if (!me && meLoading) return null;
+
+  if (!canManage) {
+    return (
+      <p
+        className="text-sm text-muted-foreground"
+        data-testid="portal-access-restricted"
+      >
+        Customer portal links are created and sent by your office team. Ask the
+        account owner or a dispatcher if this customer needs one.
+      </p>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4" data-testid="portal-access-panel">

@@ -124,6 +124,41 @@ const READ_PATTERNS: RegExp[] = [
   /\b(?:env|processEnv|rawEnv|envVars)\[\s*['"]([A-Z][A-Z0-9_]{2,})['"]\s*\]/g,
 ];
 
+/**
+ * Destructuring reads: `const { A, B: alias, C = 'x' } = env;` has no `env.A`
+ * token anywhere, so READ_PATTERNS cannot see it. This is how
+ * files/storage-provider.ts read the five STORAGE_* vars, which is why they
+ * were in no template or checklist and the storage contract drifted from its
+ * docs unnoticed. Matches `{ … } = <env object>` where the right-hand side is
+ * EXACTLY an env receiver (not `env.nested`, not an arbitrary config object),
+ * then takes each SCREAMING_SNAKE member as a read.
+ */
+const DESTRUCTURE_PATTERN =
+  /\{([^{}]*)\}\s*=\s*(?:process\.env|env|processEnv|rawEnv|envVars)\b(?![.\[])/g;
+
+/** Env var names destructured in `text`, with the offset of each in `text`. */
+function destructuredEnvReads(text: string): Array<{ name: string; index: number }> {
+  const out: Array<{ name: string; index: number }> = [];
+  for (const m of text.matchAll(DESTRUCTURE_PATTERN)) {
+    const body = m[1]!;
+    // Blank out comments in place (same length) so offsets stay valid and a
+    // comma inside a comment cannot split a member.
+    const code = body
+      .replace(/\/\*[\s\S]*?\*\//g, (c) => ' '.repeat(c.length))
+      .replace(/\/\/[^\n]*/g, (c) => ' '.repeat(c.length));
+    let offset = 0;
+    for (const member of code.split(',')) {
+      // `NAME`, `NAME: alias`, `NAME = default`; `...rest` has no name here.
+      const name = /^\s*([A-Z][A-Z0-9_]{2,})\s*(?:[:=]|$)/.exec(member)?.[1];
+      if (name) {
+        out.push({ name, index: (m.index ?? 0) + 1 + offset + member.indexOf(name) });
+      }
+      offset += member.length + 1;
+    }
+  }
+  return out;
+}
+
 /** Top-level zod schema keys in config.ts: `  SOME_VAR: z.…`. */
 const CONFIG_KEY_PATTERN = /^ {2}([A-Z][A-Z0-9_]*)\s*:\s*z\./gm;
 
@@ -167,6 +202,9 @@ export function collectEnvReads(repoRoot = REPO_ROOT): EnvRead[] {
       for (const m of text.matchAll(pattern)) {
         record(m[1]!, file, m.index ?? 0, text);
       }
+    }
+    for (const read of destructuredEnvReads(text)) {
+      record(read.name, file, read.index, text);
     }
   }
 
