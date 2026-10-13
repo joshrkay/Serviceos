@@ -838,6 +838,86 @@ describe('realtime hand-off — E1 with production ordering (await before the FS
   });
 });
 
+/**
+ * Round-2 review of #1676 — the E1 latch must only ever HOLD a hand-off for a
+ * bounded window; it may supersede the transfer only when an E1 close is real.
+ */
+describe('realtime hand-off — the E1 latch never strands a caller (N1, N2)', () => {
+  function playEverything(h: Awaited<ReturnType<typeof harness>>) {
+    const pump = setInterval(() => h.ws.ackAllMarks(h.streamSid), 10);
+    return () => clearInterval(pump);
+  }
+  const spokenOf = (h: Awaited<ReturnType<typeof harness>>) =>
+    (h.tts.synthesize as ReturnType<typeof vi.fn>).mock.calls.map(([input]) => (input as { text: string }).text);
+
+  it('N1 — an E1-looking phrase that never becomes an E1 turn + a refused transfer still reaches the fallback', async () => {
+    const twilioRest = makeTwilioRest((body) =>
+      body.has('Twiml') ? { ok: false, status: 400 } : { ok: true, status: 200 },
+    );
+    const h = await harness({ twilio: twilioRest, extraDeps: () => ({ e1SupersedeMaxWaitMs: 150 }) });
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    // Classifies E1-tier, but the low-STT gate drops it before any E1 turn.
+    h.deepgram.emit({
+      type: 'final',
+      transcript: 'and the carbon monoxide detector is chirping',
+      confidence: 0.2,
+      isFinal: true,
+    });
+    h.ws.ackAllMarks(h.streamSid);
+
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1), { timeout: 2_000 });
+    // The refused transfer falls back to the Gather degrade — never dead air.
+    await vi.waitFor(() => expect(h.twilio.degrades()).toHaveLength(1), { timeout: 2_000 });
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+  });
+
+  it('N2 — an E1 after an interim E2 is still scanned on its interim: the 911 script plays, no Dial', async () => {
+    const h = await harness({ extraDeps: () => ({ e1SupersedeMaxWaitMs: 150 }) });
+
+    h.deepgram.emit({ type: 'partial', transcript: 'my basement is flooding', confidence: 0.9, isFinal: false });
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.deepgram.emit({
+      type: 'partial',
+      transcript: 'and I smell gas it is really strong in the kitchen',
+      confidence: 0.9,
+      isFinal: false,
+    });
+
+    const stop = playEverything(h);
+    try {
+      await vi.waitFor(() => expect(h.ws.closed).toBe(true), { timeout: 4_000 });
+    } finally {
+      stop();
+    }
+    expect(h.twilio.transfers().filter((t) => t.body.get('Twiml')!.includes('<Dial'))).toHaveLength(0);
+    expect(h.session.terminalReason).toBe('life_safety_e1');
+    expect(spokenOf(h).some((t) => t.includes('leave the building'))).toBe(true);
+  });
+
+  it('N2 — an E1 turn still in flight when the wait ends: the caller gets the 911 script, never the Dial', async () => {
+    // The E1 turn is stuck behind a slow reviewed-script lookup (DB contention).
+    const h = await harness({ settingsLookupDelayMs: 600, extraDeps: () => ({ e1SupersedeMaxWaitMs: 100 }) });
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true), { timeout: 2_000 });
+    h.deepgram.emit({ type: 'partial', transcript: 'I smell gas', confidence: 0.9, isFinal: false });
+
+    const stop = playEverything(h);
+    try {
+      await vi.waitFor(() => expect(h.ws.closed).toBe(true), { timeout: 4_000 });
+    } finally {
+      stop();
+    }
+    expect(spokenOf(h).some((t) => t.includes('call 911'))).toBe(true);
+    expect(h.session.terminalReason).toBe('life_safety_e1');
+    // …and the E1 turn finishing later never pulls the call into a Dial.
+    await new Promise((r) => setTimeout(r, 700));
+    expect(h.twilio.transfers().filter((t) => t.body.get('Twiml')!.includes('<Dial'))).toHaveLength(0);
+  });
+});
+
 const PARKED_DIAL_FOR_E1 =`<?xml version="1.0" encoding="UTF-8"?><Response><Dial action="${PUBLIC_BASE_URL}/api/telephony/dial-result?sid=s"><Number>${DISPATCHER}</Number></Dial></Response>`;
 
 // ─── (d) the Gather transport keeps its own delivery ─────────────────────────
