@@ -432,9 +432,9 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       // side read the PRE-update row. Both predicates are evaluated against
       // the LIVE row: the status guard means a void/settle committing after
       // the caller's status check matches 0 rows instead of re-pricing a
-      // dead invoice; the balance guard means a credit that no longer fits
-      // the live amount due (a payment landed first) matches 0 rows instead
-      // of pushing amount_paid past total_cents (L4); the positive-adjustment
+      // dead invoice; the balance guard means a credit larger than the live
+      // amount due (a payment landed first) matches 0 rows, and the clearing
+      // floor keeps amount_paid <= total_cents (L4); the positive-adjustment
       // guard means a late fee never lands on an invoice whose live balance
       // is already $0 (a credit cleared it). Status is derived in the same
       // statement (review M2): a credit that clears the balance of an invoice
@@ -449,11 +449,23 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       // + tax), mirroring applyBps' round-half-up (ROUND(numeric) rounds half
       // away from zero; the base is clamped ≥ 0, so they agree). The new
       // total is the old total + the adjustment + the surcharge change.
-      const newFee = `CASE WHEN COALESCE(processing_fee_bps, 0) > 0
+      //
+      // Review N1 — a credit is judged against the live, surcharge-inclusive
+      // amount due (`-$3 <= total - paid`) and carries its share of the
+      // surcharge. One that reaches past the surcharge-free balance CLEARS
+      // the invoice: total = paid, and the surcharge keeps only the
+      // remainder that keeps total = subtotal − discount + tax + fee (L2b).
+      // Mirrors applyNonTaxableAdjustment(totals, adj, amountPaid).
+      const rateFee = `CASE WHEN COALESCE(processing_fee_bps, 0) > 0
           THEN ROUND(GREATEST(0, subtotal_cents + $3 - discount_cents + tax_cents)::numeric
                      * processing_fee_bps / 10000)::integer
           ELSE processing_fee_cents END`;
-      const newTotal = `(total_cents + $3 + COALESCE(${newFee}, 0) - COALESCE(processing_fee_cents, 0))`;
+      const rateTotal = `(total_cents + $3 + COALESCE(${rateFee}, 0) - COALESCE(processing_fee_cents, 0))`;
+      const clears = `(${rateTotal} < amount_paid_cents)`;
+      const newFee = `CASE WHEN ${clears}
+          THEN amount_paid_cents - (subtotal_cents + $3 - discount_cents + tax_cents)
+          ELSE ${rateFee} END`;
+      const newTotal = `GREATEST(${rateTotal}, amount_paid_cents)`;
       const { rows } = await client.query<{ id: string }>(
         `UPDATE invoices
          SET subtotal_cents       = subtotal_cents + $3,
@@ -467,7 +479,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
              updated_at           = $4
          WHERE id = $2 AND tenant_id = $1
            AND status IN ('open', 'partially_paid')
-           AND amount_paid_cents <= ${newTotal}
+           AND ($3 >= 0 OR -$3 <= total_cents - amount_paid_cents)
            AND ($3 < 0 OR total_cents - amount_paid_cents > 0)
          RETURNING id`,
         [tenantId, id, line.totalCents, now],

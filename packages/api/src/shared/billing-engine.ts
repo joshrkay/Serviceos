@@ -201,6 +201,14 @@ export function calculateDocumentTotals(
  * it, so the surcharge rate never drifts from the configured bps (review M3).
  * The total moves by the adjustment plus that surcharge change.
  *
+ * Floor (review N1): the total never drops below `amountPaidCents`. A credit
+ * is judged against the surcharge-INCLUSIVE amount due the customer sees,
+ * and carries its share of the surcharge with it; a credit that reaches past
+ * the surcharge-free balance therefore CLEARS the document — total = what was
+ * paid — and the surcharge keeps only the remainder that makes the totals add
+ * up (never more than it was). So a credit equal to the amount due always
+ * clears it. Callers refuse a credit larger than the amount due beforehand.
+ *
  * This equals `calculateDocumentTotals` over the appended line — without its
  * #1288 mixed-taxability refusal, which exists to stop a discount being
  * mis-allocated across lines at CREATION time (the discount here was already
@@ -212,22 +220,30 @@ export function calculateDocumentTotals(
 export function applyNonTaxableAdjustment(
   totals: DocumentTotals,
   adjustmentCents: number,
+  amountPaidCents: number = 0,
 ): DocumentTotals {
   const subtotalCents = totals.subtotalCents + adjustmentCents;
   const feeBps = totals.processingFeeBps ?? 0;
-  if (feeBps <= 0) {
-    return { ...totals, subtotalCents, totalCents: totals.totalCents + adjustmentCents };
+  const rateFeeCents =
+    feeBps > 0
+      ? applyBps(Math.max(0, subtotalCents - totals.discountCents + totals.taxCents), feeBps)
+      : totals.processingFeeCents;
+  const totalCents =
+    totals.totalCents + adjustmentCents + ((rateFeeCents ?? 0) - (totals.processingFeeCents ?? 0));
+  if (totalCents >= amountPaidCents) {
+    return {
+      ...totals,
+      subtotalCents,
+      ...(feeBps > 0 ? { processingFeeCents: rateFeeCents } : {}),
+      totalCents,
+    };
   }
-  const processingFeeCents = applyBps(
-    Math.max(0, subtotalCents - totals.discountCents + totals.taxCents),
-    feeBps,
-  );
-  const feeDeltaCents = processingFeeCents - (totals.processingFeeCents ?? 0);
+  // The credit cleared the balance: settle at exactly what was paid.
   return {
     ...totals,
     subtotalCents,
-    processingFeeCents,
-    totalCents: totals.totalCents + adjustmentCents + feeDeltaCents,
+    processingFeeCents: amountPaidCents - (subtotalCents - totals.discountCents + totals.taxCents),
+    totalCents: amountPaidCents,
   };
 }
 

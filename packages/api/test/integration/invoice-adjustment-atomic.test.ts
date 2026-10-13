@@ -28,6 +28,7 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
+import { evaluateInvoiceGates } from '../../src/workers/money-reconciliation';
 import { ApplyCreditExecutionHandler } from '../../src/proposals/execution/apply-credit-handler';
 import {
   ApplyLateFeeExecutionHandler,
@@ -327,6 +328,80 @@ describe('Postgres integration — apply_credit / apply_late_fee are atomic agai
     expect(row!.amountPaidCents).toBe(5000);
     expect(row!.amountDueCents).toBe(12241);
     expect(row!.status).toBe('partially_paid');
+  });
+
+  // Review N1 — at real Postgres: a credit up to the surcharge-inclusive
+  // amount due is accepted; one that reaches past the surcharge-free balance
+  // clears the invoice (total = paid, due 0, surcharge = the remainder); more
+  // than the amount due is refused as "exceeds amount due". Hand-computed.
+  it.each([
+    ['no fee: credit == due', { labor: 10000 }, 0, -10000, { subtotal: 0, fee: 0, total: 0, due: 0, status: 'open' }],
+    ['no fee: credit == due − 1¢', { labor: 10000 }, 0, -9999, { subtotal: 1, fee: 0, total: 1, due: 1, status: 'open' }],
+    ['no fee: credit == due + 1¢', { labor: 10000 }, 0, -10001, 'refused'],
+    ['3% fee: credit == due', { labor: 10000, feeBps: 300 }, 0, -10300, { subtotal: -300, fee: 300, total: 0, due: 0, status: 'open' }],
+    ['3% fee: credit == due − 1¢', { labor: 10000, feeBps: 300 }, 0, -10299, { subtotal: -299, fee: 299, total: 0, due: 0, status: 'open' }],
+    ['3% fee: credit == due + 1¢', { labor: 10000, feeBps: 300 }, 0, -10301, 'refused'],
+    ['3% fee, $50 paid: credit == due', { labor: 10000, feeBps: 300 }, 5000, -5300, { subtotal: 4700, fee: 300, total: 5000, due: 0, status: 'paid' }],
+    ['3% fee, $50 paid: credit == due − 1¢', { labor: 10000, feeBps: 300 }, 5000, -5299, { subtotal: 4701, fee: 299, total: 5000, due: 0, status: 'paid' }],
+    ['3% fee, $50 paid: credit == due + 1¢', { labor: 10000, feeBps: 300 }, 5000, -5301, 'refused'],
+    ['3% fee, $50 paid: $10 credit', { labor: 10000, feeBps: 300 }, 5000, -1000, { subtotal: 9000, fee: 270, total: 9270, due: 4270, status: 'partially_paid' }],
+    ['discounted + taxed + 2.5% fee, $50 paid: credit == due', { labor: 20000, discountCents: 2000, taxRateBps: 1000, feeBps: 250 }, 5000, -15295, { subtotal: 4705, fee: 495, total: 5000, due: 0, status: 'paid' }],
+    ['discounted + taxed + 2.5% fee, $50 paid: credit == due − 1¢', { labor: 20000, discountCents: 2000, taxRateBps: 1000, feeBps: 250 }, 5000, -15294, { subtotal: 4706, fee: 494, total: 5000, due: 0, status: 'paid' }],
+    ['discounted + taxed + 2.5% fee, $50 paid: credit == due + 1¢', { labor: 20000, discountCents: 2000, taxRateBps: 1000, feeBps: 250 }, 5000, -15296, 'refused'],
+    ['3% fee, $50 paid: $25 late fee', { labor: 10000, feeBps: 300 }, 5000, 2500, { subtotal: 12500, fee: 375, total: 12875, due: 7875, status: 'partially_paid' }],
+  ] as const)('N1 %s', async (_name, pricing, paidCents, adjustment, expected) => {
+    const seeded = await seedOpenInvoice(pricing.labor, {
+      discountCents: 'discountCents' in pricing ? pricing.discountCents : 0,
+      taxRateBps: 'taxRateBps' in pricing ? pricing.taxRateBps : 0,
+      processingFeeBps: 'feeBps' in pricing ? pricing.feeBps : 0,
+    });
+    if (paidCents > 0) {
+      await readRepo.incrementAmountPaidAtomic(seeded.tenantId, seeded.invoiceId, paidCents, new Date());
+    }
+    const before = (await readRepo.findById(seeded.tenantId, seeded.invoiceId))!;
+    const ctx = { tenantId: seeded.tenantId, executedBy: seeded.userId };
+    const result =
+      adjustment < 0
+        ? await new ApplyCreditExecutionHandler(readRepo, auditRepo).execute(creditProposal(seeded, -adjustment), ctx)
+        : await new ApplyLateFeeExecutionHandler(readRepo, auditRepo).execute(
+            {
+              ...creditProposal(seeded, 0),
+              proposalType: 'apply_late_fee',
+              payload: { invoiceId: seeded.invoiceId, feeCents: adjustment, stepKey: 'initial' },
+            },
+            ctx,
+          );
+
+    const row = (await readRepo.findById(seeded.tenantId, seeded.invoiceId))!;
+    if (expected === 'refused') {
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/exceeds amount due/i);
+      expect(row.totals.totalCents).toBe(before.totals.totalCents);
+      expect(row.lineItems).toHaveLength(1);
+    } else {
+      expect(result.success).toBe(true);
+      expect({
+        subtotal: row.totals.subtotalCents,
+        fee: row.totals.processingFeeCents,
+        total: row.totals.totalCents,
+        due: row.amountDueCents,
+        status: row.status,
+      }).toEqual(expected);
+      expect(row.amountPaidCents).toBe(paidCents);
+    }
+    expect(
+      evaluateInvoiceGates({
+        invoiceId: row.id,
+        subtotalCents: row.totals.subtotalCents,
+        discountCents: row.totals.discountCents,
+        taxCents: row.totals.taxCents,
+        processingFeeCents: row.totals.processingFeeCents ?? 0,
+        totalCents: row.totals.totalCents,
+        amountPaidCents: row.amountPaidCents,
+        lineTotalSumCents: row.lineItems.reduce((sum, li) => sum + li.totalCents, 0),
+        activePaymentSumCents: paidCents, // seeded via the atomic increment; a credit never moves it
+      }),
+    ).toEqual([]);
   });
 
   // Review L2 — the write never touches taxable_subtotal / tax, so a taxable

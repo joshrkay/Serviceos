@@ -229,10 +229,13 @@ export interface InvoiceRepository {
    * paid-but-still-owing (the P0-6 lost-update class). Guarded in the same
    * statement against the LIVE row: applies only while the status is 'open'
    * / 'partially_paid' (a void or settle committing after the caller's
-   * status check is never re-priced) AND the adjusted total still covers
-   * amount_paid (a credit that no longer fits the live due — a payment
-   * landed first — is refused instead of overpaying, L4) AND, for a positive
-   * adjustment (late fee), something is still owed. Status is derived in the
+   * status check is never re-priced) AND a credit is at most the live,
+   * surcharge-inclusive amount due (one that no longer fits — a payment
+   * landed first — is refused) AND, for a positive adjustment (late fee),
+   * something is still owed. The total never drops below amount_paid (L4):
+   * a credit that reaches past the surcharge-free balance clears the
+   * invoice at exactly what was paid, so a credit equal to the amount due
+   * always clears it (review N1). Status is derived in the
    * same write (review M2): an adjustment that clears the balance of an
    * invoice with money paid settles it as 'paid'; with nothing paid the
    * status is unchanged (a credit is not a payment). Returns the updated
@@ -887,15 +890,16 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     // Mirror the Pg WHERE guard: only an issued invoice still carrying a
     // balance is adjusted; a void/paid/draft row returns null.
     if (i.status !== 'open' && i.status !== 'partially_paid') return null;
-    // …a positive adjustment (late fee) only while something is still owed…
-    if (line.totalCents > 0 && i.totals.totalCents - i.amountPaidCents <= 0) return null;
+    // …a positive adjustment (late fee) only while something is still owed,
+    // and a credit only up to the live (surcharge-inclusive) amount due (N1).
+    const liveDueCents = i.totals.totalCents - i.amountPaidCents;
+    if (line.totalCents > 0 && liveDueCents <= 0) return null;
+    if (line.totalCents < 0 && -line.totalCents > liveDueCents) return null;
     // JS is single-threaded, so this read-modify-write is already atomic; the
     // Pg impl uses a single UPDATE for the same guarantee. Derive from the
-    // STORED row (live amount paid), never a caller snapshot.
-    const totals = applyNonTaxableAdjustment(i.totals, line.totalCents);
-    // …and only while the adjusted total still covers what was paid (a
-    // credit can never push amount paid past the total).
-    if (i.amountPaidCents > totals.totalCents) return null;
+    // STORED row (live amount paid), never a caller snapshot. The total never
+    // drops below what was paid (a clearing credit settles at exactly that).
+    const totals = applyNonTaxableAdjustment(i.totals, line.totalCents, i.amountPaidCents);
     const amountDueCents = Math.max(0, totals.totalCents - i.amountPaidCents);
     // Mirror the Pg primary key on invoice_line_items.id (review L5): a line
     // id already on ANY invoice fails like Postgres' 23505 and, as the Pg

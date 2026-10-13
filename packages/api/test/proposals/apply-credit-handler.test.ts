@@ -23,6 +23,7 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { Proposal, VALID_PROPOSAL_TYPES, actionClassForProposalType } from '../../src/proposals/proposal';
 import { validateProposalPayload } from '../../src/proposals/contracts';
 import { buildLineItem, calculateDocumentTotals, LineItem } from '../../src/shared/billing-engine';
+import { evaluateInvoiceGates } from '../../src/workers/money-reconciliation';
 
 const TENANT = 't-1';
 const OTHER_TENANT = 't-2';
@@ -120,6 +121,50 @@ class ConcurrentWriteAfterRead extends InMemoryInvoiceRepository {
     return snapshot;
   }
 }
+
+/**
+ * Review N1 — what a credit means on a surcharged invoice. The owner credits
+ * $X against the amount due the customer sees (surcharge-inclusive) and may
+ * credit up to exactly that. The credit is a −$X non-taxable line; the
+ * processing-fee surcharge follows the reduced base at its stored rate. When
+ * that would take the total below what has been paid, the credit CLEARS the
+ * invoice: total = paid, due = $0 (status per M2), and the surcharge keeps
+ * only the remainder that makes the totals add up (never more than it was).
+ * More than the amount due is refused as "exceeds amount due" — never the
+ * misleading "changed while applying". Expected cents are hand-computed.
+ */
+interface CreditCase {
+  name: string;
+  labor: number;
+  discount?: number;
+  taxBps?: number;
+  feeBps?: number;
+  paid?: number;
+  credit: number;
+  expect:
+    | { refused: RegExp }
+    | { subtotal: number; fee: number | undefined; total: number; due: number; status: string };
+}
+
+const CREDIT_CASES: CreditCase[] = [
+  // No surcharge — a credit takes exactly $X off.
+  { name: 'no fee: credit == due clears', labor: 10000, credit: 10000, expect: { subtotal: 0, fee: 0, total: 0, due: 0, status: 'open' } },
+  { name: 'no fee: credit == due − 1¢ leaves 1¢', labor: 10000, credit: 9999, expect: { subtotal: 1, fee: 0, total: 1, due: 1, status: 'open' } },
+  { name: 'no fee: credit == due + 1¢ is refused', labor: 10000, credit: 10001, expect: { refused: /exceeds amount due/i } },
+  // $100 + 3% surcharge = $103 due, nothing paid.
+  { name: '3% fee: credit == due ($103) clears', labor: 10000, feeBps: 300, credit: 10300, expect: { subtotal: -300, fee: 300, total: 0, due: 0, status: 'open' } },
+  { name: '3% fee: credit == due − 1¢ clears (its surcharge share covers the cent)', labor: 10000, feeBps: 300, credit: 10299, expect: { subtotal: -299, fee: 299, total: 0, due: 0, status: 'open' } },
+  { name: '3% fee: credit == due + 1¢ is refused', labor: 10000, feeBps: 300, credit: 10301, expect: { refused: /exceeds amount due/i } },
+  // Same invoice, $50 paid → $53 due.
+  { name: '3% fee, partly paid: credit == due ($53) clears to paid', labor: 10000, feeBps: 300, paid: 5000, credit: 5300, expect: { subtotal: 4700, fee: 300, total: 5000, due: 0, status: 'paid' } },
+  { name: '3% fee, partly paid: credit == due − 1¢ clears to paid', labor: 10000, feeBps: 300, paid: 5000, credit: 5299, expect: { subtotal: 4701, fee: 299, total: 5000, due: 0, status: 'paid' } },
+  { name: '3% fee, partly paid: credit == due + 1¢ is refused', labor: 10000, feeBps: 300, paid: 5000, credit: 5301, expect: { refused: /exceeds amount due/i } },
+  { name: '3% fee, partly paid: a $10 credit carries its surcharge share', labor: 10000, feeBps: 300, paid: 5000, credit: 1000, expect: { subtotal: 9000, fee: 270, total: 9270, due: 4270, status: 'partially_paid' } },
+  // $200 taxable, $20 discount, 10% tax (1800), 2.5% fee on 19800 (495) → 20295; $50 paid → 15295 due.
+  { name: 'discounted + taxed + 2.5% fee, partly paid: credit == due clears to paid', labor: 20000, discount: 2000, taxBps: 1000, feeBps: 250, paid: 5000, credit: 15295, expect: { subtotal: 4705, fee: 495, total: 5000, due: 0, status: 'paid' } },
+  { name: 'discounted + taxed + 2.5% fee, partly paid: credit == due − 1¢ clears to paid', labor: 20000, discount: 2000, taxBps: 1000, feeBps: 250, paid: 5000, credit: 15294, expect: { subtotal: 4706, fee: 494, total: 5000, due: 0, status: 'paid' } },
+  { name: 'discounted + taxed + 2.5% fee, partly paid: credit == due + 1¢ is refused', labor: 20000, discount: 2000, taxBps: 1000, feeBps: 250, paid: 5000, credit: 15296, expect: { refused: /exceeds amount due/i } },
+];
 
 describe('apply_credit proposal type', () => {
   it('is a valid proposal type classified as money', () => {
@@ -640,6 +685,61 @@ describe('apply_credit execution handler', () => {
     expect(row!.status).toBe('void');
     expect(row!.lineItems).toHaveLength(1);
     expect(row!.totals.totalCents).toBe(3000);
+  });
+
+  describe.each(CREDIT_CASES)('N1 — $name', (c) => {
+    it('lands exactly the hand-computed cents, refuses only above the amount due, and keeps L2a/L2b/L3/L4', async () => {
+      const lineItems: LineItem[] = [buildLineItem('li-1', 'Labor', 1, c.labor, 0, true, 'labor')];
+      const totals = calculateDocumentTotals(lineItems, c.discount ?? 0, c.taxBps ?? 0, c.feeBps ?? 0);
+      const paid = c.paid ?? 0;
+      invoiceRepo = new InMemoryInvoiceRepository();
+      await invoiceRepo.create(
+        makeInvoice({
+          lineItems,
+          totals,
+          status: paid > 0 ? 'partially_paid' : 'open',
+          amountPaidCents: paid,
+          amountDueCents: totals.totalCents - paid,
+        }),
+      );
+      handler = new ApplyCreditExecutionHandler(invoiceRepo, auditRepo);
+
+      const result = await handler.execute(
+        makeProposal({ payload: { invoiceId: INVOICE_ID, amountCents: c.credit } }),
+        ctx,
+      );
+
+      const row = (await invoiceRepo.findById(TENANT, INVOICE_ID))!;
+      if ('refused' in c.expect) {
+        expect(result.success).toBe(false);
+        expect(result.error).toMatch(c.expect.refused);
+        expect(row.totals.totalCents).toBe(totals.totalCents);
+        expect(row.lineItems).toHaveLength(1);
+      } else {
+        expect(result).toEqual({ success: true, resultEntityId: INVOICE_ID });
+        expect({
+          subtotal: row.totals.subtotalCents,
+          fee: row.totals.processingFeeCents,
+          total: row.totals.totalCents,
+          due: row.amountDueCents,
+          status: row.status,
+        }).toEqual(c.expect);
+        expect(row.amountPaidCents).toBe(paid);
+      }
+      expect(
+        evaluateInvoiceGates({
+          invoiceId: INVOICE_ID,
+          subtotalCents: row.totals.subtotalCents,
+          discountCents: row.totals.discountCents,
+          taxCents: row.totals.taxCents,
+          processingFeeCents: row.totals.processingFeeCents ?? 0,
+          totalCents: row.totals.totalCents,
+          amountPaidCents: row.amountPaidCents,
+          lineTotalSumCents: row.lineItems.reduce((sum, li) => sum + li.totalCents, 0),
+          activePaymentSumCents: paid, // the payment ledger is untouched by a credit
+        }),
+      ).toEqual([]);
+    });
   });
 
   // H1 — the handler performs Stripe I/O, so the executor runs it OUTSIDE its
