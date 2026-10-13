@@ -30,6 +30,19 @@ import { PgVoiceRepository } from '../../src/voice/pg-voice';
 import { createVoiceRecording } from '../../src/voice/voice-service';
 import { InMemoryQueue } from '../../src/queues/queue';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { PgFileRepository } from '../../src/files/pg-file';
+import type { StorageProvider } from '../../src/files/file-service';
+
+// H2 — POST /recordings mints the transcription URL from the tenant-scoped
+// files row (real PgFileRepository below, so RLS + real columns are pinned).
+const fakeStorage = {
+  generateDownloadUrl: async (bucket: string, key: string) =>
+    `https://files.example.test/${bucket}/${key}?sig=server`,
+} as unknown as StorageProvider;
+
+function fileDeps(pool: Pool) {
+  return { fileRepo: new PgFileRepository(pool), storage: fakeStorage };
+}
 
 interface TestApp {
   app: express.Express;
@@ -55,7 +68,10 @@ function buildApp(pool: Pool, tenantId: string, userId: string): TestApp {
   // transcribeAudio, auditRepo, ...) in production, so the idempotency
   // proof below exercises the actual audit wiring, not a stub.
   const auditRepo = new PgAuditRepository(pool);
-  app.use('/api/voice', createVoiceRouter(voiceRepo, queue, undefined, auditRepo));
+  app.use(
+    '/api/voice',
+    createVoiceRouter(voiceRepo, queue, undefined, auditRepo, undefined, fileDeps(pool)),
+  );
   return { app, queue };
 }
 
@@ -169,9 +185,13 @@ describe('Postgres integration — voice create idempotency (U11)', () => {
     expect(await countRows(tenant.tenantId, key)).toBe(1);
     expect(queue.size()).toBe(1);
 
-    // The re-enqueued job targets the original stranded recording.
-    const message = await queue.receive<{ recordingId: string }>();
+    // The re-enqueued job targets the original stranded recording, with audio
+    // minted from that recording's own files row (H2), never the body's URL.
+    const message = await queue.receive<{ recordingId: string; audioUrl: string }>();
     expect(message?.payload.recordingId).toBe(stranded.id);
+    expect(message?.payload.audioUrl).toBe(
+      `https://files.example.test/test-bucket/test-key-${fileId}?sig=server`,
+    );
     expect(message?.idempotencyKey).toBe(
       `${tenant.tenantId}:${stranded.id}:transcription:create`,
     );
@@ -192,7 +212,17 @@ describe('Postgres integration — voice create idempotency (U11)', () => {
       } as AuthenticatedRequest['auth'];
       next();
     });
-    appB.use('/api/voice', createVoiceRouter(new PgVoiceRepository(pool), new InMemoryQueue()));
+    appB.use(
+      '/api/voice',
+      createVoiceRouter(
+        new PgVoiceRepository(pool),
+        new InMemoryQueue(),
+        undefined,
+        undefined,
+        undefined,
+        fileDeps(pool),
+      ),
+    );
 
     const key = `shared-${crypto.randomUUID()}`;
 
@@ -207,6 +237,21 @@ describe('Postgres integration — voice create idempotency (U11)', () => {
     expect(inA.body.recording.id).not.toBe(inB.body.recording.id);
     expect(await countRows(tenant.tenantId, key)).toBe(1);
     expect(await countRows(other.tenantId, key)).toBe(1);
+  });
+
+  it("H2 — another tenant's fileId is not found under the real tenant-scoped lookup: 404, no row, no job", async () => {
+    const other = await createTestTenant(pool);
+    const otherFileId = await createTestFile(pool, other.tenantId, other.userId);
+    const { app, queue } = buildApp(pool, tenant.tenantId, tenant.userId);
+    const key = `foreign-file-${crypto.randomUUID()}`;
+
+    const res = await request(app)
+      .post('/api/voice/recordings')
+      .send({ fileId: otherFileId, audioUrl: 'http://169.254.169.254/latest/meta-data/', idempotencyKey: key });
+
+    expect(res.status).toBe(404);
+    expect(await countRows(tenant.tenantId, key)).toBe(0);
+    expect(queue.size()).toBe(0);
   });
 
   it('different keys in one tenant → different rows', async () => {

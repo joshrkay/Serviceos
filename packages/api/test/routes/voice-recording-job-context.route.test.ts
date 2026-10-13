@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
+import { InMemoryFileRepository, type FileRecord, type StorageProvider } from '../../src/files/file-service';
 import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import type { Queue } from '../../src/queues/queue';
 import { createVoiceRouter } from '../../src/routes/voice';
@@ -27,6 +28,28 @@ function job(tenantId: string): Job {
   };
 }
 
+// H2 — POST /recordings mints the transcription URL from the tenant's files
+// row (app.ts always wires fileRepo + storage), so the harness seeds one.
+function buildFileDeps(): { fileRepo: InMemoryFileRepository; storage: StorageProvider } {
+  const fileRepo = new InMemoryFileRepository();
+  void fileRepo.create({
+    id: 'file-1',
+    tenantId: TENANT_ID,
+    filename: 'voice.m4a',
+    contentType: 'audio/mp4',
+    sizeBytes: 1024,
+    storageBucket: 'voice',
+    storageKey: `${TENANT_ID}/file-1/voice.m4a`,
+    uploadedBy: 'user-1',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  } as FileRecord);
+  const storage = {
+    generateDownloadUrl: async () => 'https://files.example.test/voice.m4a?sig=server',
+  } as unknown as StorageProvider;
+  return { fileRepo, storage };
+}
+
 function buildApp(jobRepo: Pick<InMemoryJobRepository, 'findById'>) {
   const send = vi.fn(async () => 'queue-message-1');
   const queue = { send } as unknown as Queue;
@@ -49,7 +72,7 @@ function buildApp(jobRepo: Pick<InMemoryJobRepository, 'findById'>) {
     undefined,
     undefined,
     undefined,
-    { jobRepo },
+    { jobRepo, ...buildFileDeps() },
   ));
   return { app, send, createRecording };
 }
