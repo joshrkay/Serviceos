@@ -6,11 +6,17 @@
  * not allowed to compose another router into it. The body must include
  * `customerId`. URL composition uses the request host so the link is
  * tenant-correct without env coupling.
+ *
+ * Every route requires `customers:update`. A portal token is a bearer
+ * credential whose default entitlement reads invoices/estimates/agreements
+ * and payment methods and can book/cancel appointments — surfaces rbac.ts
+ * withholds from `technician` — so minting, sending and revoking one is an
+ * office action (owner, dispatcher), not something any tenant member can do.
  */
 import { Request, Response, Router } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { requireAuth, requireTenant } from '../middleware/auth';
+import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { CustomerRepository } from '../customers/customer';
 import { ContactRepository } from '../customers/contact';
 import { asyncRoute } from '../middleware/async-route';
@@ -119,7 +125,7 @@ export function createPortalRouter(deps: PortalRouterDeps): Router {
     return true;
   }
 
-  router.post('/', asyncRoute(async (req: Request, res: Response) => {
+  router.post('/', requirePermission('customers:update'), asyncRoute(async (req: Request, res: Response) => {
     const auth = (req as AuthenticatedRequest).auth!;
     const parsed = createSchema.parse(req.body ?? {});
     if (!(await validateMintTarget(res, auth.tenantId, parsed.customerId, parsed.contactId))) {
@@ -167,7 +173,7 @@ export function createPortalRouter(deps: PortalRouterDeps): Router {
    * error surfaces — a bearer credential nobody received must not stay
    * live.
    */
-  router.post('/send', asyncRoute(async (req: Request, res: Response) => {
+  router.post('/send', requirePermission('customers:update'), asyncRoute(async (req: Request, res: Response) => {
     const auth = (req as AuthenticatedRequest).auth!;
     if (!deps.sendService) {
       res.status(503).json({
@@ -263,7 +269,7 @@ export function createPortalRouter(deps: PortalRouterDeps): Router {
     });
   }));
 
-  router.delete('/:id', notFoundOnMalformedId('Portal session not found'), asyncRoute(async (req: Request, res: Response) => {
+  router.delete('/:id', requirePermission('customers:update'), notFoundOnMalformedId('Portal session not found'), asyncRoute(async (req: Request, res: Response) => {
     const auth = (req as AuthenticatedRequest).auth!;
     const session = await revokePortalSession(
       auth.tenantId,
