@@ -28,9 +28,13 @@
 | `TWILIO_DEFAULT_TENANT_ID` | Unless `TELEPHONY_ENABLED=false` | Inbound call tenant resolution |
 | `SENDGRID_API_KEY` | Unless `EMAIL_ENABLED=false` | Invoice/estimate email |
 | `SENDGRID_FROM_EMAIL` | Unless `EMAIL_ENABLED=false` | Invoice/estimate email |
-| `R2_ACCOUNT_ID` | Unless `STORAGE_ENABLED=false` | Recordings + uploads |
-| `R2_ACCESS_KEY_ID` | Unless `STORAGE_ENABLED=false` | Recordings + uploads |
-| `R2_SECRET_ACCESS_KEY` | Unless `STORAGE_ENABLED=false` | Recordings + uploads |
+| `STORAGE_BUCKET` | Unless `STORAGE_ENABLED=false` | Recordings + uploads + inbound MMS photos. ONE contract: `shared/storage-config.ts` resolves it for both the boot validator and `createStorageProvider`, so they cannot disagree (pinned by `test/files/storage-env-contract.test.ts`). Alias `R2_BUCKET`; defaults to `serviceos-uploads` when `R2_ACCOUNT_ID` supplies the endpoint |
+| `STORAGE_ENDPOINT` | Same | S3-compatible endpoint (R2: `https://<account-id>.r2.cloudflarestorage.com`). Alias: set `R2_ACCOUNT_ID` and the endpoint is derived |
+| `STORAGE_REGION` | Same | `auto` for R2 (implied when the endpoint is derived from `R2_ACCOUNT_ID`) |
+| `STORAGE_ACCESS_KEY_ID` | Same | Alias `R2_ACCESS_KEY_ID`. The key id and secret are taken as a pair from ONE family — mixing `STORAGE_*` with `R2_*` is rejected at boot |
+| `STORAGE_SECRET_ACCESS_KEY` | Same | Alias `R2_SECRET_ACCESS_KEY` |
+| `STORAGE_PUBLIC_URL` | Optional | Download base URL; unset = presigned GETs. `R2_PUBLIC_URL` is **not** read by anything |
+| `STORAGE_ENABLED=false` | Explicit opt-out | **Not a fix for a boot failure.** The process boots on a no-op dev provider: uploads, recordings and inbound MMS photos are **not persisted**, download URLs 404, and a boot-time WARN says so. The `R2_*` alias is not consulted under it (a complete `STORAGE_*` set still is). `/api/telephony/health` reports `capabilities.recording: false` |
 
 ## Runtime-fail (boot OK; feature broken or insecure)
 
