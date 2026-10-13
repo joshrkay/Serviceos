@@ -594,6 +594,21 @@ describe('E1 life-safety on an INTERIM transcript', () => {
     expect(spoken()).toHaveLength(scriptLines);
   });
 
+  it('M2 — an E1 on a FINAL transcript closes only after the 911 script has played (no truncated tail)', async () => {
+    const h = await harness();
+
+    h.say('I smell gas in the kitchen');
+    await vi.waitFor(() => expect(h.session.machine.currentState).toBe('terminated'));
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    await new Promise((r) => setTimeout(r, 30));
+    // Closing the stream now would drop the unplayed end of the script.
+    expect(h.ws.closed).toBe(false);
+
+    h.ws.ackAllMarks(h.streamSid); // Twilio played it all
+    await vi.waitFor(() => expect(h.ws.closed).toBe(true));
+    expect(h.session.terminalReason).toBe('life_safety_e1');
+  });
+
   it('the silence ladder never reprompts once the FSM has terminated, even if the leg is still open', async () => {
     const h = await harness({
       extraDeps: () => ({ silenceRepromptTimeoutMs: 20 }),
@@ -658,6 +673,9 @@ describe('realtime hand-off — an E1 life-safety close supersedes a pending tra
     h.ws.ackAllMarks(h.streamSid); // the hand-off line finished mid-E1-turn
     await new Promise((r) => setTimeout(r, 30));
     releaseE1Turn();
+    // The 911 script plays out before the leg closes (M2).
+    await vi.waitFor(() => expect(h.ws.markNames().filter((n) => n.startsWith('silence-arm-'))).toHaveLength(2));
+    h.ws.ackAllMarks(h.streamSid);
     await vi.waitFor(() => expect(h.ws.closed).toBe(true));
 
     expect(h.twilio.transfers()).toHaveLength(0);

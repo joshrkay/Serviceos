@@ -2039,7 +2039,14 @@ export class TwilioMediaStreamAdapter {
       // B2: stash the dispatch's effects so the finalize hook can read
       // the FSM-supplied end_session.payload.reason — handleClose itself
       // only carries a coarse mediastream label suitable for metrics.
+      // Stashed BEFORE the wait below, so a hang-up during it still stamps
+      // the FSM's reason (e.g. life_safety_e1), not caller_hangup.
       this.state.pendingFinalizeEffects = sideEffects;
+      // M2 — closing the stream drops audio Twilio has not played yet (up to
+      // ~2 s at the mark pacing): let the last line — the 911 script on an
+      // E1, a goodbye otherwise — finish first (bounded).
+      await this.awaitPlayout(this.deps.handoffPlayoutMaxWaitMs ?? DEFAULT_HANDOFF_PLAYOUT_MAX_WAIT_MS);
+      if (this.state.closed) return;
       this.handleClose('end_session');
     }
   }
