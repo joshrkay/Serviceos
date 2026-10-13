@@ -170,4 +170,22 @@ describe('portal sessions — technician is refused (no customers:update)', () =
     expect(res.body).toEqual(FORBIDDEN_BODY);
     expect(h.auditRepo.getAll()).toHaveLength(0);
   });
+
+  it('POST /send answers 403 FORBIDDEN: nothing minted, nothing delivered', async () => {
+    const h = await build('technician');
+    const res = await request(h.app).post('/api/portal-sessions/send').send({
+      customerId: h.customer.id,
+      channel: 'sms',
+      // The free-form fields are the abuse vector: delivery from the
+      // business identity to an arbitrary recipient with arbitrary text.
+      recipientPhone: '+15555559999',
+      customMessage: 'pay this invoice at the link below',
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual(FORBIDDEN_BODY);
+    expect(h.delivery.sentSms).toHaveLength(0);
+    expect(h.delivery.sentEmails).toHaveLength(0);
+    expect(h.auditRepo.getAll()).toHaveLength(0);
+  });
 });

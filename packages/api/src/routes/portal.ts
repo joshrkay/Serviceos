@@ -167,7 +167,7 @@ export function createPortalRouter(deps: PortalRouterDeps): Router {
    * error surfaces — a bearer credential nobody received must not stay
    * live.
    */
-  router.post('/send', asyncRoute(async (req: Request, res: Response) => {
+  router.post('/send', requirePermission('customers:update'), asyncRoute(async (req: Request, res: Response) => {
     const auth = (req as AuthenticatedRequest).auth!;
     if (!deps.sendService) {
       res.status(503).json({
