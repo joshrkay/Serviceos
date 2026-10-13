@@ -351,6 +351,58 @@ describe('realtime hand-off — escalate_with_context', () => {
   });
 });
 
+// ─── (d) the Gather transport keeps its own delivery ─────────────────────────
+
+describe('Gather transport — hand-off delivery unchanged', () => {
+  it('an escalating /gather turn returns the Dial in the webhook response; no REST update is involved', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const gather = new TwilioGatherAdapter({
+      store,
+      gateway: makeGateway(),
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: PUBLIC_BASE_URL,
+      onCallRepo: new InMemoryOnCallRepository(
+        new Map([[TENANT, [{ id: 'r1', userId: 'u1', orderIndex: 0 }]]]),
+      ),
+      auditRepo: new InMemoryAuditRepository(),
+      callControl: new DefaultTwilioCallControl(),
+      dispatcherPhoneResolver: async () => DISPATCHER,
+    });
+    const app = express();
+    app.use(
+      '/api/telephony',
+      createTelephonyRouter({
+        adapter: gather,
+        authTokenGetter: () => WEBHOOK_TOKEN,
+        publicBaseUrl: PUBLIC_BASE_URL,
+        resolveTenantId: () => TENANT,
+        voiceSessionStore: store,
+      }),
+    );
+    await gather.handleInbound({ callSid: 'CA-gather-1', from: CALLER, to: '+15125550999', tenantId: TENANT });
+    const session = store.findByCallSid('CA-gather-1')!;
+
+    const res = await signedPost(app, `/api/telephony/gather?sid=${session.id}`, {
+      CallSid: 'CA-gather-1',
+      SpeechResult: 'I want to speak to a person',
+      Confidence: '0.95',
+      From: CALLER,
+      To: '+15125550999',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Dial');
+    expect(res.text).toContain(DISPATCHER);
+    expect(res.text).toContain(
+      `action="${PUBLIC_BASE_URL}/api/telephony/dial-result?sid=${encodeURIComponent(session.id)}"`,
+    );
+    expect(res.text).not.toContain('<Gather');
+    // The webhook response consumed the parked hand-off — nothing is left for
+    // any other consumer to deliver a second time.
+    expect(gather.takePendingTransferTwiml(session.id)).toBeUndefined();
+  });
+});
+
 // ─── (b) a refused transfer never leaves the caller in dead air ──────────────
 
 const WEBHOOK_TOKEN = 'webhook-token';
