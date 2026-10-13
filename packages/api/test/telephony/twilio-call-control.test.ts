@@ -158,14 +158,16 @@ describe('dialDispatcher with whisper', () => {
     expect(twiml).not.toContain('url="');
   });
 
-  it('adds url attribute on <Number> when whisperUrl is supplied', () => {
+  it('adds url attribute on <Number> when whisperUrl is supplied, fetched with GET', () => {
+    // <Number url>'s method defaults to POST in Twilio; the whisper route is
+    // a GET route, so the fetch method is stated explicitly.
     const twiml = ctrl.dialDispatcher('CA-1', '+15551234567', {
       actionUrl: 'https://example.com/action',
       whisperUrl: 'https://example.com/api/telephony/whisper/esc_abc',
       timeoutSeconds: 20,
     });
     expect(twiml).toContain(
-      '<Number url="https://example.com/api/telephony/whisper/esc_abc">+15551234567</Number>',
+      '<Number url="https://example.com/api/telephony/whisper/esc_abc" method="GET">+15551234567</Number>',
     );
   });
 

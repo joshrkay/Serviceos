@@ -431,9 +431,8 @@ import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-ev
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
 import { escalationOutcomeRouter } from './escalations/outcome-route';
 import { escalationEventsRouter } from './escalations/events-route';
-import { whisperRouter } from './telephony/whisper-route';
+import { mountWhisperRoute } from './telephony/whisper-route';
 import { WhisperCache } from './telephony/whisper-cache';
-import { requireTwilioSignature } from './telephony/twilio-signature';
 import {
   createTwilioWebhookCredentialResolver,
   createSubaccountCredentialView,
@@ -4273,14 +4272,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   //
   // The middleware is scoped to the whisper path rather than the router mount
   // so a POST to /voice does not pay a second, weaker signature check on its
-  // way past.
-  app.use(
-    '/api/telephony/whisper',
-    requireTwilioSignature(subaccountCredentialView, {
-      publicBaseUrl: () => process.env.PUBLIC_API_URL,
-    }),
-  );
-  app.use('/api/telephony', whisperRouter({ whisperCache: sharedWhisperCache }));
+  // way past. #4 — the mount parses a POST's form body before verifying it, so
+  // a whisper fetched with Twilio's default POST verifies and is served too.
+  mountWhisperRoute(app, {
+    whisperCache: sharedWhisperCache,
+    credentialView: subaccountCredentialView,
+    publicBaseUrl: () => process.env.PUBLIC_API_URL,
+  });
 
   app.use(
     '/api/telephony',

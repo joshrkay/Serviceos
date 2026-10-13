@@ -183,7 +183,12 @@ export class DefaultTwilioCallControl implements TwilioCallControl {
     const callerIdAttr = opts.callerId
       ? ` callerId="${xmlEscape(opts.callerId)}"`
       : '';
-    const whisperAttr = opts.whisperUrl ? ` url="${xmlEscape(opts.whisperUrl)}"` : '';
+    // Twilio fetches `<Number url>` with POST unless told otherwise; the
+    // whisper route is served for GET, and a failed fetch at the moment the
+    // dispatcher answers risks dropping the call — so the method is explicit.
+    const whisperAttr = opts.whisperUrl
+      ? ` url="${xmlEscape(opts.whisperUrl)}" method="GET"`
+      : '';
 
     // The dispatcher number is wrapped in <Number> so Twilio's verb
     // parser handles E.164 cleanly. Both `dispatcherPhone` and
