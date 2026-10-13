@@ -14,9 +14,11 @@
  * policy). Schema violations throw `GoogleBusinessApiError` — distinct
  * so the worker doesn't mistake them for throttling.
  *
- * `fetchFn` is injectable so tests can stub HTTP without nock.
+ * `fetchFn` is injectable so tests can stub HTTP without nock; the default
+ * is the global fetch bounded at 10 s.
  */
 import { z } from 'zod';
+import { timedFetch } from '../shared/timed-fetch';
 
 export interface GoogleBusinessOAuthConfig {
   clientId: string;
@@ -25,6 +27,10 @@ export interface GoogleBusinessOAuthConfig {
 }
 
 export type GoogleFetch = typeof fetch;
+
+/** Default when no fetch is injected: bounded at 10 s, so an unanswered
+ *  Google call can't pin the request (see shared/timed-fetch). */
+const boundedGoogleFetch: GoogleFetch = timedFetch();
 
 /** OAuth scope required for read access to GBP locations + reviews. */
 export const GOOGLE_BUSINESS_SCOPE = 'https://www.googleapis.com/auth/business.manage';
@@ -132,7 +138,7 @@ export interface ExchangedBusinessTokens {
 export async function exchangeAuthorizationCode(
   config: GoogleBusinessOAuthConfig,
   code: string,
-  fetchFn: GoogleFetch = fetch,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
 ): Promise<ExchangedBusinessTokens> {
   const res = await fetchFn(GOOGLE_TOKEN_URL, {
     method: 'POST',
@@ -186,7 +192,7 @@ export interface RefreshedBusinessTokens {
 export async function refreshAccessToken(
   config: GoogleBusinessOAuthConfig,
   refreshToken: string,
-  fetchFn: GoogleFetch = fetch,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
 ): Promise<RefreshedBusinessTokens> {
   const res = await fetchFn(GOOGLE_TOKEN_URL, {
     method: 'POST',
@@ -319,7 +325,7 @@ export async function listReviews(
   accountId: string,
   locationId: string,
   pageToken: string | null = null,
-  fetchFn: GoogleFetch = fetch,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
 ): Promise<ListReviewsPage> {
   const url = new URL(
     `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts/${accountId}/locations/${locationId}/reviews`,
@@ -407,7 +413,7 @@ export async function replyToReview(
   locationId: string,
   reviewId: string,
   comment: string,
-  fetchFn: GoogleFetch = fetch,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
 ): Promise<ReplyToReviewResult> {
   const url = `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts/${accountId}/locations/${locationId}/reviews/${reviewId}/reply`;
   const res = await fetchFn(url, {
@@ -513,7 +519,7 @@ async function getNamedResources(
 /** List account resource names (`accounts/{id}`) visible to the token. */
 export async function listAccounts(
   accessToken: string,
-  fetchFn: GoogleFetch = fetch,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
 ): Promise<string[]> {
   return getNamedResources(
     `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts`,
@@ -529,7 +535,7 @@ export async function listAccounts(
 export async function listLocations(
   accessToken: string,
   accountId: string,
-  fetchFn: GoogleFetch = fetch,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
 ): Promise<string[]> {
   return getNamedResources(
     `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts/${accountId}/locations`,
