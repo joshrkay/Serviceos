@@ -2712,8 +2712,8 @@ export class TwilioMediaStreamAdapter {
   /**
    * Section 7 — Fan out the escalate_with_context side effect to three
    * parallel channels: whisper TwiML cache, dispatcher SMS, and in-app
-   * SSE event. Builds and stashes the <Dial> TwiML with whisperUrl so
-   * the next gather-webhook response bridges the call to the dispatcher.
+   * SSE event. Builds and parks the <Dial> TwiML with whisperUrl; the
+   * turn's hand-off (maybeHandOffToHuman) then delivers it to the live call.
    *
    * All channels are independently opt-in via channelPreferences and
    * fail gracefully — a failed SMS send is logged and swallowed, never
@@ -2769,12 +2769,10 @@ export class TwilioMediaStreamAdapter {
       );
     }
 
-    // 4) Build <Dial> with whisper URL and hand off to the gather adapter's
-    // pendingTransferTwiml Map via deps.setPendingTransferTwiml. This is the
-    // CRITICAL fix: without this callback, the TwiML would be written to the
-    // media-stream adapter's state where no route handler ever reads it, and
-    // the caller would stay on hold forever while the dispatcher gets an SMS
-    // but no incoming call.
+    // 4) Build <Dial> with whisper URL and park it in the gather adapter's
+    // shared pendingTransferTwiml Map (deps.setPendingTransferTwiml), where
+    // every escalation producer parks its hand-off; the turn's hand-off then
+    // takes it and delivers it to the live call.
     if (this.deps.callControl) {
       // Issue 6: strip trailing slash from publicBaseUrl before building URLs.
       const baseUrl = this.deps.publicBaseUrl?.replace(/\/$/, '');
@@ -2800,8 +2798,7 @@ export class TwilioMediaStreamAdapter {
       );
 
       if (this.deps.setPendingTransferTwiml && this.state.session) {
-        // Route the TwiML through the gather adapter's shared Map so the
-        // next gather-callback route response bridges the call.
+        // Parked with every other producer's hand-off (see above).
         this.deps.setPendingTransferTwiml(this.state.session.id, dialTwiml);
       } else {
         // Nothing can deliver it — log so operators know the transfer will

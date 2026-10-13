@@ -3419,9 +3419,11 @@ export class TwilioGatherAdapter {
   }
 
   /**
-   * Pop the pending transfer TwiML for a session, if any. Used by
-   * the route layer to short-circuit the normal Gather response when
-   * the escalation flow produced a `<Dial>`.
+   * Pop the pending hand-off TwiML for a session, if any. Consumers: the
+   * Gather webhook responses (finalizeTwiml / handleInbound) return it in
+   * place of the next `<Gather>`; on the realtime transport the media-stream
+   * adapter takes it and delivers it to the live call over REST; and
+   * /voice/gather-fallback returns one a degraded stream call left undelivered.
    */
   takePendingTransferTwiml(sessionId: string): string | undefined {
     const twiml = this.pendingTransferTwiml.get(sessionId);
@@ -3430,13 +3432,11 @@ export class TwilioGatherAdapter {
   }
 
   /**
-   * Store a pending <Dial> TwiML string for the given session. Called by
-   * `TwilioMediaStreamAdapter` via a deps callback so both the gather
-   * adapter (which reads via `takePendingTransferTwiml`) and the media-stream
-   * adapter (which writes during `handleEscalateWithContext`) share the same
-   * in-memory Map. Without this, the Dial TwiML would be written to
-   * `state.pendingTransferTwiml` on the media-stream adapter where nothing
-   * ever reads it — the call would hang on hold forever.
+   * Park a hand-off TwiML for the given session in the Map every escalation
+   * producer shares. Callers outside the processor: the vulnerable-caller
+   * owner patch (app.ts), and the media-stream adapter
+   * (`handleEscalateWithContext`, and re-parking an undelivered hand-off
+   * before a degrade to Gather).
    */
   setPendingTransferTwiml(sessionId: string, twiml: string): void {
     this.pendingTransferTwiml.set(sessionId, twiml);
