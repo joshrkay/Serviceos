@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { resolveStorageConfig } from './storage-config';
 
 const configSchema = z.object({
   NODE_ENV: z
@@ -509,10 +510,10 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
   // R2_PUBLIC_URL is intentionally NOT required: S3StorageProvider
   // falls back to presigned GET URLs when publicUrlBase is unset
   // (see files/storage-provider.ts:159), so storage works without it.
-  if (storageEnabled) {
-    if (!env.R2_ACCOUNT_ID) missing.push('R2_ACCOUNT_ID (or set STORAGE_ENABLED=false)');
-    if (!env.R2_ACCESS_KEY_ID) missing.push('R2_ACCESS_KEY_ID (or set STORAGE_ENABLED=false)');
-    if (!env.R2_SECRET_ACCESS_KEY) missing.push('R2_SECRET_ACCESS_KEY (or set STORAGE_ENABLED=false)');
+  if (storageEnabled && !resolveStorageConfig(env).ok) {
+    missing.push('R2_ACCOUNT_ID (or set STORAGE_ENABLED=false)');
+    missing.push('R2_ACCESS_KEY_ID (or set STORAGE_ENABLED=false)');
+    missing.push('R2_SECRET_ACCESS_KEY (or set STORAGE_ENABLED=false)');
   }
 
   // Voice Media Streams (Twilio bidirectional audio) require a raw-PCM-capable

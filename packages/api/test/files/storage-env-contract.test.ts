@@ -89,6 +89,46 @@ describe('object-storage env contract (validator and factory agree)', () => {
       expect(() => loadConfig({ ...PROD_BASE, ...R2_ONLY })).not.toThrow();
     });
   });
+
+  describe('slice 2 — the STORAGE_* set the factory has always read (live-prod shape)', () => {
+    it('resolves to a real S3 provider with exactly those values', async () => {
+      const { provider, bucket, mode } = createStorageProvider({
+        NODE_ENV: 'production',
+        ...STORAGE_FULL,
+      });
+
+      expect(mode).toBe('s3');
+      expect(provider).toBeInstanceOf(S3StorageProvider);
+      expect(bucket).toBe('prod-bucket');
+      const url = new URL(await provider.generateUploadUrl(bucket, 'k.webm', 'audio/webm', 10));
+      expect(url.host).toBe('s3.example.com');
+      expect(url.pathname).toBe('/prod-bucket/k.webm');
+      expect(url.searchParams.get('X-Amz-Credential')).toMatch(
+        /^st-key\/\d{8}\/us-east-1\/s3\/aws4_request$/
+      );
+    });
+
+    it('is accepted by the boot validator without any R2_* variable', () => {
+      expect(() => loadConfig({ ...PROD_BASE, ...STORAGE_FULL })).not.toThrow();
+    });
+
+    it('is not overridden by R2_* when both families are set (regression guard for prod configs that boot today)', async () => {
+      const both = {
+        NODE_ENV: 'production',
+        ...STORAGE_FULL,
+        ...R2_ONLY,
+        R2_BUCKET: 'r2-bucket-should-lose',
+      };
+      const { provider, bucket, mode } = createStorageProvider(both);
+
+      expect(mode).toBe('s3');
+      expect(bucket).toBe('prod-bucket');
+      const url = new URL(await provider.generateUploadUrl(bucket, 'k.webm', 'audio/webm', 10));
+      expect(url.host).toBe('s3.example.com');
+      expect(url.searchParams.get('X-Amz-Credential')).toMatch(/^st-key\//);
+      expect(() => loadConfig({ ...PROD_BASE, ...both })).not.toThrow();
+    });
+  });
 });
 
 // Referenced by later slices; imported here so each slice only adds `it`s.
