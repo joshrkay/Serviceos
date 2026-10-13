@@ -209,7 +209,13 @@ describe('whisper screen — press 1 to accept (H1)', () => {
     tenantId: TENANT_A,
   });
 
-  function build(cache: WhisperCache, hooks: { onScreenOffered?: ReturnType<typeof vi.fn>; onAccepted?: ReturnType<typeof vi.fn> } = {}) {
+  function build(
+    cache: WhisperCache,
+    hooks: {
+      onScreenOffered?: (args: { sessionId: string; tenantId: string }) => void;
+      onAccepted?: (args: { sessionId: string; tenantId: string; childCallSid?: string }) => void | Promise<void>;
+    } = {},
+  ) {
     const app = express();
     mountWhisperRoute(app, {
       whisperCache: cache,

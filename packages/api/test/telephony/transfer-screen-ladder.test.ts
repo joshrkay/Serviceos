@@ -101,7 +101,7 @@ async function harness() {
     }),
   );
 
-  const sendSms = vi.fn(async () => ({ ok: true }));
+  const sendSms = vi.fn(async (_args: { to: string; body: string }) => ({ ok: true }));
   const queue = { send: vi.fn(async () => 'job') };
   const worker = createEmergencyPageWorker({
     queue: queue as never,
