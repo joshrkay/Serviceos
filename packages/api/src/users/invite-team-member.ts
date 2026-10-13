@@ -18,10 +18,15 @@ import { PendingInvitation, PendingInvitationRepository } from './pending-invita
 import { publicUrl } from '../shared/public-origins';
 import { UserRole } from './user';
 import { assertSeatAvailable, type SeatUsageReader } from './seat-limit';
+import { timedFetch } from '../shared/timed-fetch';
+
+/** Default when no fetch is injected: the invite runs on the request path, so
+ *  an unanswered Clerk call is given up at 10 s (best-effort, as before). */
+const boundedClerkFetch: typeof fetch = timedFetch();
 
 export interface ClerkInvitationConfig {
   clerkSecretKey?: string;
-  /** Defaults to global fetch. Tests inject a stub. */
+  /** Defaults to the global fetch bounded at 10 s. Tests inject a stub. */
   clerkFetch?: typeof fetch;
 }
 
@@ -57,7 +62,7 @@ export async function inviteTeamMember(
   let clerkInvitationId: string | null = null;
   if (clerk.clerkSecretKey) {
     try {
-      const fetchFn = clerk.clerkFetch ?? fetch;
+      const fetchFn = clerk.clerkFetch ?? boundedClerkFetch;
       // Where the invitee lands after Clerk sign-up: the SPA (web origin),
       // never the API host. Resolved once by loadConfig().
       const redirectUrl = publicUrl('web', '/accept-invitation', { invitation_id: invitation.id });
@@ -81,9 +86,15 @@ export async function inviteTeamMember(
         const data = (await clerkRes.json()) as { id?: string };
         clerkInvitationId = data.id ?? null;
       }
-    } catch {
+    } catch (err) {
       // Best-effort. Local row stays; UI surfaces "Invited" on it
       // regardless. Re-send is via Clerk dashboard.
+      // eslint-disable-next-line no-console
+      console.warn('[invite-team-member] Clerk invitation failed; local invitation kept', {
+        tenantId: input.tenantId,
+        invitationId: invitation.id,
+        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
     }
   }
 

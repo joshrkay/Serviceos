@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { fakeJson, hangingFetch, settleWithin, useProviderClock } from '../helpers/hanging-fetch';
 import { v4 as uuidv4 } from 'uuid';
 import {
   PublicEstimateService,
@@ -932,6 +933,72 @@ describe('PublicEstimateService — Tier 4 deposit (PR 3b: before_approval gate 
     await expect(h.service.getOrCreateDepositCheckoutUrl(est.viewToken!)).rejects.toThrow(
       /not configured/,
     );
+  });
+
+  describe('reliability #5 — Stripe calls are bounded at 10 s when no fetch is injected', () => {
+    beforeEach(async () => {
+      useProviderClock();
+      mints = 0;
+      await h.settings.update(TENANT, {
+        depositStrategy: 'fixed',
+        depositFixedCents: 50000,
+        depositTimingPolicy: 'before_approval',
+      });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    const liveService = () =>
+      new PublicEstimateService({
+        estimateRepo: h.estimate,
+        customerRepo: h.customer,
+        jobRepo: h.job,
+        settingsRepo: h.settings,
+        stripeConfig: { apiKey: 'sk_test_xxx' },
+      });
+    let mints = 0;
+    const mintAnswer = (url: string) => {
+      if (!url.endsWith('/payment_links')) return fakeJson({ active: false });
+      mints += 1;
+      return fakeJson({ id: `plink_${mints}`, url: `https://checkout.stripe.com/c/plink_${mints}` });
+    };
+
+    it('a deposit-link mint that never answers gets the mapped provider error, not a bare 500 (#1110)', async () => {
+      const est = await seedEstimateWithTotal(100000);
+      vi.stubGlobal('fetch', hangingFetch((url) => url.endsWith('/payment_links')));
+
+      const outcome = await settleWithin(liveService().getOrCreateDepositCheckoutUrl(est.viewToken!), 10_000);
+
+      expect(outcome.status).toBe('rejected');
+      expect((outcome as { reason: unknown }).reason).toMatchObject({ statusCode: 502, code: 'PAYMENT_PROVIDER_ERROR' });
+    });
+
+    it('a hung deactivation of an expired link still hands the customer a fresh link', async () => {
+      const est = await seedEstimateWithTotal(100000);
+      vi.stubGlobal('fetch', hangingFetch((url) => url.endsWith('/payment_links/plink_1'), mintAnswer));
+      const service = liveService();
+      await service.getOrCreateDepositCheckoutUrl(est.viewToken!);
+      const job = (await h.job.findByTenant(TENANT))[0];
+      await h.job.update(TENANT, job.id, { depositStripePaymentLinkExpiresAt: new Date(Date.now() - 60_000) });
+
+      const outcome = await settleWithin(service.getOrCreateDepositCheckoutUrl(est.viewToken!), 10_000);
+
+      expect(outcome.status).toBe('fulfilled');
+      expect((outcome as { value: { url: string } }).value.url).toContain('plink_2');
+    });
+
+    it('a hung rollback deactivation after a failed persist still surfaces the persist error', async () => {
+      const est = await seedEstimateWithTotal(100000);
+      vi.stubGlobal('fetch', hangingFetch((url) => url.includes('/payment_links/'), mintAnswer));
+      vi.spyOn(h.job, 'update').mockRejectedValueOnce(new Error('db down'));
+
+      const outcome = await settleWithin(liveService().getOrCreateDepositCheckoutUrl(est.viewToken!), 10_000);
+
+      expect(outcome.status).toBe('rejected');
+      expect((outcome as { reason: Error }).reason.message).toMatch(/Failed to persist deposit Stripe link plink_\d+: db down/);
+    });
   });
 });
 

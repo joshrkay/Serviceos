@@ -6,7 +6,8 @@
  * pass payment_method_types[]=card_present. Connection tokens and intents
  * are always created on the tenant Connect account (Stripe-Account header).
  */
-import { StripeFetch } from './stripe-payment-intent';
+import { StripeFetch, boundedStripeFetch } from './stripe-payment-intent';
+import { sendIdempotentCreate } from '../shared/idempotency-key';
 
 export interface StripeTerminalConfig {
   apiKey: string;
@@ -74,7 +75,7 @@ export interface EnsureTerminalLocationInput {
 export async function ensureTerminalLocation(
   config: StripeTerminalConfig,
   input: EnsureTerminalLocationInput,
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<{ locationId: string }> {
   if (!config.apiKey) throw new Error('ensureTerminalLocation requires a Stripe API key');
   if (!config.stripeAccountId?.trim()) {
@@ -98,11 +99,20 @@ export async function ensureTerminalLocation(
   if (input.address.line2) body.set('address[line2]', input.address.line2);
   if (input.address.state) body.set('address[state]', input.address.state);
 
-  const res = await fetcher('https://api.stripe.com/v1/terminal/locations', {
-    method: 'POST',
-    headers: buildHeaders(config),
-    body: body.toString(),
-  });
+  // The location id is only persisted after the connection token succeeds
+  // (routes/terminal.ts), so a lost answer here used to leave one more
+  // Location on the connected account per retry. Keyed per account + params
+  // (policy: sendIdempotentCreate), so a retry gets the same Location back.
+  const res = await sendIdempotentCreate(
+    `terminal-location:${config.stripeAccountId.trim()}`,
+    body,
+    (idempotencyKey) =>
+      fetcher('https://api.stripe.com/v1/terminal/locations', {
+        method: 'POST',
+        headers: buildHeaders(config, idempotencyKey),
+        body: body.toString(),
+      }),
+  );
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`Stripe terminal.locations.create failed (${res.status}): ${text}`);
@@ -118,14 +128,14 @@ export async function ensureTerminalLocation(
 export async function fetchConnectAccountBusinessAddress(
   apiKey: string,
   accountId: string,
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<TerminalLocationAddress | null> {
+  // No `body` key: the platform fetch rejects a GET carrying one, even ''.
   const res = await fetcher(`https://api.stripe.com/v1/accounts/${accountId}`, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${apiKey}`,
     },
-    body: '',
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -167,7 +177,7 @@ function buildHeaders(
 
 export async function createTerminalConnectionToken(
   config: StripeTerminalConfig,
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<CreateConnectionTokenResult> {
   if (!config.apiKey) throw new Error('createTerminalConnectionToken requires a Stripe API key');
   if (!config.stripeAccountId?.trim()) {
@@ -200,7 +210,7 @@ export async function createTerminalConnectionToken(
 export async function createTerminalSession(
   config: StripeTerminalConfig,
   input: CreateTerminalSessionInput,
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<CreateTerminalSessionResult> {
   const existing = input.existingLocationId?.trim() || null;
   let locationId = existing;
@@ -243,7 +253,7 @@ export async function createTerminalSession(
 export async function createTerminalPaymentIntent(
   config: StripeTerminalConfig,
   input: CreateTerminalPaymentIntentInput,
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<CreateTerminalPaymentIntentResult> {
   if (!config.apiKey) throw new Error('createTerminalPaymentIntent requires a Stripe API key');
   if (!config.stripeAccountId?.trim()) {

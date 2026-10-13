@@ -7,7 +7,10 @@
 import { describe, it, expect } from 'vitest';
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
-import { createIdempotencyMiddleware } from '../../src/idempotency/idempotency-middleware';
+import {
+  createIdempotencyMiddleware,
+  mountIdempotentCreateRoutes,
+} from '../../src/idempotency/idempotency-middleware';
 import { InMemoryIdempotencyStore } from '../../src/idempotency/idempotency-store';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
@@ -73,5 +76,68 @@ describe('createIdempotencyMiddleware (#1489)', () => {
     finishFirst();
     expect((await first).status).toBe(201);
     expect(calls).toBe(1);
+  });
+});
+
+/**
+ * Money-data #12 — "Record payment" (manual cash/check) on an invoice is
+ * POST /api/invoices/:id/payment. It was outside the mounted create paths, so
+ * a double-tapped $50 on a $100 invoice recorded two payments.
+ */
+describe('mountIdempotentCreateRoutes — manual invoice payment', () => {
+  function buildMountedApp() {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: 'user-1',
+        sessionId: 'sess-1',
+        tenantId: '00000000-0000-4000-8000-000000000001',
+        role: 'owner',
+      };
+      next();
+    });
+    mountIdempotentCreateRoutes(app, new InMemoryIdempotencyStore());
+    const recorded: Array<{ invoiceId: string; amountCents: number }> = [];
+    app.post('/api/invoices/:id/payment', (req: Request, res: Response) => {
+      recorded.push({ invoiceId: String(req.params.id), amountCents: req.body.amountCents });
+      res.status(201).json({ paymentId: `pay-${recorded.length}` });
+    });
+    return { app, recorded };
+  }
+
+  it('a double-tapped payment with the same key records once and replays the first response', async () => {
+    const { app, recorded } = buildMountedApp();
+    const tap = () =>
+      request(app)
+        .post('/api/invoices/inv-1/payment')
+        .set('Idempotency-Key', 'k-pay-1')
+        .send({ amountCents: 5000, method: 'cash' });
+
+    const first = await tap();
+    const second = await tap();
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(second.body).toEqual(first.body);
+    expect(second.headers['idempotent-replayed']).toBe('true');
+    expect(recorded).toEqual([{ invoiceId: 'inv-1', amountCents: 5000 }]);
+  });
+
+  it('the same key on a different invoice is rejected, not replayed onto it', async () => {
+    const { app, recorded } = buildMountedApp();
+    await request(app).post('/api/invoices/inv-1/payment').set('Idempotency-Key', 'k-pay-2').send({ amountCents: 5000 });
+    const other = await request(app).post('/api/invoices/inv-2/payment').set('Idempotency-Key', 'k-pay-2').send({ amountCents: 5000 });
+
+    expect(other.status).toBe(422);
+    expect(recorded).toHaveLength(1);
+  });
+
+  it('payments sent without a key behave exactly as before: each one is recorded', async () => {
+    const { app, recorded } = buildMountedApp();
+    await request(app).post('/api/invoices/inv-1/payment').send({ amountCents: 5000 });
+    await request(app).post('/api/invoices/inv-1/payment').send({ amountCents: 5000 });
+
+    expect(recorded).toHaveLength(2);
   });
 });

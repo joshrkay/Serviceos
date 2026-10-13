@@ -8,7 +8,8 @@
  * the SAME account. Card data never touches our server — the SetupIntent client
  * secret is confirmed browser-side in Stripe Elements.
  */
-import { StripeFetch } from './stripe-payment-intent';
+import { StripeFetch, boundedStripeFetch } from './stripe-payment-intent';
+import { sendIdempotentCreate } from '../shared/idempotency-key';
 
 export interface StripeAccountConfig {
   apiKey: string;
@@ -72,7 +73,7 @@ export interface CreateSetupIntentResult {
 export async function createSetupIntent(
   config: StripeAccountConfig,
   input: CreateSetupIntentInput,
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<CreateSetupIntentResult> {
   if (!config.apiKey) throw new Error('createSetupIntent requires a Stripe API key');
   if (!input.tenantId) throw new Error('tenantId is required');
@@ -86,11 +87,22 @@ export async function createSetupIntent(
     };
     if (input.email) customerParams.email = input.email;
     if (input.name) customerParams.name = input.name;
-    const res = await fetcher('https://api.stripe.com/v1/customers', {
-      method: 'POST',
-      headers: buildHeaders(config),
-      body: new URLSearchParams(customerParams).toString(),
-    });
+    const customerBody = new URLSearchParams(customerParams).toString();
+    // A create whose response is lost leaves the portal with no customer id;
+    // the retry replays the same Stripe customer instead of minting another
+    // (key policy: sendIdempotentCreate). Scoped by account too: the customer
+    // lives on the connected account.
+    const accountScope = config.stripeAccountId || 'platform';
+    const res = await sendIdempotentCreate(
+      `customer:${input.tenantId}:saved-card:${input.customerId}:${accountScope}`,
+      customerBody,
+      (idempotencyKey) =>
+        fetcher('https://api.stripe.com/v1/customers', {
+          method: 'POST',
+          headers: buildHeaders(config, idempotencyKey),
+          body: customerBody,
+        }),
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new Error(`Stripe customers.create failed (${res.status}): ${text}`);
@@ -134,13 +146,14 @@ export interface PaymentMethodDetails {
 export async function retrievePaymentMethod(
   config: StripeAccountConfig,
   paymentMethodId: string,
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<PaymentMethodDetails> {
   if (!config.apiKey) throw new Error('retrievePaymentMethod requires a Stripe API key');
   if (!paymentMethodId) throw new Error('paymentMethodId is required');
   const res = await fetcher(
     `https://api.stripe.com/v1/payment_methods/${encodeURIComponent(paymentMethodId)}`,
-    { method: 'GET', headers: buildHeaders(config), body: '' },
+    // No `body` key: the platform fetch rejects a GET carrying one, even ''.
+    { method: 'GET', headers: buildHeaders(config) },
   );
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -180,6 +193,12 @@ export interface ChargeOffSessionInput {
  * throwing on a decline / authentication_required, so the dues sweep can fall
  * back to a payable invoice instead of crashing. Only true transport/config
  * errors throw.
+ *
+ * Deliberately NOT on the 10 s `boundedStripeFetch` default the other
+ * wrappers use: this confirms a charge from the dues sweep (no request
+ * transaction), and the sweep records any throw as a failed collection, so a
+ * short client-side deadline would report "failed" for a charge Stripe may
+ * still complete. Bounding it needs an "indeterminate" outcome first.
  */
 export async function chargeOffSession(
   config: StripeAccountConfig,

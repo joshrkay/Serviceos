@@ -10,7 +10,7 @@ exports[`createApp route manifest > matches the committed layer counts 1`] = `
   },
   "middleware": 33,
   "routers": 87,
-  "routes": 14,
+  "routes": 15,
   "total": 134,
 }
 `;

@@ -18,6 +18,8 @@
  * (`Stripe-Account` header) so funds settle on the tenant's Express account.
  */
 
+import { timedFetch } from '../shared/timed-fetch';
+
 export interface StripePaymentIntentConfig {
   apiKey: string;
 }
@@ -67,6 +69,15 @@ export interface StripeFetch {
 }
 
 /**
+ * Default fetcher for every wrapper here and in stripe-terminal.ts /
+ * stripe-saved-card.ts: the global fetch bounded at 10 s. These calls run on
+ * public pay pages and inside the /api request transaction, where an
+ * unanswered Stripe call would otherwise pin a pooled connection. A timeout
+ * rejects like a network failure, so callers' handling is unchanged.
+ */
+export const boundedStripeFetch: StripeFetch = timedFetch();
+
+/**
  * Create a Stripe PaymentIntent and return the client secret.
  *
  * @param config Stripe API config (live or test secret key).
@@ -76,7 +87,7 @@ export interface StripeFetch {
 export async function createPaymentIntent(
   config: StripePaymentIntentConfig,
   input: CreatePaymentIntentInput,
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<CreatePaymentIntentResult> {
   if (!config.apiKey) {
     throw new Error('createPaymentIntent requires a Stripe API key');
@@ -179,7 +190,7 @@ const MAX_SEARCH_PAGES = 10;
 export async function searchPaymentIntentsByInvoice(
   config: StripePaymentIntentConfig,
   input: { tenantId: string; invoiceId: string; stripeAccountId?: string },
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<PaymentIntentSummary[]> {
   if (!config.apiKey) {
     throw new Error('searchPaymentIntentsByInvoice requires a Stripe API key');
@@ -239,7 +250,7 @@ export async function cancelPaymentIntent(
   config: StripePaymentIntentConfig,
   paymentIntentId: string,
   stripeAccountId?: string,
-  fetcher: StripeFetch = globalThis.fetch as unknown as StripeFetch,
+  fetcher: StripeFetch = boundedStripeFetch,
 ): Promise<void> {
   if (!config.apiKey) throw new Error('cancelPaymentIntent requires a Stripe API key');
   if (!paymentIntentId) throw new Error('paymentIntentId is required');

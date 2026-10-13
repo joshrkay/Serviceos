@@ -1,5 +1,7 @@
 import type { Pool } from 'pg';
-import { AppError, ValidationError, NotFoundError } from '../shared/errors';
+import { AppError, ConflictError, ValidationError, NotFoundError } from '../shared/errors';
+import { timedFetch } from '../shared/timed-fetch';
+import { sendIdempotentCreate } from '../shared/idempotency-key';
 import { CALL_PLAN_USAGE, OVERAGE_CENTS_PER_MINUTE } from './call-usage-pricing';
 
 /**
@@ -124,9 +126,25 @@ export interface BillingSubscriptionView {
 export interface BillingServiceDeps {
   pool: Pool;
   config?: BillingConfig | null;
-  /** Stub-able for tests. Defaults to global fetch. */
+  /** Stub-able for tests. Defaults to the global fetch bounded at 10 s
+   *  (these calls run inside the request transaction). */
   fetchFn?: BillingFetch;
 }
+
+const boundedStripeFetch: BillingFetch = timedFetch();
+
+/**
+ * Ending a trial early charges the card inside the Stripe request, so the
+ * update is NOT cut off at the 10 s default: it gets 40 s. END_TRIAL_BUDGET_MS
+ * caps the whole call (read + update + 409 waits + replay resend) at 45 s, so
+ * it ends inside the request transaction's 60 s idle guard and the route's
+ * audit write and COMMIT still run.
+ */
+export const END_TRIAL_TIMEOUT_MS = 40_000;
+const endTrialStripeFetch: BillingFetch = timedFetch(END_TRIAL_TIMEOUT_MS);
+const END_TRIAL_IN_PROGRESS_RETRY_DELAYS_MS = [2_000, 8_000];
+/** Everything endTrialNow does, together, stays under the 60 s idle guard. */
+export const END_TRIAL_BUDGET_MS = 45_000;
 
 /**
  * Turns a failed "open the billing portal" Stripe REST call into an
@@ -278,7 +296,7 @@ export class BillingService {
       throw new ValidationError('returnUrl is required');
     }
 
-    const fetchFn = this.deps.fetchFn ?? fetch;
+    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
     const apiKey = this.deps.config.apiKey;
 
     // Reuse the tenant's single canonical Stripe customer so the portal
@@ -343,7 +361,7 @@ export class BillingService {
   ): Promise<{ priceId: string; productId: string; name: string; amountCents: number }> {
     const spec = PLAN_SPECS[planId];
     const apiKey = this.deps.config!.apiKey;
-    const fetchFn = this.deps.fetchFn ?? fetch;
+    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
     const res = await fetchFn(
       `https://api.stripe.com/v1/prices/${encodeURIComponent(priceId)}?expand[]=product`,
       {
@@ -492,7 +510,7 @@ export class BillingService {
       }
       priceId = legacy;
     }
-    const fetchFn = this.deps.fetchFn ?? fetch;
+    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
 
     // Serialize trial checkout per tenant via a Postgres advisory
     // transaction lock. Without this, two callers that ran the
@@ -699,7 +717,7 @@ export class BillingService {
     sessionId: string,
     planId: BillingPlanId | undefined,
   ): Promise<{ url: string } | 'released' | 'unknown'> {
-    const fetchFn = this.deps.fetchFn ?? fetch;
+    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
     const auth = { Authorization: `Bearer ${this.deps.config!.apiKey}` };
     const base = `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`;
     const res = await fetchFn(base, { method: 'GET', headers: auth });
@@ -738,21 +756,85 @@ export class BillingService {
     if (!subId) {
       throw new NotFoundError('Subscription', tenantId);
     }
-    const fetchFn = this.deps.fetchFn ?? fetch;
-    const body = new URLSearchParams();
-    body.set('trial_end', 'now');
-    body.set('proration_behavior', 'create_prorations');
-    const res = await fetchFn(`https://api.stripe.com/v1/subscriptions/${subId}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.deps.config.apiKey}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body,
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Stripe subscription update failed (${res.status}): ${text}`);
+    const apiKey = this.deps.config.apiKey;
+    const subscriptionUrl = `https://api.stripe.com/v1/subscriptions/${subId}`;
+
+    // One budget for the whole call (read, update, 409 waits, replay resend),
+    // so it can never outlive the request transaction's 60 s idle guard.
+    const budget = new AbortController();
+    const budgetTimer = setTimeout(() => {
+      budget.abort(new DOMException(`end-trial exceeded its ${END_TRIAL_BUDGET_MS}ms budget`, 'TimeoutError'));
+    }, END_TRIAL_BUDGET_MS);
+    (budgetTimer as { unref?: () => void }).unref?.();
+    try {
+      // A re-click after the trial already ended (the first answer was lost,
+      // or Stripe ended it on its own) must not end it — and charge — again.
+      // A re-click after a timeout recovers here: the read sees the trial
+      // ended. Best-effort: if the read fails, the keyed update still dedupes.
+      const current = await (this.deps.fetchFn ?? boundedStripeFetch)(subscriptionUrl, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: budget.signal,
+      }).catch(() => null);
+      if (current?.ok) {
+        const sub = (await current.json().catch(() => ({}))) as { status?: string };
+        // active / past_due: the trial really ended (paid, or the first charge
+        // is being retried) — nothing to do. A canceled, paused or incomplete
+        // subscription has no trial to end: refuse without touching Stripe, so
+        // the route never reports (or audits) an early trial end that didn't
+        // happen.
+        if (sub.status === 'active' || sub.status === 'past_due') return;
+        if (sub.status && sub.status !== 'trialing') {
+          throw new ConflictError(`This subscription is ${sub.status}; there is no trial to end.`, {
+            subscriptionStatus: sub.status,
+          });
+        }
+      }
+
+      // trial_end=now makes Stripe finalize the first invoice AND attempt the
+      // charge inside this request: it gets the long END_TRIAL deadline, not
+      // the 10 s default (a cut-off charge would be reported as failed and
+      // skip the route's audit event), and an Idempotency-Key so a
+      // double-click replays the first answer instead of ending the trial
+      // twice.
+      const body = new URLSearchParams();
+      body.set('trial_end', 'now');
+      body.set('proration_behavior', 'create_prorations');
+      const chargeFetch = this.deps.fetchFn ?? endTrialStripeFetch;
+      const res = await sendIdempotentCreate(
+        `end-trial:${subId}`,
+        body,
+        (idempotencyKey) =>
+          chargeFetch(subscriptionUrl, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Idempotency-Key': idempotencyKey,
+            },
+            body,
+            signal: budget.signal,
+          }),
+        // A double-click's duplicate waits for the first click's charge.
+        { inProgressRetryDelaysMs: END_TRIAL_IN_PROGRESS_RETRY_DELAYS_MS, signal: budget.signal },
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Stripe subscription update failed (${res.status}): ${text}`);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === 'TimeoutError') {
+        // Stripe may still finish: the re-click reads the subscription first
+        // and never ends the trial (or charges) twice.
+        throw new AppError(
+          'BILLING_PROVIDER_TIMEOUT',
+          "Stripe hasn't confirmed the trial end yet. It may still complete — wait a moment and try again; trying again will not charge twice.",
+          503,
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(budgetTimer);
     }
   }
 
@@ -859,7 +941,7 @@ export class BillingService {
     const sessionId = rows[0]?.pending_checkout_session_id ?? null;
 
     if (sessionId && this.deps.config?.apiKey) {
-      const fetchFn = this.deps.fetchFn ?? fetch;
+      const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
       const res = await fetchFn(
         `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}/expire`,
         {
@@ -893,11 +975,13 @@ export class BillingService {
    * which would carry a subscription invisible to the in-app portal).
    *
    * Race-tolerant: when two callers see stripe_customer_id IS NULL at
-   * the same time, each POSTs a new Stripe customer, but only the
-   * first UPDATE wins. The losing caller re-reads the winner's id and
-   * uses it. The losing call's Stripe customer becomes a no-op orphan
-   * — it has no subscription, no payment method, and Stripe doesn't
-   * bill empty customers.
+   * the same time, only the first UPDATE wins; the losing caller
+   * re-reads the winner's id and uses it. The create carries an
+   * Idempotency-Key (tenant + parameters), so a retry after a lost
+   * response — or a double-click from the same owner — gets the SAME
+   * Stripe customer back. Callers with different emails mint distinct
+   * customers; the loser's is a no-op orphan (logged) — no subscription,
+   * no payment method, and Stripe doesn't bill empty customers.
    */
   private async getOrCreateStripeCustomer(
     tenantId: string,
@@ -907,7 +991,7 @@ export class BillingService {
       throw new ValidationError('Subscription billing is not configured');
     }
     const apiKey = this.deps.config.apiKey;
-    const fetchFn = this.deps.fetchFn ?? fetch;
+    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
 
     const { rows } = await this.deps.pool.query(
       `SELECT stripe_customer_id FROM tenants WHERE id = $1`,
@@ -919,17 +1003,27 @@ export class BillingService {
       | null;
     if (existing) return existing;
 
-    const customerRes = await fetchFn('https://api.stripe.com/v1/customers', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        email: ownerEmail,
-        'metadata[tenant_id]': tenantId,
-      }),
+    const customerParams = new URLSearchParams({
+      email: ownerEmail,
+      'metadata[tenant_id]': tenantId,
     });
+    // A create whose response is lost (timeout, dropped socket) leaves no id
+    // on the tenant row; the retry replays the same customer rather than
+    // minting a second one (see sendIdempotentCreate for the key policy).
+    const customerRes = await sendIdempotentCreate(
+      `customer:${tenantId}:subscription`,
+      customerParams,
+      (idempotencyKey) =>
+        fetchFn('https://api.stripe.com/v1/customers', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Idempotency-Key': idempotencyKey,
+          },
+          body: customerParams,
+        }),
+    );
     if (!customerRes.ok) {
       const body = await customerRes.text();
       throw new Error(`Stripe customer creation failed (${customerRes.status}): ${body}`);
@@ -960,6 +1054,15 @@ export class BillingService {
     const winner = reread.rows[0]?.stripe_customer_id;
     if (!winner) {
       throw new Error('getOrCreateStripeCustomer: lost race but no winner persisted');
+    }
+    if (winner !== customer.id) {
+      // The other request's customer won; this one is an empty orphan.
+      // eslint-disable-next-line no-console
+      console.warn('[billing-subscription] customer claim lost; unused Stripe customer', {
+        tenantId,
+        unusedCustomerId: customer.id,
+        keptCustomerId: winner,
+      });
     }
     return winner;
   }
