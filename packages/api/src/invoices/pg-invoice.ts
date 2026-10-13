@@ -410,6 +410,86 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     });
   }
 
+  async applyNonTaxableAdjustmentAtomic(
+    tenantId: string,
+    id: string,
+    line: LineItem,
+    now: Date,
+  ): Promise<Invoice | null> {
+    // Review L2 — this write never re-derives taxable_subtotal / tax, so a
+    // taxable line would silently leave tax stale: refuse it before any write.
+    if (line.taxable) {
+      throw new Error('applyNonTaxableAdjustmentAtomic requires a non-taxable line (tax is not re-derived)');
+    }
+    return this.withTenantTransaction(tenantId, async (client) => {
+      // #10 — one UPDATE deriving the new subtotal/total/due from the row's
+      // OWN current values (the SQL mirror of applyNonTaxableAdjustment: a
+      // non-taxable line moves the subtotal by its amount, leaves tax and
+      // discount alone and re-derives the surcharge), so a payment committed
+      // by incrementAmountPaidAtomic between the caller's read and this write is reflected in amount_due instead
+      // of being overwritten by a snapshot-derived figure, and two
+      // concurrent adjustments both apply. Column references on the right
+      // side read the PRE-update row. Both predicates are evaluated against
+      // the LIVE row: the status guard means a void/settle committing after
+      // the caller's status check matches 0 rows instead of re-pricing a
+      // dead invoice; the balance guard means a credit larger than the live
+      // amount due (a payment landed first) matches 0 rows, and the clearing
+      // floor keeps amount_paid <= total_cents (L4); the positive-adjustment
+      // guard means a late fee never lands on an invoice whose live balance
+      // is already $0 (a credit cleared it). Status is derived in the same
+      // statement (review M2): a credit that clears the balance of an invoice
+      // the customer has partly paid settles it as 'paid'; one with nothing
+      // paid stays as it was (a credit is not a payment — product posture,
+      // pinned in apply-credit-handler.test.ts). The line insert rides the
+      // same transaction, so the ledger (Σ lines == subtotal, L2) moves
+      // together.
+      //
+      // Review M3 — the processing-fee surcharge is re-derived at the stored
+      // processing_fee_bps on the new chargeable amount (subtotal' − discount
+      // + tax), mirroring applyBps' round-half-up (ROUND(numeric) rounds half
+      // away from zero; the base is clamped ≥ 0, so they agree). The new
+      // total is the old total + the adjustment + the surcharge change.
+      //
+      // Review N1 — a credit is judged against the live, surcharge-inclusive
+      // amount due (`-$3 <= total - paid`) and carries its share of the
+      // surcharge. One that reaches past the surcharge-free balance CLEARS
+      // the invoice: total = paid, and the surcharge keeps only the
+      // remainder that keeps total = subtotal − discount + tax + fee (L2b).
+      // Mirrors applyNonTaxableAdjustment(totals, adj, amountPaid).
+      const rateFee = `CASE WHEN COALESCE(processing_fee_bps, 0) > 0
+          THEN ROUND(GREATEST(0, subtotal_cents + $3 - discount_cents + tax_cents)::numeric
+                     * processing_fee_bps / 10000)::integer
+          ELSE processing_fee_cents END`;
+      const rateTotal = `(total_cents + $3 + COALESCE(${rateFee}, 0) - COALESCE(processing_fee_cents, 0))`;
+      const clears = `(${rateTotal} < amount_paid_cents)`;
+      const newFee = `CASE WHEN ${clears}
+          THEN amount_paid_cents - (subtotal_cents + $3 - discount_cents + tax_cents)
+          ELSE ${rateFee} END`;
+      const newTotal = `GREATEST(${rateTotal}, amount_paid_cents)`;
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET subtotal_cents       = subtotal_cents + $3,
+             processing_fee_cents = ${newFee},
+             total_cents          = ${newTotal},
+             amount_due_cents     = GREATEST(0, ${newTotal} - amount_paid_cents),
+             status = CASE
+               WHEN amount_paid_cents > 0 AND ${newTotal} - amount_paid_cents <= 0 THEN 'paid'
+               ELSE status
+             END,
+             updated_at           = $4
+         WHERE id = $2 AND tenant_id = $1
+           AND status IN ('open', 'partially_paid')
+           AND ($3 >= 0 OR -$3 <= total_cents - amount_paid_cents)
+           AND ($3 < 0 OR total_cents - amount_paid_cents > 0)
+         RETURNING id`,
+        [tenantId, id, line.totalCents, now],
+      );
+      if (rows.length === 0) return null;
+      await this.insertLineItems(client, tenantId, id, [line]);
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
   async decrementAmountPaidAtomic(
     tenantId: string,
     id: string,

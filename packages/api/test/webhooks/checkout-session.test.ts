@@ -316,6 +316,46 @@ describe('P0-9 — unapplied captures are audited; stale links die on credit', (
     });
   });
 
+  // Review M1 — same pre-existing flaw on the checkout cap: the capped
+  // recordPayment commits, a post-payment side effect throws, Stripe
+  // redelivers into the completed-row dedupe, and an audit written after the
+  // capped credit is lost.
+  it('M1 — the capped excess is audited exactly once even when a post-payment side effect fails after the credit commits', async () => {
+    await invoiceRepo.create(makeInvoice({ amountPaidCents: 6000, amountDueCents: 4000 }));
+    let receiptDown = true;
+    app = buildApp({
+      invoiceRepo,
+      paymentRepo,
+      auditRepo,
+      stripeWebhookSecret: STRIPE_SECRET,
+      paymentReceiptNotifier: {
+        notifyPaymentReceived: async () => {
+          if (receiptDown) {
+            receiptDown = false;
+            throw new Error('receipt provider down');
+          }
+        },
+      },
+    });
+    const evt = checkoutEvent(10000);
+
+    const first = await postSigned(app, evt);
+    expect(first.status).toBeGreaterThanOrEqual(500);
+    const redelivered = await postSigned(app, evt);
+    expect(redelivered.status).toBe(200);
+
+    const invoice = await invoiceRepo.findById(TENANT, INVOICE_ID);
+    expect(invoice!.amountPaidCents).toBe(10000);
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'payment.unapplied_capture');
+    expect(events).toHaveLength(1);
+    expect(events[0].metadata).toMatchObject({
+      capturedCents: 10000,
+      creditedCents: 4000,
+      unappliedCents: 6000,
+      reason: 'capped_to_balance',
+    });
+  });
+
   it('a capture on an unpayable invoice audits the full amount and retries the link kill', async () => {
     await invoiceRepo.create(makeInvoice({ status: 'void' }));
 

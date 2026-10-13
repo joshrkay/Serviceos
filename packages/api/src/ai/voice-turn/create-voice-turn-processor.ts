@@ -323,6 +323,7 @@ import {
 import type { CallMeBackRepository } from '../../voice/call-me-back/call-me-back';
 import type { DeviceTokenRepository } from '../../push/device-token-service';
 import type { PushDeliveryProvider } from '../../notifications/push-delivery-provider';
+import type { SmsAlertClass } from '../../notifications/delivery-provider';
 import {
   type SpeechTurnHandler,
 } from '../../telephony/media-streams/mediastream-adapter';
@@ -913,8 +914,14 @@ export interface VoiceTurnProcessorDeps {
   now?: () => Date;
   /** F3 — whisper TwiML cache for dispatcher ear-only context. */
   whisperCache?: WhisperCache;
-  /** F4 — outbound SMS to dispatcher on escalation. */
-  deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
+  /**
+   * F4 — outbound SMS to dispatcher on escalation; also the E1 owner alert,
+   * which it tags `alertClass: 'life_safety'` so the outbound kill switch
+   * cannot silence it (notifications/delivery-provider.ts).
+   */
+  deliveryProvider?: {
+    sendSms(args: { to: string; body: string; alertClass?: SmsAlertClass }): Promise<unknown>;
+  };
   /**
    * ANS-001 — durable URGENT follow-up tasks (the same repo the call-me-back
    * worker sweeps and the emergency page ladder falls back to). Wired so an E1
@@ -3667,7 +3674,7 @@ export function createVoiceTurnProcessor(
         return;
       }
       const sends = await Promise.allSettled(
-        recipients.map((to) => provider.sendSms({ to, body })),
+        recipients.map((to) => provider.sendSms({ to, body, alertClass: 'life_safety' })),
       );
       const failures = sends.filter((s) => s.status === 'rejected');
       for (const f of failures) {
@@ -3678,11 +3685,10 @@ export function createVoiceTurnProcessor(
           sessionId: session.id,
         });
       }
-      // The durable fallback fires only when NO text went out at all — one
-      // delivered alert is a notified tenant.
-      if (failures.length === sends.length) {
-        await createE1FollowUpTask(session, tenantId, 'life_safety_e1', body);
-      }
+      // Filed whatever the SMS did: a Twilio-ACCEPTED text can still be
+      // dropped by carriers (A2P incomplete) without any signal, so an
+      // accepted send is not a notified tenant.
+      await createE1FollowUpTask(session, tenantId, 'life_safety_e1', body);
     })();
     await Promise.allSettled([push, sms]);
   }

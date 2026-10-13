@@ -471,7 +471,7 @@ describeSdk('§5 I15 scope caveat (STRUCTURAL) — NO provider SDK, not just Ope
       // entry test so its WAV wire format is unit-tested; speech-to-text,
       // not a chat completion. Harness-only: no production route reaches it.
       'src/ai/voice-quality/audio/openai-whisper-buffer-transcriber.ts:17',
-      'src/voice/transcription-providers.ts:166',
+      'src/voice/transcription-providers.ts:254',
       'src/voice/voice-service.ts:315',
     ]);
   });

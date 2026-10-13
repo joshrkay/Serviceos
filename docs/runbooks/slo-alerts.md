@@ -69,7 +69,7 @@ First response:
 
 | | |
 |---|---|
-| Measures | Pending `_queue_messages` rows older than the window (by `created_at`, including rows mid-retry-backoff) |
+| Measures | `_queue_messages` rows DUE and unclaimed for longer than the window (by `visible_at`): a delayed job is not counted until it falls due, a claimed one while its visibility lasts |
 | Threshold | `SLO_QUEUE_STALE_MIN` (default `15` minutes); ANY stale job is a breach |
 
 The queue poll loop drains every second, so a 15-minute-old pending job means
@@ -81,7 +81,7 @@ First response:
 1. Is the worker service up? (Railway: worker service status / recent deploy;
    single-service deploys: the API service, `PROCESS_ROLE` unset.)
 2. What's stuck:
-   `SELECT type, COUNT(*), MIN(created_at) FROM _queue_messages GROUP BY 1 ORDER BY 3;`
+   `SELECT type, COUNT(*), MIN(visible_at) FROM _queue_messages WHERE visible_at < NOW() GROUP BY 1 ORDER BY 3;`
 3. One `type` dominant → check `_queue_dlq` for the same type (poison
    message pattern) and Sentry for that handler's errors.
 4. Everything old across types → the poll loop is dead: restart the worker

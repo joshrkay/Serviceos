@@ -174,6 +174,7 @@ describe('stripe-terminal', () => {
         tenantId: 'tenant-1',
         invoiceId: '11111111-1111-4111-8111-111111111111',
         purpose: 'invoice',
+        repricingNonce: 2,
       },
       spy,
     );
@@ -181,10 +182,29 @@ describe('stripe-terminal', () => {
     const [, init] = spy.mock.calls[0];
     expect(init.headers['Stripe-Account']).toBe('acct_field_1');
     expect(init.headers['Idempotency-Key']).toContain('acct_field_1');
+    expect(init.headers['Idempotency-Key']).toMatch(/_r2$/);
     expect(init.body).toContain('payment_method_types');
     expect(init.body).toContain('card_present');
     expect(init.body).not.toContain('automatic_payment_methods');
     expect(init.body).toContain('invoice_id');
+  });
+
+  it('createTerminalPaymentIntent requires a repricing nonce for an invoice PI (review H2)', async () => {
+    const spy = makeOkFetcher({ id: 'pi_term_1', client_secret: 'pi_term_1_secret' });
+    await expect(
+      createTerminalPaymentIntent(
+        config,
+        {
+          amount: 9900,
+          currency: 'usd',
+          tenantId: 'tenant-1',
+          invoiceId: '11111111-1111-4111-8111-111111111111',
+          purpose: 'invoice',
+        },
+        spy,
+      ),
+    ).rejects.toThrow(/repricingNonce/);
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it('rejects missing Connect account id', async () => {

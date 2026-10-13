@@ -191,6 +191,63 @@ export function calculateDocumentTotals(
 }
 
 /**
+ * Move an ISSUED document's totals by ONE non-taxable adjustment line — an
+ * owner-approved credit (negative) or late fee (positive) appended after the
+ * fact. The subtotal moves by exactly the adjustment. Being non-taxable, it
+ * cannot move the taxable subtotal or the tax, and the discount stays as
+ * issued. The processing-fee surcharge (if the document carries one) is
+ * re-derived at its stored `processingFeeBps` on the new chargeable amount
+ * (subtotal − discount + tax), exactly as `calculateDocumentTotals` defines
+ * it, so the surcharge rate never drifts from the configured bps (review M3).
+ * The total moves by the adjustment plus that surcharge change.
+ *
+ * Floor (review N1): the total never drops below `amountPaidCents`. A credit
+ * is judged against the surcharge-INCLUSIVE amount due the customer sees,
+ * and carries its share of the surcharge with it; a credit that reaches past
+ * the surcharge-free balance therefore CLEARS the document — total = what was
+ * paid — and the surcharge keeps only the remainder that makes the totals add
+ * up (never more than it was). So a credit equal to the amount due always
+ * clears it. Callers refuse a credit larger than the amount due beforehand.
+ *
+ * This equals `calculateDocumentTotals` over the appended line — without its
+ * #1288 mixed-taxability refusal, which exists to stop a discount being
+ * mis-allocated across lines at CREATION time (the discount here was already
+ * allocated and taxed when the document was totalled; a non-taxable
+ * adjustment never re-opens that allocation, so a discounted, taxed invoice
+ * stays creditable without weakening the guard). The Pg mirror is
+ * `PgInvoiceRepository.applyNonTaxableAdjustmentAtomic`'s SQL.
+ */
+export function applyNonTaxableAdjustment(
+  totals: DocumentTotals,
+  adjustmentCents: number,
+  amountPaidCents: number = 0,
+): DocumentTotals {
+  const subtotalCents = totals.subtotalCents + adjustmentCents;
+  const feeBps = totals.processingFeeBps ?? 0;
+  const rateFeeCents =
+    feeBps > 0
+      ? applyBps(Math.max(0, subtotalCents - totals.discountCents + totals.taxCents), feeBps)
+      : totals.processingFeeCents;
+  const totalCents =
+    totals.totalCents + adjustmentCents + ((rateFeeCents ?? 0) - (totals.processingFeeCents ?? 0));
+  if (totalCents >= amountPaidCents) {
+    return {
+      ...totals,
+      subtotalCents,
+      ...(feeBps > 0 ? { processingFeeCents: rateFeeCents } : {}),
+      totalCents,
+    };
+  }
+  // The credit cleared the balance: settle at exactly what was paid.
+  return {
+    ...totals,
+    subtotalCents,
+    processingFeeCents: amountPaidCents - (subtotalCents - totals.discountCents + totals.taxCents),
+    totalCents: amountPaidCents,
+  };
+}
+
+/**
  * True when an estimate carries any customer-selectable line items
  * (tier options or optional add-ons). Used to decide whether the
  * approval flow needs a selection at all.

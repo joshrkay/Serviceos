@@ -186,6 +186,21 @@ describe('routes/terminal', () => {
     expect(piCall?.headers['Stripe-Account']).toBe('acct_term_1');
   });
 
+  // Review H2 — same idempotency-replay hazard as the pay page: the Terminal
+  // key must carry the invoice's line-item count (changes on every credit /
+  // late fee) so a re-priced balance never gets a credit-cancelled PI back.
+  it('POST /payment-intents keys the Terminal PI on the invoice line-item count', async () => {
+    const { app, seen } = await build();
+    const res = await request(app)
+      .post('/api/terminal/payment-intents')
+      .send({ invoiceId: INVOICE_ID });
+    expect(res.status).toBe(200);
+    const piCall = seen.find((s) => s.url.includes('/payment_intents'));
+    expect(piCall?.headers['Idempotency-Key']).toBe(
+      `term_pi_inv_${INVOICE_ID}_15000_acct_term_1_r1`,
+    );
+  });
+
   it('returns CONNECT_REQUIRED when Connect is not ready', async () => {
     const { app } = await build({ connect: null });
     const res = await request(app)
