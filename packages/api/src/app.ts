@@ -4387,10 +4387,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       },
       getHealth: () => {
         const { ttsEnabled, sttEnabled } = realtimeCapabilities();
+        // Recording persists only when the storage factory resolved a real S3
+        // backend (STORAGE_* or the R2_* alias — the same resolver the boot
+        // validator uses). A bare STORAGE_BUCKET is not enough: with the rest
+        // unset the app runs on the dev provider, whose writes are discarded.
         const recordingEnabled =
           !!process.env.TWILIO_ACCOUNT_SID &&
           !!process.env.TWILIO_AUTH_TOKEN &&
-          !!process.env.STORAGE_BUCKET;
+          storageMode === 's3';
         const messageDeliveryEnabled = !!sendService;
         const databaseEnabled = !!pool;
         const llmGatewayEnabled = !!config.AI_PROVIDER_API_KEY;
@@ -4400,7 +4404,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         if (!process.env.PUBLIC_API_URL) warnings.push('PUBLIC_API_URL unset — Stream URL will be invalid');
         if (!process.env.TWILIO_BUSINESS_NAME) warnings.push("TWILIO_BUSINESS_NAME unset — greeting says 'our team'");
         if (!databaseEnabled) warnings.push('DATABASE_URL unset — proposals/outcomes will not persist');
-        if (!recordingEnabled) warnings.push('Recording disabled — STORAGE_* or TWILIO_* missing');
+        if (!recordingEnabled) warnings.push('Recording disabled — object storage (STORAGE_* / R2_*) or TWILIO_* missing');
         if (!messageDeliveryEnabled) warnings.push('send_invoice disabled — TWILIO_FROM_NUMBER / SENDGRID_* missing');
         const ok =
           (!mediaStreamsEnabled || (sttEnabled && ttsEnabled)) &&
