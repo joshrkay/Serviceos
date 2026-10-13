@@ -175,3 +175,35 @@ describe('resolveCanonicalUser', () => {
     expect(found).toBeNull();
   });
 });
+
+// A new member's field-serve default: owners are field-capable (the solo
+// owner-operator IS the crew) unless the creator says otherwise; everyone
+// else opts in. Mirrors the Postgres insert default (migration 309).
+describe('UserRepository.create — canFieldServe default', () => {
+  function newMember(repo: InMemoryUserRepository, input: { role: User['role']; canFieldServe?: boolean }) {
+    return repo.create!({
+      id: uuidv4(),
+      tenantId: TENANT,
+      clerkUserId: `user_${uuidv4()}`,
+      email: 'new@example.com',
+      ...input,
+    });
+  }
+
+  it('an owner created without the flag is field-capable', async () => {
+    const owner = await newMember(new InMemoryUserRepository(), { role: 'owner' });
+    expect(owner.canFieldServe).toBe(true);
+  });
+
+  it('a technician or dispatcher created without the flag is not', async () => {
+    const repo = new InMemoryUserRepository();
+    expect((await newMember(repo, { role: 'technician' })).canFieldServe).toBe(false);
+    expect((await newMember(repo, { role: 'dispatcher' })).canFieldServe).toBe(false);
+  });
+
+  it('an explicit value is kept — an owner created office-only stays office-only', async () => {
+    const repo = new InMemoryUserRepository();
+    expect((await newMember(repo, { role: 'owner', canFieldServe: false })).canFieldServe).toBe(false);
+    expect((await newMember(repo, { role: 'dispatcher', canFieldServe: true })).canFieldServe).toBe(true);
+  });
+});

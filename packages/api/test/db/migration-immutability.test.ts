@@ -123,7 +123,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['063_language_detection', '918c4cd778821e6b38a381c6dfceb3e3446c9e390245fcb6eca0e486067b576f'],
   ['064_create_job_photos', '3ad6f895d04b29e6ef6f1d2d5b74757b6417fe9e73cfe61e61ebe31b15dfd2a7'],
   ['065_create_portal_sessions', '6b939dc150298e5af212577fda04ec07aec8338f026a6107c7ad09491f1ded10'],
-  ['066_create_voice_sessions_and_modes', '8268a58eecee1db168757965fe310b203a7bd9eb77b5b4fe2ed9e97d0bc94614'],
+  // Replay-clobber fix (2026-10-13): the owner can_field_serve backfill re-ran
+  // on every deploy (no ledger), re-flipping owners who had turned it off. It
+  // now runs only when the column is first added; same fresh-DB result.
+  ['066_create_voice_sessions_and_modes', 'da91abcaf6da051986b5135b03c9b1158915808e2d7223dbdffc5e951b0fe8bd'],
   ['067_create_time_entries', '069290a0144fb08de0171bb07d5255496236ef2d66a4dce40228a2de02c5a49f'],
   ['068_create_language_settings', 'dc485f4a1ec4e0bab7f3a58c6e54339d434057ceccbaa562c78952efa19e9931'],
   ['069_extend_leads_source_check', '881aeb61d3da8670bab3c92fb45c35cebd722ec3b3549cf6fe8b7f1e6047caff'],
@@ -314,7 +317,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // U2 (PRD gap closure): 2hr post-job thank-you SMS — jobs.completed_at,
   // jobs.thank_you_sms_sent_at, tenant_settings.send_thank_you_sms, backfill,
   // partial index on the sweep-eligibility predicate.
-  ['194_thank_you_sms', '2a1b55639fd1e9f78b69ceb0074bdddb1ba702a812a7b3a71292457f27ed0552'],
+  // Replay-clobber fix (2026-10-13): the completed_at / thank_you_sms_sent_at
+  // backfill re-ran on every deploy (no ledger), stamping raw-status-completed
+  // jobs as thanked. It now runs only when thank_you_sms_sent_at is first added.
+  ['194_thank_you_sms', '02cf14482c3fa9b325943b802462680b542844a627f2bf7893519188bc2e8359'],
   // U1 (PRD gap closure): onboarding_session table for the conversational
   // FSM (ENABLE + FORCE RLS per gemini-code-assist review on PR #594).
   ['195_onboarding_session', '4ca725aa5bd1d9e3c516282f67349e3fc5f47f0228bdc0a5e2ee6ed995d2834d'],
@@ -363,7 +369,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // PRD US-340+US-341 — reminder cadence column default → [24, 2].
   ['213_tenant_settings_reminder_offsets_default', '451325d4c247a81f0b0d60b015b7af26329f38918bde6b579d40bb94e3a26668'],
   // PRD US-345 — 24h post-completion review-request sweep columns + backfill.
-  ['214_review_request_sweep', '3a843fa5148f8a2ce89fd5ea37647c2e29f0c0fa9d74d821c3f1b5a1afc37fc2'],
+  // Replay-clobber fix (2026-10-13): the review_request_sent_at backfill re-ran
+  // on every deploy (no ledger), suppressing the 24h request for every job still
+  // in 'completed'. It now runs only when the column is first added.
+  ['214_review_request_sweep', '94ea9fd29d9f895e2f8b098a1493acdd5a9ccd5af46214f6b69cba7d998591a0'],
   // Beta-verify fix — proposals.claimed_by UUID→TEXT (worker label, not a uuid);
   // the type mismatch broke proposal execution entirely.
   ['215_proposals_claimed_by_text', '35ffa973504fd016a63c3ef2e333de24070808889cf2c7159b34ee3c09857afa'],
@@ -561,7 +570,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['289_tenant_settings_default_tax_rate', '3e065ee911220c16d7f42a2da35cfc659b10aa8b00162e174c59565e5eb61694'],
   ['290_backfill_appointment_assignments_from_jobs', 'cd2d08fa8c0404df320d8a498f384e9822ba3a602355a2bae78f9b9c7e4c88bb'],
   ['291_tenant_settings_notify_technicians_by_sms', 'f5f7b81000e4bbff1e7941484798c722aea49e99e8d026cd02745bc1fe872daf'],
-  ['292_voice_approval_pin_lock_alerts_sent_at', 'b2682e45bffbc26193870e0da80e7f2a2bcde3b8bb52abe4a54ee1bfad8c617a'],
+  // Replay-clobber fix (2026-10-13): the settle-as-sent UPDATE re-ran on every
+  // deploy (no ledger) and marked alerts claimed-but-undelivered at deploy time
+  // as sent. It now runs only when sent_at is first added; same fresh-DB result.
+  ['292_voice_approval_pin_lock_alerts_sent_at', '5510223a858455661c8b30bae42c26c299a2ba8e449647fd976f902ed8afcea4'],
   // #1386 / O-2 — E1 reviewer attestation columns (NEW migration).
   ['293_tenant_settings_e1_script_attestation', '4db0f349da1c004770878534c24f4d07fc84d8c48470b8650ff8254ebcafda70'],
   // #1401 — service_locations.service_types (customers-directory chips).
@@ -593,6 +605,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['307_ai_runs_tenant_created_at_index', 'd40b650d25ab0e63f1deef7e8262123f32c60657037182ddc5d73280adc6464c'],
   // Google Business OAuth states get their own provider (flow binding).
   ['308_oauth_states_google_business_provider', '79915b29a7a0fe83f95f798f21646cccf3ea6c50ce323b5bdb4106a0b36eb3a1'],
+  // New owners default field-capable at INSERT now that 066's backfill is one-shot.
+  ['309_users_owner_can_field_serve_default', 'e84f9ebc0b7ca4f2bd596006e3c4a2d9394be92fc18732cc405c95a4f6372a33'],
 ];
 
 function hashMigration(value: string): string {
