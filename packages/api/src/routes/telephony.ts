@@ -632,6 +632,21 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     }
 
     if (session) {
+      // Realtime hand-off — the stream leg degraded with a human hand-off
+      // still undelivered (Twilio refused the inline-TwiML update, or the
+      // stream failed while the hand-off line was playing). The session's FSM
+      // is `escalating`, which ignores every further utterance, so continuing
+      // on a bare Gather would strand the caller: bridge them instead, exactly
+      // as the Gather transport's own next webhook response would have.
+      const transferTwiml = deps.adapter.takePendingTransferTwiml(session.id);
+      if (transferTwiml) {
+        logger.info('telephony/gather-fallback: delivering undelivered realtime hand-off', {
+          callSid,
+          sessionId: session.id,
+        });
+        res.status(200).type('text/xml').send(transferTwiml);
+        return;
+      }
       const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
       const action = `${base}/api/telephony/gather?sid=${encodeURIComponent(session.id)}`;
       const lang: Language = session.language === 'es' ? 'es' : 'en';
@@ -874,7 +889,23 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     // mark the session ended, and return an empty Response so Twilio
     // hangs up the original caller leg cleanly.
     const successStatuses = new Set(['completed', 'answered']);
-    if (successStatuses.has(dialStatus)) {
+    // H1 / H1-R, scoped (round-3 review of #1676) — an EMERGENCY-CLASS leg is
+    // press-1 screened and its action carries `screen=1` (set by the producer,
+    // see DialDispatcherOptions.screen). For such a leg only a person's
+    // keypress proves the hand-off was answered: a carrier voicemail picking
+    // up is `completed` too, as is a leg whose screen fetch failed — stamping
+    // either `transferred` would silence the emergency page ladder for a real
+    // unanswered emergency. Every other leg keeps the long-standing rule:
+    // `completed`/`answered` IS the transfer.
+    const screenedLeg = req.query.screen === '1';
+    const accepted = !screenedLeg || session.transferAnsweredAt !== undefined;
+    if (!accepted && successStatuses.has(dialStatus)) {
+      logger.info('telephony/dial-result: screened leg never accepted by a person — not a transfer', {
+        sessionId,
+        dialStatus,
+      });
+    }
+    if (successStatuses.has(dialStatus) && accepted) {
       try {
         // Synthetic proposal_queued event so the FSM follows its
         // documented escalating → closing transition. We don't emit
@@ -905,6 +936,8 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         .send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
       return;
     }
+    // A screened cascade's next leg must earn its own acceptance.
+    if (screenedLeg) session.transferAnsweredAt = undefined;
 
     // Voice-parity (Feature 7) — single-line transfer model. When the tenant
     // configured a `transfer_number`, the transfer dialed that one line; a
@@ -963,6 +996,8 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           // call_me_back (the pre-per-user-number termination behavior).
           callSid: session.callSid ?? callSid,
           dialActionUrl: buildDialResultUrl(deps.publicBaseUrl, sessionId),
+          // The cascade of an emergency-class (screened) leg stays screened.
+          ...(screenedLeg ? { screenHandoff: true } : {}),
         });
 
         if (result.transfer) {

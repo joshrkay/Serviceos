@@ -1564,8 +1564,13 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       });
 
       // #1084 — tagged with the live session's tenant ('t'), which outranks the
-      // payload's own tenantId field.
-      expect(whisperCache.get('esc_xyz')).toEqual({ text: 'Test whisper', tenantId: 't' });
+      // payload's own tenantId field; H1 — and with its session, so the
+      // whisper screen's press-1 acceptance marks THIS hand-off answered.
+      expect(whisperCache.get('esc_xyz')).toEqual({
+        text: 'Test whisper',
+        tenantId: 't',
+        sessionId: session!.id,
+      });
       expect(sendSms).toHaveBeenCalledWith(
         expect.objectContaining({ to: '+15125550999', body: 'Test SMS esc_xyz' }),
       );
@@ -1675,7 +1680,7 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       const callControl = { dialDispatcher: vi.fn(() => '<Response/>') };
       const setPendingTransferTwiml = vi.fn();
 
-      const { adapter, ws } = setupAdapter({
+      const { adapter, ws, session } = setupAdapter({
         publicBaseUrl: 'https://api.example.com/', // trailing slash
         callControl,
         setPendingTransferTwiml,
@@ -1706,8 +1711,11 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
       expect(callControl.dialDispatcher).toHaveBeenCalledOnce();
       const callArgs = callControl.dialDispatcher.mock.calls[0];
       const dialOpts = callArgs[2] as { actionUrl: string; whisperUrl?: string };
-      // URL must not contain double slashes from a trailing-slash base.
-      expect(dialOpts.actionUrl).toBe('https://api.example.com/api/telephony/dial-action');
+      // URL must not contain double slashes from a trailing-slash base, and
+      // must target the route that exists (/dial-result keyed on the session).
+      expect(dialOpts.actionUrl).toBe(
+        `https://api.example.com/api/telephony/dial-result?sid=${encodeURIComponent(session!.id)}`,
+      );
       expect(dialOpts.whisperUrl).toBe('https://api.example.com/api/telephony/whisper/esc_slash');
     });
 

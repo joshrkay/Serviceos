@@ -14,6 +14,14 @@
 export interface WhisperEntry {
   text: string;
   tenantId: string;
+  /**
+   * H1 — the voice session the escalation belongs to, so the screen's
+   * press-1 acceptance can mark THAT hand-off answered. Absent → the screen
+   * still runs; nothing is marked (the ladder keeps its pre-screen behavior).
+   */
+  sessionId?: string;
+  /** The dispatcher's language for the screen prompt (the whisper text's). */
+  language?: 'en' | 'es';
 }
 
 interface CacheEntry extends WhisperEntry {
@@ -42,13 +50,24 @@ export class WhisperCache {
     this.maxEntries = opts.maxEntries ?? 1000;
   }
 
-  set(escalationId: string, text: string, tenantId: string): void {
+  set(
+    escalationId: string,
+    text: string,
+    tenantId: string,
+    opts: { sessionId?: string; language?: 'en' | 'es' } = {},
+  ): void {
     if (this.entries.size >= this.maxEntries && !this.entries.has(escalationId)) {
       // Map iteration is insertion-ordered; the first key is the oldest.
       const oldestKey = this.entries.keys().next().value;
       if (oldestKey !== undefined) this.entries.delete(oldestKey);
     }
-    this.entries.set(escalationId, { text, tenantId, expiresAt: Date.now() + this.ttlMs });
+    this.entries.set(escalationId, {
+      text,
+      tenantId,
+      ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
+      ...(opts.language ? { language: opts.language } : {}),
+      expiresAt: Date.now() + this.ttlMs,
+    });
   }
 
   get(escalationId: string): WhisperEntry | undefined {
@@ -58,7 +77,12 @@ export class WhisperCache {
       this.entries.delete(escalationId);
       return undefined;
     }
-    return { text: entry.text, tenantId: entry.tenantId };
+    return {
+      text: entry.text,
+      tenantId: entry.tenantId,
+      ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
+      ...(entry.language ? { language: entry.language } : {}),
+    };
   }
 
   size(): number {

@@ -433,9 +433,9 @@ import { createVoiceEventTransport } from './ai/agents/customer-calling/voice-ev
 import { createVoiceSessionsRouter } from './routes/voice-sessions';
 import { escalationOutcomeRouter } from './escalations/outcome-route';
 import { escalationEventsRouter } from './escalations/events-route';
-import { whisperRouter } from './telephony/whisper-route';
+import { mountWhisperRoute } from './telephony/whisper-route';
+import { createTransferScreenHooks } from './telephony/transfer-screening';
 import { WhisperCache } from './telephony/whisper-cache';
-import { requireTwilioSignature } from './telephony/twilio-signature';
 import {
   createTwilioWebhookCredentialResolver,
   createSubaccountCredentialView,
@@ -4175,9 +4175,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           return null;
         }
       },
+      // #8b / H1 — a person accepting the hand-off (live flag / durable audit
+      // event from the whisper screen's keypress) resolves the ladder while
+      // the bridged call is live; a voicemail pickup never does.
       isResolved: createEmergencyPageResolvedCheck({
         store: voiceSessionStore,
         voiceSessionRepo,
+        auditRepo,
       }),
       callMeBackRepo,
       auditRepo,
@@ -4296,14 +4300,18 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   //
   // The middleware is scoped to the whisper path rather than the router mount
   // so a POST to /voice does not pay a second, weaker signature check on its
-  // way past.
-  app.use(
-    '/api/telephony/whisper',
-    requireTwilioSignature(subaccountCredentialView, {
-      publicBaseUrl: () => process.env.PUBLIC_API_URL,
-    }),
-  );
-  app.use('/api/telephony', whisperRouter({ whisperCache: sharedWhisperCache }));
+  // way past. #4 — the mount parses a POST's form body before verifying it, so
+  // a whisper fetched with Twilio's default POST verifies and is served too.
+  // H1 — the whisper is a press-1 screen; only the keypress marks the
+  // hand-off answered (live + durable), which is what resolves the emergency
+  // page ladder. A voicemail pickup never does.
+  const transferScreenHooks = createTransferScreenHooks({ store: voiceSessionStore, auditRepo });
+  mountWhisperRoute(app, {
+    whisperCache: sharedWhisperCache,
+    credentialView: subaccountCredentialView,
+    publicBaseUrl: () => process.env.PUBLIC_API_URL,
+    onAccepted: transferScreenHooks.onAccepted,
+  });
 
   app.use(
     '/api/telephony',
@@ -4671,9 +4679,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // urgent callers straight through to the owner (fallback ladder:
       // owner → on-call → voicemail + urgent SMS + call_me_back).
       const mediaStreamPublicBase = (process.env.PUBLIC_API_URL ?? '').replace(/\/+$/, '');
-      // WS7 — mid-call REST redirector: on a terminal realtime failure the
-      // mediastream adapter steers the LIVE call back to the Gather-fallback
-      // webhook instead of hanging up. Wired only when PUBLIC_API_URL is set
+      // WS7 — mid-call REST update of the LIVE call: on a terminal realtime
+      // failure the mediastream adapter steers it back to the Gather-fallback
+      // webhook instead of hanging up, and a human hand-off is delivered
+      // through it as inline TwiML. Wired only when PUBLIC_API_URL is set
       // (Twilio must POST an absolute URL); absent → adapter keeps 1011-close.
       const twilioCallRedirector = process.env.PUBLIC_API_URL
         ? createTwilioCallRedirector({
@@ -4899,12 +4908,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // Resolve the account bound by the verified inbound webhook.
             authTokenGetter: resolveTwilioWebhookCredential,
             ...(process.env.PUBLIC_API_URL ? { publicBaseUrl: process.env.PUBLIC_API_URL } : {}),
-            // Section 7 (CRITICAL): wire the gather adapter's shared Map so
-            // Dial TwiML built inside handleEscalateWithContext is visible to
-            // the route layer via takePendingTransferTwiml(sessionId). Without
-            // this the caller stays on hold forever — the dispatcher gets SMS
-            // but the call never bridges.
+            // Realtime hand-off: every escalation producer parks its <Dial>
+            // (or no-one-available TwiML) in the gather adapter's shared Map.
+            // A <Connect><Stream> call has no next webhook to return it in, so
+            // the stream adapter TAKES it after the turn's line has played and
+            // delivers it to the live call over REST (twilioCallRedirector
+            // with inline Twiml). `set` re-parks an undelivered hand-off before
+            // a degrade so /voice/gather-fallback bridges the call instead.
             setPendingTransferTwiml: twilioAdapter.setPendingTransferTwiml.bind(twilioAdapter),
+            takePendingTransferTwiml: twilioAdapter.takePendingTransferTwiml.bind(twilioAdapter),
             // F6b: Wire the shared whisper cache so the MediaStream adapter
             // stores whisper TwiML after handleEscalateWithContext runs.
             whisperCache: sharedWhisperCache,

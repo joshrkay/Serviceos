@@ -146,7 +146,55 @@ describe('P8-013 DefaultTwilioCallControl rotation cursor', () => {
   });
 });
 
+describe('dialDispatcher — `screen` (emergency-class legs only) (H1-R, round 3)', () => {
+  const ctrl = new DefaultTwilioCallControl();
+
+  it("a screened leg's whisper becomes its press-1 screen, bound to the session; the action is marked", () => {
+    const xml = ctrl.dialDispatcher('CA-1', '+15551234567', {
+      actionUrl: 'https://api.test/api/telephony/dial-result?sid=sess-1',
+      whisperUrl: 'https://api.test/api/telephony/whisper/esc_abc',
+      screen: true,
+    });
+    expect(xml).toContain('action="https://api.test/api/telephony/dial-result?sid=sess-1&amp;screen=1"');
+    expect(xml).toContain(
+      '<Number url="https://api.test/api/telephony/whisper/esc_abc?sid=sess-1" method="GET">',
+    );
+  });
+
+  it('a screened leg with no whisper text gets the generic screen', () => {
+    const xml = ctrl.dialDispatcher('CA-1', '+15551234567', {
+      actionUrl: 'https://api.test/api/telephony/dial-result?sid=sess%2F2',
+      screen: true,
+    });
+    expect(xml).toContain(
+      '<Number url="https://api.test/api/telephony/whisper/screen?sid=sess%2F2" method="GET">',
+    );
+  });
+
+  it('a relative action keeps the screen relative to the same host', () => {
+    const xml = ctrl.dialDispatcher('CA-1', '+15551234567', {
+      actionUrl: '/api/telephony/dial-result?sid=s3',
+      screen: true,
+    });
+    expect(xml).toContain('<Number url="/api/telephony/whisper/screen?sid=s3" method="GET">');
+  });
+
+  it('a leg that cannot be screened (no /dial-result sid) is left unscreened and unmarked', () => {
+    const xml = ctrl.dialDispatcher('CA-1', '+15551234567', { actionUrl: '/x', screen: true });
+    expect(xml).not.toContain('screen=1');
+    expect(xml).toContain('<Number>+15551234567</Number>');
+  });
+});
+
 describe('dialDispatcher with whisper', () => {
+  it('asks Twilio for no answered status callback — a pickup is not proof a person answered (H1)', () => {
+    const xml = ctrl.dialDispatcher('CA-1', '+15551234567', {
+      actionUrl: 'https://example.com/api/telephony/dial-result?sid=s',
+      whisperUrl: 'https://example.com/api/telephony/whisper/esc_abc',
+    });
+    expect(xml).not.toContain('statusCallback');
+  });
+
   const ctrl = new DefaultTwilioCallControl();
 
   it('omits url attribute when no whisperUrl is supplied (no regression)', () => {
@@ -158,7 +206,9 @@ describe('dialDispatcher with whisper', () => {
     expect(twiml).not.toContain('url="');
   });
 
-  it('adds url attribute on <Number> when whisperUrl is supplied', () => {
+  it('adds url attribute on <Number> when whisperUrl is supplied (unscreened: exactly as before)', () => {
+    // An unscreened leg keeps Twilio's default fetch method (POST); the
+    // whisper route serves POST as well as GET (#4).
     const twiml = ctrl.dialDispatcher('CA-1', '+15551234567', {
       actionUrl: 'https://example.com/action',
       whisperUrl: 'https://example.com/api/telephony/whisper/esc_abc',

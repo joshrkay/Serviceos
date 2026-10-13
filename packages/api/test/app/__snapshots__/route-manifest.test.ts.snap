@@ -8,7 +8,7 @@ exports[`createApp route manifest > matches the committed layer counts 1`] = `
     "public-token": 12,
     "webhook": 10,
   },
-  "middleware": 32,
+  "middleware": 33,
   "routers": 87,
   "routes": 15,
   "total": 134,
@@ -102,30 +102,32 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ GET /google/callback
 038  authenticated use    /api/integrations    [router: router]
          └─ GET /quickbooks/callback
-039  authenticated use    /api/telephony/whisper    [middleware: <anonymous>]
-040  authenticated use    /api/telephony    [router: router]
-         └─ GET /whisper/:escalationId
+039  authenticated use    /api/telephony/whisper    [middleware: urlencodedParser]
+040  authenticated use    /api/telephony/whisper    [middleware: <anonymous>]
 041  authenticated use    /api/telephony    [router: router]
+         └─ GET /whisper/:escalationId
+         └─ POST /whisper/:escalationId
+         └─ POST /whisper/:escalationId/accept
+042  authenticated use    /api/telephony    [router: router]
          └─ GET /health
          └─ POST /callback-message
          └─ POST /dial-result
          └─ POST /gather
          └─ POST /voice
          └─ POST /voice/gather-fallback
-042  authenticated use    /api/calls    [router: router]
+043  authenticated use    /api/calls    [router: router]
          └─ POST /bridge
-043  authenticated use    /api    [middleware: <anonymous>]
 044  authenticated use    /api    [middleware: <anonymous>]
-045  authenticated use    /api    [middleware: requireAuth]
-046  authenticated use    /api    [middleware: resolveAuthorization]
-047  authenticated use    /api    [middleware: <anonymous>]
-048  authenticated POST   /api/customers    [route: handle]
-049  authenticated POST   /api/jobs    [route: handle]
-050  authenticated POST   /api/appointments    [route: handle]
-051  authenticated POST   /api/estimates    [route: handle]
-052  authenticated POST   /api/invoices    [route: handle]
-053  authenticated POST   /api/payments    [route: handle]
-054  authenticated POST   /api/invoices/:id/payment    [route: handle]
+045  authenticated use    /api    [middleware: <anonymous>]
+046  authenticated use    /api    [middleware: requireAuth]
+047  authenticated use    /api    [middleware: resolveAuthorization]
+048  authenticated use    /api    [middleware: <anonymous>]
+049  authenticated POST   /api/customers    [route: handle]
+050  authenticated POST   /api/jobs    [route: handle]
+051  authenticated POST   /api/appointments    [route: handle]
+052  authenticated POST   /api/estimates    [route: handle]
+053  authenticated POST   /api/invoices    [route: handle]
+054  authenticated POST   /api/payments    [route: handle]
 055  authenticated use    /api/customers    [router: router]
          └─ DELETE /:id/tags/:tag
          └─ GET /

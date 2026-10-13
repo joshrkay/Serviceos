@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { escalateToHuman, mapSkillReasonToBuilderReason } from '../../../src/ai/skills/escalate-to-human';
+import {
+  escalateToHuman,
+  emergencyImmediateDial,
+  mapSkillReasonToBuilderReason,
+} from '../../../src/ai/skills/escalate-to-human';
+import { DefaultTwilioCallControl } from '../../../src/telephony/twilio-call-control';
 import { InMemoryOnCallRepository } from '../../../src/oncall/rotation';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
@@ -513,5 +518,101 @@ describe('#1630 — the dispatcher language is separate from the caller-facing l
       'La persona que llama dice ser Jane Smith, pero el número no coincide con su registro',
     );
     expect(result.message).toMatch(/someone on the line/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #7 — the audit write is best-effort; it never blocks the transfer
+// ---------------------------------------------------------------------------
+
+describe('escalateToHuman — a failing audit write never blocks the transfer (#7)', () => {
+  /** The audit store is down (pool saturation, DB blip): every write rejects. */
+  function failingAudit() {
+    return { create: vi.fn().mockRejectedValue(new Error('audit pool exhausted')) } as unknown as
+      EscalateToHumanInput['auditRepo'];
+  }
+  function callControl() {
+    return new DefaultTwilioCallControl();
+  }
+  const telephonyBase = {
+    tenantId: TENANT_ID,
+    sessionId: SESSION_ID,
+    channel: 'telephony' as const,
+    callSid: 'CA-audit',
+    dialActionUrl: 'https://api.test/api/telephony/dial-result?sid=session-abc-123',
+  };
+
+  it.each([
+    {
+      branch: 'transfer_number',
+      input: (): EscalateToHumanInput => ({
+        ...telephonyBase,
+        reason: 'emergency_dispatch',
+        onCallRepo: new InMemoryOnCallRepository(),
+        callControl: callControl(),
+        transferNumber: '+15125550300',
+        auditRepo: failingAudit(),
+      }),
+      phone: '+15125550300',
+    },
+    {
+      branch: 'on-call rotation',
+      input: (): EscalateToHumanInput => ({
+        ...telephonyBase,
+        reason: 'emergency_dispatch',
+        onCallRepo: new InMemoryOnCallRepository(new Map([[TENANT_ID, [makeEntry()]]])),
+        callControl: callControl(),
+        dispatcherPhoneResolver: async () => '+15125550301',
+        auditRepo: failingAudit(),
+      }),
+      phone: '+15125550301',
+    },
+    {
+      branch: 'business-line fallback',
+      input: (): EscalateToHumanInput => ({
+        ...telephonyBase,
+        reason: 'emergency_dispatch',
+        onCallRepo: new InMemoryOnCallRepository(new Map([[TENANT_ID, [makeEntry()]]])),
+        callControl: callControl(),
+        dispatcherPhoneResolver: async () => null,
+        businessPhoneFallbackResolver: async () => '+15125550302',
+        auditRepo: failingAudit(),
+      }),
+      phone: '+15125550302',
+    },
+  ])('$branch: the Dial is still returned', async ({ input, phone }) => {
+    const result = await escalateToHuman(input());
+
+    expect(result.escalated).toBe(true);
+    expect(result.transfer?.dispatcherPhone).toBe(phone);
+    expect(result.transfer?.fallbackTwiml).toContain('<Dial');
+  });
+
+  it('no one reachable: the no-dispatcher result is still returned (so the caller gets the voicemail path)', async () => {
+    const result = await escalateToHuman({
+      ...telephonyBase,
+      reason: 'emergency_dispatch',
+      onCallRepo: new InMemoryOnCallRepository(new Map([[TENANT_ID, [makeEntry()]]])),
+      callControl: callControl(),
+      dispatcherPhoneResolver: async () => null,
+      auditRepo: failingAudit(),
+    });
+
+    expect(result.escalated).toBe(false);
+  });
+
+  it('emergencyImmediateDial: a failing emergency_immediate_dial audit still returns the dial', async () => {
+    const result = await emergencyImmediateDial({
+      ...telephonyBase,
+      intent: 'burst_pipe',
+      presenceChecker: async () => false,
+      onCallRepo: new InMemoryOnCallRepository(new Map([[TENANT_ID, [makeEntry()]]])),
+      callControl: callControl(),
+      dispatcherPhoneResolver: async () => '+15125550303',
+      auditRepo: failingAudit(),
+    });
+
+    expect(result.dialed).toBe(true);
+    expect(result.escalation?.transfer?.fallbackTwiml).toContain('+15125550303');
   });
 });

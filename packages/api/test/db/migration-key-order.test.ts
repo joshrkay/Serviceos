@@ -11,6 +11,7 @@ import {
   validateAgainstBase,
   extractKeysFromSource,
   GRANDFATHERED_KEYS,
+  baseFetchArgs,
 } from '../../scripts/check-migration-keys';
 
 describe('migration key guard', () => {
@@ -57,5 +58,20 @@ describe('migration key guard', () => {
       '  `,\n' +
       "  '264_next': `x`,\n";
     expect(extractKeysFromSource(src)).toEqual(['263_failure_monitor_indexes', '264_next']);
+  });
+
+  // `git fetch --depth=N` on a FULL clone writes `.git/shallow`, which every
+  // worktree of that clone shares: afterwards `origin/main..HEAD` and
+  // merge-base stop at the grafted commit in every worktree on the machine.
+  // Only CI's checkout is already shallow, so only there may the fetch stay
+  // depth-limited.
+  it('fetches origin/main depth-limited only when the clone is already shallow', () => {
+    expect(baseFetchArgs({ isShallowRepository: true })).toEqual([
+      'fetch',
+      '--depth=1',
+      'origin',
+      'main',
+    ]);
+    expect(baseFetchArgs({ isShallowRepository: false })).toEqual(['fetch', 'origin', 'main']);
   });
 });
