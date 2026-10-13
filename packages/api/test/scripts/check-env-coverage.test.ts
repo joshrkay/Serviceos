@@ -75,6 +75,45 @@ describe('collectEnvReads', () => {
     expect(names).toEqual(['ALPHA', 'BRAVO', 'CHARLIE', 'DELTA']);
   });
 
+  // storage-provider.ts read five STORAGE_* vars as
+  //   const { STORAGE_BUCKET, ... } = env;
+  // — no `env.X` token anywhere — so the guard never saw them and the
+  // storage env contract drifted from its docs undetected.
+  it('finds vars read through object destructuring of an env object', () => {
+    const dir = fixtureRepo({
+      'packages/api/src/d.ts': [
+        'export function f(env: NodeJS.ProcessEnv) {',
+        '  const {',
+        '    ECHO_ONE,',
+        '    ECHO_TWO: renamed, // aliased',
+        "    ECHO_THREE = 'fallback',",
+        '    nodeEnv,',
+        '    ...rest',
+        '  } = env;',
+        '  const { FOXTROT } = process.env;',
+        '  return [ECHO_ONE, renamed, ECHO_THREE, nodeEnv, rest, FOXTROT];',
+        '}',
+      ].join('\n'),
+    });
+    expect(collectEnvReads(dir).map((r) => r.name)).toEqual([
+      'ECHO_ONE',
+      'ECHO_THREE',
+      'ECHO_TWO',
+      'FOXTROT',
+    ]);
+  });
+
+  it('does not treat destructuring of a non-env object as an env read', () => {
+    const dir = fixtureRepo({
+      'packages/api/src/e.ts': [
+        'const { NOT_AN_ENV_VAR } = someConfig;',
+        "const { ALSO_NOT_ENV } = require('./constants');",
+        'const { ENV_KEY } = env.nested;',
+      ].join('\n'),
+    });
+    expect(collectEnvReads(dir)).toEqual([]);
+  });
+
   it('records a repo-relative file:line for the first sighting', () => {
     const dir = fixtureRepo({ 'packages/api/src/a.ts': '\n\nconst a = process.env.ALPHA;\n' });
     expect(collectEnvReads(dir)[0]).toEqual({ name: 'ALPHA', where: 'packages/api/src/a.ts:3' });
