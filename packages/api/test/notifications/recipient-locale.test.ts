@@ -65,7 +65,7 @@ describe('createRecipientLocaleResolver', () => {
 
     const locale = await resolve({ tenantId: TENANT, customerId: 'cust-1', to: '+15125550100' });
 
-    expect(locale).toEqual({ timezone: 'America/Chicago', states: ['TX'] });
+    expect(locale).toEqual({ tenantTimezone: 'America/Chicago', serviceStates: ['TX'], areaCodeState: 'TX' });
   });
 
   it('reports an unknown zone as null when the tenant never chose one — never America/New_York', async () => {
@@ -73,7 +73,7 @@ describe('createRecipientLocaleResolver', () => {
 
     const locale = await resolve({ tenantId: TENANT, customerId: 'cust-1', to: '+15125550100' });
 
-    expect(locale.timezone).toBeNull();
+    expect(locale.tenantTimezone).toBeNull();
   });
 
   it('treats a stored zone the runtime cannot resolve as unknown', async () => {
@@ -81,10 +81,10 @@ describe('createRecipientLocaleResolver', () => {
 
     const locale = await resolve({ tenantId: TENANT, customerId: 'cust-1', to: '+15125550100' });
 
-    expect(locale.timezone).toBeNull();
+    expect(locale.tenantTimezone).toBeNull();
   });
 
-  it("adds the early-close state a phone's area code belongs to (Florida 305)", async () => {
+  it("reports the state a phone's area code belongs to (Florida 305)", async () => {
     const resolve = await build({
       settings: settings({ timezone: 'America/New_York' }),
       locations: [location({ id: 'l1', state: 'GA' })],
@@ -92,6 +92,6 @@ describe('createRecipientLocaleResolver', () => {
 
     const locale = await resolve({ tenantId: TENANT, customerId: 'cust-1', to: '+13055550100' });
 
-    expect(locale.states).toEqual(['GA', 'FL']);
+    expect(locale).toMatchObject({ serviceStates: ['GA'], areaCodeState: 'FL' });
   });
 });

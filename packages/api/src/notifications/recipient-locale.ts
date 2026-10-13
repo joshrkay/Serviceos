@@ -1,13 +1,14 @@
 /**
- * Where a customer text's quiet-hours window gets its timezone and state.
- *
- * Customers and service locations carry no zone, so the zone is the tenant's
- * (`tenant_settings.timezone` — a service business texts its own area). The
- * states are the customer's service-location states plus the early-close
- * state of the phone's area code. Unknown stays unknown — a null zone, an
- * empty state list — and `recipientQuietHours` answers that conservatively.
+ * What the quiet-hours window knows about a customer text's recipient: the
+ * tenant's zone (`tenant_settings.timezone`), the customer's service-location
+ * states and the state of the phone's NANP area code. `recipientQuietHours`
+ * requires the window to be open in ALL of their zones, so a tenant zone left
+ * at a pre-migration-263 default cannot open the window early for a recipient
+ * the address or area code places elsewhere. Unknown stays unknown — a null
+ * zone, no recognised state — and is answered conservatively there.
  */
-import { earlyCloseStateForPhone, type RecipientLocale } from '../compliance/jurisdiction';
+import type { RecipientLocale } from '../compliance/jurisdiction';
+import { stateForUsPhone } from '../compliance/us-geography';
 import { isValidIanaTimezone, type SettingsRepository } from '../settings/settings';
 import type { LocationRepository } from '../locations/location';
 
@@ -30,11 +31,11 @@ export function createRecipientLocaleResolver(
     const locations =
       tenantId && customerId ? await deps.locationRepo.findByCustomer(tenantId, customerId) : [];
     const zone = settings?.timezone;
-    const areaCodeState = earlyCloseStateForPhone(to);
     return {
       // Unknown stays unknown: the window then requires every US zone.
-      timezone: zone && isValidIanaTimezone(zone) ? zone : null,
-      states: [...locations.map((l) => l.state), ...(areaCodeState ? [areaCodeState] : [])],
+      tenantTimezone: zone && isValidIanaTimezone(zone) ? zone : null,
+      serviceStates: locations.map((l) => l.state),
+      areaCodeState: stateForUsPhone(to),
     };
   };
 }

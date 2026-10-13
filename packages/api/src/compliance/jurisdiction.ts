@@ -1,3 +1,5 @@
+import { normalizeUsState, zonesForState } from './us-geography';
+
 const US_RECORDING_DISCLOSURE_STATES = new Set([
   'CA',
   'FL',
@@ -57,31 +59,52 @@ export function unsubscribeFooter(): string {
  */
 export interface RecipientLocale {
   /**
-   * The recipient's IANA zone, or null when unknown — then the window must be
-   * open in every US zone at once (`US_RECIPIENT_ZONES`), never a guessed one.
+   * The tenant's IANA zone, or null when unknown (never chosen, or invalid) —
+   * then the window must be open in every US zone at once
+   * (`US_RECIPIENT_ZONES`), never a guessed one.
    */
-  timezone: string | null;
-  /** US states the recipient is associated with (service address, area code). */
-  states: readonly string[];
+  tenantTimezone: string | null;
+  /**
+   * The customer's service-location states, as stored (free text: "FL",
+   * "Florida", "Fla." all count). None recognised = residence unknown, which
+   * gets the strictest (20:00) close.
+   */
+  serviceStates: readonly string[];
+  /**
+   * The state the phone's NANP area code belongs to. Its zones join the
+   * window and an early-close state tightens the close (the Florida and
+   * Oklahoma acts presume an in-state area code is a resident); it never
+   * relaxes either, because a number travels with its owner.
+   */
+  areaCodeState: string | null;
 }
 
 /**
- * US quiet hours — the recipient-local send window for a NON-transactional
- * customer text: 08:00 (inclusive) to 21:00 (exclusive), or 20:00 for an
- * early-close state (see EARLY_CLOSE_STATES) or an unknown one. Consumed by
- * GatedMessageDelivery for texts tagged `quietHours: 'defer'`.
+ * US quiet hours — the send window for a NON-transactional customer text:
+ * open 08:00 (inclusive) to 21:00 (exclusive), or 20:00 for an early-close
+ * state or an unknown residence, in EVERY zone the text could land in: the
+ * tenant's zone (all US zones when unknown) plus every zone of each
+ * recognised service-location state and of the area-code state. Requiring
+ * all of them can only shrink the window. Consumed by GatedMessageDelivery
+ * for texts tagged `quietHours: 'defer'`.
  */
 export function recipientQuietHours(
   locale: RecipientLocale,
   now: Date = new Date(),
 ): QuietHoursResult {
-  // No known state → assume the strictest close rather than guess.
+  const serviceStates = locale.serviceStates
+    .map(normalizeUsState)
+    .filter((code): code is string => code !== null);
+  const areaCodeState = locale.areaCodeState ? normalizeUsState(locale.areaCodeState) : null;
+  const residenceStates = [...serviceStates, ...(areaCodeState ? [areaCodeState] : [])];
+
+  // No recognised service address → assume the strictest close rather than guess.
   const earlyClose =
-    locale.states.length === 0 ||
-    locale.states.some((s) => EARLY_CLOSE_STATES.has(s.trim().toUpperCase()));
+    serviceStates.length === 0 || residenceStates.some((code) => EARLY_CLOSE_STATES.has(code));
   const endHour = earlyClose ? EARLY_CLOSE_END_HOUR : WINDOW_END_HOUR;
-  const zones = locale.timezone ? [locale.timezone] : US_RECIPIENT_ZONES;
-  return sendWindow(zones, now, endHour);
+  const zones = new Set<string>(locale.tenantTimezone ? [locale.tenantTimezone] : US_RECIPIENT_ZONES);
+  for (const code of residenceStates) for (const zone of zonesForState(code)) zones.add(zone);
+  return sendWindow([...zones], now, endHour);
 }
 
 /**
@@ -111,36 +134,6 @@ const WINDOW_END_HOUR = 21;
  */
 const EARLY_CLOSE_STATES: ReadonlySet<string> = new Set(['FL', 'OK', 'MD', 'WA']);
 const EARLY_CLOSE_END_HOUR = 20;
-
-/**
- * NANPA area codes (incl. overlays) of the early-close states. Florida's and
- * Oklahoma's acts presume a number with an in-state area code belongs to a
- * resident, so the area code counts even when the service address is
- * elsewhere. Keep this list current with NANPA: an extra code only makes a
- * window stricter, a missing one makes it too loose.
- */
-const EARLY_CLOSE_AREA_CODES: Readonly<Record<string, string>> = {
-  ...Object.fromEntries(
-    [
-      '239', '305', '321', '324', '352', '386', '407', '448', '561', '645', '656',
-      '689', '727', '728', '754', '772', '786', '813', '850', '863', '904', '941', '954',
-    ].map((code) => [code, 'FL']),
-  ),
-  ...Object.fromEntries(['405', '539', '572', '580', '918'].map((code) => [code, 'OK'])),
-  ...Object.fromEntries(['227', '240', '301', '410', '443', '667'].map((code) => [code, 'MD'])),
-  ...Object.fromEntries(['206', '253', '360', '425', '509', '564'].map((code) => [code, 'WA'])),
-};
-
-/**
- * The early-close state a US (+1) number's area code belongs to, or null —
- * null means "not one of those states' codes", not "not a resident there".
- */
-export function earlyCloseStateForPhone(phone: string): string | null {
-  const digits = phone.replace(/\D/g, '');
-  const national = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
-  if (national.length !== 10) return null;
-  return EARLY_CLOSE_AREA_CODES[national.slice(0, 3)] ?? null;
-}
 
 function inWindow(now: Date, zones: readonly string[], endHour: number): boolean {
   return zones.every((zone) => {

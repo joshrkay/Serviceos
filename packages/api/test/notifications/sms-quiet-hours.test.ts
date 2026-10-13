@@ -27,7 +27,7 @@ const TENANT = '11111111-1111-1111-1111-111111111111';
 const PHONE = '+16025550100';
 
 /** America/Phoenix is UTC-7 all year (no DST) — keeps the instants obvious. */
-const PHOENIX: RecipientLocale = { timezone: 'America/Phoenix', states: ['AZ'] };
+const PHOENIX: RecipientLocale = { tenantTimezone: 'America/Phoenix', serviceStates: ['AZ'], areaCodeState: 'AZ' };
 
 function build(opts: {
   now: Date;
@@ -115,23 +115,24 @@ describe('GatedMessageDelivery — stricter state windows (FL / OK / MD / WA clo
   // 2026-10-14T00:30Z = 20:30 EDT on Oct 13.
   const EVENING = new Date('2026-10-14T00:30:00Z');
 
-  it('defers a text to a Florida recipient at 20:30 local until 08:00 the next morning', async () => {
+  it('defers a text to a Florida recipient at 20:30 local until the next morning', async () => {
     const { gate, base } = build({
       now: EVENING,
-      locale: { timezone: 'America/New_York', states: ['FL'] },
+      locale: { tenantTimezone: 'America/New_York', serviceStates: ['FL'], areaCodeState: null },
     });
 
     const err = await gate.sendSms(customerText({ quietHours: 'defer' })).catch((e: unknown) => e);
 
     expect(base.sentSms).toHaveLength(0);
     expect(err).toBeInstanceOf(SmsDeferredError);
-    expect((err as SmsDeferredError).nextAllowedAt.toISOString()).toBe('2026-10-14T12:00:00.000Z');
+    // 08:00 Central (09:00 Eastern): Florida's panhandle is on Central time.
+    expect((err as SmsDeferredError).nextAllowedAt.toISOString()).toBe('2026-10-14T13:00:00.000Z');
   });
 
   it('still sends to a Georgia recipient at 20:30 local (federal 21:00 close)', async () => {
     const { gate, base } = build({
       now: EVENING,
-      locale: { timezone: 'America/New_York', states: ['GA'] },
+      locale: { tenantTimezone: 'America/New_York', serviceStates: ['GA'], areaCodeState: null },
     });
 
     await gate.sendSms(customerText({ quietHours: 'defer' }));
@@ -142,7 +143,7 @@ describe('GatedMessageDelivery — stricter state windows (FL / OK / MD / WA clo
   it('applies the 20:00 close when the recipient state is unknown (conservative)', async () => {
     const { gate, base } = build({
       now: EVENING,
-      locale: { timezone: 'America/New_York', states: [] },
+      locale: { tenantTimezone: 'America/New_York', serviceStates: [], areaCodeState: null },
     });
 
     const err = await gate.sendSms(customerText({ quietHours: 'defer' })).catch((e: unknown) => e);
@@ -157,7 +158,7 @@ describe('GatedMessageDelivery — unknown recipient timezone', () => {
     // 2026-10-13T16:00Z = 12:00 EDT but 06:00 HST: an Eastern guess would send.
     const { gate, base } = build({
       now: new Date('2026-10-13T16:00:00Z'),
-      locale: { timezone: null, states: [] },
+      locale: { tenantTimezone: null, serviceStates: [], areaCodeState: null },
     });
 
     const err = await gate.sendSms(customerText({ quietHours: 'defer' })).catch((e: unknown) => e);
