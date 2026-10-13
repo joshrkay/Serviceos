@@ -33,7 +33,15 @@ export interface StripeOutcome {
   delayMs?: number;
 }
 
-function respond(status: number, body: unknown, replayed: boolean) {
+export interface FakeStripeResponse {
+  ok: boolean;
+  status: number;
+  headers: { get(name: string): string | null };
+  json(): Promise<unknown>;
+  text(): Promise<string>;
+}
+
+function respond(status: number, body: unknown, replayed: boolean): FakeStripeResponse {
   return {
     ok: status >= 200 && status < 300,
     status,
@@ -88,7 +96,7 @@ export function fakeStripe(answer: (call: StripeCall) => StripeOutcome) {
       return Promise.resolve(respond(result.status, result.body, false));
     }
     if (key) inFlight.add(key);
-    return new Promise<ReturnType<typeof respond>>((resolve, reject) => {
+    return new Promise<FakeStripeResponse>((resolve, reject) => {
       setTimeout(() => {
         finish();
         resolve(respond(result.status, result.body, false));
