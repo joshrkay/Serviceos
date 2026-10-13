@@ -2083,23 +2083,69 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             tenantId, invoiceId, amountCents, paymentIntentId: piId,
           });
         } catch (payErr) {
-          if (
+          const exceedsBalance =
+            payErr instanceof ValidationError && payErr.message.includes('exceeds amount due');
+          const invoiceForCap = exceedsBalance
+            ? await deps.invoiceRepo.findById(tenantId, invoiceId)
+            : null;
+          if (exceedsBalance && invoiceForCap && invoiceForCap.amountDueCents > 0) {
+            // P0-9 — parity with checkout.session.completed: an intent minted
+            // at a balance that has since shrunk (an approved credit, a
+            // partial cash payment) captured MORE than is owed. Crediting
+            // nothing would leave real customer money unrecorded and the
+            // invoice open for a second charge. Cap the invoice credit to the
+            // remaining balance (over-crediting would be worse) under the
+            // same intent-keyed reference, and audit the uncredited excess so
+            // reconciliation can refund it.
+            const capped = invoiceForCap.amountDueCents;
+            const { invoice: creditedInvoice } = await recordPayment(
+              {
+                tenantId,
+                invoiceId,
+                amountCents: capped,
+                method: mapStripePaymentMethod(pi),
+                providerReference: piId,
+                processedBy: 'stripe_webhook',
+              },
+              deps.invoiceRepo,
+              deps.paymentRepo,
+              buildMoneyStateDeps(deps),
+              deps.paymentReceiptNotifier,
+              deps.auditRepo,
+              { actorRole: 'system', correlationId: piId },
+              undefined,
+              deps.paymentLinkProvider
+                ? { provider: deps.paymentLinkProvider, connectAccountResolver: deps.connectAccountResolver }
+                : undefined,
+            );
+            logger.info('Invoice paid at capped amount via payment_intent.succeeded', {
+              tenantId, invoiceId, requested: amountCents, paid: capped, paymentIntentId: piId,
+            });
+            await auditUnappliedCapture({
+              tenantId, invoiceId, eventId: event.id,
+              providerReference: piId,
+              capturedCents: amountCents,
+              creditedCents: capped,
+              invoiceStatus: creditedInvoice.status,
+              reason: 'capped_to_balance_payment_intent',
+            });
+          } else if (
             payErr instanceof ValidationError &&
-            (payErr.message.includes('status') || payErr.message.includes('exceeds amount due'))
+            (payErr.message.includes('status') || exceedsBalance)
           ) {
-            // Invoice already settled — idempotent for the EVENT, but this is
-            // still a succeeded capture with no intent-keyed payment row
-            // (P0-9): either the same money was recorded under the checkout
-            // session-id fallback reference (benign; the audit row is a
-            // reviewable false positive), or a genuinely stale/direct intent
-            // captured against a settled/void invoice (real unapplied money).
-            // Audit it either way and retry the stale-link kill — the
-            // reconciliation trail must not depend on which Stripe event
-            // shape happened to arrive.
+            // Invoice already settled (or carries no balance) — idempotent for
+            // the EVENT, but this is still a succeeded capture with no
+            // intent-keyed payment row (P0-9): either the same money was
+            // recorded under the checkout session-id fallback reference
+            // (benign; the audit row is a reviewable false positive), or a
+            // genuinely stale/direct intent captured against a settled/void
+            // invoice (real unapplied money). Audit it either way and retry
+            // the stale-link kill — the reconciliation trail must not depend
+            // on which Stripe event shape happened to arrive.
             logger.info('Invoice already settled, ignoring payment_intent.succeeded', {
               tenantId, invoiceId,
             });
-            const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
+            const invoice = invoiceForCap ?? (await deps.invoiceRepo.findById(tenantId, invoiceId));
             if (invoice) {
               await auditUnappliedCapture({
                 tenantId, invoiceId, eventId: event.id,
@@ -2107,7 +2153,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 capturedCents: amountCents,
                 creditedCents: 0,
                 invoiceStatus: invoice.status,
-                reason: payErr.message.includes('exceeds amount due')
+                reason: exceedsBalance
                   ? 'exceeds_balance_payment_intent'
                   : 'not_payable_payment_intent',
               });
