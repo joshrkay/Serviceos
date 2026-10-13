@@ -88,6 +88,7 @@ import {
   type SessionLanguage,
 } from '../../ai/agents/customer-calling/tts-copy';
 import { classifyCallerSafety } from '../../ai/agents/customer-calling/emergency-tier';
+import { injectSafetySayLines } from '../shared/safety-say-lines';
 import { VOICE_EVENT_CHANNEL } from '../../ai/voice-quality/event-bus';
 import type { WhisperCache } from '../whisper-cache';
 import type { TwilioCallControl } from '../twilio-call-control';
@@ -772,6 +773,19 @@ interface RuntimeState {
    * result is known instead of being stamped as a caller hang-up.
    */
   handoffDeferredCloseReason: string | null;
+  /**
+   * C1 (review of #1676) — set SYNCHRONOUSLY the moment any caller transcript
+   * (interim or final) classifies as E1 life safety: before barge-in, before
+   * any lock or await. The FSM only flips to `terminated` after the E1 scan's
+   * awaited work (the reviewed-script lookup) under the session lock, so a
+   * hand-off that read only the FSM could pull a gas-leak caller into a
+   * `<Dial>` instead of the 911 script. The hand-off treats it as superseding.
+   */
+  e1Pending: boolean;
+  /** The E1 turn's effects (911 script + end_session) once produced. */
+  e1Effects: ReadonlyArray<SideEffect> | null;
+  /** True once the live call was corrected from a delivered hand-off to the E1 script. */
+  e1Corrected: boolean;
   /** Highest turn id whose end-of-utterance `silence-arm-` mark was enqueued. */
   lastEnqueuedSilenceArmTurnId: number;
   /** Highest turn id whose end-of-utterance `silence-arm-` mark Twilio acked. */
@@ -1037,6 +1051,14 @@ export const DEFAULT_TURN_HOLD_DEADLINE_MS = 4_500;
 export const DEFAULT_HANDOFF_PLAYOUT_MAX_WAIT_MS = 4_000;
 
 /**
+ * C1 — how long a hand-off waits, once an E1 hazard was heard, for the E1
+ * turn to close the conversation (its reviewed-script lookup + bounded audit
+ * write precede the FSM flip). Past it the caller is handed to a human rather
+ * than stranded; a later E1 close corrects the delivered call.
+ */
+const E1_SUPERSEDE_MAX_WAIT_MS = 3_000;
+
+/**
  * Realtime hand-off — the delivered TwiML bridges through a `<Dial>` whose
  * action is `/dial-result`, which then owns the session's terminal stamp.
  */
@@ -1114,6 +1136,9 @@ export class TwilioMediaStreamAdapter {
       handoffTwiml: null,
       handoffFinalizedByDialResult: false,
       handoffDeferredCloseReason: null,
+      e1Pending: false,
+      e1Effects: null,
+      e1Corrected: false,
       lastEnqueuedSilenceArmTurnId: 0,
       lastAckedSilenceArmTurnId: 0,
       playoutWaiters: [],
@@ -1795,6 +1820,9 @@ export class TwilioMediaStreamAdapter {
     // generation this bump invalidates is what makes that expiry a no-op.
     this.state.callerActivityGeneration++;
     this.clearSilenceRepromptTimer();
+    // C1 — latch an E1 hazard BEFORE the barge-in below can release a
+    // pending hand-off and before any await (see RuntimeState.e1Pending).
+    this.latchLifeSafety(event.transcript);
     // Barge-in: any interim transcript while we're playing TTS aborts
     // the current agent utterance. Empty interim transcripts are
     // already filtered by DeepgramStreamingProvider.
@@ -1909,6 +1937,7 @@ export class TwilioMediaStreamAdapter {
     // later isolated blip still gets its own apology+reprompt (not an
     // immediate escalation off a stale count).
     this.state.consecutiveSpeechTurnFailures = 0;
+    this.noteLifeSafetyEffects(sideEffects);
 
     // Stop pending early-filler timer; an in-flight early filler clip is
     // cancelled when emitSideEffects bumps outboundTurnId for real TTS.
@@ -2053,6 +2082,7 @@ export class TwilioMediaStreamAdapter {
     if (!effects) return;
 
     this.state.interimEmergencyFired = true;
+    this.noteLifeSafetyEffects(effects);
     await this.emitSideEffects(effects);
     // Realtime hand-off — an E2 escalation parks the dispatcher <Dial>.
     void this.maybeHandOffToHuman('interim_emergency');
@@ -3752,6 +3782,103 @@ export class TwilioMediaStreamAdapter {
     });
   }
 
+  /** C1 — latch an E1 hazard synchronously (see RuntimeState.e1Pending). */
+  private latchLifeSafety(transcript: string): void {
+    if (this.state.e1Pending || !transcript.trim()) return;
+    if (classifyCallerSafety(transcript, {}).tier === 'E1') this.state.e1Pending = true;
+  }
+
+  /** E1 heard (latched) or the FSM already closed the conversation. */
+  private lifeSafetyPending(session: VoiceSession): boolean {
+    return this.state.e1Pending || session.machine.currentState === 'terminated';
+  }
+
+  /**
+   * Bounded wait for the E1 close to land: the FSM terminated or the leg
+   * closed. Polls — the FSM has no change event — and never rejects.
+   */
+  private async awaitLifeSafetyClose(session: VoiceSession): Promise<void> {
+    const deadline = Date.now() + E1_SUPERSEDE_MAX_WAIT_MS;
+    while (
+      !this.state.closed &&
+      !this.state.wsCloseInitiated &&
+      session.machine.currentState !== 'terminated' &&
+      Date.now() < deadline
+    ) {
+      await new Promise((r) => {
+        const t = setTimeout(r, 20);
+        if (typeof t.unref === 'function') t.unref();
+      });
+    }
+  }
+
+  /**
+   * C1 — keep the E1 turn's effects (911 script + end_session) and, when a
+   * hand-off was already delivered, correct the live call to them.
+   */
+  private noteLifeSafetyEffects(effects: ReadonlyArray<SideEffect>): void {
+    const isE1 = effects.some(
+      (fx) => fx.type === 'end_session' && fx.payload.reason === 'life_safety_e1',
+    );
+    if (!isE1) return;
+    this.state.e1Pending = true;
+    this.state.e1Effects = effects;
+    const session = this.state.session;
+    const callSid = this.state.callSid;
+    if (this.state.handoff === 'delivered' && session && callSid) {
+      void this.correctHandoffToLifeSafety(session, callSid).catch(() => undefined);
+    }
+  }
+
+  /**
+   * C1 backstop — an E1 close arrived after the hand-off `<Dial>` reached
+   * Twilio (the caller is ringing / bridged). The call stays REST-controllable
+   * while in `<Dial>`: replace it with the E1 safety lines + `<Hangup/>` (the
+   * same `<Say>` rendering the Gather transport prepends to a Dial), and stamp
+   * the session `life_safety_e1` so the E2 page ladder cancels (FIX 6). At
+   * most once. A refused correction leaves the caller with the human — logged.
+   */
+  private async correctHandoffToLifeSafety(session: VoiceSession, callSid: string): Promise<void> {
+    const effects = this.state.e1Effects;
+    if (this.state.e1Corrected || !effects) return;
+    this.state.e1Corrected = true;
+    const twiml = injectSafetySayLines(
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>',
+      effects,
+      {
+        language: session.language === 'es' ? 'es' : 'en',
+        ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+      },
+    );
+    logger.error('E1 life safety arrived during a realtime hand-off — correcting the live call', {
+      callSid,
+      sessionId: session.id,
+    });
+    let corrected = false;
+    try {
+      corrected =
+        (await this.deps.restRedirect?.({
+          callSid,
+          ...(this.state.accountSid ? { accountSid: this.state.accountSid } : {}),
+          twiml,
+        })) ?? false;
+    } catch {
+      corrected = false;
+    }
+    if (!corrected) {
+      logger.error('E1 corrective update refused — the caller stays on the human hand-off', {
+        callSid,
+        sessionId: session.id,
+      });
+    }
+    // The E1 stamp is the terminal outcome either way: first stamp wins.
+    try {
+      this.deps.finalizeOnClose?.(session, 'session_ended', effects);
+    } catch {
+      /* best-effort, like every terminal stamp */
+    }
+  }
+
   /**
    * Realtime hand-off — deliver a parked human hand-off to the LIVE call.
    *
@@ -3795,20 +3922,37 @@ export class TwilioMediaStreamAdapter {
     await this.awaitPlayout(this.deps.handoffPlayoutMaxWaitMs ?? DEFAULT_HANDOFF_PLAYOUT_MAX_WAIT_MS);
     if (this.state.closed || this.state.wsCloseInitiated) return;
     // E1 life safety supersedes the hand-off: the caller reported a hazard
-    // while the line played ("…and I smell gas"), the FSM terminated, and the
-    // E1 turn is speaking the 911 script and ending the call. E1 never
-    // bridges to the dispatcher — do not pull the call into a <Dial>.
-    if (session.machine.currentState === 'terminated') {
-      this.state.handoff = 'failed';
-      this.state.handoffTwiml = null;
-      logger.info('realtime hand-off superseded by a life-safety close', {
+    // ("…and I smell gas"). E1 never bridges to the dispatcher — the E1 turn
+    // speaks the 911 script and ends the call. The latch is set the instant
+    // the words were heard; the FSM flips only after the E1 scan's awaited
+    // work, so give that close a bounded window rather than racing it.
+    if (this.lifeSafetyPending(session)) {
+      await this.awaitLifeSafetyClose(session);
+      if (
+        this.state.closed ||
+        this.state.wsCloseInitiated ||
+        session.machine.currentState === 'terminated'
+      ) {
+        this.state.handoff = 'failed';
+        this.state.handoffTwiml = null;
+        logger.info('realtime hand-off superseded by a life-safety close', {
+          callSid,
+          sessionId: session.id,
+          trigger,
+        });
+        return;
+      }
+      // Hazard words were heard but no E1 close followed (e.g. a debounced
+      // interim + an undispatched final): never strand the caller — reach a
+      // human. If the E1 close lands later, the delivered call is corrected.
+      logger.error('realtime hand-off: hazard heard but no life-safety close followed — handing off', {
         callSid,
         sessionId: session.id,
         trigger,
       });
-      return;
     }
 
+    // Synchronous from the check above to the request: nothing can interleave.
     this.state.handoff = 'delivering';
     let delivered = false;
     if (restRedirect) {
@@ -3832,6 +3976,13 @@ export class TwilioMediaStreamAdapter {
         this.settleCloseOutcome(closedDuringDelivery);
         return;
       }
+      // An E1 landed while the request was in flight: the stream is still
+      // ours and the E1 turn is closing it with the 911 script — never
+      // degrade (that would re-deliver the <Dial> via the Gather fallback).
+      if (this.lifeSafetyPending(session)) {
+        this.state.handoffTwiml = null;
+        return;
+      }
       await this.recoverFromRefusedHandoff(session, callSid, trigger);
       return;
     }
@@ -3849,6 +4000,8 @@ export class TwilioMediaStreamAdapter {
       trigger,
       bridged: this.state.handoffFinalizedByDialResult,
     });
+    // C1 backstop — an E1 landed while the request was in flight.
+    if (this.state.e1Effects) await this.correctHandoffToLifeSafety(session, callSid);
     if (closedDuringDelivery !== null) {
       // Twilio already tore the stream down to run the TwiML — that close was
       // the hand-off, not a hang-up.

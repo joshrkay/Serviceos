@@ -73,6 +73,11 @@ import {
 } from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
 import { xmlEscape } from './shared/xml-escape';
+import {
+  GATHER_VOICE_EN,
+  GATHER_VOICE_ES,
+  injectSafetySayLines,
+} from './shared/safety-say-lines';
 import { isBlockedCallerId } from '../ai/voice-turn/shared/blocked-caller-id';
 import { resolveOwnerSession } from '../ai/voice-turn/shared/owner-session';
 import { switchSessionLanguage } from '../ai/voice-turn/shared/language-switch';
@@ -108,7 +113,6 @@ import { classifyCallerSafety } from '../ai/agents/customer-calling/emergency-ti
 import { askCallerUtteranceCarriesRequest } from '../ai/voice-turn/ask-caller-request';
 import { detectPromptInjection } from '../ai/agents/customer-calling/untrusted-content';
 import {
-  renderTtsText,
   ttsCopy,
   TTS_COPY,
   type SessionLanguage,
@@ -586,6 +590,7 @@ export async function notifyOwnerOfIncomingCall(opts: {
 // `xmlEscape` (whisper-route.ts, twilio-call-control.ts, routes/telephony.ts,
 // and their tests) keep working unchanged.
 export { xmlEscape } from './shared/xml-escape';
+export { injectSafetySayLines } from './shared/safety-say-lines';
 
 // ─── Side-effect → TwiML mapping ─────────────────────────────────────────────
 
@@ -633,8 +638,6 @@ interface BuildTwimlOpts {
  */
 const E1_AUDIT_DEADLINE_MS = 1500;
 
-const GATHER_VOICE_EN = 'Polly.Joanna';
-const GATHER_VOICE_ES = 'Polly.Mia-Neural';
 const GATHER_LOCALE_EN = 'en-US';
 const GATHER_LOCALE_ES = 'es-US';
 /** A2 — mirrors VerticalTerminologyProvider/TenantGlossaryProvider's caps; protects Gather URL/TwiML size. */
@@ -748,45 +751,6 @@ export function buildTwiML(
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${parts.join('')}</Response>`;
-}
-
-/**
- * RV-142 — prepend safety-marked TTS lines (payload.priority === 'safety',
- * e.g. the emergency 911 line) as `<Say>` verbs at the top of an existing
- * `<Response>` document (typically the pending `<Dial>` transfer TwiML), so
- * the safety script is spoken BEFORE the bridge. Non-safety lines are left
- * out, preserving the long-standing behavior where transfer TwiML replaces
- * ordinary turn copy. Returns the document unchanged when no safety lines
- * are present.
- */
-export function injectSafetySayLines(
-  twiml: string,
-  sideEffects: ReadonlyArray<SideEffect>,
-  opts: { language?: 'en' | 'es'; voiceOverride?: string } = {},
-): string {
-  const lang: SessionLanguage = opts.language === 'es' ? 'es' : 'en';
-  const sayParts = sideEffects
-    .filter(
-      (fx) =>
-        fx.type === 'tts_play' &&
-        fx.payload.priority === 'safety' &&
-        typeof fx.payload.text === 'string' &&
-        fx.payload.text.length > 0,
-    )
-    .map((fx) => {
-      const voice =
-        opts.voiceOverride ?? (lang === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
-      // Localize the safety script by session language — same selector the
-      // Polly voice switch above uses. renderTtsText resolves the FSM's
-      // fixed English sentences back to their TTS_COPY entry (exact match;
-      // the 911 + transfer lines are catalogued), and passes unknown text
-      // through unchanged, so an 'en' session is a no-op.
-      const text = renderTtsText(String(fx.payload.text), fx.payload, lang);
-      return `<Say voice="${xmlEscape(voice)}">${xmlEscape(text)}</Say>`;
-    })
-    .join('');
-  if (!sayParts) return twiml;
-  return twiml.replace('<Response>', `<Response>${sayParts}`);
 }
 
 // ─── Adapter ─────────────────────────────────────────────────────────────────

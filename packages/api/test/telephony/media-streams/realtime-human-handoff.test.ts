@@ -40,7 +40,7 @@ import {
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
 } from '../../../src/ai/agents/customer-calling/tts-copy';
 import { patchOwnerThrough } from '../../../src/ai/skills/patch-owner-through';
-import { DEFAULT_ESCALATION_SETTINGS } from '../../../src/settings/settings';
+import { DEFAULT_ESCALATION_SETTINGS, type SettingsRepository } from '../../../src/settings/settings';
 import type { VoiceSession } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
 
@@ -61,7 +61,13 @@ class FakeWs implements WsLike {
   private acked = new Set<string>();
   private listeners: Record<string, Array<(...args: unknown[]) => void>> = {};
   send(data: string): void {
-    this.sent.push(JSON.parse(data) as Record<string, unknown>);
+    const frame = JSON.parse(data) as Record<string, unknown>;
+    this.sent.push(frame);
+    // Twilio answers a `clear` (barge-in) by echoing every outstanding mark.
+    if (frame.event === 'clear') {
+      const streamSid = String(frame.streamSid);
+      setImmediate(() => this.ackAllMarks(streamSid));
+    }
   }
   close(code?: number, reason?: string): void {
     this.closed = true;
@@ -112,10 +118,11 @@ function makeStreamingProvider(): {
   };
 }
 
-function makeTtsProvider(): TtsProvider {
+/** `frames` × 20 ms of audio per line (1 = the line is enqueued at once). */
+function makeTtsProvider(frames = 1): TtsProvider {
   return {
     synthesize: vi.fn(async () => ({
-      audio: Buffer.alloc(640),
+      audio: Buffer.alloc(640 * frames),
       contentType: 'audio/pcm',
       provider: 'test',
     })),
@@ -168,6 +175,13 @@ async function harness(opts: {
   llmFrustrationScore?: number;
   /** Further host deps, bound to the gather adapter. */
   extraDeps?: (gather: TwilioGatherAdapter) => Partial<MediaStreamAdapterDeps>;
+  /**
+   * Production ordering of an E1: runEmergencyScan awaits the tenant's
+   * reviewed-script lookup BEFORE the FSM flips to `terminated`.
+   */
+  settingsLookupDelayMs?: number;
+  /** Length of every spoken line, in 20 ms frames (long lines pace on mark acks). */
+  ttsFrames?: number;
 } = {}) {
   const callSid = `CA-handoff-${++callSeq}`;
   const streamSid = `MZ-handoff-${callSeq}`;
@@ -184,6 +198,16 @@ async function harness(opts: {
     auditRepo,
     callControl: new DefaultTwilioCallControl(),
     dispatcherPhoneResolver: async () => DISPATCHER,
+    ...(opts.settingsLookupDelayMs !== undefined
+      ? {
+          settingsRepo: {
+            findByTenant: async () => {
+              await new Promise((r) => setTimeout(r, opts.settingsLookupDelayMs));
+              return null;
+            },
+          } as unknown as SettingsRepository,
+        }
+      : {}),
   });
   await gather.handleInboundForStream({ callSid, from: CALLER, tenantId: TENANT });
   const session = store.findByCallSid(callSid)!;
@@ -199,7 +223,7 @@ async function harness(opts: {
   const finalizeOnClose = vi.fn((s, reason: string, fx) => gather.finalizeTerminatedSession(s, fx, reason));
   const deepgram = makeStreamingProvider();
   const ws = new FakeWs();
-  const tts = makeTtsProvider();
+  const tts = makeTtsProvider(opts.ttsFrames);
   // Wired exactly as app.ts wires attachMediaStreamServer.
   const stream = new TwilioMediaStreamAdapter(
     {
@@ -621,7 +645,86 @@ describe('realtime hand-off — an E1 life-safety close supersedes a pending tra
   });
 });
 
-const PARKED_DIAL_FOR_E1 = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial action="${PUBLIC_BASE_URL}/api/telephony/dial-result?sid=s"><Number>${DISPATCHER}</Number></Dial></Response>`;
+/**
+ * C1 (review of #1676) — PRODUCTION ordering. The E1 scan awaits the tenant's
+ * reviewed-script lookup BEFORE the FSM flips to `terminated`, and the
+ * hand-off takes no session lock, so a point-in-time FSM read lost the race.
+ */
+describe('realtime hand-off — E1 with production ordering (await before the FSM flips)', () => {
+  /** Keep echoing marks (= Twilio playing whatever is queued) until stopped. */
+  function playEverything(h: Awaited<ReturnType<typeof harness>>) {
+    const pump = setInterval(() => h.ws.ackAllMarks(h.streamSid), 10);
+    return () => clearInterval(pump);
+  }
+  const spokenOf = (h: Awaited<ReturnType<typeof harness>>) =>
+    (h.tts.synthesize as ReturnType<typeof vi.fn>).mock.calls.map(([input]) => (input as { text: string }).text);
+
+  it('barge-in: "I smell gas" over the hand-off line → the 911 script plays, no transfer (30 ms lookup)', async () => {
+    const h = await harness({ settingsLookupDelayMs: 30, ttsFrames: 200 });
+
+    h.say('I want to speak to a person');
+    // The hand-off line is mid-stream, paced on (unacked) marks.
+    await vi.waitFor(() =>
+      expect(h.ws.markNames().filter((n) => n.startsWith('turn-')).length).toBeGreaterThanOrEqual(3),
+    );
+    h.deepgram.emit({ type: 'partial', transcript: 'I smell gas', confidence: 0.9, isFinal: false });
+
+    const stop = playEverything(h);
+    try {
+      await vi.waitFor(() => expect(h.ws.closed).toBe(true), { timeout: 4_000 });
+    } finally {
+      stop();
+    }
+    expect(h.twilio.transfers()).toHaveLength(0);
+    expect(h.session.terminalReason).toBe('life_safety_e1');
+    expect(spokenOf(h).some((t) => t.includes('call 911'))).toBe(true);
+  });
+
+  it('no barge-in: the line finishes while the E1 lookup (300 ms) is still in flight → no transfer', async () => {
+    const h = await harness({ settingsLookupDelayMs: 300 });
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.deepgram.emit({ type: 'partial', transcript: 'I smell gas', confidence: 0.9, isFinal: false });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const stop = playEverything(h);
+    try {
+      await vi.waitFor(() => expect(h.ws.closed).toBe(true), { timeout: 4_000 });
+    } finally {
+      stop();
+    }
+    expect(h.twilio.transfers()).toHaveLength(0);
+    expect(h.session.terminalReason).toBe('life_safety_e1');
+  });
+
+  it('backstop: E1 while the transfer is in flight → a corrective update speaks the 911 script and hangs up', async () => {
+    let accept!: (r: { ok: boolean; status: number }) => void;
+    const twilio = makeTwilioRest();
+    twilio.fetchImpl.mockImplementationOnce(
+      () => new Promise<{ ok: boolean; status: number }>((resolve) => { accept = resolve; }),
+    );
+    const h = await harness({ twilio });
+
+    h.say('I want to speak to a person');
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1)); // the Dial is in flight
+
+    h.deepgram.emit({ type: 'partial', transcript: 'I smell gas', confidence: 0.9, isFinal: false });
+    await vi.waitFor(() => expect(h.session.machine.currentState).toBe('terminated'));
+    accept({ ok: true, status: 200 }); // Twilio had already applied the Dial
+
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(2));
+    const corrective = h.twilio.transfers()[1].body.get('Twiml')!;
+    expect(corrective).toContain('call 911');
+    expect(corrective).toContain('<Hangup/>');
+    expect(corrective).not.toContain('<Dial');
+    await vi.waitFor(() => expect(h.session.terminalReason).toBe('life_safety_e1'));
+  });
+});
+
+const PARKED_DIAL_FOR_E1 =`<?xml version="1.0" encoding="UTF-8"?><Response><Dial action="${PUBLIC_BASE_URL}/api/telephony/dial-result?sid=s"><Number>${DISPATCHER}</Number></Dial></Response>`;
 
 // ─── (d) the Gather transport keeps its own delivery ─────────────────────────
 
