@@ -134,6 +134,15 @@ export interface BillingServiceDeps {
 const boundedStripeFetch: BillingFetch = timedFetch();
 
 /**
+ * Ending a trial early charges the card inside the Stripe request, so it is
+ * NOT cut off at the 10 s default. 40 s still lands inside the request
+ * transaction's 60 s idle guard, so the route's audit write and COMMIT run.
+ */
+export const END_TRIAL_TIMEOUT_MS = 40_000;
+const endTrialStripeFetch: BillingFetch = timedFetch(END_TRIAL_TIMEOUT_MS);
+const END_TRIAL_IN_PROGRESS_RETRY_DELAYS_MS = [2_000, 8_000];
+
+/**
  * Turns a failed "open the billing portal" Stripe REST call into an
  * operator-facing AppError while preserving the full Stripe reason in the
  * server logs. Mirrors `connectStripeFailure` in
@@ -743,18 +752,44 @@ export class BillingService {
     if (!subId) {
       throw new NotFoundError('Subscription', tenantId);
     }
-    const fetchFn = this.deps.fetchFn ?? boundedStripeFetch;
+    const apiKey = this.deps.config.apiKey;
+    const subscriptionUrl = `https://api.stripe.com/v1/subscriptions/${subId}`;
+
+    // A re-click after the trial already ended (the first answer was lost, or
+    // the re-click lands in a later idempotency window) must not end it — and
+    // charge — again. Best-effort: if the read fails, the keyed update below
+    // still dedupes a retry inside its window.
+    const current = await (this.deps.fetchFn ?? boundedStripeFetch)(subscriptionUrl, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${apiKey}` },
+    }).catch(() => null);
+    if (current?.ok) {
+      const sub = (await current.json().catch(() => ({}))) as { status?: string };
+      if (sub.status && sub.status !== 'trialing') return;
+    }
+
+    // trial_end=now makes Stripe finalize the first invoice AND attempt the
+    // charge inside this request: it gets the long END_TRIAL deadline, not the
+    // 10 s default (a cut-off charge would be reported as failed and skip the
+    // route's audit event), and an Idempotency-Key so a double-click replays
+    // the first answer instead of ending the trial twice.
     const body = new URLSearchParams();
     body.set('trial_end', 'now');
     body.set('proration_behavior', 'create_prorations');
-    const res = await fetchFn(`https://api.stripe.com/v1/subscriptions/${subId}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.deps.config.apiKey}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body,
-    });
+    const chargeFetch = this.deps.fetchFn ?? endTrialStripeFetch;
+    const res = await sendIdempotentCreate(`end-trial:${subId}`, body, (idempotencyKey) =>
+      chargeFetch(subscriptionUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body,
+      }),
+      // A double-click's duplicate waits for the first click's charge.
+      END_TRIAL_IN_PROGRESS_RETRY_DELAYS_MS,
+    );
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`Stripe subscription update failed (${res.status}): ${text}`);

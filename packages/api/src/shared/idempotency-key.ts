@@ -56,10 +56,12 @@ export async function sendIdempotentCreate<R extends ProviderResponse>(
   scope: string,
   params: URLSearchParams | string,
   send: (idempotencyKey: string) => Promise<R>,
+  /** Waits before resending on 409; a slow request (a charge) needs longer. */
+  inProgressRetryDelaysMs: readonly number[] = IN_PROGRESS_RETRY_DELAYS_MS,
 ): Promise<R> {
   const key = deterministicIdempotencyKey(scope, params);
   let res = await send(key);
-  for (const delayMs of IN_PROGRESS_RETRY_DELAYS_MS) {
+  for (const delayMs of inProgressRetryDelaysMs) {
     if (res.status !== 409) break;
     await pause(delayMs);
     res = await send(key);

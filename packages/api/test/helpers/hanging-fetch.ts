@@ -80,3 +80,50 @@ export async function settleWithin<T>(promise: Promise<T>, ms: number): Promise<
   await flushAsync();
   return settled;
 }
+
+/**
+ * Like `settleWithin`, for code that also needs real I/O turns (an HTTP
+ * request through supertest): advances the fake clock in `stepMs` steps,
+ * yielding to the real event loop between steps.
+ */
+export async function settleWithinIo<T>(promise: Promise<T>, ms: number, stepMs = 250): Promise<Settled<T>> {
+  let settled: Settled<T> = { status: 'pending' };
+  promise.then(
+    (value) => {
+      settled = { status: 'fulfilled', value };
+    },
+    (reason: unknown) => {
+      settled = { status: 'rejected', reason };
+    },
+  );
+  for (let elapsed = 0; settled.status === 'pending' && elapsed <= ms; elapsed += stepMs) {
+    for (let i = 0; i < 5; i += 1) await flushAsync();
+    await vi.advanceTimersByTimeAsync(stepMs);
+  }
+  for (let i = 0; i < 5; i += 1) await flushAsync();
+  return settled;
+}
+
+/** Watch a promise's outcome while the test drives the fake clock with `advance`. */
+export function track<T>(promise: Promise<T>): { readonly state: Settled<T> } {
+  let state: Settled<T> = { status: 'pending' };
+  promise.then(
+    (value) => {
+      state = { status: 'fulfilled', value };
+    },
+    (reason: unknown) => {
+      state = { status: 'rejected', reason };
+    },
+  );
+  return {
+    get state() {
+      return state;
+    },
+  };
+}
+
+export async function advance(ms: number): Promise<void> {
+  await flushAsync();
+  await vi.advanceTimersByTimeAsync(ms);
+  await flushAsync();
+}

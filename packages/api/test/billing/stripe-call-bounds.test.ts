@@ -13,13 +13,15 @@
  * the tenant's next attempt.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BillingService } from '../../src/billing/subscription';
+import { BillingService, END_TRIAL_TIMEOUT_MS } from '../../src/billing/subscription';
 import { StripeConnectService } from '../../src/billing/stripe-connect';
 import { fakePool } from './fake-pool';
 import {
+  advance,
   fakeJson,
   hangingFetch,
   settleWithin,
+  track,
   useProviderClock,
 } from '../helpers/hanging-fetch';
 import { fakeStripe } from '../helpers/fake-stripe';
@@ -56,6 +58,10 @@ describe('BillingService — Stripe calls are bounded when no fetch is injected'
     name: string;
     tenant: Record<string, unknown>;
     hangOn: string;
+    /** Only this method hangs (default: any). */
+    method?: string;
+    /** Deadline the call must give up by (default: the 10 s Stripe bound). */
+    boundMs?: number;
     run: (svc: BillingService) => Promise<unknown>;
   }> = [
     {
@@ -88,9 +94,13 @@ describe('BillingService — Stripe calls are bounded when no fetch is injected'
       run: (svc) => svc.createTrialCheckoutSession({ tenantId: TENANT, ownerEmail: 'o@x.com', successUrl: 'https://app/ok', cancelUrl: 'https://app/no' }),
     },
     {
-      name: 'end trial now',
+      // #1677 H1 — this update charges the card inside the request: it gets
+      // the long END_TRIAL deadline instead of the 10 s default.
+      name: 'end trial now (charges the card)',
       tenant: { stripe_subscription_id: 'sub_1' },
       hangOn: '/v1/subscriptions/sub_1',
+      method: 'POST',
+      boundMs: END_TRIAL_TIMEOUT_MS,
       run: (svc) => svc.endTrialNow(TENANT),
     },
     {
@@ -101,15 +111,22 @@ describe('BillingService — Stripe calls are bounded when no fetch is injected'
     },
   ];
 
-  it.each(cases)('$name times out at 10 s like a network failure', async ({ tenant, hangOn, run }) => {
-    const fetchMock = hangingFetch((url) => url.includes(hangOn), () => fakeJson({ id: 'cus_new', url: 'https://stripe/x' }));
+  it.each(cases)('$name gives up at its deadline like a network failure', async ({ tenant, hangOn, method, boundMs, run }) => {
+    const fetchMock = hangingFetch(
+      (url, init) => url.includes(hangOn) && (!method || init?.method === method),
+      () => fakeJson({ id: 'cus_new', url: 'https://stripe/x' }),
+    );
     vi.stubGlobal('fetch', fetchMock);
     const svc = new BillingService({ pool: billingPool(tenant), config: { apiKey: 'sk_test' } });
 
-    const outcome = await settleWithin(run(svc), STRIPE_TIMEOUT_MS);
+    const deadline = boundMs ?? STRIPE_TIMEOUT_MS;
+    const call = track(run(svc));
+    await advance(deadline - 1_000);
+    expect(call.state.status).toBe('pending');
+    await advance(1_000);
 
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes(hangOn))).toBe(true);
-    timedOut(outcome);
+    timedOut(call.state);
   });
 });
 
