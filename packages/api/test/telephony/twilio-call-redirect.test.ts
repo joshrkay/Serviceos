@@ -138,6 +138,51 @@ describe('WS7 createTwilioCallRedirector', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('hand-off: with `twiml`, POSTs the TwiML inline (Twiml=) and no Url, to the same call resource', async () => {
+    const fetchMock = okFetch();
+    const redirect = createTwilioCallRedirector({
+      resolveAuthToken: () => Promise.resolve(AUTH_TOKEN),
+      defaultAccountSid: DEFAULT_SID,
+      publicBaseUrl: PUBLIC_BASE,
+      apiBaseUrl: API_BASE,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    const dial = '<?xml version="1.0" encoding="UTF-8"?><Response><Dial><Number>+15125550101</Number></Dial></Response>';
+
+    expect(await redirect({ callSid: CALL_SID, accountSid: ACCOUNT_SID, twiml: dial })).toBe(true);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`${API_BASE}/Accounts/${ACCOUNT_SID}/Calls/${CALL_SID}.json`);
+    const params = new URLSearchParams(init.body as string);
+    expect(params.get('Twiml')).toBe(dial);
+    expect(params.has('Url')).toBe(false);
+  });
+
+  it("aborts a request Twilio does not answer within the timeout and reports 'unknown' (it may have been applied)", async () => {
+    // A hung api.twilio.com must not hold a live caller: the request is
+    // aborted at the bound and the caller's fallback runs.
+    const fetchMock = vi.fn(
+      (_url: string, init: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+        }),
+    );
+    const redirect = createTwilioCallRedirector({
+      resolveAuthToken: () => Promise.resolve(AUTH_TOKEN),
+      defaultAccountSid: DEFAULT_SID,
+      publicBaseUrl: PUBLIC_BASE,
+      apiBaseUrl: API_BASE,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      timeoutMs: 25,
+    });
+
+    const outcome = await Promise.race([
+      redirect({ callSid: CALL_SID, accountSid: ACCOUNT_SID, twiml: '<Response/>' }),
+      new Promise((r) => setTimeout(() => r('still pending'), 1_000)),
+    ]);
+    expect(outcome).toBe('unknown');
+  });
+
   it('returns false (never throws) when resolveAuthToken throws', async () => {
     const fetchMock = okFetch();
     const redirect = createTwilioCallRedirector({

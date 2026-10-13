@@ -3176,6 +3176,7 @@ export function createVoiceTurnProcessor(
         ...(transferNumber ? { transferNumber } : {}),
         ...(session.callSid ? { callSid: session.callSid } : {}),
         dialActionUrl: dialResultUrl(session.id),
+        ...(skillReason === 'emergency_dispatch' ? { screenHandoff: true } : {}),
         channelPreferences,
         dispatcherLanguage,
         buildSummary: buildEscalationSummary,
@@ -3201,7 +3202,10 @@ export function createVoiceTurnProcessor(
           channelPreferences.whisper &&
           deps.whisperCache
         ) {
-          deps.whisperCache.set(escalationId, summary.whisper, tenantId);
+          deps.whisperCache.set(escalationId, summary.whisper, tenantId, {
+            sessionId: session.id,
+            language: dispatcherLanguage,
+          });
         }
 
         if (

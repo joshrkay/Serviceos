@@ -156,6 +156,13 @@ export const TTS_COPY = {
     en: "I'm having trouble completing that. Let me connect you with a team member.",
     es: 'Tengo dificultades para completar eso. Le comunico con un miembro del equipo.',
   },
+  // Realtime hand-off — Twilio refused both the transfer and the Gather
+  // degrade, so the call cannot be connected to anyone. Honest: it promises
+  // no callback (none is guaranteed on this path).
+  handoff_unavailable: {
+    en: "I'm sorry, I wasn't able to connect you to a team member. Please try calling again in a few minutes.",
+    es: 'Lo siento, no pude comunicarle con un miembro del equipo. Por favor, vuelva a llamar en unos minutos.',
+  },
   low_stt_confidence_reprompt: {
     en: "I didn't quite catch that — could you say that again?",
     es: 'No alcancé a escuchar bien eso — ¿podría repetirlo, por favor?',
@@ -627,6 +634,12 @@ export const SPEECH_TURN_FAILURE_REPROMPT_COPY = TTS_COPY.speech_turn_failure_re
  */
 export const TURN_HOLD_COPY = TTS_COPY.turn_hold.en;
 export const SPEECH_TURN_FAILURE_ESCALATION_COPY = TTS_COPY.speech_turn_failure_escalation.en;
+/**
+ * Realtime hand-off — spoken on a stream call when neither the transfer nor
+ * the Gather degrade could be delivered (Twilio refused both REST updates),
+ * immediately before the call ends. The alternative is silence.
+ */
+export const HANDOFF_UNAVAILABLE_COPY = TTS_COPY.handoff_unavailable.en;
 
 /**
  * A3 — spoken when a FINAL transcript's STT acoustic confidence (Deepgram
