@@ -18,8 +18,8 @@ import { settleWithin, settleWithinIo, useProviderClock } from '../helpers/hangi
 const TENANT = '66666666-6666-4666-8666-666666666666';
 
 /** Stripe holding one trialing subscription; ending the trial charges the card. */
-function stripeWithTrial(chargeTakesMs: number) {
-  let status = 'trialing';
+function stripeWithTrial(chargeTakesMs: number, initialStatus = 'trialing') {
+  let status = initialStatus;
   const stripe = fakeStripe((call) => {
     if (call.path !== '/v1/subscriptions/sub_1') return { status: 404, body: { error: { message: 'no' } } };
     if (call.method === 'GET') return { body: { id: 'sub_1', status } };
@@ -63,7 +63,34 @@ describe('BillingService.endTrialNow', () => {
     expect(stripe.charges()).toBe(1);
   });
 
-  it('a re-click after the trial already ended (a later key window) does not charge again', async () => {
+  it.each(['active', 'past_due'])(
+    'a subscription already %s (the trial really ended) needs nothing: no update, no charge',
+    async (status) => {
+      const stripe = stripeWithTrial(0, status);
+      vi.stubGlobal('fetch', stripe.fetchFn);
+
+      const outcome = await settleWithin(service().endTrialNow(TENANT), 0);
+
+      expect(outcome.status).toBe('fulfilled');
+      expect(stripe.charges()).toBe(0);
+    },
+  );
+
+  it.each(['canceled', 'paused', 'incomplete', 'incomplete_expired', 'unpaid'])(
+    'a %s subscription has no trial to end: a 409 and nothing sent to Stripe',
+    async (status) => {
+      const stripe = stripeWithTrial(0, status);
+      vi.stubGlobal('fetch', stripe.fetchFn);
+
+      const outcome = await settleWithin(service().endTrialNow(TENANT), 0);
+
+      expect(outcome.status).toBe('rejected');
+      expect((outcome as { reason: unknown }).reason).toMatchObject({ statusCode: 409 });
+      expect(stripe.charges()).toBe(0);
+    },
+  );
+
+  it('a re-click after the trial already ended does not charge again', async () => {
     const stripe = stripeWithTrial(0);
     vi.stubGlobal('fetch', stripe.fetchFn);
     const svc = service();
@@ -82,6 +109,37 @@ describe('POST /api/billing/end-trial-now', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  function appWith(audited: Array<{ eventType: string }>) {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = { userId: 'u-1', sessionId: 's-1', tenantId: TENANT, role: 'owner' };
+      next();
+    });
+    app.use(
+      '/api/billing',
+      createBillingRouter({
+        billingService: service(),
+        auditRepo: { create: async (e: { eventType: string }) => { audited.push(e); return e; } } as never,
+      }),
+    );
+    return app;
+  }
+
+  it('a canceled subscription answers 409 and writes no tenant.trial_ended_early', async () => {
+    const stripe = stripeWithTrial(0, 'canceled');
+    vi.stubGlobal('fetch', stripe.fetchFn);
+    const audited: Array<{ eventType: string }> = [];
+
+    const outcome = await settleWithinIo(
+      request(appWith(audited)).post('/api/billing/end-trial-now').send({}).then((r) => r),
+      1_000,
+    );
+
+    expect((outcome as { value: { status: number } }).value.status).toBe(409);
+    expect(audited).toEqual([]);
   });
 
   it('a slow but successful trial end answers 200 and records tenant.trial_ended_early', async () => {

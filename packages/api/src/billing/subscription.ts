@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { AppError, ValidationError, NotFoundError } from '../shared/errors';
+import { AppError, ConflictError, ValidationError, NotFoundError } from '../shared/errors';
 import { timedFetch } from '../shared/timed-fetch';
 import { sendIdempotentCreate } from '../shared/idempotency-key';
 import { CALL_PLAN_USAGE, OVERAGE_CENTS_PER_MINUTE } from './call-usage-pricing';
@@ -765,7 +765,17 @@ export class BillingService {
     }).catch(() => null);
     if (current?.ok) {
       const sub = (await current.json().catch(() => ({}))) as { status?: string };
-      if (sub.status && sub.status !== 'trialing') return;
+      // active / past_due: the trial really ended (paid, or the first charge
+      // is being retried) — nothing to do. A canceled, paused or incomplete
+      // subscription has no trial to end: refuse without touching Stripe, so
+      // the route never reports (or audits) an early trial end that didn't
+      // happen.
+      if (sub.status === 'active' || sub.status === 'past_due') return;
+      if (sub.status && sub.status !== 'trialing') {
+        throw new ConflictError(`This subscription is ${sub.status}; there is no trial to end.`, {
+          subscriptionStatus: sub.status,
+        });
+      }
     }
 
     // trial_end=now makes Stripe finalize the first invoice AND attempt the
