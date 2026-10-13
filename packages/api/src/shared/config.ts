@@ -506,10 +506,14 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     }
   }
 
-  // Object storage — voice recordings, file/job uploads via Cloudflare R2.
-  // R2_PUBLIC_URL is intentionally NOT required: S3StorageProvider
-  // falls back to presigned GET URLs when publicUrlBase is unset
-  // (see files/storage-provider.ts:159), so storage works without it.
+  // Object storage — voice recordings, file/job uploads, inbound MMS photos.
+  // Validates the RESOLVED config — the same shared/storage-config.ts resolver
+  // createStorageProvider() builds the provider from (STORAGE_* canonical,
+  // R2_* alias) — so the validator and the factory cannot demand different
+  // variable families. STORAGE_PUBLIC_URL is intentionally NOT required:
+  // S3StorageProvider falls back to presigned GET URLs when it is unset.
+  // STORAGE_ENABLED=false is the explicit opt-out; the factory then runs the
+  // dev provider (uploads/recordings/MMS NOT persisted) and logs a boot WARN.
   if (storageEnabled) {
     const storage = resolveStorageConfig(env);
     if (!storage.ok) {

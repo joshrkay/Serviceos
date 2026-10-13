@@ -28,8 +28,6 @@ export interface DevStorageConfig {
 
 export interface StorageProviderEnv extends StorageConfigEnv {
   STORAGE_PUBLIC_URL?: string;
-  /** Explicit opt-out aligned with validateFeatureRequiredConfig. */
-  STORAGE_ENABLED?: string;
   API_PORT?: string;
   PORT?: string;
   NODE_ENV?: string;
