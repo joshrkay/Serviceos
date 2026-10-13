@@ -197,6 +197,8 @@ export async function patchToOwnerCell(
     {
       actionUrl: input.dialActionUrl,
       timeoutSeconds: OWNER_DIAL_TIMEOUT_SECONDS,
+      // Emergency-class (vulnerable caller): a voicemail must not "answer".
+      screen: true,
     },
   );
 

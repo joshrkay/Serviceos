@@ -889,15 +889,18 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     // mark the session ended, and return an empty Response so Twilio
     // hangs up the original caller leg cleanly.
     const successStatuses = new Set(['completed', 'answered']);
-    // H1 / H1-R — every Dial leg is screened (press 1 to accept), and only a
-    // person's keypress proves the hand-off was answered: a carrier voicemail
-    // picking up the dispatcher's phone is `completed` too, as is a leg whose
-    // screen fetch failed. Stamping either `transferred` would silence the
-    // emergency page ladder for a real unanswered emergency and strand the
-    // caller in a mailbox — continue the cascade instead.
-    const accepted = session.transferAnsweredAt !== undefined;
+    // H1 / H1-R, scoped (round-3 review of #1676) — an EMERGENCY-CLASS leg is
+    // press-1 screened and its action carries `screen=1` (set by the producer,
+    // see DialDispatcherOptions.screen). For such a leg only a person's
+    // keypress proves the hand-off was answered: a carrier voicemail picking
+    // up is `completed` too, as is a leg whose screen fetch failed — stamping
+    // either `transferred` would silence the emergency page ladder for a real
+    // unanswered emergency. Every other leg keeps the long-standing rule:
+    // `completed`/`answered` IS the transfer.
+    const screenedLeg = req.query.screen === '1';
+    const accepted = !screenedLeg || session.transferAnsweredAt !== undefined;
     if (!accepted && successStatuses.has(dialStatus)) {
-      logger.info('telephony/dial-result: leg never accepted by a person — not a transfer', {
+      logger.info('telephony/dial-result: screened leg never accepted by a person — not a transfer', {
         sessionId,
         dialStatus,
       });
@@ -933,8 +936,8 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         .send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
       return;
     }
-    // The next leg (cascade) must earn its own acceptance.
-    session.transferAnsweredAt = undefined;
+    // A screened cascade's next leg must earn its own acceptance.
+    if (screenedLeg) session.transferAnsweredAt = undefined;
 
     // Voice-parity (Feature 7) — single-line transfer model. When the tenant
     // configured a `transfer_number`, the transfer dialed that one line; a
@@ -993,6 +996,8 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           // call_me_back (the pre-per-user-number termination behavior).
           callSid: session.callSid ?? callSid,
           dialActionUrl: buildDialResultUrl(deps.publicBaseUrl, sessionId),
+          // The cascade of an emergency-class (screened) leg stays screened.
+          ...(screenedLeg ? { screenHandoff: true } : {}),
         });
 
         if (result.transfer) {

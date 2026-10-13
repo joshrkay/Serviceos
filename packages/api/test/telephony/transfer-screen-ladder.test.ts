@@ -143,12 +143,14 @@ async function harness() {
   };
   /** The dispatcher (child) leg: its `To` is the dispatcher's number. */
   const childLeg = { CallSid: 'CA-child', ParentCallSid: 'CA-parent', AccountSid: 'AC_sub', To: DISPATCHER, Called: DISPATCHER };
-  const pickUp = () => signedPost('/api/telephony/whisper/esc_1', childLeg);
+  // An emergency leg's screen URL, as the call control builds it (whisper + sid).
+  const pickUp = () => signedPost(`/api/telephony/whisper/esc_1?sid=${encodeURIComponent(session.id)}`, childLeg);
   const press = (digit: string) =>
     signedPost('/api/telephony/whisper/esc_1/accept', { ...childLeg, Digits: digit });
   /** The parent call's Dial action: its `To` is the tenant's DID. */
   const dialResult = (status: string) =>
-    signedPost(`/api/telephony/dial-result?sid=${encodeURIComponent(session.id)}`, {
+    // An emergency-class (screened) leg's action carries `screen=1`.
+    signedPost(`/api/telephony/dial-result?sid=${encodeURIComponent(session.id)}&screen=1`, {
       CallSid: 'CA-parent',
       DialCallStatus: status,
       From: '+15125550100',
@@ -172,9 +174,14 @@ async function harness() {
   return { session, sendSms, queue, runLadderStep, pickUp, press, dialResult, fetchScreen, pressOn };
 }
 
-/** A Dial leg exactly as the cascade / P12-004 / business-line producers build it: no whisper text. */
+/**
+ * An EMERGENCY leg with no whisper text, exactly as the emergency producers
+ * build it (the screened cascade / P12-004 / an emergency business-line leg):
+ * `screenHandoff` set, no summary.
+ */
 async function unscreenedProducerDial(sessionId: string): Promise<string> {
   const result = await escalateToHuman({
+    screenHandoff: true,
     tenantId: TENANT,
     sessionId,
     reason: 'emergency_dispatch',

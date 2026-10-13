@@ -3169,6 +3169,7 @@ export function createVoiceTurnProcessor(
         ...(transferNumber ? { transferNumber } : {}),
         ...(session.callSid ? { callSid: session.callSid } : {}),
         dialActionUrl: dialResultUrl(session.id),
+        ...(skillReason === 'emergency_dispatch' ? { screenHandoff: true } : {}),
         channelPreferences,
         dispatcherLanguage,
         buildSummary: buildEscalationSummary,

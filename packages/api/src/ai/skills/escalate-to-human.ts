@@ -228,6 +228,14 @@ export interface EscalateToHumanInput {
    * completes. Required when `callControl` is set.
    */
   dialActionUrl?: string;
+  /**
+   * Round-3 review of #1676 — press-1 screen the dialled leg (default OFF).
+   * Set ONLY by emergency-class producers (an `emergency_dispatch`
+   * notify_oncall, the P12-004 immediate dial, the /dial-result cascade of a
+   * screened leg): see `DialDispatcherOptions.screen`. Every other transfer
+   * is built exactly as before.
+   */
+  screenHandoff?: boolean;
   /** P11-002: spoken-message language. Defaults to 'en'. */
   language?: Language;
   /**
@@ -411,6 +419,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
     businessPhoneFallbackResolver,
     callSid,
     dialActionUrl,
+    screenHandoff,
     session,
     buildSummary,
     callerContext,
@@ -479,6 +488,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
             dialActionUrl ??
             `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
           ...(whisperUrl ? { whisperUrl } : {}),
+          ...(screenHandoff ? { screen: true } : {}),
         })
       : undefined;
 
@@ -597,6 +607,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
               actionUrl:
                 dialActionUrl ??
                 `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
+              ...(screenHandoff ? { screen: true } : {}),
             })
           : undefined;
         await recordAuditBestEffort(
@@ -729,6 +740,7 @@ export async function escalateToHuman(input: EscalateToHumanInput): Promise<Esca
           {
             actionUrl: dialActionUrl ?? `/api/telephony/dial-result?sid=${encodeURIComponent(sessionId)}`,
             ...(whisperUrl ? { whisperUrl } : {}),
+            ...(screenHandoff ? { screen: true } : {}),
           },
         )
       : undefined;
@@ -893,6 +905,8 @@ export async function emergencyImmediateDial(
   const escalation = await escalateToHuman({
     ...escalateInput,
     reason: 'emergency_dispatch',
+    // An emergency: a voicemail must never "answer" it (press-1 screen).
+    screenHandoff: true,
   });
 
   // Audit — every immediate-Dial decision is recorded, regardless of

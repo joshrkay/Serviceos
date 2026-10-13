@@ -90,13 +90,13 @@ describe('GET /api/telephony/whisper/:escalationId — tenant check (#1084)', ()
     return request(app).get(path).set('X-Twilio-Signature', sig);
   }
 
-  it("tenant A's own credential fetching tenant B's escalation gets only the generic screen", async () => {
+  it("tenant A's own credential fetching tenant B's escalation gets the empty whisper", async () => {
     const cache = new WhisperCache();
     cache.set('esc_b', 'Incoming call from a B customer.', TENANT_B);
     const res = await signedGet(build(cache), 'esc_b', 'ACaaaa', 'token-a');
 
     expect(res.status).toBe(200);
-    expect(res.text).toContain('Press 1 to accept this call.');
+    expect(res.text).toContain('<Response/>');
     expect(res.text).not.toContain('B customer');
   });
 
@@ -241,7 +241,8 @@ describe('whisper screen — press 1 to accept (H1)', () => {
   it('the screen prompts FIRST, gives the summary, re-prompts once, and only then hangs the leg up (M-a)', async () => {
     const cache = new WhisperCache();
     cache.set('esc_s', 'Emergency call: basement flooding.', TENANT_A, { sessionId: 'sess-1' });
-    const res = await signed(build(cache), '/api/telephony/whisper/esc_s', {
+    // An emergency-class leg's screen URL (the call control adds `?sid=`).
+    const res = await signed(build(cache), '/api/telephony/whisper/esc_s?sid=sess-1', {
       AccountSid: 'ACaaaa',
       CallSid: 'CA-child',
     });

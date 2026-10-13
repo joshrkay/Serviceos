@@ -72,16 +72,17 @@ function queryString(req: Request, key: string): string | undefined {
  * plays in THEIR ear before the caller is connected. The caller hears
  * standard ring + hold during this window.
  *
- * H1 / H1-R — it is ALWAYS a press-1 SCREEN: a carrier voicemail answering
+ * H1 / H1-R — for an EMERGENCY-CLASS leg (its URL carries `?sid=`, see
+ * DialDispatcherOptions.screen) it is a press-1 SCREEN: a carrier voicemail answering
  * looks exactly like a person to Twilio, and treating that as "answered"
  * silenced the emergency page ladder for a real unanswered emergency. The
  * prompt comes FIRST (M-a), then the summary when the escalation has one,
  * then the prompt again; a second Gather re-prompts once; only a keypress
  * (POST …/accept) connects and marks the hand-off answered. No keypress →
  * `<Hangup/>` ends the dialled leg, the caller is not bridged to a mailbox,
- * and /dial-result continues the cascade. Every Dial leg points here (the
- * call control derives it); `screen` (no cache entry) and a cache miss serve
- * the generic screen, still bound to the session through `?sid=`.
+ * and /dial-result continues the cascade. `screen` (no cache entry) and a
+ * cache miss serve the generic screen, still bound to the session through
+ * `?sid=`. Any other leg (no `sid`) gets the plain whisper, as it always did.
  *
  * Never a 404 or a 403 — an error on this URL risks dropping the call.
  *
@@ -111,6 +112,22 @@ export function whisperRouter(deps: WhisperRouterDeps): Router {
   // so a POST is answered by the very same handler.
   const serveScreen = (req: Request, res: Response): void => {
     const { escalationId, entry, sessionId } = resolve(req);
+    res.set('Content-Type', 'text/xml; charset=utf-8');
+    // Round-3 — only an emergency-class leg is screened, and only its URL is
+    // session-bound (`?sid=`). Every other leg gets the plain whisper exactly
+    // as before (an empty <Response/> when there is none to give).
+    if (!queryString(req, 'sid')) {
+      const text = entry?.text;
+      const voiceAttr = deps.voice ? ` voice="${xmlEscape(deps.voice)}"` : '';
+      res
+        .status(200)
+        .send(
+          text
+            ? `<?xml version="1.0" encoding="UTF-8"?><Response><Say${voiceAttr}>${xmlEscape(text)}</Say></Response>`
+            : EMPTY_RESPONSE,
+        );
+      return;
+    }
     const copy = SCREEN_COPY[entry?.language === 'es' ? 'es' : 'en'];
     const base = (deps.publicBaseUrl?.() ?? '').replace(/\/+$/, '');
     const acceptUrl =
@@ -120,7 +137,6 @@ export function whisperRouter(deps: WhisperRouterDeps): Router {
     const say = (text: string): string => `<Say${voiceAttr}>${xmlEscape(text)}</Say>`;
     const gather = (inner: string): string =>
       `<Gather numDigits="1" timeout="${WHISPER_SCREEN_TIMEOUT_SECONDS}" action="${xmlEscape(acceptUrl)}" method="POST">${inner}</Gather>`;
-    res.set('Content-Type', 'text/xml; charset=utf-8');
     res
       .status(200)
       .send(

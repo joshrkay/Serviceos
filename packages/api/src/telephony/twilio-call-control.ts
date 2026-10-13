@@ -64,6 +64,18 @@ export interface DialDispatcherOptions {
    * The value is XML-escaped before insertion into the TwiML document.
    */
   whisperUrl?: string;
+  /**
+   * Round-3 review of #1676 — press-1 SCREEN this leg (default OFF). Set by
+   * the EMERGENCY-CLASS producers only (E2/emergency escalations, the P12-004
+   * immediate dial, the vulnerable-caller patches, and the /dial-result
+   * cascade of a screened leg): a carrier voicemail must never "answer" an
+   * emergency and silence the page ladder. The leg's `<Number url>` becomes a
+   * session-bound screen and the action is marked `screen=1`, so /dial-result
+   * requires the keypress before it stamps `transferred`. Unset, the Dial is
+   * byte-for-byte what it always was (ordinary transfers to IVR-fronted
+   * numbers / untrained receptionists keep working).
+   */
+  screen?: boolean;
 }
 
 /**
@@ -162,26 +174,28 @@ const DIAL_RESULT_PATH = '/api/telephony/dial-result';
 const GENERIC_SCREEN_PATH = '/api/telephony/whisper/screen';
 
 /**
- * H1-R (round-2 review of #1676) — the `<Number url>` of a Dial leg.
- *
- * A carrier voicemail answering looks exactly like a person to Twilio, so a
- * hand-off only counts as answered once a person presses 1 on the screen the
- * whisper route serves. EVERY leg whose action is `/dial-result` (rotation,
- * transfer number, business line, P12-004 immediate dial, the /dial-result
- * cascade, the vulnerable-caller and owner-cell patches) is screened: the
- * producer's whisper when it has one, else the generic screen — both carrying
- * the session (`sid`) the press-1 acceptance belongs to. Derived here, the one
- * place every Dial is built, so no producer can ship an unscreened leg. Any
- * other action keeps the producer's whisper (or none).
+ * H1-R / round-3 — the press-1 screen URL of a SCREENED leg: the producer's
+ * whisper (when it has one) or the generic screen, both carrying the session
+ * (`sid`, from the /dial-result action) the keypress is recorded for. Only a
+ * leg whose action is /dial-result with a `sid` can be screened.
  */
 function screenUrlFor(actionUrl: string, whisperUrl: string | undefined): string | undefined {
   const queryAt = actionUrl.indexOf('?');
   const path = queryAt === -1 ? actionUrl : actionUrl.slice(0, queryAt);
-  if (!path.endsWith(DIAL_RESULT_PATH)) return whisperUrl;
+  if (!path.endsWith(DIAL_RESULT_PATH)) return undefined;
   const sid = new URLSearchParams(queryAt === -1 ? '' : actionUrl.slice(queryAt + 1)).get('sid');
-  if (!sid) return whisperUrl;
+  if (!sid) return undefined;
   const base = whisperUrl ?? `${path.slice(0, -DIAL_RESULT_PATH.length)}${GENERIC_SCREEN_PATH}`;
   return `${base}${base.includes('?') ? '&' : '?'}sid=${encodeURIComponent(sid)}`;
+}
+
+/**
+ * Mark a screened leg's /dial-result action, so that route knows THIS leg
+ * required a person's keypress (and cascades a screened next leg) — carried
+ * in our own URL (signed by Twilio's request signature), not inferred.
+ */
+function markScreened(actionUrl: string): string {
+  return `${actionUrl}${actionUrl.includes('?') ? '&' : '?'}screen=1`;
 }
 
 // ─── Default implementation ──────────────────────────────────────────────────
@@ -209,13 +223,17 @@ export class DefaultTwilioCallControl implements TwilioCallControl {
     const callerIdAttr = opts.callerId
       ? ` callerId="${xmlEscape(opts.callerId)}"`
       : '';
-    // Twilio fetches `<Number url>` with POST unless told otherwise; the
-    // whisper route is served for GET, and a failed fetch at the moment the
-    // dispatcher answers risks dropping the call — so the method is explicit.
-    // H1-R — every /dial-result leg gets the press-1 SCREEN (the whisper, or a
-    // generic one when the producer had no whisper text), bound to its session.
-    const screenUrl = screenUrlFor(opts.actionUrl, opts.whisperUrl);
-    const whisperAttr = screenUrl ? ` url="${xmlEscape(screenUrl)}" method="GET"` : '';
+    // A screened leg (emergency-class producers only) points `<Number url>`
+    // at the session-bound press-1 screen, fetched with an explicit GET; an
+    // unscreened leg keeps its plain whisper exactly as before (Twilio's
+    // default POST is served by the whisper route too).
+    const screenUrl = opts.screen === true ? screenUrlFor(opts.actionUrl, opts.whisperUrl) : undefined;
+    const actionUrl = screenUrl ? markScreened(opts.actionUrl) : opts.actionUrl;
+    const whisperAttr = screenUrl
+      ? ` url="${xmlEscape(screenUrl)}" method="GET"`
+      : opts.whisperUrl
+        ? ` url="${xmlEscape(opts.whisperUrl)}"`
+        : '';
 
     // The dispatcher number is wrapped in <Number> so Twilio's verb
     // parser handles E.164 cleanly. Both `dispatcherPhone` and
@@ -224,7 +242,7 @@ export class DefaultTwilioCallControl implements TwilioCallControl {
     return (
       `<?xml version="1.0" encoding="UTF-8"?>` +
       `<Response>` +
-      `<Dial timeout="${timeout}" action="${xmlEscape(opts.actionUrl)}" method="POST"${callerIdAttr}>` +
+      `<Dial timeout="${timeout}" action="${xmlEscape(actionUrl)}" method="POST"${callerIdAttr}>` +
       `<Number${whisperAttr}>${xmlEscape(dispatcherPhone)}</Number>` +
       `</Dial>` +
       `</Response>`

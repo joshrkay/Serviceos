@@ -332,9 +332,24 @@ describe('realtime hand-off — escalation on a stream call reaches a human', ()
     expect(h.session.terminalOutcome).toBeUndefined();
   });
 
-  it("the delivered Dial's whisper screen is tied to this session (H1: its press-1 marks THIS hand-off)", async () => {
+  it("stream: an EMERGENCY hand-off's delivered Dial is screened and tied to this session (H1)", async () => {
     const whisperCache = new WhisperCache();
     const h = await harness({ whisperCache });
+
+    h.deepgram.emit({ type: 'partial', transcript: 'my basement is flooding', confidence: 0.9, isFinal: false });
+    await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
+    h.ws.ackAllMarks(h.streamSid);
+    await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
+
+    const twiml = h.twilio.transfers()[0].body.get('Twiml')!;
+    expect(twiml).toContain('screen=1');
+    const escalationId = /\/api\/telephony\/whisper\/([^"?]+)\?sid=[^"]+" method="GET"/.exec(twiml)?.[1];
+    expect(escalationId).toBeDefined();
+    expect(whisperCache.get(escalationId!)).toMatchObject({ tenantId: TENANT, sessionId: h.session.id });
+  });
+
+  it('stream: a non-emergency hand-off ("I want a person") is delivered unscreened — main\'s Dial bytes', async () => {
+    const h = await harness();
 
     h.say('I want to speak to a person');
     await vi.waitFor(() => expect(h.ws.markNames().some((n) => n.startsWith('silence-arm-'))).toBe(true));
@@ -342,9 +357,9 @@ describe('realtime hand-off — escalation on a stream call reaches a human', ()
     await vi.waitFor(() => expect(h.twilio.transfers()).toHaveLength(1));
 
     const twiml = h.twilio.transfers()[0].body.get('Twiml')!;
-    const escalationId = /\/api\/telephony\/whisper\/([^"?]+)\?sid=[^"]+" method="GET"/.exec(twiml)?.[1];
-    expect(escalationId).toBeDefined();
-    expect(whisperCache.get(escalationId!)).toMatchObject({ tenantId: TENANT, sessionId: h.session.id });
+    expect(twiml.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, '<uuid>')).toBe(
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Dial timeout="20" action="https://api.test/api/telephony/dial-result?sid=<uuid>" method="POST"><Number url="https://api.test/api/telephony/whisper/esc_<uuid>">+15125550101</Number></Dial></Response>',
+    );
   });
 
   it('Twilio ending the stream while the transfer request is in flight is not stamped as a hang-up', async () => {
