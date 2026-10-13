@@ -90,9 +90,31 @@ export function validateAgainstBase(branchKeys: string[], baseKeys: string[]): s
   return violations;
 }
 
+/**
+ * The `git fetch` that refreshes origin/main. `--depth=1` only on an
+ * already-shallow clone (CI's checkout): on a FULL clone a depth-limited fetch
+ * writes `.git/shallow`, which every worktree of that clone shares, so
+ * `origin/main..HEAD` and merge-base silently stop at the grafted commit in
+ * every worktree on the machine.
+ */
+export function baseFetchArgs({ isShallowRepository }: { isShallowRepository: boolean }): string[] {
+  return isShallowRepository ? ['fetch', '--depth=1', 'origin', 'main'] : ['fetch', 'origin', 'main'];
+}
+
+function isShallowRepository(): boolean {
+  try {
+    return (
+      execFileSync('git', ['rev-parse', '--is-shallow-repository'], { encoding: 'utf8' }).trim() === 'true'
+    );
+  } catch {
+    // Unknown → treat as a full clone: a plain fetch can never truncate history.
+    return false;
+  }
+}
+
 function baseSchemaSource(): string | null {
   try {
-    execFileSync('git', ['fetch', '--depth=1', 'origin', 'main'], { stdio: 'ignore' });
+    execFileSync('git', baseFetchArgs({ isShallowRepository: isShallowRepository() }), { stdio: 'ignore' });
   } catch {
     // offline / no remote — fall through; git show may still hit a local ref
   }
