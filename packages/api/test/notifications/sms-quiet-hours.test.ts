@@ -111,6 +111,20 @@ describe('GatedMessageDelivery — recipient quiet hours', () => {
   });
 });
 
+describe('GatedMessageDelivery — quiet hours in warn mode', () => {
+  it('a deferred attempt writes no would-block audit row (one row per real send, not per retry)', async () => {
+    const { gate, base, auditRepo } = build({ now: new Date('2026-10-14T05:30:00Z'), enforcement: 'warn' });
+
+    const err = await gate
+      .sendSms(customerText({ quietHours: 'defer', consent: { smsConsent: false, customerId: 'cust-1' } }))
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SmsDeferredError);
+    expect(base.sentSms).toHaveLength(0);
+    expect(auditRepo.getAll()).toHaveLength(0);
+  });
+});
+
 describe('GatedMessageDelivery — stricter state windows (FL / OK / MD / WA close at 20:00)', () => {
   // 2026-10-14T00:30Z = 20:30 EDT on Oct 13.
   const EVENING = new Date('2026-10-14T00:30:00Z');

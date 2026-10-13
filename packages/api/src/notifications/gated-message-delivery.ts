@@ -334,7 +334,10 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
     const reason = await this.evaluate(message);
     if (reason) {
       if (this.deps.enforcement === 'warn') {
-        // Would block, but warn mode only observes — audit then send.
+        // Would block, but warn mode only observes — audit then send. A send
+        // the window defers is not a send: check it first, so a text retried
+        // all night is audited once, when it actually goes.
+        await this.deferOutsideSendWindow(message);
         await this.audit('sms.suppressed-would-block', reason, message);
         return this.sendWithinVolumeCap(message);
       }
