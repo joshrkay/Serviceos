@@ -40,6 +40,7 @@ function buildFileDeps(): { fileRepo: InMemoryFileRepository; storage: StoragePr
     sizeBytes: 1024,
     storageBucket: 'voice',
     storageKey: `${TENANT_ID}/file-1/voice.m4a`,
+    entityType: 'voice_recording',
     uploadedBy: 'user-1',
     createdAt: new Date(),
     updatedAt: new Date(),

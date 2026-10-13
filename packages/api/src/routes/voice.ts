@@ -607,6 +607,19 @@ export function createVoiceRouter(
           res.status(404).json({ error: 'NOT_FOUND', message: 'Recording audio file not found' });
           return null;
         }
+        // H2 review M2 — only the caller's own memo upload (what web and
+        // mobile request via /api/files/upload-url: entityType
+        // 'voice_recording', uploadedBy = this user). The Twilio webhooks
+        // write voice_recording files too; re-posting one would launder
+        // caller audio into a trusted 'inapp_voice' operator memo and skip
+        // the voicemail caller-ID / STIR gate.
+        if (file.entityType !== 'voice_recording' || file.uploadedBy !== req.auth!.userId) {
+          res.status(403).json({
+            error: 'RECORDING_FILE_NOT_OWNED',
+            message: 'Recording file must be your own voice memo upload',
+          });
+          return null;
+        }
         if (!isAllowedMimeType(file.contentType)) {
           res.status(409).json({
             error: 'INVALID_RECORDING_AUDIO',

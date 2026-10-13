@@ -44,6 +44,13 @@ function fileDeps(pool: Pool) {
   return { fileRepo: new PgFileRepository(pool), storage: fakeStorage };
 }
 
+/** H2 review M2 — the route accepts only the caller's own memo upload. */
+async function createVoiceMemoFile(pool: Pool, tenantId: string, userId: string): Promise<string> {
+  const id = await createTestFile(pool, tenantId, userId);
+  await pool.query(`UPDATE files SET entity_type = 'voice_recording' WHERE id = $1`, [id]);
+  return id;
+}
+
 interface TestApp {
   app: express.Express;
   queue: InMemoryQueue;
@@ -83,7 +90,7 @@ describe('Postgres integration — voice create idempotency (U11)', () => {
   beforeAll(async () => {
     pool = await getSharedTestDb();
     tenant = await createTestTenant(pool);
-    fileId = await createTestFile(pool, tenant.tenantId, tenant.userId);
+    fileId = await createVoiceMemoFile(pool, tenant.tenantId, tenant.userId);
   });
 
   afterAll(async () => {
@@ -199,7 +206,7 @@ describe('Postgres integration — voice create idempotency (U11)', () => {
 
   it('tenant-isolates the key: the same value in two tenants → two independent rows', async () => {
     const other = await createTestTenant(pool);
-    const otherFileId = await createTestFile(pool, other.tenantId, other.userId);
+    const otherFileId = await createVoiceMemoFile(pool, other.tenantId, other.userId);
     const appA = buildApp(pool, tenant.tenantId, tenant.userId);
     const appB = express();
     appB.use(express.json());
@@ -250,6 +257,24 @@ describe('Postgres integration — voice create idempotency (U11)', () => {
       .send({ fileId: otherFileId, audioUrl: 'http://169.254.169.254/latest/meta-data/', idempotencyKey: key });
 
     expect(res.status).toBe(404);
+    expect(await countRows(tenant.tenantId, key)).toBe(0);
+    expect(queue.size()).toBe(0);
+  });
+
+  it('H2 review M2 — a same-tenant voicemail file (real uploaded_by/entity_type columns) is refused: 403, no row, no job', async () => {
+    const voicemailFileId = await createTestFile(pool, tenant.tenantId, tenant.userId);
+    await pool.query(
+      `UPDATE files SET entity_type = 'voice_recording', uploaded_by = 'voicemail_webhook' WHERE id = $1`,
+      [voicemailFileId],
+    );
+    const { app, queue } = buildApp(pool, tenant.tenantId, tenant.userId);
+    const key = `voicemail-file-${crypto.randomUUID()}`;
+
+    const res = await request(app)
+      .post('/api/voice/recordings')
+      .send({ fileId: voicemailFileId, audioUrl: 'https://files.example.test/vm.mp3', idempotencyKey: key });
+
+    expect(res.status).toBe(403);
     expect(await countRows(tenant.tenantId, key)).toBe(0);
     expect(queue.size()).toBe(0);
   });

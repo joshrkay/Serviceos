@@ -45,6 +45,10 @@ function audioFile(overrides: Partial<FileRecord> = {}): FileRecord {
     sizeBytes: 1024,
     storageBucket: 'voice',
     storageKey: `${TENANT}/${FILE}/memo.m4a`,
+    // What /api/files/upload-url writes for web (AssistantPage, VoiceBar)
+    // and mobile (uploadAndTranscribe): entityType 'voice_recording',
+    // uploadedBy = the authenticated caller's userId.
+    entityType: 'voice_recording',
     uploadedBy: 'tech-h2',
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -132,6 +136,29 @@ describe('H2 — POST /api/voice/recordings selects audio from server-owned reco
     expect(generateDownloadUrl).toHaveBeenCalledWith('voice', `${TENANT}/${FILE}/memo.m4a`);
     const jobs = await queue.receiveBatch<Record<string, unknown>>(10);
     expect(jobs.map((j) => j.payload.audioUrl)).toEqual([SERVER_URL]);
+  });
+
+  it.each([
+    // The Twilio webhooks write voice_recording rows too (voice-service.ts),
+    // with a non-user uploader: caller audio must not become an operator memo.
+    ['a voicemail recording', audioFile({ uploadedBy: 'voicemail_webhook' })],
+    ['an inbound-call recording', audioFile({ uploadedBy: 'twilio-recording-webhook' })],
+    ["another user's memo upload", audioFile({ uploadedBy: 'other-tech' })],
+    ['an audio file uploaded for something else', audioFile({ entityType: 'job', entityId: 'job-1' })],
+    ['an audio file with no entity type', audioFile({ entityType: undefined })],
+  ])('403s and enqueues nothing when fileId is %s', async (_label, seeded) => {
+    const { app, queue, voiceRepo, generateDownloadUrl } = await harness([seeded]);
+    const create = vi.spyOn(voiceRepo, 'create');
+
+    const response = await request(app)
+      .post('/api/voice/recordings')
+      .send({ fileId: FILE, audioUrl: 'https://storage.example.test/memo.m4a' });
+
+    expect(response.status).toBe(403);
+    expect(response.body.error).toBe('RECORDING_FILE_NOT_OWNED');
+    expect(create).not.toHaveBeenCalled();
+    expect(generateDownloadUrl).not.toHaveBeenCalled();
+    expect(await queue.receiveBatch(10)).toHaveLength(0);
   });
 
   it('503s and enqueues nothing when no storage is wired to mint the URL', async () => {
