@@ -61,8 +61,9 @@ export function scrubPii(text: string): string {
     );
 }
 
-const callKey = (r: { tenantId: string; callSid: string; sessionId: string }) =>
-  `${r.tenantId}\u0000${r.callSid}\u0000${r.sessionId}`;
+// The voice session id identifies one call leg; `audit_events` rows may carry no
+// callSid (in-app sessions), so the join key is tenant + session only.
+const callKey = (r: { tenantId: string; sessionId: string }) => `${r.tenantId}\u0000${r.sessionId}`;
 
 export async function extractFrustrationUtterances(
   source: UtteranceSource,

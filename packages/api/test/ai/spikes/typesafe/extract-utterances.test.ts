@@ -83,6 +83,17 @@ describe('extractFrustrationUtterances', () => {
     expect(rows.find((r) => r.text === 'first call')?.firedBaseline).toBe(false);
   });
 
+  it('joins on tenant + session even when the audit event carries no callSid', async () => {
+    const turns = [turn({ callSid: 'CA1', sessionId: 's1', text: 'where is the tech', at: 1_000 })];
+    const events: FrustrationEvent[] = [
+      { tenantId: 't1', callSid: '', sessionId: 's1', source: 'keyword', at: 1_500 },
+    ];
+
+    const rows = await extractFrustrationUtterances(sourceOf(turns, events), window);
+
+    expect(rows).toEqual([{ text: 'where is the tech', firedBaseline: true, eventSource: 'keyword' }]);
+  });
+
   it('keeps every fired turn when capping and fills the rest with a seeded sample of the others', async () => {
     const turns = Array.from({ length: 50 }, (_, i) =>
       turn({ callSid: `CA${i}`, sessionId: `s${i}`, text: `utterance ${i}`, at: 1_000 + i })
