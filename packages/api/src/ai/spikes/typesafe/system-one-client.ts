@@ -21,7 +21,7 @@ export interface SystemOneAnswer {
 }
 
 export interface SystemOneClient {
-  systemOne(req: SystemOneRequest): Promise<{ answers: Record<string, SystemOneAnswer> }>;
+  systemOne(req: SystemOneRequest): Promise<{ answers: Record<string, SystemOneAnswer | undefined> }>;
 }
 
 export const SPIKE_MODEL = 'jev-latest';

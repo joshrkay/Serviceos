@@ -1,13 +1,13 @@
 /**
- * Offline spike runner:  npx tsx src/ai/spikes/typesafe/run-spike.ts
+ * Offline spike runner:  npx tsx scripts/typesafe-spike/run-spike.ts
  * Always scores the production baselines. Adds the TypeSafe judges only when
  * TYPESAFE_API_KEY is set (this sends the sample utterances to api.typesafe.ai).
  */
-import { evaluateBinaryJudge, type BinaryEvalReport, type BinaryJudge } from './eval-harness';
-import { baselineFrustrationJudge, typesafeFrustrationJudge } from './frustration-judges';
-import { baselineComplexityJudge, typesafeComplexityJudge } from './complexity-judges';
-import { COMPLEXITY_SAMPLES, FRUSTRATION_SAMPLES } from './fixtures';
-import { createHttpSystemOneClient } from './http-client';
+import { evaluateBinaryJudge, type BinaryEvalReport, type BinaryJudge } from '../../src/ai/spikes/typesafe/eval-harness';
+import { baselineFrustrationJudge, typesafeFrustrationJudge } from '../../src/ai/spikes/typesafe/frustration-judges';
+import { baselineComplexityJudge, typesafeComplexityJudge } from '../../src/ai/spikes/typesafe/complexity-judges';
+import { COMPLEXITY_SAMPLES, FRUSTRATION_SAMPLES } from '../../src/ai/spikes/typesafe/fixtures';
+import { createHttpSystemOneClient } from '../../src/ai/spikes/typesafe/http-client';
 
 function show(name: string, r: BinaryEvalReport): void {
   const c = r.confusion;

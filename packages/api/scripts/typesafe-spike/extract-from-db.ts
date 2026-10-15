@@ -2,7 +2,7 @@
  * Extract scrubbed caller utterances from a NON-PRODUCTION database for the
  * TypeSafe frustration spike. Read-only (see pg-source.ts).
  *
- *   DATABASE_URL=postgres://...staging... npx tsx src/ai/spikes/typesafe/extract-from-db.ts \
+ *   DATABASE_URL=postgres://...staging... npx tsx scripts/typesafe-spike/extract-from-db.ts \
  *     --tenant <uuid> --from 2026-09-15 --to 2026-10-15 --out utterances.txt \
  *     --confirm-non-prod [--limit 400] [--seed 1]
  *
@@ -11,8 +11,8 @@
  */
 import { writeFileSync } from 'node:fs';
 import { Pool } from 'pg';
-import { extractFrustrationUtterances, toUtterancesFile } from './extract-utterances';
-import { PgUtteranceSource } from './pg-source';
+import { extractFrustrationUtterances, toUtterancesFile } from '../../src/ai/spikes/typesafe/extract-utterances';
+import { PgUtteranceSource } from '../../src/ai/spikes/typesafe/pg-source';
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);

@@ -10,9 +10,8 @@ const FRUSTRATION_INSTRUCTIONS =
   'Is the caller frustrated, angry, or asking to speak to a human instead of the automated assistant?';
 
 /** Today's production rule, wrapped as a judge so it can be compared. */
-export const baselineFrustrationJudge: BinaryJudge = async (text) => ({
-  positive: detectFrustration(text).matched,
-});
+export const baselineFrustrationJudge: BinaryJudge = (text) =>
+  Promise.resolve({ positive: detectFrustration(text).matched });
 
 export function typesafeFrustrationJudge(
   client: SystemOneClient,

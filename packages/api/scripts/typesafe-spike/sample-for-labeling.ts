@@ -1,7 +1,7 @@
 /**
  * Build a human-labeling sheet from real (SCRUBBED) utterances.
  *
- *   TYPESAFE_API_KEY=... npx tsx src/ai/spikes/typesafe/sample-for-labeling.ts \
+ *   TYPESAFE_API_KEY=... npx tsx scripts/typesafe-spike/sample-for-labeling.ts \
  *     --kind frustration --input utterances.txt --out sheet.csv [--agreements 30] [--seed 1] [--threshold 0.5]
  *
  * input: one utterance per line (blank lines ignored), or JSONL with a "text" field.
@@ -9,9 +9,9 @@
  * Only `--kind frustration` is wired: complexity has no binary ground truth until outcomes are labeled.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
-import { buildLabelingSheet, toCsv, type JudgedRow } from './labeling-sheet';
-import { baselineFrustrationJudge, typesafeFrustrationJudge } from './frustration-judges';
-import { createHttpSystemOneClient } from './http-client';
+import { buildLabelingSheet, toCsv, type JudgedRow } from '../../src/ai/spikes/typesafe/labeling-sheet';
+import { baselineFrustrationJudge, typesafeFrustrationJudge } from '../../src/ai/spikes/typesafe/frustration-judges';
+import { createHttpSystemOneClient } from '../../src/ai/spikes/typesafe/http-client';
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);

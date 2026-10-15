@@ -17,9 +17,8 @@ export interface ScoreVerdict extends BinaryVerdict {
 }
 
 /** Today's production rule (word count / context size), wrapped as a judge. */
-export const baselineComplexityJudge: BinaryJudge = async (text) => ({
-  positive: classifyComplexity({ message: text }) === 'complex',
-});
+export const baselineComplexityJudge: BinaryJudge = (text) =>
+  Promise.resolve({ positive: classifyComplexity({ message: text }) === 'complex' });
 
 export function typesafeComplexityJudge(
   client: SystemOneClient,
