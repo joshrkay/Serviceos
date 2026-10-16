@@ -591,7 +591,17 @@ flowchart LR
     voice is visible.
   - `packages/api/src/routes/onboarding.ts` — `POST /voice/preview` synthesises the greeting
     through the same provider, cached by (preset, greeting hash), short TTL; stamps
-    `voice_preview_at` on first success. `packages/api/src/routes/settings.ts` —
+    `voice_preview_at` **together with `voice_preview_persona_hash`**, a hash of the
+    previewed (voice preset, greeting, agent name, style) tuple, on every success. The proof
+    is bound to that hash, not to a first-ever success: `PUT /api/settings/voice-persona`
+    recomputes the hash of what it is about to save and, when it differs from
+    `voice_preview_persona_hash`, clears `voice_preview_at` in the same write (the wizard's
+    `voice_preview` step regresses to incomplete), so the go-live guard that checks
+    `voice_preview_at` is checking that the *currently saved* persona was heard; a save
+    whose hash matches keeps the proof. `test/routes/onboarding.voice-preview.test.ts` pins
+    that saving a different voice, greeting, name or style after a successful preview clears
+    the proof and the guard blocks, and that saving the previewed persona keeps it.
+    `packages/api/src/routes/settings.ts` —
     `PUT /api/settings/voice-persona` (owner, audited `tenant.voice_persona_set`).
   - `packages/web/src/components/onboarding/v2/steps/VoiceStep.tsx` (replaces `AiCheckStep.tsx`;
     preview button, name, greeting, style; the readiness probe stays as its footer),
@@ -1072,7 +1082,8 @@ flowchart LR
      sets `forwarding_verified_at` when `ForwardedFrom` matches a registered line).
      `voice/go-live.ts` — delete `maybeAutoGoLiveOnInboundEnd` and its `app.ts` wiring; the
      only caller of `enableVoiceAgentLive` is `POST /api/voice/go-live` from the `go_live` step;
-     `enableVoiceAgentLive` checks subscription, `full_readiness`, `voice_preview_at`, **a
+     `enableVoiceAgentLive` checks subscription, `full_readiness`, `voice_preview_at` (set
+     only while `voice_preview_persona_hash` matches the saved persona — U3), **a
      non-empty `transfer_targets.emergency` whose every entry is E.164 and not a provisioned
      tenant DID** (the `emergency_target_missing` blocker from U7, re-evaluated against the
      stored list at the moment of the call — `full_readiness` covers only Twilio provisioning
@@ -1478,9 +1489,12 @@ flowchart LR
     'voice_outbound'`, `customerId`, `callback_job_id`, `consent_event_id`,
     `twilio_account_sid`, `call_sid NULL`) —
     **`callback_job_id UUID NULL REFERENCES voice_callback_jobs(id)`, `consent_event_id
-    UUID NULL REFERENCES consent_events(id)` and `twilio_account_sid TEXT NULL` are three
-    new nullable columns on `voice_sessions`, declared in this unit's migration beside
-    `escalation_state`** — the account SID because the stream upgrade and `handleStart`
+    UUID NULL REFERENCES consent_events(id)`, `twilio_account_sid TEXT NULL` and
+    `answered_at TIMESTAMPTZ NULL` are four new nullable columns on `voice_sessions`,
+    declared in this unit's migration beside `escalation_state`** — `answered_at` because
+    the terminal-status handler below needs a durable record that the answer path ran, and
+    neither the CallSid binding nor `dial_state` can serve (an `initiated` status writes
+    both exactly as the answer does); the account SID because the stream upgrade and `handleStart`
     both require the runtime session to be bound to the account that owns the call
     (`twilio-mediastream-server.ts:147-154`; `mediastream-adapter.ts:1346-1354` closes
     `authenticated_call_mismatch` when `session.twilioAccountSid` differs from the
@@ -1513,9 +1527,11 @@ flowchart LR
     write is only as good as the write, the conditional UPDATE also carries `AND tenant_id =
     $verifiedTenant` whenever a verified tenant exists, so a webhook signed with tenant A's
     credential cannot bind or end tenant B's session even if the guard were bypassed. The
-    route then binds the CallSid with that one conditional UPDATE: `SET call_sid = $CallSid WHERE id
-    = $session AND ended_at IS NULL AND (call_sid IS NULL OR call_sid = $CallSid) RETURNING
-    *` — `ended_at` being the column `voice_sessions` already has (`schema.ts:1808`, with the
+    route then binds the CallSid with that one conditional UPDATE: `SET call_sid = $CallSid,
+    answered_at = COALESCE(answered_at, NOW()) WHERE id = $session AND ended_at IS NULL AND
+    (call_sid IS NULL OR call_sid = $CallSid) RETURNING *` — `answered_at` written in the
+    same statement as the binding, so no replica or race can observe one without the other,
+    and `ended_at` being the column `voice_sessions` already has (`schema.ts:1808`, with the
     `voice_sessions_active` partial index on it) and the one `VoiceSessionRepository.markEnded`
     stamps (`voice/voice-session.ts:96`); no new closure column is introduced. One row → **register the runtime session before answering**, then return
     `<Connect><Stream>` for it. The persisted row alone is not enough to take the stream:
@@ -1614,12 +1630,20 @@ flowchart LR
     terminal events. **A correlated webhook proves Twilio placed the call; only a
     non-terminal one lets it proceed.** `initiated`, `ringing`, `in-progress` and
     `/outbound-answer` itself move `dial_state` to `confirmed`. A terminal status for a
-    session `/outbound-answer` never bound — `busy`, `no-answer`, `canceled`, `failed`, or a
-    `completed` that arrives with no answer having been streamed — is **final**, not a
+    session whose **`answered_at` is null** — `busy`, `no-answer`, `canceled`, `failed`, or
+    a `completed` that arrives before any answer was recorded — is **final**, not a
     confirmation: the handler ends the session through `markEnded` with `outcome =
     'failed'` and `ended_at`, marks the job terminal with `outcome` set to that status
     (`busy`, `no_answer`, `canceled`, `failed`) and `dial_state = 'confirmed'` (Twilio did
-    dial), audits it, and fires the one-time SMS fallback below. Without this the status
+    dial), audits it, and fires the one-time SMS fallback below. **The decision is made by
+    the database, not by in-memory state**: the finalising UPDATE is `… WHERE id = $session
+    AND answered_at IS NULL AND ended_at IS NULL`, so a `completed` that races the answer
+    route's own write, or lands on a replica that never saw the stream, affects zero rows
+    and does nothing — `answered_at` was written atomically with the CallSid binding, which
+    is why the marker exists and why `dial_state` (which `initiated` also moves) cannot
+    stand in for it. A `completed` for a session with `answered_at` set is the ordinary end
+    of an answered call and is left to the session's own end-of-call path, never to this
+    handler. Without this the status
     callback would bind the CallSid and the "still unbound" reconciliation would never
     close the row, leaving the job non-terminal, `ended_at` null and the customer who did
     not pick up with no text. The reconciliation job enqueued at +90 s — past Twilio's retry
@@ -1695,12 +1719,15 @@ flowchart LR
     'unconfirmed'`, then an `/outbound-status` `initiated` callback for that session moves it
     to `confirmed` and the call proceeds, or no correlated webhook by the reconcile job →
     session ended `failed`, job `dial_failed` / `dial_unconfirmed_expired`; a `no-answer`
-    status (and each of `busy`, `canceled`, `failed`, and `completed` with no answer
-    streamed) for a session `/outbound-answer` never bound → session ended `failed`, job
-    terminal with that outcome, the SMS fallback sent exactly once even when the status is
-    redelivered, and the reconcile job then finds nothing to do; `/outbound-answer`
+    status (and each of `busy`, `canceled`, `failed`, and `completed` arriving while
+    `answered_at` is null) → session ended `failed`, job terminal with that outcome, the SMS
+    fallback sent exactly once even when the status is redelivered, and the reconcile job
+    then finds nothing to do; a `completed` arriving after `/outbound-answer` wrote
+    `answered_at` — on the same replica, on another, or racing the socket teardown → the
+    finalising UPDATE affects zero rows, the session is left to its normal end, and no
+    fallback SMS is sent; `/outbound-answer`
     for an ended session → `<Hangup/>`, audit, no stream; the correlation columns
-    (`voice_sessions.callback_job_id`, `consent_event_id`, `twilio_account_sid`,
+    (`voice_sessions.callback_job_id`, `consent_event_id`, `twilio_account_sid`, `answered_at`,
     `voice_callback_jobs.outbound_session_id`, `dial_state`, `failure_reason`) are written
     and read back on real Postgres;
     the WS upgrade and `start` frame for the outbound CallSid resolve the hydrated runtime
