@@ -295,15 +295,21 @@ flowchart LR
     turnIndex, firstAudibleAt?, firstAudioAt?, replyGapMs? })`, an UPDATE keyed on the row's
     existing `(tenant_id, call_sid, session_id, turn_index)` upsert key, called from the
     adapter's first-frame branch (the same `awaitingFirstAudioFrame` branch that observes the
-    histogram) for `first_audio_at`/`reply_gap_ms` and from the filler-start branch for
-    `first_audible_at`. **The update is chained behind the insert, never raced against it:**
+    histogram) for `first_audio_at`/`reply_gap_ms`, and for `first_audible_at` from whichever
+    came first: the filler-start branch stamps it when a filler plays, and the real-frame
+    branch stamps it too when no filler was emitted (U3's cold or failed per-voice cache makes
+    fillerless turns normal, not exceptional), so `first_audible_at` is set on every turn that
+    produced any audio and equals `first_audio_at` on a fillerless one — the UPDATE uses
+    `first_audible_at = COALESCE(first_audible_at, $x)` so a filler stamp is never overwritten
+    by the later real frame. **The update is chained behind the insert, never raced against it:**
     `persistTurn` keeps the `recordTurn` promise per `turnIndex` on the session
     (`pendingTurnPersist`) and **retains it after it settles** — the normal order is insert
     resolved long before the first frame, so a settle-time delete would leave every ordinary
     turn with no promise to chain on. The entry is dropped only once both stamps for that
-    turn have run, or the turn is abandoned (barge-in discards the reply, session
-    termination), and the map is cleared with the session; it is bounded by the session's turn
-    count. The adapter's stamp call is
+    turn have run — in practice once the real-frame stamp has run, since that one carries
+    `first_audible_at` when no filler preceded it — or the turn is abandoned (barge-in discards
+    the reply, session termination), and the map is cleared with the session; it is bounded by
+    the session's turn count. The adapter's stamp call is
     `pendingTurnPersist.get(turnIndex).then(() => markReplyAudio(...))`, so both orders land:
     a cached or fast reply whose first frame beats a slow insert stamps after the row exists,
     and a reply whose insert resolved earlier chains on the already-settled promise.
@@ -336,7 +342,9 @@ flowchart LR
     `first_audio_at` null and is excluded; a first frame that arrives while the insert is still
     pending (delayed `recordTurn` promise) still stamps because the update is chained behind
     it; a first frame that arrives after the insert already resolved (the normal order) also
-    stamps, because the settled promise is retained until the stamps run; a zero-row update
+    stamps, because the settled promise is retained until the stamps run; a fillerless turn
+    gets `first_audible_at = first_audio_at` from the real frame and its map entry is released;
+    a filler followed by a real frame keeps the earlier filler stamp; a zero-row update
     increments `voice_reply_stamp_lost_total` and never inserts;
     a Gather turn leaves `first_audio_at`, `first_audible_at` and `reply_gap_ms` null and is
     excluded from the percentiles while counted in the Gather share).
@@ -708,8 +716,16 @@ flowchart LR
      `appointments.proposal_id UUID NULL` (index tenant + session), `appointments.is_test
      BOOLEAN NOT NULL DEFAULT FALSE` (no such column exists today; mapped in
      `appointments/pg-appointment.ts`; **set by the writers, never by verify**: the session
-     carries `testBooking: true` when it is a preview session or an attested owner call on a
-     not-yet-live tenant (the `voice-gate.ts` owner bypass is the signal); `resolveAndPlaceAppointmentHold`
+     carries `testBooking: true` when it is a preview session, or an attested owner call on a
+     tenant that is **in an uncompleted onboarding test**: `tenant_settings.test_booking_started_at`
+     set by `POST /api/onboarding/test-booking/start` (the wizard's "call this number now"
+     step, stamped with a 30-minute window), `test_booking_verified_at` null, and
+     `voice_first_live_at` null — a new column that `enableVoiceAgentLive` stamps once and
+     `pauseVoiceAgentLive` never clears. The `voice-gate.ts` owner bypass is **not** the
+     signal: `pauseVoiceAgentLive` (`voice/go-live.ts:71`) also nulls `voice_agent_live_at`, so
+     an attested owner calling a previously live, paused tenant takes the same bypass, and
+     keying on it would mark that owner's real booking `is_test`, swap in the wizard
+     customer, hide it from the board and cancel it at the next go-live; `resolveAndPlaceAppointmentHold`
      and both booking execution handlers copy that flag onto `appointments.is_test` and the
      provisional job, and the wizard's `test_customer_id` is substituted for the caller's
      record on those sessions, on both the real-phone and browser-preview transports; excluded from availability, the dispatch board,
@@ -794,7 +810,8 @@ flowchart LR
     cancels the test appointment and its provisional job);
     `packages/api/test/integration/test-booking-verify.test.ts` also pins `appointments.is_test`
     and `jobs.provisional`, and asserts the marker is set on both transports and never on an
-    ordinary inbound call; `packages/api/test/integration/place-hold.concurrent-slot.test.ts`
+    ordinary inbound call, nor on an attested owner call to a paused tenant that was live
+    before (`voice_first_live_at` set), nor on an owner call outside the started-test window; `packages/api/test/integration/place-hold.concurrent-slot.test.ts`
     (two concurrent hold requests on real Postgres for the same slot, and again for
     overlapping windows with different starts → exactly one hold each time);
     `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (hang-up mid-ask → no
