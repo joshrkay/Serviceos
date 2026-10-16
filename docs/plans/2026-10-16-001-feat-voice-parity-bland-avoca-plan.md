@@ -560,9 +560,11 @@ flowchart LR
      conflict check runs by customer location and time **before** the provisional job is
      created (item 3's checker takes a location, not a job), so a taken slot never creates a
      job at all; job creation and `placeAppointmentHold` run in one transaction **under
-     `pg_advisory_xact_lock(hashtext(tenant_id || location_id || slot_start_bucket))`** taken
-     before the conflict read, so two concurrent calls asking for the same slot serialise on
-     the lock and the second sees the first's hold (the existing `no_double_booking` exclusion
+     `pg_advisory_xact_lock(hashtext(tenant_id || location_id))`** taken before the conflict
+     read — keyed on the location only, not on a start bucket, so two requests whose windows
+     overlap with different starts (2:00–3:00 and 2:30–3:30) still take the same lock; holds
+     per location are rare enough that the coarser key costs nothing — so two concurrent calls
+     asking for overlapping slots serialise on the lock and the second sees the first's hold (the existing `no_double_booking` exclusion
      covers technician assignments, not unassigned holds, so it does not help here); a pre-hold
      failure rolls the job back. `CreateAppointmentExecutionHandler` /
      `CreateBookingExecutionHandler` promote the job (`provisional = false`) at execution.
@@ -650,9 +652,12 @@ flowchart LR
      sets `forwarding_verified_at` when `ForwardedFrom` matches a registered line).
      `voice/go-live.ts` — delete `maybeAutoGoLiveOnInboundEnd` and its `app.ts` wiring; the
      only caller of `enableVoiceAgentLive` is `POST /api/voice/go-live` from the `go_live` step;
-     `enableVoiceAgentLive` checks subscription, `full_readiness`, `voice_preview_at`, required
-     business answers, `test_booking_verified_at` (or `force: true`, audited) and returns 409
-     `GO_LIVE_BLOCKED { blockers }`. Keep the #1605 attested-owner bypass in `voice-gate.ts`.
+     `enableVoiceAgentLive` checks subscription, `full_readiness`, `voice_preview_at`, the
+     scenario-interview completion predicate from U9 (every selected core scenario has an
+     `answered` or `skipped` row — **not** the U4 business-answer keys, which a skipped
+     interview legitimately leaves unset; a missing answer is served by U5's "not on file"
+     fallback, never a go-live blocker), `test_booking_verified_at` (or `force: true`, audited)
+     and returns 409 `GO_LIVE_BLOCKED { blockers }`. Keep the #1605 attested-owner bypass in `voice-gate.ts`.
      `voice/activation.ts` keys on `caller_phone_e164`, not count.
   10. **Wizard.** `derive-status.ts` order
       `signup → identity → pack → voice_preview → scenario_interview → billing → phone → test_booking → go_live`
@@ -693,7 +698,8 @@ flowchart LR
     `packages/api/test/integration/test-booking-verify.test.ts` also pins `appointments.is_test`
     and `jobs.provisional`, and asserts the marker is set on both transports and never on an
     ordinary inbound call; `packages/api/test/integration/place-hold.concurrent-slot.test.ts`
-    (two concurrent hold requests for one slot on real Postgres → exactly one hold);
+    (two concurrent hold requests on real Postgres for the same slot, and again for
+    overlapping windows with different starts → exactly one hold each time);
     `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (hang-up mid-ask → no
     proposal, hold and job released, capture cleared, `booking_consent_abandoned` audited).
 - **Floor-criteria risks (Appendix B):** #2 noAutoMutation (job and hold exist before
