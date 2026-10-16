@@ -989,15 +989,22 @@ flowchart LR
      repository writes through the client `tenantContextStore` holds, which the runner sets,
      so the draft insert joins that transaction rather than committing on its own): **first
      the slot check**, so a taken slot returns `slot_taken` before any row is written and the
-     FSM speaks the bucket 09 line with no draft left behind; **then mint the `draft`
-     proposal** (`status = 'draft'` with `missingFields: ['confirmation_channel']`, which
-     `approveProposal` refuses and the executor never dequeues — `proposals/lifecycle.ts` lets a
-     draft move only to `ready_for_review`, `approved`, `rejected` or `expired`); **then** place
-     the hold with `appointments.proposal_id` pointing at that draft. A failure anywhere after
-     the check rolls the draft back together with the hold and the provisional job, so a
-     conflicting attempt writes nothing, no unapprovable draft can outlive a failed hold, and
-     the hold and the provisional job are never operational writes without a proposal behind
-     them (floor
+     FSM speaks the bucket 09 line with no draft left behind; **then place the hold**, which
+     is what mints the appointment id (`proposal_id` still null at this instant); **then mint
+     the `draft` proposal with that `appointmentId` in its payload** — `createBookingPayloadSchema`
+     requires it (`proposals/contracts.ts:363-364`, `appointmentId: z.guid()`), so a draft
+     minted before the hold could not pass the contract it must pass, and
+     `promoteConsentDraft` fills only `confirmationChannel`, never an id — (`status = 'draft'`
+     with `missingFields: ['confirmation_channel']`, which `approveProposal` refuses and the
+     executor never dequeues — `proposals/lifecycle.ts` lets a draft move only to
+     `ready_for_review`, `approved`, `rejected` or `expired`); **then** `UPDATE appointments
+     SET proposal_id = $draft` so the hold points at the draft; **then commit**. Because all
+     four writes share one transaction the hold is never *visible* without its proposal —
+     the floor-2 invariant is a commit-time property, not an insert-order one — and a
+     failure anywhere after the check rolls the hold, the provisional job and the draft back
+     together, so a conflicting attempt writes nothing, no unapprovable draft can outlive a
+     failed hold, and the hold and the provisional job are never operational writes without a
+     proposal behind them (floor
      criterion 2, `noAutoMutation`, which Appendix B pins as "a `hold_pending_approval` row
      **plus** a `proposals` row"); arm `pendingConsentCapture { purpose: 'booking',
      appointmentId, proposalId }`, and speak
