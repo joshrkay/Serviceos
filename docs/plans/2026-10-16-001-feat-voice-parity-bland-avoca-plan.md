@@ -28,13 +28,13 @@ traces behind this plan say why at the function level.
    goes live on "the owner's test call ended", with no check that it went well. Transfers have
    no schedule term and no keypad escape. Missed leads get SMS only.
 
-Eight units close those three areas. Each names the functions, columns, gates and spoken copy
+Nine units close those three areas (U9 turns the knowledge step into a scenario interview; see `docs/strategy/scenario-interview-onboarding.md`). Each names the functions, columns, gates and spoken copy
 it changes, the floor criterion it could violate, and the test that pins it.
 
 | # | Area | Units | The bar (Appendix E) |
 |---|---|---|---|
 | A1 | Responsiveness and turn-taking | U1, U2 | caller-perceived p50 ≈ 0.8 s, p95 ≤ 1.5 s; confidence-aware endpointing; barge-in gated on evidence; resume after a false interruption |
-| A2 | Knowledge and persona | U3, U4, U5 | Avoca: KB is the first onboarding step (hours, policies, fees, after-hours); Bland: KB with query logs; both: brand voice and name |
+| A2 | Knowledge and persona | U3, U4, U5, U9 | Avoca: KB is the first onboarding step (hours, policies, fees, after-hours); Bland: KB with query logs; both: brand voice and name |
 | A3 | Close the loop: book, hand off, recover | U6, U7, U8 | Avoca: 85–90 % booked on the call, approved test booking before go-live, transfer rules by schedule, transferred-calls review; the SMB set's top complaint is "booked with no problem description" |
 
 ## Problem Frame
@@ -571,7 +571,7 @@ flowchart LR
      `GO_LIVE_BLOCKED { blockers }`. Keep the #1605 attested-owner bypass in `voice-gate.ts`.
      `voice/activation.ts` keys on `caller_phone_e164`, not count.
   10. **Wizard.** `derive-status.ts` order
-      `signup → identity → pack → voice_preview → business_answers → billing → phone → test_booking → go_live`
+      `signup → identity → pack → voice_preview → scenario_interview → billing → phone → test_booking → go_live`
       (Appendix D §12 rules; `contracts.ts` `.length(9)`, web types mirrored);
       `packages/web/src/components/onboarding/v2/steps/TestBookingStep.tsx` replaces
       `TestCallStep.tsx`: names the test customer and what to say ("book a water heater repair
@@ -683,6 +683,81 @@ flowchart LR
 - **Verification:** a staged dropped call with a consent row produces one callback within the
   window on the test number; bucket 05 green; the legal checklist in Appendix E §4 is signed.
 
+### U9. Scenario interview: the owner configures the agent by reacting to calls, and replays them after
+- **Goal:** replace the business-answers form with a conversation in which the agent plays
+  twelve trade-selected scenarios from the corpus in the owner's voice, asks "is that right, or
+  would you rather I…?", and types every answer into a setting; then let the owner replay any
+  scenario after a settings change. Design: `docs/strategy/scenario-interview-onboarding.md`.
+- **Requirements:** R5, R8, R11, R12
+- **Dependencies:** U3 (voice), U4 (schema and settings sheet; its wizard step is absorbed
+  here), U6 (preview mode and verified test booking), U7 (`transfer_targets`)
+- **Files:**
+  - `packages/api/src/onboarding/scenarios/library.ts` (new: reads corpus scripts, renders
+    owner-facing cards, substitutes tenant fixtures, selects by pack and persona),
+    `packages/api/src/onboarding/scenarios/options.ts` (the fixed option set per family, each
+    option = an FSM effect + the setting it writes), `packages/api/src/onboarding/scenarios/apply-answer.ts`
+    (tap → typed write + audit; speech → existing extractor → clarification or write; free
+    text → FAQ entry, standing-instruction candidate, or white-space note).
+  - `packages/api/src/ai/voice-quality/corpus/schema.ts` and ~12 core scripts — optional
+    `ownerFacing { family, options, settingKey }` block; no second copy of the script.
+  - `packages/api/src/ai/agents/onboarding/transitions.ts` — new act `scenario_interview`
+    after `schedule_capture`, driving `library.select(tenant)`; `MAX_TURNS` raised to cover it;
+    closing `open_capture` state bounded to five items.
+  - `packages/api/src/db/schema.ts`, `packages/api/src/settings/settings.ts` — new typed keys
+    `booking_required_fields TEXT[]` (default problem description + address), `quote_policy`
+    (`never | ranges_from_catalog | exact_from_catalog`), `services_not_offered TEXT[]`,
+    per-tenant emergency terms (lifts the platform-only limit in `emergency-detector.ts`);
+    table `onboarding_whitespace_notes` (tenant_id, scenario_id, note, created_at; FORCE RLS);
+    `tenant_settings.scenario_interview_completed_at`.
+  - `packages/api/src/routes/onboarding.ts` — `GET /scenarios/next`, `POST /scenarios/:id/answer`,
+    `POST /scenarios/:id/replay` (runs the scenario through the preview session with current
+    settings and returns the spoken handling), `POST /scenarios/open-capture`.
+  - `packages/api/src/onboarding/derive-status.ts` — step `scenario_interview` (replaces
+    `business_answers`), complete when the selected core set is answered or explicitly skipped.
+  - `packages/api/src/workers/daily-call-review-worker.ts` (new: one real call a day rendered
+    as a scenario card; thumbs-up or "should have…" writes a `corrections` row and, where it
+    cascades, a lesson) and `packages/web/src/components/inbox/CallReviewCard.tsx`.
+  - `packages/web/src/components/onboarding/v2/steps/ScenarioInterviewStep.tsx` (replaces
+    `BusinessAnswersStep.tsx`; agent speaks, options as ≥44 px taps, mic or type for
+    "something else"), `packages/web/src/components/settings/ScenarioReplaySheet.tsx`.
+  - Tests: `packages/api/test/onboarding/scenarios/library.select.test.ts` (HVAC vs plumbing
+    vs solo selection; twelve-core cap), `options.test.ts` (every option maps to a real FSM
+    effect and a real setting key), `apply-answer.test.ts` (tap writes + audit; conflicting
+    answers → clarification; unsupported ask → white-space note, never a setting),
+    `packages/api/test/ai/agents/onboarding/scenario-interview-act.test.ts` (handler-level,
+    mocked gateway), `packages/api/test/routes/onboarding.scenarios.test.ts`,
+    `packages/api/test/workers/daily-call-review-worker.test.ts`,
+    `packages/web/src/components/onboarding/v2/steps/ScenarioInterviewStep.test.tsx` (jsdom
+    class contract), `e2e/scenario-interview-mobile.spec.ts`,
+    `packages/api/test/integration/scenario-interview-settings-and-notes.test.ts` (pins the
+    new columns and the notes table), corpus: the `ownerFacing` block is validated by the
+    corpus-integrity check.
+- **Approach:** options are FSM effects only, so an answer is always typeable; the agent's
+  current choice is the conservative default (hold, transfer on uncertainty, no quotes) so a
+  skipped interview yields a safe agent; emergency rails, negotiation refusal and spam handling
+  are shown with a "make it stricter" option and no "looser"; replay reuses U6's preview session
+  with the tenant's live settings so it doubles as the regression view after any settings
+  change.
+- **Patterns to follow:** `ai/agents/onboarding/transitions.ts` opening prompts and extractor
+  → proposal path; `proposals/corrections/correction.ts` and `learning/corrections/` for the
+  review card; `docs/strategy/day-in-the-life.md` for the voice of the agent's lines.
+- **Test scenarios:**
+  - Happy: HVAC tenant → twelve cards including no-cool emergency and after-hours; owner taps
+    "book it on the call" → `autonomous_booking_enabled=true` + audit; says "always ask what's
+    wrong first" → `booking_required_fields` gains problem description.
+  - Edge: owner skips every card → settings equal the conservative defaults and the step is
+    complete; "offer 10 % if they book today" → white-space note, no setting, spoken "I can't do
+    that yet"; conflicting answers across two cards → one clarification, last answer wins only
+    after it.
+  - Replay: after-hours mode changed in Settings → replay of the 9 pm scenario speaks the new
+    handling; the preview session is excluded from billing and activation.
+  - Review card: a real call rendered without PII beyond what the owner may see; thumbs-up
+    writes nothing; "should have transferred" writes a `corrections` row with intent and field.
+  - Integration: new columns and the notes table pinned on real Postgres with RLS.
+- **Verification:** a new HVAC tenant completes Act 2 in under ten minutes on a phone, hears
+  each handling in their chosen voice, and the inbox shows "here's what you told me" as typed
+  settings; the white-space log receives entries in the first week.
+
 ## Onboarding impact
 
 The nine-step flow (Appendix D §12), what each step must satisfy, and why it moved:
@@ -693,7 +768,7 @@ The nine-step flow (Appendix D §12), what each step must satisfy, and why it mo
 | identity | name, rate, buffer, timezone, hours, **owner cell (now required)** | trial caps, overage forwarding and the U6 UNDO SMS all need the cell |
 | pack | active pack | unchanged; prefill source for business answers |
 | voice_preview | `voice_preview_at` | U3; the owner hears the agent in the chosen voice before paying for a number; replaces `ai_check` (the `verify_ai` ping becomes a Settings probe) |
-| business_answers | required keys present | U4; Avoca's first configuration step for the same reason |
+| scenario_interview | twelve core scenarios answered or explicitly skipped | U9; absorbs U4's form — the owner reacts to calls in their voice and every answer is a typed setting; Avoca's KB-first order, as a conversation |
 | billing | trialing or active | unchanged; still before phone so no number is bought for a tire-kicker |
 | phone | `full_readiness` | unchanged; forwarding codes move to the test step |
 | test_booking | `test_booking_verified_at` | U6; real phone when attested, browser preview otherwise; "Something's wrong" feeds the correction loop; forwarding check optional with a visible "unverified" badge |
@@ -810,6 +885,7 @@ keys are a production change outside this plan's code and block everything below
 
 ## Sources & Research
 
+- `docs/strategy/scenario-interview-onboarding.md` (the U9 product design).
 - `docs/research/voice-parity-deep-dive-2026-10-16/README.md` and appendices A–E (the five
   traces this plan is built on; file:line throughout).
 - `docs/research/voice-feature-parity-tracker.md`; `docs/research/avoca-competitive-analysis.md`
