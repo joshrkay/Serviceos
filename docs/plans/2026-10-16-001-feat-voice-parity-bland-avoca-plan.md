@@ -1907,8 +1907,18 @@ flowchart LR
     the `MessageSid`, and it is delivered independently of the worker's own HTTP response —
     so a create that Twilio accepted while the worker died is still tied to exactly its
     row by the first callback that lands, which stamps `sent_at` and the SID with `WHERE
-    job_id = $1 AND sent_at IS NULL`; a single lost POST is covered by the next
-    transition's. **No match on recipient, sender, time or body ever marks a row sent**:
+    job_id = $1 AND tenant_id = $verifiedTenant AND sent_at IS NULL`; a single lost POST is
+    covered by the next transition's. **`/fallback-status` is bound to the verified tenant
+    exactly as `/outbound-answer` and `/outbound-status` are** (U3): it is mounted in
+    `app.ts` with the AccountSid-only `subaccountCredentialView` ahead of the shared
+    telephony router, because its `To` is the customer's number and the DID-bound resolver
+    would refuse or mis-resolve it (`twilio-webhook-credential.ts:211-223`); the signature
+    proves which subaccount sent the POST, so the handler resolves the tenant from that
+    verified credential, loads the outbox row by `job_id` **under that tenant's RLS
+    context**, and the conditional UPDATE carries `tenant_id = $verifiedTenant` — a callback
+    signed with tenant A's credential that names tenant B's job id affects zero rows and is
+    audited `fallback_status_tenant_mismatch` under tenant A, never stamping B's row. **No
+    match on recipient, sender, time or body ever marks a row sent**:
     Twilio's list filters are calendar-date granular (`DateSent`), two callback jobs for
     the same customer can carry the identical body from the same DID, and stamping the
     later row with the earlier job's message would suppress that fallback forever. A
@@ -1936,7 +1946,9 @@ flowchart LR
     overlap, that a crash injected after the provider accepted the send but before
     `sent_at` was stamped leaves the row in `sending`, is **not** re-sent by the next
     worker pass, and is stamped sent by its own status callback (carrying `?job=`), with
-    exactly one provider create across the whole sequence; that a `sending` row with no
+    exactly one provider create across the whole sequence; that a status callback signed
+    with another tenant's credential naming this job affects zero rows and leaves the row
+    `sending` (and the row's own tenant's callback then stamps it); that a `sending` row with no
     callback and no candidate message after the window is re-sent once and then stamped;
     that two jobs for the same customer with identical bodies, the later crashed
     post-accept, are never cross-stamped — the earlier job's SID is excluded and the later
