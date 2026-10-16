@@ -52,6 +52,7 @@ const NOW = new Date('2026-07-02T15:00:00Z');
 function eligibleInput(): EvaluateAutonomousLaneInput {
   return {
     settings: { enabled: true, threshold: 0.95 },
+    ownerPhone: '+15555550100',
     proposalType: 'create_booking',
     inboundReceptionistSource: true,
     confidenceScore: 0.97,
@@ -84,6 +85,13 @@ describe('evaluateAutonomousBookingLane — every gate blocks independently', ()
     ],
     ['tenant not opted in', { settings: { enabled: false } }, 'tenant_not_opted_in'],
     ['settings absent', { settings: undefined }, 'tenant_not_opted_in'],
+    ['no owner cell on file', { ownerPhone: null }, 'owner_cell_missing'],
+    ['blank owner cell', { ownerPhone: '   ' }, 'owner_cell_missing'],
+    [
+      'tenant opt-in checked BEFORE the owner cell',
+      { settings: { enabled: false }, ownerPhone: null },
+      'tenant_not_opted_in',
+    ],
     [
       'non-booking type',
       { proposalType: 'draft_estimate' as ProposalType },

@@ -2829,6 +2829,7 @@ export function createVoiceTurnProcessor(
                     ? { threshold: settings.autonomousBookingThreshold }
                     : {}),
                 },
+                ownerPhone: settings?.ownerPhone,
                 confidenceScore: payloadConfidence,
                 customerId,
                 holdExpiryAt: hold.holdExpiryAt,
@@ -4413,6 +4414,7 @@ export function createVoiceTurnProcessor(
             ? { threshold: settings.autonomousBookingThreshold }
             : {}),
         },
+        ownerPhone: settings?.ownerPhone,
         proposalType: 'create_booking',
         inboundReceptionistSource: true,
         ...(typeof draft?.confidenceScore === 'number'

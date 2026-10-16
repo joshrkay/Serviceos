@@ -58,6 +58,8 @@ export function bookingSpeechForLane(
 export function buildLaneInputFromSettings(opts: {
   platformDisabled?: boolean;
   settings?: AutonomousLaneSettings;
+  /** `tenant_settings.owner_phone` — no cell, no autonomous booking. */
+  ownerPhone: string | null | undefined;
   confidenceScore?: number;
   customerId?: string;
   holdExpiryAt: Date;
@@ -70,6 +72,7 @@ export function buildLaneInputFromSettings(opts: {
   return evaluateAutonomousBookingLane({
     platformDisabled: opts.platformDisabled === true,
     settings: opts.settings,
+    ownerPhone: opts.ownerPhone,
     proposalType: 'create_booking',
     inboundReceptionistSource: true,
     confidenceScore: opts.confidenceScore,

@@ -88,6 +88,12 @@ export interface EvaluateAutonomousLaneInput {
    */
   platformDisabled?: boolean;
   settings?: AutonomousLaneSettings;
+  /**
+   * The owner's cell (`tenant_settings.owner_phone`). Required so every
+   * caller decides: the owner UNDO SMS is part of why the lane is safe, so a
+   * tenant with no cell on file never books autonomously.
+   */
+  ownerPhone: string | null | undefined;
   proposalType: ProposalType;
   /**
    * True only for the inbound-receptionist path (customer-call FSM or the
@@ -130,6 +136,7 @@ export type AutonomousLaneEvaluation =
 export type AutonomousLaneIneligibleReason =
   | 'platform_disabled'
   | 'tenant_not_opted_in'
+  | 'owner_cell_missing'
   | 'proposal_type_not_eligible'
   | 'not_inbound_receptionist'
   | 'below_threshold'
@@ -154,6 +161,9 @@ export function evaluateAutonomousBookingLane(
   }
   if (!input.settings?.enabled) {
     return { eligible: false, reason: 'tenant_not_opted_in' };
+  }
+  if (!input.ownerPhone?.trim()) {
+    return { eligible: false, reason: 'owner_cell_missing' };
   }
   if (
     !AUTONOMOUS_LANE_PROPOSAL_TYPES.includes(input.proposalType) ||

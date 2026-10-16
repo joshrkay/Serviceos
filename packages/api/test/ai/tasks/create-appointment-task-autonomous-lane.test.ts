@@ -60,6 +60,7 @@ function laneContext(
     supervisorPresent: false,
     autonomousBooking: {
       settings: { enabled: true, threshold: 0.95 },
+      ownerPhone: '+15555550100',
       inboundReceptionistSource: true,
       pendingReferenceCount: 0,
       ...lane,
@@ -102,6 +103,18 @@ describe('create-appointment task — autonomous booking lane (UB-D)', () => {
     expect(autonomousLaneEvaluationFor(result.proposal)).toEqual({
       eligible: false,
       reason: 'tenant_not_opted_in',
+    });
+  });
+
+  it('no owner cell on file: the booking waits for review (owner_cell_missing)', async () => {
+    const result = await handlerWith(mockGateway(bookingJson(0.97))).handle(
+      laneContext({}, { ownerPhone: null }),
+    );
+
+    expect(result.proposal.status).toBe('ready_for_review');
+    expect(autonomousLaneEvaluationFor(result.proposal)).toEqual({
+      eligible: false,
+      reason: 'owner_cell_missing',
     });
   });
 

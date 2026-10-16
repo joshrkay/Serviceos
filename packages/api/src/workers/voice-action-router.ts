@@ -1692,7 +1692,7 @@ async function processSegment(
     return { kind: 'clarified', classification };
   }
 
-  // These four reads are mutually independent (none consumes another's
+  // These five reads are mutually independent (none consumes another's
   // result), so they run concurrently via Promise.all instead of
   // sequential awaits. Each retains its EXACT pre-existing failure
   // behavior (per-call .catch(() => undefined), or — for
@@ -1704,6 +1704,7 @@ async function processSegment(
     tenantThresholdOverride,
     scheduling,
     autonomousBookingSettings,
+    autonomousBookingOwnerPhone,
     supervisorPresent,
   ] = await Promise.all([
     // Tier 4 / PR B — per-tenant auto-approve threshold override.
@@ -1721,6 +1722,14 @@ async function processSegment(
     // Best-effort: a resolver failure means the lane simply doesn't engage.
     deps.autonomousBookingResolver && handler.taskType === 'create_appointment'
       ? deps.autonomousBookingResolver(tenantId).catch(() => undefined)
+      : Promise.resolve(undefined),
+    // The lane requires the number the owner UNDO SMS goes to (the same
+    // resolveOwnerPhone the UNDO send below uses). Same booking-only scope;
+    // a failure reads as "no cell", so the lane reports owner_cell_missing.
+    deps.autonomousBookingResolver &&
+    handler.taskType === 'create_appointment' &&
+    deps.unsupervisedRouting?.resolveOwnerPhone
+      ? deps.unsupervisedRouting.resolveOwnerPhone(tenantId).catch(() => undefined)
       : Promise.resolve(undefined),
     // Phase 12 supervisor gate. Resolve presence once per request and thread
     // it onto the context so an autonomous, capture-class proposal (today:
@@ -1823,6 +1832,7 @@ async function processSegment(
       ? {
           autonomousBooking: {
             settings: autonomousBookingSettings,
+            ownerPhone: autonomousBookingOwnerPhone,
             inboundReceptionistSource: Boolean(customerId),
             pendingReferenceCount: annotation.pendingReferences.length,
             ...(deps.autonomousBookingPlatformDisabled ? { platformDisabled: true } : {}),

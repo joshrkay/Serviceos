@@ -32,6 +32,7 @@ function passing(overrides: Partial<EvaluateAutonomousCloseInput> = {}): Evaluat
     now: NOW,
     booking: {
       settings: { enabled: true, threshold: 0.95 },
+      ownerPhone: '+15555550100',
       proposalType: 'create_booking',
       inboundReceptionistSource: true,
       confidenceScore: 0.97,
@@ -123,6 +124,13 @@ describe('evaluateAutonomousCloseLane — gate order', () => {
       passing({ booking: { ...passing().booking, confidenceScore: 0.5 } }),
     );
     expect(r).toMatchObject({ eligible: false, reason: 'booking_lane_ineligible', bookingReason: 'below_threshold' });
+  });
+
+  it('no owner cell on file → the close books nothing autonomously (booking_lane_ineligible, owner_cell_missing)', () => {
+    const r = evaluateAutonomousCloseLane(
+      passing({ booking: { ...passing().booking, ownerPhone: null } }),
+    );
+    expect(r).toEqual({ eligible: false, reason: 'booking_lane_ineligible', bookingReason: 'owner_cell_missing' });
   });
 
   it('session_flagged is checked LAST (after the booking lane passes)', () => {
