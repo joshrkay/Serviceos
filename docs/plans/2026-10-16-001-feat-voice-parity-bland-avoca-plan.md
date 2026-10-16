@@ -1529,17 +1529,32 @@ flowchart LR
     it does, for inbound too — the upgrade consults only the local store
     (`twilio-mediastream-server.ts:147-153`) — which is tolerable at one replica and fails
     probabilistically at two, and U1's replica trigger is precisely the point at which that
-    starts. So the upgrade gains a **durable hydration path**: on a local `findByCallSid`
-    miss it reads `voice_sessions` by `call_sid` (a new UNIQUE partial index on `call_sid
-    WHERE ended_at IS NULL`), takes `tenant_id` from the row, verifies the upgrade signature
-    against **that tenant's** credential exactly as it does for a local hit
-    (`authTokenGetter` with the row's tenant; the refusal branch at `:168-190` is unchanged,
-    so a credential that is not the row's tenant's is still rejected), and only then calls
-    the same shared `establishSession` to register a runtime session under the row's id
-    with `twilioAccountSid`, `customerId`, `direction` and the job and consent linkage;
-    `handleStart` then finds it locally. A row with no CallSid yet, an ended row, or a row
-    whose tenant is not the verifying credential's hydrates nothing and the upgrade is
-    rejected as today. Hydration is exact for the outbound leg because nothing but the row
+    starts. So the upgrade gains a **durable hydration path**, and because `voice_sessions`
+    is under RLS (`schema.ts:1815-1820`: `tenant_id = current_setting('app.current_tenant_id')`)
+    the tenant has to be known *before* the row can be read, not discovered from it. **The
+    tenant travels in the stream path.** Stream URLs cannot carry a query string
+    (`twilio-adapter.ts:1592-1595` binds the upgrade to the call through the path for that
+    reason), so the TwiML both legs emit becomes
+    `wss://…/api/telephony/stream/<tenantId>/<callSid>`, and Twilio signs that full URL
+    (`twilio-mediastream-server.ts:200-210` validates `reconstructUpgradeUrl` against the
+    presented signature). The upgrade handler reads the tenant segment, resolves **that
+    tenant's** credential through the existing `authTokenGetter({ tenantId })` (the refusal
+    branch at `:168-190` unchanged, so a credential that is not that tenant's is still
+    rejected) and verifies the signature with it — a forged or altered tenant segment fails
+    here, because the signature was made with the real tenant's token and the attacker needs
+    that token to sign a URL naming any other tenant. Only after the signature verifies does
+    it, on a local `findByCallSid` miss, read the row through the ordinary repository API
+    under that tenant's context: `SELECT … FROM voice_sessions WHERE tenant_id = $1 AND
+    call_sid = $2 AND ended_at IS NULL` (a new UNIQUE partial index on `(tenant_id,
+    call_sid) WHERE ended_at IS NULL`), so RLS is satisfied rather than bypassed and no
+    privileged, tenant-less lookup is introduced; a real tenant naming another tenant's
+    CallSid finds no row under RLS and is rejected 403 as today. It then calls the same
+    shared `establishSession` to register a runtime session under the row's id with
+    `twilioAccountSid`, `customerId`, `direction` and the job and consent linkage;
+    `handleStart` then finds it locally. A row with no CallSid yet, an ended row, or no row
+    hydrates nothing and the upgrade is rejected as today. The server keeps accepting the
+    legacy `/stream/<callSid>` path with today's local-only resolution for calls whose TwiML
+    was emitted before the deploy, and drops it once no such call can be live. Hydration is exact for the outbound leg because nothing but the row
     exists before the opener turn; for an inbound call it is exact only if the row exists
     when the upgrade arrives, and today's B2 write is fire-and-forget
     (`twilio-adapter.ts:1176-1177`), so this unit awaits that write before the inbound TwiML
@@ -1649,10 +1664,13 @@ flowchart LR
     `dial_state`, `failure_reason`) are written and read back on real Postgres;
     the WS upgrade and `start` frame for the outbound CallSid resolve the hydrated runtime
     session, whose id equals the persisted row's, and a retry of `/outbound-answer` does
-    not register a second runtime session; an upgrade arriving at a process with an empty
-    store hydrates the runtime session from the row under the row's tenant credential and
-    takes the stream, while an upgrade for an ended row, an unbound row, or one signed with
-    another tenant's credential is rejected 403 and hydrates nothing; `/outbound-answer`
+    not register a second runtime session; an upgrade on `/stream/<tenantId>/<callSid>`
+    arriving at a process with an empty store verifies against the path tenant's
+    credential, reads the row under that tenant's RLS context, hydrates the runtime session
+    and takes the stream, while an upgrade for an ended row, an unbound row, a forged tenant
+    segment (signature failure), or a real tenant naming another tenant's CallSid (no row
+    under RLS) is rejected 403 and hydrates nothing, and the test asserts no query ran
+    without `app.current_tenant_id` set; `/outbound-answer`
     signed by tenant A naming tenant B's session → 403 `session_tenant_mismatch`, row
     untouched, and the same for `/outbound-status`; the hydrated runtime session's channel
     is `telephony` with `direction: 'outbound'` and the booking lane gate admits it),
