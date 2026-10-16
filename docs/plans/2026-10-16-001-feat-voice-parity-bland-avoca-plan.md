@@ -651,10 +651,15 @@ flowchart LR
     revision's exhausted retry budget or stale failure text. The embed job carries the
     `content_rev` it was enqueued for, and **every** worker transition is conditional on it,
     the claim included: the worker claims the row with `UPDATE … SET index_status =
-    'indexing' WHERE id = $1 AND content_rev = $rev AND index_status IN ('pending',
-    'failed') AND index_attempts < 5 RETURNING id` — the attempts cap sits inside the atomic
-    claim, so an at-least-once duplicate delivered after the fifth failure can never claim
-    the row and call the provider a sixth time. A zero-row claim has several meanings and
+    'indexing' WHERE id = $1 AND content_rev = $rev AND active = true AND index_status IN
+    ('pending', 'failed') AND index_attempts < 5 RETURNING id` — the attempts cap sits inside
+    the atomic claim, so an at-least-once duplicate delivered after the fifth failure can
+    never claim the row and call the provider a sixth time, and **`active = true` sits inside
+    it too**, so an entry the owner deactivated between enqueue and the worker's run is never
+    claimed, never costs an embedding call and is never marked `indexed` while inactive; it
+    falls to the zero-row path and its "gone or inactive" outcome below. Re-activating an
+    entry whose `index_status` is not `indexed` re-enqueues the embed job from the save
+    route, so a row deactivated mid-queue is not stranded when it comes back. A zero-row claim has several meanings and
     the worker tells them apart with one follow-up read of the row, which has five outcomes:
     if `content_rev` has moved on, the job is stale and it exits successfully (the queue acks
     it, `app.ts:3132-3134`); if the revision is current, `failed`, and `index_attempts >= 5`,
@@ -673,7 +678,7 @@ flowchart LR
     ten-minute lease: a crash-redelivery arriving early would otherwise be acked as a no-op
     and the row would sit in `indexing` for ever.
     The claim also stamps `index_claimed_at = NOW()`, and the predicate accepts a row left in
-    `indexing` whose claim is older than the lease: `… AND index_attempts < 5 AND (index_status IN ('pending',
+    `indexing` whose claim is older than the lease: `… AND active = true AND index_attempts < 5 AND (index_status IN ('pending',
     'failed') OR (index_status = 'indexing' AND index_claimed_at < NOW() - INTERVAL '10
     minutes'))` — ten minutes is longer than any embedding call, so a worker that died or
     lost its queue lease between the claim and the terminal update does not strand the FAQ
@@ -839,6 +844,18 @@ flowchart LR
      for the same slot — a location-keyed lock would hand them different locks and let both
      pass the conflict read before either inserted (the existing `no_double_booking`
      exclusion covers technician assignments, not unassigned holds, so it does not help here).
+     **The dispatcher's own writer joins the same protocol.** `POST /api/appointments`
+     (`routes/appointments.ts:256-302`) today takes no lock and runs `assertNoDoubleBooking`
+     only when `technicianId` is present, so an unassigned visit created from the board
+     concurrently with a voice hold passes its (absent) check while the hold passes
+     `isSlotFree`, and both rows land. The route therefore wraps `createAppointment` in
+     `PgTenantTransactionRunner.run(tenantId, ({ lock }) => …)` with
+     `lock('self-service-booking')` and runs `isSlotFree` for the window first, assigned or
+     not, returning 409 `SLOT_TAKEN` with `nextOpening`; the technician-specific
+     `assertNoDoubleBooking` stays as the narrower check on top. A dispatcher deliberately
+     overbooking capacity (two crews, one window) passes `force: true`, audited as
+     `appointment_overbooked`, which skips `isSlotFree` but still takes the lock, so a
+     concurrent voice hold always sees the row once it is committed.
      One lock per tenant serialises every hold placement for that tenant, which is a handful
      per minute at the busiest tenant and costs nothing measurable; two concurrent calls for
      overlapping windows with different starts (2:00–3:00 and 2:30–3:30) therefore also
@@ -1096,7 +1113,11 @@ flowchart LR
     overlapping windows with different starts → exactly one hold; same-location pair → one;
     **cross-surface**: a voice hold and a `POST /api/public/booking` request for the same
     window started concurrently → exactly one of them books, the other sees `slot_taken`,
-    and the test asserts both took the `self-service-booking` key on the same runner);
+    and the test asserts both took the `self-service-booking` key on the same runner; a voice
+    hold and a dispatcher `POST /api/appointments` with no `technicianId` for the same window
+    started concurrently → exactly one row, the loser gets `slot_taken` or 409 `SLOT_TAKEN`,
+    and the same pair with `force: true` on the dispatcher side → the dispatcher row lands
+    and the hold that follows it sees `slot_taken`);
     `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (a draft proposal exists
     before the hold and the hold's `proposal_id` points at it; the draft cannot be approved or
     executed while `missingFields` is set; grant and decline each complete that same draft
@@ -1158,24 +1179,47 @@ flowchart LR
     strictly worse than no dial. When the filter leaves nothing dialable the branch takes an
     **external fail-safe, never a tenant number**: `tenant_settings.owner_phone` when it is
     set and not a DID (a legacy tenant may have none — the identity step only requires it
-    for new signups); otherwise no `<Dial>` at all — the caller hears the existing emergency
-    page line ("I'm paging the on-call team now; stay on the line, and if we're cut off
-    someone will call you back at this number"), the durable page ladder that every E2
-    already arms (`twilio-adapter.ts:1856` → `armEmergencyPageLadder`) pages the owner by
+    for new signups), then `transfer_number` when it is set and not a DID; otherwise no
+    `<Dial>` at all, and what the caller is told depends on whether anyone can actually be
+    paged. **A page is promised only when a page recipient exists.** The page worker today
+    resolves `ownerPhone ?? transferNumber` (`app.ts:4170-4175`) and sends nothing when both
+    are null, and the callback worker only notifies `transferNumber`
+    (`call-me-back-worker.ts:71-79`) and otherwise leaves the task pending — so for a legacy
+    tenant with neither, "I'm paging the on-call team" would be a lie. Both workers move to
+    one shared `resolveEmergencyRecipients(tenantId)` that returns, DID-filtered, the owner
+    phone, the transfer number and **every on-call user's `mobile_number` regardless of the
+    hours schedule** (an emergency is not gated by who is rostered), and the compatibility
+    branch asks it before speaking. Recipients found → the caller hears the existing
+    emergency page line ("I'm paging the on-call team now; stay on the line, and if we're cut
+    off someone will call you back at this number"), the durable page ladder that every E2
+    already arms (`twilio-adapter.ts:1856` → `armEmergencyPageLadder`) pages *all* of them by
     SMS at the tenant cadence, and the call drops into the existing callback-collection
-    branch with the emergency flag so a human calls back from their own phone. That path is
-    not better than a human answering a transfer, but it is the one path that never rings
-    the AI line and never silently fails, which is the bar for a branch that exists only
-    until the owner adds a number; (b) sends the owner one
-    SMS and one in-app card ("add an emergency contact — until you do, emergencies ring
-    {rotation or owner cell} / are paged to you by text") and shows a persistent banner in the routing sheet; and
+    branch with the emergency flag, whose worker notifies the same recipients. No recipient
+    anywhere → the caller hears the **honest** line instead ("I can't reach the on-call team
+    right now. If this is a life-threatening emergency, hang up and call 911. Otherwise tell
+    me the best number and I'll make sure someone calls you back"), the callback task is
+    created with the emergency flag and an `emergency_unreachable` audit, no page is armed
+    (the ladder would page nobody), and the tenant is marked `emergency_unreachable_at`,
+    which the owner's email (the one channel that still exists for an account with no phone
+    on file), the in-app card and the daily review card carry as a pinned blocker until a
+    recipient is written. Such a tenant cannot reach a human on E2 today either — its only
+    dial would have been its own DID — so the migration makes that visible rather than
+    pretending to page; it does not pause the tenant, because an honest line plus a callback
+    task is still better than a dead line. (b) sends the owner one SMS when a phone exists
+    (otherwise one email) and one in-app card ("add an emergency contact — until you do,
+    emergencies ring {rotation or owner cell} / are paged to you by text / cannot reach
+    anyone") and shows a persistent banner in the routing sheet; and
     (c) is cleared the moment a qualifying number is written by any writer. Nothing is
     paused automatically — silently taking a live tenant offline is worse than the
     compatibility branch. The schedule test pins that a live tenant migrated with `[]` still
-    reaches a human on E2 by today's path (rotation, then the owner cell, then a business
-    line that is not a DID), that one whose `business_phone` **is** its DID and has no
-    rotation or owner cell dials nothing and takes the page-and-callback fail-safe, gets the
-    notice, and leaves the branch once a number is added.
+    reaches a human on E2 by today's path (rotation, then the owner cell, then the transfer
+    number, then a business line that is not a DID), that one whose `business_phone` **is**
+    its DID and has no rotation, owner cell or transfer number dials nothing and takes the
+    page-and-callback fail-safe only when `resolveEmergencyRecipients` returns at least one
+    number (an off-roster on-call mobile counts), that one with no recipient at all hears the
+    honest line, gets the callback task and the `emergency_unreachable` audit and never the
+    page promise, that every recipient is paged, gets the notice, and leaves the branch once
+    a number is added.
     `on_call_rotation.hours JSONB` optional. **The legacy single line is carried over, not
     dropped**: tenants who configured `tenant_settings.transfer_number` (read today by
     `create-voice-turn-processor.ts:3110-3123` as the warm-transfer destination that replaces
@@ -1222,17 +1266,30 @@ flowchart LR
     for a delayed retry of an earlier callback the current leg is already ringing (or has
     already been answered or timed out), and a `<Dial>` in the retry's response would place a
     second, simultaneous call to that target from the same caller leg, or re-dial a target the
-    cascade has moved past. The advance therefore also records what each callback produced —
-    `legResponses: { [DialCallSid]: nextIndex }`, written in the same `jsonb_set` as the
-    index — and the zero-row path re-reads the state and compares `legResponses[$DialCallSid]`
-    with the current `index`: equal (the lost-response case — Twilio never received the TwiML,
-    so no call to that leg exists yet) → replay exactly that leg's TwiML; not equal (a delayed
-    retry whose produced leg is no longer the one being waited on) → return the empty,
-    hang-up-safe TwiML and audit `dial_result_retry_ignored`, never a new dial. A callback
-    whose SID is in `processedDialCallSids` but absent from `legResponses` cannot occur after
-    the migration (both are written by one UPDATE); a pre-migration row is read as "not
-    current" and takes the no-op. For `kind: 'emergency'` the list is
-    `transfer_targets.emergency` and exhaustion falls into the existing rotation cascade. For
+    cascade has moved past. The state therefore carries a monotonic `stage INT` that every
+    transition increments — each numbered leg, the exhaustion fallthrough, each rotation
+    advance after it, and the completed tombstone — and the advance records what each
+    callback produced: `legResponses: { [DialCallSid]: { stage, twiml } }`, the stage the
+    transition moved the state **to** and the exact TwiML returned, written in the same
+    `jsonb_set` as the index. The zero-row path re-reads the state and compares
+    `legResponses[$DialCallSid].stage` with the current `stage`: equal (the lost-response
+    case — Twilio never received the TwiML, so no call to that leg exists yet) → replay
+    exactly the recorded TwiML; not equal (a delayed retry whose produced transition is no
+    longer the one being waited on) → return the empty, hang-up-safe TwiML and audit
+    `dial_result_retry_ignored`, never a new dial. **The last configured target is not
+    special**: its callback's transition is the fallthrough (the first rotation dial for
+    `kind: 'emergency'`, the callback or voicemail branch's TwiML for `kind: 'scheduled'`),
+    and because the fallthrough runs inside the same request as the conditional UPDATE and
+    its output is stored as that SID's `twiml`, a redelivery of the final target's callback
+    replays that stored response while the stage is current and no-ops once the rotation has
+    moved on — it can neither repeat the rotation advance nor lose the fallthrough when the
+    original response was never delivered. Rotation legs after exhaustion go through the
+    same UPDATE, so a redelivered rotation no-answer is deduplicated the same way (today's
+    handler advances the rotation cursor on every callback it receives). A callback whose
+    SID is in `processedDialCallSids` but absent from `legResponses` cannot occur after the
+    migration (both are written by one UPDATE); a pre-migration row is read as "not current"
+    and takes the no-op. For `kind: 'emergency'` the list is `transfer_targets.emergency`
+    and exhaustion falls into the existing rotation cascade. For
     `kind: 'scheduled'` (an ordinary transfer resolved to `open` or `after_hours`) the list is
     `[scheduled target, overflow]` when `overflow` is a number, because today the single-line
     branch of `/dial-result` (`routes/telephony.ts:955-967`) sends an unanswered configured
@@ -1266,7 +1323,10 @@ flowchart LR
     2's has advanced the cascade → no third advance **and no `<Dial>`**: the response is the
     empty no-op TwiML because that callback's recorded leg (2) is no longer current, while the
     same callback redelivered *before* target 2's arrives replays leg 2's TwiML once; list exhausted → rotation
-    cascade as today; answered leg writes the completed tombstone and a delayed no-answer retry for an earlier leg is then ignored with no new dial); the contract rejects
+    cascade as today; the last configured target's callback redelivered → the stored
+    fallthrough response (the first rotation dial, or the callback Gather for a scheduled
+    kind) is replayed once while that stage is current with no second rotation advance, and
+    is the no-op once the rotation has advanced past it; answered leg writes the completed tombstone and a delayed no-answer retry for an earlier leg is then ignored with no new dial); the contract rejects
     `'voicemail'`, and rejects an
     empty list as an interview answer while allowing it as the migrated state; migration
     backfill prefers `owner_phone` over `business_phone`, never seeds the tenant's own Twilio
