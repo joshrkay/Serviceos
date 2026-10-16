@@ -288,7 +288,8 @@ flowchart LR
     checked first (Open Question 1).
   - `packages/api/src/db/schema.ts` — migration adding `call_transcript_turns.last_word_at`
     (when the caller stopped speaking), `stt_final_at` (when the recogniser finalised),
-    `first_audio_at` (first **real** frame), `first_audible_at` (filler or real),
+    `first_audio_at` (first **real** frame, stamped at the acknowledged mark that brackets
+    it — when Twilio played it, not when it was enqueued), `first_audible_at` (filler or real),
     `reply_gap_ms`, `endpoint_delay_ms`, `transport` ('gather' | 'realtime').
     **`reply_gap_ms` is measured from `last_word_at`, not `stt_final_at`:** the SLO is
     last-caller-word to first audio, and under U2 a normal sentence deliberately waits the
@@ -331,9 +332,18 @@ flowchart LR
     `lastWordEndMs`, and STT-final is the append moment) and the repository gains
     `markReplyAudio({ tenantId, callSid, sessionId,
     turnIndex, firstAudibleAt?, firstAudioAt?, replyGapMs? })`, an UPDATE keyed on the row's
-    existing `(tenant_id, call_sid, session_id, turn_index)` upsert key, called from the
-    adapter's first-frame branch (the same `awaitingFirstAudioFrame` branch that observes the
-    histogram) for `first_audio_at`/`reply_gap_ms`, and for `first_audible_at` from whichever
+    existing `(tenant_id, call_sid, session_id, turn_index)` upsert key, called for
+    `first_audio_at`/`reply_gap_ms` **from the ack of a mark the adapter sends immediately
+    behind the first real frame** (`mark name="first_real:<turnId>"`, emitted by the
+    `awaitingFirstAudioFrame` branch right after that frame instead of waiting for the
+    25-frame cadence) — not from the enqueue: when an early filler is still queued at Twilio
+    the first real frame is enqueued while the caller is still hearing the filler, so an
+    enqueue-time stamp understates the caller-perceived gap and could satisfy the 1,500 ms
+    SLO falsely, whereas a mark ack is Twilio's statement that playout reached that point.
+    The enqueue time is kept as `first_audio_enqueued_at` for diagnosing transport delay,
+    the `voice_reply_gap_ms` histogram observes the acked stamp too, and a mark whose ack is
+    a clear-echo or never arrives (safety-timer turn) leaves `first_audio_at` and
+    `reply_gap_ms` null rather than estimated; and for `first_audible_at` from whichever
     came first: the filler-start branch stamps it when a filler plays, and the real-frame
     branch stamps it too when no filler was emitted (U3's cold or failed per-voice cache makes
     fillerless turns normal, not exceptional), so `first_audible_at` is set on every turn that
@@ -511,7 +521,18 @@ flowchart LR
      (`test/telephony/media-streams/realtime-human-handoff.test.ts:67-70` models exactly
      this), so the adapter sets `clearInFlight` before sending `clear` and treats mark acks
      that arrive while it is set as clear-echoes that **do not advance** `lastAckedMark`; the
-     flag clears on resume or on the confirmed barge-in. **The 2 s is a silence timer, not a
+     flag clears on resume or on the confirmed barge-in. An ack Twilio emitted for audio it
+     genuinely played just before it processed `clear` is indistinguishable from an echo by
+     content, so the design does not try to tell them apart — it **bounds the cost and picks
+     the direction**: on the realtime path marks are sent every 10 frames (200 ms) rather
+     than 25 (`mediastream-adapter.ts:3421`), with `TWILIO_MAX_UNACKED_MARKS` raised from 3 to
+     8 (`:931`) so the backpressure window stays ≈1.6 s of audio, and an in-flight genuine
+     ack is treated as an echo, so a false-barge-in resume can repeat at most one 200 ms
+     interval the caller already heard and can never skip audio they did not — repeating
+     200 ms is the safe failure, skipping is the one this item exists to remove.
+     `test/telephony/media-streams/pause-resume.test.ts` includes the case where a genuine
+     ack is already in flight when `clear` is sent and asserts the resume repeats at most
+     one interval and skips nothing. **The 2 s is a silence timer, not a
      deadline**: it is armed on the gated interim and re-armed on every subsequent interim or
      VAD speech event, so a caller who keeps talking keeps the reply paused for as long as
      they speak — Deepgram cannot emit a final until the caller stops and the endpointing
@@ -1692,12 +1713,25 @@ flowchart LR
     end-of-utterance mark ack, with the same safety timeout and the same fail-closed hang-up
     if the opener produces no playback), so `<Connect><Stream>` starting media early is
     harmless: frames are dropped, not transcribed, until the recording notice is complete.
-    The `recording/implicit` ledger row for the outbound leg is committed **at validated
-    complete playback of the opener — the same `disclosureValidated` branch inbound uses
-    (`mediastream-adapter.ts:1552-1570`) — before either the mark ack or the lost-ack safety
-    timer opens capture**, never at the ack itself and never at TwiML generation: inbound
-    commits there precisely so that a lost mark frame, which the safety timer recovers from
-    by opening capture anyway, cannot forward caller audio without the consent record;
+    The `recording/implicit` ledger row for the outbound leg is committed at validated
+    complete playback of the opener — the point the `disclosureValidated` branch reaches
+    (`mediastream-adapter.ts:1552-1570`) — **and the write is awaited before capture can
+    open**. That branch today does not give this ordering: it issues `void
+    commitRecordingConsent(...).catch(...)` and arms capture at once (its comment trades the
+    record for not dropping the caller's first words), so citing it is not enough. The gate
+    therefore holds a `consentCommitted` promise that resolves only when the INSERT has
+    committed, and **both** the mark-ack path and the lost-ack safety timer `await` it
+    before `enableCapture` — until it resolves frames are dropped exactly as they are before
+    the notice, so a slow database delays capture by its own latency and never forwards
+    audio without the row. A commit that fails or exceeds 5 s fails closed: the leg is hung
+    up with the existing technical-difficulty line, audited `consent_commit_failed`, the job
+    marked `failed`, and no customer audio is ever forwarded. The gate is one shared
+    function, so the inbound disclosure takes the same await — the risk is identical and
+    the consent record is the one thing that cannot be best-effort; the cost is that a slow
+    ledger write delays the caller's first captured words by its latency instead of
+    dropping the record, which is the right trade. Never at the ack itself and never at
+    TwiML generation: a lost mark frame, which the safety timer recovers from by opening
+    capture anyway, cannot forward caller audio without the consent record;
     global STOP intent → tenant DNC flag; `AnsweredBy` machine → the deterministic
     `outbound_callback_voicemail` line (business name, "automated assistant", the same spoken
     callback number, no content) or hang
@@ -1763,8 +1797,10 @@ flowchart LR
     is `telephony` with `direction: 'outbound'` and the booking lane gate admits it),
     `packages/api/test/telephony/media-streams/outbound-disclosure-gate.test.ts` (media
     frames before the opener's mark ack are dropped and never forwarded; the ledger row is
-    written when playback is validated complete, before the ack; no ack within the timeout →
-    capture enabled by the safety timer as inbound **and the row already exists**; opener
+    written **and committed** when playback is validated complete, and capture opens only
+    after the commit resolves on the ack path and on the safety-timer path alike; a commit
+    that fails or exceeds 5 s → leg hung up, `consent_commit_failed` audit, no frame
+    forwarded; a slow commit → frames dropped until it resolves, then capture opens; opener
     with no playback → leg hung up, no row),
     `packages/api/test/integration/voice-callback-jobs.test.ts`; corpus bucket 05: no consent →
     SMS only; STOP after consent → no call; bucket 03: callback books through the lane.
