@@ -1028,7 +1028,13 @@ flowchart LR
      sets `forwarding_verified_at` when `ForwardedFrom` matches a registered line).
      `voice/go-live.ts` — delete `maybeAutoGoLiveOnInboundEnd` and its `app.ts` wiring; the
      only caller of `enableVoiceAgentLive` is `POST /api/voice/go-live` from the `go_live` step;
-     `enableVoiceAgentLive` checks subscription, `full_readiness`, `voice_preview_at`, the
+     `enableVoiceAgentLive` checks subscription, `full_readiness`, `voice_preview_at`, **a
+     non-empty `transfer_targets.emergency` whose every entry is E.164 and not a provisioned
+     tenant DID** (the `emergency_target_missing` blocker from U7, re-evaluated against the
+     stored list at the moment of the call — `full_readiness` covers only Twilio provisioning
+     and `derive-status` only orders the wizard, so neither is the server-side guarantee; a
+     tenant whose only emergency number was deleted from the routing sheet between the
+     wizard's last render and the go-live click is blocked here, not by the UI), the
      scenario-interview completion predicate from U9 (every selected core scenario has an
      `answered` or `skipped` row — **not** the U4 business-answer keys, which a skipped
      interview legitimately leaves unset; a missing answer is served by U5's "not on file"
@@ -1135,23 +1141,41 @@ flowchart LR
     list was written. If no
     candidate qualifies the migration leaves `emergency = []` (the contract allows empty as a
     stored state, never as an interview answer), `derive-status` reports it as a go-live
-    blocker (`GO_LIVE_BLOCKED { emergency_target_missing }`), and the mandatory opener card
+    blocker (`GO_LIVE_BLOCKED { emergency_target_missing }`) **and `enableVoiceAgentLive`
+    enforces the same predicate server-side** (U6 item 9 — the wizard status is advisory, the
+    guard is the gate), and the mandatory opener card
     is what fills it — so no tenant goes live with an empty or non-human emergency target.
     **A tenant that is already live is remediated by the migration, not left to a blocker
     it will never hit**: for every row with `voice_agent_live_at` set and `emergency = []`
     the migration stamps `tenant_settings.emergency_target_missing_at`, which (a) makes the
-    E2 path for that tenant take a **compatibility branch that is exactly today's
-    behaviour** — the hours-filtered rotation, then `escalateToHuman`'s existing
-    business-phone fallback with the dial-time DID filter *not* applied on this branch,
-    because today's live path already dials whatever `business_phone` holds and the
-    migration must not make a life-safety call worse than it is now; (b) sends the owner one
+    E2 path for that tenant take a **compatibility branch that is today's behaviour with
+    the DID filter kept** — the hours-filtered rotation, then `escalateToHuman`'s existing
+    business-phone fallback **only when `business_phone` is not a provisioned tenant DID**.
+    The filter is not relaxed here, because for exactly the tenants this branch exists for
+    the business line is commonly the AI line itself (`provision-twilio.ts:689-698` fills an
+    empty `business_phone` with the tenant's own Twilio DID): dialling it rings the agent
+    back into itself, which is a dropped emergency presented to the caller as a transfer —
+    strictly worse than no dial. When the filter leaves nothing dialable the branch takes an
+    **external fail-safe, never a tenant number**: `tenant_settings.owner_phone` when it is
+    set and not a DID (a legacy tenant may have none — the identity step only requires it
+    for new signups); otherwise no `<Dial>` at all — the caller hears the existing emergency
+    page line ("I'm paging the on-call team now; stay on the line, and if we're cut off
+    someone will call you back at this number"), the durable page ladder that every E2
+    already arms (`twilio-adapter.ts:1856` → `armEmergencyPageLadder`) pages the owner by
+    SMS at the tenant cadence, and the call drops into the existing callback-collection
+    branch with the emergency flag so a human calls back from their own phone. That path is
+    not better than a human answering a transfer, but it is the one path that never rings
+    the AI line and never silently fails, which is the bar for a branch that exists only
+    until the owner adds a number; (b) sends the owner one
     SMS and one in-app card ("add an emergency contact — until you do, emergencies ring
-    {rotation or business line}") and shows a persistent banner in the routing sheet; and
+    {rotation or owner cell} / are paged to you by text") and shows a persistent banner in the routing sheet; and
     (c) is cleared the moment a qualifying number is written by any writer. Nothing is
     paused automatically — silently taking a live tenant offline is worse than the
     compatibility branch. The schedule test pins that a live tenant migrated with `[]` still
-    reaches a human on E2 by today's path, gets the notice, and leaves the branch once a
-    number is added.
+    reaches a human on E2 by today's path (rotation, then the owner cell, then a business
+    line that is not a DID), that one whose `business_phone` **is** its DID and has no
+    rotation or owner cell dials nothing and takes the page-and-callback fail-safe, gets the
+    notice, and leaves the branch once a number is added.
     `on_call_rotation.hours JSONB` optional. **The legacy single line is carried over, not
     dropped**: tenants who configured `tenant_settings.transfer_number` (read today by
     `create-voice-turn-processor.ts:3110-3123` as the warm-transfer destination that replaces
@@ -1194,8 +1218,20 @@ flowchart LR
     processedDialCallSids || $DialCallSid) WHERE id = $1 AND NOT
     (escalation_state->'processedDialCallSids' ? $DialCallSid) RETURNING escalation_state`.
     Zero rows means this callback belongs to a leg that already advanced the cascade, however
-    long ago; the handler re-reads the state and returns the TwiML for the **current** index
-    without advancing, so every retry gets the leg the cascade is actually waiting on. For `kind: 'emergency'` the list is
+    long ago. **The zero-row path must not answer with a fresh `<Dial>` of the current leg**:
+    for a delayed retry of an earlier callback the current leg is already ringing (or has
+    already been answered or timed out), and a `<Dial>` in the retry's response would place a
+    second, simultaneous call to that target from the same caller leg, or re-dial a target the
+    cascade has moved past. The advance therefore also records what each callback produced —
+    `legResponses: { [DialCallSid]: nextIndex }`, written in the same `jsonb_set` as the
+    index — and the zero-row path re-reads the state and compares `legResponses[$DialCallSid]`
+    with the current `index`: equal (the lost-response case — Twilio never received the TwiML,
+    so no call to that leg exists yet) → replay exactly that leg's TwiML; not equal (a delayed
+    retry whose produced leg is no longer the one being waited on) → return the empty,
+    hang-up-safe TwiML and audit `dial_result_retry_ignored`, never a new dial. A callback
+    whose SID is in `processedDialCallSids` but absent from `legResponses` cannot occur after
+    the migration (both are written by one UPDATE); a pre-migration row is read as "not
+    current" and takes the no-op. For `kind: 'emergency'` the list is
     `transfer_targets.emergency` and exhaustion falls into the existing rotation cascade. For
     `kind: 'scheduled'` (an ordinary transfer resolved to `open` or `after_hours`) the list is
     `[scheduled target, overflow]` when `overflow` is a number, because today the single-line
@@ -1227,7 +1263,9 @@ flowchart LR
     with `reason: 'emergency_dispatch'` before any rotation entry; the same `/dial-result`
     callback delivered twice with the same `DialCallSid` → the second response is identical
     to the first and the index advances once; target 1's callback redelivered *after* target
-    2's has advanced the cascade → no third advance, the response is the current leg; list exhausted → rotation
+    2's has advanced the cascade → no third advance **and no `<Dial>`**: the response is the
+    empty no-op TwiML because that callback's recorded leg (2) is no longer current, while the
+    same callback redelivered *before* target 2's arrives replays leg 2's TwiML once; list exhausted → rotation
     cascade as today; answered leg writes the completed tombstone and a delayed no-answer retry for an earlier leg is then ignored with no new dial); the contract rejects
     `'voicemail'`, and rejects an
     empty list as an interview answer while allowing it as the migrated state; migration
