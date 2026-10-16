@@ -1231,8 +1231,10 @@ flowchart LR
     409 `SLOT_TAKEN` without `force`, even though that technician's calendar is empty),
     and the same pair with `force: true` on the dispatcher side → the dispatcher row lands
     and the hold that follows it sees `slot_taken`);
-    `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (a draft proposal exists
-    before the hold and the hold's `proposal_id` points at it; the draft cannot be approved or
+    `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (inside one transaction
+    the hold is placed first, the draft is then minted with the hold's `appointmentId` in its
+    payload, and the hold's `proposal_id` is pointed at it before commit, so no committed hold
+    is ever visible without its draft and the draft always passes `createBookingPayloadSchema`; the draft cannot be approved or
     executed while `missingFields` is set; grant and decline each complete that same draft
     rather than minting a second row, through `promoteConsentDraft`: eligible → `approved`
     with the lane stamp and `approved_at` set at promotion, the UNDO SMS sent then;
@@ -1362,8 +1364,22 @@ flowchart LR
     rotation cursor, so without more the second emergency number would never be dialled.
     `escalateToHuman` therefore writes `voice_sessions.escalation_state JSONB`
     (`{ kind: 'emergency' | 'scheduled', reason, targets, index, screened }`) whenever it
-    dials from a configured list rather than the rotation, and `/dial-result` reads it: while
-    `index + 1 < targets.length` it re-enters with the same `reason` and the next index (the
+    dials from a configured list rather than the rotation, and `/dial-result` reads it —
+    **from the row, never from the runtime session**: today the handler answers `<Hangup/>`
+    the moment the local store has no session for the `?sid=` (`routes/telephony.ts:876-883`),
+    before any cascade logic runs, so with more than one replica, or after the replica that
+    placed the transfer restarts, a busy or no-answer leg would hang up on an emergency
+    caller instead of ringing the next target. The cascade therefore operates entirely from
+    durable state: the handler resolves the tenant from the verified credential exactly as
+    it does now (`sessionBelongsToAnotherTenant` against the `?sid=` session, with the row's
+    `tenant_id` standing in when no runtime session is local), loads `voice_sessions` by id
+    under that tenant's RLS context, runs the conditional `escalation_state` UPDATE below,
+    and builds the next leg's TwiML from the row's `targets`, `index` and `screened` plus
+    tenant settings through `callControl.dialDispatcher` — none of which needs the FSM. A
+    runtime session, when one is local, only receives the `escalationTriggered` event; when
+    none is, the audit is written from the row's tenant and session id. The `<Hangup/>` stays
+    only for a `?sid=` with no durable row at all (reaped or unknown). While `index + 1 <
+    targets.length` the handler re-enters with the same `reason` and the next index (the
     `screenedLeg` flag carried as today), and only once the list is exhausted does it fall
     through. When a leg answers the state is **not deleted but tombstoned** —
     `{ kind, status: 'completed', processedDialCallSids }` kept for the session's lifetime —
@@ -1447,7 +1463,10 @@ flowchart LR
     the ordered list before the rotation; a list of one falls through to the rotation then the
     business phone that is not a tenant DID; `packages/api/test/integration/dial-result-emergency-cascade.test.ts`
     (first emergency target no-answer → `/dial-result` dials the second emergency number
-    with `reason: 'emergency_dispatch'` before any rotation entry; the same `/dial-result`
+    with `reason: 'emergency_dispatch'` before any rotation entry; the same callback
+    delivered to a process whose store holds no runtime session → the second number is still
+    dialled from the durable row, audited under the row's tenant; a callback for a `?sid=`
+    with no row at all → `<Hangup/>`; the same `/dial-result`
     callback delivered twice with the same `DialCallSid` → the second response is identical
     to the first and the index advances once; target 1's callback redelivered *after* target
     2's has advanced the cascade → no third advance **and no `<Dial>`**: the response is the
@@ -1822,7 +1841,7 @@ flowchart LR
   - Tests: `packages/api/test/ai/voice-turn/callback-consent-arming.test.ts` (armed with the
     booking ask on the booking path and written as two rows on grant; armed alone when a
     callback proposal or call-me-back task is created; armed alone on the booking path for a
-    customer with `sms_consent = true`, where the draft exists before the hold on this path too, grant → that draft completed
+    customer with `sms_consent = true`, where the same hold → draft → link sequence runs in one transaction on this path too, grant → that draft completed
     as the one lane proposal plus the `voice` row, decline → the same draft completed with no
     row, hang-up → draft `expired` and the hold released
     (never zero proposals on an answered ask, never two), and still armed when that customer holds a
