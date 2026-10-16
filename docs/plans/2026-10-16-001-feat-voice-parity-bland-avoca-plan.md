@@ -931,7 +931,33 @@ flowchart LR
      the request. A dispatcher deliberately booking *beyond* capacity passes `force: true`,
      audited as `appointment_overbooked`, which skips the predicate but still takes the lock,
      so a concurrent voice hold always sees the row once it is committed; ordinary parallel
-     work never needs it.
+     work never needs it. **The invariant lives in one helper and every writer that creates
+     or moves a visit calls it, not `POST` alone**: `appointments/capacity-guard.ts`
+     `assertCapacityAvailable({ tenantId, window, excludeAppointmentId?, technicianId?,
+     force? })` takes the lock, runs the capacity predicate with the appointment being moved
+     excluded from the count, and when a technician is in play runs `assertNoDoubleBooking`
+     with the same `excludeAppointmentId` (`appointments/assignment.ts:166-172` already
+     accepts one). Today `PUT /api/appointments/:id` (`routes/appointments.ts:453-510`)
+     reaches `updateAppointment`, whose only check on a moved start is
+     `assertStartNotInPast` (`appointments/appointment.ts:345-347`), so at
+     `booking_capacity = 1` a dispatcher could create a visit in a free window and then drag
+     it onto an unassigned visit, or one assigned to another technician, with no `force`
+     and no overbooking audit — the technician exclusion constraint sees neither case. The
+     guard therefore runs inside `updateAppointment`'s moved-window branch (a changed
+     `scheduledStart` **or** `scheduledEnd`; re-sending the persisted values is not a
+     reschedule, exactly as the past-start check already distinguishes), on the request
+     transaction, so every caller of `updateAppointment` inherits it; and in
+     `syncJobSchedule`'s schedule and reschedule operations
+     (`jobs/job-appointment-sync.ts:284`, reached from job create with schedule-on-create,
+     `POST /jobs/:id/schedule` and estimate conversion), which today validate only the
+     technician against the new window (`:369`). A technician-only change
+     (`PUT /:id/technician`) keeps the technician check alone: the row already occupies its
+     capacity unit. `force: true` on a reschedule is audited `appointment_overbooked`
+     exactly as on create. `test/routes/appointments.capacity.test.ts` pins, at capacity 1:
+     create in a free window then `PUT` onto an occupied one → 409 `SLOT_TAKEN`; the same
+     with `force` → 200 and the overbooking audit; a `PUT` that re-sends the unchanged
+     window → no capacity query; a move within the visit's own window → passes (self
+     excluded); `POST /jobs/:id/schedule` onto a full window → 409.
      One lock per tenant serialises every hold placement for that tenant, which is a handful
      per minute at the busiest tenant and costs nothing measurable; two concurrent calls for
      overlapping windows with different starts (2:00–3:00 and 2:30–3:30) therefore also
@@ -1875,27 +1901,47 @@ flowchart LR
     close — a crash **after** Twilio accepted the message but **before** `sent_at` was
     stamped — is closed by reconciliation, not by re-sending: a row left in `sending` is
     never re-sent blindly (exactly the ledger's "never auto-reclaim `sending`" rule). First
-    the status callback, which Twilio delivers independently of the worker, stamps
-    `sent_at` and the SID with `WHERE job_id = $1 AND sent_at IS NULL`. Then a reconciler
-    pass for rows in `sending` older than 2 minutes with `sent_at` null lists the
-    subaccount's messages for `to = target_e164`, `from = <the tenant's DID>`,
-    `dateSentAfter = sending_at − 1 min` and matches the stored `body`: a match stamps the
-    row sent with that SID; no match after the window means Twilio never accepted the
-    create, so the row is moved back to `pending` (bounded by `attempts`, ≤ 3) and sent
-    again. Three layers make it once: the `job_id` primary key means a redelivered terminal
-    status finds the guard false and writes nothing, and a worker retry after `sent_at`
-    sends nothing; the `sending` CAS means two workers cannot both call the provider for one
-    row; and the callback-or-list reconcile means a post-accept crash resolves to the
-    message Twilio already holds rather than a second one.
+    **the status callback is the per-job correlation**: the `statusCallback` URL carries
+    `?job=<job_id>`, Twilio posts to it for every status transition of that one message
+    (`queued`, `sent`, then `delivered` / `undelivered` / `failed`), each POST carrying
+    the `MessageSid`, and it is delivered independently of the worker's own HTTP response —
+    so a create that Twilio accepted while the worker died is still tied to exactly its
+    row by the first callback that lands, which stamps `sent_at` and the SID with `WHERE
+    job_id = $1 AND sent_at IS NULL`; a single lost POST is covered by the next
+    transition's. **No match on recipient, sender, time or body ever marks a row sent**:
+    Twilio's list filters are calendar-date granular (`DateSent`), two callback jobs for
+    the same customer can carry the identical body from the same DID, and stamping the
+    later row with the earlier job's message would suppress that fallback forever. A
+    `sending` row whose callback has not arrived after 10 minutes goes through a
+    **set reconcile** that can only ever *add* a send, never swallow one: the reconciler
+    lists the subaccount's messages to `target_e164` from the DID created that calendar
+    day, drops every SID already stamped on any outbox row of the tenant, and keeps the
+    rest whose `date_created` (a full timestamp on the returned resource) falls within
+    `[sending_at, sending_at + 10 min]`. Zero candidates means Twilio never accepted the
+    create: the row goes back to `pending` for one bounded re-send (`attempts ≤ 3`).
+    Exactly as many candidates as unresolved `sending` rows for that recipient means each
+    row takes one SID — the bodies are identical by construction, so which is which cannot
+    change what the customer received — and is stamped. Anything else (more candidates
+    than rows, or a candidate whose body differs) is ambiguous: the row stays `sending`, is
+    neither re-sent nor stamped, and is surfaced through the same stuck-claims report
+    `findStuckSendClaims` feeds (`send-claim-ledger.ts:33`) for an operator. Three layers
+    make it once: the `job_id` primary key means a redelivered terminal status finds the
+    guard false and writes nothing, and a worker retry after `sent_at` sends nothing; the
+    `sending` CAS means two workers cannot both call the provider for one row; and the
+    callback (or, failing it, the exclusion-and-count reconcile) means a post-accept crash
+    resolves to the message Twilio already holds rather than a second one.
     `test/integration/callback-fallback-outbox.test.ts` pins that a failure injected after
     the session commit leaves no half-finalised state (either all three rows are written or
     none), that the fallback is sent once across redelivery, worker retry and reconciler
     overlap, that a crash injected after the provider accepted the send but before
     `sent_at` was stamped leaves the row in `sending`, is **not** re-sent by the next
-    worker pass, and is stamped sent by the status callback or by the list reconcile
-    (mocked provider returns the accepted message), with exactly one provider create
-    across the whole sequence; that a `sending` row with no provider message after the
-    window is re-sent once and then stamped; and that an adapter-lost finalisation writes no outbox row
+    worker pass, and is stamped sent by its own status callback (carrying `?job=`), with
+    exactly one provider create across the whole sequence; that a `sending` row with no
+    callback and no candidate message after the window is re-sent once and then stamped;
+    that two jobs for the same customer with identical bodies, the later crashed
+    post-accept, are never cross-stamped — the earlier job's SID is excluded and the later
+    row resolves only through its own callback or the count rule; that an ambiguous
+    candidate set leaves the row `sending`, reported and not re-sent; and that an adapter-lost finalisation writes no outbox row
     and sends no text. The `ended_at IS NULL`
     guard on the answer-side UPDATE is what makes the late case safe (above). The `voice_callback_jobs` UNIQUE on tenant + session
     keeps the job singular.
