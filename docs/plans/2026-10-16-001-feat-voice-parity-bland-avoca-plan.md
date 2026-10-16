@@ -1447,17 +1447,32 @@ flowchart LR
     `initiateOutboundCall` with `Url=/api/telephony/outbound-answer`, `StatusCallback`,
     `MachineDetection=Enable`); `routes/telephony.ts` `/outbound-answer` returns
     `<Connect><Stream>` bound to a `voice_sessions` row `channel 'voice_outbound'` seeded
-    with `customerId` — **established idempotently by CallSid, the way inbound's
-    `establishInboundSession` is** (`twilio-adapter.ts:1123-1137` looks the CallSid up in
-    the store before constructing anything, and `handleInbound` replays the same TwiML for
-    an existing session, `:2154-2179`): the service creates the session row keyed on the
-    CallSid that `calls.create` returns (UNIQUE `voice_sessions.call_sid`, insert `ON
-    CONFLICT DO NOTHING` then re-read, because Twilio can deliver `/outbound-answer` before
-    the create call has returned to us), and the route looks the row up by CallSid and only
-    creates it when absent, so a Twilio retry of `/outbound-answer` after a timeout or lost
-    response gets the identical `<Connect><Stream>` for the one existing session — no second
-    row, no second opener turn, no duplicate consent-ledger, audit or usage event; the
-    `voice_callback_jobs` UNIQUE on tenant + session already keeps the job singular.
+    with `customerId` — **established idempotently, with the correlation persisted before
+    the dial rather than recovered from the CallSid**, because the answer webhook can arrive
+    before `calls.create` has returned the CallSid to us, and a webhook carrying only an
+    unknown CallSid has no tenant, job, consent event or `customerId` to seed a row from.
+    The service therefore creates the `voice_sessions` row **first** (tenant, `channel
+    'voice_outbound'`, `customerId`, `callback_job_id`, `consent_event_id`, `call_sid NULL`),
+    stamps `voice_callback_jobs.outbound_session_id`, and only then dials with
+    `Url=/api/telephony/outbound-answer?session=<that id>`. The id in the query is
+    authenticated by the route's existing `X-Twilio-Signature` check
+    (`telephony/twilio-signature.ts:223-231` runs the SDK's `validateRequest` over the full
+    URL including the query string, so a forged or altered id fails 403 exactly as a forged
+    body does), and the route loads the row by that id — everything it needs is already on
+    it — and binds the CallSid with one conditional UPDATE: `SET call_sid = $CallSid WHERE id
+    = $session AND (call_sid IS NULL OR call_sid = $CallSid) RETURNING *`. One row → return
+    `<Connect><Stream>` for that session; zero rows → the row is already bound to a
+    *different* CallSid, which is not a Twilio retry (a retry re-posts the same CallSid), so
+    the route answers 403 with an audit and no stream. A Twilio retry of `/outbound-answer`
+    after a timeout or lost response carries the same session id and the same CallSid, so it
+    gets the identical `<Connect><Stream>` for the one existing session — no second row, no
+    second opener turn, no duplicate consent-ledger, audit or usage event — mirroring the
+    replay guard inbound already has (`twilio-adapter.ts:1123-1137`, `:2154-2179`). When the
+    REST call returns, the service stores its CallSid on the job for the status callbacks
+    (the same conditional UPDATE, so service and webhook agree whichever lands first); when
+    `calls.create` throws, the pre-created session is closed with `outcome = 'dial_failed'`
+    and the job records the failure. The `voice_callback_jobs` UNIQUE on tenant + session
+    keeps the job singular.
     `proposals/surface.ts` outbound surface with the inbound allowed set;
     opening line `outbound_callback_opener` ("This is {agent}, {business}'s automated assistant,
     calling back about your request a moment ago. This call is recorded. You can reach
@@ -1506,10 +1521,13 @@ flowchart LR
     callbacks, one attempt; the opener and the voicemail line both contain the tenant's
     business phone rendered as digits, and a tenant whose `business_phone` fails the
     non-premium check cannot enable callbacks), `packages/api/test/routes/telephony.outbound-answer.test.ts`
-    (the same CallSid delivered twice → one `voice_sessions` row and byte-identical TwiML on
-    the retry, one opener turn, one ledger row; `/outbound-answer` arriving before the
-    service has stored the CallSid → the row is created once by whichever side wins and the
-    other re-reads it),
+    (the same session id and CallSid delivered twice → one `voice_sessions` row and
+    byte-identical TwiML on the retry, one opener turn, one ledger row; `/outbound-answer`
+    arriving before the REST response → the pre-created row is found by its id and bound to
+    the CallSid, and the service's later stamp is a no-op; a request whose `session` query
+    value is altered → 403 from the signature check, no row touched; a valid id already
+    bound to a different CallSid → 403, audit, no stream; `calls.create` throwing → session
+    closed `dial_failed`, job failed, no orphan row awaiting a webhook),
     `packages/api/test/telephony/media-streams/outbound-disclosure-gate.test.ts` (media
     frames before the opener's mark ack are dropped and never forwarded; the ledger row is
     written when playback is validated complete, before the ack; no ack within the timeout →
