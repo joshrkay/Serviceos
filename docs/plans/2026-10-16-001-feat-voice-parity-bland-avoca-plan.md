@@ -652,8 +652,16 @@ flowchart LR
     `content_rev` it was enqueued for, and **every** worker transition is conditional on it,
     the claim included: the worker claims the row with `UPDATE … SET index_status =
     'indexing' WHERE id = $1 AND content_rev = $rev AND index_status IN ('pending',
-    'failed') RETURNING id`, and a zero-row claim means the job is stale (an edit bumped the
-    revision, or another job already holds it) and it exits without calling the provider.
+    'failed') RETURNING id`. A zero-row claim has two meanings and the worker tells them
+    apart with one follow-up read of the row: if `content_rev` has moved on, the job is
+    stale and it exits successfully (the queue acks it, `app.ts:3132-3134`); if the revision
+    is current but the row is `indexing` under a live lease, the job is **not** done — it
+    re-enqueues itself with `queue.send(…, { delaySeconds: remainingLease + 1 })` (the same
+    delayed send the page ladder uses) and only then returns success, so the ack at
+    `app.ts:3132-3134` never discards the only job for a row whose first claimant has died.
+    This matters because the queue's first visibility timeout is 120 s, well inside the
+    ten-minute lease: a crash-redelivery arriving early would otherwise be acked as a no-op
+    and the row would sit in `indexing` for ever.
     The claim also stamps `index_claimed_at = NOW()`, and the predicate accepts a row left in
     `indexing` whose claim is older than the lease: `… AND (index_status IN ('pending',
     'failed') OR (index_status = 'indexing' AND index_claimed_at < NOW() - INTERVAL '10
@@ -717,7 +725,7 @@ flowchart LR
     a stale job that only *starts* after the edit → its claim affects zero rows, it never
     calls the provider, and the new revision's job claims and indexes the row; a worker that
     dies after the claim → the row sits in `indexing`, a redelivery inside ten minutes cannot
-    claim it, a redelivery after ten minutes reclaims and indexes it; the
+    claim it and re-enqueues itself for the lease remainder instead of acking, a redelivery after ten minutes reclaims and indexes it; the
     original worker finishing after that reclaim → its terminal update carries the old token,
     affects zero rows, and the reclaimer's result stands.
   - Integration: RLS denies cross-tenant reads on both tables; raw select pins the columns.
@@ -748,7 +756,12 @@ flowchart LR
     `biz_about`, `biz_not_on_file` (EN+ES).
   - Post-check inside the skill before `buildAnswer`: floor regexes (`PHONE_REGEX`,
     `EMAIL_REGEX`, `BALANCE_REGEX`) must not match unless topic is `about`; no `$` unless topic is
-    `pricing_policy` and the string is byte-equal to owner text; ≤ 2 sentences / 280 chars is
+    `pricing_policy` **and** the dollar string is either byte-equal to owner-authored text or
+    byte-equal to `formatCents(x)` for a confirmed structured fee — `trip_fee_cents` or
+    `deposit_cents` whose `*_confirmed_at` is set — rendered by the one deterministic money
+    formatter the invoices already use (never an LLM, never arithmetic); this is what lets
+    U4's accepted `$89.50` be spoken without the owner retyping it into `pricing_policy`,
+    while an unconfirmed seed or any other computed amount still fails the gate; ≤ 2 sentences / 280 chars is
     a **tripwire, not a truncation**: the same bound is enforced when the FAQ is saved (U4),
     so a stored answer always fits and is spoken verbatim; an answer that somehow exceeds it
     (a row written before the bound, a template that grew) is not cut at a sentence boundary
@@ -1109,13 +1122,16 @@ flowchart LR
     through; the state is cleared when a leg answers. **Advancing is idempotent per attempted
     leg**: Twilio retries `/dial-result` when a response is lost, and a second advance on the
     retry would skip a target (a lost response carrying target 2's TwiML would make the retry
-    return target 3). The state therefore records `lastDialCallSid`, the `DialCallSid` of
-    the leg that just ended, and the advance is one conditional UPDATE: `SET
-    escalation_state = jsonb_set(…, index + 1, lastDialCallSid = $DialCallSid) WHERE id = $1
-    AND escalation_state->>'lastDialCallSid' IS DISTINCT FROM $DialCallSid RETURNING
-    escalation_state`. Zero rows means this callback is a duplicate for a leg already
-    advanced past; the handler re-reads the state and returns the TwiML for the **current**
-    index without advancing, so the retry gets the same next leg the lost response carried. For `kind: 'emergency'` the list is
+    return target 3). The state therefore keeps `processedDialCallSids: string[]`, every
+    `DialCallSid` that has already advanced the cascade — not just the most recent one,
+    because a *delayed* retry of target 1's callback arriving after target 2 has also
+    advanced would differ from the latest SID and advance a third time — and the advance is
+    one conditional UPDATE: `SET escalation_state = jsonb_set(…, index + 1,
+    processedDialCallSids || $DialCallSid) WHERE id = $1 AND NOT
+    (escalation_state->'processedDialCallSids' ? $DialCallSid) RETURNING escalation_state`.
+    Zero rows means this callback belongs to a leg that already advanced the cascade, however
+    long ago; the handler re-reads the state and returns the TwiML for the **current** index
+    without advancing, so every retry gets the leg the cascade is actually waiting on. For `kind: 'emergency'` the list is
     `transfer_targets.emergency` and exhaustion falls into the existing rotation cascade. For
     `kind: 'scheduled'` (an ordinary transfer resolved to `open` or `after_hours`) the list is
     `[scheduled target, overflow]` when `overflow` is a number, because today the single-line
@@ -1146,7 +1162,8 @@ flowchart LR
     (first emergency target no-answer → `/dial-result` dials the second emergency number
     with `reason: 'emergency_dispatch'` before any rotation entry; the same `/dial-result`
     callback delivered twice with the same `DialCallSid` → the second response is identical
-    to the first and the index advances once; list exhausted → rotation
+    to the first and the index advances once; target 1's callback redelivered *after* target
+    2's has advanced the cascade → no third advance, the response is the current leg; list exhausted → rotation
     cascade as today; answered leg clears `escalation_state`); the contract rejects
     `'voicemail'`, and rejects an
     empty list as an interview answer while allowing it as the migrated state; migration
@@ -1202,12 +1219,16 @@ flowchart LR
     close flow's `close: { proposalId, strictConfirmed }`, `voice-session-store.ts:400-404`,
     run by `runOwnerApprovedClose`) resumes anything. So this ask arms the same booking
     continuation U6 item 5 uses, `pendingConsentCapture { customerId, phone, booking:
-    { appointmentId, jobId, laneInput }, ask: 'callback_only' }`, and the consumer mints
-    **exactly one** lane proposal on the next turn in both branches: grant → write the
-    `voice` row, then mint; decline → mint without the callback (SMS confirmation still on,
-    since that consent is already on file). A hang-up mid-ask takes U6 item 5's termination
-    branch (hold and provisional job released, no proposal). Without the continuation either
-    answer would leave the hold with no proposal behind it. **A grant from an earlier
+    { appointmentId, jobId, laneInput, proposalId }, ask: 'callback_only' }` — and the same
+    **draft-before-hold order**: this branch mints the non-executable `draft` proposal
+    before placing the hold exactly as item 5 does (the hold's `proposal_id` points at it),
+    so a hold never exists without a proposal behind it on this path either, and the consumer
+    completes **that one draft** on the next turn in both branches: grant → write the `voice`
+    row, then complete it as the lane proposal; decline → complete it without the callback
+    (SMS confirmation still on, since that consent is already on file). A hang-up mid-ask
+    takes U6 item 5's termination branch (draft `expired`, hold and provisional job
+    released), and the reaper expires the draft if cleanup never ran. Without the continuation
+    either answer would leave the hold with no completed proposal behind it. **A grant from an earlier
     call is never reused to skip the ask:** the callback service below binds the consent event
     to the job's `voice_session_id`, so an old event could not authorise this call's callback
     and a drop would silently fall back to SMS. The only thing that suppresses the ask is a
@@ -1276,8 +1297,9 @@ flowchart LR
   - Tests: `packages/api/test/ai/voice-turn/callback-consent-arming.test.ts` (armed with the
     booking ask on the booking path and written as two rows on grant; armed alone when a
     callback proposal or call-me-back task is created; armed alone on the booking path for a
-    customer with `sms_consent = true`, where grant → one lane proposal plus the `voice` row,
-    decline → one lane proposal and no row, hang-up → no proposal and the hold released
+    customer with `sms_consent = true`, where the draft exists before the hold on this path too, grant → that draft completed
+    as the one lane proposal plus the `voice` row, decline → the same draft completed with no
+    row, hang-up → draft `expired` and the hold released
     (never zero proposals on an answered ask, never two), and still armed when that customer holds a
     `dropped_call_callback` grant from an earlier session (old grants never suppress the
     ask), but not when this session already recorded one; never armed on a lookup,
