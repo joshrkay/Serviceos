@@ -35,7 +35,8 @@ import { withTenantTransaction } from '../../src/middleware/tenant-context';
 import { MIGRATIONS } from '../../src/db/schema';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
-const DAY = '2026-11-18';
+// Appointment creation rejects a start in the past (#1402); a fixed date ages out.
+const DAY = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 const at = (hhmm: string) => new Date(`${DAY}T${hhmm}:00.000Z`);
 
 describe('Postgres integration — reschedule into a double-booking (#1472)', () => {
