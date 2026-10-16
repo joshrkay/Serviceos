@@ -699,7 +699,20 @@ flowchart LR
     (tap → typed write + audit; speech → existing extractor → clarification or write; free
     text → FAQ entry, standing-instruction candidate, or white-space note).
   - `packages/api/src/ai/voice-quality/corpus/schema.ts` and ~12 core scripts — optional
-    `ownerFacing { family, options, settingKey }` block; no second copy of the script.
+    `ownerFacing { family, options, settingKey, order }` block; no second copy of the script.
+  - **The opener (decided 2026-10-16): the no-cooling, vulnerable-occupant call is card one
+    for every trade.** New golden scripts
+    `packages/api/src/ai/voice-quality/corpus/scripts/12-life-safety/e2-no-cooling-vulnerable-occupant.json`
+    and `es-e2-sin-aire-ocupante-vulnerable.json` (caller: "My AC just stopped, it's 104 in
+    here, and my mom is on oxygen"; expected: E2 tier, no booking drafted, patch-through to the
+    emergency target, whisper names medical priority + no AC + elderly occupant + customer
+    tenure, page ladder armed if unanswered; floor criteria 1, 2, 7, 8; disposition 9, 11).
+    Plumbing and electrical variants use the existing burst-pipe and sparking-panel scripts
+    with a vulnerable-occupant line added. Closes tracker row 15 for this case.
+  - `packages/api/src/flags/voice-flags.ts` — `voice_vulnerability_triage` joins the default-ON
+    resolver (D-039 order: tenant override → platform → ON), with a decision-log entry; the
+    opener's patch-through does not run on a fresh tenant without it. Pinned by
+    `packages/api/test/integration/voice-flags-default-on-1588.test.ts` (add the key).
   - `packages/api/src/ai/agents/onboarding/transitions.ts` — new act `scenario_interview`
     after `schedule_capture`, driving `library.select(tenant)`; `MAX_TURNS` raised to cover it;
     closing `open_capture` state bounded to five items.
@@ -745,6 +758,9 @@ flowchart LR
   → proposal path; `proposals/corrections/correction.ts` and `learning/corrections/` for the
   review card; `docs/strategy/day-in-the-life.md` for the voice of the agent's lines.
 - **Test scenarios:**
+  - Opener: every trade's first card is the vulnerable-occupant emergency; the preview speaks
+    the E2 line, the hand-off and the whisper, drafts no booking, and the only options offered
+    are the emergency target order and the page cadence (no "looser" option exists).
   - Happy: HVAC tenant → twelve cards including no-cool emergency and after-hours; owner taps
     "book it on the call" → `autonomous_booking_enabled=true` + audit; says "always ask what's
     wrong first" → `booking_required_fields` gains problem description.
@@ -886,7 +902,8 @@ keys are a production change outside this plan's code and block everything below
 5. The replica trigger concurrency from U1 decides whether a shared session store becomes a
    unit in the next plan.
 6. Decision-log entries needed: realtime default-on with capacity (U1), `lookup_business_info`
-   as tenant-public (U5), new-tenant booking default and removal of auto-go-live (U6).
+   as tenant-public (U5), new-tenant booking default and removal of auto-go-live (U6),
+   `voice_vulnerability_triage` default-on (U9 opener).
 7. Deepgram Flux: evaluate after U2 lands and is measured; it changes the provider contract and
    the Layer 2 emulator.
 

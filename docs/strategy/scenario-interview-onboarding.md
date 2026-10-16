@@ -57,7 +57,7 @@ scenarios for a typical shop and fits in about ten minutes.
 | Booking (02) | Known customer wants Tuesday 2 pm for a repair | Book it on the call, or hold it for you? What must I collect first (what's wrong, address, access)? | `autonomous_booking_enabled/threshold`, new `booking_required_fields` (defaults to problem description + address), `job_buffer_minutes` |
 | New caller (03) | Unknown number, "do you do water heaters, how much?" | Collect what? Quote never / ranges from your price book / exact from price book? | `quote_policy` (new), `services_offered`, `services_not_offered` (new) |
 | Returning customer (01, 04) | "What do I owe you?" from a number that matches two customers | Read balances back after I confirm who they are? How should I confirm? | identity-check posture flags, existing lookup allowlist (no new free text) |
-| Emergency (12, 05) | 104°F, elderly caller, no AC (HVAC) / active leak (plumbing) | What counts as an emergency for you? Who do I page, in what order, how fast? | `e1_reviewed_script`, per-tenant emergency terms (today platform-only; this is the motivation to open it), `transfer_targets.emergency`, page ladder |
+| Emergency (12, 05) — **always first** | 104°F, elderly caller on oxygen, no AC (HVAC) / active leak with a vulnerable occupant (plumbing) / sparking panel (electrical) | Who do I patch through first, then who? How fast does the page ladder run? (What the agent always does is shown, not asked; "make it stricter" only) | `transfer_targets.emergency`, page ladder, `e1_reviewed_script`; per-tenant emergency terms (today platform-only; this is the motivation to open it); requires `voice_vulnerability_triage` default-on |
 | After hours (05) | Same call at 9 pm | Answer and book, or voicemail? Different number after hours? | `after_hours_voice_mode`, `transfer_targets.after_hours` |
 | Out of area / scope (05, 07) | ZIP outside the radius; "do you do ductwork?" | Decline, refer out, or take a message? What do we not do? | `service_area_zips/radius`, `services_not_offered`, decline copy choice |
 | Questions about the business (new 13) | "Do you charge a trip fee? Is it credited?" | The structured business answers, one at a time, each read back in the agent's words | `tenant_business_answers` (U4) |
@@ -70,6 +70,41 @@ scenarios for a typical shop and fits in about ten minutes.
 Two scenario kinds are deliberately not questions. Emergency safety rails and the negotiation
 refusal are shown and explained but not configurable below the platform floor; the owner can
 make them stricter, never looser. That is the same posture as the action-class ladder.
+
+## The opener: the same first scenario for every owner
+
+**Decided 2026-10-16: the interview opens with the no-cooling, vulnerable-occupant call for
+every trade.** The HVAC line is the day-in-the-life one: *"My AC just stopped, it's 104 in here,
+and my mom is on oxygen."* Plumbing hears the active-leak equivalent with a vulnerable
+occupant; electrical hears a sparking panel. It goes first for three reasons:
+
+1. It is the call the owner is most afraid of missing, so it is the moment they decide whether
+   to trust the agent at all.
+2. It shows the rails before asking for anything. The agent does not try to book; it says what
+   it will always do (safety line, then a human) and asks only the two things that are the
+   owner's to decide: who gets patched through, in what order, and how fast the page ladder
+   runs if nobody answers.
+3. It is the scenario where "make it stricter" is the only direction, which teaches the owner
+   the shape of every later card.
+
+What the agent plays: the caller line in the second voice; then, in the owner's voice, the
+E2 safety line, the hand-off ("I'm connecting you to {owner} now"), and the whisper the owner
+would hear on their own phone: *"Medical priority. No AC, elderly occupant on oxygen. {Caller},
+your customer since {year}."* Then: "That's what I'll do every time. Who should I reach first,
+and who after that?"
+
+Two things the code does not have today, both required before this card can be honest:
+
+- **A golden script.** Bucket 12 covers gas, carbon monoxide, fire, injury and sparking (E1,
+  call 911 and close) and a burst pipe (E2, dispatcher). The no-cooling-with-a-vulnerable-
+  occupant call has no script; U9 adds `12-life-safety/e2-no-cooling-vulnerable-occupant.json`
+  (and the Spanish twin) asserting the E2 tier, the patch-through, the whisper content, and
+  that no booking is drafted.
+- **The vulnerability triage flag is dark by default.** `voice_vulnerability_triage` resolves
+  tenant override → platform → false, so the patch-through that makes this card true does not
+  run on a fresh tenant. D-039 flipped the extended-intents and multi-action flags to default
+  ON and left this one. The opener requires the same decision for this flag (a D-entry), or the
+  card would demonstrate behaviour the tenant does not get.
 
 ## The interaction, act by act
 
