@@ -136,7 +136,8 @@ editor, an outbound dialer. Each is either an anti-persona need or a separate pr
   that pins real columns; voice-behaviour changes with Layer 1 golden scripts, and the Layer 2
   audio gate stays green.
 - R12. Onboarding emits a timestamped event per step including `voice_preview_played`,
-  `business_answers_saved`, `test_booking_verified`, `forwarding_verified`, `go_live`; PostHog
+  `business_answers_saved`, `scenario_interview_completed`, `test_booking_verified`,
+  `forwarding_verified`, `go_live`; PostHog
   keys are set in production so the funnel is measurable.
 
 ## Key Technical Decisions
@@ -866,8 +867,12 @@ flowchart LR
     **`emergency: string[]`** — an ordered list of one to three E.164 numbers, never
     `'voicemail'` or `'callback'` (an E2 call is patched to a person or it keeps ringing the
     ladder; the Zod contract in `packages/shared` rejects anything else) }; the migration
-    backfills `emergency` from the existing on-call rotation head, else `open`, else the
-    business phone, so no tenant has an empty list. `on_call_rotation.hours JSONB` optional.
+    backfills `emergency` from the first candidate that is a **valid E.164 string**: the
+    on-call rotation head, then `open` **only if it is a number** (`open` may legitimately be
+    `'voicemail'` or `'callback'`, and copying that sentinel would seed a value the contract
+    rejects and the E2 dial path cannot ring), then `tenant_settings.business_phone`, then the
+    owner cell that the identity step now requires — so no tenant has an empty list and none
+    has a non-number in it. `on_call_rotation.hours JSONB` optional.
     The U9 opener's "who first, then who?" writes exactly this key, and the E2 path reads it:
   - `packages/api/src/ai/skills/escalate-to-human.ts:447-585` — resolve the target by schedule
     through `telephony/business-hours-loader.ts` before dialling; filter rotation entries by
@@ -891,7 +896,8 @@ flowchart LR
   - Tests: `packages/api/test/ai/skills/escalate-to-human.schedule.test.ts` (emergency walks
     the ordered list before the rotation; a list of one falls through to the rotation then the
     business phone; the contract rejects `'voicemail'` and an empty list; migration backfill
-    yields a non-empty list for a tenant with only a business phone),
+    yields a non-empty list for a tenant with only a business phone, and a tenant whose `open`
+    is `'voicemail'` with no rotation backfills from the business phone, never the sentinel),
     `packages/api/test/telephony/dtmf-escape.test.ts` (Gather and realtime; protected states),
     `packages/api/test/escalations/outcome-route.persists.test.ts`,
     `packages/api/test/routes/recordings.by-call.test.ts` (cross-tenant 404, expired 403),
@@ -1070,7 +1076,17 @@ flowchart LR
     UNIQUE tenant + scenario; FORCE RLS) — `GET /scenarios/next` reads it to resume after a
     refresh or restart without repeating a card, and step completion is derived from it (every
     selected core scenario has a row), not from a stamp; `tenant_settings.scenario_interview_completed_at`
-    is a convenience stamp written when the derivation first holds.
+    is a convenience stamp written when the derivation first holds, and **that write is also
+    the R12 event's trigger**: `apply-answer.ts` runs
+    `UPDATE tenant_settings SET scenario_interview_completed_at = NOW() WHERE tenant_id = $1
+    AND scenario_interview_completed_at IS NULL` after each answered or skipped row, and when
+    (and only when) that UPDATE affects a row it calls `recordFunnelEvent` with a new
+    `scenario_interview_completed` member of the `FunnelEvent` union
+    (`analytics/posthog.ts:32`), carrying `answered`, `skipped` and `selected` counts. The
+    conditional UPDATE makes the event fire exactly once per tenant, including when the
+    completing action is a skip, so the nine-step funnel measures this step the way it
+    measures the others; R12's event list gains `scenario_interview_completed` beside
+    `business_answers_saved` (which U4's settings surface still emits).
   - `packages/api/src/routes/onboarding.ts` — `GET /scenarios/next`, `POST /scenarios/:id/answer`,
     `POST /scenarios/:id/replay` (runs the scenario through a preview session in
     **simulation mode** with current settings and returns the spoken handling),
@@ -1107,7 +1123,8 @@ flowchart LR
     path ships first), `packages/web/src/components/settings/ScenarioReplaySheet.tsx`.
   - Tests: `packages/api/test/onboarding/scenarios/library.select.test.ts` (HVAC vs plumbing
     vs solo selection; twelve-core cap), `options.test.ts` (every option maps to a real FSM
-    effect and a real setting key), `apply-answer.test.ts` (tap writes + audit; conflicting
+    effect and a real setting key), `apply-answer.test.ts` (tap writes + audit; `scenario_interview_completed` fires once when
+    the last selected card is answered or skipped and never again on later answers; conflicting
     answers → clarification; unsupported ask → white-space note, never a setting),
     `packages/api/test/ai/agents/onboarding/scenario-interview-act.test.ts` (handler-level,
     mocked gateway), `packages/api/test/routes/onboarding.scenarios.test.ts`,
