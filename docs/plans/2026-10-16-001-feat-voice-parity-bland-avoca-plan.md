@@ -1363,7 +1363,8 @@ flowchart LR
     re-enters `escalateToHuman` with `reason: 'low_confidence'` and advances only the
     rotation cursor, so without more the second emergency number would never be dialled.
     `escalateToHuman` therefore writes `voice_sessions.escalation_state JSONB`
-    (`{ kind: 'emergency' | 'scheduled', reason, targets, index, screened }`) whenever it
+    (`{ kind: 'emergency' | 'scheduled', reason, targets, index, screened, acceptedBy?:
+    { childCallSid, at } }`) whenever it
     dials from a configured list rather than the rotation, and `/dial-result` reads it —
     **from the row, never from the runtime session**: today the handler answers `<Hangup/>`
     the moment the local store has no session for the `?sid=` (`routes/telephony.ts:876-883`),
@@ -1381,7 +1382,20 @@ flowchart LR
     only for a `?sid=` with no durable row at all (reaped or unknown). While `index + 1 <
     targets.length` the handler re-enters with the same `reason` and the next index (the
     `screenedLeg` flag carried as today), and only once the list is exhausted does it fall
-    through. When a leg answers the state is **not deleted but tombstoned** —
+    through. **A screened leg's press-1 acceptance is persisted, not held in memory**:
+    today `createTransferScreenHooks.onAccepted` returns the moment its local store lacks the
+    session (`transfer-screening.ts:54-57`), before even writing the audit, so with the
+    whisper keypress and `/dial-result` on different replicas the row-only handler would
+    have no way to know a person took the call and would cascade a successful emergency
+    hand-off to the next target. `onAccepted` therefore resolves the session the same way the
+    durable `/dial-result` does — tenant from the verified credential, row by id under RLS —
+    and writes `escalation_state.acceptedBy = { childCallSid, at }` with one conditional
+    UPDATE (`WHERE escalation_state->'acceptedBy' IS NULL`), audits from the row, and only
+    then updates the local `transferAnsweredAt` when a runtime session is present. The
+    row-only `/dial-result` consults `acceptedBy` before anything else: a callback whose
+    `DialCallSid` matches `acceptedBy.childCallSid` is the accepted leg finishing, and takes
+    the tombstone path below, never the cascade. When a leg answers the state is **not
+    deleted but tombstoned** —
     `{ kind, status: 'completed', processedDialCallSids }` kept for the session's lifetime —
     because today's handler does not reject callbacks for an ended escalation, and a delayed
     no-answer retry for an earlier leg arriving after the caller was transferred would, with
@@ -1583,8 +1597,18 @@ flowchart LR
     branch.
   - **Outbound leg.** `packages/api/src/telephony/outbound-ai-call-service.ts` (clone of
     `initiateOutboundCall` with `Url=/api/telephony/outbound-answer`, `StatusCallback`,
-    `MachineDetection=Enable`); `routes/telephony.ts` `/outbound-answer` returns
-    `<Connect><Stream>` bound to a `voice_sessions` row `channel 'voice_outbound'` seeded
+    `MachineDetection=Enable`); `/outbound-answer` and `/outbound-status` are **mounted in
+    `app.ts` with the AccountSid-only `subaccountCredentialView`, ahead of the shared
+    telephony router**, not inside it: the router applies `requireTwilioSignature` with the
+    DID-bound resolver to every route (`routes/telephony.ts:425-430`), and that resolver
+    picks the owner of `To` and refuses when the presented subaccount differs
+    (`twilio-webhook-credential.ts:211-223`) — correct for inbound webhooks, wrong for a leg
+    whose `To` is the *customer*, who may hold a number another tenant provisioned;
+    `app.ts:4246-4256` reserves the AccountSid-only view for exactly the outbound call-bridge
+    callbacks for this reason, and the whisper mount already uses it. The view verifies the
+    signature with the presented account's token and records the verifying tenant, after
+    which the session-tenant authorisation below applies unchanged. `/outbound-answer`
+    returns `<Connect><Stream>` bound to a `voice_sessions` row `channel 'voice_outbound'` seeded
     with `customerId` — **established idempotently, with the correlation persisted before
     the dial rather than recovered from the CallSid**, because the answer webhook can arrive
     before `calls.create` has returned the CallSid to us, and a webhook carrying only an
@@ -1791,9 +1815,25 @@ flowchart LR
     The one-attempt rule means no redial, and the SMS fallback for a callback that did not
     reach the customer — the same `else the SMS branch` recovery takes when no call is
     placed — runs **exactly once per job**, from whichever path finalises it (definitive
-    rejection, terminal unanswered status, or reconcile expiry), idempotent on the job id
-    so a redelivered terminal status cannot send a second text, and never beside a live
-    call. The `ended_at IS NULL`
+    rejection, terminal unanswered status, or reconcile expiry), and never beside a live
+    call. "Exactly once" is a property of one transaction, not of three writes in a row: a
+    process that dies after `markEnded` commits but before the job transition or the
+    fallback enqueue would leave a session with `ended_at` set, a job that is still
+    non-terminal, and no text — and every reconciler above looks only at *open* sessions, so
+    nothing would ever come back for it. So every finaliser (the terminal-status handler,
+    the delayed adapter-lost job, each reconciler pass and the definitive-rejection path)
+    commits the session transition, the `voice_callback_jobs` transition and a
+    **`voice_callback_fallbacks` outbox row** (`job_id` PRIMARY KEY REFERENCES
+    voice_callback_jobs, `tenant_id`, `target_e164`, `body`, `sent_at NULL`, `attempts`;
+    FORCE RLS) in **one** transaction keyed on the same `ended_at IS NULL` guard, and the
+    SMS is delivered by a worker that claims unsent outbox rows and stamps `sent_at` with
+    the provider message id — the `job_id` primary key is the idempotency: a redelivered
+    terminal status finds the guard false and writes nothing, a worker retry finds
+    `sent_at` set and sends nothing, and a crash between commit and send leaves an unsent
+    row the worker picks up. `test/integration/callback-fallback-outbox.test.ts` pins that a
+    failure injected after the session commit leaves no half-finalised state (either all
+    three rows are written or none), and that the fallback is sent once across redelivery,
+    worker retry and reconciler overlap. The `ended_at IS NULL`
     guard on the answer-side UPDATE is what makes the late case safe (above). The `voice_callback_jobs` UNIQUE on tenant + session
     keeps the job singular.
     `proposals/surface.ts` outbound surface with the inbound allowed set;
