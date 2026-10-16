@@ -1098,6 +1098,14 @@ export interface IntentClassification {
    */
   aiRunId?: string;
   /**
+   * D-015 — where `confidence` came from: 'model' when the LLM classified
+   * this turn, 'rule' when a deterministic short-circuit pinned it (e.g. the
+   * new-booking phrase match's constant 0.95). The autonomous booking lane
+   * only trusts a model's confidence. Stamped on every result by
+   * `classifyIntent`.
+   */
+  confidenceSource?: 'model' | 'rule';
+  /**
    * Story 3.4 — the intent-taxonomy version that produced this classification
    * (`INTENT_TAXONOMY_VERSION`). Stamped on every result by `classifyIntent`;
    * lets observability / correction analytics detect taxonomy drift.
@@ -2890,15 +2898,20 @@ export async function classifyIntent(
   // Story 3.4 — single choke point that stamps the taxonomy version on every
   // classification, regardless of which of classifyIntentRaw's return paths
   // (short-circuit, override, low-confidence, unknown, success) produced it.
-  const result = await classifyIntentRaw(transcript, context, gateway);
+  const trace = { modelCalled: false };
+  const result = await classifyIntentRaw(transcript, context, gateway, trace);
   result.taxonomyVersion = INTENT_TAXONOMY_VERSION;
+  // No post-gateway path pins create_appointment's confidence, so for the
+  // D-015 lane "the model was called" means "the model produced it".
+  result.confidenceSource = trace.modelCalled ? 'model' : 'rule';
   return result;
 }
 
 async function classifyIntentRaw(
   transcript: string,
   context: ClassifyContext,
-  gateway: LLMGateway
+  gateway: LLMGateway,
+  trace: { modelCalled: boolean },
 ): Promise<IntentClassification> {
   // Cheap short-circuit: empty / whitespace transcripts never trigger an LLM call.
   if (!transcript || transcript.trim().length === 0) {
@@ -3190,6 +3203,7 @@ async function classifyIntentRaw(
     systemMessages.push({ role: 'system', content: CALLER_UTTERANCE_FENCE_PROMPT_SECTION });
   }
 
+  trace.modelCalled = true;
   const response = await gateway.complete({
     taskType: 'classify_intent',
     // The taxonomy prompt is substantially larger than typical lightweight

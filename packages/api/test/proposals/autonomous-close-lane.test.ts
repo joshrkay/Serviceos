@@ -49,6 +49,9 @@ function passing(overrides: Partial<EvaluateAutonomousCloseInput> = {}): Evaluat
 }
 
 describe('evaluateAutonomousCloseLane — gate order', () => {
+  // D-019: the booking leg carries no owner cell, UNDO channel or conflict
+  // check — the owner approves every close, so those autonomy-only gates never
+  // apply and a tenant with no cell keeps the held booking in the chain.
   it('all gates pass → eligible with the composed booking threshold', () => {
     const r = evaluateAutonomousCloseLane(passing());
     expect(r).toEqual({ eligible: true, bookingThreshold: 0.95, closeCapCents: 500000 });
@@ -123,15 +126,6 @@ describe('evaluateAutonomousCloseLane — gate order', () => {
       passing({ booking: { ...passing().booking, confidenceScore: 0.5 } }),
     );
     expect(r).toMatchObject({ eligible: false, reason: 'booking_lane_ineligible', bookingReason: 'below_threshold' });
-  });
-
-  // D-019: the owner approves every close, so the owner-cell gate (which
-  // exists for the owner UNDO SMS on AUTONOMOUS approval) never applies to
-  // the booking leg here — a tenant with no cell keeps the held booking in
-  // the owner's approval chain.
-  it('the owner-approved close never applies the owner-cell gate to its booking leg', () => {
-    const r = evaluateAutonomousCloseLane(passing());
-    expect(r).toEqual({ eligible: true, bookingThreshold: 0.95, closeCapCents: 500000 });
   });
 
   it('session_flagged is checked LAST (after the booking lane passes)', () => {

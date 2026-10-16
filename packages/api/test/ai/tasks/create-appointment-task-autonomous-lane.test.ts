@@ -61,6 +61,7 @@ function laneContext(
     autonomousBooking: {
       settings: { enabled: true, threshold: 0.95 },
       ownerPhone: '+15555550100',
+      undoChannelAvailable: true,
       inboundReceptionistSource: true,
       pendingReferenceCount: 0,
       ...lane,
@@ -69,12 +70,15 @@ function laneContext(
   } as TaskContext;
 }
 
-function handlerWith(gateway: LLMGateway) {
+/** P0-035 checker that finds the slot free. */
+const freeSlot = { check: async () => ({ ok: true as const }) };
+
+function handlerWith(gateway: LLMGateway, opts: { conflictChecker?: boolean } = {}) {
   // No jobRepo: the legacy held path (no ownership pre-check) keeps the
   // fixture focused on the lane gates themselves.
   return new CreateAppointmentAITaskHandler(
     gateway,
-    undefined,
+    opts.conflictChecker === false ? undefined : freeSlot,
     undefined,
     new InMemoryAppointmentRepository(),
   );
@@ -115,6 +119,21 @@ describe('create-appointment task — autonomous booking lane (UB-D)', () => {
     expect(autonomousLaneEvaluationFor(result.proposal)).toEqual({
       eligible: false,
       reason: 'owner_cell_missing',
+    });
+  });
+
+  // Value: protects=a booking whose slot nobody checked for conflicts is never auto-approved;
+  //   fails_when=the task stops reporting slotConflictFree from the P0-035 check, or reports true without one;
+  //   why_new=the lane had no conflict gate before; seam=none; no_claim=the checker's own overlap logic
+  it('no slot-conflict checker wired: the booking waits for review (slot_conflict)', async () => {
+    const result = await handlerWith(mockGateway(bookingJson(0.97)), { conflictChecker: false }).handle(
+      laneContext(),
+    );
+
+    expect(result.proposal.status).toBe('ready_for_review');
+    expect(autonomousLaneEvaluationFor(result.proposal)).toEqual({
+      eligible: false,
+      reason: 'slot_conflict',
     });
   });
 

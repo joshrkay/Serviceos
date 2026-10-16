@@ -245,6 +245,7 @@ export interface VoiceSession {
     cancelledAppointmentId: string;
     entities: Record<string, unknown>;
     confidence: number;
+    confidenceSource?: 'model' | 'rule';
   };
   /**
    * #1223 — Twilio's STIR/SHAKEN verdict (`StirVerstat`) from the inbound
@@ -252,6 +253,12 @@ export interface VoiceSession {
    * requires full A-attestation (`telephony/stir-attestation.ts`).
    */
   stirVerstat?: string;
+  /**
+   * D-015 — appointments the live-call lane already auto-approved on this
+   * call. A repeated booking of the same slot never gets a second
+   * auto-approval or a second owner UNDO SMS.
+   */
+  laneApprovedAppointmentIds?: string[];
   /**
    * #1223 — the caller-ID matched an approver (owner / backup supervisor) but
    * the call was NOT A-attested, so it runs as an untrusted caller. Drives

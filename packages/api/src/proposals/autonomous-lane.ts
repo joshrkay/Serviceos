@@ -28,10 +28,11 @@
  * opted in.
  *
  * D-015 amendment (2026-10-16): autonomous approval requires the owner's cell
- * (`owner_cell_missing`) and, where the caller knows it, a working UNDO SMS
- * channel (`undo_channel_unavailable`), both checked after the structural
- * gates. `evaluateBookingLaneForOwnerApproval` skips them for the D-019 close,
- * which the owner always approves.
+ * (`owner_cell_missing`), a working UNDO SMS channel
+ * (`undo_channel_unavailable`), localized caller copy (`language_unsupported`)
+ * and a slot-conflict check that ran clean (`slot_conflict`).
+ * `evaluateBookingLaneForOwnerApproval` skips these autonomy-only gates for
+ * the D-019 close, which the owner always approves.
  */
 import { actionClassForProposalType, type ProposalType } from './proposal';
 import { confidenceMetaBlocksAutoApprove } from './auto-approve';
@@ -101,10 +102,28 @@ export interface EvaluateAutonomousLaneInput {
    */
   ownerPhone: string | null | undefined;
   /**
-   * False only when the caller knows its owner UNDO SMS cannot be sent (the
-   * sender, signing secret or undo link is not wired). Absent ⇒ not checked.
+   * True only when the owner UNDO SMS can actually be minted and sent (sender,
+   * signing secret and undo link all wired). Required so every caller decides;
+   * anything but true is `undo_channel_unavailable`.
    */
-  undoChannelAvailable?: boolean;
+  undoChannelAvailable: boolean;
+  /**
+   * True only when a slot-conflict check RAN before the hold and found no
+   * overlapping appointment (customer or technician busy). Required; a slot
+   * nobody checked is never auto-booked (`slot_conflict`).
+   */
+  slotConflictFree: boolean;
+  /**
+   * False when the live caller's language has no localized booking copy, so
+   * the binding "you're booked" line could not be spoken in it. Absent on
+   * surfaces with no caller to speak to (the memo router).
+   */
+  callerLanguageSupported?: boolean;
+  /**
+   * True when this held slot was already auto-approved earlier on the same
+   * call: a repeat never gets a second auto-approval or owner UNDO SMS.
+   */
+  slotAlreadyAutoBooked?: boolean;
   proposalType: ProposalType;
   /**
    * True only for the inbound-receptionist path (customer-call FSM or the
@@ -149,6 +168,9 @@ export type AutonomousLaneIneligibleReason =
   | 'tenant_not_opted_in'
   | 'owner_cell_missing'
   | 'undo_channel_unavailable'
+  | 'language_unsupported'
+  | 'slot_conflict'
+  | 'duplicate_booking'
   | 'proposal_type_not_eligible'
   | 'not_inbound_receptionist'
   | 'below_threshold'
@@ -173,19 +195,28 @@ export function evaluateAutonomousBookingLane(
 }
 
 /**
- * D-019 — every D-015 gate except the owner-cell gate, for a booking a human
- * approves (the on-call close's owner-approval chain). The owner cell is
- * required only for autonomous approval, where the owner UNDO SMS is part of
- * the safety; a close is never system-approved.
+ * D-019 — every D-015 gate except the autonomy-only ones (owner cell, UNDO
+ * channel, caller language, slot-conflict check), for a booking a human
+ * approves (the on-call close's owner-approval chain). Those gates exist
+ * because the system approves alone; a close is never system-approved.
  */
 export function evaluateBookingLaneForOwnerApproval(
-  input: Omit<EvaluateAutonomousLaneInput, 'ownerPhone'>,
+  input: Omit<EvaluateAutonomousLaneInput, AutonomyOnlyInput>,
 ): AutonomousLaneEvaluation {
   return evaluateLaneGates(input, false);
 }
 
+/** Inputs only autonomous (system) approval checks; the D-019 close omits them. */
+type AutonomyOnlyInput =
+  | 'ownerPhone'
+  | 'undoChannelAvailable'
+  | 'slotConflictFree'
+  | 'callerLanguageSupported'
+  | 'slotAlreadyAutoBooked';
+
 function evaluateLaneGates(
-  input: Omit<EvaluateAutonomousLaneInput, 'ownerPhone'> & { ownerPhone?: string | null },
+  input: Omit<EvaluateAutonomousLaneInput, AutonomyOnlyInput> &
+    Partial<Pick<EvaluateAutonomousLaneInput, AutonomyOnlyInput>>,
   autonomousApproval: boolean,
 ): AutonomousLaneEvaluation {
   if (input.platformDisabled) {
@@ -208,8 +239,11 @@ function evaluateLaneGates(
   if (autonomousApproval && !input.ownerPhone?.trim()) {
     return { eligible: false, reason: 'owner_cell_missing' };
   }
-  if (autonomousApproval && input.undoChannelAvailable === false) {
+  if (autonomousApproval && input.undoChannelAvailable !== true) {
     return { eligible: false, reason: 'undo_channel_unavailable' };
+  }
+  if (autonomousApproval && input.callerLanguageSupported === false) {
+    return { eligible: false, reason: 'language_unsupported' };
   }
   const flags = input.flags ?? {};
   if (flags.vulnerability || flags.emergency || flags.negotiation) {
@@ -232,6 +266,12 @@ function evaluateLaneGates(
   }
   if (!input.holdExpiryAt || input.holdExpiryAt.getTime() <= input.now.getTime()) {
     return { eligible: false, reason: 'hold_expired' };
+  }
+  if (autonomousApproval && input.slotConflictFree !== true) {
+    return { eligible: false, reason: 'slot_conflict' };
+  }
+  if (autonomousApproval && input.slotAlreadyAutoBooked === true) {
+    return { eligible: false, reason: 'duplicate_booking' };
   }
   if (!input.slotWithinBusinessHours) {
     return { eligible: false, reason: 'outside_business_hours' };

@@ -61,7 +61,7 @@ export type CallingAgentEvent =
   // guard forwards it so severity detection sees the caller's actual words
   // ("refund", "my lawyer"), not just whatever entities the classifier
   // happened to extract (#846 review fix).
-  | { type: 'intent_classified'; intentType: string; entities: Record<string, unknown>; confidence: number; aiRunId?: string; utterance?: string }
+  | { type: 'intent_classified'; intentType: string; entities: Record<string, unknown>; confidence: number; aiRunId?: string; utterance?: string; confidenceSource?: 'model' | 'rule' }
   | { type: 'entity_resolved'; refs: Record<string, string> }
   | {
       type: 'entity_ambiguous';
@@ -291,6 +291,12 @@ export interface CallingAgentContext {
    * draft guard landed.
    */
   lastIntentConfidence?: number;
+  /**
+   * D-015 — whether `lastIntentConfidence` came from the model ('model') or a
+   * deterministic short-circuit's pinned constant ('rule'). The live-call
+   * autonomous booking lane trusts only a model's confidence.
+   */
+  lastIntentConfidenceSource?: 'model' | 'rule';
   /**
    * The persisted `ai_runs` id of the classify call that produced the current
    * intent (from the `intent_classified` event's `aiRunId`). Captured at

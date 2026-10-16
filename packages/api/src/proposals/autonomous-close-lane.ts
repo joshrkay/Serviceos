@@ -16,7 +16,8 @@
  * extension: D-015's gate set stays untouched. It COMPOSES the D-015 gates for
  * the create_booking leg through evaluateBookingLaneForOwnerApproval (so the
  * calendar / hold / customer gates are enforced exactly once, in one place; the
- * owner-cell gate is skipped because D-019 makes every close owner-approved)
+ * autonomy-only gates (owner cell, UNDO channel, caller language, conflict
+ * check) are skipped because D-019 makes every close owner-approved)
  * and layers the close-specific gates on top.
  *
  * Gate order (first-failing wins; eligibility requires every gate to pass):
@@ -90,7 +91,15 @@ export interface EvaluateAutonomousCloseInput {
    * empty here — the close lane checks live-session flags itself (last gate) so
    * the audit reason is `session_flagged`, not `booking_lane_ineligible`.
    */
-  booking: Omit<EvaluateAutonomousLaneInput, 'flags' | 'ownerPhone'>;
+  booking: Omit<
+    EvaluateAutonomousLaneInput,
+    | 'flags'
+    | 'ownerPhone'
+    | 'undoChannelAvailable'
+    | 'slotConflictFree'
+    | 'callerLanguageSupported'
+    | 'slotAlreadyAutoBooked'
+  >;
   /** Live-session risk flags — any true blocks the close (checked LAST). */
   flags?: {
     vulnerability?: boolean;

@@ -122,8 +122,8 @@ export interface TaskContext {
      * No number on file ⇒ the lane reports `owner_cell_missing`.
      */
     ownerPhone: string | null | undefined;
-    /** False when the entry point cannot send the owner UNDO SMS. */
-    undoChannelAvailable?: boolean;
+    /** True only when the entry point can send the owner UNDO SMS. */
+    undoChannelAvailable: boolean;
     inboundReceptionistSource: boolean;
     pendingReferenceCount: number;
     platformDisabled?: boolean;

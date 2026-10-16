@@ -904,6 +904,10 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
           settings: context.autonomousBooking.settings,
           ownerPhone: context.autonomousBooking.ownerPhone,
           undoChannelAvailable: context.autonomousBooking.undoChannelAvailable,
+          // The P0-035 check above ran before the hold and returned a
+          // clarification on any conflict, so reaching here with it wired
+          // means the slot was checked and is free.
+          slotConflictFree: Boolean(checker && customerId),
           proposalType: 'create_booking',
           inboundReceptionistSource: context.autonomousBooking.inboundReceptionistSource,
           confidenceScore: confidence.score,

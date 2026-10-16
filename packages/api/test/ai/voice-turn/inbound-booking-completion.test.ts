@@ -50,6 +50,7 @@ describe('buildLaneInputFromSettings', () => {
     confidenceScore: 0.97,
     ownerPhone: '+15555550100',
     undoChannelAvailable: true,
+    slotConflictFree: true,
     payload: { appointmentId: 'appt-1' },
   };
 

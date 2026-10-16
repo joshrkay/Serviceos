@@ -174,6 +174,8 @@ import {
   type AutonomousCloseIneligibleReason,
 } from '../../proposals/autonomous-close-lane';
 import { sendLaneUndoSms, type LaneUndoChannel } from '../../proposals/lane-undo-sms';
+import { isOwnerLineAttested } from '../../telephony/stir-attestation';
+import type { SlotConflictChecker } from '../tasks/slot-conflict-checker';
 import {
   queueCloseFallbackChain,
   AUTONOMOUS_CLOSE_ACTOR,
@@ -872,6 +874,11 @@ export interface VoiceTurnProcessorDeps {
    * without the owner's UNDO.
    */
   laneUndo?: LaneUndoChannel;
+  /**
+   * D-015 — the P0-035 slot-conflict check run before a live-call hold. The
+   * live lane auto-approves only a slot this checked (`slot_conflict`).
+   */
+  slotConflictChecker?: SlotConflictChecker;
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
   callerPlanResolver?: (
     tenantId: string,
@@ -2635,11 +2642,6 @@ export function createVoiceTurnProcessor(
               ...(typeof fx.payload.utterance === 'string' && fx.payload.utterance.trim().length > 0
                 ? { utterance: fx.payload.utterance }
                 : {}),
-              // The classifier's confidence: the D-015 lane's threshold gate
-              // reads it (without it every live booking ended below_threshold).
-              ...(typeof fx.payload.confidence === 'number'
-                ? { confidence: fx.payload.confidence }
-                : {}),
             },
             {
               tenantId,
@@ -2760,8 +2762,14 @@ export function createVoiceTurnProcessor(
       let autonomousLaneForCreate:
         | { eligible: true; threshold: number }
         | undefined;
+      // The model confidence the lane judged; stored as the lane-approved
+      // booking's score (no other live proposal carries one).
+      let laneConfidenceForCreate: number | undefined;
       // The owner cell the lane checked: the UNDO SMS goes to exactly it.
       let laneOwnerPhone: string | undefined;
+      // The honest pending line, spoken instead of "you're booked" when the
+      // stored booking did not end up approved (supervisor cap, held gap).
+      let bookingPendingUtterance: string | undefined;
       let laneSourceStamp: Record<string, unknown> | undefined;
       // #1045 — the held slot's back-to-back drivability result.
       let holdFeasibilityStamp: HoldFeasibility | undefined;
@@ -2807,6 +2815,9 @@ export function createVoiceTurnProcessor(
                 appointmentRepo: deps.appointmentRepo,
                 ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
                 ...(deps.feasibilityDeps ? { feasibility: deps.feasibilityDeps } : {}),
+                ...(deps.slotConflictChecker
+                  ? { slotConflictChecker: deps.slotConflictChecker }
+                  : {}),
               },
               {
                 tenantId,
@@ -2836,6 +2847,28 @@ export function createVoiceTurnProcessor(
                   ? { _meta: { overallConfidence: getConfidenceLevel(payloadConfidence) } }
                   : {}),
               };
+              // D-015 — autonomy needs an identity nobody can fake on this
+              // call: the caller-ID match on an A-attested call, not created
+              // on this call and not rejected by the identity check. A
+              // customer resolved from spoken words books only as a draft.
+              const laneCustomerId =
+                session.customerId &&
+                customerId === session.customerId &&
+                isOwnerLineAttested(session.stirVerstat) &&
+                !session.callerCreatedThisCall &&
+                session.callerIdentity !== 'rejected'
+                  ? session.customerId
+                  : undefined;
+              // Only a model's confidence counts: a deterministic phrase match
+              // pins a constant that would always clear the threshold.
+              const laneConfidence =
+                fx.payload.confidenceSource === 'model' &&
+                typeof fx.payload.confidence === 'number'
+                  ? fx.payload.confidence
+                  : undefined;
+              const laneApprovedThisCall = (session.laneApprovedAppointmentIds ?? []).includes(
+                hold.appointmentId,
+              );
               const laneEval = buildLaneInputFromSettings({
                 platformDisabled: process.env.AUTONOMOUS_BOOKING_DISABLED === 'true',
                 settings: {
@@ -2846,8 +2879,11 @@ export function createVoiceTurnProcessor(
                 },
                 ownerPhone: settings?.ownerPhone,
                 undoChannelAvailable: deps.laneUndo !== undefined,
-                confidenceScore: payloadConfidence,
-                customerId,
+                slotConflictFree: hold.conflictChecked,
+                callerLanguageSupported: sessionLanguage(session) === 'en',
+                slotAlreadyAutoBooked: laneApprovedThisCall,
+                confidenceScore: laneConfidence,
+                customerId: laneCustomerId,
                 holdExpiryAt: hold.holdExpiryAt,
                 now: new Date(),
                 slotWithinBusinessHours,
@@ -2860,16 +2896,17 @@ export function createVoiceTurnProcessor(
                 | Record<string, unknown>
                 | undefined;
               bookingUtterance = bookingSpeechForLane(laneEval, timeReadback);
+              bookingPendingUtterance = bookingSpeechForLane(undefined, timeReadback);
               payloadProposalType = 'create_booking';
               payload = bookingPayload;
               holdFeasibilityStamp = hold.feasibility;
               if (laneEval.eligible) {
                 autonomousLaneForCreate = laneEval;
+                laneConfidenceForCreate = laneConfidence;
                 laneOwnerPhone = settings?.ownerPhone ?? undefined;
-              } else if (!laneEval.eligible) {
-                // Hold stays for owner confirmation window (24h); ineligible
-                // lane means draft create_booking, not auto-approve.
               }
+              // Otherwise the hold stays for the owner's confirmation window
+              // (24h): a draft create_booking, never an auto-approval.
             } else {
               bookingUtterance = await draftOnlySpeech();
             }
@@ -2943,9 +2980,11 @@ export function createVoiceTurnProcessor(
         // uncatalogued-capped score `groundVoiceQuote` produced; a degraded
         // clarification carries neither it nor the quote's missingFields,
         // because there is no quote on that payload to qualify.
-        ...(!degradedFromContract && payloadConfidence !== undefined
-          ? { confidenceScore: payloadConfidence }
-          : {}),
+        ...(autonomousLaneForCreate && laneConfidenceForCreate !== undefined
+          ? { confidenceScore: laneConfidenceForCreate }
+          : !degradedFromContract && payloadConfidence !== undefined
+            ? { confidenceScore: payloadConfidence }
+            : {}),
         // Ambiguous catalog lines AND unmet contract keys both land here:
         // `approveProposal` refuses a proposal with unfilled missingFields, so
         // this is the gate that keeps a contract-incomplete voice draft out of
@@ -3001,6 +3040,19 @@ export function createVoiceTurnProcessor(
       const held = await holdForExecutability(tenantId, proposal, deps.approvalReferenceChecks);
       const stored = await deps.proposalRepo.create(held.proposal);
       session.proposalIds.push(stored.id);
+      if (autonomousLaneForCreate) {
+        if (stored.status === 'approved') {
+          // F10 — this slot has had its one auto-approval on this call.
+          const appointmentId = stored.payload.appointmentId;
+          if (typeof appointmentId === 'string') {
+            (session.laneApprovedAppointmentIds ??= []).push(appointmentId);
+          }
+        } else if (bookingPendingUtterance) {
+          // The lane said yes but the booking was stored for review (the
+          // supervisor's cap, an executability hold): never "you're booked".
+          bookingUtterance = bookingPendingUtterance;
+        }
+      }
       // D-015 — a lane-approved booking texts the owner the one-tap UNDO at
       // the cell the lane checked, the same text the memo router sends.
       // Best-effort: a send failure never fails the booking or the turn.
@@ -4902,6 +4954,8 @@ export function createVoiceTurnProcessor(
       entities: Record<string, unknown>;
       /** The classifier's confidence for this request, carried into the rebook. */
       confidence: number;
+      /** Where that confidence came from (D-015: the lane trusts only 'model'). */
+      confidenceSource?: 'model' | 'rule';
     },
     tenantId: string,
   ): Promise<SideEffect[] | null> {
@@ -4981,6 +5035,7 @@ export function createVoiceTurnProcessor(
       cancelledAppointmentId: stale.id,
       entities: bookingEntities,
       confidence: turn.confidence,
+      ...(turn.confidenceSource ? { confidenceSource: turn.confidenceSource } : {}),
     };
     const offerPayload = {
       template: 'rebook_offer',
@@ -5040,6 +5095,7 @@ export function createVoiceTurnProcessor(
         entities: { ...pending.entities },
         confidence: pending.confidence,
         utterance: pending.heldUtterance,
+        ...(pending.confidenceSource ? { confidenceSource: pending.confidenceSource } : {}),
       };
       effects.push(...session.machine.dispatch(booking));
       if (session.machine.currentState === 'entity_resolution') {
@@ -6033,6 +6089,9 @@ export function createVoiceTurnProcessor(
             // Thread the classify call's REAL ai_runs id so a proposal born
             // from this intent links to its run row (proposals.ai_run_id FK).
             ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
+            ...(classification.confidenceSource
+              ? { confidenceSource: classification.confidenceSource }
+              : {}),
           };
         } else {
           // Low / unknown intent → intent_classified so FSM uses
@@ -6458,6 +6517,9 @@ export function createVoiceTurnProcessor(
             utterance: speechResult,
             entities: classifierEvent.entities,
             confidence: classifierEvent.confidence,
+            ...(classifierEvent.confidenceSource
+              ? { confidenceSource: classifierEvent.confidenceSource }
+              : {}),
           },
           tenantId,
         );

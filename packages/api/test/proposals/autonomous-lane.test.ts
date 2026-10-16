@@ -53,6 +53,8 @@ function eligibleInput(): EvaluateAutonomousLaneInput {
   return {
     settings: { enabled: true, threshold: 0.95 },
     ownerPhone: '+15555550100',
+    undoChannelAvailable: true,
+    slotConflictFree: true,
     proposalType: 'create_booking',
     inboundReceptionistSource: true,
     confidenceScore: 0.97,
@@ -97,6 +99,9 @@ describe('evaluateAutonomousBookingLane — every gate blocks independently', ()
       { ownerPhone: null, undoChannelAvailable: false },
       'owner_cell_missing',
     ],
+    ['caller language without localized booking copy', { callerLanguageSupported: false }, 'language_unsupported'],
+    ['slot conflicts with an existing appointment, or was never checked', { slotConflictFree: false }, 'slot_conflict'],
+    ['the same slot was already auto-booked on this call', { slotAlreadyAutoBooked: true }, 'duplicate_booking'],
     [
       'tenant opt-in checked BEFORE the owner cell',
       { settings: { enabled: false }, ownerPhone: null },
@@ -153,12 +158,17 @@ describe('evaluateAutonomousBookingLane — every gate blocks independently', ()
     });
   }
 
-  it('undoChannelAvailable absent or true does not block (only a caller that knows its UNDO cannot send passes false)', () => {
-    expect(evaluateAutonomousBookingLane({ ...eligibleInput(), undoChannelAvailable: undefined })).toEqual({
-      eligible: true,
-      threshold: 0.95,
-    });
-    expect(evaluateAutonomousBookingLane({ ...eligibleInput(), undoChannelAvailable: true })).toEqual({
+  it('an UNDO channel or conflict check that is not affirmatively true fails closed', () => {
+    for (const patch of [
+      { undoChannelAvailable: undefined as unknown as boolean },
+      { slotConflictFree: undefined as unknown as boolean },
+    ]) {
+      expect(evaluateAutonomousBookingLane({ ...eligibleInput(), ...patch }).eligible).toBe(false);
+    }
+  });
+
+  it('callerLanguageSupported absent (no caller on this surface) does not block', () => {
+    expect(evaluateAutonomousBookingLane({ ...eligibleInput(), callerLanguageSupported: undefined })).toEqual({
       eligible: true,
       threshold: 0.95,
     });

@@ -12,7 +12,9 @@
  *   seam=none;
  *   no_claim=SMS delivery and token redemption (mocked sender; the undo route has its own tests)
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { configureSupervisorCreationHook } from '../../../src/proposals/supervisor/hook';
+import { STIR_VERSTAT_FULL_ATTESTATION } from '../../../src/telephony/stir-attestation';
 import { createVoiceTurnProcessor } from '../../../src/ai/voice-turn';
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
@@ -37,7 +39,7 @@ const CALLER_PHONE = '+15125550100';
 const CUSTOMER_ID = '22222222-3333-4444-5555-666666666666';
 const JOB_ID = '33333333-3333-4333-8333-333333333333';
 
-/** Classifier verdict (0.97, above the tenant's 0.95 lane threshold), then "yes". */
+/** Classifier verdict (0.97, above the tenant's 0.95 lane threshold), then "yes"; repeats per booking. */
 function bookingGateway(): LLMGateway {
   const contents = [
     JSON.stringify({
@@ -54,7 +56,7 @@ function bookingGateway(): LLMGateway {
   let i = 0;
   return {
     complete: vi.fn(async () => ({
-      content: contents[Math.min(i++, contents.length - 1)],
+      content: contents[i++ % contents.length],
       model: 'mock',
       provider: 'mock',
       tokenUsage: { input: 1, output: 1, total: 2 },
@@ -86,9 +88,18 @@ function undoChannel() {
   };
 }
 
+const FREE_SLOT = { check: async () => ({ ok: true as const }) };
+
 async function bookOnLiveCall(opts: {
   ownerPhone?: string;
   laneUndo?: ReturnType<typeof undoChannel>;
+  /** Defaults to A-attested; pass a verstat (or null) to override. */
+  stirVerstat?: string | null;
+  /** Defaults to a checker that finds the slot free; null leaves it unwired. */
+  slotConflictChecker?: { check: (...args: never[]) => Promise<unknown> } | null;
+  language?: 'en' | 'es';
+  /** Book the same slot twice on one call. */
+  bookTwice?: boolean;
 }) {
   const { ownerPhone, laneUndo } = opts;
   const store = new VoiceSessionStore({ startInterval: false });
@@ -119,6 +130,10 @@ async function bookOnLiveCall(opts: {
   session.machine.dispatch({ type: 'greeted_ok' });
   session.machine.dispatch({ type: 'caller_known', customerId: CUSTOMER_ID });
   session.customerId = CUSTOMER_ID;
+  const verstat = opts.stirVerstat === undefined ? STIR_VERSTAT_FULL_ATTESTATION : opts.stirVerstat;
+  if (verstat) session.stirVerstat = verstat;
+  if (opts.language) session.language = opts.language;
+  const checker = opts.slotConflictChecker === undefined ? FREE_SLOT : opts.slotConflictChecker;
 
   const processor = createVoiceTurnProcessor({
     store,
@@ -132,20 +147,24 @@ async function bookOnLiveCall(opts: {
     appointmentRepo,
     entityResolver: jobResolver,
     ...(laneUndo ? { laneUndo } : {}),
+    ...(checker ? { slotConflictChecker: checker as never } : {}),
   });
 
-  await processor.speechTurn({
-    session,
-    speechResult: 'My furnace stopped heating, can someone come Tuesday at 2pm?',
-    callSid: CALL_SID,
-    tenantId: TENANT,
-  });
-  const fx: SideEffect[] = await processor.speechTurn({
-    session,
-    speechResult: 'Yes, that works',
-    callSid: CALL_SID,
-    tenantId: TENANT,
-  });
+  let fx: SideEffect[] = [];
+  for (let i = 0; i < (opts.bookTwice ? 2 : 1); i++) {
+    await processor.speechTurn({
+      session,
+      speechResult: 'My furnace stopped heating, can someone come Tuesday at 2pm?',
+      callSid: CALL_SID,
+      tenantId: TENANT,
+    });
+    fx = await processor.speechTurn({
+      session,
+      speechResult: 'Yes, that works',
+      callSid: CALL_SID,
+      tenantId: TENANT,
+    });
+  }
 
   const proposals = await proposalRepo.findByTenant(TENANT);
   const spoken = [...fx].reverse().find((e) => e.type === 'tts_play')?.payload.text;
@@ -153,6 +172,101 @@ async function bookOnLiveCall(opts: {
 }
 
 describe('live-call booking (U3) — D-015 owner-cell gate and owner UNDO', () => {
+  afterEach(() => configureSupervisorCreationHook(null));
+
+  it('caller-ID that is not A-attested never books autonomously (no_verified_customer)', async () => {
+    const laneUndo = undoChannel();
+    const { proposals } = await bookOnLiveCall({
+      ownerPhone: OWNER_CELL,
+      laneUndo,
+      stirVerstat: 'TN-Validation-Passed-B',
+    });
+    expect(proposals[0]!.status).toBe('draft');
+    expect(autonomousLaneEvaluationFor(proposals[0]!)).toEqual({
+      eligible: false,
+      reason: 'no_verified_customer',
+    });
+    expect(laneUndo.sendSms).not.toHaveBeenCalled();
+  });
+
+  it('a slot the caller is already busy in is never held: a draft for the owner, no SMS', async () => {
+    const laneUndo = undoChannel();
+    const { proposals } = await bookOnLiveCall({
+      ownerPhone: OWNER_CELL,
+      laneUndo,
+      slotConflictChecker: {
+        check: async () => ({ ok: false, conflict: 'customer_busy', appointmentId: 'a-busy' }),
+      },
+    });
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.proposalType).toBe('create_appointment');
+    expect(proposals[0]!.status).toBe('draft');
+    expect(laneUndo.sendSms).not.toHaveBeenCalled();
+  });
+
+  it('no slot-conflict check wired: the hold waits for review (slot_conflict)', async () => {
+    const { proposals } = await bookOnLiveCall({
+      ownerPhone: OWNER_CELL,
+      laneUndo: undoChannel(),
+      slotConflictChecker: null,
+    });
+    expect(proposals[0]!.status).toBe('draft');
+    expect(autonomousLaneEvaluationFor(proposals[0]!)).toEqual({
+      eligible: false,
+      reason: 'slot_conflict',
+    });
+  });
+
+  it('a Spanish-language call never hears the English "you\'re booked" commitment (language_unsupported)', async () => {
+    const { proposals } = await bookOnLiveCall({
+      ownerPhone: OWNER_CELL,
+      laneUndo: undoChannel(),
+      language: 'es',
+    });
+    expect(proposals[0]!.status).toBe('draft');
+    expect(autonomousLaneEvaluationFor(proposals[0]!)).toEqual({
+      eligible: false,
+      reason: 'language_unsupported',
+    });
+  });
+
+  // Value: protects=a caller never hears "You're booked" for a booking the supervisor held for review, and the owner gets no UNDO for it;
+  //   fails_when=the spoken line keys on the lane verdict alone, or the UNDO send drops the stored.status === 'approved' guard;
+  //   why_new=live tests only reached approved or lane-ineligible bookings; seam=none (the production hook installer);
+  //   no_claim=the supervisor's own cap counting
+  it('a lane-eligible booking the supervisor holds for review: honest pending line, no UNDO text', async () => {
+    configureSupervisorCreationHook({
+      evaluate: () => ({ verdict: 'force_review', reasons: ['hourly auto-approvals budget exhausted'] }),
+      onAutoApproved() {},
+      onDecision() {},
+    });
+    const laneUndo = undoChannel();
+    const { proposals, spoken, appointmentRepo } = await bookOnLiveCall({
+      ownerPhone: OWNER_CELL,
+      laneUndo,
+    });
+    const booking = proposals[0]!;
+    expect(autonomousLaneEvaluationFor(booking)).toEqual({ eligible: true, threshold: 0.95 });
+    expect(booking.status).not.toBe('approved');
+    const hold = await appointmentRepo.findById(TENANT, booking.payload.appointmentId as string);
+    expect(spoken).toBe(
+      spokenBookingPendingOwner(timeReadbackFromHold(hold!.scheduledStart.toISOString(), TZ)),
+    );
+    expect(laneUndo.sendSms).not.toHaveBeenCalled();
+  });
+
+  it('booking the same slot twice on one call auto-approves it once and texts the owner once', async () => {
+    const laneUndo = undoChannel();
+    const { proposals } = await bookOnLiveCall({ ownerPhone: OWNER_CELL, laneUndo, bookTwice: true });
+    expect(proposals).toHaveLength(2);
+    expect(proposals.map((p) => p.status)).toEqual(['approved', 'draft']);
+    expect(autonomousLaneEvaluationFor(proposals[1]!)).toEqual({
+      eligible: false,
+      reason: 'duplicate_booking',
+    });
+    expect(laneUndo.sendSms).toHaveBeenCalledTimes(1);
+  });
+
   it('opted-in tenant with NO owner cell: draft booking, honest "team will confirm" line, owner_cell_missing, no SMS', async () => {
     const laneUndo = undoChannel();
     const { proposals, spoken, appointmentRepo } = await bookOnLiveCall({ laneUndo });

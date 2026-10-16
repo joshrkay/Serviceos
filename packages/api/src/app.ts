@@ -4152,6 +4152,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
     },
+    // D-015 — the live-call lane auto-books only a slot the P0-035 check
+    // found free (the same checker the memo router's task uses).
+    slotConflictChecker,
     // D-015 — owner one-tap UNDO for a lane-approved live-call booking: the
     // same sender, secret and undo link as the memo router's UNDO. Without
     // them the live lane refuses autonomy (undo_channel_unavailable).

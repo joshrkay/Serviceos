@@ -203,6 +203,8 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
       proposalRepo,
       appointmentRepo,
       auditRepo,
+      // P0-035 — the slot is checked and free (the lane requires a check).
+      slotConflictChecker: { check: async () => ({ ok: true as const }) },
       autonomousBookingResolver: async () => ({
         enabled: opts.laneEnabled ?? true,
         threshold: 0.95,
