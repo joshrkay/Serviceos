@@ -862,11 +862,20 @@ flowchart LR
 - **Dependencies:** none
 - **Files (Appendix B "Concrete changes" 7–9):**
   - `packages/api/src/db/schema.ts`, `packages/api/src/settings/settings.ts` —
-    `transfer_targets JSONB` { open, after_hours, overflow: number | 'voicemail' | 'callback' };
-    `on_call_rotation.hours JSONB` optional.
+    `transfer_targets JSONB` { open, after_hours, overflow: number | 'voicemail' | 'callback';
+    **`emergency: string[]`** — an ordered list of one to three E.164 numbers, never
+    `'voicemail'` or `'callback'` (an E2 call is patched to a person or it keeps ringing the
+    ladder; the Zod contract in `packages/shared` rejects anything else) }; the migration
+    backfills `emergency` from the existing on-call rotation head, else `open`, else the
+    business phone, so no tenant has an empty list. `on_call_rotation.hours JSONB` optional.
+    The U9 opener's "who first, then who?" writes exactly this key, and the E2 path reads it:
   - `packages/api/src/ai/skills/escalate-to-human.ts:447-585` — resolve the target by schedule
     through `telephony/business-hours-loader.ts` before dialling; filter rotation entries by
-    hours; business-phone fallback when the filtered list is empty (never strand).
+    hours; business-phone fallback when the filtered list is empty (never strand). For
+    `reason = 'emergency_dispatch'` the walk order is `transfer_targets.emergency` in list
+    order (each with the existing ring timeout), then the hours-filtered rotation, then the
+    business phone; `CallRoutingSheet.tsx` gains an ordered emergency list (add, remove,
+    reorder; ≥44 px) beside the three single targets.
   - `packages/api/src/telephony/twilio-adapter.ts:728` — `<Gather input="speech dtmf">`;
     `Digits === '0'` → `operator_request`. `mediastream-adapter.ts` — consume Twilio `dtmf`
     stream messages; `dtmf_received` gets its first producer; ignored during the disclosure and
@@ -879,7 +888,10 @@ flowchart LR
     reusing the `:716-760` handler body (tenant-scoped, presigned, short TTL, 410 on purged).
   - `packages/web/src/components/interactions/InteractionsPage.tsx` — Transferred filter, outcome
     badge, audio player (min-h-11 controls); `CallRoutingSheet.tsx` — the three targets.
-  - Tests: `packages/api/test/ai/skills/escalate-to-human.schedule.test.ts`,
+  - Tests: `packages/api/test/ai/skills/escalate-to-human.schedule.test.ts` (emergency walks
+    the ordered list before the rotation; a list of one falls through to the rotation then the
+    business phone; the contract rejects `'voicemail'` and an empty list; migration backfill
+    yields a non-empty list for a tenant with only a business phone),
     `packages/api/test/telephony/dtmf-escape.test.ts` (Gather and realtime; protected states),
     `packages/api/test/escalations/outcome-route.persists.test.ts`,
     `packages/api/test/routes/recordings.by-call.test.ts` (cross-tenant 404, expired 403),
@@ -938,6 +950,13 @@ flowchart LR
     `phone_normalized`** — `consent_events` already stores the number that granted, so the
     grant authorises a call to that number only; a job whose target was derived from the wrong
     field or mutated after enqueue is refused with `callback_target_mismatch` and audited)
+    **and runs a fresh `tenant_dnc_list` lookup on `target_e164` immediately before dialling**,
+    reusing the DNC stage of `voice/outbound-consent.ts:117-125` extracted into a shared
+    `isOnDncList(client, tenantId, phoneE164)` rather than re-implementing it. The ledger check
+    alone is not enough: `compliance/stop-reply.ts:82-84` deliberately keeps the DNC mutation
+    when the ledger append fails, so a STOP after the grant can exist as a DNC row with no
+    `revoked` event, and a validator that bypasses the generic gate would otherwise dial a
+    listed number. DNC hit → job `outcome = 'dnc_listed'`, no retry, audited. All of this runs
     before dialling. The enqueue path sets `target_e164` from the event's `phone_normalized`,
     never from a second source, so the check is a tripwire rather than the only guard. The owner click-to-call path and any future outbound
     leg never see the callback grant as consent.
@@ -975,7 +994,8 @@ flowchart LR
     out-of-scope or E1 call; at most once per session; consumed on Gather), `packages/api/test/voice/outbound-consent.voice-kind.test.ts` (a
     `dropped_call_callback` grant authorises only the job that references it; click-to-call and
     a second callback job for the same number are refused; a job whose `target_e164` differs
-    from the event's `phone_normalized` is refused and audited),
+    from the event's `phone_normalized` is refused and audited; a number on `tenant_dnc_list`
+    with a valid grant and **no** `revoked` ledger row is refused with `dnc_listed`),
     `packages/api/test/voice/recovery/callback-branch.test.ts`,
     `packages/api/test/telephony/outbound-ai-call-service.test.ts` (AMD paths, status
     callbacks, one attempt), `packages/api/test/routes/telephony.outbound-answer.test.ts`,
@@ -1009,7 +1029,17 @@ flowchart LR
   - `packages/api/src/onboarding/scenarios/library.ts` (new: reads the generated registry,
     renders owner-facing cards, substitutes tenant fixtures, selects by pack and persona),
     `packages/api/src/onboarding/scenarios/options.ts` (the fixed option set per family, each
-    option = an FSM effect + the setting it writes), `packages/api/src/onboarding/scenarios/apply-answer.ts`
+    option = an FSM effect + the setting it writes; **the opener's page-cadence option writes
+    two new bounded columns**, `tenant_settings.emergency_page_interval_sec INT NOT NULL
+    DEFAULT 120 CHECK (BETWEEN 30 AND 600)` and `emergency_page_max INT NOT NULL DEFAULT 3
+    CHECK (BETWEEN 1 AND 5)`, offered as fixed pairs — "every 2 minutes, 3 pages" (today's
+    constants, the default) and "every minute, 5 pages" (stricter) — because today the ladder
+    is fixed at `EMERGENCY_PAGE_INTERVAL_MS` / `MAX_EMERGENCY_PAGES` in
+    `telephony/emergency-page-retry.ts:54-55` and no setting exists for the option to write.
+    `twilio-adapter.ts:1994` passes the tenant's values through the existing
+    `EmergencyPageLadderDeps.intervalMs` / `maxPages`, which `armEmergencyPageLadder` already
+    prefers over the constants, so the worker's payload carries the tenant cadence and the
+    constants become the schema defaults; replay in U9 resolves the same two keys), `packages/api/src/onboarding/scenarios/apply-answer.ts`
     (tap → typed write + audit; speech → existing extractor → clarification or write; free
     text → FAQ entry, standing-instruction candidate, or white-space note).
   - `packages/api/src/ai/voice-quality/corpus/schema.ts` and ~12 core scripts — optional
