@@ -722,10 +722,16 @@ flowchart LR
      appointments are** (`dispatch/board-query.ts`, `jobs/pg-job.ts` list queries, digest). The
      conflict check runs by customer location and time **before** the provisional job is
      created (item 3's predicate takes a window, not a job), so a taken slot never creates a
-     job at all; job creation and `placeAppointmentHold` run in one transaction **under a
-     tenant-wide scheduling lock, `pg_advisory_xact_lock(hashtext(tenant_id || ':scheduling'))`**,
-     taken before the conflict read. The key is the tenant, not the customer location and not
-     a start bucket: the thing two callers compete for is the tenant's capacity for that
+     job at all; job creation and `placeAppointmentHold` run in one transaction **under the
+     lock every other booking surface already takes**: `place-hold.ts` runs inside
+     `PgTenantTransactionRunner.run(tenantId, ({ lock }) => …)` and calls
+     `lock('self-service-booking')` — the same runner and the same key string that
+     `routes/public-booking.ts:342` and `routes/public-portal.ts:738` use, so the advisory key
+     (the runner hashes tenant id plus key name, `db/tenant-transaction.ts:109`) is identical
+     across voice, public booking and portal. A voice-only key such as
+     `hashtext(tenant_id || ':scheduling')` would serialise two voice calls against each other
+     and still let a voice hold and a portal booking both pass `isSlotFree` for the same
+     window. The key is the tenant, not the customer location and not a start bucket: the thing two callers compete for is the tenant's capacity for that
      window, and the normal race is two *different* customers at *different* addresses asking
      for the same slot — a location-keyed lock would hand them different locks and let both
      pass the conflict read before either inserted (the existing `no_double_booking`
@@ -904,7 +910,10 @@ flowchart LR
     before (`voice_first_live_at` set), nor on an owner call outside the started-test window; `packages/api/test/integration/place-hold.concurrent-slot.test.ts`
     (two concurrent hold requests on real Postgres for the same slot from two different
     customers at two different locations → exactly one hold when capacity is one; again for
-    overlapping windows with different starts → exactly one hold; same-location pair → one);
+    overlapping windows with different starts → exactly one hold; same-location pair → one;
+    **cross-surface**: a voice hold and a `POST /api/public/booking` request for the same
+    window started concurrently → exactly one of them books, the other sees `slot_taken`,
+    and the test asserts both took the `self-service-booking` key on the same runner);
     `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (hang-up mid-ask → no
     proposal, hold and job released, capture cleared, `booking_consent_abandoned` audited).
 - **Floor-criteria risks (Appendix B):** #2 noAutoMutation (job and hold exist before
@@ -1038,7 +1047,18 @@ flowchart LR
     a returning customer who already granted SMS consent would otherwise reach a booking with
     no callback question and no `voice` row, and a drop on that call could never select the AI
     callback. For that caller the booking path arms `callback_consent_ask` alone (the same
-    single-purpose line as (b)) before the lane proposal is minted. **A grant from an earlier
+    single-purpose line as (b)) before the lane proposal is minted — **and carries the booking
+    forward through that turn**: today `handlePendingConsentCapture` clears a plain capture
+    and speaks an acknowledgement, and only a capture with explicit continuation state (the
+    close flow's `close: { proposalId, strictConfirmed }`, `voice-session-store.ts:400-404`,
+    run by `runOwnerApprovedClose`) resumes anything. So this ask arms the same booking
+    continuation U6 item 5 uses, `pendingConsentCapture { customerId, phone, booking:
+    { appointmentId, jobId, laneInput }, ask: 'callback_only' }`, and the consumer mints
+    **exactly one** lane proposal on the next turn in both branches: grant → write the
+    `voice` row, then mint; decline → mint without the callback (SMS confirmation still on,
+    since that consent is already on file). A hang-up mid-ask takes U6 item 5's termination
+    branch (hold and provisional job released, no proposal). Without the continuation either
+    answer would leave the hold with no proposal behind it. **A grant from an earlier
     call is never reused to skip the ask:** the callback service below binds the consent event
     to the job's `voice_session_id`, so an old event could not authorise this call's callback
     and a drop would silently fall back to SMS. The only thing that suppresses the ask is a
@@ -1107,7 +1127,9 @@ flowchart LR
   - Tests: `packages/api/test/ai/voice-turn/callback-consent-arming.test.ts` (armed with the
     booking ask on the booking path and written as two rows on grant; armed alone when a
     callback proposal or call-me-back task is created; armed alone on the booking path for a
-    customer with `sms_consent = true`, and still armed when that customer holds a
+    customer with `sms_consent = true`, where grant → one lane proposal plus the `voice` row,
+    decline → one lane proposal and no row, hang-up → no proposal and the hold released
+    (never zero proposals on an answered ask, never two), and still armed when that customer holds a
     `dropped_call_callback` grant from an earlier session (old grants never suppress the
     ask), but not when this session already recorded one; never armed on a lookup,
     out-of-scope or E1 call; at most once per session; consumed on Gather), `packages/api/test/voice/outbound-consent.voice-kind.test.ts` (a
