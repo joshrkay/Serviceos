@@ -492,11 +492,20 @@ flowchart LR
      lifecycle destroys**: `bargeIn()` (`:3535`) sends Twilio `clear` (discarding its
      buffer), empties the adapter queue and, under item 1, closes the ElevenLabs context and
      drops its late chunks, so the remainder of the reply no longer exists anywhere. A gated
-     interim therefore takes a new **pause** path instead of `bargeIn()`: **snapshot the
-     playback cursor first** (`resumeFrom = lastAckedMark`, taken before anything is sent),
-     then send `clear` (the only way to stop playback promptly), but keep the ElevenLabs
-     context open and keep draining its chunks, and retain every frame from `resumeFrom`
-     onward in a `pausedReply` PCM buffer (bounded by the utterance; one reply at a time). The
+     interim therefore takes a new **pause** path instead of `bargeIn()`. **The frames that
+     `clear` discards must already be in hand before the pause begins**: a snapshot of the
+     cursor at pause time cannot recover audio that was sent after the last acked mark but
+     never played, because `streamPcmAsMedia` (`mediastream-adapter.ts:3435-3442`) enqueues
+     each frame and keeps no copy, and `clear` throws Twilio's copy away. So the send path
+     keeps a rolling **`unackedFrames`** buffer for the whole turn — every frame it enqueues
+     is appended under the mark that follows it, and a *genuine* mark ack releases the frames
+     up to that mark; the buffer is bounded by the existing `TWILIO_MAX_UNACKED_MARKS`
+     backpressure, which already caps how much audio can be outstanding. On a gated interim
+     the adapter **snapshots the cursor first** (`resumeFrom = lastAckedMark`, taken before
+     anything is sent), then sends `clear` (the only way to stop playback promptly), keeps
+     the ElevenLabs context open and keeps draining its chunks, and builds `pausedReply` as
+     the still-unreleased `unackedFrames` (sent, never acked, discarded by `clear`) followed
+     by every live frame from then on (bounded by the utterance; one reply at a time). The
      snapshot matters because Twilio answers `clear` by echoing every outstanding mark,
      including marks for audio it discarded rather than played
      (`test/telephony/media-streams/realtime-human-handoff.test.ts:67-70` models exactly
@@ -510,9 +519,11 @@ flowchart LR
      multi-second interruption, which is the talk-over this item exists to remove. If a final
      arrives (at any time), the pause becomes a real barge-in: close the context, drop the
      buffer. If 2 s pass with **no** interim, no VAD speech and no final, the interruption was
-     false: resume by re-sending the buffer from the first frame after `resumeFrom` and
-     continuing the live stream — no re-synthesis, so the resumed audio is byte-identical to
-     what was cut and nothing the caller never heard is skipped. Hold lines and the disclosure never
+     false: resume by re-sending `pausedReply` — the unreleased frames after `resumeFrom`
+     first, then the retained live tail — and continuing the live stream; no re-synthesis, so
+     the resumed audio is byte-identical to what was cut and nothing the caller never heard
+     is skipped, including the frames Twilio had received but not yet played when `clear`
+     arrived. Hold lines and the disclosure never
      enter the pause path (they are protected above). `packages/api/src/settings/settings.ts` +
      `packages/api/src/db/schema.ts` (`voice_barge_in_level`), `packages/web/src/components/settings/CallRoutingSheet.tsx`.
   - Tests: `packages/api/test/ai/tts/elevenlabs-persistent-socket.test.ts` (two sequential
@@ -1195,14 +1206,20 @@ flowchart LR
     already arms (`twilio-adapter.ts:1856` → `armEmergencyPageLadder`) pages *all* of them by
     SMS at the tenant cadence, and the call drops into the existing callback-collection
     branch with the emergency flag, whose worker notifies the same recipients. No recipient
-    anywhere → the caller hears the **honest** line instead ("I can't reach the on-call team
-    right now. If this is a life-threatening emergency, hang up and call 911. Otherwise tell
-    me the best number and I'll make sure someone calls you back"), the callback task is
-    created with the emergency flag and an `emergency_unreachable` audit, no page is armed
-    (the ladder would page nobody), and the tenant is marked `emergency_unreachable_at`,
-    which the owner's email (the one channel that still exists for an account with no phone
-    on file), the in-app card and the daily review card carry as a pinned blocker until a
-    recipient is written. Such a tenant cannot reach a human on E2 today either — its only
+    anywhere → the caller hears the **honest** line instead, and **it promises nothing the
+    system cannot deliver**: "I can't reach the on-call team right now. If this is a
+    life-threatening emergency, hang up and call 911. I can pass your number and what you've
+    told me to the business, but I can't promise when they'll see it." No "someone will call
+    you back" — by this branch's premise nobody is on the phone roster to call. What the
+    caller gives is delivered through the one channel that *does* have a confirmed
+    recipient: the owner account's login email (verified at signup) receives, immediately
+    and per call, the caller's number and the emergency summary — not only the
+    configuration notice — and the same lands as an in-app card; the callback task is still
+    created with the emergency flag so the request is on the board when a human looks, and
+    an `emergency_unreachable` audit is written. No page is armed (the ladder would page
+    nobody), and the tenant is marked `emergency_unreachable_at`, which the owner's email,
+    the in-app card and the daily review card carry as a pinned blocker until a recipient is
+    written. Such a tenant cannot reach a human on E2 today either — its only
     dial would have been its own DID — so the migration makes that visible rather than
     pretending to page; it does not pause the tenant, because an honest line plus a callback
     task is still better than a dead line. (b) sends the owner one SMS when a phone exists
@@ -1217,8 +1234,9 @@ flowchart LR
     its DID and has no rotation, owner cell or transfer number dials nothing and takes the
     page-and-callback fail-safe only when `resolveEmergencyRecipients` returns at least one
     number (an off-roster on-call mobile counts), that one with no recipient at all hears the
-    honest line, gets the callback task and the `emergency_unreachable` audit and never the
-    page promise, that every recipient is paged, gets the notice, and leaves the branch once
+    honest line that promises neither a page nor a callback, gets the callback task, the
+    immediate owner email carrying the caller's number and summary, and the
+    `emergency_unreachable` audit, that every recipient is paged, gets the notice, and leaves the branch once
     a number is added.
     `on_call_rotation.hours JSONB` optional. **The legacy single line is carried over, not
     dropped**: tenants who configured `tenant_settings.transfer_number` (read today by
@@ -1428,8 +1446,19 @@ flowchart LR
   - **Outbound leg.** `packages/api/src/telephony/outbound-ai-call-service.ts` (clone of
     `initiateOutboundCall` with `Url=/api/telephony/outbound-answer`, `StatusCallback`,
     `MachineDetection=Enable`); `routes/telephony.ts` `/outbound-answer` returns
-    `<Connect><Stream>` bound to a new `voice_sessions` row `channel 'voice_outbound'` seeded
-    with `customerId`; `proposals/surface.ts` outbound surface with the inbound allowed set;
+    `<Connect><Stream>` bound to a `voice_sessions` row `channel 'voice_outbound'` seeded
+    with `customerId` — **established idempotently by CallSid, the way inbound's
+    `establishInboundSession` is** (`twilio-adapter.ts:1123-1137` looks the CallSid up in
+    the store before constructing anything, and `handleInbound` replays the same TwiML for
+    an existing session, `:2154-2179`): the service creates the session row keyed on the
+    CallSid that `calls.create` returns (UNIQUE `voice_sessions.call_sid`, insert `ON
+    CONFLICT DO NOTHING` then re-read, because Twilio can deliver `/outbound-answer` before
+    the create call has returned to us), and the route looks the row up by CallSid and only
+    creates it when absent, so a Twilio retry of `/outbound-answer` after a timeout or lost
+    response gets the identical `<Connect><Stream>` for the one existing session — no second
+    row, no second opener turn, no duplicate consent-ledger, audit or usage event; the
+    `voice_callback_jobs` UNIQUE on tenant + session already keeps the job singular.
+    `proposals/surface.ts` outbound surface with the inbound allowed set;
     opening line `outbound_callback_opener` ("This is {agent}, {business}'s automated assistant,
     calling back about your request a moment ago. This call is recorded. You can reach
     {business} any time at {business_phone}.") before any content — the spoken callback number
@@ -1476,7 +1505,11 @@ flowchart LR
     `packages/api/test/telephony/outbound-ai-call-service.test.ts` (AMD paths, status
     callbacks, one attempt; the opener and the voicemail line both contain the tenant's
     business phone rendered as digits, and a tenant whose `business_phone` fails the
-    non-premium check cannot enable callbacks), `packages/api/test/routes/telephony.outbound-answer.test.ts`,
+    non-premium check cannot enable callbacks), `packages/api/test/routes/telephony.outbound-answer.test.ts`
+    (the same CallSid delivered twice → one `voice_sessions` row and byte-identical TwiML on
+    the retry, one opener turn, one ledger row; `/outbound-answer` arriving before the
+    service has stored the CallSid → the row is created once by whichever side wins and the
+    other re-reads it),
     `packages/api/test/telephony/media-streams/outbound-disclosure-gate.test.ts` (media
     frames before the opener's mark ack are dropped and never forwarded; the ledger row is
     written when playback is validated complete, before the ack; no ack within the timeout →
