@@ -363,7 +363,12 @@ flowchart LR
   - `packages/api/src/voice/quality/grade-voice-session.ts`, `packages/api/src/routes/voice.ts`
     `GET /api/voice/quality` — 7-day p50/p95 of `reply_gap_ms` and first-audible from the new
     columns, per tenant, **filtered to `transport = 'realtime'`**; the response also carries the
-    share of turns on Gather in the window, shown on the card as "unmeasured on N % of calls"
+    share of **calls** on Gather in the window — `COUNT(DISTINCT session_id) FILTER (WHERE
+    transport = 'gather') / COUNT(DISTINCT session_id)`, a session counting as degraded if any
+    of its turns ran on Gather — shown on the card as "unmeasured on N % of calls", because a
+    turn-based share and a call-based label diverge whenever call lengths differ (one long
+    realtime call would make many short degraded calls look insignificant); the turn share is
+    also returned, labelled as such, for the SLO page but never shown as a call percentage;
     so a degraded tenant never sees an artificially low percentile;
     `packages/web/src/components/settings/CallQualityCard.tsx` — two tiles plus that share.
   - `loadtest/voice-realtime-concurrency.ts` — N emulated streams via
@@ -388,7 +393,8 @@ flowchart LR
     a filler followed by a real frame keeps the earlier filler stamp; a zero-row update
     increments `voice_reply_stamp_lost_total` and never inserts;
     a Gather turn leaves `first_audio_at`, `first_audible_at` and `reply_gap_ms` null and is
-    excluded from the percentiles while counted in the Gather share).
+    excluded from the percentiles while counted in the Gather share; three one-turn Gather calls beside one twenty-turn realtime
+    call yield a call share of 75 % and a turn share of 13 %, and the card shows the former).
 - **Approach:** no behaviour change on the call. Per-tenant ramp through `voice_realtime` for
   the first accounts before the env default moves, watching `realtime-health-circuit.ts`.
 - **Patterns to follow:** D-041 (reads stored calls, never audio); `report-layer2.ts` TTFA
@@ -641,7 +647,13 @@ flowchart LR
     the claim included: the worker claims the row with `UPDATE … SET index_status =
     'indexing' WHERE id = $1 AND content_rev = $rev AND index_status IN ('pending',
     'failed') RETURNING id`, and a zero-row claim means the job is stale (an edit bumped the
-    revision, or another job already holds it) and it exits without calling the provider —
+    revision, or another job already holds it) and it exits without calling the provider.
+    The claim also stamps `index_claimed_at = NOW()`, and the predicate accepts a row left in
+    `indexing` whose claim is older than the lease: `… AND (index_status IN ('pending',
+    'failed') OR (index_status = 'indexing' AND index_claimed_at < NOW() - INTERVAL '10
+    minutes'))` — ten minutes is longer than any embedding call, so a worker that died or
+    lost its queue lease between the claim and the terminal update does not strand the FAQ
+    in `indexing` forever; the redelivered job for the same revision reclaims it —
     otherwise a delayed revision-1 job could move the freshly reset revision-2 row to
     `indexing`, its terminal update would then miss, and the revision-2 job would find the
     row unclaimable, leaving the FAQ stuck. The terminal transitions keep the same guard:
@@ -693,7 +705,9 @@ flowchart LR
     and `indexed_at` and gets a fresh budget; an edit while a job is in flight → the stale
     job's completion affects zero rows and the row is indexed by the new revision's job only;
     a stale job that only *starts* after the edit → its claim affects zero rows, it never
-    calls the provider, and the new revision's job claims and indexes the row.
+    calls the provider, and the new revision's job claims and indexes the row; a worker that
+    dies after the claim → the row sits in `indexing`, a redelivery inside ten minutes cannot
+    claim it, a redelivery after ten minutes reclaims and indexes it.
   - Integration: RLS denies cross-tenant reads on both tables; raw select pins the columns.
 - **Verification:** a new tenant completes the step under five minutes from pack defaults.
 
@@ -1025,7 +1039,16 @@ flowchart LR
     stored state, never as an interview answer), `derive-status` reports it as a go-live
     blocker (`GO_LIVE_BLOCKED { emergency_target_missing }`), and the mandatory opener card
     is what fills it — so no tenant goes live with an empty or non-human emergency target.
-    `on_call_rotation.hours JSONB` optional.
+    `on_call_rotation.hours JSONB` optional. **The legacy single line is carried over, not
+    dropped**: tenants who configured `tenant_settings.transfer_number` (read today by
+    `create-voice-turn-processor.ts:3110-3123` as the warm-transfer destination that replaces
+    the rotation) get the same migration setting `transfer_targets.open` and `after_hours` to
+    that number when they are unset (skipped if it is a tenant DID, as above) and `overflow =
+    'callback'`, which is what an unanswered configured line does today
+    (`routes/telephony.ts:955-967`), so switching resolution to the scheduled targets changes
+    nothing for them. The resolver keeps `transfer_number` as a compatibility fallback only
+    while `transfer_targets` is null, and the routing sheet writes the targets on first save;
+    `transfer_number` is removed once every tenant has targets.
     The U9 opener's "who first, then who?" writes exactly this key, and the E2 path reads it:
   - `packages/api/src/ai/skills/escalate-to-human.ts:447-585` — resolve the target by schedule
     through `telephony/business-hours-loader.ts` before dialling; filter rotation entries by
@@ -1041,7 +1064,16 @@ flowchart LR
     dials from a configured list rather than the rotation, and `/dial-result` reads it: while
     `index + 1 < targets.length` it re-enters with the same `reason` and the next index (the
     `screenedLeg` flag carried as today), and only once the list is exhausted does it fall
-    through; the state is cleared when a leg answers. For `kind: 'emergency'` the list is
+    through; the state is cleared when a leg answers. **Advancing is idempotent per attempted
+    leg**: Twilio retries `/dial-result` when a response is lost, and a second advance on the
+    retry would skip a target (a lost response carrying target 2's TwiML would make the retry
+    return target 3). The state therefore records `lastDialCallSid`, the `DialCallSid` of
+    the leg that just ended, and the advance is one conditional UPDATE: `SET
+    escalation_state = jsonb_set(…, index + 1, lastDialCallSid = $DialCallSid) WHERE id = $1
+    AND escalation_state->>'lastDialCallSid' IS DISTINCT FROM $DialCallSid RETURNING
+    escalation_state`. Zero rows means this callback is a duplicate for a leg already
+    advanced past; the handler re-reads the state and returns the TwiML for the **current**
+    index without advancing, so the retry gets the same next leg the lost response carried. For `kind: 'emergency'` the list is
     `transfer_targets.emergency` and exhaustion falls into the existing rotation cascade. For
     `kind: 'scheduled'` (an ordinary transfer resolved to `open` or `after_hours`) the list is
     `[scheduled target, overflow]` when `overflow` is a number, because today the single-line
@@ -1062,13 +1094,17 @@ flowchart LR
     reusing the `:716-760` handler body (tenant-scoped, presigned, short TTL, 410 on purged).
   - `packages/web/src/components/interactions/InteractionsPage.tsx` — Transferred filter, outcome
     badge, audio player (min-h-11 controls); `CallRoutingSheet.tsx` — the three targets.
-  - Tests: `packages/api/test/ai/skills/escalate-to-human.schedule.test.ts` (an `owner_phone`
+  - Tests: `packages/api/test/ai/skills/escalate-to-human.schedule.test.ts` (a tenant with
+    `transfer_number` set and no targets migrates to `open = after_hours = transfer_number`,
+    `overflow = 'callback'`, and a 2 pm transfer still dials that number; an `owner_phone`
     equal to a provisioned DID is skipped by the backfill and rejected by the answer route and
     the routing sheet with 422; emergency walks
     the ordered list before the rotation; a list of one falls through to the rotation then the
     business phone that is not a tenant DID; `packages/api/test/integration/dial-result-emergency-cascade.test.ts`
     (first emergency target no-answer → `/dial-result` dials the second emergency number
-    with `reason: 'emergency_dispatch'` before any rotation entry; list exhausted → rotation
+    with `reason: 'emergency_dispatch'` before any rotation entry; the same `/dial-result`
+    callback delivered twice with the same `DialCallSid` → the second response is identical
+    to the first and the index advances once; list exhausted → rotation
     cascade as today; answered leg clears `escalation_state`); the contract rejects
     `'voicemail'`, and rejects an
     empty list as an interview answer while allowing it as the migrated state; migration
