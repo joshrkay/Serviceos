@@ -1397,6 +1397,20 @@ flowchart LR
     the tombstone path below, never the cascade. When a leg answers the state is **not
     deleted but tombstoned** —
     `{ kind, status: 'completed', processedDialCallSids }` kept for the session's lifetime —
+    **and the same statement finalises the durable session row**: today the dial-success
+    branch calls `adapter.finalizeTerminatedSession(session, [], 'transferred')` on the
+    local runtime session (`routes/telephony.ts:932`), which is what stamps `ended_at`,
+    `ended_reason = 'transferred'` and the outcome the mapper resolves for that reason
+    (`'completed'`, `outcome-mapper.ts:54-56`; the emergency page retry keys off exactly that
+    `ended_reason`, `emergency-page-retry.ts:37`), so a row-only accepted-leg transition on a
+    replica with no runtime session would tombstone the cascade and leave the session open
+    forever — unreaped, counted as live by the concurrency gate, and invisible to the page
+    retry. The tombstone UPDATE therefore also sets `ended_at = NOW()`, `ended_reason =
+    'transferred'`, `outcome = 'completed'` with an `ended_at IS NULL` guard in the same
+    `jsonb_set` statement (a local adapter, when present, still runs
+    `finalizeTerminatedSession` for its in-memory teardown; its `persistSessionEnded` is a
+    no-op against the already-stamped row because the guard fails), and the no-answer
+    exhaustion and voicemail fallthroughs stamp their own `ended_reason` the same way —
     because today's handler does not reject callbacks for an ended escalation, and a delayed
     no-answer retry for an earlier leg arriving after the caller was transferred would, with
     the state gone, find no deduplication record and fall into the ordinary rotation or
@@ -1479,7 +1493,10 @@ flowchart LR
     (first emergency target no-answer → `/dial-result` dials the second emergency number
     with `reason: 'emergency_dispatch'` before any rotation entry; the same callback
     delivered to a process whose store holds no runtime session → the second number is still
-    dialled from the durable row, audited under the row's tenant; a callback for a `?sid=`
+    dialled from the durable row, audited under the row's tenant; the accepted leg's
+    `completed` callback delivered to a process with no runtime session → the row is
+    tombstoned **and** `ended_at`, `ended_reason = 'transferred'`, `outcome = 'completed'`
+    are stamped in the same statement, and a second delivery changes nothing; a callback for a `?sid=`
     with no row at all → `<Hangup/>`; the same `/dial-result`
     callback delivered twice with the same `DialCallSid` → the second response is identical
     to the first and the index advances once; target 1's callback redelivered *after* target
@@ -2055,9 +2072,19 @@ flowchart LR
     refresh or restart without repeating a card, and step completion is derived from it (every
     selected core scenario has a row), not from a stamp; `tenant_settings.scenario_interview_completed_at`
     is a convenience stamp written when the derivation first holds, and **that write is also
-    the R12 event's trigger**: after each answered or skipped row `apply-answer.ts` first runs
-    the completion query (every selected core scenario has an `onboarding_scenario_answers`
-    row), and **only when that query says complete** runs
+    the R12 event's trigger**: `apply-answer.ts` runs on the request's own transaction and
+    **first takes `lockInCurrentTransaction('scenario-interview')`** (the same
+    `pg_advisory_xact_lock` helper the booking paths share, keyed by tenant + name, see U6
+    item 1), *then* upserts the answered or skipped row, *then* runs the completion query
+    (every selected core scenario has an `onboarding_scenario_answers` row) — serialised
+    per tenant, because without the lock two concurrent final answers (two tabs, a double
+    tap, a retried request) each insert their own row, each run the completion query under
+    READ COMMITTED before the other's insert is visible, each see one scenario still
+    missing, and neither stamps the completion nor emits the event, leaving the tenant with a
+    complete answer set and no `scenario_interview_completed_at` until some later answer
+    happens to run the query again (and for a fully answered set there is no later answer).
+    Under the lock the second request's completion query runs after the first's commit, so
+    exactly one of them sees the full set. **Only when that query says complete** does it run
     `UPDATE tenant_settings SET scenario_interview_completed_at = NOW() WHERE tenant_id = $1
     AND scenario_interview_completed_at IS NULL`; the null check alone is not the predicate
     (it would stamp on the first card and swallow the real completion). When (and only when)
@@ -2118,7 +2145,11 @@ flowchart LR
     `packages/web/src/components/onboarding/v2/steps/ScenarioInterviewStep.test.tsx` (jsdom
     class contract), `e2e/scenario-interview-mobile.spec.ts`,
     `packages/api/test/integration/scenario-interview-settings-and-notes.test.ts` (pins the
-    new columns and the notes table), `packages/api/test/onboarding/scenarios/registry-fresh.test.ts`
+    new columns and the notes table; two concurrent final answers for the last two
+    unanswered scenarios, started on separate connections, produce exactly one
+    `scenario_interview_completed_at` stamp and one `scenario_interview_completed` funnel
+    event, and the lock is observed on the request transaction, not a nested runner),
+    `packages/api/test/onboarding/scenarios/registry-fresh.test.ts`
     (regenerating the registry from the corpus produces no diff), corpus: the `ownerFacing`
     block is validated by the corpus-integrity check.
 - **Approach:** options are FSM effects only, so an answer is always typeable; the agent's
