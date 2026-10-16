@@ -652,9 +652,15 @@ flowchart LR
     `content_rev` it was enqueued for, and **every** worker transition is conditional on it,
     the claim included: the worker claims the row with `UPDATE … SET index_status =
     'indexing' WHERE id = $1 AND content_rev = $rev AND index_status IN ('pending',
-    'failed') RETURNING id`. A zero-row claim has two meanings and the worker tells them
-    apart with one follow-up read of the row, which has four outcomes: if `content_rev` has
-    moved on, the job is stale and it exits successfully (the queue acks it,
+    'failed') AND index_attempts < 5 RETURNING id` — the attempts cap sits inside the atomic
+    claim, so an at-least-once duplicate delivered after the fifth failure can never claim
+    the row and call the provider a sixth time. A zero-row claim has several meanings and
+    the worker tells them apart with one follow-up read of the row, which has five outcomes:
+    if `content_rev` has moved on, the job is stale and it exits successfully (the queue acks
+    it, `app.ts:3132-3134`); if the revision is current, `failed`, and `index_attempts >= 5`,
+    the budget is exhausted — it exits successfully as a no-op and the row stays `failed`
+    and visible in the sheet until the owner edits it (which resets the budget); if the
+    revision is current and the row is already indexed, it exits successfully (the queue acks it,
     `app.ts:3132-3134`); if the revision is current and `index_status = 'indexed'`, another
     delivery of the same job already finished the work — an ordinary duplicate — and it
     exits successfully too, never re-enqueuing a healthy row; if the row is gone or
@@ -667,7 +673,7 @@ flowchart LR
     ten-minute lease: a crash-redelivery arriving early would otherwise be acked as a no-op
     and the row would sit in `indexing` for ever.
     The claim also stamps `index_claimed_at = NOW()`, and the predicate accepts a row left in
-    `indexing` whose claim is older than the lease: `… AND (index_status IN ('pending',
+    `indexing` whose claim is older than the lease: `… AND index_attempts < 5 AND (index_status IN ('pending',
     'failed') OR (index_status = 'indexing' AND index_claimed_at < NOW() - INTERVAL '10
     minutes'))` — ten minutes is longer than any embedding call, so a worker that died or
     lost its queue lease between the claim and the terminal update does not strand the FAQ
@@ -731,7 +737,8 @@ flowchart LR
     dies after the claim → the row sits in `indexing`, a redelivery inside ten minutes cannot
     claim it and re-enqueues itself for the lease remainder instead of acking; a duplicate
     delivery arriving after another worker indexed the same revision → acked as success with
-    no re-enqueue; a delivery for a deleted row → acked with the row-gone audit, a redelivery after ten minutes reclaims and indexes it; the
+    no re-enqueue; a sixth delivery for a row already failed five times → zero-row claim, no
+    provider call, acked as a no-op; a delivery for a deleted row → acked with the row-gone audit, a redelivery after ten minutes reclaims and indexes it; the
     original worker finishing after that reclaim → its terminal update carries the old token,
     affects zero rows, and the reclaimer's result stands.
   - Integration: RLS denies cross-tenant reads on both tables; raw select pins the columns.
@@ -963,8 +970,18 @@ flowchart LR
      record on those sessions, on both the real-phone and browser-preview transports; excluded from availability, the dispatch board,
      reminders, digests and billing; the test appointment and its provisional job are
      cancelled when go-live succeeds or the test is rejected), `voice_sessions.caller_phone_e164 TEXT NULL`,
-     `tenant_settings.test_booking_verified_at`, `test_booking_rejected_at`, `test_booking_reason`,
-     `test_booking_session_id`, `forwarding_check_started_at`, `forwarding_verified_at`.
+     `tenant_settings.test_booking_started_at TIMESTAMPTZ NULL` (stamped by
+     `POST /api/onboarding/test-booking/start`, the 30-minute window item 7's `testBooking`
+     signal reads; neither it nor the next column exists today),
+     `tenant_settings.test_customer_id UUID NULL REFERENCES customers(id)` (the wizard
+     creates this synthetic customer once, on first entry to the test-booking step, as
+     "Onboarding test caller" with the owner's phone, `customers.is_test = true` — a new
+     column the customer list, digests, exports and lookups exclude the same way
+     `appointments.is_test` is excluded — and keeps it for the tenant's lifetime so re-runs
+     of the test reuse it; it is never shown as a real customer and never counts toward
+     activation), `test_booking_verified_at`, `test_booking_rejected_at`,
+     `test_booking_reason`, `test_booking_session_id`, `forwarding_check_started_at`,
+     `forwarding_verified_at`; all mapped in `settings/settings.ts`.
      `twilio-adapter.ts` writes the caller number at session create; `place-hold.ts` and
      `CreateAppointmentExecutionHandler` stamp the session and proposal ids.
   8. **Preview mode for the browser test.** `ai/agents/customer-calling/inapp-adapter.ts` —
@@ -1030,9 +1047,11 @@ flowchart LR
     → hold + lane evaluated), `autonomous-lane-threading.test.ts`,
     `packages/api/test/ai/scheduling/place-hold.conflict.test.ts`,
     `packages/api/test/proposals/lane-undo-sms.test.ts` (live path sends; DNC and consent
-    respected), `packages/api/test/ai/voice-turn/booking-consent-ask.test.ts` (ask is armed before any
-    proposal row exists; grant on the next turn mints the lane proposal with SMS; decline mints
-    it email-only; a 6-second delay between ask and answer still yields exactly one confirmation,
+    respected), `packages/api/test/ai/voice-turn/booking-consent-ask.test.ts` (the non-executable `draft`
+    exists before the ask and the hold's `proposal_id` points at it — no executable row
+    exists before the answer; grant on the next turn promotes **that same row** through
+    `promoteConsentDraft` with SMS; decline promotes it email-only; the proposal count is one
+    before and after; a 6-second delay between ask and answer still yields exactly one confirmation,
     sent after the grant), `packages/api/test/telephony/twilio-adapter.gather-consent-capture.test.ts`
     (a Gather yes/no turn consumes the pending capture instead of classifying a fresh intent;
     `coverage-table.ts` row `ws18_consent_capture` updated),
@@ -1158,8 +1177,14 @@ flowchart LR
     dials from a configured list rather than the rotation, and `/dial-result` reads it: while
     `index + 1 < targets.length` it re-enters with the same `reason` and the next index (the
     `screenedLeg` flag carried as today), and only once the list is exhausted does it fall
-    through; the state is cleared when a leg answers. **Advancing is idempotent per attempted
-    leg**: Twilio retries `/dial-result` when a response is lost, and a second advance on the
+    through. When a leg answers the state is **not deleted but tombstoned** —
+    `{ kind, status: 'completed', processedDialCallSids }` kept for the session's lifetime —
+    because today's handler does not reject callbacks for an ended escalation, and a delayed
+    no-answer retry for an earlier leg arriving after the caller was transferred would, with
+    the state gone, find no deduplication record and fall into the ordinary rotation or
+    callback branch; `/dial-result` consults the tombstone first and answers any callback for
+    a completed escalation with an empty, hang-up-safe TwiML and an audit, never a new dial.
+    **Advancing is idempotent per attempted leg**: Twilio retries `/dial-result` when a response is lost, and a second advance on the
     retry would skip a target (a lost response carrying target 2's TwiML would make the retry
     return target 3). The state therefore keeps `processedDialCallSids: string[]`, every
     `DialCallSid` that has already advanced the cascade — not just the most recent one,
@@ -1203,7 +1228,7 @@ flowchart LR
     callback delivered twice with the same `DialCallSid` → the second response is identical
     to the first and the index advances once; target 1's callback redelivered *after* target
     2's has advanced the cascade → no third advance, the response is the current leg; list exhausted → rotation
-    cascade as today; answered leg clears `escalation_state`); the contract rejects
+    cascade as today; answered leg writes the completed tombstone and a delayed no-answer retry for an earlier leg is then ignored with no new dial); the contract rejects
     `'voicemail'`, and rejects an
     empty list as an interview answer while allowing it as the migrated state; migration
     backfill prefers `owner_phone` over `business_phone`, never seeds the tenant's own Twilio
@@ -1219,7 +1244,7 @@ flowchart LR
     `e2e/interactions-playback-mobile.spec.ts`,
     `packages/api/test/integration/transfer-targets-and-outcomes.test.ts` (unanswered `open`
     target → `/dial-result` dials `overflow` before any callback prompt; `overflow =
-    'callback'` → callback prompt as today; answered leg clears `escalation_state`); Layer 1: a bucket 07
+    'callback'` → callback prompt as today; answered leg writes the completed tombstone and a delayed no-answer retry for an earlier leg is then ignored with no new dial); Layer 1: a bucket 07
     press-0 script and the transfer-with-context script (tracker row 11).
 - **Patterns to follow:** the #1676 hand-off hardening; `recording-control.ts` pause segments;
   `docs/solutions/logic-errors/escalation-per-user-phone-fallback-loop.md`;
