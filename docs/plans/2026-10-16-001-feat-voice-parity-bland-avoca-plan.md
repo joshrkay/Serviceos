@@ -343,7 +343,17 @@ flowchart LR
     The enqueue time is kept as `first_audio_enqueued_at` for diagnosing transport delay,
     the `voice_reply_gap_ms` histogram observes the acked stamp too, and a mark whose ack is
     a clear-echo or never arrives (safety-timer turn) leaves `first_audio_at` and
-    `reply_gap_ms` null rather than estimated; and for `first_audible_at` from whichever
+    `reply_gap_ms` null rather than estimated **but is counted, never dropped**: such a turn
+    is stamped `reply_unacked_reason` (`'clear_echo' | 'ack_timeout' | 'stream_closed'`,
+    the first set 5 s after the first real frame was enqueued with no acked `first_real`
+    mark, the last when the stream closes first), because those are exactly the turns on
+    which the caller heard a long delay or nothing at all, and a percentile computed only
+    over acked turns would let repeated playout failures make the p95 look *healthier*.
+    The SLO is therefore two numbers, not one: the p95 of acked gaps **and the unacked
+    rate** — turns with a first real frame enqueued and no acked mark, over all turns that
+    enqueued one — observed as the `voice_reply_unacked_total` counter beside the
+    histogram, alerted at 1 % alongside the p95 alert, and both are required by the
+    seven-day gate below; and for `first_audible_at` from whichever
     came first: the filler-start branch stamps it when a filler plays, and the real-frame
     branch stamps it too when no filler was emitted (U3's cold or failed per-voice cache makes
     fillerless turns normal, not exceptional), so `first_audible_at` is set on every turn that
@@ -372,7 +382,10 @@ flowchart LR
     number.
   - `packages/api/src/voice/quality/grade-voice-session.ts`, `packages/api/src/routes/voice.ts`
     `GET /api/voice/quality` — 7-day p50/p95 of `reply_gap_ms` and first-audible from the new
-    columns, per tenant, **filtered to `transport = 'realtime'`**; the response also carries the
+    columns, per tenant, **filtered to `transport = 'realtime'`**, plus the unacked rate
+    (`COUNT(*) FILTER (WHERE reply_unacked_reason IS NOT NULL) / NULLIF(COUNT(*) FILTER
+    (WHERE first_audio_enqueued_at IS NOT NULL), 0)`) with its per-reason split, shown on
+    the owner's card as "replies that never played"; the response also carries the
     share of **calls** on Gather in the window — `COUNT(DISTINCT session_id) FILTER (WHERE
     transport = 'gather')::numeric / NULLIF(COUNT(DISTINCT session_id), 0)` (the cast is
     load-bearing: two bare `COUNT`s divide as integers in Postgres, so a 3-of-4 window would
@@ -581,7 +594,9 @@ flowchart LR
 - **Patterns to follow:** `armEarlyFiller` lifecycle; the abort semantics in
   `docs/plans/2026-07-23-002-fix-voice-breaker-abort-cascade-plan.md`; the deadline-env lesson
   in `docs/solutions/runtime-errors/empty-classify-deadline-env-collapses-voice-pass.md`.
-- **Verification:** `voice_reply_gap_ms` p95 under 1,500 ms for seven days; the discard rate of
+- **Verification:** `voice_reply_gap_ms` p95 under 1,500 ms **and** the unacked-reply rate
+  under 1 % for seven days — a rate above 1 % fails the gate however good the p95 looks,
+  since the p95 only describes the replies that played; the discard rate of
   speculative classifies under 30 %; bucket 08 green at Layer 2.
 
 ### U3. The owner's voice, name and greeting are what the call speaks, with a preview
@@ -1413,7 +1428,17 @@ flowchart LR
     hours; business-phone fallback when the filtered list is empty (never strand). For
     `reason = 'emergency_dispatch'` the walk order is `transfer_targets.emergency` in list
     order (each with the existing ring timeout), then the hours-filtered rotation, then the
-    business phone. **The cascade state has to survive the webhook round-trip**: today a
+    business phone — **and every number is rung at most once per cascade**: the state
+    carries `attempted: string[]` (the E.164-normalised numbers already dialled, appended
+    by the same advance UPDATE that moves `index`), and the rotation walk and the
+    business-phone fallthrough skip any entry whose normalised number is in it. A
+    migrated tenant's one-number emergency list is seeded from the rotation head (the
+    backfill below), so without the skip an exhausted list would ring that same
+    unavailable person for a second full timeout before the next on-call user — on the
+    one reason where a minute matters most; a rotation entry equal to the business phone
+    is skipped the second time for the same reason. When every candidate is in
+    `attempted`, the walk falls through to the callback branch rather than re-ringing
+    anyone. **The cascade state has to survive the webhook round-trip**: today a
     no-answer comes back through `routes/telephony.ts:982-1011` `/dial-result`, which
     re-enters `escalateToHuman` with `reason: 'low_confidence'` and advances only the
     rotation cursor, so without more the second emergency number would never be dialled.
@@ -1460,12 +1485,23 @@ flowchart LR
     `ended_reason`, `emergency-page-retry.ts:37`), so a row-only accepted-leg transition on a
     replica with no runtime session would tombstone the cascade and leave the session open
     forever — unreaped, counted as live by the concurrency gate, and invisible to the page
-    retry. The tombstone UPDATE therefore also sets `ended_at = NOW()`, `ended_reason =
-    'transferred'`, `outcome = 'completed'` with an `ended_at IS NULL` guard in the same
-    `jsonb_set` statement (a local adapter, when present, still runs
-    `finalizeTerminatedSession` for its in-memory teardown; its `persistSessionEnded` is a
-    no-op against the already-stamped row because the guard fails), and the no-answer
-    exhaustion and voicemail fallthroughs stamp their own `ended_reason` the same way —
+    retry. The tombstone UPDATE therefore also stamps the end fields — **but the guard on
+    them is per column, never on the statement**: `SET escalation_state = <tombstone>,
+    ended_at = COALESCE(ended_at, NOW()), ended_reason = COALESCE(ended_reason,
+    'transferred'), outcome = COALESCE(outcome, 'completed') WHERE id = $1 AND NOT
+    (escalation_state->'processedDialCallSids' ? $DialCallSid)`. The row predicate is the
+    cascade's own deduplication, not `ended_at IS NULL`, because the adapter's WebSocket
+    teardown finaliser can stamp `ended_at` (the caller's media stream ends when the
+    bridge completes) *before* the accepted leg's `/dial-result` reaches a replica, and a
+    statement-level `ended_at IS NULL` guard would then affect zero rows, leave
+    `escalation_state` active, and let a delayed or retried callback advance the cascade
+    and ring another dispatcher after a successful hand-off. So the tombstone is written
+    whether or not the session had already ended, and the end fields are written only
+    where still null (a local adapter, when present, still runs
+    `finalizeTerminatedSession` for its in-memory teardown; its `persistSessionEnded` keeps
+    its own `ended_at IS NULL` guard, so whichever writer comes second changes nothing).
+    The no-answer exhaustion and voicemail fallthroughs stamp their own `ended_reason` the
+    same way —
     because today's handler does not reject callbacks for an ended escalation, and a delayed
     no-answer retry for an earlier leg arriving after the caller was transferred would, with
     the state gone, find no deduplication record and fall into the ordinary rotation or
@@ -1571,7 +1607,11 @@ flowchart LR
     dialled from the durable row, audited under the row's tenant; the accepted leg's
     `completed` callback delivered to a process with no runtime session → the row is
     tombstoned **and** `ended_at`, `ended_reason = 'transferred'`, `outcome = 'completed'`
-    are stamped in the same statement, and a second delivery changes nothing; a callback for a `?sid=`
+    are stamped in the same statement, and a second delivery changes nothing; the same
+    callback arriving **after** the adapter's teardown already stamped `ended_at` with
+    another reason → the tombstone is still written, the end fields are untouched, and a
+    retried no-answer callback for an earlier leg arriving afterwards gets the empty TwiML
+    and dials nobody; a callback for a `?sid=`
     with no row at all → `<Hangup/>`; the same `/dial-result`
     callback delivered twice with the same `DialCallSid` → the second response is identical
     to the first and the index advances once; target 1's callback redelivered *after* target
@@ -1690,14 +1730,36 @@ flowchart LR
     by any digit is refused). The check is a tripwire rather than the only guard. The owner click-to-call path and any future outbound
     leg never see the callback grant as consent.
   - **Branch in recovery.** `voice/recovery/detect-dropped.ts`, `workers/dropped-call-worker.ts`
-    — consent row + `block` mode + tenant `voice_callback_enabled` + inside window → enqueue one
+    — consent row + `block` mode + tenant `voice_callback_enabled` + inside window **+ the
+    originating number's persisted A-attestation state is `approved`** → enqueue one
     `voice_callback_jobs` row (`tenant_id`, `voice_session_id`, `target_e164`,
     `consent_event_id`, `attempt`, `outcome`, **`outbound_session_id UUID NULL REFERENCES
     voice_sessions(id)`** (the leg this job placed, stamped before the dial — below),
     **`dial_state TEXT NOT NULL DEFAULT 'pending' CHECK (dial_state IN ('pending',
     'dialing', 'unconfirmed', 'confirmed', 'rejected'))`** and **`failure_reason TEXT NULL`**;
     UNIQUE tenant + session; FORCE RLS); else the SMS
-    branch.
+    branch. **Attestation is a persisted per-tenant predicate, not a checklist item**: the
+    Trust Hub prerequisite listed under Dependencies is enforced in code, because a tenant
+    that flips `voice_callback_enabled` before its Business Profile and number assignment
+    are approved would otherwise place an unattested outbound call and R10 would hold only
+    by convention. Today the codebase knows attestation only on the *inbound* side
+    (`telephony/stir-attestation.ts` reads Twilio's `StirVerstat` on incoming calls), so
+    the unit adds, on the tenant's Twilio integration row (`tenant_integrations`,
+    `provider_data`), `trustProductSid`, `trustProductStatus` (`'pending' | 'approved' |
+    'rejected'`) and `trustVerifiedAt`, written **only** by a `trust-hub-sync-worker`
+    (P0-009 pattern; fetches the number's assigned Trust Product / customer-profile status
+    from Twilio's Trust Hub API nightly and on the Trust Hub status webhook) — never by
+    hand and never by the settings UI. Two gates read it and fail closed: the settings
+    route refuses to set `voice_callback_enabled = true` while the status is not
+    `approved` (422 `callback_requires_attestation`, the enable card shows the reason),
+    and `call-me-back-worker` re-reads it **immediately before dialling** and, if it has
+    lapsed since enqueue, finalises the job `dial_state = 'rejected'`, `failure_reason =
+    'attestation_not_approved'`, takes the SMS branch and audits it — so the "legal by
+    construction" claim in Appendix E holds per tenant and per dial, not per launch
+    checklist. `test/workers/call-me-back-worker.test.ts` gains: enqueue refused while
+    `trustProductStatus` is `pending`; a job enqueued while `approved` whose tenant is
+    `rejected` by dial time is finalised without a dial; the settings route 422s the flag
+    while unapproved.
   - **Outbound leg.** `packages/api/src/telephony/outbound-ai-call-service.ts` (clone of
     `initiateOutboundCall` with `Url=/api/telephony/outbound-answer`, `StatusCallback`,
     `MachineDetection=Enable`); `/outbound-answer` and `/outbound-status` are **mounted in
