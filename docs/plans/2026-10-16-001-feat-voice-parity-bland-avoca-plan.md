@@ -913,14 +913,19 @@ flowchart LR
      `pg_advisory_xact_lock` with the identical `advisoryKeyPair(tenantId + key)` on
      whatever client the current `tenantContextStore` holds — the request client here, the
      runner's client on the voice and public paths — so all three writers contend for one
-     lock while each stays inside its own single transaction. The route then runs
-     `isSlotFree` for the window first, assigned or not, returning 409 `SLOT_TAKEN` with
-     `nextOpening`, and lock, predicate, `createAppointment`, `ensurePrimaryTechnician` and
-     `syncJobAssignment` all commit or roll back together with the request; the technician-specific
-     `assertNoDoubleBooking` stays as the narrower check on top. A dispatcher deliberately
-     overbooking capacity (two crews, one window) passes `force: true`, audited as
-     `appointment_overbooked`, which skips `isSlotFree` but still takes the lock, so a
-     concurrent voice hold always sees the row once it is committed.
+     lock while each stays inside its own single transaction. The route then runs the
+     check that fits the visit: an **assigned** visit keeps today's technician-scoped
+     `assertNoDoubleBooking` and no tenant-wide predicate (one tech, one calendar; other
+     crews are irrelevant), while an **unassigned** visit runs the capacity-aware
+     `isSlotFree` from item 3 — free while overlapping active appointments plus live holds
+     are below `booking_capacity`, so a three-truck shop books three parallel unassigned
+     visits without ceremony — returning 409 `SLOT_TAKEN` with `nextOpening` only when
+     capacity is actually full; lock, predicate, `createAppointment`,
+     `ensurePrimaryTechnician` and `syncJobAssignment` all commit or roll back together with
+     the request. A dispatcher deliberately booking *beyond* capacity passes `force: true`,
+     audited as `appointment_overbooked`, which skips the predicate but still takes the lock,
+     so a concurrent voice hold always sees the row once it is committed; ordinary parallel
+     work never needs it.
      One lock per tenant serialises every hold placement for that tenant, which is a handful
      per minute at the busiest tenant and costs nothing measurable; two concurrent calls for
      overlapping windows with different starts (2:00–3:00 and 2:30–3:30) therefore also
@@ -966,8 +971,18 @@ flowchart LR
      overlapping rows belong to other customers (`ai/tasks/slot-conflict-checker.ts:150-175`),
      which is precisely the two-different-customers race the lock exists to serialise, so a
      lock around that checker would still let both holds in. `isSlotFree` is the tenant-wide
-     predicate the booking routes already use: any active appointment or live hold in the
-     window blocks, buffer applied, expired holds ignored. Return
+     predicate the booking routes already use, **made capacity-aware in this unit**: today
+     `DefaultAvailabilityFinder` treats *any* active appointment as busy when no technician
+     is given (`ai/tasks/availability-finder.ts:81-84`), which is single capacity for the
+     whole tenant — wrong for the two-to-five-truck shops this product targets, and the
+     reason a voice hold or a public booking today can refuse a slot a second crew could
+     take. `tenant_settings.booking_capacity INT NOT NULL DEFAULT 1 CHECK (booking_capacity
+     BETWEEN 1 AND 20)` is backfilled by the migration to each tenant's count of field-capable
+     users (minimum 1) and editable in the scheduling settings; the finder, given no
+     technician, counts overlapping active appointments plus live holds (buffer applied,
+     expired holds ignored) and reports the window free while that count is below capacity,
+     so the voice hold, the public and portal bookings and the unassigned dispatcher visit
+     all share one rule. A technician-scoped check (`technicianId` given) is unchanged. Return
      `{ ok: false, failed: 'slot_taken', nextOpening }` with `nextOpening` from the same
      finder; the FSM speaks the bucket 09 line
      ("That {time} slot was just booked — the next opening is {next}. I've drafted that for an
@@ -1192,7 +1207,8 @@ flowchart LR
     ordinary inbound call, nor on an attested owner call to a paused tenant that was live
     before (`voice_first_live_at` set), nor on an owner call outside the started-test window; `packages/api/test/integration/place-hold.concurrent-slot.test.ts`
     (two concurrent hold requests on real Postgres for the same slot from two different
-    customers at two different locations → exactly one hold when capacity is one; again for
+    customers at two different locations → exactly one hold when capacity is one, and with
+    `booking_capacity = 3` → three overlapping holds and the fourth sees `slot_taken`; again for
     overlapping windows with different starts → exactly one hold; same-location pair → one;
     **cross-surface**: a voice hold and a `POST /api/public/booking` request for the same
     window started concurrently → exactly one of them books, the other sees `slot_taken`,
@@ -1693,8 +1709,18 @@ flowchart LR
     and does nothing — `answered_at` was written atomically with the CallSid binding, which
     is why the marker exists and why `dial_state` (which `initiated` also moves) cannot
     stand in for it. A `completed` for a session with `answered_at` **and**
-    `stream_started_at` set is the ordinary end of an answered call and is left to the
-    adapter's own socket-teardown finaliser, never to this handler. A `completed` for a
+    `stream_started_at` set is the ordinary end of an answered call, and the adapter's own
+    socket-teardown finaliser is the one that should end it — so this handler **defers to
+    it, but does not abstain**: the adapter may be gone (its replica died before teardown and
+    this webhook landed on another), so the handler enqueues a 15 s delayed job that runs
+    `UPDATE … SET ended_at = NOW(), outcome = COALESCE(outcome, 'completed'), failure_reason
+    = 'adapter_lost' WHERE id = $session AND ended_at IS NULL` and marks the job terminal
+    `completed` with **no** fallback (the customer was spoken to). In the normal case the
+    adapter's finaliser has already stamped `ended_at` long before the delay elapses and the
+    job affects zero rows; the conditional guard means the two can never both finalise. A
+    stale-started reconciliation pass (open sessions whose `stream_started_at` is older than
+    the maximum call duration, 2 h, provider status fetched first) covers a `completed` that
+    was itself lost. A `completed` for a
     session with `answered_at` set but `stream_started_at` **null** — the answer route ran
     but the upgrade or the `start` frame was rejected or never arrived, so no adapter exists
     to run that finaliser — is this handler's to finalise: `… WHERE id = $session AND
@@ -1812,6 +1838,10 @@ flowchart LR
     later webhook dropped → the 150 s pass fetches the call's status from Twilio and
     finalises it, fallback once; `answered_at` set, no stream and no `completed` → the 60 s
     pass finalises it; a webhook and a reconciler pass racing on one row → one finalisation;
+    `completed` arriving on another replica after the adapter's replica died with both
+    markers set → the delayed finaliser ends the session `completed` / `adapter_lost`, job
+    terminal, no fallback, and the same `completed` with a live adapter → the adapter
+    finalises first and the delayed job affects zero rows;
     `/outbound-answer`
     for an ended session → `<Hangup/>`, audit, no stream; the correlation columns
     (`voice_sessions.callback_job_id`, `consent_event_id`, `twilio_account_sid`, `answered_at`,
