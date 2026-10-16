@@ -599,8 +599,12 @@ flowchart LR
 - **Dependencies:** none
 - **Files (Appendix C Design A):**
   - `packages/api/src/db/schema.ts` — migrations: `tenant_business_answers` (one row per tenant:
-    `pricing_policy TEXT ≤300`, `trip_fee_cents INT NULL`, `trip_fee_credited BOOL`,
-    `deposit_policy TEXT ≤300`, `deposit_cents INT NULL`, `payment_methods TEXT[]`,
+    `pricing_policy TEXT ≤300`, `trip_fee_cents INT NULL`, **`trip_fee_confirmed_at
+    TIMESTAMPTZ NULL`**, `trip_fee_credited BOOL`, `deposit_policy TEXT ≤300`,
+    `deposit_cents INT NULL`, **`deposit_confirmed_at TIMESTAMPTZ NULL`** (the `*_confirmed_at`
+    siblings the Approach below requires for every monetary field: null on pack prefill, set
+    by owner accept or edit, read by U5 before a fee is ever spoken; in the shared contract
+    and the repository), `payment_methods TEXT[]`,
     `financing_available BOOL`, `free_estimates BOOL`, `warranty_text ≤300`, `license_text ≤200`,
     `insurance_text ≤200`, `emergency_policy ≤300`, `service_area_summary ≤200`,
     `hours_exceptions JSONB`, `years_in_business INT`, `brands_serviced TEXT[]`,
@@ -619,8 +623,18 @@ flowchart LR
     `packages/api/src/workers/faq-embed-worker.ts` (P0-009 pattern; embeds on write via the
     existing `EmbeddingProvider`; transitions `pending → indexing → indexed` with `indexed_at`,
     or `indexing → failed` with `last_index_error` and `index_attempts + 1`; failed rows are
-    retried with backoff up to five attempts, then stay `failed` and visible in the sheet; an
-    edit to `question`/`answer`/`aliases` resets the row to `pending` and clears the embedding).
+    retried with backoff up to five attempts, then stay `failed` and visible in the sheet. An
+    edit to `question`/`answer`/`aliases` is a **new content revision**: the row carries
+    `content_rev INT NOT NULL DEFAULT 1`, the edit bumps it and resets `index_status =
+    'pending'`, `embedding = NULL`, `index_attempts = 0`, `last_index_error = NULL`,
+    `indexed_at = NULL` in the same write, so a revision never inherits the previous
+    revision's exhausted retry budget or stale failure text. The embed job carries the
+    `content_rev` it was enqueued for, and **both** worker transitions are conditional on it:
+    `UPDATE … SET index_status = 'indexed', embedding = $v, indexed_at = NOW() WHERE id = $1
+    AND content_rev = $rev` (and the same guard on the `failed` transition); an UPDATE that
+    affects zero rows means the owner edited mid-flight, the stale result is dropped, and the
+    newer revision's own job indexes it — so retrieval can never match on a vector of the
+    previous question while speaking the current answer).
   - `packages/api/src/routes/knowledge.ts` — CRUD, owner, audited.
   - `packages/api/src/onboarding/derive-status.ts`, `load-facts.ts`, `contracts.ts` — step
     `business_answers`, complete when `REQUIRED_ANSWER_KEYS` (service area summary, emergency
@@ -660,7 +674,9 @@ flowchart LR
   - Failure: embedding provider down → row saved `pending`, worker moves it to `indexing`,
     the failure lands as `failed` with `last_index_error` and `index_attempts = 1`, retrieval
     skips it, the retry succeeds → `indexed` with `indexed_at`; five failures → stays `failed`
-    and the sheet shows the error.
+    and the sheet shows the error; an edit to a five-times-failed row resets attempts, error
+    and `indexed_at` and gets a fresh budget; an edit while a job is in flight → the stale
+    job's completion affects zero rows and the row is indexed by the new revision's job only.
   - Integration: RLS denies cross-tenant reads on both tables; raw select pins the columns.
 - **Verification:** a new tenant completes the step under five minutes from pack defaults.
 
