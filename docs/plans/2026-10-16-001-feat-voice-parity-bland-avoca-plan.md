@@ -1460,18 +1460,55 @@ flowchart LR
     URL including the query string, so a forged or altered id fails 403 exactly as a forged
     body does), and the route loads the row by that id — everything it needs is already on
     it — and binds the CallSid with one conditional UPDATE: `SET call_sid = $CallSid WHERE id
-    = $session AND (call_sid IS NULL OR call_sid = $CallSid) RETURNING *`. One row → return
-    `<Connect><Stream>` for that session; zero rows → the row is already bound to a
-    *different* CallSid, which is not a Twilio retry (a retry re-posts the same CallSid), so
-    the route answers 403 with an audit and no stream. A Twilio retry of `/outbound-answer`
+    = $session AND closed_at IS NULL AND (call_sid IS NULL OR call_sid = $CallSid) RETURNING
+    *`. One row → **register the runtime session before answering**, then return
+    `<Connect><Stream>` for it. The persisted row alone is not enough to take the stream:
+    the WebSocket upgrade resolves the call exclusively through the in-process
+    `VoiceSessionStore.findByCallSid` and rejects 403 when no session with a
+    `twilioAccountSid` is registered (`twilio-mediastream-server.ts:147-153`), and the
+    adapter's `handleStart` closes the socket `unknown_callsid` on the same miss
+    (`mediastream-adapter.ts:1337-1345`). So the route does what `establishInboundSession`
+    does at `twilio-adapter.ts:1159-1167` — `store.create(tenantId, 'telephony', { callSid,
+    … })` with the FSM, catalog preload and caller-id stash — factored into one shared
+    `establishSession({ direction })`, with two additions: `create` accepts an optional `id`
+    so the runtime session carries the **persisted row's id** rather than minting its own
+    (`voice-session-store.ts:650`), keeping `voice_sessions`, the job's
+    `outbound_session_id`, audits and the consent ledger on one identifier; and the runtime
+    session is seeded with `twilioAccountSid`, `channel 'voice_outbound'` and `customerId`
+    from the row. A retry of `/outbound-answer` finds the runtime session by
+    `findByCallSid` first and reuses it, so the retry registers nothing twice. This keeps
+    the constraint inbound already lives with — the answer webhook and the stream upgrade
+    must reach the same process — and adds no new one; the durable row is what survives a
+    process that does not. Zero rows → either the row is already bound to a *different*
+    CallSid, which is not a Twilio retry (a retry re-posts the same CallSid), and the route
+    answers 403 with an audit and no stream; or the session is already **closed** (the
+    ambiguous-dial reconciliation below gave up before Twilio delivered the answer), and the
+    route answers `<Hangup/>` with a `late_answer_after_close` audit, so a call Twilio did
+    place after we stopped waiting is ended at once rather than streamed into a closed
+    session beside the fallback that replaced it. A Twilio retry of `/outbound-answer`
     after a timeout or lost response carries the same session id and the same CallSid, so it
     gets the identical `<Connect><Stream>` for the one existing session — no second row, no
     second opener turn, no duplicate consent-ledger, audit or usage event — mirroring the
     replay guard inbound already has (`twilio-adapter.ts:1123-1137`, `:2154-2179`). When the
     REST call returns, the service stores its CallSid on the job for the status callbacks
-    (the same conditional UPDATE, so service and webhook agree whichever lands first); when
-    `calls.create` throws, the pre-created session is closed with `outcome = 'dial_failed'`
-    and the job records the failure. The `voice_callback_jobs` UNIQUE on tenant + session
+    (the same conditional UPDATE, so service and webhook agree whichever lands first). **A
+    thrown `calls.create` is not one case but two**, and the existing
+    `outbound-call-service.ts:274-292` collapses them — a non-2xx response, a 2xx body
+    carrying `error_code`, and a fetch that threw are all `markFailed` + `provider_failed` —
+    which this clone must not copy: a Twilio *response* (non-2xx, or `error_code` in the
+    body) is a definitive rejection, and only then is the pre-created session closed
+    `outcome = 'dial_failed'` with the job failed; a fetch that threw without a response
+    (timeout, reset, DNS) is **ambiguous**, because Twilio may have accepted the request and
+    be about to dial, so the session stays open flagged `dial_unconfirmed` and the job
+    `pending_reconcile`, and the truth is read back from the correlated webhooks: the dial
+    passes `StatusCallback=/api/telephony/outbound-status?session=<id>` (same signature check,
+    same conditional CallSid binding) with the `initiated`, `ringing`, `answered` and
+    terminal events, and any correlated status or answer webhook clears the flag and lets
+    the call proceed. A reconciliation job enqueued at +90 s — past Twilio's retry window for
+    a first webhook — finds the row still unbound and closes it `dial_failed` with the job
+    failed; the one-attempt rule means no redial, and the SMS fallback for a failed callback
+    runs only once `dial_failed` is final, never beside a live call. The `closed_at IS NULL`
+    guard on the answer-side UPDATE is what makes the late case safe (above). The `voice_callback_jobs` UNIQUE on tenant + session
     keeps the job singular.
     `proposals/surface.ts` outbound surface with the inbound allowed set;
     opening line `outbound_callback_opener` ("This is {agent}, {business}'s automated assistant,
@@ -1527,7 +1564,14 @@ flowchart LR
     the CallSid, and the service's later stamp is a no-op; a request whose `session` query
     value is altered → 403 from the signature check, no row touched; a valid id already
     bound to a different CallSid → 403, audit, no stream; `calls.create` throwing → session
-    closed `dial_failed`, job failed, no orphan row awaiting a webhook),
+    closed `dial_failed`, job failed, no orphan row awaiting a webhook — **only** on a Twilio
+    response (non-2xx or `error_code`); a fetch timeout → session `dial_unconfirmed` and job
+    `pending_reconcile`, then an `/outbound-status` `initiated` callback for that session
+    clears both and the call proceeds, or no correlated webhook by the reconcile job → closed
+    `dial_failed`; `/outbound-answer` for a closed session → `<Hangup/>`, audit, no stream;
+    the WS upgrade and `start` frame for the outbound CallSid resolve the hydrated runtime
+    session, whose id equals the persisted row's, and a retry of `/outbound-answer` does
+    not register a second runtime session),
     `packages/api/test/telephony/media-streams/outbound-disclosure-gate.test.ts` (media
     frames before the opener's mark ack are dropped and never forwarded; the ledger row is
     written when playback is validated complete, before the ack; no ack within the timeout →
