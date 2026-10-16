@@ -133,7 +133,17 @@ stateDiagram-v2
 
 ## 12. Spec for the reordered flow
 
-**New `derive-status` order**: `['signup','identity','pack','voice_preview','business_answers','billing','phone','test_booking','go_live']`. Rules:
+> **Superseded in part (2026-10-16, same day).** This section was written before U9. The
+> plan's final order is `signup → identity → pack → voice_preview → scenario_interview →
+> billing → phone → test_booking → go_live`: the `business_answers` step and its key/value
+> completion rule below are replaced by `scenario_interview`, complete when every selected
+> core scenario has an `answered` or `skipped` row in `onboarding_scenario_answers` (the U4
+> `tenant_business_answers` table remains as storage the interview writes into). Go-live is
+> gated on that predicate, not on answer keys. The facts, routes and tests below still apply
+> except where they name `business_answers`; the plan (U6 items 9–10, U9) is authoritative.
+
+
+**New `derive-status` order** (as first drafted; see the note above — `business_answers` became `scenario_interview`): `['signup','identity','pack','voice_preview','business_answers','billing','phone','test_booking','go_live']`. Rules:
 
 - `voice_preview`: `tenant_settings.voice_preview_at IS NOT NULL` (stamped when a preview session produced a greeting through the gateway; subsumes `ai_check` — delete `verify_ai` enqueue in `webhooks/routes.ts` L2632-2634 and the worker, or keep it only for Settings).
 - `business_answers`: all `REQUIRED_ANSWER_KEYS` present in `business_answers` (new table, migration `310_business_answers`: `id, tenant_id, key text, answer text, source enum(form,conversation), updated_at`, unique `(tenant_id,key)`, FORCE RLS). Keys: `service_area`, `emergency_policy`, `after_hours`, `pricing_disclosure`, `booking_rules`, `do_not_book`, `payment_terms`.

@@ -570,9 +570,16 @@ flowchart LR
      `CreateBookingExecutionHandler` promote the job (`provisional = false`) at execution.
      Cleanup is durable and does not depend on a hold existing: `workers/hold-reaper-worker.ts`
      gains a sibling pass over `jobs WHERE provisional AND created_at < now() - hold TTL` that
-     deletes any such job whose hold is expired, cancelled **or absent** and whose proposal is
-     not approved; `finalizeTerminatedSession` deletes the session's provisional job when the
-     session ends with no proposal; both audited. A process exit between creation and
+     removes any such job whose hold is expired, cancelled **or absent** and whose proposal is
+     not approved; `finalizeTerminatedSession` does the same for the session's provisional job
+     when the session ends with no proposal; both audited. **Order matters because
+     `appointments.job_id` is a `NOT NULL` foreign key without cascade:** the existing reaper
+     cancels holds rather than deleting them, so for a provisional job the cleanup first
+     **deletes** the held `appointments` row(s) that reference it (a hold on a provisional job is
+     an artefact of the turn, not a customer-visible record, and has no proposal to keep it) and
+     only then deletes the job, in one transaction; if the appointment cannot be deleted (a
+     proposal references it), the job is kept and marked `provisional = false, status =
+     'cancelled'` instead. Pinned by an integration test on real Postgres. A process exit between creation and
      finalisation leaves a row the sweep removes on its next pass. Thread `missingFields`, `emergencyFlagged`,
      `vulnerabilityFlagged` into `buildLaneInputFromSettings` (`inbound-booking-completion.ts:58`).
   2. **Thread the supervisor mode.** `VoiceTurnProcessorDeps` gains `isSupervisorPresent`;
@@ -758,9 +765,19 @@ flowchart LR
   a per-tenant Trust Hub Business Profile path so the tenant's number carries A attestation;
   counsel sign-off on the consent utterance and opening line (Appendix E §4).
 - **Files (Appendix B "Concrete changes" 11–12; Appendix E §4 minimum viable design):**
-  - **Consent utterance on the inbound call.** `tts-copy.ts` `callback_consent_ask` ("If we get
-    cut off, is it okay for our automated assistant to call you back at this number about this
-    request?"); `handlePendingConsentCapture` grant → new `recordVoiceConsentFromVoice` writing
+  - **Consent utterance on the inbound call, and where it is armed.** Today the only setter of
+    `session.pendingConsentCapture` is the quote-close flow, so this unit adds explicit arming
+    points in `create-voice-turn-processor.ts`: (a) on the booking path the U6 item 5 ask is
+    extended to one question with two purposes ("I can text you the confirmation at this
+    number, and if we get cut off our automated assistant can call you back about it — is that
+    okay?"), a grant writing both the `sms` row and the `voice` row below in one step; (b) for
+    callers who do not reach a booking, the ask is armed when a `callback` proposal or a
+    `call_me_back` task is created for the session (the request is now in flight and a drop
+    would lose it), using `callback_consent_ask` alone ("If we get cut off, is it okay for our
+    automated assistant to call you back at this number about this request?"); (c) never on
+    lookups, out-of-scope or emergency calls. One ask per session at most, consumed on both
+    transports (the U6 Gather consumer). `tts-copy.ts` gains `callback_consent_ask` and the
+    combined `booking_sms_and_callback_consent_ask` (EN+ES); `handlePendingConsentCapture` grant → new `recordVoiceConsentFromVoice` writing
     `consent_events { kind: 'voice', state: 'granted', source: 'voice', voice_session_id,
     purpose: 'dropped_call_callback' }` (CHECK gains `'voice'`; new `purpose` column).
     **This grant is scoped, not standing:** `compliance/resolve-outbound-consent.ts` is unchanged
@@ -786,7 +803,10 @@ flowchart LR
   - **Billing and settings.** `billing/call-usage-events.ts` `classifyCall` gains direction;
     `call_usage_events.direction TEXT DEFAULT 'inbound'`; `CallRoutingSheet.tsx` toggle, window
     minutes, one attempt.
-  - Tests: `packages/api/test/voice/outbound-consent.voice-kind.test.ts` (a
+  - Tests: `packages/api/test/ai/voice-turn/callback-consent-arming.test.ts` (armed with the
+    booking ask on the booking path and written as two rows on grant; armed alone when a
+    callback proposal or call-me-back task is created; never armed on a lookup, out-of-scope or
+    E1 call; at most once per session; consumed on Gather), `packages/api/test/voice/outbound-consent.voice-kind.test.ts` (a
     `dropped_call_callback` grant authorises only the job that references it; click-to-call and
     a second callback job for the same number are refused),
     `packages/api/test/voice/recovery/callback-branch.test.ts`,
