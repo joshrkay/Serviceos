@@ -1477,9 +1477,12 @@ flowchart LR
     run by `runOwnerApprovedClose`) resumes anything. So this ask arms the same booking
     continuation U6 item 5 uses, `pendingConsentCapture { customerId, phone, booking:
     { appointmentId, jobId, laneInput, proposalId }, ask: 'callback_only' }` — and the same
-    **draft-before-hold order**: this branch mints the non-executable `draft` proposal
-    before placing the hold exactly as item 5 does (the hold's `proposal_id` points at it),
-    so a hold never exists without a proposal behind it on this path either, and the consumer
+    **locked slot-check → hold → draft → link sequence in one runner transaction** that U6
+    item 5 specifies: the hold mints the appointment id, the non-executable `draft` proposal
+    is then minted with that `appointmentId` in its payload (the only way it can satisfy
+    `createBookingPayloadSchema`), the hold's `proposal_id` is pointed at it, and all of it
+    commits together, so a hold is never visible without a proposal behind it on this path
+    either and a conflicting slot writes nothing; the consumer
     completes **that one draft** on the next turn in both branches: grant → write the `voice`
     row, then complete it as the lane proposal; decline → complete it without the callback
     (SMS confirmation still on, since that consent is already on file). A hang-up mid-ask
@@ -1535,8 +1538,11 @@ flowchart LR
     `twilio_account_sid`, `call_sid NULL`) —
     **`callback_job_id UUID NULL REFERENCES voice_callback_jobs(id)`, `consent_event_id
     UUID NULL REFERENCES consent_events(id)`, `twilio_account_sid TEXT NULL` and
-    `answered_at TIMESTAMPTZ NULL` are four new nullable columns on `voice_sessions`,
-    declared in this unit's migration beside `escalation_state`** — `answered_at` because
+    `answered_at TIMESTAMPTZ NULL` and `stream_started_at TIMESTAMPTZ NULL` are five new
+    nullable columns on `voice_sessions`, declared in this unit's migration beside
+    `escalation_state`** — `stream_started_at` written by `handleStart` (the durable twin of
+    the in-memory `mediaStreamsUsed` flag) so the row records whether an adapter ever
+    existed for the call, which is what decides who finalises it; `answered_at` because
     the terminal-status handler below needs a durable record that the answer path ran, and
     neither the CallSid binding nor `dial_state` can serve (an `initiated` status writes
     both exactly as the answer does); the account SID because the stream upgrade and `handleStart`
@@ -1686,16 +1692,33 @@ flowchart LR
     route's own write, or lands on a replica that never saw the stream, affects zero rows
     and does nothing — `answered_at` was written atomically with the CallSid binding, which
     is why the marker exists and why `dial_state` (which `initiated` also moves) cannot
-    stand in for it. A `completed` for a session with `answered_at` set is the ordinary end
-    of an answered call and is left to the session's own end-of-call path, never to this
-    handler. Without this the status
+    stand in for it. A `completed` for a session with `answered_at` **and**
+    `stream_started_at` set is the ordinary end of an answered call and is left to the
+    adapter's own socket-teardown finaliser, never to this handler. A `completed` for a
+    session with `answered_at` set but `stream_started_at` **null** — the answer route ran
+    but the upgrade or the `start` frame was rejected or never arrived, so no adapter exists
+    to run that finaliser — is this handler's to finalise: `… WHERE id = $session AND
+    stream_started_at IS NULL AND ended_at IS NULL` ends the session (`outcome = 'failed'`,
+    `failure_reason = 'stream_never_started'`), marks the job terminal and fires the
+    one-time fallback, because the customer picked up and heard nothing. Without this the status
     callback would bind the CallSid and the "still unbound" reconciliation would never
     close the row, leaving the job non-terminal, `ended_at` null and the customer who did
     not pick up with no text. The reconciliation job enqueued at +90 s — past Twilio's retry
-    window for a first webhook — therefore looks for a row whose job is still `dial_state =
-    'unconfirmed'` (anything a webhook touched has already been confirmed or finalised by
-    that webhook) and ends it the same way (`outcome = 'failed'`, `ended_at`) with the job
+    window for a first webhook — looks for a row whose job is still `dial_state =
+    'unconfirmed'` and ends it the same way (`outcome = 'failed'`, `ended_at`) with the job
     `dial_failed`, `dial_state = 'rejected'`, `failure_reason = 'dial_unconfirmed_expired'`.
+    **Webhooks that were delivered do not prove the later ones will be**, so the same
+    reconciler runs two more passes rather than trusting `confirmed`: at the maximum dial
+    window (ring timeout plus Twilio's retry window, 150 s after the dial) it takes every
+    session still open with `answered_at IS NULL` — an `initiated` or `ringing` arrived and
+    the terminal callback was lost in an outage — reads provider truth first
+    (`calls(sid).fetch().status`), and finalises as the terminal handler would (`failed`,
+    job outcome from the fetched status or `terminal_webhook_lost` when the fetch itself
+    fails, fallback once); and 60 s after `answered_at` it takes every open session with
+    `stream_started_at IS NULL` and finalises it `stream_never_started` as above, so an
+    answered call whose stream never came up and whose `completed` was also lost cannot
+    stay open. Every pass uses the same conditional UPDATEs as the webhook handlers, so a
+    webhook and the reconciler racing on one row finalise it exactly once.
     The one-attempt rule means no redial, and the SMS fallback for a callback that did not
     reach the customer — the same `else the SMS branch` recovery takes when no call is
     placed — runs **exactly once per job**, from whichever path finalises it (definitive
@@ -1781,11 +1804,18 @@ flowchart LR
     `answered_at` is null) → session ended `failed`, job terminal with that outcome, the SMS
     fallback sent exactly once even when the status is redelivered, and the reconcile job
     then finds nothing to do; a `completed` arriving after `/outbound-answer` wrote
-    `answered_at` — on the same replica, on another, or racing the socket teardown → the
-    finalising UPDATE affects zero rows, the session is left to its normal end, and no
-    fallback SMS is sent; `/outbound-answer`
+    `answered_at` and `handleStart` wrote `stream_started_at` — on the same replica, on
+    another, or racing the socket teardown → the finalising UPDATE affects zero rows, the
+    session is left to its normal end, and no fallback SMS is sent; `answered_at` set but
+    the upgrade rejected (no `stream_started_at`) and `completed` arriving → session ended
+    `stream_never_started`, job terminal, fallback once; an `initiated` delivered and every
+    later webhook dropped → the 150 s pass fetches the call's status from Twilio and
+    finalises it, fallback once; `answered_at` set, no stream and no `completed` → the 60 s
+    pass finalises it; a webhook and a reconciler pass racing on one row → one finalisation;
+    `/outbound-answer`
     for an ended session → `<Hangup/>`, audit, no stream; the correlation columns
     (`voice_sessions.callback_job_id`, `consent_event_id`, `twilio_account_sid`, `answered_at`,
+    `stream_started_at`,
     `voice_callback_jobs.outbound_session_id`, `dial_state`, `failure_reason`) are written
     and read back on real Postgres;
     the WS upgrade and `start` frame for the outbound CallSid resolve the hydrated runtime
