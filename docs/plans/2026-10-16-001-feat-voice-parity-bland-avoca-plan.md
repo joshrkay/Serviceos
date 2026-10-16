@@ -914,13 +914,16 @@ flowchart LR
      whatever client the current `tenantContextStore` holds — the request client here, the
      runner's client on the voice and public paths — so all three writers contend for one
      lock while each stays inside its own single transaction. The route then runs the
-     check that fits the visit: an **assigned** visit keeps today's technician-scoped
-     `assertNoDoubleBooking` and no tenant-wide predicate (one tech, one calendar; other
-     crews are irrelevant), while an **unassigned** visit runs the capacity-aware
-     `isSlotFree` from item 3 — free while overlapping active appointments plus live holds
-     are below `booking_capacity`, so a three-truck shop books three parallel unassigned
-     visits without ceremony — returning 409 `SLOT_TAKEN` with `nextOpening` only when
-     capacity is actually full; lock, predicate, `createAppointment`,
+     capacity-aware `isSlotFree` from item 3 for **every** visit, assigned or not — free
+     while overlapping active appointments (assigned or unassigned) plus live holds are
+     below `booking_capacity`, so a three-truck shop books three parallel visits without
+     ceremony — and, for an **assigned** visit, today's technician-scoped
+     `assertNoDoubleBooking` **as well**, never instead: an unassigned voice or public hold
+     has no `appointment_assignments` row, so a technician-only check cannot see it, and a
+     dispatcher assigning a tech into the last capacity unit a hold already took would
+     otherwise commit over it at `booking_capacity = 1` with no `force`. The route returns
+     409 `SLOT_TAKEN` with `nextOpening` when capacity is full and 409 from the technician
+     check when that tech is busy; lock, predicates, `createAppointment`,
      `ensurePrimaryTechnician` and `syncJobAssignment` all commit or roll back together with
      the request. A dispatcher deliberately booking *beyond* capacity passes `force: true`,
      audited as `appointment_overbooked`, which skips the predicate but still takes the lock,
@@ -982,7 +985,10 @@ flowchart LR
      technician, counts overlapping active appointments plus live holds (buffer applied,
      expired holds ignored) and reports the window free while that count is below capacity,
      so the voice hold, the public and portal bookings and the unassigned dispatcher visit
-     all share one rule. A technician-scoped check (`technicianId` given) is unchanged. Return
+     all share one rule. A technician-scoped check (`technicianId` given) adds that
+     technician's own calendar on top of the capacity count; it does not replace it,
+     because a hold that has not been assigned reserves a capacity unit without appearing
+     on any technician's calendar. Return
      `{ ok: false, failed: 'slot_taken', nextOpening }` with `nextOpening` from the same
      finder; the FSM speaks the bucket 09 line
      ("That {time} slot was just booked — the next opening is {next}. I've drafted that for an
@@ -1217,7 +1223,9 @@ flowchart LR
     started concurrently → exactly one row, the loser gets `slot_taken` or 409 `SLOT_TAKEN`
     (the test asserts the two holders took the same `advisoryKeyPair` output, one through the
     runner and one through the request client, and that a failing `syncJobAssignment` after
-    the dispatcher insert leaves no appointment row),
+    the dispatcher insert leaves no appointment row; a voice hold occupying the last
+    capacity unit and a dispatcher create **with** `technicianId` for the same window →
+    409 `SLOT_TAKEN` without `force`, even though that technician's calendar is empty),
     and the same pair with `force: true` on the dispatcher side → the dispatcher row lands
     and the hold that follows it sees `slot_taken`);
     `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (a draft proposal exists
