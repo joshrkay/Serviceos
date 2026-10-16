@@ -476,14 +476,21 @@ flowchart LR
      lifecycle destroys**: `bargeIn()` (`:3535`) sends Twilio `clear` (discarding its
      buffer), empties the adapter queue and, under item 1, closes the ElevenLabs context and
      drops its late chunks, so the remainder of the reply no longer exists anywhere. A gated
-     interim therefore takes a new **pause** path instead of `bargeIn()`: send `clear` (the
-     only way to stop playback promptly), but keep the ElevenLabs context open and keep
-     draining its chunks, and retain every frame from the last acked mark onward in a
-     `pausedReply` PCM buffer (bounded by the utterance; one reply at a time). If a final
-     confirms the interruption within 2 s, the pause becomes a real barge-in: close the
-     context, drop the buffer. If not, resume by re-sending the buffer from the first frame
-     after the last acked mark and continuing the live stream — no re-synthesis, so the
-     resumed audio is byte-identical to what was cut. Hold lines and the disclosure never
+     interim therefore takes a new **pause** path instead of `bargeIn()`: **snapshot the
+     playback cursor first** (`resumeFrom = lastAckedMark`, taken before anything is sent),
+     then send `clear` (the only way to stop playback promptly), but keep the ElevenLabs
+     context open and keep draining its chunks, and retain every frame from `resumeFrom`
+     onward in a `pausedReply` PCM buffer (bounded by the utterance; one reply at a time). The
+     snapshot matters because Twilio answers `clear` by echoing every outstanding mark,
+     including marks for audio it discarded rather than played
+     (`test/telephony/media-streams/realtime-human-handoff.test.ts:67-70` models exactly
+     this), so the adapter sets `clearInFlight` before sending `clear` and treats mark acks
+     that arrive while it is set as clear-echoes that **do not advance** `lastAckedMark`; the
+     flag clears on resume or on the confirmed barge-in. If a final confirms the interruption
+     within 2 s, the pause becomes a real barge-in: close the context, drop the buffer. If
+     not, resume by re-sending the buffer from the first frame after `resumeFrom` and
+     continuing the live stream — no re-synthesis, so the resumed audio is byte-identical to
+     what was cut and nothing the caller never heard is skipped. Hold lines and the disclosure never
      enter the pause path (they are protected above). `packages/api/src/settings/settings.ts` +
      `packages/api/src/db/schema.ts` (`voice_barge_in_level`), `packages/web/src/components/settings/CallRoutingSheet.tsx`.
   - Tests: `packages/api/test/ai/tts/elevenlabs-persistent-socket.test.ts` (two sequential
@@ -501,8 +508,10 @@ flowchart LR
     (synthesis starts before the insert resolves; no frame is released before it; an insert
     failure discards the buffered audio and speaks the failure copy),
     `packages/api/test/telephony/media-streams/barge-in-gate.test.ts` (levels; gated interim →
-    `clear` sent, context stays open, frames after the last acked mark retained; no final in
-    2 s → resume re-sends exactly the retained frames then the live tail; final within 2 s →
+    cursor snapshotted, `clear` sent, context stays open, frames after the snapshot retained;
+    the mock echoes every outstanding mark on `clear` and those echoes do not move the
+    cursor; no final in 2 s → resume re-sends exactly the retained frames from the snapshot,
+    including the audio whose marks were echoed, then the live tail; final within 2 s →
     context closed and buffer dropped; disclosure and E1
     protected; interrupted turn's reply discarded; resume after 2 s with no transcript),
     `packages/api/test/integration/voice-barge-in-level-setting.test.ts`; Layer 2 scripts under
@@ -701,14 +710,18 @@ flowchart LR
      appointments are** (`dispatch/board-query.ts`, `jobs/pg-job.ts` list queries, digest). The
      conflict check runs by customer location and time **before** the provisional job is
      created (item 3's checker takes a location, not a job), so a taken slot never creates a
-     job at all; job creation and `placeAppointmentHold` run in one transaction **under
-     `pg_advisory_xact_lock(hashtext(tenant_id || location_id))`** taken before the conflict
-     read — keyed on the location only, not on a start bucket, so two requests whose windows
-     overlap with different starts (2:00–3:00 and 2:30–3:30) still take the same lock; holds
-     per location are rare enough that the coarser key costs nothing — so two concurrent calls
-     asking for overlapping slots serialise on the lock and the second sees the first's hold (the existing `no_double_booking` exclusion
-     covers technician assignments, not unassigned holds, so it does not help here); a pre-hold
-     failure rolls the job back. `CreateAppointmentExecutionHandler` /
+     job at all; job creation and `placeAppointmentHold` run in one transaction **under a
+     tenant-wide scheduling lock, `pg_advisory_xact_lock(hashtext(tenant_id || ':scheduling'))`**,
+     taken before the conflict read. The key is the tenant, not the customer location and not
+     a start bucket: the thing two callers compete for is the tenant's capacity for that
+     window, and the normal race is two *different* customers at *different* addresses asking
+     for the same slot — a location-keyed lock would hand them different locks and let both
+     pass the conflict read before either inserted (the existing `no_double_booking`
+     exclusion covers technician assignments, not unassigned holds, so it does not help here).
+     One lock per tenant serialises every hold placement for that tenant, which is a handful
+     per minute at the busiest tenant and costs nothing measurable; two concurrent calls for
+     overlapping windows with different starts (2:00–3:00 and 2:30–3:30) therefore also
+     serialise, and the second sees the first's hold. A pre-hold failure rolls the job back. `CreateAppointmentExecutionHandler` /
      `CreateBookingExecutionHandler` promote the job (`provisional = false`) at execution.
      Cleanup is durable and does not depend on a hold existing: `workers/hold-reaper-worker.ts`
      gains a sibling pass over `jobs WHERE provisional AND created_at < now() - hold TTL` that
@@ -868,8 +881,9 @@ flowchart LR
     and `jobs.provisional`, and asserts the marker is set on both transports and never on an
     ordinary inbound call, nor on an attested owner call to a paused tenant that was live
     before (`voice_first_live_at` set), nor on an owner call outside the started-test window; `packages/api/test/integration/place-hold.concurrent-slot.test.ts`
-    (two concurrent hold requests on real Postgres for the same slot, and again for
-    overlapping windows with different starts → exactly one hold each time);
+    (two concurrent hold requests on real Postgres for the same slot from two different
+    customers at two different locations → exactly one hold when capacity is one; again for
+    overlapping windows with different starts → exactly one hold; same-location pair → one);
     `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (hang-up mid-ask → no
     proposal, hold and job released, capture cleared, `booking_consent_abandoned` audited).
 - **Floor-criteria risks (Appendix B):** #2 noAutoMutation (job and hold exist before
