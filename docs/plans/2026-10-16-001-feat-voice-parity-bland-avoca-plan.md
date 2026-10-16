@@ -1485,8 +1485,19 @@ flowchart LR
     authenticated by the route's existing `X-Twilio-Signature` check
     (`telephony/twilio-signature.ts:223-231` runs the SDK's `validateRequest` over the full
     URL including the query string, so a forged or altered id fails 403 exactly as a forged
-    body does), and the route loads the row by that id — everything it needs is already on
-    it — and binds the CallSid with one conditional UPDATE: `SET call_sid = $CallSid WHERE id
+    body does) — **and authenticated is not authorised**: in a per-tenant subaccount
+    deployment the signature proves which tenant's credential signed, never that the
+    credential owns the session the query names, which is the exact threat
+    `twilio-signature.ts:105-166` documents and every session-scoped telephony route already
+    guards with `sessionBelongsToAnotherTenant` before acting (`routes/telephony.ts:626`,
+    `:768`, `:868`, `:1114`). So `/outbound-answer` and `/outbound-status` load the row by id,
+    run `sessionBelongsToAnotherTenant(req, row, row.tenantId)` against the tenant
+    `getVerifiedTwilioTenantId` recorded, and on a mismatch answer 403
+    `session_tenant_mismatch` with an audit and touch nothing; and because a check before a
+    write is only as good as the write, the conditional UPDATE also carries `AND tenant_id =
+    $verifiedTenant` whenever a verified tenant exists, so a webhook signed with tenant A's
+    credential cannot bind or end tenant B's session even if the guard were bypassed. The
+    route then binds the CallSid with that one conditional UPDATE: `SET call_sid = $CallSid WHERE id
     = $session AND ended_at IS NULL AND (call_sid IS NULL OR call_sid = $CallSid) RETURNING
     *` — `ended_at` being the column `voice_sessions` already has (`schema.ts:1808`, with the
     `voice_sessions_active` partial index on it) and the one `VoiceSessionRepository.markEnded`
@@ -1503,12 +1514,40 @@ flowchart LR
     so the runtime session carries the **persisted row's id** rather than minting its own
     (`voice-session-store.ts:650`), keeping `voice_sessions`, the job's
     `outbound_session_id`, audits and the consent ledger on one identifier; and the runtime
-    session is seeded with `twilioAccountSid`, `channel 'voice_outbound'` and `customerId`
-    from the row. A retry of `/outbound-answer` finds the runtime session by
-    `findByCallSid` first and reuses it, so the retry registers nothing twice. This keeps
-    the constraint inbound already lives with — the answer webhook and the stream upgrade
-    must reach the same process — and adds no new one; the durable row is what survives a
-    process that does not. Zero rows → either the row is already bound to a *different*
+    session is seeded with `twilioAccountSid` and `customerId` from the row **on the runtime
+    channel `telephony`, with the outbound direction carried as a separate
+    `direction: 'outbound'` context field** — `CallingAgentChannel` is `'telephony' |
+    'inapp'` (`customer-calling/types.ts:40`) and the booking lane gate, today
+    (`create-voice-turn-processor.ts:2753-2761`) and as amended in U6 item 8, admits only
+    `channel === 'telephony'`, so a runtime channel of `voice_outbound` would drop every
+    callback out of the lane and void this unit's premise that a callback can book.
+    `voice_outbound` remains the *persisted* `voice_sessions.channel` value (the table's
+    CHECK already lists it) and `direction` is what the opener, the comms-C5 gate and the
+    usage classifier read. A retry of `/outbound-answer` finds the runtime session by
+    `findByCallSid` first and reuses it, so the retry registers nothing twice. **The
+    upgrade must not depend on landing in the same process as the answer webhook.** Today
+    it does, for inbound too — the upgrade consults only the local store
+    (`twilio-mediastream-server.ts:147-153`) — which is tolerable at one replica and fails
+    probabilistically at two, and U1's replica trigger is precisely the point at which that
+    starts. So the upgrade gains a **durable hydration path**: on a local `findByCallSid`
+    miss it reads `voice_sessions` by `call_sid` (a new UNIQUE partial index on `call_sid
+    WHERE ended_at IS NULL`), takes `tenant_id` from the row, verifies the upgrade signature
+    against **that tenant's** credential exactly as it does for a local hit
+    (`authTokenGetter` with the row's tenant; the refusal branch at `:168-190` is unchanged,
+    so a credential that is not the row's tenant's is still rejected), and only then calls
+    the same shared `establishSession` to register a runtime session under the row's id
+    with `twilioAccountSid`, `customerId`, `direction` and the job and consent linkage;
+    `handleStart` then finds it locally. A row with no CallSid yet, an ended row, or a row
+    whose tenant is not the verifying credential's hydrates nothing and the upgrade is
+    rejected as today. Hydration is exact for the outbound leg because nothing but the row
+    exists before the opener turn; for an inbound call it is exact only if the row exists
+    when the upgrade arrives, and today's B2 write is fire-and-forget
+    (`twilio-adapter.ts:1176-1177`), so this unit awaits that write before the inbound TwiML
+    is returned — the row is small and the write already runs on the request path. A
+    mid-call failover (a process dying with turns in flight) is not covered here and stays
+    with the shared-session-store decision in open question 5. Connection affinity is
+    deliberately not the mechanism: `<Stream url>` is one public hostname and the deploy
+    target's balancer offers no sticky routing this plan can rely on. Zero rows → either the row is already bound to a *different*
     CallSid, which is not a Twilio retry (a retry re-posts the same CallSid), and the route
     answers 403 with an audit and no stream; or the session is already **closed** (the
     ambiguous-dial reconciliation below gave up before Twilio delivered the answer), and the
@@ -1610,7 +1649,13 @@ flowchart LR
     `dial_state`, `failure_reason`) are written and read back on real Postgres;
     the WS upgrade and `start` frame for the outbound CallSid resolve the hydrated runtime
     session, whose id equals the persisted row's, and a retry of `/outbound-answer` does
-    not register a second runtime session),
+    not register a second runtime session; an upgrade arriving at a process with an empty
+    store hydrates the runtime session from the row under the row's tenant credential and
+    takes the stream, while an upgrade for an ended row, an unbound row, or one signed with
+    another tenant's credential is rejected 403 and hydrates nothing; `/outbound-answer`
+    signed by tenant A naming tenant B's session → 403 `session_tenant_mismatch`, row
+    untouched, and the same for `/outbound-status`; the hydrated runtime session's channel
+    is `telephony` with `direction: 'outbound'` and the booking lane gate admits it),
     `packages/api/test/telephony/media-streams/outbound-disclosure-gate.test.ts` (media
     frames before the opener's mark ack are dropped and never forwarded; the ledger row is
     written when playback is validated complete, before the ack; no ack within the timeout →
