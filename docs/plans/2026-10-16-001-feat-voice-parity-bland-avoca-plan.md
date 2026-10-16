@@ -277,13 +277,31 @@ flowchart LR
     the new histogram on the first real chunk (`awaitingFirstAudioFrame` path), alongside the
     existing `audio_frame_emitted`.
   - `packages/api/src/workers/slo-monitor.ts`, `docs/runbooks/slo-alerts.md` — new rule
-    `voice_reply_gap_p95` at 1,500 ms (warning), staged behind the old rule for seven days.
+    `voice_reply_gap_p95` at 1,500 ms (warning) **on the last-word-anchored gap**, staged
+    behind the old rule for seven days; the in-memory histogram gets the same anchor (the
+    adapter stamps `lastWordAtMs` on the turn when the `final` event carries it and observes
+    `first_audio − last_word`, falling back to STT-final only when the event has no timing and
+    labelling the sample `anchor="stt_final"` so the two populations are never mixed).
   - `packages/api/src/shared/config.ts` `resolveMediaStreamsEnabled` — unchanged semantics;
     `.env.production.example` flips to `auto` with the degrade note; the production env is
     checked first (Open Question 1).
-  - `packages/api/src/db/schema.ts` — migration adding `call_transcript_turns.stt_final_at`,
+  - `packages/api/src/db/schema.ts` — migration adding `call_transcript_turns.last_word_at`
+    (when the caller stopped speaking), `stt_final_at` (when the recogniser finalised),
     `first_audio_at` (first **real** frame), `first_audible_at` (filler or real),
-    `reply_gap_ms`, `transport` ('gather' | 'realtime'). The table today has only
+    `reply_gap_ms`, `endpoint_delay_ms`, `transport` ('gather' | 'realtime').
+    **`reply_gap_ms` is measured from `last_word_at`, not `stt_final_at`:** the SLO is
+    last-caller-word to first audio, and under U2 a normal sentence deliberately waits the
+    1,000 ms `UtteranceEnd` guard before `stt_final_at` exists, so a gap measured from the
+    STT-final would call a turn healthy while the caller sat through another second of
+    silence. `last_word_at` comes from Deepgram's own clock: `transcription-providers.ts`
+    parses the `Results` message's top-level `start` and `duration` (seconds on the stream
+    clock; `channel.alternatives[0].words[].end` where present) into a `lastWordEndMs` on the
+    `final` event, and the adapter anchors that stream clock to wall time once, at the first
+    inbound `media` frame it forwards after `captureEnabled` (the frame's `media.timestamp` is
+    ms on the same stream clock), so `last_word_at = anchor + lastWordEndMs`.
+    `endpoint_delay_ms = stt_final_at − last_word_at` is kept as its own column because it is
+    exactly the number U2 item 2 changes, and the card shows it beside the gap. Gather turns
+    have no stream clock and leave `last_word_at`, `endpoint_delay_ms` null. The table today has only
     `started_at`/`completed_at`, which are set when the text is appended (before synthesis),
     so the reply gap cannot be reconstructed from it; the in-memory histogram has no tenant
     identity and no durability. `packages/api/src/voice/pg-call-transcript-turn.ts` and
@@ -338,7 +356,10 @@ flowchart LR
     `packages/web/src/components/settings/CallQualityCard.test.tsx`,
     `packages/api/test/integration/voice-latency-summary.test.ts` (pins the new columns: a
     turn written through `recordTurn` at append time and then `markReplyAudio` on the first
-    frame yields the expected `reply_gap_ms`; a turn whose `markReplyAudio` never arrives keeps
+    frame yields the expected `reply_gap_ms` measured from `last_word_at`, and
+    `endpoint_delay_ms = stt_final_at − last_word_at`; a `final` event without timing leaves
+    `last_word_at` null and the turn out of the gap percentile while still counted in the
+    STT-final-anchored histogram; a turn whose `markReplyAudio` never arrives keeps
     `first_audio_at` null and is excluded; a first frame that arrives while the insert is still
     pending (delayed `recordTurn` promise) still stamps because the update is chained behind
     it; a first frame that arrives after the insert already resolved (the normal order) also
@@ -901,7 +922,12 @@ flowchart LR
     (the generic voice branch still reads only `customers.consent_status`), and the callback
     service validates the exact `consent_event_id` bound to its `voice_callback_jobs` row (same
     tenant, same `voice_session_id`, purpose `dropped_call_callback`, inside the window, no
-    later revocation) before dialling. The owner click-to-call path and any future outbound
+    later revocation, **and `voice_callback_jobs.target_e164` equal to the event's
+    `phone_normalized`** — `consent_events` already stores the number that granted, so the
+    grant authorises a call to that number only; a job whose target was derived from the wrong
+    field or mutated after enqueue is refused with `callback_target_mismatch` and audited)
+    before dialling. The enqueue path sets `target_e164` from the event's `phone_normalized`,
+    never from a second source, so the check is a tripwire rather than the only guard. The owner click-to-call path and any future outbound
     leg never see the callback grant as consent.
   - **Branch in recovery.** `voice/recovery/detect-dropped.ts`, `workers/dropped-call-worker.ts`
     — consent row + `block` mode + tenant `voice_callback_enabled` + inside window → enqueue one
@@ -914,7 +940,15 @@ flowchart LR
     `<Connect><Stream>` bound to a new `voice_sessions` row `channel 'voice_outbound'` seeded
     with `customerId`; `proposals/surface.ts` outbound surface with the inbound allowed set;
     opening line `outbound_callback_opener` ("This is {agent}, {business}'s automated assistant,
-    calling back about your request a moment ago. This call is recorded.") before any content;
+    calling back about your request a moment ago. This call is recorded.") before any content
+    — and **nothing the callee says reaches Deepgram until that opener has finished
+    playing**: the outbound session runs the same comms-C5 gate the inbound realtime path
+    already has (`mediastream-adapter.ts` `captureEnabled`, false until the opener turn's
+    end-of-utterance mark ack, with the same safety timeout and the same fail-closed hang-up
+    if the opener produces no playback), so `<Connect><Stream>` starting media early is
+    harmless: frames are dropped, not transcribed, until the recording notice is complete.
+    The `recording/implicit` ledger row for the outbound leg is committed at that mark ack,
+    exactly as inbound does, never at TwiML generation;
     global STOP intent → tenant DNC flag; `AnsweredBy` machine → compliant short message or hang
     up, job `voicemail`, no retry.
   - **Billing and settings.** `billing/call-usage-events.ts` `classifyCall` gains direction;
@@ -928,10 +962,15 @@ flowchart LR
     ask), but not when this session already recorded one; never armed on a lookup,
     out-of-scope or E1 call; at most once per session; consumed on Gather), `packages/api/test/voice/outbound-consent.voice-kind.test.ts` (a
     `dropped_call_callback` grant authorises only the job that references it; click-to-call and
-    a second callback job for the same number are refused),
+    a second callback job for the same number are refused; a job whose `target_e164` differs
+    from the event's `phone_normalized` is refused and audited),
     `packages/api/test/voice/recovery/callback-branch.test.ts`,
     `packages/api/test/telephony/outbound-ai-call-service.test.ts` (AMD paths, status
     callbacks, one attempt), `packages/api/test/routes/telephony.outbound-answer.test.ts`,
+    `packages/api/test/telephony/media-streams/outbound-disclosure-gate.test.ts` (media
+    frames before the opener's mark ack are dropped and never forwarded; the ledger row is
+    written at the ack; no ack within the timeout → capture enabled by the safety timer as
+    inbound; opener with no playback → leg hung up, no row),
     `packages/api/test/integration/voice-callback-jobs.test.ts`; corpus bucket 05: no consent →
     SMS only; STOP after consent → no call; bucket 03: callback books through the lane.
 - **Floor-criteria risks:** #7 (DNC, consent, STOP), #8 hangupHandled (outbound sessions stamp
@@ -1008,9 +1047,18 @@ flowchart LR
     `business_answers`), complete when the selected core set is answered or explicitly skipped.
   - `packages/api/src/workers/daily-call-review-worker.ts` (new: exactly one real call a day,
     the lowest-graded from `voice_session_grades` (D-041), random graded call as fallback, none
-    on a day with no eligible calls; rendered as a scenario card; thumbs-up or "should have…"
-    writes a `corrections` row and, where it cascades, a lesson) and
-    `packages/web/src/components/inbox/CallReviewCard.tsx`.
+    on a day with no eligible calls; rendered as a scenario card). **The selection and the
+    response are both persisted** in a new `voice_daily_review_cards` table (`tenant_id`,
+    `review_date` in the tenant timezone, `voice_session_id`, `status
+    'pending' | 'approved' | 'corrected'`, `responded_at`, `correction_id NULL`, FORCE RLS,
+    **UNIQUE (tenant_id, review_date)**): the worker inserts with `ON CONFLICT DO NOTHING`, so
+    a retry or restart cannot enqueue a second card for the day, and eligibility excludes any
+    session already in the table, so an approved call is never picked again. Thumbs-up writes
+    `status = 'approved'` (no `corrections` row — approval is a fact about the card, not a
+    correction); "should have…" writes the `corrections` row, links it via `correction_id`,
+    sets `status = 'corrected'`, and cascades to a lesson where it applies. The card renders
+    from the row, so a refresh shows the same day's card in its current state rather than a
+    fresh pick. `packages/web/src/components/inbox/CallReviewCard.tsx`.
   - `packages/web/src/components/onboarding/v2/steps/ScenarioInterviewStep.tsx` (replaces
     `BusinessAnswersStep.tsx`; voice-first: the agent speaks and listens, via
     `useConversationVoice`; options stay on screen as ≥44 px taps as the fallback; the spoken
@@ -1021,7 +1069,11 @@ flowchart LR
     answers → clarification; unsupported ask → white-space note, never a setting),
     `packages/api/test/ai/agents/onboarding/scenario-interview-act.test.ts` (handler-level,
     mocked gateway), `packages/api/test/routes/onboarding.scenarios.test.ts`,
-    `packages/api/test/workers/daily-call-review-worker.test.ts`,
+    `packages/api/test/workers/daily-call-review-worker.test.ts` (one card per tenant per
+    day; a second run the same day is a no-op; an approved or corrected session is never
+    re-selected; thumbs-up persists `approved` without a corrections row; a correction links
+    the row), `packages/api/test/integration/voice-daily-review-cards.test.ts` (unique key and
+    RLS pinned on real Postgres),
     `packages/web/src/components/onboarding/v2/steps/ScenarioInterviewStep.test.tsx` (jsdom
     class contract), `e2e/scenario-interview-mobile.spec.ts`,
     `packages/api/test/integration/scenario-interview-settings-and-notes.test.ts` (pins the
