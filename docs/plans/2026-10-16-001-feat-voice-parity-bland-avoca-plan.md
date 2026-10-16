@@ -653,8 +653,12 @@ flowchart LR
     the claim included: the worker claims the row with `UPDATE … SET index_status =
     'indexing' WHERE id = $1 AND content_rev = $rev AND index_status IN ('pending',
     'failed') RETURNING id`. A zero-row claim has two meanings and the worker tells them
-    apart with one follow-up read of the row: if `content_rev` has moved on, the job is
-    stale and it exits successfully (the queue acks it, `app.ts:3132-3134`); if the revision
+    apart with one follow-up read of the row, which has four outcomes: if `content_rev` has
+    moved on, the job is stale and it exits successfully (the queue acks it,
+    `app.ts:3132-3134`); if the revision is current and `index_status = 'indexed'`, another
+    delivery of the same job already finished the work — an ordinary duplicate — and it
+    exits successfully too, never re-enqueuing a healthy row; if the row is gone or
+    `active = false`, it exits successfully with a `faq_embed_row_gone` audit; if the revision
     is current but the row is `indexing` under a live lease, the job is **not** done — it
     re-enqueues itself with `queue.send(…, { delaySeconds: remainingLease + 1 })` (the same
     delayed send the page ladder uses) and only then returns success, so the ack at
@@ -725,7 +729,9 @@ flowchart LR
     a stale job that only *starts* after the edit → its claim affects zero rows, it never
     calls the provider, and the new revision's job claims and indexes the row; a worker that
     dies after the claim → the row sits in `indexing`, a redelivery inside ten minutes cannot
-    claim it and re-enqueues itself for the lease remainder instead of acking, a redelivery after ten minutes reclaims and indexes it; the
+    claim it and re-enqueues itself for the lease remainder instead of acking; a duplicate
+    delivery arriving after another worker indexed the same revision → acked as success with
+    no re-enqueue; a delivery for a deleted row → acked with the row-gone audit, a redelivery after ten minutes reclaims and indexes it; the
     original worker finishing after that reclaim → its terminal update carries the old token,
     affects zero rows, and the reclaimer's result stands.
   - Integration: RLS denies cross-tenant reads on both tables; raw select pins the columns.
@@ -899,9 +905,24 @@ flowchart LR
      appointmentId, proposalId }`, and speak
      `booking_sms_consent_ask` ("I can text you the confirmation at this number — is that
      okay?"). The next turn's answer records consent through `recordSmsConsentFromVoice` and
-     only then **completes the draft** — fills `confirmation_channel`, clears `missingFields`,
-     and hands it to the lane exactly as a freshly minted `create_booking` proposal would be —
-     so the executor never sees an executable proposal before consent is known. Grant → the
+     only then **completes the draft through a dedicated, audited promotion**, because
+     clearing `missingFields` alone would leave the row in `draft` for ever: the auto-approve
+     decision (`proposals/auto-approve.ts` `shouldAutoApprove` + `autonomous-lane.ts`) runs
+     only when a proposal is first created, and the ordinary approval path cannot stand in
+     for it — `proposals/lifecycle.ts:138-143` refuses any transition to `approved` by a
+     `system:` actor. So a new `proposals/promote-consent-draft.ts`
+     `promoteConsentDraft({ proposalId, confirmationChannel })` fills the payload, clears
+     `missingFields`, re-runs exactly the creation-time decision (`shouldAutoApprove`, then
+     `evaluateAutonomousLane` with the same inputs item 2 threads, writing the
+     `autonomousLaneEvaluation` stamp into `source_context`), and writes the outcome through
+     a new repository method `promoteDraft(id, { status, sourceContext, approvedAt })` that
+     sets the initial executable status the way creation does — bypassing the transition
+     guard only for `draft` rows that carry a `pendingConsentCapture` continuation, and
+     audited as `proposal.consent_draft_promoted` with the lane stamp and the consent
+     outcome. Lane eligible → `approved` with `approved_at = NOW()`, so the five-second undo
+     window counts from promotion, and item 4's owner UNDO SMS is sent at that moment;
+     lane ineligible → `ready_for_review`, the owner-approval path, never a silent `draft`.
+     The executor therefore never sees an executable proposal before consent is known. Grant → the
      draft becomes the lane proposal with the SMS confirmation; decline → the lane proposal
      with email-only confirmation and the spoken line drops the "I'll text you" clause;
      hang-up mid-ask → **no executable proposal ever exists**: the termination branch moves
@@ -1054,7 +1075,10 @@ flowchart LR
     `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (a draft proposal exists
     before the hold and the hold's `proposal_id` points at it; the draft cannot be approved or
     executed while `missingFields` is set; grant and decline each complete that same draft
-    rather than minting a second row; hang-up mid-ask → draft `expired`, no
+    rather than minting a second row, through `promoteConsentDraft`: eligible → `approved`
+    with the lane stamp and `approved_at` set at promotion, the UNDO SMS sent then;
+    ineligible → `ready_for_review`; a `system:` actor is never passed to
+    `transitionProposal`; hang-up mid-ask → draft `expired`, no
     proposal, hold and job released, capture cleared, `booking_consent_abandoned` audited).
 - **Floor-criteria risks (Appendix B):** #2 noAutoMutation (job and hold exist before
   approval; pinned by `hold_pending_approval = true` plus a proposal row), #6 noDuplicateCustomer
@@ -1094,6 +1118,21 @@ flowchart LR
     stored state, never as an interview answer), `derive-status` reports it as a go-live
     blocker (`GO_LIVE_BLOCKED { emergency_target_missing }`), and the mandatory opener card
     is what fills it — so no tenant goes live with an empty or non-human emergency target.
+    **A tenant that is already live is remediated by the migration, not left to a blocker
+    it will never hit**: for every row with `voice_agent_live_at` set and `emergency = []`
+    the migration stamps `tenant_settings.emergency_target_missing_at`, which (a) makes the
+    E2 path for that tenant take a **compatibility branch that is exactly today's
+    behaviour** — the hours-filtered rotation, then `escalateToHuman`'s existing
+    business-phone fallback with the dial-time DID filter *not* applied on this branch,
+    because today's live path already dials whatever `business_phone` holds and the
+    migration must not make a life-safety call worse than it is now; (b) sends the owner one
+    SMS and one in-app card ("add an emergency contact — until you do, emergencies ring
+    {rotation or business line}") and shows a persistent banner in the routing sheet; and
+    (c) is cleared the moment a qualifying number is written by any writer. Nothing is
+    paused automatically — silently taking a live tenant offline is worse than the
+    compatibility branch. The schedule test pins that a live tenant migrated with `[]` still
+    reaches a human on E2 by today's path, gets the notice, and leaves the branch once a
+    number is added.
     `on_call_rotation.hours JSONB` optional. **The legacy single line is carried over, not
     dropped**: tenants who configured `tenant_settings.transfer_number` (read today by
     `create-voice-turn-processor.ts:3110-3123` as the warm-transfer destination that replaces
@@ -1168,7 +1207,9 @@ flowchart LR
     `'voicemail'`, and rejects an
     empty list as an interview answer while allowing it as the migrated state; migration
     backfill prefers `owner_phone` over `business_phone`, never seeds the tenant's own Twilio
-    DID, yields `[]` plus a go-live blocker for a tenant with nothing but its DID, and a tenant
+    DID, yields `[]` plus a go-live blocker for a not-yet-live tenant with nothing but its DID, and
+    `[]` plus `emergency_target_missing_at`, the owner notice and the compatibility E2 branch
+    for an already-live one, and a tenant
     whose `open` is `'voicemail'` with no rotation backfills from the owner cell, never the
     sentinel; the dial path refuses a tenant DID even if one is stored),
     `packages/api/test/telephony/dtmf-escape.test.ts` (Gather and realtime; protected states),
