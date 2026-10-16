@@ -870,9 +870,18 @@ flowchart LR
     backfills `emergency` from the first candidate that is a **valid E.164 string**: the
     on-call rotation head, then `open` **only if it is a number** (`open` may legitimately be
     `'voicemail'` or `'callback'`, and copying that sentinel would seed a value the contract
-    rejects and the E2 dial path cannot ring), then `tenant_settings.business_phone`, then the
-    owner cell that the identity step now requires — so no tenant has an empty list and none
-    has a non-number in it. `on_call_rotation.hours JSONB` optional.
+    rejects and the E2 dial path cannot ring), then **`tenant_settings.owner_phone`** (the
+    owner cell the identity step now requires), and only then `business_phone` — and
+    `business_phone` is skipped when it is one of the tenant's own provisioned numbers, because
+    `workers/provision-twilio.ts:689-698` fills an empty `business_phone` with the tenant's
+    Twilio DID, and an emergency ladder that dials that number rings the AI line back into
+    itself. The same exclusion applies at dial time: `escalate-to-human.ts` never dials a
+    number that belongs to the tenant's provisioned set, whatever list it came from. If no
+    candidate qualifies the migration leaves `emergency = []` (the contract allows empty as a
+    stored state, never as an interview answer), `derive-status` reports it as a go-live
+    blocker (`GO_LIVE_BLOCKED { emergency_target_missing }`), and the mandatory opener card
+    is what fills it — so no tenant goes live with an empty or non-human emergency target.
+    `on_call_rotation.hours JSONB` optional.
     The U9 opener's "who first, then who?" writes exactly this key, and the E2 path reads it:
   - `packages/api/src/ai/skills/escalate-to-human.ts:447-585` — resolve the target by schedule
     through `telephony/business-hours-loader.ts` before dialling; filter rotation entries by
@@ -895,9 +904,12 @@ flowchart LR
     badge, audio player (min-h-11 controls); `CallRoutingSheet.tsx` — the three targets.
   - Tests: `packages/api/test/ai/skills/escalate-to-human.schedule.test.ts` (emergency walks
     the ordered list before the rotation; a list of one falls through to the rotation then the
-    business phone; the contract rejects `'voicemail'` and an empty list; migration backfill
-    yields a non-empty list for a tenant with only a business phone, and a tenant whose `open`
-    is `'voicemail'` with no rotation backfills from the business phone, never the sentinel),
+    business phone that is not a tenant DID; the contract rejects `'voicemail'`, and rejects an
+    empty list as an interview answer while allowing it as the migrated state; migration
+    backfill prefers `owner_phone` over `business_phone`, never seeds the tenant's own Twilio
+    DID, yields `[]` plus a go-live blocker for a tenant with nothing but its DID, and a tenant
+    whose `open` is `'voicemail'` with no rotation backfills from the owner cell, never the
+    sentinel; the dial path refuses a tenant DID even if one is stored),
     `packages/api/test/telephony/dtmf-escape.test.ts` (Gather and realtime; protected states),
     `packages/api/test/escalations/outcome-route.persists.test.ts`,
     `packages/api/test/routes/recordings.by-call.test.ts` (cross-tenant 404, expired 403),
@@ -1068,8 +1080,13 @@ flowchart LR
     closing `open_capture` state bounded to five items.
   - `packages/api/src/db/schema.ts`, `packages/api/src/settings/settings.ts` — new typed keys
     `booking_required_fields TEXT[]` (default problem description + address), `quote_policy`
-    (`never | ranges_from_catalog | exact_from_catalog`), `services_not_offered TEXT[]`,
-    per-tenant emergency terms (lifts the platform-only limit in `emergency-detector.ts`);
+    (`never | ranges_from_catalog | exact_from_catalog`), per-tenant emergency terms (lifts
+    the platform-only limit in `emergency-detector.ts`). **`services_not_offered` is not a
+    second key**: the interview's "we don't do that" option writes U4's
+    `tenant_business_answers.services_not_offered` through the U4 repository, the FSM's
+    out-of-scope check and U5's `services` topic both read that same column, and the Knowledge
+    sheet edits the same row — one store, one set of writers, so an onboarding answer and a
+    later settings edit can never disagree;
     table `onboarding_whitespace_notes` (tenant_id, scenario_id, note, created_at; FORCE RLS);
     table `onboarding_scenario_answers` (tenant_id, scenario_id, status `answered | skipped`,
     option_key, free_text_route `faq | standing_instruction | whitespace | none`, answered_at;
@@ -1077,10 +1094,13 @@ flowchart LR
     refresh or restart without repeating a card, and step completion is derived from it (every
     selected core scenario has a row), not from a stamp; `tenant_settings.scenario_interview_completed_at`
     is a convenience stamp written when the derivation first holds, and **that write is also
-    the R12 event's trigger**: `apply-answer.ts` runs
+    the R12 event's trigger**: after each answered or skipped row `apply-answer.ts` first runs
+    the completion query (every selected core scenario has an `onboarding_scenario_answers`
+    row), and **only when that query says complete** runs
     `UPDATE tenant_settings SET scenario_interview_completed_at = NOW() WHERE tenant_id = $1
-    AND scenario_interview_completed_at IS NULL` after each answered or skipped row, and when
-    (and only when) that UPDATE affects a row it calls `recordFunnelEvent` with a new
+    AND scenario_interview_completed_at IS NULL`; the null check alone is not the predicate
+    (it would stamp on the first card and swallow the real completion). When (and only when)
+    that UPDATE affects a row it calls `recordFunnelEvent` with a new
     `scenario_interview_completed` member of the `FunnelEvent` union
     (`analytics/posthog.ts:32`), carrying `answered`, `skipped` and `selected` counts. The
     conditional UPDATE makes the event fire exactly once per tenant, including when the
@@ -1124,7 +1144,8 @@ flowchart LR
   - Tests: `packages/api/test/onboarding/scenarios/library.select.test.ts` (HVAC vs plumbing
     vs solo selection; twelve-core cap), `options.test.ts` (every option maps to a real FSM
     effect and a real setting key), `apply-answer.test.ts` (tap writes + audit; `scenario_interview_completed` fires once when
-    the last selected card is answered or skipped and never again on later answers; conflicting
+    the last selected card is answered or skipped, not on the first card, and never again on
+    later answers; conflicting
     answers → clarification; unsupported ask → white-space note, never a setting),
     `packages/api/test/ai/agents/onboarding/scenario-interview-act.test.ts` (handler-level,
     mocked gateway), `packages/api/test/routes/onboarding.scenarios.test.ts`,
