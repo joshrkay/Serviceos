@@ -284,8 +284,18 @@ flowchart LR
     `started_at`/`completed_at`, which are set when the text is appended (before synthesis),
     so the reply gap cannot be reconstructed from it; the in-memory histogram has no tenant
     identity and no durability. `packages/api/src/voice/pg-call-transcript-turn.ts` and
-    `packages/api/src/ai/voice-turn/transcript-append.ts` — the adapter's existing
-    fire-and-forget `recordTurn` carries the stamps; realtime writes all four. Gather writes
+    `packages/api/src/ai/voice-turn/transcript-append.ts` — the stamps are written in **two
+    steps**, because the existing fire-and-forget `recordTurn` runs from
+    `VoiceSessionStore.appendTranscript` when the text is appended, before synthesis, and so
+    cannot know `first_audio_at`: `recordTurn` gains `sttFinalAt` and `transport` (known at
+    append time) and the repository gains `markReplyAudio({ tenantId, callSid, sessionId,
+    turnIndex, firstAudibleAt?, firstAudioAt?, replyGapMs? })`, an UPDATE keyed on the row's
+    existing `(tenant_id, call_sid, session_id, turn_index)` upsert key, called from the
+    adapter's first-frame branch (the same `awaitingFirstAudioFrame` branch that observes the
+    histogram) for `first_audio_at`/`reply_gap_ms` and from the filler-start branch for
+    `first_audible_at`. No timestamp is ever fabricated: a turn that never reaches a real frame
+    keeps those columns null and is excluded from the percentiles. Realtime therefore ends up
+    with all four; Gather writes
     `stt_final_at` (webhook receipt) and `transport = 'gather'` only: returning TwiML is not
     audio (Twilio still receives it, synthesises Polly and starts playout), so `first_audio_at`
     and `reply_gap_ms` stay **null** on Gather turns rather than recording an optimistic
@@ -305,7 +315,9 @@ flowchart LR
     `packages/api/test/voice/quality/latency-summary.test.ts`,
     `packages/web/src/components/settings/CallQualityCard.test.tsx`,
     `packages/api/test/integration/voice-latency-summary.test.ts` (pins the new columns: a
-    turn written through `recordTurn` with all four stamps yields the expected `reply_gap_ms`;
+    turn written through `recordTurn` at append time and then `markReplyAudio` on the first
+    frame yields the expected `reply_gap_ms`; a turn whose `markReplyAudio` never arrives keeps
+    `first_audio_at` null and is excluded; `markReplyAudio` for an unknown key updates nothing;
     a Gather turn leaves `first_audio_at`, `first_audible_at` and `reply_gap_ms` null and is
     excluded from the percentiles while counted in the Gather share).
 - **Approach:** no behaviour change on the call. Per-tenant ramp through `voice_realtime` for
@@ -413,8 +425,16 @@ flowchart LR
   - `packages/api/src/telephony/twilio-adapter.ts:684-693, 1030` — `voiceOverride` from the
     persona's Polly pair, validated against an allowlist; keep the other-language-default rule.
   - `packages/api/src/ai/agents/customer-calling/filler-audio-cache.ts` — key
-    `${voiceId}:${filler.id}`, lazy per-voice fill, LRU on voice id, default-voice clip as
-    fallback rather than silence.
+    `${voiceId}:${filler.id}`, LRU on voice id, and **the default voice is never substituted**
+    (R4: the filler must match the chosen voice, and a default-voice filler followed by a
+    selected-voice reply is an audible mid-turn speaker change). The selected voice's fillers
+    are pre-synthesised when the persona is chosen, not on the first call: `POST /voice/preview`
+    and `PUT /api/settings/voice-persona` both kick `startFillerSynthesis` for that voice id,
+    and the cache is also warmed at boot for every tenant's saved voice id. If a clip is still
+    missing when a turn needs it (cold cache after a deploy, synthesis failure) the turn runs
+    **without filler** — silence until the first real frame, exactly what the Gather transport
+    does today — and increments `voice_filler_miss_total{voice_id}` so a persistently cold
+    voice is visible.
   - `packages/api/src/routes/onboarding.ts` — `POST /voice/preview` synthesises the greeting
     through the same provider, cached by (preset, greeting hash), short TTL; stamps
     `voice_preview_at` on first success. `packages/api/src/routes/settings.ts` —
@@ -425,7 +445,9 @@ flowchart LR
   - Tests: `packages/api/test/settings/voice-persona-resolver.test.ts`,
     `packages/api/test/ai/tts/per-tenant-voice.test.ts`,
     `packages/api/test/telephony/twilio-adapter.say-voice.test.ts`,
-    `packages/api/test/ai/agents/customer-calling/filler-cache-per-voice.test.ts`,
+    `packages/api/test/ai/agents/customer-calling/filler-cache-per-voice.test.ts` (a miss on
+    the selected voice yields no filler and increments the miss counter, never the default
+    voice's clip; preview and persona save both start synthesis for the chosen voice),
     `packages/web/src/components/onboarding/v2/steps/VoiceStep.test.tsx`,
     `packages/web/src/components/settings/VoicePersonaSheet.test.tsx`,
     `packages/api/test/integration/voice-persona-roundtrip.test.ts`.
@@ -651,7 +673,16 @@ flowchart LR
      preview, **and the query requires a linked `appointments` row with `is_test = true` whose
      `customer_id` is the wizard's test customer** (`tenant_settings.test_customer_id`), else
      409 `TEST_BOOKING_NO_APPOINTMENT`; a real appointment linked by a wrong session id can
-     never satisfy it. Verify **only stamps `test_booking_verified_at`**; it never calls
+     never satisfy it. **The booking must also have executed**, not merely been held: during
+     the five-second undo window the `is_test` appointment already exists with
+     `hold_pending_approval = true` and its proposal is `approved`/`executing`, and a verify
+     stamped then would let the owner go live, whose cleanup cancels that appointment before
+     the executor reaches it. So the query additionally requires the linked appointment to
+     have `hold_pending_approval = false` and `status IN ('scheduled', 'confirmed')`, and the
+     proposal on `appointments.proposal_id` to be `status = 'executed'` (the booking handler
+     clears the hold at `proposals/execution/create-booking-handler.ts:109` in the same
+     execution), else 409 `TEST_BOOKING_NOT_EXECUTED` with `retryAfterMs` so the wizard polls
+     rather than fails. Verify **only stamps `test_booking_verified_at`**; it never calls
      `enableVoiceAgentLive`. Activation is the explicit `go_live` step's button, per R8),
      `POST /test-booking/reject {sessionId, reason}` (stamps,
      records a correction event the learning loop consumes), `POST /forwarding-check/start`
@@ -690,7 +721,10 @@ flowchart LR
     `packages/api/test/ai/agents/customer-calling/inapp-adapter.preview.test.ts` (profile
     resolves to `caller`; excluded from counts), `packages/api/test/onboarding/derive-status.nine-steps.test.ts`,
     `packages/web/src/components/onboarding/v2/steps/TestBookingStep.test.tsx`,
-    `packages/api/test/integration/test-booking-verify.test.ts` (linkage columns),
+    `packages/api/test/integration/test-booking-verify.test.ts` (linkage columns; verify
+    inside the undo window, with the hold still pending and the proposal `approved`, returns
+    409 `TEST_BOOKING_NOT_EXECUTED`; after the handler clears the hold and the proposal is
+    `executed` it stamps; a canceled or undone test booking never stamps),
     `packages/api/test/integration/new-tenant-booking-default.test.ts`,
     `packages/api/test/integration/onboarding-status.test.ts` (updated to nine steps); corpus
     `02-happy-booker/create-appointment-known-customer` asserts the confirmed outcome for a
@@ -775,7 +809,14 @@ flowchart LR
     `call_me_back` task is created for the session (the request is now in flight and a drop
     would lose it), using `callback_consent_ask` alone ("If we get cut off, is it okay for our
     automated assistant to call you back at this number about this request?"); (c) never on
-    lookups, out-of-scope or emergency calls. One ask per session at most, consumed on both
+    lookups, out-of-scope or emergency calls; (d) **on the booking path when SMS consent is
+    already on file** — the U6 item 5 ask runs only when `customers.sms_consent !== true`, so
+    a returning customer who already granted SMS consent would otherwise reach a booking with
+    no callback question and no `voice` row, and a drop on that call could never select the AI
+    callback. For that caller the booking path arms `callback_consent_ask` alone (the same
+    single-purpose line as (b)) before the lane proposal is minted, unless a non-withdrawn
+    `voice` consent row with `purpose = 'dropped_call_callback'` already exists for the
+    customer, in which case nothing is asked. One ask per session at most, consumed on both
     transports (the U6 Gather consumer). `tts-copy.ts` gains `callback_consent_ask` and the
     combined `booking_sms_and_callback_consent_ask` (EN+ES); `handlePendingConsentCapture` grant → new `recordVoiceConsentFromVoice` writing
     `consent_events { kind: 'voice', state: 'granted', source: 'voice', voice_session_id,
@@ -805,8 +846,10 @@ flowchart LR
     minutes, one attempt.
   - Tests: `packages/api/test/ai/voice-turn/callback-consent-arming.test.ts` (armed with the
     booking ask on the booking path and written as two rows on grant; armed alone when a
-    callback proposal or call-me-back task is created; never armed on a lookup, out-of-scope or
-    E1 call; at most once per session; consumed on Gather), `packages/api/test/voice/outbound-consent.voice-kind.test.ts` (a
+    callback proposal or call-me-back task is created; armed alone on the booking path for a
+    customer with `sms_consent = true` and no existing callback grant, and not at all when a
+    non-withdrawn `dropped_call_callback` row already exists; never armed on a lookup,
+    out-of-scope or E1 call; at most once per session; consumed on Gather), `packages/api/test/voice/outbound-consent.voice-kind.test.ts` (a
     `dropped_call_callback` grant authorises only the job that references it; click-to-call and
     a second callback job for the same number are refused),
     `packages/api/test/voice/recovery/callback-branch.test.ts`,
