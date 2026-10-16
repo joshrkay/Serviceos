@@ -656,11 +656,15 @@ flowchart LR
     in `indexing` forever; the redelivered job for the same revision reclaims it —
     otherwise a delayed revision-1 job could move the freshly reset revision-2 row to
     `indexing`, its terminal update would then miss, and the revision-2 job would find the
-    row unclaimable, leaving the FAQ stuck. The terminal transitions keep the same guard:
-    `UPDATE … SET index_status = 'indexed', embedding = $v, indexed_at = NOW() WHERE id = $1
-    AND content_rev = $rev` (and the same guard on the `failed` transition); an UPDATE that
-    affects zero rows means the owner edited mid-flight, the stale result is dropped, and the
-    newer revision's own job indexes it — so retrieval can never match on a vector of the
+    row unclaimable, leaving the FAQ stuck. The claim also mints `index_claim_token =
+    gen_random_uuid()` and returns it, and the terminal transitions are guarded by the
+    revision **and that token**: `UPDATE … SET index_status = 'indexed', embedding = $v,
+    indexed_at = NOW() WHERE id = $1 AND content_rev = $rev AND index_claim_token = $token`
+    (and the same guard on the `failed` transition); an UPDATE that affects zero rows means
+    either the owner edited mid-flight or the lease expired and another worker reclaimed the
+    row with a new token — in both cases the stale result is dropped, so a worker whose
+    embedding call outran the ten-minute lease can neither overwrite the reclaimer's success
+    nor mark its valid embedding failed, and the newer claim's own job indexes it — so retrieval can never match on a vector of the
     previous question while speaking the current answer).
   - `packages/api/src/routes/knowledge.ts` — CRUD, owner, audited.
   - `packages/api/src/onboarding/derive-status.ts`, `load-facts.ts`, `contracts.ts` — step
@@ -707,7 +711,9 @@ flowchart LR
     a stale job that only *starts* after the edit → its claim affects zero rows, it never
     calls the provider, and the new revision's job claims and indexes the row; a worker that
     dies after the claim → the row sits in `indexing`, a redelivery inside ten minutes cannot
-    claim it, a redelivery after ten minutes reclaims and indexes it.
+    claim it, a redelivery after ten minutes reclaims and indexes it; the
+    original worker finishing after that reclaim → its terminal update carries the old token,
+    affects zero rows, and the reclaimer's result stands.
   - Integration: RLS denies cross-tenant reads on both tables; raw select pins the columns.
 - **Verification:** a new tenant completes the step under five minutes from pack defaults.
 
@@ -853,17 +859,30 @@ flowchart LR
      would race the executor and could suppress the confirmation for good. Follow the D-018
      close path's order instead (`create-voice-turn-processor.ts:4266` arms
      `pendingConsentCapture` before any proposal; `:4513` consumes it on the next turn): when
-     the lane is eligible and `customers.sms_consent !== true`, place the hold, arm
-     `pendingConsentCapture { purpose: 'booking', appointmentId }`, and speak
+     the lane is eligible and `customers.sms_consent !== true`, **first mint a `draft`
+     proposal** (`status = 'draft'` with `missingFields: ['confirmation_channel']`, which
+     `approveProposal` refuses and the executor never dequeues — `proposals/lifecycle.ts` lets a
+     draft move only to `ready_for_review`, `approved`, `rejected` or `expired`), then place the
+     hold with `appointments.proposal_id` pointing at that draft, so the hold and the
+     provisional job are never operational writes without a proposal behind them (floor
+     criterion 2, `noAutoMutation`, which Appendix B pins as "a `hold_pending_approval` row
+     **plus** a `proposals` row"); arm `pendingConsentCapture { purpose: 'booking',
+     appointmentId, proposalId }`, and speak
      `booking_sms_consent_ask` ("I can text you the confirmation at this number — is that
      okay?"). The next turn's answer records consent through `recordSmsConsentFromVoice` and
-     only then mints the `create_booking` proposal, so the executor never sees it before consent
-     is known. Grant → lane proposal with the SMS confirmation; decline → lane proposal with
-     email-only confirmation and the spoken line drops the "I'll text you" clause; hang-up
-     mid-ask → **no proposal is minted** (floor criterion 8 and every bucket 06 script expect a
-     mid-flow hang-up to leave no half-baked proposal; `finalizeTerminatedSession` only stamps
-     the outcome today and the plan does not add a minting path): the hold and provisional job
-     are released by the termination cleanup in item 1, the session outcome is `dropped`, and
+     only then **completes the draft** — fills `confirmation_channel`, clears `missingFields`,
+     and hands it to the lane exactly as a freshly minted `create_booking` proposal would be —
+     so the executor never sees an executable proposal before consent is known. Grant → the
+     draft becomes the lane proposal with the SMS confirmation; decline → the lane proposal
+     with email-only confirmation and the spoken line drops the "I'll text you" clause;
+     hang-up mid-ask → **no executable proposal ever exists**: the termination branch moves
+     the draft to `expired` in the same cleanup that releases the hold and the provisional
+     job (item 1), and the hold reaper expires any draft whose hold TTL has passed, so a
+     process failure before cleanup cannot leave a hold blocking availability longer than the
+     TTL. Floor criterion 8 and the bucket 06 scripts assert no proposal in a non-terminal
+     status after a mid-flow hang-up, which an expired draft satisfies
+     (`finalizeTerminatedSession` only stamps the outcome today; the plan adds the expiry,
+     not a minting path). The session outcome is `dropped`, and
      dropped-call recovery (SMS today, U8's callback later) re-engages the caller. A new
      explicit `pendingConsentCapture` termination branch in `finalizeTerminatedSession` clears
      the capture and audits `booking_consent_abandoned`; tested. The consent capture
@@ -919,7 +938,11 @@ flowchart LR
   9. **Verified test booking and go-live.** `routes/onboarding.ts` —
      `POST /test-booking/verify {sessionId}` (session belongs to tenant, is `voice_inbound` or
      preview, **and the query requires a linked `appointments` row with `is_test = true` whose
-     `customer_id` is the wizard's test customer** (`tenant_settings.test_customer_id`), else
+     job belongs to the wizard's test customer** — `appointments` has no customer column
+     (`appointments.job_id UUID NOT NULL REFERENCES jobs(id)` is the link), so the query joins
+     `jobs ON jobs.id = appointments.job_id` and compares `jobs.customer_id` with
+     `tenant_settings.test_customer_id`, pinned against real columns by the integration test;
+     else
      409 `TEST_BOOKING_NO_APPOINTMENT`; a real appointment linked by a wrong session id can
      never satisfy it. **The booking must also have executed**, not merely been held: during
      the five-second undo window the `is_test` appointment already exists with
@@ -999,7 +1022,10 @@ flowchart LR
     **cross-surface**: a voice hold and a `POST /api/public/booking` request for the same
     window started concurrently → exactly one of them books, the other sees `slot_taken`,
     and the test asserts both took the `self-service-booking` key on the same runner);
-    `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (hang-up mid-ask → no
+    `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (a draft proposal exists
+    before the hold and the hold's `proposal_id` points at it; the draft cannot be approved or
+    executed while `missingFields` is set; grant and decline each complete that same draft
+    rather than minting a second row; hang-up mid-ask → draft `expired`, no
     proposal, hold and job released, capture cleared, `booking_consent_abandoned` audited).
 - **Floor-criteria risks (Appendix B):** #2 noAutoMutation (job and hold exist before
   approval; pinned by `hold_pending_approval = true` plus a proposal row), #6 noDuplicateCustomer
