@@ -239,8 +239,11 @@ flowchart LR
     SC --> M
     M -->|yes| FSM
     M -->|no| RC[re-classify] --> FSM
-    FSM -->|tts_play first| AUD[audio out]
-    FSM -->|then| DB[(audit + proposal)]
+    FSM -->|tts_play: synthesise, hold frames| BUF[audio buffered]
+    FSM -->|audit + proposal insert| DB[(commit)]
+    DB -->|resolved| AUD[audio released]
+    BUF --> AUD
+    DB -->|insert failed| DISC[discard buffer, speak failure copy]
   end
   subgraph A2[A2 — knowledge]
     FSM -->|lookup_business_info| LB[phone-lookup-surface]
@@ -294,10 +297,16 @@ flowchart LR
     adapter's first-frame branch (the same `awaitingFirstAudioFrame` branch that observes the
     histogram) for `first_audio_at`/`reply_gap_ms` and from the filler-start branch for
     `first_audible_at`. **The update is chained behind the insert, never raced against it:**
-    `persistTurn` keeps the in-flight `recordTurn` promise per `turnIndex` on the session
-    (`pendingTurnPersist`, cleared on settle), and the adapter's stamp call is
-    `pendingTurnPersist.get(turnIndex).then(() => markReplyAudio(...))`, so a cached or fast
-    reply whose first frame beats a slow insert still lands its stamps after the row exists.
+    `persistTurn` keeps the `recordTurn` promise per `turnIndex` on the session
+    (`pendingTurnPersist`) and **retains it after it settles** — the normal order is insert
+    resolved long before the first frame, so a settle-time delete would leave every ordinary
+    turn with no promise to chain on. The entry is dropped only once both stamps for that
+    turn have run, or the turn is abandoned (barge-in discards the reply, session
+    termination), and the map is cleared with the session; it is bounded by the session's turn
+    count. The adapter's stamp call is
+    `pendingTurnPersist.get(turnIndex).then(() => markReplyAudio(...))`, so both orders land:
+    a cached or fast reply whose first frame beats a slow insert stamps after the row exists,
+    and a reply whose insert resolved earlier chains on the already-settled promise.
     If the chained update still affects zero rows (the row was deleted underneath it) the
     sample is counted in `voice_reply_stamp_lost_total` and logged with the key, so a silent
     drop is visible rather than assumed away. No timestamp is ever fabricated: a turn that never
@@ -326,7 +335,9 @@ flowchart LR
     frame yields the expected `reply_gap_ms`; a turn whose `markReplyAudio` never arrives keeps
     `first_audio_at` null and is excluded; a first frame that arrives while the insert is still
     pending (delayed `recordTurn` promise) still stamps because the update is chained behind
-    it; a zero-row update increments `voice_reply_stamp_lost_total` and never inserts;
+    it; a first frame that arrives after the insert already resolved (the normal order) also
+    stamps, because the settled promise is retained until the stamps run; a zero-row update
+    increments `voice_reply_stamp_lost_total` and never inserts;
     a Gather turn leaves `first_audio_at`, `first_audible_at` and `reply_gap_ms` null and is
     excluded from the percentiles while counted in the Gather share).
 - **Approach:** no behaviour change on the call. Per-tenant ramp through `voice_realtime` for
@@ -351,10 +362,20 @@ flowchart LR
 - **Dependencies:** U1 (so the change is measured); U3 should land first so the persistent
   socket carries the tenant voice.
 - **Files and changes, in the order they should land (Appendix A §12):**
-  1. **Pre-connect / persist the ElevenLabs socket.** `packages/api/src/ai/tts/elevenlabs-stream.ts`
-     (connection object reusable across `synthesizeStream` calls, `inactivity_timeout`, reopen
-     on error), `packages/api/src/ai/tts/tts-provider.ts` (`ElevenLabsTtsProvider` keeps one
-     connection per call session keyed by session id + voice id),
+  1. **Pre-connect / persist the ElevenLabs socket.** Retaining today's connection object is
+     not enough: `elevenlabs-stream.ts:202` sends the empty-text terminator after every
+     utterance, which is the single-stream protocol's end-of-stream and closes that socket, so
+     the next turn would reopen one anyway. The persistent connection therefore moves to the
+     **multi-context endpoint** (`/v1/text-to-speech/{voice_id}/multi-stream-input`): one socket
+     per call session, one `context_id` per utterance, `flush: true` on the utterance's last
+     text message to force generation of the buffered text, `close_context` once that
+     context's `isFinal` arrives, and `close_socket` only at call teardown; responses are
+     demultiplexed by `contextId` so a late chunk from an aborted context is dropped rather than
+     played. The empty-text terminator stays only on the one-shot fallback path.
+     `packages/api/src/ai/tts/elevenlabs-stream.ts` (`ElevenLabsStreamConnection` gains
+     `openContext`/`flush`/`closeContext`/`closeSocket`; `inactivity_timeout` on the URL;
+     reopen on error), `packages/api/src/ai/tts/tts-provider.ts` (`ElevenLabsTtsProvider`
+     keeps one connection per call session keyed by session id + voice id),
      `packages/api/src/telephony/media-streams/mediastream-adapter.ts` (`onTranscriptEvent`
      opens or warms the connection at STT-final next to `armEarlyFiller`; `bargeIn()` aborts the
      stream, not the socket).
@@ -363,14 +384,23 @@ flowchart LR
      parse `speech_final` into a `speech_final` event and `UtteranceEnd` into an `utterance_end`
      event; keep `is_final` segments as `segment` events. `mediastream-adapter.ts` — buffer
      `segment` text and dispatch exactly one `speechTurn` on the first of: (a) `speech_final`
-     **when the buffered text is complete** (ends in terminal punctuation from `smart_format`,
-     or is a short confirm/deny such as "yes", "no", "that's right"), or (b) `utterance_end`
-     (1,000 ms word gap). A `speech_final` on text that is not complete ("um, next Tuesday at")
-     never dispatches; it starts the speculative classify and the TTS pre-connect only, and the
-     turn waits for (b) or for a later complete `speech_final`. This is the Vapi
-     punctuation / no-punctuation pattern (Appendix E §1.1): a finished sentence gets the 300 ms
-     path, a mid-thought pause gets the 1,000 ms guard, and the two signals cannot race because
-     only one rule dispatches. The adapter passes `endpointingMs` from a new
+     **only when the buffered text is on the short-confirmation allowlist** — an enumerated
+     set shared with `confirmIntent` ("yes", "no", "yeah", "nope", "that's right", "correct",
+     "sounds good", "go ahead", their Spanish forms; ≤ 3 words, exact match after
+     normalisation), or (b) `utterance_end` (1,000 ms word gap) for everything else.
+     Formatter punctuation is **not** a dispatch signal: `smart_format` punctuates whatever
+     segment the recogniser finalised, so "I need someone Tuesday." can be the first half of
+     "…Tuesday, or Wednesday if that's easier", and dispatching on the period at 300 ms would
+     recreate the split-turn bug this item exists to fix. A `speech_final` on any other text
+     never dispatches; it starts the speculative classify and the TTS pre-connect only, and
+     the turn waits for (b). So in v1 the 300 ms path is earned only by one-word answers and
+     the 1,000 ms guard covers every full sentence; the two signals cannot race because only
+     one rule dispatches. The full-sentence gain Appendix A §12 item 2 estimates needs a
+     **semantic end-of-turn signal**, which lands behind a flag as a follow-on: Deepgram's
+     end-of-turn detection (`EndOfTurn` with an `eot_threshold`) where the account has it, else
+     a small classifier over the buffered text that answers "is this a complete request?"
+     (`voice_eot_semantic` platform setting, default off; it replaces (b) only when it says
+     complete, and `utterance_end` stays as the floor). The adapter passes `endpointingMs` from a new
      `voice_endpointing_ms` platform setting (no tenant knob yet).
   3. **TTS model.** `tts-provider.ts:161` `eleven_turbo_v2_5` → `eleven_flash_v2_5` for `en`;
      `scripts/render-fillers.ts` re-renders fillers with the same model; Spanish stays on
@@ -395,12 +425,17 @@ flowchart LR
      only by the capture-disabled accident; on a gated interim that yields no final within 2 s,
      resume the paused reply from the last mark. `packages/api/src/settings/settings.ts` +
      `packages/api/src/db/schema.ts` (`voice_barge_in_level`), `packages/web/src/components/settings/CallRoutingSheet.tsx`.
-  - Tests: `packages/api/test/ai/tts/elevenlabs-persistent-socket.test.ts` (one socket per
-    call, reopen on error, abort does not close), `packages/api/test/voice/transcription-providers.endpointing.test.ts`
+  - Tests: `packages/api/test/ai/tts/elevenlabs-persistent-socket.test.ts` (two sequential
+    utterances on one mock connection: one WebSocket open, two `context_id`s, each flushed and
+    closed, chunks routed to the right utterance by `contextId`; a barge-in sends
+    `close_context` and the socket stays open for the next turn; `close_socket` only at
+    teardown; a late chunk for a closed context is dropped; reopen on error), `packages/api/test/voice/transcription-providers.endpointing.test.ts`
     (URL params; `speech_final`/`UtteranceEnd` mapping), `packages/api/test/telephony/media-streams/segment-buffering.test.ts`
     ("two is_final without speech_final → one speechTurn"; "speech_final on 'next Tuesday at'
     → no dispatch, speculative classify armed, dispatch on utterance_end"; "speech_final on
-    'Tuesday at two.' → dispatch at 300 ms"; "speech_final on 'yes' → dispatch"), `packages/api/test/telephony/media-streams/speculative-classify.test.ts`
+    'I need someone Tuesday.' → no dispatch on the period, dispatch on utterance_end with the
+    continuation 'or Wednesday' included"; "speech_final on 'yes' → dispatch at 300 ms";
+    "speech_final on 'sí' → dispatch"; "allowlist is exact: 'yes but' → waits"), `packages/api/test/telephony/media-streams/speculative-classify.test.ts`
     (hit, miss, exactly one proposal, cost-cap respected), `packages/api/test/ai/voice-turn/side-effects-overlap.test.ts`
     (synthesis starts before the insert resolves; no frame is released before it; an insert
     failure discards the buffered audio and speaks the failure copy),
@@ -511,12 +546,23 @@ flowchart LR
 - **Approach:** the step is prefilled from the vertical pack (categories → services offered,
   typical fees) so the owner edits rather than authors; every field shows the exact sentence
   the agent will say, rendered from the U5 template. Amounts are cents; the pack seed stays the
-  price source and business answers reference fees only as policy.
+  price source and business answers reference fees only as policy. **A seeded money value is
+  never speakable until the owner accepts it:** `trip_fee_cents`, `deposit_cents` and any
+  other monetary field carry a sibling `*_confirmed_at TIMESTAMPTZ NULL`; the pack prefill
+  writes the amount with `confirmed_at` null, the step renders it as a placeholder the owner
+  must tap to accept or edit (either stamps `confirmed_at`), and U5's template reads a fee only
+  when `confirmed_at` is set — an unconfirmed seed renders the same "not on file" line as a
+  null. A skipped card or a skipped interview therefore leaves a generic pack fee unspoken
+  rather than quoted as the tenant's policy. Non-monetary seeds (services offered, brands)
+  stay plain prefills; only money needs the explicit accept.
 - **Patterns to follow:** `onboarding/activate-pack-with-seed.ts`; identity handlers in
   `routes/onboarding.ts`; the tenant-settings proposer gate idiom for the talk-through path.
 - **Test scenarios:**
   - Happy: owner saves required keys → step done; FAQ saved → chunk embedded with tenant id.
-  - Edge: "89.50" → 8950; past hours exception rejected; 51st FAQ rejected; empty answer rejected.
+  - Edge: "89.50" → 8950; past hours exception rejected; 51st FAQ rejected; empty answer rejected;
+    pack-seeded trip fee with `confirmed_at` null → U5 speaks "not on file"; owner taps accept
+    → `confirmed_at` stamped and the fee is spoken; owner edits the amount → confirmed in the
+    same write.
   - Failure: embedding provider down → row saved, `indexing`, retried.
   - Integration: RLS denies cross-tenant reads on both tables; raw select pins the columns.
 - **Verification:** a new tenant completes the step under five minutes from pack defaults.
