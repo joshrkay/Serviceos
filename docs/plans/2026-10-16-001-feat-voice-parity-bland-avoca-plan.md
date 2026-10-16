@@ -859,10 +859,22 @@ flowchart LR
      (`routes/appointments.ts:256-302`) today takes no lock and runs `assertNoDoubleBooking`
      only when `technicianId` is present, so an unassigned visit created from the board
      concurrently with a voice hold passes its (absent) check while the hold passes
-     `isSlotFree`, and both rows land. The route therefore wraps `createAppointment` in
-     `PgTenantTransactionRunner.run(tenantId, ({ lock }) => …)` with
-     `lock('self-service-booking')` and runs `isSlotFree` for the window first, assigned or
-     not, returning 409 `SLOT_TAKEN` with `nextOpening`; the technician-specific
+     `isSlotFree`, and both rows land. The route therefore takes the same advisory lock —
+     **on the request's own transaction, not through the runner**: every `/api` route already
+     runs inside `withTenantTransaction` (`app.ts:5074`), whose client repos reach through
+     `tenantContextStore`, whereas `PgTenantTransactionRunner.run` checks out a *second*
+     pooled connection and commits it on its own (`db/tenant-transaction.ts:99-129`), so a
+     runner nested inside the request would commit the appointment before
+     `ensurePrimaryTechnician` and `syncJobAssignment` ran and leave it orphaned when either
+     failed and the outer request rolled back. The runner's key derivation is lifted into a
+     shared `lockInCurrentTransaction('self-service-booking')` that issues
+     `pg_advisory_xact_lock` with the identical `advisoryKeyPair(tenantId + key)` on
+     whatever client the current `tenantContextStore` holds — the request client here, the
+     runner's client on the voice and public paths — so all three writers contend for one
+     lock while each stays inside its own single transaction. The route then runs
+     `isSlotFree` for the window first, assigned or not, returning 409 `SLOT_TAKEN` with
+     `nextOpening`, and lock, predicate, `createAppointment`, `ensurePrimaryTechnician` and
+     `syncJobAssignment` all commit or roll back together with the request; the technician-specific
      `assertNoDoubleBooking` stays as the narrower check on top. A dispatcher deliberately
      overbooking capacity (two crews, one window) passes `force: true`, audited as
      `appointment_overbooked`, which skips `isSlotFree` but still takes the lock, so a
@@ -1126,7 +1138,10 @@ flowchart LR
     window started concurrently → exactly one of them books, the other sees `slot_taken`,
     and the test asserts both took the `self-service-booking` key on the same runner; a voice
     hold and a dispatcher `POST /api/appointments` with no `technicianId` for the same window
-    started concurrently → exactly one row, the loser gets `slot_taken` or 409 `SLOT_TAKEN`,
+    started concurrently → exactly one row, the loser gets `slot_taken` or 409 `SLOT_TAKEN`
+    (the test asserts the two holders took the same `advisoryKeyPair` output, one through the
+    runner and one through the request client, and that a failing `syncJobAssignment` after
+    the dispatcher insert leaves no appointment row),
     and the same pair with `force: true` on the dispatcher side → the dispatcher row lands
     and the hold that follows it sees `slot_taken`);
     `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (a draft proposal exists
@@ -1441,7 +1456,11 @@ flowchart LR
   - **Branch in recovery.** `voice/recovery/detect-dropped.ts`, `workers/dropped-call-worker.ts`
     — consent row + `block` mode + tenant `voice_callback_enabled` + inside window → enqueue one
     `voice_callback_jobs` row (`tenant_id`, `voice_session_id`, `target_e164`,
-    `consent_event_id`, `attempt`, `outcome`; UNIQUE tenant + session; FORCE RLS); else the SMS
+    `consent_event_id`, `attempt`, `outcome`, **`outbound_session_id UUID NULL REFERENCES
+    voice_sessions(id)`** (the leg this job placed, stamped before the dial — below),
+    **`dial_state TEXT NOT NULL DEFAULT 'pending' CHECK (dial_state IN ('pending',
+    'dialing', 'unconfirmed', 'confirmed', 'rejected'))`** and **`failure_reason TEXT NULL`**;
+    UNIQUE tenant + session; FORCE RLS); else the SMS
     branch.
   - **Outbound leg.** `packages/api/src/telephony/outbound-ai-call-service.ts` (clone of
     `initiateOutboundCall` with `Url=/api/telephony/outbound-answer`, `StatusCallback`,
@@ -1452,7 +1471,15 @@ flowchart LR
     before `calls.create` has returned the CallSid to us, and a webhook carrying only an
     unknown CallSid has no tenant, job, consent event or `customerId` to seed a row from.
     The service therefore creates the `voice_sessions` row **first** (tenant, `channel
-    'voice_outbound'`, `customerId`, `callback_job_id`, `consent_event_id`, `call_sid NULL`),
+    'voice_outbound'`, `customerId`, `callback_job_id`, `consent_event_id`, `call_sid NULL`) —
+    **`callback_job_id UUID NULL REFERENCES voice_callback_jobs(id)` and `consent_event_id
+    UUID NULL REFERENCES consent_events(id)` are two new nullable columns on
+    `voice_sessions`, declared in this unit's migration beside `escalation_state`, mapped in
+    `pg-voice-session.ts` (`create`, `markEnded`'s upsert and the row reader) and pinned on
+    real Postgres by `test/integration/outbound-session-correlation.test.ts`, because the
+    current table has neither and a mocked pool would not notice** (the job row exists
+    before the session row, so the job → session and session → job references never form a
+    cycle at insert time) — then
     stamps `voice_callback_jobs.outbound_session_id`, and only then dials with
     `Url=/api/telephony/outbound-answer?session=<that id>`. The id in the query is
     authenticated by the route's existing `X-Twilio-Signature` check
@@ -1460,8 +1487,10 @@ flowchart LR
     URL including the query string, so a forged or altered id fails 403 exactly as a forged
     body does), and the route loads the row by that id — everything it needs is already on
     it — and binds the CallSid with one conditional UPDATE: `SET call_sid = $CallSid WHERE id
-    = $session AND closed_at IS NULL AND (call_sid IS NULL OR call_sid = $CallSid) RETURNING
-    *`. One row → **register the runtime session before answering**, then return
+    = $session AND ended_at IS NULL AND (call_sid IS NULL OR call_sid = $CallSid) RETURNING
+    *` — `ended_at` being the column `voice_sessions` already has (`schema.ts:1808`, with the
+    `voice_sessions_active` partial index on it) and the one `VoiceSessionRepository.markEnded`
+    stamps (`voice/voice-session.ts:96`); no new closure column is introduced. One row → **register the runtime session before answering**, then return
     `<Connect><Stream>` for it. The persisted row alone is not enough to take the stream:
     the WebSocket upgrade resolves the call exclusively through the in-process
     `VoiceSessionStore.findByCallSid` and rejects 403 when no session with a
@@ -1496,18 +1525,24 @@ flowchart LR
     `outbound-call-service.ts:274-292` collapses them — a non-2xx response, a 2xx body
     carrying `error_code`, and a fetch that threw are all `markFailed` + `provider_failed` —
     which this clone must not copy: a Twilio *response* (non-2xx, or `error_code` in the
-    body) is a definitive rejection, and only then is the pre-created session closed
-    `outcome = 'dial_failed'` with the job failed; a fetch that threw without a response
-    (timeout, reset, DNS) is **ambiguous**, because Twilio may have accepted the request and
-    be about to dial, so the session stays open flagged `dial_unconfirmed` and the job
-    `pending_reconcile`, and the truth is read back from the correlated webhooks: the dial
+    body) is a definitive rejection, and only then is the pre-created session ended through
+    `markEnded` with **`outcome = 'failed'`** — the only value of the existing
+    `voice_sessions.outcome` CHECK (`schema.ts:1573`) and the `CallOutcome` union that fits,
+    so the finalising write cannot itself be rejected and leave the session open — while the
+    detail lives on the job: `voice_callback_jobs.outcome = 'dial_failed'`, `dial_state =
+    'rejected'`, `failure_reason` = the Twilio error code and message; a fetch that threw
+    without a response (timeout, reset, DNS) is **ambiguous**, because Twilio may have
+    accepted the request and be about to dial, so the session stays open (no `ended_at`) and
+    the job is flagged `dial_state = 'unconfirmed'`, and the truth is read back from the
+    correlated webhooks: the dial
     passes `StatusCallback=/api/telephony/outbound-status?session=<id>` (same signature check,
     same conditional CallSid binding) with the `initiated`, `ringing`, `answered` and
     terminal events, and any correlated status or answer webhook clears the flag and lets
     the call proceed. A reconciliation job enqueued at +90 s — past Twilio's retry window for
-    a first webhook — finds the row still unbound and closes it `dial_failed` with the job
-    failed; the one-attempt rule means no redial, and the SMS fallback for a failed callback
-    runs only once `dial_failed` is final, never beside a live call. The `closed_at IS NULL`
+    a first webhook — finds the row still unbound and ends it the same way (`outcome =
+    'failed'`, `ended_at`) with the job `dial_failed`, `dial_state = 'rejected'`,
+    `failure_reason = 'dial_unconfirmed_expired'`; the one-attempt rule means no redial, and the SMS fallback for a failed callback
+    runs only once `dial_failed` is final, never beside a live call. The `ended_at IS NULL`
     guard on the answer-side UPDATE is what makes the late case safe (above). The `voice_callback_jobs` UNIQUE on tenant + session
     keeps the job singular.
     `proposals/surface.ts` outbound surface with the inbound allowed set;
@@ -1564,11 +1599,15 @@ flowchart LR
     the CallSid, and the service's later stamp is a no-op; a request whose `session` query
     value is altered → 403 from the signature check, no row touched; a valid id already
     bound to a different CallSid → 403, audit, no stream; `calls.create` throwing → session
-    closed `dial_failed`, job failed, no orphan row awaiting a webhook — **only** on a Twilio
-    response (non-2xx or `error_code`); a fetch timeout → session `dial_unconfirmed` and job
-    `pending_reconcile`, then an `/outbound-status` `initiated` callback for that session
-    clears both and the call proceeds, or no correlated webhook by the reconcile job → closed
-    `dial_failed`; `/outbound-answer` for a closed session → `<Hangup/>`, audit, no stream;
+    ended with `outcome = 'failed'` and `ended_at` set, job `dial_failed` with the Twilio
+    code in `failure_reason`, no orphan row awaiting a webhook — **only** on a Twilio response
+    (non-2xx or `error_code`); a fetch timeout → session still open and job `dial_state =
+    'unconfirmed'`, then an `/outbound-status` `initiated` callback for that session moves it
+    to `confirmed` and the call proceeds, or no correlated webhook by the reconcile job →
+    session ended `failed`, job `dial_failed` / `dial_unconfirmed_expired`; `/outbound-answer`
+    for an ended session → `<Hangup/>`, audit, no stream; the correlation columns
+    (`voice_sessions.callback_job_id`, `consent_event_id`, `voice_callback_jobs.outbound_session_id`,
+    `dial_state`, `failure_reason`) are written and read back on real Postgres;
     the WS upgrade and `start` frame for the outbound CallSid resolve the hydrated runtime
     session, whose id equals the persisted row's, and a retry of `/outbound-answer` does
     not register a second runtime session),
