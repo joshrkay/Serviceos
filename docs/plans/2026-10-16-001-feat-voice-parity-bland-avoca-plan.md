@@ -296,9 +296,19 @@ flowchart LR
     silence. `last_word_at` comes from Deepgram's own clock: `transcription-providers.ts`
     parses the `Results` message's top-level `start` and `duration` (seconds on the stream
     clock; `channel.alternatives[0].words[].end` where present) into a `lastWordEndMs` on the
-    `final` event, and the adapter anchors that stream clock to wall time once, at the first
-    inbound `media` frame it forwards after `captureEnabled` (the frame's `media.timestamp` is
-    ms on the same stream clock), so `last_word_at = anchor + lastWordEndMs`.
+    `final` event, and the adapter anchors that clock to wall time once, as
+    `deepgramAnchorMs = Date.now()` taken at the moment the **first sample is actually
+    forwarded to Deepgram** (the first `send` after `captureEnabled`), so
+    `last_word_at = deepgramAnchorMs + lastWordEndMs`. Twilio's `media.timestamp` is **not**
+    the same clock and is not used: it counts from the start of the media stream, but on every
+    normal call the adapter drops frames until the disclosure has played, so Deepgram's offsets
+    start later than Twilio's by exactly that dropped interval, and anchoring through the
+    Twilio timestamp would shift `last_word_at` earlier and inflate both `endpoint_delay_ms`
+    and `reply_gap_ms` by the length of the greeting. The adapter forwards every frame once
+    capture is enabled and never pauses forwarding mid-call, so one anchor holds for the
+    session; `latency-observe.test.ts` pins that the anchor is taken at the first forwarded
+    sample, not at the `start` frame, and that frames dropped before `captureEnabled` do not
+    move it.
     `endpoint_delay_ms = stt_final_at − last_word_at` is kept as its own column because it is
     exactly the number U2 item 2 changes, and the card shows it beside the gap. Gather turns
     have no stream clock and leave `last_word_at`, `endpoint_delay_ms` null. The table today has only
@@ -308,8 +318,10 @@ flowchart LR
     `packages/api/src/ai/voice-turn/transcript-append.ts` — the stamps are written in **two
     steps**, because the existing fire-and-forget `recordTurn` runs from
     `VoiceSessionStore.appendTranscript` when the text is appended, before synthesis, and so
-    cannot know `first_audio_at`: `recordTurn` gains `sttFinalAt` and `transport` (known at
-    append time) and the repository gains `markReplyAudio({ tenantId, callSid, sessionId,
+    cannot know `first_audio_at`: `recordTurn` gains `lastWordAt`, `sttFinalAt`,
+    `endpointDelayMs` and `transport` (all known at append time — the `final` event carries
+    `lastWordEndMs`, and STT-final is the append moment) and the repository gains
+    `markReplyAudio({ tenantId, callSid, sessionId,
     turnIndex, firstAudibleAt?, firstAudioAt?, replyGapMs? })`, an UPDATE keyed on the row's
     existing `(tenant_id, call_sid, session_id, turn_index)` upsert key, called from the
     adapter's first-frame branch (the same `awaitingFirstAudioFrame` branch that observes the
@@ -1113,8 +1125,10 @@ flowchart LR
     appointment.
   - Review card: the lowest-graded call of the day is picked; with no low grade a random graded
     call; with no graded calls no card; never two in a day; rendered without PII beyond what
-    the owner may see; thumbs-up writes nothing; "should have transferred" writes a
-    `corrections` row with intent and field.
+    the owner may see; thumbs-up persists `status = 'approved'` on the day's
+    `voice_daily_review_cards` row and writes no `corrections` row, and the card stays
+    approved after refresh and after a worker retry; "should have transferred" writes a
+    `corrections` row with intent and field and links it from the card row.
   - Voice-first: a spoken "book it on the call" is extracted and written without a tap; a
     spoken answer the extractor cannot type gets one clarification, then the tap options.
   - Integration: new columns and the notes table pinned on real Postgres with RLS.
