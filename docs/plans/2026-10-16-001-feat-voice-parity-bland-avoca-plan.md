@@ -278,9 +278,19 @@ flowchart LR
   - `packages/api/src/shared/config.ts` `resolveMediaStreamsEnabled` — unchanged semantics;
     `.env.production.example` flips to `auto` with the degrade note; the production env is
     checked first (Open Question 1).
+  - `packages/api/src/db/schema.ts` — migration adding `call_transcript_turns.stt_final_at`,
+    `first_audio_at` (first **real** frame), `first_audible_at` (filler or real),
+    `reply_gap_ms`, `transport` ('gather' | 'realtime'). The table today has only
+    `started_at`/`completed_at`, which are set when the text is appended (before synthesis),
+    so the reply gap cannot be reconstructed from it; the in-memory histogram has no tenant
+    identity and no durability. `packages/api/src/voice/pg-call-transcript-turn.ts` and
+    `packages/api/src/ai/voice-turn/transcript-append.ts` — the adapter's existing
+    fire-and-forget `recordTurn` carries the stamps; realtime writes all four, Gather writes
+    `stt_final_at` (webhook receipt) and `first_audio_at` (TwiML returned) with the Polly
+    synthesis cost noted as unmeasured.
   - `packages/api/src/voice/quality/grade-voice-session.ts`, `packages/api/src/routes/voice.ts`
-    `GET /api/voice/quality` — 7-day p50/p95 of reply gap and TTFA from `call_transcript_turns`
-    timing markers; `packages/web/src/components/settings/CallQualityCard.tsx` — two tiles.
+    `GET /api/voice/quality` — 7-day p50/p95 of `reply_gap_ms` and first-audible from the new
+    columns, per tenant; `packages/web/src/components/settings/CallQualityCard.tsx` — two tiles.
   - `loadtest/voice-realtime-concurrency.ts` — N emulated streams via
     `ai/voice-quality/audio/twilio-stream-emulator.ts` against one API process; records the N at
     which p95 TTFA crosses 800 ms.
@@ -289,7 +299,9 @@ flowchart LR
     stop it; real chunk does), `packages/api/test/telephony/media-streams/latency-observe.test.ts`,
     `packages/api/test/voice/quality/latency-summary.test.ts`,
     `packages/web/src/components/settings/CallQualityCard.test.tsx`,
-    `packages/api/test/integration/voice-latency-summary.test.ts` (pins the timing columns).
+    `packages/api/test/integration/voice-latency-summary.test.ts` (pins the new columns: a
+    turn written through `recordTurn` with all four stamps yields the expected `reply_gap_ms`;
+    a Gather turn leaves `first_audible_at` null).
 - **Approach:** no behaviour change on the call. Per-tenant ramp through `voice_realtime` for
   the first accounts before the env default moves, watching `realtime-health-circuit.ts`.
 - **Patterns to follow:** D-041 (reads stored calls, never audio); `report-layer2.ts` TTFA
@@ -300,7 +312,9 @@ flowchart LR
   - Edge: barge-in before any real chunk observes neither for that turn; fewer than 10 timed
     turns in the window renders "not enough calls".
   - Failure: health circuit open forces Gather and logs once.
-  - Integration: seeded `call_transcript_turns` rows yield the expected p95.
+  - Integration: `call_transcript_turns` rows written with `stt_final_at`/`first_audio_at`
+    yield the expected p95; rows from before the migration (null stamps) are excluded, not
+    counted as zero.
 - **Verification:** the dashboard shows realtime share and a p95 reply gap; the capacity number
   is in the decisions log.
 
@@ -334,9 +348,11 @@ flowchart LR
      existing per-session cap; the discard rate is logged.
   5. **Trim serial work.** `create-voice-turn-processor.ts:1372-1377` `Promise.all` the vertical
      and plan prompt sections; `config/ai-routing.ts:261` `maxTokens` 1024 → 256 for
-     `classify_intent`; `:3696-3735` reorder `executeSideEffects` so `tts_play` effects are handed
-     to the adapter before `audit_log` and `create_proposal` are awaited (the proposal id is not
-     spoken, so nothing depends on it); `mediastream-adapter.ts:1973-2025` add a generation check
+     `classify_intent`; `:3696-3735` overlap, do not reorder: start TTS synthesis for the turn's
+     `tts_play` text (socket warm, first chunks buffered in the adapter) concurrently with the
+     `audit_log` and `create_proposal` inserts, and release audio to Twilio only after
+     `proposalRepo.create` resolves; if the insert fails, discard the buffered audio and speak
+     the existing failure copy. Success audio never precedes the commit it describes; `mediastream-adapter.ts:1973-2025` add a generation check
      after the lock so an interrupted turn's reply is discarded and its proposal kept.
   6. **Barge-in gate and resume.** `mediastream-adapter.ts:1891-1894` gate on the tenant level
      (low: ≥ 3 words or confidence ≥ 0.85; medium default: ≥ 2 words or ≥ 0.75; high: any
@@ -348,8 +364,9 @@ flowchart LR
     call, reopen on error, abort does not close), `packages/api/test/voice/transcription-providers.endpointing.test.ts`
     (URL params; `speech_final`/`UtteranceEnd` mapping), `packages/api/test/telephony/media-streams/segment-buffering.test.ts`
     ("two is_final without speech_final → one speechTurn"), `packages/api/test/telephony/media-streams/speculative-classify.test.ts`
-    (hit, miss, exactly one proposal, cost-cap respected), `packages/api/test/ai/voice-turn/side-effects-order.test.ts`
-    (audio handed off before the proposal insert; failure after audio still persists),
+    (hit, miss, exactly one proposal, cost-cap respected), `packages/api/test/ai/voice-turn/side-effects-overlap.test.ts`
+    (synthesis starts before the insert resolves; no frame is released before it; an insert
+    failure discards the buffered audio and speaks the failure copy),
     `packages/api/test/telephony/media-streams/barge-in-gate.test.ts` (levels; disclosure and E1
     protected; interrupted turn's reply discarded; resume after 2 s with no transcript),
     `packages/api/test/integration/voice-barge-in-level-setting.test.ts`; Layer 2 scripts under
@@ -515,12 +532,22 @@ flowchart LR
 - **Requirements:** R7, R8, R11, R12
 - **Dependencies:** U3 (the test call speaks the chosen voice); U4 recommended.
 - **Files and changes, in order (Appendix B "Concrete changes" 1–5, 10; Appendix D §12):**
-  1. **Open the job for new work.** `create-voice-turn-processor.ts:2787` — when `jobId` is
-     absent and `jobTitle` present, call a new `packages/api/src/ai/scheduling/open-job-for-booking.ts`
-     (extracts the auto-open from `CreateAppointmentExecutionHandler`; status `draft`, idempotent
-     on session + title) and continue with that `jobId`; thread `missingFields`,
-     `emergencyFlagged`, `vulnerabilityFlagged` into `buildLaneInputFromSettings`
-     (`inbound-booking-completion.ts:58`).
+  1. **A provisional job for new work, reaped with the hold.** `appointments.job_id` is
+     `NOT NULL`, so a hold needs a job row, and a job created before approval would otherwise
+     become a phantom on the board when the slot is taken, the lane is ineligible, or the caller
+     hangs up. `create-voice-turn-processor.ts:2787` — when `jobId` is absent and `jobTitle`
+     present, call a new `packages/api/src/ai/scheduling/open-provisional-job.ts`: migration adds
+     `jobs.provisional BOOLEAN NOT NULL DEFAULT FALSE` and `jobs.voice_session_id UUID NULL`;
+     the row is created with `provisional = true`, idempotent on session + title, and
+     **excluded from the dispatch board, job lists, digests and search the same way held
+     appointments are** (`dispatch/board-query.ts`, `jobs/pg-job.ts` list queries, digest). The
+     conflict check runs by customer location, not by job. `CreateAppointmentExecutionHandler`
+     / `CreateBookingExecutionHandler` promote the job (`provisional = false`) at execution.
+     Cleanup is durable: `workers/hold-reaper-worker.ts` gains a sibling pass that deletes a
+     provisional job whose hold expired or was cancelled and whose proposal is not approved;
+     `finalizeTerminatedSession` deletes the session's provisional job when the session ends
+     with no proposal; both audited. Thread `missingFields`, `emergencyFlagged`,
+     `vulnerabilityFlagged` into `buildLaneInputFromSettings` (`inbound-booking-completion.ts:58`).
   2. **Thread the supervisor mode.** `VoiceTurnProcessorDeps` gains `isSupervisorPresent`;
      `buildProposal` at `:2865` passes `supervisorMode` (from `voice_sessions.supervisor_mode_at_start`)
      and `supervisorPresent`; delete the "harmless only because" comment; replace the
@@ -546,8 +573,12 @@ flowchart LR
      writes `autonomous_booking_enabled = true` for tenants created after the migration; existing
      rows untouched; `AIApprovalRulesSheet.tsx` shows a one-tap enable card for existing
      tenants with the UNDO explanation. Decision-log entry.
-  7. **Linkage columns.** `appointments.voice_session_id UUID NULL`, `appointments.proposal_id
-     UUID NULL` (index tenant + session), `voice_sessions.caller_phone_e164 TEXT NULL`,
+  7. **Linkage and test columns.** `appointments.voice_session_id UUID NULL`,
+     `appointments.proposal_id UUID NULL` (index tenant + session), `appointments.is_test
+     BOOLEAN NOT NULL DEFAULT FALSE` (no such column exists today; mapped in
+     `appointments/pg-appointment.ts`; excluded from availability, the dispatch board,
+     reminders, digests and billing; the test appointment and its provisional job are
+     cancelled when go-live succeeds or the test is rejected), `voice_sessions.caller_phone_e164 TEXT NULL`,
      `tenant_settings.test_booking_verified_at`, `test_booking_rejected_at`, `test_booking_reason`,
      `test_booking_session_id`, `forwarding_check_started_at`, `forwarding_verified_at`.
      `twilio-adapter.ts` writes the caller number at session create; `place-hold.ts` and
@@ -559,8 +590,9 @@ flowchart LR
      billing and auto-go-live ignore it. Route `POST /api/onboarding/test-booking/start-browser`.
   9. **Verified test booking and go-live.** `routes/onboarding.ts` —
      `POST /test-booking/verify {sessionId}` (session belongs to tenant, is `voice_inbound` or
-     preview, has a linked `appointments` row else 409 `TEST_BOOKING_NO_APPOINTMENT`; flags the
-     appointment `is_test`, stamps `verified_at`, calls `enableVoiceAgentLive` with
+     preview, has a linked `appointments` row else 409 `TEST_BOOKING_NO_APPOINTMENT`; the row
+     was created with `is_test = true` from the wizard's test customer; stamps `verified_at`,
+     calls `enableVoiceAgentLive` with
      `source: 'test_booking_verified'`), `POST /test-booking/reject {sessionId, reason}` (stamps,
      records a correction event the learning loop consumes), `POST /forwarding-check/start`
      (stamps, returns carrier codes and expected `ForwardedFrom`; `routes/telephony.ts /voice`
@@ -592,7 +624,14 @@ flowchart LR
     `packages/api/test/integration/onboarding-status.test.ts` (updated to nine steps); corpus
     `02-happy-booker/create-appointment-known-customer` asserts the confirmed outcome for a
     default new tenant; bucket 09 `slot-just-taken-by-other-call` passes; bucket 05 asserts no
-    SMS promise without consent.
+    SMS promise without consent; `packages/api/test/ai/scheduling/open-provisional-job.test.ts`
+    and `packages/api/test/workers/hold-reaper.provisional-jobs.test.ts` (slot taken → no job
+    remains after the turn; hang-up after the hold → reaper deletes job and hold, audited;
+    approved booking → job promoted and visible); `packages/api/test/appointments/is-test-exclusion.test.ts`
+    (`is_test` rows never appear in availability, the board, reminders or the digest; go-live
+    cancels the test appointment and its provisional job);
+    `packages/api/test/integration/test-booking-verify.test.ts` also pins `appointments.is_test`
+    and `jobs.provisional`.
 - **Floor-criteria risks (Appendix B):** #2 noAutoMutation (job and hold exist before
   approval; pinned by `hold_pending_approval = true` plus a proposal row), #6 noDuplicateCustomer
   (opening a job never creates a customer), #7 complianceGatesRespected (UNDO SMS and
@@ -692,8 +731,15 @@ flowchart LR
 - **Dependencies:** U3 (voice), U4 (schema and settings sheet; its wizard step is absorbed
   here), U6 (preview mode and verified test booking), U7 (`transfer_targets`)
 - **Files:**
-  - `packages/api/src/onboarding/scenarios/library.ts` (new: reads corpus scripts, renders
-    owner-facing cards, substitutes tenant fixtures, selects by pack and persona),
+  - `packages/api/scripts/generate-scenario-registry.ts` (new, same pattern as
+    `catalog:generate`): reads the corpus at build time and emits
+    `packages/api/src/onboarding/scenarios/registry.generated.ts` from the scripts' `ownerFacing`
+    blocks. The runtime corpus loader resolves `scripts/` beside the compiled module and the
+    production image copies only `packages/api/dist` (no JSON is emitted by
+    `tsconfig.build.json`), so a runtime filesystem read would see an empty corpus in
+    production. A CI step (`corpus-integrity`) fails when the generated registry is stale.
+  - `packages/api/src/onboarding/scenarios/library.ts` (new: reads the generated registry,
+    renders owner-facing cards, substitutes tenant fixtures, selects by pack and persona),
     `packages/api/src/onboarding/scenarios/options.ts` (the fixed option set per family, each
     option = an FSM effect + the setting it writes), `packages/api/src/onboarding/scenarios/apply-answer.ts`
     (tap → typed write + audit; speech → existing extractor → clarification or write; free
@@ -746,8 +792,9 @@ flowchart LR
     `packages/web/src/components/onboarding/v2/steps/ScenarioInterviewStep.test.tsx` (jsdom
     class contract), `e2e/scenario-interview-mobile.spec.ts`,
     `packages/api/test/integration/scenario-interview-settings-and-notes.test.ts` (pins the
-    new columns and the notes table), corpus: the `ownerFacing` block is validated by the
-    corpus-integrity check.
+    new columns and the notes table), `packages/api/test/onboarding/scenarios/registry-fresh.test.ts`
+    (regenerating the registry from the corpus produces no diff), corpus: the `ownerFacing`
+    block is validated by the corpus-integrity check.
 - **Approach:** options are FSM effects only, so an answer is always typeable; the agent's
   current choice is the conservative default (hold, transfer on uncertainty, no quotes) so a
   skipped interview yields a safe agent; emergency rails, negotiation refusal and spam handling
