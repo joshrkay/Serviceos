@@ -607,11 +607,20 @@ flowchart LR
     `residential BOOL`, `commercial BOOL`, `services_not_offered TEXT[]`, `updated_at`,
     `updated_by`; FORCE RLS) and `tenant_faq_entries` (`id`, `tenant_id`, `question ≤200`,
     `answer ≤500`, `aliases TEXT[]`, `language en|es`, `active`, `embedding vector(1536) NULL`,
-    `embedding_model`, `updated_at`; ≤ 50 per tenant; FORCE RLS; cosine ivfflat).
+    `embedding_model`, **`index_status TEXT NOT NULL DEFAULT 'pending' CHECK (index_status IN
+    ('pending', 'indexing', 'indexed', 'failed'))`, `index_attempts INT NOT NULL DEFAULT 0`,
+    `last_index_error TEXT NULL`, `indexed_at TIMESTAMPTZ NULL`**, `updated_at`; ≤ 50 per
+    tenant; FORCE RLS; cosine ivfflat). The status column is what the embed worker drives
+    and what retrieval filters on (`index_status = 'indexed'` only), so a pending or failed
+    row is never served and never mistaken for an indexed one; the Zod contract and the
+    repository expose it, and the Knowledge sheet shows `failed` rows with the error.
   - `packages/shared/src/contracts/knowledge.ts` — Zod shapes shared by API and web.
   - `packages/api/src/knowledge/business-answers-repo.ts`, `faq-repo.ts`,
     `packages/api/src/workers/faq-embed-worker.ts` (P0-009 pattern; embeds on write via the
-    existing `EmbeddingProvider`; status `indexing` until done).
+    existing `EmbeddingProvider`; transitions `pending → indexing → indexed` with `indexed_at`,
+    or `indexing → failed` with `last_index_error` and `index_attempts + 1`; failed rows are
+    retried with backoff up to five attempts, then stay `failed` and visible in the sheet; an
+    edit to `question`/`answer`/`aliases` resets the row to `pending` and clears the embedding).
   - `packages/api/src/routes/knowledge.ts` — CRUD, owner, audited.
   - `packages/api/src/onboarding/derive-status.ts`, `load-facts.ts`, `contracts.ts` — step
     `business_answers`, complete when `REQUIRED_ANSWER_KEYS` (service area summary, emergency
@@ -648,7 +657,10 @@ flowchart LR
     pack-seeded trip fee with `confirmed_at` null → U5 speaks "not on file"; owner taps accept
     → `confirmed_at` stamped and the fee is spoken; owner edits the amount → confirmed in the
     same write.
-  - Failure: embedding provider down → row saved, `indexing`, retried.
+  - Failure: embedding provider down → row saved `pending`, worker moves it to `indexing`,
+    the failure lands as `failed` with `last_index_error` and `index_attempts = 1`, retrieval
+    skips it, the retry succeeds → `indexed` with `indexed_at`; five failures → stays `failed`
+    and the sheet shows the error.
   - Integration: RLS denies cross-tenant reads on both tables; raw select pins the columns.
 - **Verification:** a new tenant completes the step under five minutes from pack defaults.
 
@@ -832,9 +844,22 @@ flowchart LR
      `twilio-adapter.ts` writes the caller number at session create; `place-hold.ts` and
      `CreateAppointmentExecutionHandler` stamp the session and proposal ids.
   8. **Preview mode for the browser test.** `ai/agents/customer-calling/inapp-adapter.ts` —
-     `preview: true` option: `channel 'inapp_voice'`, no `actorUserId`, `ownerSession false`, so
-     `classifierProfileForSession` returns `caller`; runs the inbound greeting and `ask_caller`
-     path with `From` = owner phone; `context.preview = true` so `recordCallEnded`, activation,
+     `preview: true` option: `channel 'inapp_voice'`, no `actorUserId`, `ownerSession false`,
+     **and `session.testMode = 'caller_preview'`** — an explicit mode, because neither of the
+     two test transports reaches the caller booking lane on its own:
+     `classifierProfileForSession` (`create-voice-turn-processor.ts:643-647`) maps every
+     trusted `inapp` session to `operator` regardless of `ownerSession`, and the lane block
+     (`:2752-2761`) requires `session.channel === 'telephony'` and `ownerSession !== true`,
+     which the attested-owner phone test fails on the second condition. So
+     `classifierProfileForSession` returns `caller` first whenever `testMode ===
+     'caller_preview'`, and the lane gate becomes `(channel === 'telephony' || testMode ===
+     'caller_preview') && (ownerSession !== true || testMode === 'caller_preview')`. The
+     real-phone test sets the same `testMode` on the session when `testBooking` is true (item
+     7), so both transports classify as a caller, reach the lane, and execute to the `is_test`
+     appointment item 9 verifies. The test-only safeguards stay attached to the mode:
+     `is_test`, the wizard customer substitution, exclusion from billing, activation and
+     counts, no `owner_line` intents, and the hold TTL. Runs the inbound greeting and
+     `ask_caller` path with `From` = owner phone; `context.preview = true` so `recordCallEnded`, activation,
      billing and auto-go-live ignore it. Route `POST /api/onboarding/test-booking/start-browser`.
   9. **Verified test booking and go-live.** `routes/onboarding.ts` —
      `POST /test-booking/verify {sessionId}` (session belongs to tenant, is `voice_inbound` or
@@ -889,7 +914,10 @@ flowchart LR
     `packages/api/test/ai/agents/customer-calling/inapp-adapter.preview.test.ts` (profile
     resolves to `caller`; excluded from counts), `packages/api/test/onboarding/derive-status.nine-steps.test.ts`,
     `packages/web/src/components/onboarding/v2/steps/TestBookingStep.test.tsx`,
-    `packages/api/test/integration/test-booking-verify.test.ts` (linkage columns; verify
+    `packages/api/test/integration/test-booking-verify.test.ts` (linkage columns; a browser
+    preview and an attested-owner phone test both classify as `caller`, pass the lane gate,
+    mint a lane proposal and execute to an `is_test` appointment; an attested owner call
+    outside a started test keeps `owner_line` and never enters the lane; verify
     inside the undo window, with the hold still pending and the proposal `approved`, returns
     409 `TEST_BOOKING_NOT_EXECUTED`; after the handler clears the hold and the proposal is
     `executed` it stamps; a canceled or undone test booking never stamps),
