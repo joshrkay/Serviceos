@@ -953,11 +953,40 @@ flowchart LR
      technician against the new window (`:369`). A technician-only change
      (`PUT /:id/technician`) keeps the technician check alone: the row already occupies its
      capacity unit. `force: true` on a reschedule is audited `appointment_overbooked`
-     exactly as on create. `test/routes/appointments.capacity.test.ts` pins, at capacity 1:
+     exactly as on create. **The guard and the write are one transaction on every path,
+     including the ones that have no request transaction.** The approved-proposal
+     handlers that create or move a visit — `RescheduleAppointmentExecutionHandler`
+     (`proposals/execution/reschedule-handler.ts:24-30,243-248`),
+     `CreateAppointmentExecutionHandler` (`handlers.ts:377-385,634`) and the
+     emergency-dispatch hold (`emergency-dispatch-handler.ts:146,310`) — declare
+     `performsExternalIo = true`, so the executor deliberately runs them **outside** its
+     transaction (`executor.ts:358-389`, Path B) and each repo call opens and commits its
+     own connection; a `lockInCurrentTransaction` there would have no ambient client to
+     lock on, and the capacity check would commit separately from the move. So
+     `updateAppointment`'s moved-window branch and `createAppointment` run the lock, the
+     predicate and the write inside **one tenant transaction that is opened on demand**:
+     when `tenantContextStore` already holds a request client (every `/api` route) the
+     guard uses it, exactly as `runAfterCommit` already distinguishes the two cases
+     (`middleware/tenant-context.ts:549-559`); when none is ambient (Path B handlers,
+     workers) the branch itself wraps lock + check + write in
+     `PgTenantTransactionRunner.run` (`db/tenant-transaction.ts:37`), which is safe there
+     precisely because nothing outer is holding a transaction to orphan. The handlers'
+     external sends (`transactionalComms.notifyRescheduled`, the booking confirmation, the
+     emergency page) stay after that transaction commits, as they are today, so a 409 from
+     the guard means nothing was moved and nothing was sent; the handler maps it to
+     `{ success: false, error: 'SLOT_TAKEN …' }` and the proposal lands in
+     `execution_error` with the next opening in the message rather than silently
+     overbooking. `test/routes/appointments.capacity.test.ts` pins, at capacity 1:
      create in a free window then `PUT` onto an occupied one → 409 `SLOT_TAKEN`; the same
      with `force` → 200 and the overbooking audit; a `PUT` that re-sends the unchanged
      window → no capacity query; a move within the visit's own window → passes (self
      excluded); `POST /jobs/:id/schedule` onto a full window → 409.
+     `test/proposals/execution/reschedule-capacity.test.ts` (integration, real Postgres)
+     pins that an approved reschedule onto a full window fails with `SLOT_TAKEN`, moves
+     nothing and sends no customer notification; that the lock is observed on the
+     handler's own transaction (a concurrent operator `PUT` for the same window blocks
+     until it commits, then 409s); and that the emergency-dispatch hold contends for the
+     same lock.
      One lock per tenant serialises every hold placement for that tenant, which is a handful
      per minute at the busiest tenant and costs nothing measurable; two concurrent calls for
      overlapping windows with different starts (2:00–3:00 and 2:30–3:30) therefore also
