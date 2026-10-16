@@ -1046,11 +1046,30 @@ export async function computeDigestPayload(
   // D-015 amendment — "Auto-booked: N appointment(s)" reflection. Omitted
   // when no autonomous-lane bookings ran today (count===0), per the "omit if
   // zero" convention shared with unsureAbout/learnedToday/supervisorChecks.
+  // Undone = undone before execution (status 'undone') OR after it: the
+  // owner's UNDO then cancels the appointment and the proposal stays
+  // 'executed', which is the common case once the 5 s window has passed.
+  const undoneFlags = await Promise.all(
+    autonomousLaneProposals.map(async (p) => {
+      if (p.status === 'undone') return true;
+      const appointmentId =
+        typeof p.resultEntityId === 'string' && p.resultEntityId
+          ? p.resultEntityId
+          : typeof p.payload?.appointmentId === 'string'
+            ? p.payload.appointmentId
+            : undefined;
+      if (!appointmentId) return false;
+      const appointment = await deps.appointmentRepo
+        .findById(tenantId, appointmentId)
+        .catch(() => null);
+      return appointment?.status === 'canceled';
+    }),
+  );
   const autonomousBookings: DigestAutonomousBookings | undefined =
     autonomousLaneProposals.length > 0
       ? {
           count: autonomousLaneProposals.length,
-          undone: autonomousLaneProposals.filter((p) => p.status === 'undone').length,
+          undone: undoneFlags.filter(Boolean).length,
         }
       : undefined;
 

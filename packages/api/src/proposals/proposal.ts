@@ -1463,7 +1463,9 @@ export class InMemoryProposalRepository implements ProposalRepository {
         return (
           !!evaluation &&
           typeof evaluation === 'object' &&
-          (evaluation as Record<string, unknown>).eligible === true
+          (evaluation as Record<string, unknown>).eligible === true &&
+          // Actually auto-booked (mirrors the Postgres query).
+          ['approved', 'executing', 'executed', 'undone'].includes(p.status)
         );
       })
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())

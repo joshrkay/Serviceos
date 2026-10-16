@@ -105,6 +105,8 @@ interface DepsOverrides {
   autonomousLaneProposals?: Proposal[];
   /** D-015 amendment — when false, omit findAutonomousLaneApprovedForDay entirely (optional-method path). */
   withAutonomousLaneMethod?: boolean;
+  /** D-015 — appointment ids appointmentRepo.findById reports as canceled. */
+  canceledAppointmentIds?: string[];
   /** WS10 — proposals returned by findAppliedInstructionsForDay. */
   appliedInstructionProposals?: Proposal[];
   /** WS10 — when false, omit findAppliedInstructionsForDay entirely (optional-method path). */
@@ -131,6 +133,8 @@ function makeDeps(o: DepsOverrides = {}): DigestComputeDeps {
     } as unknown as JobRepository,
     appointmentRepo: {
       findByDateRange: async () => o.appointments ?? [],
+      findById: async (_t: string, id: string) =>
+        o.canceledAppointmentIds?.includes(id) ? { id, status: 'canceled' } : { id, status: 'scheduled' },
     } as unknown as AppointmentRepository,
     invoiceRepo: {
       findByTenant: async (_t: string, opts?: { status?: string }) =>
@@ -664,6 +668,20 @@ describe('computeDigestPayload', () => {
         ],
       }));
       expect(result.autonomousBookings).toEqual({ count: 3, undone: 1 });
+    });
+
+    // Value: protects=an owner's UNDO after the booking executed counts as undone in the digest;
+    //   fails_when=undone reads only proposal status 'undone' (a post-execution undo keeps 'executed');
+    //   why_new=the common undo (after the 5 s window) read 0; seam=none; no_claim=other cancel causes
+    it('counts a post-execution undo (appointment canceled, proposal still executed) as undone', async () => {
+      const result = await computeDigestPayload(TENANT, DATE, makeDeps({
+        autonomousLaneProposals: [
+          proposal({ id: 'ab-1', proposalType: 'create_booking', status: 'executed', payload: { appointmentId: 'appt-1' } }),
+          proposal({ id: 'ab-2', proposalType: 'create_booking', status: 'executed', payload: { appointmentId: 'appt-2' } }),
+        ],
+        canceledAppointmentIds: ['appt-2'],
+      }));
+      expect(result.autonomousBookings).toEqual({ count: 2, undone: 1 });
     });
 
     it('omits autonomousBookings when nothing took the lane today', async () => {

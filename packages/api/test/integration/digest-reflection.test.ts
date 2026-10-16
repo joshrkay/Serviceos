@@ -179,6 +179,12 @@ describe('Postgres integration — digest reflection sections (N-005)', () => {
       sourceContext: { autonomousLaneEvaluation: { eligible: true, threshold: 0.95 } },
     });
     const noStamp = makeProposal({ status: 'draft' });
+    // Lane-eligible but stored for review (supervisor cap): never auto-booked.
+    const eligibleButHeld = makeProposal({
+      status: 'ready_for_review',
+      sourceContext: { autonomousLaneEvaluation: { eligible: true, threshold: 0.95 } },
+    });
+    await proposalRepo.create(eligibleButHeld);
     await proposalRepo.create(eligibleToday);
     await proposalRepo.create(ineligibleToday);
     await proposalRepo.create(eligibleYesterday);

@@ -230,6 +230,9 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
            WHERE tenant_id = $1
              AND created_at >= $2 AND created_at < $3
              AND source_context->'autonomousLaneEvaluation'->>'eligible' = 'true'
+             -- Actually auto-booked: a lane-eligible booking stored for review
+             -- (supervisor cap, executability hold) never was.
+             AND status IN ('approved', 'executing', 'executed', 'undone')
            ORDER BY created_at DESC
            ${typeof limit === 'number' ? 'LIMIT $4' : ''}`,
         typeof limit === 'number' ? [tenantId, from, to, limit] : [tenantId, from, to],

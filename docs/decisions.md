@@ -224,20 +224,29 @@ proposals whose `sourceContext.autonomousLaneEvaluation.eligible = true` —
 mirroring the WS6 supervisorChecks reflection so autonomous activity is never
 silent even when nothing goes wrong.
 
-**Amendment (2026-10-16):** Autonomous approval requires the owner's cell,
-because the owner UNDO SMS is part of why the lane is safe (voice-parity plan,
-design review 2026-10-15). After the structural gates (`proposal_type_not_eligible`,
-`not_inbound_receptionist`, so memo traffic keeps its structural reason), the lane
-returns `owner_cell_missing` when `tenant_settings.owner_phone` is empty; the
-backup supervisor's mobile does not count. Both the memo router and the live call
-return `undo_channel_unavailable` when the UNDO SMS cannot be minted or sent (sender,
-one-tap signing secret or undo link unwired), and both send the UNDO to the exact
-number the lane checked (`proposals/lane-undo-sms.ts`). The live call now passes the
-classifier confidence to the lane (before, every live booking ended `below_threshold`)
-and sends the same one-tap UNDO SMS after a lane-approved booking. The D-019 on-call close composes the D-015 gates without the
-owner-cell check (`evaluateBookingLaneForOwnerApproval`): every close is
-owner-approved, so the UNDO rationale does not apply there. A tenant that opted in
-with no owner cell now gets its bookings queued for review instead of auto-approved.
+**Amendment (2026-10-16):** Autonomous (system) approval now requires, after the
+structural gates (`proposal_type_not_eligible`, `not_inbound_receptionist`, so memo
+traffic keeps its structural reason):
+- the owner's cell, `tenant_settings.owner_phone` only, never a backup supervisor's
+  mobile (`owner_cell_missing`), because the owner UNDO SMS is part of why the lane is
+  safe (voice-parity plan, design review 2026-10-15);
+- an UNDO channel that can deliver (`undo_channel_unavailable`): a sender and the
+  one-tap secret, and in production a configured SMS provider and an https,
+  non-localhost API origin (`proposals/lane-undo-sms.ts` `buildLaneUndoChannel`);
+- a slot-conflict check that ran before the hold and found the slot free
+  (`slot_conflict`); localized caller copy (`language_unsupported`); and no earlier
+  auto-approval of the same slot on the call (`duplicate_booking`).
+
+The live call can now auto-approve: it passes the classifier confidence only when a
+model produced it (`IntentClassification.confidenceSource`; a phrase rule's pinned
+0.95 never counts), takes the lane's customer only from an A-attested caller-ID match
+not created on the call, speaks the pending line whenever the stored booking is not
+approved, and sends the owner a fire-and-forget, audited UNDO naming the customer on
+record and the held time. The one-tap UNDO link confirms on GET and acts only on POST,
+so SMS link previews cannot cancel bookings. The D-019 on-call close composes the
+D-015 gates without the autonomy-only ones (`evaluateBookingLaneForOwnerApproval`):
+every close is owner-approved. A tenant that opted in with no owner cell now gets its
+bookings queued for review instead of auto-approved.
 
 ### D-016: Railway supersedes AWS (D-001) — CDK prototype removed
 **Date:** 2026-07-11
