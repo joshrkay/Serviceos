@@ -2911,6 +2911,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         ...(s.autonomousBookingThreshold !== undefined
           ? { threshold: s.autonomousBookingThreshold }
           : {}),
+        // The lane's owner cell: owner_phone only, never the backup supervisor.
+        ownerPhone: s.ownerPhone ?? null,
       };
     },
     // D-015 amendment — platform-wide kill switch, checked before tenant
@@ -4150,6 +4152,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
     },
+    // D-015 — owner one-tap UNDO for a lane-approved live-call booking: the
+    // same sender, secret and undo link as the memo router's UNDO. Without
+    // them the live lane refuses autonomy (undo_channel_unavailable).
+    ...(oneTapSmsSender && oneTapSecret
+      ? {
+          laneUndo: {
+            sendSms: oneTapSmsSender,
+            secret: oneTapSecret,
+            buildUndoUrl: (token: string) =>
+              `${oneTapApiBaseUrl}/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`,
+          },
+        }
+      : {}),
   };
   const twilioAdapter = new TwilioGatherAdapter(twilioAdapterDeps);
 

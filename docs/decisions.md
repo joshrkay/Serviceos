@@ -224,6 +224,21 @@ proposals whose `sourceContext.autonomousLaneEvaluation.eligible = true` —
 mirroring the WS6 supervisorChecks reflection so autonomous activity is never
 silent even when nothing goes wrong.
 
+**Amendment (2026-10-16):** Autonomous approval requires the owner's cell,
+because the owner UNDO SMS is part of why the lane is safe (voice-parity plan,
+design review 2026-10-15). After the structural gates (`proposal_type_not_eligible`,
+`not_inbound_receptionist`, so memo traffic keeps its structural reason), the lane
+returns `owner_cell_missing` when `tenant_settings.owner_phone` is empty; the
+backup supervisor's mobile does not count. Both the memo router and the live call
+return `undo_channel_unavailable` when the UNDO SMS cannot be minted or sent (sender,
+one-tap signing secret or undo link unwired), and both send the UNDO to the exact
+number the lane checked (`proposals/lane-undo-sms.ts`). The live call now passes the
+classifier confidence to the lane (before, every live booking ended `below_threshold`)
+and sends the same one-tap UNDO SMS after a lane-approved booking. The D-019 on-call close composes the D-015 gates without the
+owner-cell check (`evaluateBookingLaneForOwnerApproval`): every close is
+owner-approved, so the UNDO rationale does not apply there. A tenant that opted in
+with no owner cell now gets its bookings queued for review instead of auto-approved.
+
 ### D-016: Railway supersedes AWS (D-001) — CDK prototype removed
 **Date:** 2026-07-11
 **Decision:** D-001's single-cloud AWS/CDK deployment was never carried into production.

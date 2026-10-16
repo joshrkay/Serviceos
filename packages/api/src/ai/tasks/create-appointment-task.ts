@@ -903,6 +903,7 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
           platformDisabled: context.autonomousBooking.platformDisabled,
           settings: context.autonomousBooking.settings,
           ownerPhone: context.autonomousBooking.ownerPhone,
+          undoChannelAvailable: context.autonomousBooking.undoChannelAvailable,
           proposalType: 'create_booking',
           inboundReceptionistSource: context.autonomousBooking.inboundReceptionistSource,
           confidenceScore: confidence.score,

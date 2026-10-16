@@ -126,7 +126,6 @@ function settingsRow(overrides: Partial<TenantSettings> = {}): TenantSettings {
     autonomousCloseMaxCents: 500000,
     autonomousBookingEnabled: true,
     autonomousBookingThreshold: 0.95,
-    ownerPhone: OWNER_PHONE,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,

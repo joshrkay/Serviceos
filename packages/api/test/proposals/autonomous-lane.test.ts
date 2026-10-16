@@ -88,9 +88,29 @@ describe('evaluateAutonomousBookingLane — every gate blocks independently', ()
     ['no owner cell on file', { ownerPhone: null }, 'owner_cell_missing'],
     ['blank owner cell', { ownerPhone: '   ' }, 'owner_cell_missing'],
     [
+      'owner UNDO SMS cannot be sent (sender, secret or link unwired)',
+      { undoChannelAvailable: false },
+      'undo_channel_unavailable',
+    ],
+    [
+      'owner cell checked BEFORE the UNDO channel',
+      { ownerPhone: null, undoChannelAvailable: false },
+      'owner_cell_missing',
+    ],
+    [
       'tenant opt-in checked BEFORE the owner cell',
       { settings: { enabled: false }, ownerPhone: null },
       'tenant_not_opted_in',
+    ],
+    [
+      'owner memo with no owner cell reports the structural reason, not the cell',
+      { inboundReceptionistSource: false, ownerPhone: null },
+      'not_inbound_receptionist',
+    ],
+    [
+      'non-booking type with no owner cell reports the structural reason, not the cell',
+      { proposalType: 'draft_estimate' as ProposalType, ownerPhone: null },
+      'proposal_type_not_eligible',
     ],
     [
       'non-booking type',
@@ -132,6 +152,17 @@ describe('evaluateAutonomousBookingLane — every gate blocks independently', ()
       expect(result).toEqual({ eligible: false, reason });
     });
   }
+
+  it('undoChannelAvailable absent or true does not block (only a caller that knows its UNDO cannot send passes false)', () => {
+    expect(evaluateAutonomousBookingLane({ ...eligibleInput(), undoChannelAvailable: undefined })).toEqual({
+      eligible: true,
+      threshold: 0.95,
+    });
+    expect(evaluateAutonomousBookingLane({ ...eligibleInput(), undoChannelAvailable: true })).toEqual({
+      eligible: true,
+      threshold: 0.95,
+    });
+  });
 
   it('platformDisabled absent/false ⇒ byte-identical to today (eligible when every other gate passes)', () => {
     expect(evaluateAutonomousBookingLane({ ...eligibleInput(), platformDisabled: undefined })).toEqual({

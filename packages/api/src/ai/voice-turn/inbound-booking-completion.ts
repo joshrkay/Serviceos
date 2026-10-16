@@ -60,6 +60,8 @@ export function buildLaneInputFromSettings(opts: {
   settings?: AutonomousLaneSettings;
   /** `tenant_settings.owner_phone` — no cell, no autonomous booking. */
   ownerPhone: string | null | undefined;
+  /** False when the live path cannot send the owner UNDO SMS. */
+  undoChannelAvailable: boolean;
   confidenceScore?: number;
   customerId?: string;
   holdExpiryAt: Date;
@@ -73,6 +75,7 @@ export function buildLaneInputFromSettings(opts: {
     platformDisabled: opts.platformDisabled === true,
     settings: opts.settings,
     ownerPhone: opts.ownerPhone,
+    undoChannelAvailable: opts.undoChannelAvailable,
     proposalType: 'create_booking',
     inboundReceptionistSource: true,
     confidenceScore: opts.confidenceScore,

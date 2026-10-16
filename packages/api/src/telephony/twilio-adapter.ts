@@ -491,6 +491,11 @@ export interface TwilioAdapterDeps {
    * drift from VoiceTurnProcessorDeps.
    */
   autonomousClose?: VoiceTurnProcessorDeps['autonomousClose'];
+  /**
+   * D-015 — owner one-tap UNDO for a lane-approved live-call booking.
+   * Processor-only pass-through, typed by reference like autonomousClose.
+   */
+  laneUndo?: VoiceTurnProcessorDeps['laneUndo'];
 }
 
 /**

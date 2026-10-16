@@ -187,7 +187,14 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
     sendSms?: (to: string, body: string) => Promise<void>;
     laneEnabled?: boolean;
     platformDisabled?: boolean;
+    /** tenant_settings.owner_phone as the lane resolver reads it. */
+    laneOwnerPhone?: string | null;
+    /** The owner-or-backup number the routing SMS goes to. */
+    resolveOwnerPhone?: (tenantId: string) => Promise<string | null | undefined>;
+    /** Leave the one-tap signing secret unwired (no UNDO link can be minted). */
+    noUndoSecret?: boolean;
   }) {
+    const resolveOwnerPhone = opts.resolveOwnerPhone ?? (async () => '+15125550100');
     return createVoiceActionRouterWorker({
     // Production always resolves a tenant zone; a booking without one now
     // asks the operator instead of guessing at US-Eastern.
@@ -199,6 +206,7 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
       autonomousBookingResolver: async () => ({
         enabled: opts.laneEnabled ?? true,
         threshold: 0.95,
+        ownerPhone: opts.laneOwnerPhone === undefined ? '+15125550100' : opts.laneOwnerPhone,
       }),
       ...(opts.platformDisabled !== undefined
         ? { autonomousBookingPlatformDisabled: opts.platformDisabled }
@@ -206,10 +214,10 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
       unsupervisedRouting: {
         auditRepo,
         sendSms: opts.sendSms ?? (async () => {}),
-        secret: SECRET,
+        ...(opts.noUndoSecret ? {} : { secret: SECRET }),
         buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
         buildUndoUrl: (token) => `https://api.example.com/undo?token=${token}`,
-        resolveOwnerPhone: async () => '+15125550100',
+        resolveOwnerPhone,
         resolveRouting: async () => 'queue_and_sms',
       },
     });
@@ -354,5 +362,81 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
     const events = await auditRepo.findByEntity(TENANT, 'proposal', proposals[0].id);
     const evaluated = events.find((e) => e.eventType === 'autonomous_booking_lane_evaluated');
     expect(evaluated?.metadata).toMatchObject({ eligible: false, reason: 'platform_disabled' });
+  });
+
+  function bookingMessage() {
+    return msg({
+      tenantId: TENANT,
+      userId: 'u-1',
+      transcript: 'Book the AC repair tomorrow at 2pm',
+      customerId: CUSTOMER_ID,
+    });
+  }
+
+  async function laneVerdict() {
+    const proposals = await proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].proposalType).toBe('create_booking');
+    const events = await auditRepo.findByEntity(TENANT, 'proposal', proposals[0].id);
+    const evaluated = events.find((e) => e.eventType === 'autonomous_booking_lane_evaluated');
+    return { status: proposals[0].status, evaluation: evaluated?.metadata };
+  }
+
+  // Value: protects=only tenant_settings.owner_phone counts as the owner cell; a backup supervisor's mobile never qualifies a booking for the lane;
+  //   fails_when=the router feeds the lane the owner-or-backup resolver (or any number other than owner_phone);
+  //   why_new=router tests only ran tenants whose owner cell was set; seam=none;
+  //   no_claim=the backup supervisor lookup itself (mocked resolver)
+  it('no owner_phone on file: the booking queues for review as owner_cell_missing, even with a backup supervisor mobile; the review text carries no UNDO', async () => {
+    const sendSms = vi.fn(async (_to: string, _body: string) => {});
+    const worker = makeWorker({
+      sendSms,
+      laneOwnerPhone: null,
+      resolveOwnerPhone: async () => '+15125550777',
+    });
+
+    await expect(worker.handle(bookingMessage(), silentLogger())).resolves.toBeUndefined();
+
+    const { status, evaluation } = await laneVerdict();
+    expect(status).toBe('ready_for_review');
+    expect(evaluation).toMatchObject({ eligible: false, reason: 'owner_cell_missing' });
+    // The review-routing text still reaches the backup, and it is never an UNDO.
+    expect(sendSms).toHaveBeenCalled();
+    expect(sendSms.mock.calls.every(([to]) => to === '+15125550777')).toBe(true);
+    expect(sendSms.mock.calls.some(([, body]) => body.includes('UNDO'))).toBe(false);
+  });
+
+  // Value: protects=the lane never auto-approves a booking whose owner UNDO SMS cannot be sent;
+  //   fails_when=the router stops passing undoChannelAvailable, or computes it without the signing secret;
+  //   why_new=router tests always wired sender, secret and undo link; seam=none;
+  //   no_claim=the production env actually setting ONE_TAP_APPROVE_SECRET
+  it('UNDO channel not wired (no signing secret): the booking queues for review as undo_channel_unavailable', async () => {
+    const worker = makeWorker({ noUndoSecret: true });
+
+    await expect(worker.handle(bookingMessage(), silentLogger())).resolves.toBeUndefined();
+
+    const { status, evaluation } = await laneVerdict();
+    expect(status).toBe('ready_for_review');
+    expect(evaluation).toMatchObject({ eligible: false, reason: 'undo_channel_unavailable' });
+  });
+
+  // Value: protects=the UNDO SMS goes to the exact number the lane checked, with no second lookup that can fail after approval;
+  //   fails_when=the UNDO block re-resolves the owner phone instead of using the lane's number;
+  //   why_new=the existing UNDO test used one resolver that always succeeds; seam=none;
+  //   no_claim=SMS delivery (mocked sender)
+  it('the UNDO SMS goes to the lane-checked owner cell even when the owner-or-backup lookup fails', async () => {
+    const sendSms = vi.fn(async (_to: string, _body: string) => {});
+    const worker = makeWorker({
+      sendSms,
+      laneOwnerPhone: '+15125550100',
+      resolveOwnerPhone: async () => {
+        throw new Error('settings db down');
+      },
+    });
+
+    await worker.handle(bookingMessage(), silentLogger());
+
+    const { status } = await laneVerdict();
+    expect(status).toBe('approved');
+    expect(sendSms).toHaveBeenCalledWith('+15125550100', expect.stringContaining('Tap to UNDO'));
   });
 });

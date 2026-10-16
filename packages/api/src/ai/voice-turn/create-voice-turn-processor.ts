@@ -173,6 +173,7 @@ import {
   type AutonomousCloseEvaluation,
   type AutonomousCloseIneligibleReason,
 } from '../../proposals/autonomous-close-lane';
+import { sendLaneUndoSms, type LaneUndoChannel } from '../../proposals/lane-undo-sms';
 import {
   queueCloseFallbackChain,
   AUTONOMOUS_CLOSE_ACTOR,
@@ -864,6 +865,13 @@ export interface VoiceTurnProcessorDeps {
     oneTapSecret?: string;
     buildApproveUrl?: (token: string) => string;
   };
+  /**
+   * D-015 — the owner one-tap UNDO SMS for a lane-approved live-call booking
+   * (sender, one-tap secret, undo link). Absent ⇒ the live lane refuses
+   * autonomy (`undo_channel_unavailable`): a booking is never auto-approved
+   * without the owner's UNDO.
+   */
+  laneUndo?: LaneUndoChannel;
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
   callerPlanResolver?: (
     tenantId: string,
@@ -2627,6 +2635,11 @@ export function createVoiceTurnProcessor(
               ...(typeof fx.payload.utterance === 'string' && fx.payload.utterance.trim().length > 0
                 ? { utterance: fx.payload.utterance }
                 : {}),
+              // The classifier's confidence: the D-015 lane's threshold gate
+              // reads it (without it every live booking ended below_threshold).
+              ...(typeof fx.payload.confidence === 'number'
+                ? { confidence: fx.payload.confidence }
+                : {}),
             },
             {
               tenantId,
@@ -2747,6 +2760,8 @@ export function createVoiceTurnProcessor(
       let autonomousLaneForCreate:
         | { eligible: true; threshold: number }
         | undefined;
+      // The owner cell the lane checked: the UNDO SMS goes to exactly it.
+      let laneOwnerPhone: string | undefined;
       let laneSourceStamp: Record<string, unknown> | undefined;
       // #1045 — the held slot's back-to-back drivability result.
       let holdFeasibilityStamp: HoldFeasibility | undefined;
@@ -2830,6 +2845,7 @@ export function createVoiceTurnProcessor(
                     : {}),
                 },
                 ownerPhone: settings?.ownerPhone,
+                undoChannelAvailable: deps.laneUndo !== undefined,
                 confidenceScore: payloadConfidence,
                 customerId,
                 holdExpiryAt: hold.holdExpiryAt,
@@ -2849,6 +2865,7 @@ export function createVoiceTurnProcessor(
               holdFeasibilityStamp = hold.feasibility;
               if (laneEval.eligible) {
                 autonomousLaneForCreate = laneEval;
+                laneOwnerPhone = settings?.ownerPhone ?? undefined;
               } else if (!laneEval.eligible) {
                 // Hold stays for owner confirmation window (24h); ineligible
                 // lane means draft create_booking, not auto-approve.
@@ -2984,6 +3001,29 @@ export function createVoiceTurnProcessor(
       const held = await holdForExecutability(tenantId, proposal, deps.approvalReferenceChecks);
       const stored = await deps.proposalRepo.create(held.proposal);
       session.proposalIds.push(stored.id);
+      // D-015 — a lane-approved booking texts the owner the one-tap UNDO at
+      // the cell the lane checked, the same text the memo router sends.
+      // Best-effort: a send failure never fails the booking or the turn.
+      if (
+        stored.status === 'approved' &&
+        autonomousLaneForCreate &&
+        deps.laneUndo &&
+        laneOwnerPhone
+      ) {
+        try {
+          await sendLaneUndoSms(deps.laneUndo, {
+            proposalId: stored.id,
+            tenantId,
+            summary: stored.summary,
+            ownerPhone: laneOwnerPhone,
+          });
+        } catch (err) {
+          logger.warn('live-call lane undo SMS failed', {
+            proposalId: stored.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       // #1600 (2) — a request that was read back, confirmed and drafted is a
       // completed request, not a repeat: its count starts over, so a caller
       // booking five visits (or correcting a mis-heard readback) on one call
@@ -4414,7 +4454,6 @@ export function createVoiceTurnProcessor(
             ? { threshold: settings.autonomousBookingThreshold }
             : {}),
         },
-        ownerPhone: settings?.ownerPhone,
         proposalType: 'create_booking',
         inboundReceptionistSource: true,
         ...(typeof draft?.confidenceScore === 'number'

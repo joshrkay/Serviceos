@@ -551,8 +551,8 @@ export function decideInitialStatus(input: {
    * UB-D / D-015 — autonomous booking lane. Set ONLY by the
    * inbound-receptionist booking call sites after
    * `evaluateAutonomousBookingLane` passed every gate (tenant opt-in,
-   * booking capture types only, clean resolution, live held slot in
-   * business hours, no session flags). When present-and-eligible AND the
+   * booking capture types only, owner cell on file, clean resolution, live
+   * held slot in business hours, no session flags). When present-and-eligible AND the
    * tenant is unsupervised (threshold resolution returned null), the lane's
    * dedicated (stricter) threshold is used instead of categorically
    * blocking. Absent input ⇒ behavior byte-identical to pre-lane code for

@@ -26,6 +26,12 @@
  * tenant opt-in gate — so the stamped reason (`platform_disabled`)
  * distinguishes an operator-level shutoff from a tenant simply not having
  * opted in.
+ *
+ * D-015 amendment (2026-10-16): autonomous approval requires the owner's cell
+ * (`owner_cell_missing`) and, where the caller knows it, a working UNDO SMS
+ * channel (`undo_channel_unavailable`), both checked after the structural
+ * gates. `evaluateBookingLaneForOwnerApproval` skips them for the D-019 close,
+ * which the owner always approves.
  */
 import { actionClassForProposalType, type ProposalType } from './proposal';
 import { confidenceMetaBlocksAutoApprove } from './auto-approve';
@@ -94,6 +100,11 @@ export interface EvaluateAutonomousLaneInput {
    * tenant with no cell on file never books autonomously.
    */
   ownerPhone: string | null | undefined;
+  /**
+   * False only when the caller knows its owner UNDO SMS cannot be sent (the
+   * sender, signing secret or undo link is not wired). Absent ⇒ not checked.
+   */
+  undoChannelAvailable?: boolean;
   proposalType: ProposalType;
   /**
    * True only for the inbound-receptionist path (customer-call FSM or the
@@ -137,6 +148,7 @@ export type AutonomousLaneIneligibleReason =
   | 'platform_disabled'
   | 'tenant_not_opted_in'
   | 'owner_cell_missing'
+  | 'undo_channel_unavailable'
   | 'proposal_type_not_eligible'
   | 'not_inbound_receptionist'
   | 'below_threshold'
@@ -150,20 +162,37 @@ export type AutonomousLaneIneligibleReason =
   | 'session_flagged';
 
 /**
- * All-gates evaluator. Order matters only for the audit reason (first
- * failing gate wins); eligibility requires every gate to pass.
+ * All-gates evaluator for AUTONOMOUS approval. Order matters only for the
+ * audit reason (first failing gate wins); eligibility requires every gate to
+ * pass.
  */
 export function evaluateAutonomousBookingLane(
   input: EvaluateAutonomousLaneInput,
+): AutonomousLaneEvaluation {
+  return evaluateLaneGates(input, true);
+}
+
+/**
+ * D-019 — every D-015 gate except the owner-cell gate, for a booking a human
+ * approves (the on-call close's owner-approval chain). The owner cell is
+ * required only for autonomous approval, where the owner UNDO SMS is part of
+ * the safety; a close is never system-approved.
+ */
+export function evaluateBookingLaneForOwnerApproval(
+  input: Omit<EvaluateAutonomousLaneInput, 'ownerPhone'>,
+): AutonomousLaneEvaluation {
+  return evaluateLaneGates(input, false);
+}
+
+function evaluateLaneGates(
+  input: Omit<EvaluateAutonomousLaneInput, 'ownerPhone'> & { ownerPhone?: string | null },
+  autonomousApproval: boolean,
 ): AutonomousLaneEvaluation {
   if (input.platformDisabled) {
     return { eligible: false, reason: 'platform_disabled' };
   }
   if (!input.settings?.enabled) {
     return { eligible: false, reason: 'tenant_not_opted_in' };
-  }
-  if (!input.ownerPhone?.trim()) {
-    return { eligible: false, reason: 'owner_cell_missing' };
   }
   if (
     !AUTONOMOUS_LANE_PROPOSAL_TYPES.includes(input.proposalType) ||
@@ -173,6 +202,14 @@ export function evaluateAutonomousBookingLane(
   }
   if (!input.inboundReceptionistSource) {
     return { eligible: false, reason: 'not_inbound_receptionist' };
+  }
+  // After the structural gates, so traffic that could never take the lane
+  // (owner memos, non-booking types) keeps its structural audit reason.
+  if (autonomousApproval && !input.ownerPhone?.trim()) {
+    return { eligible: false, reason: 'owner_cell_missing' };
+  }
+  if (autonomousApproval && input.undoChannelAvailable === false) {
+    return { eligible: false, reason: 'undo_channel_unavailable' };
   }
   const flags = input.flags ?? {};
   if (flags.vulnerability || flags.emergency || flags.negotiation) {
