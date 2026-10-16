@@ -1858,21 +1858,44 @@ flowchart LR
     finaliser and the adapter's own teardown never write one, because the customer was
     spoken to: adapter-lost's "no fallback" is enforced by the absence of the row, not by a
     flag the worker has to honour. The SMS is delivered by a worker that claims unsent
-    outbox rows and sends with `idempotencyKey: 'callback-fallback:<job_id>'` on the
-    `SmsMessage` (`notifications/delivery-provider.ts:46-47` — the provider dedupes on it
-    within ~24 h, the same field the customer-message service passes through at
-    `twilio-customer-message-service.ts:92`), then stamps `sent_at` with the provider message
-    id. Two layers make it once: the `job_id` primary key means a redelivered terminal
-    status finds the guard false and writes nothing and a worker retry after `sent_at`
-    sends nothing; the provider key means a crash **after** the provider accepted the send
-    but **before** `sent_at` was stamped — the one gap a database key cannot close — re-sends
-    with the same key and the provider drops it, so the customer still receives one text.
+    outbox rows, and **the outbox row is its own send-claim ledger** in the three-state
+    shape `send-claim-ledger.ts` already uses for every recurring customer send
+    (`send_state` CHECK `pending | sending | sent`, `sending_at`, `provider_message_sid`,
+    `sent_at`): the worker moves a row `pending → sending` with a committed CAS (`WHERE
+    send_state = 'pending'`) **before** calling the provider, sends with
+    `statusCallback = /api/telephony/fallback-status?job=<job_id>` (signature-verified
+    like every other Twilio callback), and on the provider's response stamps `sent_at` and
+    the message SID. It does **not** rely on `SmsMessage.idempotencyKey`: that field is
+    forwarded verbatim as an `Idempotency-Key` header on `Messages.json`
+    (`per-tenant-twilio-delivery-provider.ts:107-108`, `twilio-delivery-provider.ts:251-253`),
+    and Twilio's Create Message operation documents no such header, so the provider
+    deduplicates nothing — the comment on `delivery-provider.ts:46` ("provider should dedupe
+    within ~24h") and at `twilio-delivery-provider.ts:252` are corrected in the same change,
+    and the key is still sent only as a harmless tracing tag. The gap a database key cannot
+    close — a crash **after** Twilio accepted the message but **before** `sent_at` was
+    stamped — is closed by reconciliation, not by re-sending: a row left in `sending` is
+    never re-sent blindly (exactly the ledger's "never auto-reclaim `sending`" rule). First
+    the status callback, which Twilio delivers independently of the worker, stamps
+    `sent_at` and the SID with `WHERE job_id = $1 AND sent_at IS NULL`. Then a reconciler
+    pass for rows in `sending` older than 2 minutes with `sent_at` null lists the
+    subaccount's messages for `to = target_e164`, `from = <the tenant's DID>`,
+    `dateSentAfter = sending_at − 1 min` and matches the stored `body`: a match stamps the
+    row sent with that SID; no match after the window means Twilio never accepted the
+    create, so the row is moved back to `pending` (bounded by `attempts`, ≤ 3) and sent
+    again. Three layers make it once: the `job_id` primary key means a redelivered terminal
+    status finds the guard false and writes nothing, and a worker retry after `sent_at`
+    sends nothing; the `sending` CAS means two workers cannot both call the provider for one
+    row; and the callback-or-list reconcile means a post-accept crash resolves to the
+    message Twilio already holds rather than a second one.
     `test/integration/callback-fallback-outbox.test.ts` pins that a failure injected after
     the session commit leaves no half-finalised state (either all three rows are written or
     none), that the fallback is sent once across redelivery, worker retry and reconciler
     overlap, that a crash injected after the provider accepted the send but before
-    `sent_at` was stamped retries with the same `idempotencyKey` and the provider's dedupe
-    leaves exactly one message, and that an adapter-lost finalisation writes no outbox row
+    `sent_at` was stamped leaves the row in `sending`, is **not** re-sent by the next
+    worker pass, and is stamped sent by the status callback or by the list reconcile
+    (mocked provider returns the accepted message), with exactly one provider create
+    across the whole sequence; that a `sending` row with no provider message after the
+    window is re-sent once and then stamped; and that an adapter-lost finalisation writes no outbox row
     and sends no text. The `ended_at IS NULL`
     guard on the answer-side UPDATE is what makes the late case safe (above). The `voice_callback_jobs` UNIQUE on tenant + session
     keeps the job singular.
@@ -2088,17 +2111,41 @@ flowchart LR
     `UPDATE tenant_settings SET scenario_interview_completed_at = NOW() WHERE tenant_id = $1
     AND scenario_interview_completed_at IS NULL`; the null check alone is not the predicate
     (it would stamp on the first card and swallow the real completion). When (and only when)
-    that UPDATE affects a row it calls `recordFunnelEvent` with a new
-    `scenario_interview_completed` member of the `FunnelEvent` union
-    (`analytics/posthog.ts:32`), carrying `answered`, `skipped` and `selected` counts. The
-    conditional UPDATE makes the event fire exactly once per tenant, including when the
-    completing action is a skip, so the nine-step funnel measures this step the way it
-    measures the others; R12's event list gains `scenario_interview_completed` beside
-    `business_answers_saved` (which U4's settings surface still emits).
+    that UPDATE affects a row it emits a new `scenario_interview_completed` member of the
+    `FunnelEvent` union (`analytics/posthog.ts:32`), carrying `answered`, `skipped` and
+    `selected` counts — **through a transactional outbox, not a direct capture**.
+    `recordFunnelEvent` is a fire-and-forget `ph.capture` (`posthog.ts:162-170`), so
+    calling it inside the request would emit before COMMIT (a later rollback would report a
+    completion that never happened) and a crash after COMMIT but before PostHog accepted
+    the event would lose it for good, because the retry finds the stamp populated and the
+    conditional UPDATE affects nothing. The completion transaction therefore inserts, in
+    the same statement batch as the stamp, an `analytics_outbox` row (`insert_id TEXT
+    PRIMARY KEY` = `scenario_interview_completed:<tenant_id>`, `tenant_id`, `event`,
+    `distinct_id`, `properties JSONB`, `published_at NULL`, `attempts`; FORCE RLS) — written
+    only when the stamp UPDATE affected a row, so it commits or rolls back with the stamp.
+    Publication is post-commit and at-least-once with provider-side dedupe: the route
+    registers `runAfterCommit` (`middleware/tenant-context.ts:557`, which fires only after
+    COMMIT succeeds) to publish the row immediately and stamp `published_at`, and the
+    `analytics-outbox-worker` (P0-009 pattern, `FOR UPDATE SKIP LOCKED`) sweeps rows with
+    `published_at IS NULL` older than one minute for the crash case. Both publish by
+    calling `recordFunnelEvent` with a new optional `insertId` that is forwarded as
+    PostHog's `$insert_id` exactly as `recordProductEvent` already does
+    (`posthog.ts:185-187`), so the one row's two possible publications collapse to one event
+    on PostHog's side. The `insert_id` primary key plus the conditional stamp makes the
+    event fire exactly once per tenant, including when the completing action is a skip, so
+    the nine-step funnel measures this step the way it measures the others; R12's event
+    list gains `scenario_interview_completed` beside `business_answers_saved` (which U4's
+    settings surface still emits).
   - `packages/api/src/routes/onboarding.ts` — `GET /scenarios/next`, `POST /scenarios/:id/answer`,
     `POST /scenarios/:id/replay` (runs the scenario through a preview session in
     **simulation mode** with current settings and returns the spoken handling),
     `POST /scenarios/open-capture`.
+  - `packages/api/src/analytics/analytics-outbox.ts` (insert + publish helpers),
+    `packages/api/src/workers/analytics-outbox-worker.ts` (sweep of unpublished rows),
+    `packages/api/src/analytics/posthog.ts` (`recordFunnelEvent` gains `insertId` →
+    `$insert_id`), migration adding `analytics_outbox` (FORCE RLS);
+    `packages/api/test/analytics/analytics-outbox.test.ts` (publish after commit, sweep,
+    `$insert_id` carried on every publication).
   - **Simulation mode is a side-effect sink, not an exclusion list.** Replay and the Act 2
     cards run the real caller FSM with `simulate: true`: the turn processor's deps are the Layer
     1 harness's in-memory bundle (`ai/voice-quality/runner.ts` `makeRepoBundle('memory')`)
@@ -2148,7 +2195,11 @@ flowchart LR
     new columns and the notes table; two concurrent final answers for the last two
     unanswered scenarios, started on separate connections, produce exactly one
     `scenario_interview_completed_at` stamp and one `scenario_interview_completed` funnel
-    event, and the lock is observed on the request transaction, not a nested runner),
+    event, and the lock is observed on the request transaction, not a nested runner; a
+    rollback injected after the stamp leaves no outbox row and emits nothing; a crash
+    injected between COMMIT and the after-commit publish leaves an unpublished row that
+    the worker publishes once, and a publish retried after a crash between capture and
+    `published_at` carries the same `$insert_id`),
     `packages/api/test/onboarding/scenarios/registry-fresh.test.ts`
     (regenerating the registry from the corpus produces no diff), corpus: the `ownerFacing`
     block is validated by the corpus-integrity check.
