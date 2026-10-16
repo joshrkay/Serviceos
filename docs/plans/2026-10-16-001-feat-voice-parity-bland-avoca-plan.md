@@ -646,8 +646,12 @@ flowchart LR
     three coordination columns the worker SQL below reads and writes, mapped in the
     repository with the rest of the indexing state), `updated_at`; ≤ 50 per
     tenant; FORCE RLS; cosine ivfflat). The status column is what the embed worker drives
-    and what retrieval filters on (`index_status = 'indexed'` only), so a pending or failed
-    row is never served and never mistaken for an indexed one; the Zod contract and the
+    and what retrieval filters on — **`index_status = 'indexed' AND active = true`**, both
+    in the vector-search predicate: a row the owner deactivates *after* it was indexed keeps
+    `indexed` (the `active = true` claim guard only covers rows deactivated before the
+    embed ran), so the active flag, read live by every retrieval, is what makes a disabled
+    policy unservable the moment the owner saves it — so a pending, failed or deactivated
+    row is never served and never mistaken for a live one; the Zod contract and the
     repository expose it, and the Knowledge sheet shows `failed` rows with the error.
   - `packages/shared/src/contracts/knowledge.ts` — Zod shapes shared by API and web.
   - `packages/api/src/knowledge/business-answers-repo.ts`, `faq-repo.ts`,
@@ -1607,12 +1611,28 @@ flowchart LR
     correlated webhooks: the dial
     passes `StatusCallback=/api/telephony/outbound-status?session=<id>` (same signature check,
     same conditional CallSid binding) with the `initiated`, `ringing`, `answered` and
-    terminal events, and any correlated status or answer webhook clears the flag and lets
-    the call proceed. A reconciliation job enqueued at +90 s — past Twilio's retry window for
-    a first webhook — finds the row still unbound and ends it the same way (`outcome =
-    'failed'`, `ended_at`) with the job `dial_failed`, `dial_state = 'rejected'`,
-    `failure_reason = 'dial_unconfirmed_expired'`; the one-attempt rule means no redial, and the SMS fallback for a failed callback
-    runs only once `dial_failed` is final, never beside a live call. The `ended_at IS NULL`
+    terminal events. **A correlated webhook proves Twilio placed the call; only a
+    non-terminal one lets it proceed.** `initiated`, `ringing`, `in-progress` and
+    `/outbound-answer` itself move `dial_state` to `confirmed`. A terminal status for a
+    session `/outbound-answer` never bound — `busy`, `no-answer`, `canceled`, `failed`, or a
+    `completed` that arrives with no answer having been streamed — is **final**, not a
+    confirmation: the handler ends the session through `markEnded` with `outcome =
+    'failed'` and `ended_at`, marks the job terminal with `outcome` set to that status
+    (`busy`, `no_answer`, `canceled`, `failed`) and `dial_state = 'confirmed'` (Twilio did
+    dial), audits it, and fires the one-time SMS fallback below. Without this the status
+    callback would bind the CallSid and the "still unbound" reconciliation would never
+    close the row, leaving the job non-terminal, `ended_at` null and the customer who did
+    not pick up with no text. The reconciliation job enqueued at +90 s — past Twilio's retry
+    window for a first webhook — therefore looks for a row whose job is still `dial_state =
+    'unconfirmed'` (anything a webhook touched has already been confirmed or finalised by
+    that webhook) and ends it the same way (`outcome = 'failed'`, `ended_at`) with the job
+    `dial_failed`, `dial_state = 'rejected'`, `failure_reason = 'dial_unconfirmed_expired'`.
+    The one-attempt rule means no redial, and the SMS fallback for a callback that did not
+    reach the customer — the same `else the SMS branch` recovery takes when no call is
+    placed — runs **exactly once per job**, from whichever path finalises it (definitive
+    rejection, terminal unanswered status, or reconcile expiry), idempotent on the job id
+    so a redelivered terminal status cannot send a second text, and never beside a live
+    call. The `ended_at IS NULL`
     guard on the answer-side UPDATE is what makes the late case safe (above). The `voice_callback_jobs` UNIQUE on tenant + session
     keeps the job singular.
     `proposals/surface.ts` outbound surface with the inbound allowed set;
@@ -1674,7 +1694,11 @@ flowchart LR
     (non-2xx or `error_code`); a fetch timeout → session still open and job `dial_state =
     'unconfirmed'`, then an `/outbound-status` `initiated` callback for that session moves it
     to `confirmed` and the call proceeds, or no correlated webhook by the reconcile job →
-    session ended `failed`, job `dial_failed` / `dial_unconfirmed_expired`; `/outbound-answer`
+    session ended `failed`, job `dial_failed` / `dial_unconfirmed_expired`; a `no-answer`
+    status (and each of `busy`, `canceled`, `failed`, and `completed` with no answer
+    streamed) for a session `/outbound-answer` never bound → session ended `failed`, job
+    terminal with that outcome, the SMS fallback sent exactly once even when the status is
+    redelivered, and the reconcile job then finds nothing to do; `/outbound-answer`
     for an ended session → `<Hangup/>`, audit, no stream; the correlation columns
     (`voice_sessions.callback_job_id`, `consent_event_id`, `twilio_account_sid`,
     `voice_callback_jobs.outbound_session_id`, `dial_state`, `failure_reason`) are written
