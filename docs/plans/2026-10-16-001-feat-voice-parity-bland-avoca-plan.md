@@ -624,10 +624,16 @@ flowchart LR
     `hours_exceptions JSONB`, `years_in_business INT`, `brands_serviced TEXT[]`,
     `residential BOOL`, `commercial BOOL`, `services_not_offered TEXT[]`, `updated_at`,
     `updated_by`; FORCE RLS) and `tenant_faq_entries` (`id`, `tenant_id`, `question ≤200`,
-    `answer ≤500`, `aliases TEXT[]`, `language en|es`, `active`, `embedding vector(1536) NULL`,
+    `answer` **≤ 280 characters and ≤ 2 sentences, enforced in the Zod contract and the save
+    route** (the same bound U5 speaks, so a stored answer is always playable verbatim and the
+    call-time post-check never has to truncate an owner's caveat or reject an accepted entry),
+    `aliases TEXT[]`, `language en|es`, `active`, `embedding vector(1536) NULL`,
     `embedding_model`, **`index_status TEXT NOT NULL DEFAULT 'pending' CHECK (index_status IN
     ('pending', 'indexing', 'indexed', 'failed'))`, `index_attempts INT NOT NULL DEFAULT 0`,
-    `last_index_error TEXT NULL`, `indexed_at TIMESTAMPTZ NULL`**, `updated_at`; ≤ 50 per
+    `last_index_error TEXT NULL`, `indexed_at TIMESTAMPTZ NULL`, `content_rev INT NOT NULL
+    DEFAULT 1`, `index_claimed_at TIMESTAMPTZ NULL`, `index_claim_token UUID NULL`** (the
+    three coordination columns the worker SQL below reads and writes, mapped in the
+    repository with the rest of the indexing state), `updated_at`; ≤ 50 per
     tenant; FORCE RLS; cosine ivfflat). The status column is what the embed worker drives
     and what retrieval filters on (`index_status = 'indexed'` only), so a pending or failed
     row is never served and never mistaken for an indexed one; the Zod contract and the
@@ -742,9 +748,15 @@ flowchart LR
     `biz_about`, `biz_not_on_file` (EN+ES).
   - Post-check inside the skill before `buildAnswer`: floor regexes (`PHONE_REGEX`,
     `EMAIL_REGEX`, `BALANCE_REGEX`) must not match unless topic is `about`; no `$` unless topic is
-    `pricing_policy` and the string is byte-equal to owner text; ≤ 2 sentences / 280 chars at a
-    sentence boundary; answer language equals `session.language` (per-language rows, no
-    translation); strip fence markers; log `lookup_executed` with similarity.
+    `pricing_policy` and the string is byte-equal to owner text; ≤ 2 sentences / 280 chars is
+    a **tripwire, not a truncation**: the same bound is enforced when the FAQ is saved (U4),
+    so a stored answer always fits and is spoken verbatim; an answer that somehow exceeds it
+    (a row written before the bound, a template that grew) is not cut at a sentence boundary
+    but refused — `biz_not_on_file` is spoken, the row is flagged `needs_review` in the
+    Knowledge sheet, and `lookup_answer_overlength` is audited — because silently dropping an
+    owner's second sentence can drop the caveat that made the answer true; answer language
+    equals `session.language` (per-language rows, no translation); strip fence markers; log
+    `lookup_executed` with similarity.
   - `packages/voice-eval/live-support.ts` `EST_SYSTEM_PROMPT_TOKENS`; `npm run voice-quality:refresh`.
   - Corpus: `corpus/scripts/13-business-questions/` (≥ 8 scripts: hours, trip fee credited,
     payment methods, service area with ZIP, brand, financing, FAQ hit, FAQ miss → callback) and a
@@ -816,7 +828,7 @@ flowchart LR
      cleanup cancels them as item 7 says.
      Cleanup is durable and does not depend on a hold existing: `workers/hold-reaper-worker.ts`
      gains a sibling pass over `jobs WHERE provisional AND created_at < now() - hold TTL` that
-     removes any such job whose hold is expired, cancelled **or absent** and whose proposal is
+     removes any such job whose hold is expired, canceled **or absent** and whose proposal is
      not approved; `finalizeTerminatedSession` does the same for the session's provisional job
      when the session ends with no proposal; both audited. **Order matters because
      `appointments.job_id` is a `NOT NULL` foreign key without cascade:** the existing reaper
@@ -825,7 +837,11 @@ flowchart LR
      an artefact of the turn, not a customer-visible record, and has no proposal to keep it) and
      only then deletes the job, in one transaction; if the appointment cannot be deleted (a
      proposal references it), the job is kept and marked `provisional = false, status =
-     'cancelled'` instead. Pinned by an integration test on real Postgres. A process exit between creation and
+     'canceled'` instead — `canceled` with one "l" is the only spelling `jobs.status` accepts
+     (`jobs/job.ts` `JobStatus`); the two-"l" form would violate the CHECK and roll back the
+     cleanup in exactly the branch meant to keep a non-deletable job, leaving the provisional
+     artefacts behind on every reaper pass. Pinned by an integration test on real Postgres
+     that exercises this branch. A process exit between creation and
      finalisation leaves a row the sweep removes on its next pass. Thread `missingFields`, `emergencyFlagged`,
      `vulnerabilityFlagged` into `buildLaneInputFromSettings` (`inbound-booking-completion.ts:58`).
   2. **Thread the supervisor mode.** `VoiceTurnProcessorDeps` gains `isSupervisorPresent`;
