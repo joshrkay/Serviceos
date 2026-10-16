@@ -596,11 +596,18 @@ flowchart LR
     is bound to that hash, not to a first-ever success: `PUT /api/settings/voice-persona`
     recomputes the hash of what it is about to save and, when it differs from
     `voice_preview_persona_hash`, clears `voice_preview_at` in the same write (the wizard's
-    `voice_preview` step regresses to incomplete), so the go-live guard that checks
-    `voice_preview_at` is checking that the *currently saved* persona was heard; a save
-    whose hash matches keeps the proof. `test/routes/onboarding.voice-preview.test.ts` pins
-    that saving a different voice, greeting, name or style after a successful preview clears
-    the proof and the guard blocks, and that saving the previewed persona keeps it.
+    `voice_preview` step regresses to incomplete); a save whose hash matches keeps the
+    proof. **The gate is the hash comparison, not the timestamp**: `enableVoiceAgentLive`
+    and `derive-status` both evaluate `voice_preview_at IS NOT NULL AND
+    voice_preview_persona_hash = hash(saved persona)`, recomputing the saved persona's hash
+    at call time. That closes the race the clear alone cannot: a preview of persona A still
+    synthesising when the owner saves persona B lands its success *after* the save and
+    stamps A's hash, and the guard still blocks because the saved persona hashes to B — so
+    the stamp needs no conditional write and the save route's clear is a wizard nicety, not
+    the gate. `test/routes/onboarding.voice-preview.test.ts` pins that saving a different
+    voice, greeting, name or style after a successful preview clears the proof and the
+    guard blocks, that saving the previewed persona keeps it, and that a preview of A whose
+    success is recorded after a save of B leaves the guard blocking until B is previewed.
     `packages/api/src/routes/settings.ts` —
     `PUT /api/settings/voice-persona` (owner, audited `tenant.voice_persona_set`).
   - `packages/web/src/components/onboarding/v2/steps/VoiceStep.tsx` (replaces `AiCheckStep.tsx`;
@@ -955,12 +962,21 @@ flowchart LR
      would race the executor and could suppress the confirmation for good. Follow the D-018
      close path's order instead (`create-voice-turn-processor.ts:4266` arms
      `pendingConsentCapture` before any proposal; `:4513` consumes it on the next turn): when
-     the lane is eligible and `customers.sms_consent !== true`, **first mint a `draft`
+     the lane is eligible and `customers.sms_consent !== true`, run the whole sequence
+     **inside item 1's `runner.run(tenantId, ({ lock }) => …)` — the one transaction that
+     takes `self-service-booking`, runs `isSlotFree` and places the hold** (the proposal
+     repository writes through the client `tenantContextStore` holds, which the runner sets,
+     so the draft insert joins that transaction rather than committing on its own): **first
+     the slot check**, so a taken slot returns `slot_taken` before any row is written and the
+     FSM speaks the bucket 09 line with no draft left behind; **then mint the `draft`
      proposal** (`status = 'draft'` with `missingFields: ['confirmation_channel']`, which
      `approveProposal` refuses and the executor never dequeues — `proposals/lifecycle.ts` lets a
-     draft move only to `ready_for_review`, `approved`, `rejected` or `expired`), then place the
-     hold with `appointments.proposal_id` pointing at that draft, so the hold and the
-     provisional job are never operational writes without a proposal behind them (floor
+     draft move only to `ready_for_review`, `approved`, `rejected` or `expired`); **then** place
+     the hold with `appointments.proposal_id` pointing at that draft. A failure anywhere after
+     the check rolls the draft back together with the hold and the provisional job, so a
+     conflicting attempt writes nothing, no unapprovable draft can outlive a failed hold, and
+     the hold and the provisional job are never operational writes without a proposal behind
+     them (floor
      criterion 2, `noAutoMutation`, which Appendix B pins as "a `hold_pending_approval` row
      **plus** a `proposals` row"); arm `pendingConsentCapture { purpose: 'booking',
      appointmentId, proposalId }`, and speak
@@ -1082,8 +1098,9 @@ flowchart LR
      sets `forwarding_verified_at` when `ForwardedFrom` matches a registered line).
      `voice/go-live.ts` — delete `maybeAutoGoLiveOnInboundEnd` and its `app.ts` wiring; the
      only caller of `enableVoiceAgentLive` is `POST /api/voice/go-live` from the `go_live` step;
-     `enableVoiceAgentLive` checks subscription, `full_readiness`, `voice_preview_at` (set
-     only while `voice_preview_persona_hash` matches the saved persona — U3), **a
+     `enableVoiceAgentLive` checks subscription, `full_readiness`, `voice_preview_at`
+     **together with `voice_preview_persona_hash = hash(saved persona)`** (U3 — the hash
+     comparison is the gate, so a stale timestamp from an earlier persona never passes), **a
      non-empty `transfer_targets.emergency` whose every entry is E.164 and not a provisioned
      tenant DID** (the `emergency_target_missing` blocker from U7, re-evaluated against the
      stored list at the moment of the call — `full_readiness` covers only Twilio provisioning
