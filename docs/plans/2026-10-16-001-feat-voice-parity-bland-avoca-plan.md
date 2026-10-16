@@ -871,12 +871,19 @@ flowchart LR
     on-call rotation head, then `open` **only if it is a number** (`open` may legitimately be
     `'voicemail'` or `'callback'`, and copying that sentinel would seed a value the contract
     rejects and the E2 dial path cannot ring), then **`tenant_settings.owner_phone`** (the
-    owner cell the identity step now requires), and only then `business_phone` — and
-    `business_phone` is skipped when it is one of the tenant's own provisioned numbers, because
-    `workers/provision-twilio.ts:689-698` fills an empty `business_phone` with the tenant's
-    Twilio DID, and an emergency ladder that dials that number rings the AI line back into
-    itself. The same exclusion applies at dial time: `escalate-to-human.ts` never dials a
-    number that belongs to the tenant's provisioned set, whatever list it came from. If no
+    owner cell the identity step now requires), and only then `business_phone`. **Every
+    candidate, not just `business_phone`, is checked against the tenant's provisioned
+    numbers** (the `provider = 'twilio'` rows `workers/provision-twilio.ts:685` reads): a
+    rotation head, an `open` target or an `owner_phone` that equals a provisioned DID is
+    skipped the same way, because the settings route validates `owner_phone` only as E.164
+    and nothing today stops an owner from entering the business's own Twilio number there, and
+    `provision-twilio.ts:689-698` fills an empty `business_phone` with that DID; an emergency
+    ladder that dials it rings the AI line back into itself. The same rule holds for every
+    later writer: `POST /scenarios/:id/answer` and the routing sheet's `PUT` reject a tenant
+    DID with 422 `emergency_target_is_tenant_number`, so a stored list never contains one and
+    the go-live blocker below is computed on a list that is actually dialable. The dial-time
+    filter in `escalate-to-human.ts` stays as a tripwire for a number provisioned after the
+    list was written. If no
     candidate qualifies the migration leaves `emergency = []` (the contract allows empty as a
     stored state, never as an interview answer), `derive-status` reports it as a go-live
     blocker (`GO_LIVE_BLOCKED { emergency_target_missing }`), and the mandatory opener card
@@ -888,8 +895,18 @@ flowchart LR
     hours; business-phone fallback when the filtered list is empty (never strand). For
     `reason = 'emergency_dispatch'` the walk order is `transfer_targets.emergency` in list
     order (each with the existing ring timeout), then the hours-filtered rotation, then the
-    business phone; `CallRoutingSheet.tsx` gains an ordered emergency list (add, remove,
-    reorder; ≥44 px) beside the three single targets.
+    business phone. **The cascade state has to survive the webhook round-trip**: today a
+    no-answer comes back through `routes/telephony.ts:982-1011` `/dial-result`, which
+    re-enters `escalateToHuman` with `reason: 'low_confidence'` and advances only the
+    rotation cursor, so without more the second emergency number would never be dialled.
+    `escalateToHuman` therefore writes `voice_sessions.escalation_state JSONB`
+    (`{ reason, emergencyTargets, emergencyIndex, screened }`) when it dials from the
+    emergency list, and `/dial-result` reads it: while `emergencyIndex + 1 <
+    emergencyTargets.length` it re-enters with `reason: 'emergency_dispatch'` and the next
+    index (the `screenedLeg` flag carried as today), and only once the list is exhausted does
+    it fall into the existing rotation cascade; the state is cleared when a leg answers.
+    `CallRoutingSheet.tsx` gains an ordered emergency list (add, remove, reorder; ≥44 px)
+    beside the three single targets.
   - `packages/api/src/telephony/twilio-adapter.ts:728` — `<Gather input="speech dtmf">`;
     `Digits === '0'` → `operator_request`. `mediastream-adapter.ts` — consume Twilio `dtmf`
     stream messages; `dtmf_received` gets its first producer; ignored during the disclosure and
@@ -902,9 +919,15 @@ flowchart LR
     reusing the `:716-760` handler body (tenant-scoped, presigned, short TTL, 410 on purged).
   - `packages/web/src/components/interactions/InteractionsPage.tsx` — Transferred filter, outcome
     badge, audio player (min-h-11 controls); `CallRoutingSheet.tsx` — the three targets.
-  - Tests: `packages/api/test/ai/skills/escalate-to-human.schedule.test.ts` (emergency walks
+  - Tests: `packages/api/test/ai/skills/escalate-to-human.schedule.test.ts` (an `owner_phone`
+    equal to a provisioned DID is skipped by the backfill and rejected by the answer route and
+    the routing sheet with 422; emergency walks
     the ordered list before the rotation; a list of one falls through to the rotation then the
-    business phone that is not a tenant DID; the contract rejects `'voicemail'`, and rejects an
+    business phone that is not a tenant DID; `packages/api/test/integration/dial-result-emergency-cascade.test.ts`
+    (first emergency target no-answer → `/dial-result` dials the second emergency number
+    with `reason: 'emergency_dispatch'` before any rotation entry; list exhausted → rotation
+    cascade as today; answered leg clears `escalation_state`); the contract rejects
+    `'voicemail'`, and rejects an
     empty list as an interview answer while allowing it as the migrated state; migration
     backfill prefers `owner_phone` over `business_phone`, never seeds the tenant's own Twilio
     DID, yields `[]` plus a go-live blocker for a tenant with nothing but its DID, and a tenant
@@ -996,8 +1019,12 @@ flowchart LR
     end-of-utterance mark ack, with the same safety timeout and the same fail-closed hang-up
     if the opener produces no playback), so `<Connect><Stream>` starting media early is
     harmless: frames are dropped, not transcribed, until the recording notice is complete.
-    The `recording/implicit` ledger row for the outbound leg is committed at that mark ack,
-    exactly as inbound does, never at TwiML generation;
+    The `recording/implicit` ledger row for the outbound leg is committed **at validated
+    complete playback of the opener — the same `disclosureValidated` branch inbound uses
+    (`mediastream-adapter.ts:1552-1570`) — before either the mark ack or the lost-ack safety
+    timer opens capture**, never at the ack itself and never at TwiML generation: inbound
+    commits there precisely so that a lost mark frame, which the safety timer recovers from
+    by opening capture anyway, cannot forward caller audio without the consent record;
     global STOP intent → tenant DNC flag; `AnsweredBy` machine → compliant short message or hang
     up, job `voicemail`, no retry.
   - **Billing and settings.** `billing/call-usage-events.ts` `classifyCall` gains direction;
@@ -1019,8 +1046,9 @@ flowchart LR
     callbacks, one attempt), `packages/api/test/routes/telephony.outbound-answer.test.ts`,
     `packages/api/test/telephony/media-streams/outbound-disclosure-gate.test.ts` (media
     frames before the opener's mark ack are dropped and never forwarded; the ledger row is
-    written at the ack; no ack within the timeout → capture enabled by the safety timer as
-    inbound; opener with no playback → leg hung up, no row),
+    written when playback is validated complete, before the ack; no ack within the timeout →
+    capture enabled by the safety timer as inbound **and the row already exists**; opener
+    with no playback → leg hung up, no row),
     `packages/api/test/integration/voice-callback-jobs.test.ts`; corpus bucket 05: no consent →
     SMS only; STOP after consent → no call; bucket 03: callback books through the lane.
 - **Floor-criteria risks:** #7 (DNC, consent, STOP), #8 hangupHandled (outbound sessions stamp
