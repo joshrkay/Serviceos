@@ -709,6 +709,20 @@ flowchart LR
     policy unservable the moment the owner saves it — so a pending, failed or deactivated
     row is never served and never mistaken for a live one; the Zod contract and the
     repository expose it, and the Knowledge sheet shows `failed` rows with the error.
+    **Retrieval is exact within the tenant, never approximate**: a shared `ivfflat` index
+    picks its candidate lists globally *before* the `tenant_id` (RLS), `active` and
+    `index_status` predicates filter them, so once many tenants hold similar FAQs a
+    tenant's true top-2 can be absent from the probed lists and this path would speak
+    `biz_not_on_file` for a question the owner answered — a recall failure the
+    cross-tenant isolation test cannot see. Because a tenant holds ≤ 50 rows, the
+    retrieval statement runs `SET LOCAL enable_indexscan = off, enable_bitmapscan = off`
+    on its transaction and orders the tenant's filtered rows by `embedding <=> $1`
+    directly: an exact scan over at most 50 vectors, cheaper than the probe it replaces.
+    The index stays for `suggest-reply`'s cross-chunk search, where approximate is
+    acceptable. `test/integration/faq-retrieval.test.ts` seeds two thousand
+    foreign-tenant rows whose vectors are closer to the query than the tenant's own top-2
+    and asserts the tenant's two rows come back in order with scores equal to a
+    brute-force computation; the existing cross-tenant test keeps proving isolation.
   - `packages/shared/src/contracts/knowledge.ts` — Zod shapes shared by API and web.
   - `packages/api/src/knowledge/business-answers-repo.ts`, `faq-repo.ts`,
     `packages/api/src/workers/faq-embed-worker.ts` (P0-009 pattern; embeds on write via the
@@ -1055,10 +1069,21 @@ flowchart LR
      take. `tenant_settings.booking_capacity INT NOT NULL DEFAULT 1 CHECK (booking_capacity
      BETWEEN 1 AND 20)` is backfilled by the migration to each tenant's count of field-capable
      users (minimum 1) and editable in the scheduling settings; the finder, given no
-     technician, counts overlapping active appointments plus live holds (buffer applied,
-     expired holds ignored) and reports the window free while that count is below capacity,
-     so the voice hold, the public and portal bookings and the unassigned dispatcher visit
-     all share one rule. A technician-scoped check (`technicianId` given) adds that
+     technician, loads the active appointments plus live holds that intersect the
+     requested window (buffer applied, expired holds ignored) and **computes peak
+     concurrency, not the count of intersecting rows**: a sweep over every interval's start
+     and end — the candidate included — tracking how many are open at each instant, and the
+     window is free while that peak is at or below capacity. Counting intersections would
+     reject valid multi-crew work: at capacity 2 with visits 09:00–10:30 and 11:30–13:00, a
+     proposed 10:00–12:00 intersects both (count 2 → rejected) although no instant ever
+     holds more than two visits. `nextOpening` uses the same sweep, advancing the candidate
+     to the next interval end at which the peak drops below capacity, so the spoken
+     alternative is the first slot that really fits. The voice hold, the public and
+     portal bookings and the unassigned dispatcher visit all share this one rule.
+     `test/ai/tasks/availability-finder.capacity.test.ts` pins the staggered case above
+     (free at capacity 2, taken at capacity 1), three visits overlapping at one instant
+     against capacity 2 (taken), the buffer widening an interval into a conflict, and a
+     `nextOpening` that lands on an interval end rather than a fixed step. A technician-scoped check (`technicianId` given) adds that
      technician's own calendar on top of the capacity count; it does not replace it,
      because a hold that has not been assigned reserves a capacity unit without appearing
      on any technician's calendar. Return
@@ -1152,7 +1177,14 @@ flowchart LR
      set by `POST /api/onboarding/test-booking/start` (the wizard's "call this number now"
      step, stamped with a 30-minute window), `test_booking_verified_at` null, and
      `voice_first_live_at` null — a new column that `enableVoiceAgentLive` stamps once and
-     `pauseVoiceAgentLive` never clears. The `voice-gate.ts` owner bypass is **not** the
+     `pauseVoiceAgentLive` never clears, **and that its migration backfills from
+     `voice_agent_live_at` for every tenant live at migration time** (`UPDATE tenant_settings
+     SET voice_first_live_at = voice_agent_live_at WHERE voice_agent_live_at IS NOT NULL AND
+     voice_first_live_at IS NULL`): a tenant that went live before the column existed would
+     otherwise carry null, and if later paused and put through the test-booking flow, an
+     attested owner call inside the 30-minute window would satisfy the test predicate and
+     mark a real booking `is_test` — the exact paused-tenant case the marker exists to
+     prevent; the migration test pins the backfill. The `voice-gate.ts` owner bypass is **not** the
      signal: `pauseVoiceAgentLive` (`voice/go-live.ts:71`) also nulls `voice_agent_live_at`, so
      an attested owner calling a previously live, paused tenant takes the same bypass, and
      keying on it would mark that owner's real booking `is_test`, swap in the wizard
@@ -1752,7 +1784,17 @@ flowchart LR
     'rejected'`) and `trustVerifiedAt`, written **only** by a `trust-hub-sync-worker`
     (P0-009 pattern; fetches the number's assigned Trust Product / customer-profile status
     from Twilio's Trust Hub API nightly and on the Trust Hub status webhook) — never by
-    hand and never by the settings UI. Two gates read it and fail closed: the settings
+    hand and never by the settings UI — **and bound to the number they were verified
+    for**: the approval also records `trustVerifiedNumberSid`, the `phoneNumberSid` the
+    Trust Product assignment was checked against, and both gates treat a value that
+    differs from the row's *current* `phoneNumberSid` as not approved. That binding is
+    what survives a number change: `workers/change-twilio-number.ts:47` merges the new SID
+    and E.164 into `provider_data` without touching sibling keys, so an approval earned by
+    the old number would otherwise outlive it until the nightly sync noticed, and the
+    pre-dial check would authorise callbacks from a newly purchased, not-yet-assigned
+    number. The change worker also strips the attestation keys in that same UPDATE, and
+    the sync worker re-populates them on its next run or on the Trust Hub webhook for the
+    new SID. Two gates read it and fail closed: the settings
     route refuses to set `voice_callback_enabled = true` while the status is not
     `approved` (422 `callback_requires_attestation`, the enable card shows the reason),
     and `call-me-back-worker` re-reads it **immediately before dialling** and, if it has
@@ -2107,7 +2149,9 @@ flowchart LR
     candidate set leaves the row `sending`, reported and not re-sent; that a job whose
     customer holds only a `voice` consent row produces no outbox row, a `:no_sms_consent`
     failure suffix and one owner note; that a STOP arriving between enqueue and send leaves
-    the row `suppressed` with no provider create; and that an adapter-lost finalisation
+    the row `suppressed` with no provider create; that a number change on a tenant whose
+    old number was approved makes the enable route 422 and finalises an already-enqueued
+    job `attestation_not_approved` at dial time until the sync approves the new SID; and that an adapter-lost finalisation
     after the opener played writes no outbox row and sends no text, while one before the
     opener played writes the row once. The `ended_at IS NULL`
     guard on the answer-side UPDATE is what makes the late case safe (above). The `voice_callback_jobs` UNIQUE on tenant + session
