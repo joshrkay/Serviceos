@@ -436,7 +436,17 @@ flowchart LR
      **only when the buffered text is on the short-confirmation allowlist** — an enumerated
      set shared with `confirmIntent` ("yes", "no", "yeah", "nope", "that's right", "correct",
      "sounds good", "go ahead", their Spanish forms; ≤ 3 words, exact match after
-     normalisation), or (b) `utterance_end` (1,000 ms word gap) for everything else.
+     normalisation) **and no mutation-authorising question is pending** — when the session
+     is waiting on an answer that would mint a proposal or record consent
+     (`pendingConsentCapture` armed, a booking or callback confirmation outstanding, a
+     lane-eligible "shall I book it?"), even an allowlisted word waits for (b), because a
+     caller who says "yes", pauses 400 ms, and continues "but don't text me" would otherwise
+     have had the consent row written and the proposal minted on the first word, with the
+     continuation arriving as a second turn too late to retract either; the exact-match rule
+     only protects a continuation that is already in the same buffer. So the 300 ms path is
+     for short answers that commit nothing (a lookup follow-up, "do you want the hours?",
+     language choice), and anything that authorises a side effect pays the 1,000 ms guard —
+     or (b) `utterance_end` (1,000 ms word gap) for everything else.
      Formatter punctuation is **not** a dispatch signal: `smart_format` punctuates whatever
      segment the recogniser finalised, so "I need someone Tuesday." can be the first half of
      "…Tuesday, or Wednesday if that's easier", and dispatching on the period at 300 ms would
@@ -502,7 +512,9 @@ flowchart LR
     ("two is_final without speech_final → one speechTurn"; "speech_final on 'next Tuesday at'
     → no dispatch, speculative classify armed, dispatch on utterance_end"; "speech_final on
     'I need someone Tuesday.' → no dispatch on the period, dispatch on utterance_end with the
-    continuation 'or Wednesday' included"; "speech_final on 'yes' → dispatch at 300 ms";
+    continuation 'or Wednesday' included"; "speech_final on 'yes' with no pending mutation → dispatch at 300 ms"; "speech_final on
+    'yes' with `pendingConsentCapture` armed → no dispatch, and a 'but don't text me' segment
+    600 ms later is concatenated into one turn on utterance_end with no consent row written";
     "speech_final on 'sí' → dispatch"; "allowlist is exact: 'yes but' → waits"), `packages/api/test/telephony/media-streams/speculative-classify.test.ts`
     (hit, miss, exactly one proposal, cost-cap respected), `packages/api/test/ai/voice-turn/side-effects-overlap.test.ts`
     (synthesis starts before the insert resolves; no frame is released before it; an insert
@@ -709,7 +721,7 @@ flowchart LR
      **excluded from the dispatch board, job lists, digests and search the same way held
      appointments are** (`dispatch/board-query.ts`, `jobs/pg-job.ts` list queries, digest). The
      conflict check runs by customer location and time **before** the provisional job is
-     created (item 3's checker takes a location, not a job), so a taken slot never creates a
+     created (item 3's predicate takes a window, not a job), so a taken slot never creates a
      job at all; job creation and `placeAppointmentHold` run in one transaction **under a
      tenant-wide scheduling lock, `pg_advisory_xact_lock(hashtext(tenant_id || ':scheduling'))`**,
      taken before the conflict read. The key is the tenant, not the customer location and not
@@ -744,8 +756,17 @@ flowchart LR
      lane threshold is the one applied for an unsupervised tenant and the mode threshold for a
      supervised one.
   3. **Conflict-check the hold.** `packages/api/src/ai/scheduling/place-hold.ts:115-160` — run
-     the slot-conflict checker before `createAppointment`; return
-     `{ ok: false, failed: 'slot_taken', nextOpening }`; the FSM speaks the bucket 09 line
+     **`isSlotFree` from `scheduling/booking-availability.ts`** (with the tenant's
+     `bufferMinutes`) under item 1's lock and before `createAppointment` — **not**
+     `DefaultSlotConflictChecker.check`: that checker only asks whether the proposed technician
+     or the same customer is busy and returns `ok: true` for an unassigned slot whenever the
+     overlapping rows belong to other customers (`ai/tasks/slot-conflict-checker.ts:150-175`),
+     which is precisely the two-different-customers race the lock exists to serialise, so a
+     lock around that checker would still let both holds in. `isSlotFree` is the tenant-wide
+     predicate the booking routes already use: any active appointment or live hold in the
+     window blocks, buffer applied, expired holds ignored. Return
+     `{ ok: false, failed: 'slot_taken', nextOpening }` with `nextOpening` from the same
+     finder; the FSM speaks the bucket 09 line
      ("That {time} slot was just booked — the next opening is {next}. I've drafted that for an
      operator to confirm.") and flips `slot-just-taken-by-other-call` from documented failure to
      pass.
@@ -1056,7 +1077,14 @@ flowchart LR
     `<Connect><Stream>` bound to a new `voice_sessions` row `channel 'voice_outbound'` seeded
     with `customerId`; `proposals/surface.ts` outbound surface with the inbound allowed set;
     opening line `outbound_callback_opener` ("This is {agent}, {business}'s automated assistant,
-    calling back about your request a moment ago. This call is recorded.") before any content
+    calling back about your request a moment ago. This call is recorded. You can reach
+    {business} any time at {business_phone}.") before any content — the spoken callback number
+    is what 47 CFR §64.1200(b)(2) requires of every artificial-voice message (identify the
+    business at the start, and give a telephone number during or after; caller ID does not
+    satisfy the spoken requirement; Appendix E §4 row "Mandatory content"), rendered from
+    `tenant_settings.business_phone` through the existing digit-grouping `speakableText`
+    path, and validated at go-live as a non-premium NANP number (no 900/976 prefixes) that
+    the tenant answers
     — and **nothing the callee says reaches Deepgram until that opener has finished
     playing**: the outbound session runs the same comms-C5 gate the inbound realtime path
     already has (`mediastream-adapter.ts` `captureEnabled`, false until the opener turn's
@@ -1069,7 +1097,9 @@ flowchart LR
     timer opens capture**, never at the ack itself and never at TwiML generation: inbound
     commits there precisely so that a lost mark frame, which the safety timer recovers from
     by opening capture anyway, cannot forward caller audio without the consent record;
-    global STOP intent → tenant DNC flag; `AnsweredBy` machine → compliant short message or hang
+    global STOP intent → tenant DNC flag; `AnsweredBy` machine → the deterministic
+    `outbound_callback_voicemail` line (business name, "automated assistant", the same spoken
+    callback number, no content) or hang
     up, job `voicemail`, no retry.
   - **Billing and settings.** `billing/call-usage-events.ts` `classifyCall` gains direction;
     `call_usage_events.direction TEXT DEFAULT 'inbound'`; `CallRoutingSheet.tsx` toggle, window
@@ -1087,7 +1117,9 @@ flowchart LR
     with a valid grant and **no** `revoked` ledger row is refused with `dnc_listed`),
     `packages/api/test/voice/recovery/callback-branch.test.ts`,
     `packages/api/test/telephony/outbound-ai-call-service.test.ts` (AMD paths, status
-    callbacks, one attempt), `packages/api/test/routes/telephony.outbound-answer.test.ts`,
+    callbacks, one attempt; the opener and the voicemail line both contain the tenant's
+    business phone rendered as digits, and a tenant whose `business_phone` fails the
+    non-premium check cannot enable callbacks), `packages/api/test/routes/telephony.outbound-answer.test.ts`,
     `packages/api/test/telephony/media-streams/outbound-disclosure-gate.test.ts` (media
     frames before the opener's mark ack are dropped and never forwarded; the ledger row is
     written when playback is validated complete, before the ack; no ack within the timeout →
