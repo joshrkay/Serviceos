@@ -285,12 +285,17 @@ flowchart LR
     so the reply gap cannot be reconstructed from it; the in-memory histogram has no tenant
     identity and no durability. `packages/api/src/voice/pg-call-transcript-turn.ts` and
     `packages/api/src/ai/voice-turn/transcript-append.ts` — the adapter's existing
-    fire-and-forget `recordTurn` carries the stamps; realtime writes all four, Gather writes
-    `stt_final_at` (webhook receipt) and `first_audio_at` (TwiML returned) with the Polly
-    synthesis cost noted as unmeasured.
+    fire-and-forget `recordTurn` carries the stamps; realtime writes all four. Gather writes
+    `stt_final_at` (webhook receipt) and `transport = 'gather'` only: returning TwiML is not
+    audio (Twilio still receives it, synthesises Polly and starts playout), so `first_audio_at`
+    and `reply_gap_ms` stay **null** on Gather turns rather than recording an optimistic
+    number.
   - `packages/api/src/voice/quality/grade-voice-session.ts`, `packages/api/src/routes/voice.ts`
     `GET /api/voice/quality` — 7-day p50/p95 of `reply_gap_ms` and first-audible from the new
-    columns, per tenant; `packages/web/src/components/settings/CallQualityCard.tsx` — two tiles.
+    columns, per tenant, **filtered to `transport = 'realtime'`**; the response also carries the
+    share of turns on Gather in the window, shown on the card as "unmeasured on N % of calls"
+    so a degraded tenant never sees an artificially low percentile;
+    `packages/web/src/components/settings/CallQualityCard.tsx` — two tiles plus that share.
   - `loadtest/voice-realtime-concurrency.ts` — N emulated streams via
     `ai/voice-quality/audio/twilio-stream-emulator.ts` against one API process; records the N at
     which p95 TTFA crosses 800 ms.
@@ -301,7 +306,8 @@ flowchart LR
     `packages/web/src/components/settings/CallQualityCard.test.tsx`,
     `packages/api/test/integration/voice-latency-summary.test.ts` (pins the new columns: a
     turn written through `recordTurn` with all four stamps yields the expected `reply_gap_ms`;
-    a Gather turn leaves `first_audible_at` null).
+    a Gather turn leaves `first_audio_at`, `first_audible_at` and `reply_gap_ms` null and is
+    excluded from the percentiles while counted in the Gather share).
 - **Approach:** no behaviour change on the call. Per-tenant ramp through `voice_realtime` for
   the first accounts before the env default moves, watching `realtime-health-circuit.ts`.
 - **Patterns to follow:** D-041 (reads stored calls, never audio); `report-layer2.ts` TTFA
@@ -331,12 +337,20 @@ flowchart LR
      `packages/api/src/telephony/media-streams/mediastream-adapter.ts` (`onTranscriptEvent`
      opens or warms the connection at STT-final next to `armEarlyFiller`; `bargeIn()` aborts the
      stream, not the socket).
-  2. **Endpointing.** `packages/api/src/voice/transcription-providers.ts` — `endpointingMs`
-     default 300, add `utteranceEndMs` (1000) and `vad_events=true` to the URL; parse
-     `speech_final` and `UtteranceEnd` into a new `utterance_end` event; keep `is_final` segments
-     as `segment` events. `mediastream-adapter.ts` — concatenate `segment` text until
-     `utterance_end` (or `speech_final`), then dispatch one `speechTurn`; the adapter passes
-     `endpointingMs` from a new `voice_endpointing_ms` platform setting (no tenant knob yet).
+  2. **Endpointing: one dispatch rule, two signals.** `packages/api/src/voice/transcription-providers.ts`
+     — `endpointingMs` default 300, add `utteranceEndMs` (1000) and `vad_events=true` to the URL;
+     parse `speech_final` into a `speech_final` event and `UtteranceEnd` into an `utterance_end`
+     event; keep `is_final` segments as `segment` events. `mediastream-adapter.ts` — buffer
+     `segment` text and dispatch exactly one `speechTurn` on the first of: (a) `speech_final`
+     **when the buffered text is complete** (ends in terminal punctuation from `smart_format`,
+     or is a short confirm/deny such as "yes", "no", "that's right"), or (b) `utterance_end`
+     (1,000 ms word gap). A `speech_final` on text that is not complete ("um, next Tuesday at")
+     never dispatches; it starts the speculative classify and the TTS pre-connect only, and the
+     turn waits for (b) or for a later complete `speech_final`. This is the Vapi
+     punctuation / no-punctuation pattern (Appendix E §1.1): a finished sentence gets the 300 ms
+     path, a mid-thought pause gets the 1,000 ms guard, and the two signals cannot race because
+     only one rule dispatches. The adapter passes `endpointingMs` from a new
+     `voice_endpointing_ms` platform setting (no tenant knob yet).
   3. **TTS model.** `tts-provider.ts:161` `eleven_turbo_v2_5` → `eleven_flash_v2_5` for `en`;
      `scripts/render-fillers.ts` re-renders fillers with the same model; Spanish stays on
      `eleven_multilingual_v2` until a Layer 2 pronunciation pass clears flash.
@@ -363,7 +377,9 @@ flowchart LR
   - Tests: `packages/api/test/ai/tts/elevenlabs-persistent-socket.test.ts` (one socket per
     call, reopen on error, abort does not close), `packages/api/test/voice/transcription-providers.endpointing.test.ts`
     (URL params; `speech_final`/`UtteranceEnd` mapping), `packages/api/test/telephony/media-streams/segment-buffering.test.ts`
-    ("two is_final without speech_final → one speechTurn"), `packages/api/test/telephony/media-streams/speculative-classify.test.ts`
+    ("two is_final without speech_final → one speechTurn"; "speech_final on 'next Tuesday at'
+    → no dispatch, speculative classify armed, dispatch on utterance_end"; "speech_final on
+    'Tuesday at two.' → dispatch at 300 ms"; "speech_final on 'yes' → dispatch"), `packages/api/test/telephony/media-streams/speculative-classify.test.ts`
     (hit, miss, exactly one proposal, cost-cap respected), `packages/api/test/ai/voice-turn/side-effects-overlap.test.ts`
     (synthesis starts before the insert resolves; no frame is released before it; an insert
     failure discards the buffered audio and speaks the failure copy),
@@ -541,12 +557,17 @@ flowchart LR
      the row is created with `provisional = true`, idempotent on session + title, and
      **excluded from the dispatch board, job lists, digests and search the same way held
      appointments are** (`dispatch/board-query.ts`, `jobs/pg-job.ts` list queries, digest). The
-     conflict check runs by customer location, not by job. `CreateAppointmentExecutionHandler`
-     / `CreateBookingExecutionHandler` promote the job (`provisional = false`) at execution.
-     Cleanup is durable: `workers/hold-reaper-worker.ts` gains a sibling pass that deletes a
-     provisional job whose hold expired or was cancelled and whose proposal is not approved;
-     `finalizeTerminatedSession` deletes the session's provisional job when the session ends
-     with no proposal; both audited. Thread `missingFields`, `emergencyFlagged`,
+     conflict check runs by customer location and time **before** the provisional job is
+     created (item 3's checker takes a location, not a job), so a taken slot never creates a
+     job at all; job creation and `placeAppointmentHold` run in one transaction, and a
+     pre-hold failure rolls the job back. `CreateAppointmentExecutionHandler` /
+     `CreateBookingExecutionHandler` promote the job (`provisional = false`) at execution.
+     Cleanup is durable and does not depend on a hold existing: `workers/hold-reaper-worker.ts`
+     gains a sibling pass over `jobs WHERE provisional AND created_at < now() - hold TTL` that
+     deletes any such job whose hold is expired, cancelled **or absent** and whose proposal is
+     not approved; `finalizeTerminatedSession` deletes the session's provisional job when the
+     session ends with no proposal; both audited. A process exit between creation and
+     finalisation leaves a row the sweep removes on its next pass. Thread `missingFields`, `emergencyFlagged`,
      `vulnerabilityFlagged` into `buildLaneInputFromSettings` (`inbound-booking-completion.ts:58`).
   2. **Thread the supervisor mode.** `VoiceTurnProcessorDeps` gains `isSupervisorPresent`;
      `buildProposal` at `:2865` passes `supervisorMode` (from `voice_sessions.supervisor_mode_at_start`)
@@ -603,14 +624,17 @@ flowchart LR
      billing and auto-go-live ignore it. Route `POST /api/onboarding/test-booking/start-browser`.
   9. **Verified test booking and go-live.** `routes/onboarding.ts` —
      `POST /test-booking/verify {sessionId}` (session belongs to tenant, is `voice_inbound` or
-     preview, has a linked `appointments` row else 409 `TEST_BOOKING_NO_APPOINTMENT`; the row
-     was created with `is_test = true` from the wizard's test customer; stamps `verified_at`,
-     calls `enableVoiceAgentLive` with
-     `source: 'test_booking_verified'`), `POST /test-booking/reject {sessionId, reason}` (stamps,
+     preview, **and the query requires a linked `appointments` row with `is_test = true` whose
+     `customer_id` is the wizard's test customer** (`tenant_settings.test_customer_id`), else
+     409 `TEST_BOOKING_NO_APPOINTMENT`; a real appointment linked by a wrong session id can
+     never satisfy it. Verify **only stamps `test_booking_verified_at`**; it never calls
+     `enableVoiceAgentLive`. Activation is the explicit `go_live` step's button, per R8),
+     `POST /test-booking/reject {sessionId, reason}` (stamps,
      records a correction event the learning loop consumes), `POST /forwarding-check/start`
      (stamps, returns carrier codes and expected `ForwardedFrom`; `routes/telephony.ts /voice`
      sets `forwarding_verified_at` when `ForwardedFrom` matches a registered line).
-     `voice/go-live.ts` — delete `maybeAutoGoLiveOnInboundEnd` and its `app.ts` wiring;
+     `voice/go-live.ts` — delete `maybeAutoGoLiveOnInboundEnd` and its `app.ts` wiring; the
+     only caller of `enableVoiceAgentLive` is `POST /api/voice/go-live` from the `go_live` step;
      `enableVoiceAgentLive` checks subscription, `full_readiness`, `voice_preview_at`, required
      business answers, `test_booking_verified_at` (or `force: true`, audited) and returns 409
      `GO_LIVE_BLOCKED { blockers }`. Keep the #1605 attested-owner bypass in `voice-gate.ts`.
@@ -633,7 +657,9 @@ flowchart LR
     sent after the grant), `packages/api/test/telephony/twilio-adapter.gather-consent-capture.test.ts`
     (a Gather yes/no turn consumes the pending capture instead of classifying a fresh intent;
     `coverage-table.ts` row `ws18_consent_capture` updated),
-    `packages/api/test/voice/go-live.blockers.test.ts`, `packages/api/test/voice/activation.caller-keyed.test.ts`,
+    `packages/api/test/voice/go-live.blockers.test.ts` (verify never flips
+    `voice_agent_live_at`; a linked non-test appointment is rejected with 409; a test appointment
+    for a different customer is rejected), `packages/api/test/voice/activation.caller-keyed.test.ts`,
     `packages/api/test/ai/agents/customer-calling/inapp-adapter.preview.test.ts` (profile
     resolves to `caller`; excluded from counts), `packages/api/test/onboarding/derive-status.nine-steps.test.ts`,
     `packages/web/src/components/onboarding/v2/steps/TestBookingStep.test.tsx`,
@@ -644,8 +670,9 @@ flowchart LR
     default new tenant; bucket 09 `slot-just-taken-by-other-call` passes; bucket 05 asserts no
     SMS promise without consent; `packages/api/test/ai/scheduling/open-provisional-job.test.ts`
     and `packages/api/test/workers/hold-reaper.provisional-jobs.test.ts` (slot taken → no job
-    remains after the turn; hang-up after the hold → reaper deletes job and hold, audited;
-    approved booking → job promoted and visible); `packages/api/test/appointments/is-test-exclusion.test.ts`
+    is ever created; hold insert fails → job rolled back in the same transaction; hang-up after
+    the hold → reaper deletes job and hold, audited; provisional job older than the hold TTL
+    with no hold at all → swept; approved booking → job promoted and visible); `packages/api/test/appointments/is-test-exclusion.test.ts`
     (`is_test` rows never appear in availability, the board, reminders or the digest; go-live
     cancels the test appointment and its provisional job);
     `packages/api/test/integration/test-booking-verify.test.ts` also pins `appointments.is_test`
@@ -787,8 +814,19 @@ flowchart LR
     table `onboarding_whitespace_notes` (tenant_id, scenario_id, note, created_at; FORCE RLS);
     `tenant_settings.scenario_interview_completed_at`.
   - `packages/api/src/routes/onboarding.ts` — `GET /scenarios/next`, `POST /scenarios/:id/answer`,
-    `POST /scenarios/:id/replay` (runs the scenario through the preview session with current
-    settings and returns the spoken handling), `POST /scenarios/open-capture`.
+    `POST /scenarios/:id/replay` (runs the scenario through a preview session in
+    **simulation mode** with current settings and returns the spoken handling),
+    `POST /scenarios/open-capture`.
+  - **Simulation mode is a side-effect sink, not an exclusion list.** Replay and the Act 2
+    cards run the real caller FSM with `simulate: true`: the turn processor's deps are the Layer
+    1 harness's in-memory bundle (`ai/voice-quality/runner.ts` `makeRepoBundle('memory')`)
+    seeded from the tenant's live settings and the scenario's fixtures, plus recorder
+    implementations of call control, SMS, the emergency pager, the escalation notifier and the
+    consent ledger, so a booking, transfer or emergency scenario produces proposals, holds,
+    pages and texts only inside the recorder, which the card renders as "what I'd do". Nothing
+    reaches Twilio, the proposal table or the owner's phone. The verified test booking (Act 3)
+    is the one preview that runs with `simulate: false` and real deps, by design, and is the
+    only preview excluded from billing and activation rather than sunk.
   - `packages/api/src/onboarding/derive-status.ts` — step `scenario_interview` (replaces
     `business_answers`), complete when the selected core set is answered or explicitly skipped.
   - `packages/api/src/workers/daily-call-review-worker.ts` (new: exactly one real call a day,
@@ -834,7 +872,10 @@ flowchart LR
     that yet"; conflicting answers across two cards → one clarification, last answer wins only
     after it.
   - Replay: after-hours mode changed in Settings → replay of the 9 pm scenario speaks the new
-    handling; the preview session is excluded from billing and activation.
+    handling; replaying the emergency opener and a booking scenario leaves zero rows in
+    `proposals`, `appointments`, `jobs` and `consent_events`, places no Twilio call and sends no
+    SMS or page (recorder assertions); Act 3's test booking does create its one `is_test`
+    appointment.
   - Review card: the lowest-graded call of the day is picked; with no low grade a random graded
     call; with no graded calls no card; never two in a day; rendered without PII beyond what
     the owner may see; thumbs-up writes nothing; "should have transferred" writes a
