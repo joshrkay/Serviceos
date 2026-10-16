@@ -564,11 +564,24 @@ flowchart LR
      `workers/voice-action-router.ts:2695-2737` into `packages/api/src/proposals/lane-undo-sms.ts`;
      call it after `proposalRepo.create` (`:2984`) when the stored proposal's lane evaluation is
      eligible; owner cell required (identity step makes `ownerPhone` required).
-  5. **Consent on the booking path.** Reuse `pendingConsentCapture` after the eligible
-     utterance when `customers.sms_consent !== true`: new copy `booking_sms_consent_ask` ("I can
-     text you the confirmation at this number — is that okay?"); grant → existing
-     `recordSmsConsentFromVoice`; decline → confirmation by email only and the spoken line drops
-     the "I'll text you" clause. Under `block` the promise is now always keepable.
+  5. **Consent on the booking path, asked before the proposal exists.** The lane-approved
+     proposal becomes executable five seconds after creation and the booking handler notifies
+     with the consent value at that moment, so a consent dialogue running *after* minting
+     would race the executor and could suppress the confirmation for good. Follow the D-018
+     close path's order instead (`create-voice-turn-processor.ts:4266` arms
+     `pendingConsentCapture` before any proposal; `:4513` consumes it on the next turn): when
+     the lane is eligible and `customers.sms_consent !== true`, place the hold, arm
+     `pendingConsentCapture { purpose: 'booking', appointmentId }`, and speak
+     `booking_sms_consent_ask` ("I can text you the confirmation at this number — is that
+     okay?"). The next turn's answer records consent through `recordSmsConsentFromVoice` and
+     only then mints the `create_booking` proposal, so the executor never sees it before consent
+     is known. Grant → lane proposal with the SMS confirmation; decline → lane proposal with
+     email-only confirmation and the spoken line drops the "I'll text you" clause; hang-up
+     mid-ask → the existing hangup path mints the held draft for the owner. The consent capture
+     is consumed on **both transports**: `_handleGatherLocked` in `telephony/twilio-adapter.ts`
+     gains the `handlePendingConsentCapture` call that `coverage-table.ts` (`ws18_consent_capture`)
+     records as missing, before the fresh-intent classification, so a Gather or degraded call
+     answers the same question the same way. Under `block` the promise is now always keepable.
   6. **New-tenant default.** `packages/api/src/settings/settings.ts` `ensureTenantSettings`
      writes `autonomous_booking_enabled = true` for tenants created after the migration; existing
      rows untouched; `AIApprovalRulesSheet.tsx` shows a one-tap enable card for existing
@@ -614,7 +627,12 @@ flowchart LR
     → hold + lane evaluated), `autonomous-lane-threading.test.ts`,
     `packages/api/test/ai/scheduling/place-hold.conflict.test.ts`,
     `packages/api/test/proposals/lane-undo-sms.test.ts` (live path sends; DNC and consent
-    respected), `packages/api/test/ai/voice-turn/booking-consent-ask.test.ts`,
+    respected), `packages/api/test/ai/voice-turn/booking-consent-ask.test.ts` (ask is armed before any
+    proposal row exists; grant on the next turn mints the lane proposal with SMS; decline mints
+    it email-only; a 6-second delay between ask and answer still yields exactly one confirmation,
+    sent after the grant), `packages/api/test/telephony/twilio-adapter.gather-consent-capture.test.ts`
+    (a Gather yes/no turn consumes the pending capture instead of classifying a fresh intent;
+    `coverage-table.ts` row `ws18_consent_capture` updated),
     `packages/api/test/voice/go-live.blockers.test.ts`, `packages/api/test/voice/activation.caller-keyed.test.ts`,
     `packages/api/test/ai/agents/customer-calling/inapp-adapter.preview.test.ts` (profile
     resolves to `caller`; excluded from counts), `packages/api/test/onboarding/derive-status.nine-steps.test.ts`,
