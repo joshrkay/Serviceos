@@ -1666,7 +1666,10 @@ flowchart LR
     callers who do not reach a booking, the ask is armed when a `callback` proposal or a
     `call_me_back` task is created for the session (the request is now in flight and a drop
     would lose it), using `callback_consent_ask` alone ("If we get cut off, is it okay for our
-    automated assistant to call you back at this number about this request?"); (c) never on
+    automated assistant to call **or text** you back at this number about this request?") —
+    one question, two purposes, exactly like the booking line: a grant writes the `voice`
+    row **and** the `sms` row, because the callback's own no-contact fallback is a text, and
+    a caller who agreed only to a call must never receive one; (c) never on
     lookups, out-of-scope or emergency calls; (d) **on the booking path when SMS consent is
     already on file** — the U6 item 5 ask runs only when `customers.sms_consent !== true`, so
     a returning customer who already granted SMS consent would otherwise reach a booking with
@@ -1941,12 +1944,26 @@ flowchart LR
     `stream_started_at` set is the ordinary end of an answered call, and the adapter's own
     socket-teardown finaliser is the one that should end it — so this handler **defers to
     it, but does not abstain**: the adapter may be gone (its replica died before teardown and
-    this webhook landed on another), so the handler enqueues a 15 s delayed job that runs
-    `UPDATE … SET ended_at = NOW(), outcome = COALESCE(outcome, 'completed'), ended_reason
-    = 'adapter_lost' WHERE id = $session AND ended_at IS NULL` — `ended_reason` being the
-    column `voice_sessions` already has (`schema.ts:1809`); `failure_reason` exists only on
-    `voice_callback_jobs` and receives the same string there — and marks the job terminal
-    `completed` with **no** fallback (the customer was spoken to). In the normal case the
+    this webhook landed on another), so the handler enqueues a 15 s delayed job. **Whether
+    that job suppresses the fallback turns on a third marker, not on the stream having
+    started**: `stream_started_at` is written by `handleStart` before a single frame of the
+    opener has played, so an adapter that dies, a TTS that fails or a socket that closes
+    right after the `start` frame would leave a customer who picked up and heard silence
+    with no text and no call — the original request simply lost. The session row therefore
+    also carries `opener_played_at TIMESTAMPTZ NULL`, stamped `WHERE id = $session AND
+    opener_played_at IS NULL` when Twilio acks the `opener_done:<turnId>` mark the adapter
+    sends immediately behind the opener line's last frame (the same acked-mark mechanism U1
+    uses for `first_real`: an ack is Twilio's statement that playout reached that point).
+    The delayed job runs `UPDATE … SET ended_at = NOW(), outcome = COALESCE(outcome, CASE
+    WHEN opener_played_at IS NOT NULL THEN 'completed' ELSE 'failed' END), ended_reason =
+    CASE WHEN opener_played_at IS NOT NULL THEN 'adapter_lost' ELSE
+    'adapter_lost_before_opener' END WHERE id = $session AND ended_at IS NULL` —
+    `ended_reason` being the column `voice_sessions` already has (`schema.ts:1809`);
+    `failure_reason` exists only on `voice_callback_jobs` and receives the same string
+    there — and marks the job terminal: `completed` with **no** fallback when the opener
+    was heard (the customer knows who called and the number to reach), `failed` **with the
+    one-time fallback** when it was not (the customer was reached but told nothing). The
+    2 h stale-started pass applies the same rule. In the normal case the
     adapter's finaliser has already stamped `ended_at` long before the delay elapses and the
     job affects zero rows; the conditional guard means the two can never both finalise. A
     stale-started reconciliation pass (open sessions whose `stream_started_at` is older than
@@ -1991,10 +2008,26 @@ flowchart LR
     a terminal unanswered status, the unconfirmed and lost-terminal reconciler passes, and
     `stream_never_started` — write a **`voice_callback_fallbacks` outbox row** (`job_id`
     PRIMARY KEY REFERENCES voice_callback_jobs, `tenant_id`, `target_e164`, `body`, `sent_at
-    NULL`, `attempts`; FORCE RLS) in that same transaction. The delayed adapter-lost
-    finaliser and the adapter's own teardown never write one, because the customer was
-    spoken to: adapter-lost's "no fallback" is enforced by the absence of the row, not by a
-    flag the worker has to honour. The SMS is delivered by a worker that claims unsent
+    NULL`, `attempts`; FORCE RLS) in that same transaction — **and only when SMS consent is
+    on file at that moment**. The `voice` consent row the callback ask records is consent
+    to a *call*; it is not consent to a text, and a `voice`-only customer (a pre-change
+    grant, or a customer whose `sms` row was later revoked by STOP) must not be texted
+    because the call failed, or the fallback would route around the
+    `TCPA_CONSENT_ENFORCEMENT=block` gate every other customer send goes through. So the
+    finaliser's transaction reads `customers.sms_consent` (and the `sms` consent event for
+    the number) and writes the row only when it is true; otherwise it appends
+    `:no_sms_consent` to the job's `failure_reason`, writes no row, and sends the **owner**
+    (recipient class `owner`, which the gate does not block) a one-line note — "we couldn't
+    reach {name} back at {number}; no text was sent because they agreed to a call only" —
+    so a person can return the call. The worker then sends every row **through the gated
+    customer delivery, never the raw provider** (`recipientClass: 'customer'`, `consent:
+    { smsConsent, customerId }` from the customer row re-read at send time), so a STOP that
+    lands between enqueue and send is honoured too: `SmsSuppressedError` moves the row to
+    `send_state = 'suppressed'` (a fourth state in the CHECK), stamps the job the same way,
+    audits it and never retries. The delayed adapter-lost finaliser (when the opener was
+    heard, above) and the adapter's own teardown never write a row, because the customer
+    was spoken to: adapter-lost's "no fallback" is enforced by the absence of the row, not
+    by a flag the worker has to honour. The SMS is delivered by a worker that claims unsent
     outbox rows, and **the outbox row is its own send-claim ledger** in the three-state
     shape `send-claim-ledger.ts` already uses for every recurring customer send
     (`send_state` CHECK `pending | sending | sent`, `sending_at`, `provider_message_sid`,
@@ -2071,8 +2104,12 @@ flowchart LR
     that two jobs for the same customer with identical bodies, the later crashed
     post-accept, are never cross-stamped — the earlier job's SID is excluded and the later
     row resolves only through its own callback or the count rule; that an ambiguous
-    candidate set leaves the row `sending`, reported and not re-sent; and that an adapter-lost finalisation writes no outbox row
-    and sends no text. The `ended_at IS NULL`
+    candidate set leaves the row `sending`, reported and not re-sent; that a job whose
+    customer holds only a `voice` consent row produces no outbox row, a `:no_sms_consent`
+    failure suffix and one owner note; that a STOP arriving between enqueue and send leaves
+    the row `suppressed` with no provider create; and that an adapter-lost finalisation
+    after the opener played writes no outbox row and sends no text, while one before the
+    opener played writes the row once. The `ended_at IS NULL`
     guard on the answer-side UPDATE is what makes the late case safe (above). The `voice_callback_jobs` UNIQUE on tenant + session
     keeps the job singular.
     `proposals/surface.ts` outbound surface with the inbound allowed set;
@@ -2160,10 +2197,13 @@ flowchart LR
     later webhook dropped → the 150 s pass fetches the call's status from Twilio and
     finalises it, fallback once; `answered_at` set, no stream and no `completed` → the 60 s
     pass finalises it; a webhook and a reconciler pass racing on one row → one finalisation;
-    `completed` arriving on another replica after the adapter's replica died with both
-    markers set → the delayed finaliser ends the session `completed` / `adapter_lost`, job
-    terminal, no fallback, and the same `completed` with a live adapter → the adapter
-    finalises first and the delayed job affects zero rows;
+    `completed` arriving on another replica after the adapter's replica died with all
+    three markers set → the delayed finaliser ends the session `completed` / `adapter_lost`,
+    job terminal, no fallback; the same with `answered_at` and `stream_started_at` set but
+    `opener_played_at` null (socket closed before the opener's mark was acked) → session
+    `failed` / `adapter_lost_before_opener`, job terminal, fallback once; and the same
+    `completed` with a live adapter → the adapter finalises first and the delayed job
+    affects zero rows;
     `/outbound-answer`
     for an ended session → `<Hangup/>`, audit, no stream; the correlation columns
     (`voice_sessions.callback_job_id`, `consent_event_id`, `twilio_account_sid`, `answered_at`,
