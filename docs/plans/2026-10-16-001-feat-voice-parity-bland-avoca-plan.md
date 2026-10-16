@@ -714,12 +714,15 @@ flowchart LR
     settings and returns the spoken handling), `POST /scenarios/open-capture`.
   - `packages/api/src/onboarding/derive-status.ts` — step `scenario_interview` (replaces
     `business_answers`), complete when the selected core set is answered or explicitly skipped.
-  - `packages/api/src/workers/daily-call-review-worker.ts` (new: one real call a day rendered
-    as a scenario card; thumbs-up or "should have…" writes a `corrections` row and, where it
-    cascades, a lesson) and `packages/web/src/components/inbox/CallReviewCard.tsx`.
+  - `packages/api/src/workers/daily-call-review-worker.ts` (new: exactly one real call a day,
+    the lowest-graded from `voice_session_grades` (D-041), random graded call as fallback, none
+    on a day with no eligible calls; rendered as a scenario card; thumbs-up or "should have…"
+    writes a `corrections` row and, where it cascades, a lesson) and
+    `packages/web/src/components/inbox/CallReviewCard.tsx`.
   - `packages/web/src/components/onboarding/v2/steps/ScenarioInterviewStep.tsx` (replaces
-    `BusinessAnswersStep.tsx`; agent speaks, options as ≥44 px taps, mic or type for
-    "something else"), `packages/web/src/components/settings/ScenarioReplaySheet.tsx`.
+    `BusinessAnswersStep.tsx`; voice-first: the agent speaks and listens, via
+    `useConversationVoice`; options stay on screen as ≥44 px taps as the fallback; the spoken
+    path ships first), `packages/web/src/components/settings/ScenarioReplaySheet.tsx`.
   - Tests: `packages/api/test/onboarding/scenarios/library.select.test.ts` (HVAC vs plumbing
     vs solo selection; twelve-core cap), `options.test.ts` (every option maps to a real FSM
     effect and a real setting key), `apply-answer.test.ts` (tap writes + audit; conflicting
@@ -751,8 +754,12 @@ flowchart LR
     after it.
   - Replay: after-hours mode changed in Settings → replay of the 9 pm scenario speaks the new
     handling; the preview session is excluded from billing and activation.
-  - Review card: a real call rendered without PII beyond what the owner may see; thumbs-up
-    writes nothing; "should have transferred" writes a `corrections` row with intent and field.
+  - Review card: the lowest-graded call of the day is picked; with no low grade a random graded
+    call; with no graded calls no card; never two in a day; rendered without PII beyond what
+    the owner may see; thumbs-up writes nothing; "should have transferred" writes a
+    `corrections` row with intent and field.
+  - Voice-first: a spoken "book it on the call" is extracted and written without a tap; a
+    spoken answer the extractor cannot type gets one clarification, then the tap options.
   - Integration: new columns and the notes table pinned on real Postgres with RLS.
 - **Verification:** a new HVAC tenant completes Act 2 in under ten minutes on a phone, hears
   each handling in their chosen voice, and the inbox shows "here's what you told me" as typed

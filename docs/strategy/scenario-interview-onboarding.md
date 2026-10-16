@@ -86,9 +86,12 @@ scenarios).
    script fixtures).
 2. The screen shows three to four handling options, the agent's current choice highlighted,
    plus "something else". Options are FSM effects, so the set is fixed per scenario family.
-3. The owner taps or says the answer. A tap writes the setting directly. Speech goes through
+3. The owner answers by voice; the agent is listening as soon as it finishes speaking, and the
+   option buttons stay on screen for a noisy cab or a quiet waiting room. Speech goes through
    the existing extractor; an ambiguous answer gets one clarifying question, the same way a
-   caller's ambiguous reference does.
+   caller's ambiguous reference does. A tap writes the setting directly. Voice-first is the
+   build order as well as the default: the spoken path ships first and taps are the fallback.
+   (Decided 2026-10-16.)
 4. "Anything else I should know about calls like this?" Free text here becomes either a FAQ
    entry (spoken verbatim later), a standing instruction candidate (bounded, inbox-approved),
    or a *white-space note* when it asks for something the agent cannot do yet ("offer 10 % if
@@ -126,10 +129,13 @@ Most of this is composition. The new parts are small and each has a natural home
 - **White-space log** (`onboarding_whitespace_notes`): the asks the agent could not satisfy,
   per tenant, with the scenario they arose in. This is the demand signal for the roadmap and
   it is free.
-- **Daily "did I handle this right?"** After go-live, one real call a day is rendered as the
-  same scenario card (transcript, the handling taken, the options) for a thumbs-up or "should
-  have…", which writes a correction and, where it cascades, a lesson. Avoca's Coach loop,
-  operated by the owner in thirty seconds.
+- **Daily "did I handle this right?"** After go-live, exactly one real call a day is rendered
+  as the same scenario card (transcript, the handling taken, the options) for a thumbs-up or
+  "should have…", which writes a correction and, where it cascades, a lesson. The call is
+  chosen by grade: the lowest-scored call of the day from the D-041 nightly grader, falling
+  back to a random graded call when nothing scored low, and skipped on a day with no eligible
+  calls. Never more than one. Avoca's Coach loop, operated by the owner in thirty seconds, with
+  the worst call seen first. (Decided 2026-10-16.)
 
 ## Positions worth arguing about
 
