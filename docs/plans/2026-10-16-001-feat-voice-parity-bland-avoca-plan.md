@@ -559,8 +559,12 @@ flowchart LR
      appointments are** (`dispatch/board-query.ts`, `jobs/pg-job.ts` list queries, digest). The
      conflict check runs by customer location and time **before** the provisional job is
      created (item 3's checker takes a location, not a job), so a taken slot never creates a
-     job at all; job creation and `placeAppointmentHold` run in one transaction, and a
-     pre-hold failure rolls the job back. `CreateAppointmentExecutionHandler` /
+     job at all; job creation and `placeAppointmentHold` run in one transaction **under
+     `pg_advisory_xact_lock(hashtext(tenant_id || location_id || slot_start_bucket))`** taken
+     before the conflict read, so two concurrent calls asking for the same slot serialise on
+     the lock and the second sees the first's hold (the existing `no_double_booking` exclusion
+     covers technician assignments, not unassigned holds, so it does not help here); a pre-hold
+     failure rolls the job back. `CreateAppointmentExecutionHandler` /
      `CreateBookingExecutionHandler` promote the job (`provisional = false`) at execution.
      Cleanup is durable and does not depend on a hold existing: `workers/hold-reaper-worker.ts`
      gains a sibling pass over `jobs WHERE provisional AND created_at < now() - hold TTL` that
@@ -598,7 +602,13 @@ flowchart LR
      only then mints the `create_booking` proposal, so the executor never sees it before consent
      is known. Grant → lane proposal with the SMS confirmation; decline → lane proposal with
      email-only confirmation and the spoken line drops the "I'll text you" clause; hang-up
-     mid-ask → the existing hangup path mints the held draft for the owner. The consent capture
+     mid-ask → **no proposal is minted** (floor criterion 8 and every bucket 06 script expect a
+     mid-flow hang-up to leave no half-baked proposal; `finalizeTerminatedSession` only stamps
+     the outcome today and the plan does not add a minting path): the hold and provisional job
+     are released by the termination cleanup in item 1, the session outcome is `dropped`, and
+     dropped-call recovery (SMS today, U8's callback later) re-engages the caller. A new
+     explicit `pendingConsentCapture` termination branch in `finalizeTerminatedSession` clears
+     the capture and audits `booking_consent_abandoned`; tested. The consent capture
      is consumed on **both transports**: `_handleGatherLocked` in `telephony/twilio-adapter.ts`
      gains the `handlePendingConsentCapture` call that `coverage-table.ts` (`ws18_consent_capture`)
      records as missing, before the fresh-intent classification, so a Gather or degraded call
@@ -610,7 +620,12 @@ flowchart LR
   7. **Linkage and test columns.** `appointments.voice_session_id UUID NULL`,
      `appointments.proposal_id UUID NULL` (index tenant + session), `appointments.is_test
      BOOLEAN NOT NULL DEFAULT FALSE` (no such column exists today; mapped in
-     `appointments/pg-appointment.ts`; excluded from availability, the dispatch board,
+     `appointments/pg-appointment.ts`; **set by the writers, never by verify**: the session
+     carries `testBooking: true` when it is a preview session or an attested owner call on a
+     not-yet-live tenant (the `voice-gate.ts` owner bypass is the signal); `resolveAndPlaceAppointmentHold`
+     and both booking execution handlers copy that flag onto `appointments.is_test` and the
+     provisional job, and the wizard's `test_customer_id` is substituted for the caller's
+     record on those sessions, on both the real-phone and browser-preview transports; excluded from availability, the dispatch board,
      reminders, digests and billing; the test appointment and its provisional job are
      cancelled when go-live succeeds or the test is rejected), `voice_sessions.caller_phone_e164 TEXT NULL`,
      `tenant_settings.test_booking_verified_at`, `test_booking_rejected_at`, `test_booking_reason`,
@@ -676,7 +691,11 @@ flowchart LR
     (`is_test` rows never appear in availability, the board, reminders or the digest; go-live
     cancels the test appointment and its provisional job);
     `packages/api/test/integration/test-booking-verify.test.ts` also pins `appointments.is_test`
-    and `jobs.provisional`.
+    and `jobs.provisional`, and asserts the marker is set on both transports and never on an
+    ordinary inbound call; `packages/api/test/integration/place-hold.concurrent-slot.test.ts`
+    (two concurrent hold requests for one slot on real Postgres → exactly one hold);
+    `packages/api/test/ai/voice-turn/booking-consent-hangup.test.ts` (hang-up mid-ask → no
+    proposal, hold and job released, capture cleared, `booking_consent_abandoned` audited).
 - **Floor-criteria risks (Appendix B):** #2 noAutoMutation (job and hold exist before
   approval; pinned by `hold_pending_approval = true` plus a proposal row), #6 noDuplicateCustomer
   (opening a job never creates a customer), #7 complianceGatesRespected (UNDO SMS and
@@ -736,9 +755,14 @@ flowchart LR
   - **Consent utterance on the inbound call.** `tts-copy.ts` `callback_consent_ask` ("If we get
     cut off, is it okay for our automated assistant to call you back at this number about this
     request?"); `handlePendingConsentCapture` grant → new `recordVoiceConsentFromVoice` writing
-    `consent_events { kind: 'voice', state: 'granted', source: 'voice', voice_session_id }`
-    (CHECK gains `'voice'`); `compliance/resolve-outbound-consent.ts` voice branch reads the
-    ledger, not only `customers.consent_status`.
+    `consent_events { kind: 'voice', state: 'granted', source: 'voice', voice_session_id,
+    purpose: 'dropped_call_callback' }` (CHECK gains `'voice'`; new `purpose` column).
+    **This grant is scoped, not standing:** `compliance/resolve-outbound-consent.ts` is unchanged
+    (the generic voice branch still reads only `customers.consent_status`), and the callback
+    service validates the exact `consent_event_id` bound to its `voice_callback_jobs` row (same
+    tenant, same `voice_session_id`, purpose `dropped_call_callback`, inside the window, no
+    later revocation) before dialling. The owner click-to-call path and any future outbound
+    leg never see the callback grant as consent.
   - **Branch in recovery.** `voice/recovery/detect-dropped.ts`, `workers/dropped-call-worker.ts`
     — consent row + `block` mode + tenant `voice_callback_enabled` + inside window → enqueue one
     `voice_callback_jobs` row (`tenant_id`, `voice_session_id`, `target_e164`,
@@ -756,7 +780,9 @@ flowchart LR
   - **Billing and settings.** `billing/call-usage-events.ts` `classifyCall` gains direction;
     `call_usage_events.direction TEXT DEFAULT 'inbound'`; `CallRoutingSheet.tsx` toggle, window
     minutes, one attempt.
-  - Tests: `packages/api/test/voice/outbound-consent.voice-kind.test.ts`,
+  - Tests: `packages/api/test/voice/outbound-consent.voice-kind.test.ts` (a
+    `dropped_call_callback` grant authorises only the job that references it; click-to-call and
+    a second callback job for the same number are refused),
     `packages/api/test/voice/recovery/callback-branch.test.ts`,
     `packages/api/test/telephony/outbound-ai-call-service.test.ts` (AMD paths, status
     callbacks, one attempt), `packages/api/test/routes/telephony.outbound-answer.test.ts`,
@@ -812,7 +838,12 @@ flowchart LR
     (`never | ranges_from_catalog | exact_from_catalog`), `services_not_offered TEXT[]`,
     per-tenant emergency terms (lifts the platform-only limit in `emergency-detector.ts`);
     table `onboarding_whitespace_notes` (tenant_id, scenario_id, note, created_at; FORCE RLS);
-    `tenant_settings.scenario_interview_completed_at`.
+    table `onboarding_scenario_answers` (tenant_id, scenario_id, status `answered | skipped`,
+    option_key, free_text_route `faq | standing_instruction | whitespace | none`, answered_at;
+    UNIQUE tenant + scenario; FORCE RLS) — `GET /scenarios/next` reads it to resume after a
+    refresh or restart without repeating a card, and step completion is derived from it (every
+    selected core scenario has a row), not from a stamp; `tenant_settings.scenario_interview_completed_at`
+    is a convenience stamp written when the derivation first holds.
   - `packages/api/src/routes/onboarding.ts` — `GET /scenarios/next`, `POST /scenarios/:id/answer`,
     `POST /scenarios/:id/replay` (runs the scenario through a preview session in
     **simulation mode** with current settings and returns the spoken handling),
@@ -852,8 +883,12 @@ flowchart LR
     (regenerating the registry from the corpus produces no diff), corpus: the `ownerFacing`
     block is validated by the corpus-integrity check.
 - **Approach:** options are FSM effects only, so an answer is always typeable; the agent's
-  current choice is the conservative default (hold, transfer on uncertainty, no quotes) so a
-  skipped interview yields a safe agent; emergency rails, negotiation refusal and spam handling
+  current choice is the platform default for that setting, which is conservative everywhere
+  except booking: skipping the booking card **preserves** the new-tenant
+  `autonomous_booking_enabled = true` from R7/U6 (the lane's own gates, undo, UNDO SMS and
+  conflict check are the safety, so a skipped interview still books), while skipped cards for
+  transfer, quotes, after-hours and the rest keep their conservative defaults (transfer on
+  uncertainty, no quotes, AI answers after hours); emergency rails, negotiation refusal and spam handling
   are shown with a "make it stricter" option and no "looser"; replay reuses U6's preview session
   with the tenant's live settings so it doubles as the regression view after any settings
   change.
@@ -867,8 +902,10 @@ flowchart LR
   - Happy: HVAC tenant → twelve cards including no-cool emergency and after-hours; owner taps
     "book it on the call" → `autonomous_booking_enabled=true` + audit; says "always ask what's
     wrong first" → `booking_required_fields` gains problem description.
-  - Edge: owner skips every card → settings equal the conservative defaults and the step is
-    complete; "offer 10 % if they book today" → white-space note, no setting, spoken "I can't do
+  - Edge: owner skips every card → every selected scenario has a `skipped` row, the step is
+    complete, `autonomous_booking_enabled` is still `true` for a new tenant and every other
+    setting equals its conservative default; refresh mid-interview → `next` returns the first
+    scenario with no row, never a repeated one; "offer 10 % if they book today" → white-space note, no setting, spoken "I can't do
     that yet"; conflicting answers across two cards → one clarification, last answer wins only
     after it.
   - Replay: after-hours mode changed in Settings → replay of the 9 pm scenario speaks the new

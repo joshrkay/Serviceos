@@ -194,10 +194,12 @@ expectations; replay is what lets the owner trust a settings change without plac
 Bland's Standards and Testbed are developer tools; this is the same mechanism with the owner
 as the author of expectations.
 
-**Default to "hold and tell me" for anything the owner skips.** An owner who taps through in
-four minutes should end up with a safe agent (hold bookings, transfer on uncertainty, voicemail
-after hours off, no quotes), not a blank one. Every scenario has a default that is the
-conservative FSM behaviour.
+**Skipping keeps the platform default, which is conservative everywhere except booking.** An
+owner who taps through in four minutes ends up with an agent that transfers on uncertainty,
+quotes nothing, answers after hours, and **still books on the call**, because the new-tenant
+default for booking is on and the lane's own gates, undo, owner UNDO text and conflict check are
+the safety. Every other scenario's default is the cautious FSM behaviour. (Decided 2026-10-16:
+skipping the booking card preserves the default; it does not write an opt-out.)
 
 ## What could go wrong
 
