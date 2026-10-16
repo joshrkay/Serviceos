@@ -1529,11 +1529,31 @@ flowchart LR
     overloading it: `escalation_id TEXT NULL`, **`escalation_outcome TEXT NULL CHECK
     (escalation_outcome IN ('resolved', 'hung_up', 'needs_callback'))`,
     `escalation_outcome_at TIMESTAMPTZ NULL` and `escalation_outcome_by UUID NULL REFERENCES
-    users(id)`**, mapped in `pg-voice-session.ts` and pinned on real Postgres by
-    `test/integration/escalation-outcome.test.ts`; the route writes all three in one UPDATE
-    keyed on the session and the dispatcher's user id, `needs_callback` also creates the
-    call-me-back task, and the Interactions page's Transferred filter and outcome badge read
-    `escalation_outcome`, never `outcome`.
+    users(id)`**, mapped in `pg-voice-session.ts`. **The escalation id is persisted when
+    the hand-off is initiated, not only read back**: today `escalate-to-human.ts:448` mints
+    `esc_<uuid>` and the processor puts it only in the in-memory whisper cache and the
+    dispatcher SMS (`create-voice-turn-processor.ts:3196-3216`), so nothing durable maps
+    `:escalationId` to a session and the route has nothing to resolve — which is exactly
+    why today's handler returns 200 on nothing. The unit therefore writes
+    `escalation_id = $escalationId` in the **same conditional UPDATE that writes
+    `escalation_state` when the dispatcher dial is placed** (U3's cascade state, for every
+    dispatcher dial — cascade, rotation and the single-line transfer alike), guarded by
+    `escalation_id IS NULL`, so the row carries the id before Twilio rings anyone, and a
+    partial unique index on `(tenant_id, escalation_id) WHERE escalation_id IS NOT NULL`
+    makes the lookup exact. `VoiceSessionStore` / `pg-voice-session.ts` gain a
+    tenant-scoped `findByEscalationId(tenantId, escalationId)` that reads under the
+    tenant's RLS context (`schema.ts:1815-1820`); the outcome route runs behind
+    `requireAuth` + `requireTenant` and resolves the row through it under the
+    dispatcher's tenant — 404 when no row, never a silent 200 — and writes the three
+    outcome columns in one UPDATE keyed on `tenant_id`, `escalation_id` and
+    `escalation_outcome IS NULL` (first outcome wins; a second submission returns 409 with
+    the stored outcome). `needs_callback` also creates the call-me-back task, and the
+    Interactions page's Transferred filter and outcome badge read `escalation_outcome`,
+    never `outcome`. `test/integration/escalation-outcome.test.ts` pins on real Postgres
+    that initiating a transfer stamps `escalation_id` in the same statement as
+    `escalation_state` (before the dial), that the route resolves the row by id under
+    tenant A and 404s under tenant B, that a second outcome is refused with 409, and that
+    the badge query reads the typed columns.
   - `packages/api/src/routes/voice.ts` — `GET /api/voice/recordings/by-call/:callSid/audio`
     reusing the `:716-760` handler body (tenant-scoped, presigned, short TTL, 410 on purged).
   - `packages/web/src/components/interactions/InteractionsPage.tsx` — Transferred filter, outcome
@@ -1953,15 +1973,22 @@ flowchart LR
     later row with the earlier job's message would suppress that fallback forever. A
     `sending` row whose callback has not arrived after 10 minutes goes through a
     **set reconcile** that can only ever *add* a send, never swallow one: the reconciler
-    lists the subaccount's messages to `target_e164` from the DID created that calendar
-    day, drops every SID already stamped on any outbox row of the tenant, and keeps the
-    rest whose `date_created` (a full timestamp on the returned resource) falls within
-    `[sending_at, sending_at + 10 min]`. Zero candidates means Twilio never accepted the
+    lists the subaccount's messages to `target_e164` created that calendar day **with no
+    `From` filter** — the per-tenant provider prefers `MessagingServiceSid` whenever the
+    tenant has one (`per-tenant-twilio-delivery-provider.ts:85-99`), so Twilio picks the
+    sender from the service's pool and it need not be the tenant's DID; a `From` filter
+    would return zero candidates for a Messaging Service send, and zero candidates means
+    re-send, i.e. a duplicate — drops every SID already stamped on any outbox row of the
+    tenant, and keeps the rest whose `date_created` (a full timestamp on the returned
+    resource) falls within `[sending_at, sending_at + 10 min]` **and whose body equals the
+    stored body** (other texts to the same customer in that window — a confirmation, a
+    reminder — carry different bodies, are not candidates, and are correlated by their own
+    dispatch rows). Zero candidates means Twilio never accepted the
     create: the row goes back to `pending` for one bounded re-send (`attempts ≤ 3`).
     Exactly as many candidates as unresolved `sending` rows for that recipient means each
     row takes one SID — the bodies are identical by construction, so which is which cannot
-    change what the customer received — and is stamped. Anything else (more candidates
-    than rows, or a candidate whose body differs) is ambiguous: the row stays `sending`, is
+    change what the customer received — and is stamped. Anything else (more same-body
+    candidates than unresolved rows) is ambiguous: the row stays `sending`, is
     neither re-sent nor stamped, and is surfaced through the same stuck-claims report
     `findStuckSendClaims` feeds (`send-claim-ledger.ts:33`) for an operator. Three layers
     make it once: the `job_id` primary key means a redelivered terminal status finds the
