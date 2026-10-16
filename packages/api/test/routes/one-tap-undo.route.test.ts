@@ -1,6 +1,10 @@
 /**
  * UB-D / D-015 (D3) — public one-tap UNDO route.
  *
+ * A GET only renders a confirm page (SMS link previews and carrier scanners
+ * issue GETs, so a GET must never cancel); the confirm button POSTs the same
+ * token, and only the POST spends the nonce.
+ *
  * Redemption paths:
  *  - proposal still 'approved' (inside the 5s undo window) → existing
  *    undoProposal path (status 'undone') + held slot released;
@@ -51,7 +55,7 @@ const customer = {
 } as unknown as Customer;
 
 async function makeApp(opts: {
-  proposalStatus: 'approved' | 'executed' | 'ready_for_review';
+  proposalStatus: 'approved' | 'executed' | 'ready_for_review' | 'executing' | 'execution_failed';
   proposalType?: 'create_booking' | 'add_note';
   onDnc?: boolean;
 }) {
@@ -71,7 +75,8 @@ async function makeApp(opts: {
       createdBy: 'voice',
       // Executed bookings have been confirmed (hold cleared); approved ones
       // still hold.
-      holdPendingApproval: opts.proposalStatus === 'approved',
+      holdPendingApproval:
+        opts.proposalStatus === 'approved' || opts.proposalStatus === 'executing',
       holdExpiryAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     },
     appointmentRepo,
@@ -141,6 +146,11 @@ async function makeApp(opts: {
   return { app, proposalRepo, auditRepo, appointmentRepo, appointment, proposal, sendSms };
 }
 
+/** The confirm page's button: a form POST of the same token. */
+function redeem(app: express.Express, token: string) {
+  return request(app).post('/public/proposals/one-tap-undo').type('form').send({ token });
+}
+
 function mint(proposalId: string, ttlMs?: number, nowMs?: number) {
   return createOneTapUndoToken({
     proposalId,
@@ -151,13 +161,72 @@ function mint(proposalId: string, ttlMs?: number, nowMs?: number) {
   });
 }
 
-describe('GET /public/proposals/one-tap-undo', () => {
+describe('/public/proposals/one-tap-undo', () => {
+  // Value: protects=a GET (SMS link preview, carrier scanner) never cancels a booking or spends the link;
+  //   fails_when=the route acts on GET again, or consumes the nonce before the confirm POST;
+  //   why_new=every earlier test acted on GET; seam=none; no_claim=real preview-bot behaviour
+  it('GET renders a confirm page and changes nothing; the confirm POST then undoes the booking', async () => {
+    const { app, proposalRepo, appointmentRepo, appointment, proposal, sendSms } = await makeApp({
+      proposalStatus: 'executed',
+    });
+    const { token } = mint(proposal.id);
+
+    const preview = await request(app).get('/public/proposals/one-tap-undo').query({ token });
+    expect(preview.status).toBe(200);
+    expect(preview.text).toContain('<form method="post"');
+    expect(preview.text).toContain('min-height:44px');
+    expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).not.toBe('canceled');
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe('executed');
+    expect(sendSms).not.toHaveBeenCalled();
+
+    // The nonce survived the GET: the real tap still works.
+    const res = await redeem(app, token);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('Booking undone');
+    expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).toBe('canceled');
+  });
+
+  it('while the executor holds the booking (executing), the tap asks to retry and does not spend the link', async () => {
+    const { app, proposalRepo, appointmentRepo, appointment, proposal } = await makeApp({
+      proposalStatus: 'executing',
+    });
+    const { token } = mint(proposal.id);
+
+    const busy = await redeem(app, token);
+    expect(busy.status).toBe(503);
+    expect(busy.text).toContain('Try again');
+    expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).not.toBe('canceled');
+
+    // Execution finishes; the same link still works.
+    await proposalRepo.update(TENANT, proposal.id, {
+      status: 'executed',
+      executedAt: new Date(),
+      resultEntityId: appointment.id,
+    } as never);
+    const res = await redeem(app, token);
+    expect(res.status).toBe(200);
+    expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).toBe('canceled');
+  });
+
+  it('a booking whose execution failed after the caller was told "booked" is still canceled with the apology', async () => {
+    const { app, appointmentRepo, appointment, proposal, sendSms } = await makeApp({
+      proposalStatus: 'execution_failed',
+    });
+    const { token } = mint(proposal.id);
+
+    const res = await redeem(app, token);
+    expect(res.status).toBe(200);
+    expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).toBe('canceled');
+    expect(sendSms).toHaveBeenCalledTimes(1);
+  });
+
+
   it('undo BEFORE execution: undoProposal path + hold released, no apology SMS', async () => {
     const { app, proposalRepo, auditRepo, appointmentRepo, appointment, proposal, sendSms } =
       await makeApp({ proposalStatus: 'approved' });
     const { token } = mint(proposal.id);
 
-    const res = await request(app).get('/public/proposals/one-tap-undo').query({ token });
+    const res = await redeem(app, token);
 
     expect(res.status).toBe(200);
     expect(res.text).toContain('Booking undone');
@@ -180,7 +249,7 @@ describe('GET /public/proposals/one-tap-undo', () => {
     });
     const { token } = mint(proposal.id);
 
-    const res = await request(app).get('/public/proposals/one-tap-undo').query({ token });
+    const res = await redeem(app, token);
 
     expect(res.status).toBe(200);
     expect(res.text).toContain('Booking undone');
@@ -206,10 +275,10 @@ describe('GET /public/proposals/one-tap-undo', () => {
     });
     const { token } = mint(proposal.id);
 
-    const first = await request(app).get('/public/proposals/one-tap-undo').query({ token });
+    const first = await redeem(app, token);
     expect(first.status).toBe(200);
 
-    const second = await request(app).get('/public/proposals/one-tap-undo').query({ token });
+    const second = await redeem(app, token);
     expect(second.status).toBe(200);
     expect(second.text).toContain('Already undone');
 
@@ -224,7 +293,7 @@ describe('GET /public/proposals/one-tap-undo', () => {
     });
     const { token } = mint(proposal.id);
 
-    const res = await request(app).get('/public/proposals/one-tap-undo').query({ token });
+    const res = await redeem(app, token);
     expect(res.status).toBe(200);
     expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).toBe('canceled');
     expect(sendSms).not.toHaveBeenCalled();
@@ -257,7 +326,7 @@ describe('GET /public/proposals/one-tap-undo', () => {
     });
     const { token } = mint(proposal.id);
 
-    const res = await request(app).get('/public/proposals/one-tap-undo').query({ token });
+    const res = await redeem(app, token);
     expect(res.status).toBe(403);
     const types = (await auditRepo.findByEntity(TENANT, 'proposal', proposal.id)).map(
       (e) => e.eventType,
@@ -265,12 +334,15 @@ describe('GET /public/proposals/one-tap-undo', () => {
     expect(types).toContain('proposal.one_tap_undo_blocked_type');
   });
 
-  it('returns 409 for a proposal that never went live (ready_for_review)', async () => {
+  it('returns 409 for a proposal that never went live (ready_for_review), without spending the link', async () => {
     const { app, proposal } = await makeApp({ proposalStatus: 'ready_for_review' });
     const { token } = mint(proposal.id);
-    const res = await request(app).get('/public/proposals/one-tap-undo').query({ token });
+    const res = await redeem(app, token);
     expect(res.status).toBe(409);
     expect(res.text).toContain('Nothing to undo');
+    // Not consumed: a second tap gets the same answer, not "already used".
+    const again = await redeem(app, token);
+    expect(again.status).toBe(409);
   });
 
   it('answers 503 when no secret is configured', async () => {

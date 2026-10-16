@@ -22,6 +22,12 @@
  * a double-tap return success without double-cancelling (the already-undone
  * check runs on a NON-consuming peek, so a second tap never errors).
  *
+ * A GET only renders a confirm page: SMS link previews and carrier scanners
+ * issue GETs, so a GET must never cancel a booking or spend the link. The
+ * confirm button POSTs the same token. A booking the executor holds
+ * ('executing') or that never went live is answered BEFORE the nonce is
+ * consumed, so the owner's real tap is never wasted.
+ *
  * Mounted under `/public/proposals` next to the one-tap approve route
  * (unauthenticated but token-gated), with the same minimal mobile HTML
  * responses.
@@ -83,6 +89,32 @@ export interface OneTapUndoRouterDeps {
    * Optional: absent ⇒ the cancel still happens, the apology is skipped.
    */
   customerMessageDeps?: CustomerMessageDeliveryDeps;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** The GET interstitial; the button POSTs the same token. ≥44px tap target. */
+function undoConfirmPage(summary: string, token: string, action: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Undo this booking?</title>
+<style>body{font-family:system-ui,sans-serif;margin:0;padding:48px 24px;text-align:center;color:#111}
+h1{font-size:1.4rem}p{color:#555}
+button{min-height:44px;padding:12px 32px;font-size:1rem;border:0;border-radius:8px;
+background:#111;color:#fff;cursor:pointer}</style></head>
+<body><h1>Undo this booking?</h1>
+<p>${escapeHtml(summary)}</p>
+<form method="post" action="${escapeHtml(action)}">
+<input type="hidden" name="token" value="${escapeHtml(token)}">
+<button type="submit">Undo booking</button>
+</form></body></html>`;
 }
 
 function page(title: string, body: string): string {
@@ -247,6 +279,37 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
       return;
     }
 
+    // A GET (link preview, scanner or the owner's first tap) only confirms.
+    if (req.method === 'GET') {
+      res
+        .status(200)
+        .type('html')
+        .send(undoConfirmPage(proposal.summary, token, `${req.baseUrl}${req.path}`));
+      return;
+    }
+
+    // Answer the states that cannot be undone yet, or ever, BEFORE spending
+    // the link, so a retry or a later tap still works.
+    if (proposal.status === 'executing') {
+      res
+        .status(503)
+        .type('html')
+        .send(page('Almost done booking', 'Try again in a moment — the booking is being finalized.'));
+      return;
+    }
+    if (
+      proposal.status !== 'approved' &&
+      proposal.status !== 'executed' &&
+      proposal.status !== 'execution_failed'
+    ) {
+      // rejected / ready_for_review / draft — the booking never went live.
+      res
+        .status(409)
+        .type('html')
+        .send(page('Nothing to undo', 'This booking is not active — check your review queue.'));
+      return;
+    }
+
     // Real, nonce-consuming verify. From here the link is spent.
     const verified = await verifyOneTapUndoToken({
       token,
@@ -311,49 +374,40 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
       return;
     }
 
-    if (proposal.status === 'executed') {
-      // Compensating flow: the customer confirmation already went out, so
-      // cancel the appointment and send the fixed-template apology.
-      if (!appointment) {
-        res
-          .status(404)
-          .type('html')
-          .send(page('Could not undo', 'The booked appointment could not be found.'));
-        return;
-      }
-      const updated = await updateAppointment(
-        tenantId,
-        appointment.id,
-        { status: 'canceled', holdPendingApproval: false },
-        deps.appointmentRepo,
-      );
-      if (!updated) {
-        res
-          .status(500)
-          .type('html')
-          .send(page('Could not undo', 'Something went wrong — cancel it from the app.'));
-        return;
-      }
-      await sendApology(tenantId, appointment);
-      await auditUndone(tenantId, proposal.id, 'post_execution_compensated', appointment.id);
+    // 'executed' or 'execution_failed'. Compensating flow: the caller was
+    // told the booking is confirmed (and the confirmation may have gone
+    // out), so cancel the appointment and send the fixed-template apology.
+    if (!appointment) {
       res
-        .status(200)
+        .status(404)
         .type('html')
-        .send(
-          page(
-            'Booking undone',
-            'The appointment was canceled and the customer received an apology text.',
-          ),
-        );
+        .send(page('Could not undo', 'The booked appointment could not be found.'));
       return;
     }
-
-    // Any other status (rejected / ready_for_review / draft) — the booking
-    // never went live; nothing to undo from this link.
+    const updated = await updateAppointment(
+      tenantId,
+      appointment.id,
+      { status: 'canceled', holdPendingApproval: false },
+      deps.appointmentRepo,
+    );
+    if (!updated) {
+      res
+        .status(500)
+        .type('html')
+        .send(page('Could not undo', 'Something went wrong — cancel it from the app.'));
+      return;
+    }
+    await sendApology(tenantId, appointment);
+    await auditUndone(tenantId, proposal.id, 'post_execution_compensated', appointment.id);
     res
-      .status(409)
+      .status(200)
       .type('html')
-      .send(page('Nothing to undo', 'This booking is not active — check your review queue.'));
+      .send(
+        page(
+          'Booking undone',
+          'The appointment was canceled and the customer received an apology text.',
+        ),
+      );
   };
 
   router.get('/one-tap-undo', handler);
