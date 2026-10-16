@@ -8,7 +8,7 @@
  *   no_claim=SMS delivery (mocked sender)
  */
 import { describe, it, expect, vi } from 'vitest';
-import { sendLaneUndoSms } from '../../src/proposals/lane-undo-sms';
+import { sendLaneUndoSms, buildLaneUndoChannel } from '../../src/proposals/lane-undo-sms';
 import { verifyOneTapUndoToken } from '../../src/proposals/one-tap-undo';
 
 const SECRET = 'lane-undo-test-secret';
@@ -44,5 +44,37 @@ describe('sendLaneUndoSms', () => {
       consumeNonce: () => true,
     });
     expect(verified).toMatchObject({ ok: true, proposalId: 'prop-1', tenantId: 'tenant-1' });
+  });
+});
+
+describe('buildLaneUndoChannel', () => {
+  const sendSms = async () => {};
+  const base = {
+    nodeEnv: 'prod',
+    apiBaseUrl: 'https://api.rivet.example',
+    smsConfigured: true,
+    sendSms,
+    secret: 'one-tap-secret',
+  };
+
+  // Value: protects=the owner UNDO channel is wired only when its SMS can really go out and its link reaches this API;
+  //   fails_when=production wires the channel with no SMS provider, an http/localhost link base or no secret;
+  //   why_new=a channel that cannot deliver let the lane auto-approve with no UNDO; seam=none;
+  //   no_claim=the deploy's actual env values
+  it('wires the channel in production only with a configured SMS sender, a secret and a public https link base', () => {
+    const channel = buildLaneUndoChannel(base);
+    expect(channel?.buildUndoUrl('t.k')).toBe('https://api.rivet.example/public/proposals/one-tap-undo?token=t.k');
+
+    expect(buildLaneUndoChannel({ ...base, smsConfigured: false })).toBeUndefined();
+    expect(buildLaneUndoChannel({ ...base, apiBaseUrl: 'http://api.rivet.example' })).toBeUndefined();
+    expect(buildLaneUndoChannel({ ...base, apiBaseUrl: 'https://localhost:3000' })).toBeUndefined();
+    expect(buildLaneUndoChannel({ ...base, secret: undefined })).toBeUndefined();
+    expect(buildLaneUndoChannel({ ...base, sendSms: undefined })).toBeUndefined();
+  });
+
+  it('dev keeps the in-memory sender and a localhost link', () => {
+    expect(
+      buildLaneUndoChannel({ ...base, nodeEnv: 'dev', smsConfigured: false, apiBaseUrl: 'http://localhost:3000' }),
+    ).toBeDefined();
   });
 });

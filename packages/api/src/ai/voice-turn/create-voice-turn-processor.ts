@@ -174,6 +174,7 @@ import {
   type AutonomousCloseIneligibleReason,
 } from '../../proposals/autonomous-close-lane';
 import { sendLaneUndoSms, type LaneUndoChannel } from '../../proposals/lane-undo-sms';
+import { autonomousLaneEvaluationFor } from '../../proposals/autonomous-lane';
 import { isOwnerLineAttested } from '../../telephony/stir-attestation';
 import type { SlotConflictChecker } from '../tasks/slot-conflict-checker';
 import {
@@ -2767,6 +2768,8 @@ export function createVoiceTurnProcessor(
       let laneConfidenceForCreate: number | undefined;
       // The owner cell the lane checked: the UNDO SMS goes to exactly it.
       let laneOwnerPhone: string | undefined;
+      // The held time as the caller heard it, for the owner's UNDO text.
+      let laneUndoWhen: string | undefined;
       // The honest pending line, spoken instead of "you're booked" when the
       // stored booking did not end up approved (supervisor cap, held gap).
       let bookingPendingUtterance: string | undefined;
@@ -2904,6 +2907,7 @@ export function createVoiceTurnProcessor(
                 autonomousLaneForCreate = laneEval;
                 laneConfidenceForCreate = laneConfidence;
                 laneOwnerPhone = settings?.ownerPhone ?? undefined;
+                laneUndoWhen = timeReadback;
               }
               // Otherwise the hold stays for the owner's confirmation window
               // (24h): a draft create_booking, never an auto-approval.
@@ -3053,28 +3057,76 @@ export function createVoiceTurnProcessor(
           bookingUtterance = bookingPendingUtterance;
         }
       }
+      // D-015 — every live lane verdict is audited, as the router does.
+      const laneVerdict = autonomousLaneEvaluationFor(stored);
+      if (laneVerdict && deps.auditRepo) {
+        await deps.auditRepo
+          .create(
+            createAuditEvent({
+              tenantId,
+              actorId: deps.systemActorId ?? 'calling-agent',
+              actorRole: 'system',
+              eventType: 'autonomous_booking_lane_evaluated',
+              entityType: 'proposal',
+              entityId: stored.id,
+              metadata: {
+                proposalType: stored.proposalType,
+                channel: 'telephony',
+                eligible: laneVerdict.eligible,
+                ...(laneVerdict.eligible
+                  ? { threshold: laneVerdict.threshold }
+                  : { reason: laneVerdict.reason }),
+              },
+            }),
+          )
+          .catch(() => undefined);
+      }
       // D-015 — a lane-approved booking texts the owner the one-tap UNDO at
-      // the cell the lane checked, the same text the memo router sends.
-      // Best-effort: a send failure never fails the booking or the turn.
+      // the cell the lane checked, naming the customer on record and the held
+      // time (never caller-spoken text). Fire-and-forget so the caller's
+      // confirmation never waits on the SMS provider; the outcome is audited.
       if (
         stored.status === 'approved' &&
         autonomousLaneForCreate &&
         deps.laneUndo &&
-        laneOwnerPhone
+        laneOwnerPhone &&
+        laneUndoWhen
       ) {
-        try {
-          await sendLaneUndoSms(deps.laneUndo, {
+        const laneUndo = deps.laneUndo;
+        const ownerPhone = laneOwnerPhone;
+        const when = laneUndoWhen;
+        const customerId = session.customerId;
+        const auditUndoSms = (status: 'sent' | 'failed', error?: string) =>
+          deps.auditRepo
+            ?.create(
+              createAuditEvent({
+                tenantId,
+                actorId: deps.systemActorId ?? 'calling-agent',
+                actorRole: 'system',
+                eventType: 'autonomous_booking_undo_sms',
+                entityType: 'proposal',
+                entityId: stored.id,
+                metadata: { status, ...(error ? { error } : {}) },
+              }),
+            )
+            .catch(() => undefined);
+        void (async () => {
+          const customer =
+            customerId && deps.customerRepo
+              ? await deps.customerRepo.findById(tenantId, customerId).catch(() => null)
+              : null;
+          await sendLaneUndoSms(laneUndo, {
             proposalId: stored.id,
             tenantId,
-            summary: stored.summary,
-            ownerPhone: laneOwnerPhone,
+            summary: customer?.displayName ? `${customer.displayName} — ${when}` : when,
+            ownerPhone,
           });
-        } catch (err) {
-          logger.warn('live-call lane undo SMS failed', {
-            proposalId: stored.id,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
+          await auditUndoSms('sent');
+        })().catch(async (err) => {
+          const error = err instanceof Error ? err.message : String(err);
+          logger.warn('live-call lane undo SMS failed', { proposalId: stored.id, error });
+          await auditUndoSms('failed', error);
+        });
       }
       // #1600 (2) — a request that was read back, confirmed and drafted is a
       // completed request, not a repeat: its count starts over, so a caller

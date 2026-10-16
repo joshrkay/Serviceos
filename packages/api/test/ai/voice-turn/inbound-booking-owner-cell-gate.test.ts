@@ -100,10 +100,13 @@ async function bookOnLiveCall(opts: {
   language?: 'en' | 'es';
   /** Book the same slot twice on one call. */
   bookTwice?: boolean;
+  /** The caller's customer record (display name for the owner's UNDO text). */
+  customerDisplayName?: string;
 }) {
   const { ownerPhone, laneUndo } = opts;
   const store = new VoiceSessionStore({ startInterval: false });
   const proposalRepo = new InMemoryProposalRepository();
+  const auditRepo = new InMemoryAuditRepository();
   const appointmentRepo = new InMemoryAppointmentRepository();
   const settingsRepo = new InMemorySettingsRepository();
   await settingsRepo.create({
@@ -140,7 +143,7 @@ async function bookOnLiveCall(opts: {
     gateway: bookingGateway(),
     businessName: 'Rivet HVAC',
     systemActorId: 'calling-agent',
-    auditRepo: new InMemoryAuditRepository(),
+    auditRepo,
     proposalRepo,
     voiceSessionRepo: new InMemoryVoiceSessionRepository(),
     settingsRepo,
@@ -148,6 +151,14 @@ async function bookOnLiveCall(opts: {
     entityResolver: jobResolver,
     ...(laneUndo ? { laneUndo } : {}),
     ...(checker ? { slotConflictChecker: checker as never } : {}),
+    ...(opts.customerDisplayName
+      ? {
+          customerRepo: {
+            findById: async (_t: string, id: string) =>
+              id === CUSTOMER_ID ? ({ id, displayName: opts.customerDisplayName } as never) : null,
+          } as never,
+        }
+      : {}),
   });
 
   let fx: SideEffect[] = [];
@@ -168,7 +179,7 @@ async function bookOnLiveCall(opts: {
 
   const proposals = await proposalRepo.findByTenant(TENANT);
   const spoken = [...fx].reverse().find((e) => e.type === 'tts_play')?.payload.text;
-  return { proposals, spoken, appointmentRepo };
+  return { proposals, spoken, appointmentRepo, auditRepo };
 }
 
 describe('live-call booking (U3) — D-015 owner-cell gate and owner UNDO', () => {
@@ -264,7 +275,7 @@ describe('live-call booking (U3) — D-015 owner-cell gate and owner UNDO', () =
       eligible: false,
       reason: 'duplicate_booking',
     });
-    expect(laneUndo.sendSms).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(laneUndo.sendSms).toHaveBeenCalledTimes(1));
   });
 
   it('opted-in tenant with NO owner cell: draft booking, honest "team will confirm" line, owner_cell_missing, no SMS', async () => {
@@ -305,8 +316,66 @@ describe('live-call booking (U3) — D-015 owner-cell gate and owner UNDO', () =
     expect(spoken).toBe(
       spokenAutonomousBookConfirm(timeReadbackFromHold(hold!.scheduledStart.toISOString(), TZ)),
     );
-    expect(laneUndo.sendSms).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(laneUndo.sendSms).toHaveBeenCalledTimes(1));
     expect(laneUndo.sendSms).toHaveBeenCalledWith(OWNER_CELL, expect.stringContaining('Tap to UNDO'));
+  });
+
+  // Value: protects=the owner's UNDO text names the customer on record and the booked time, never caller-spoken text;
+  //   fails_when=the live path sends stored.summary ("Schedule appointment for <spoken name>") or drops the time;
+  //   why_new=the first live UNDO text carried no time and a caller-influenced name; seam=none; no_claim=SMS delivery
+  it('the owner UNDO text names the customer on record and the booked time', async () => {
+    const laneUndo = undoChannel();
+    const { proposals, appointmentRepo } = await bookOnLiveCall({
+      ownerPhone: OWNER_CELL,
+      laneUndo,
+      customerDisplayName: 'Dana Lee',
+    });
+    const hold = await appointmentRepo.findById(TENANT, proposals[0]!.payload.appointmentId as string);
+    const when = timeReadbackFromHold(hold!.scheduledStart.toISOString(), TZ);
+    await vi.waitFor(() => expect(laneUndo.sendSms).toHaveBeenCalledTimes(1));
+    const [, body] = laneUndo.sendSms.mock.calls[0]!;
+    expect(body.startsWith(`Rivet booked: Dana Lee — ${when}. Tap to UNDO: `)).toBe(true);
+  });
+
+  // Value: protects=a slow or failing UNDO send never delays or breaks the caller's confirmed booking, and is audited;
+  //   fails_when=the send is awaited in the turn again, or a send failure escapes the turn or leaves no audit trail;
+  //   why_new=the live UNDO send was awaited inline with no failure test; seam=none; no_claim=Twilio timeouts
+  it('a hung UNDO send never delays the confirmation; a failed one is audited and the booking stands', async () => {
+    const hung = undoChannel();
+    hung.sendSms.mockImplementation(() => new Promise<void>(() => {}));
+    const result = await Promise.race([
+      bookOnLiveCall({ ownerPhone: OWNER_CELL, laneUndo: hung }),
+      new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 2000)),
+    ]);
+    expect(result).not.toBe('timeout');
+
+    const failing = undoChannel();
+    failing.sendSms.mockRejectedValue(new Error('twilio down'));
+    const { proposals, spoken, appointmentRepo, auditRepo } = await bookOnLiveCall({
+      ownerPhone: OWNER_CELL,
+      laneUndo: failing,
+    });
+    const booking = proposals[0]!;
+    expect(booking.status).toBe('approved');
+    const hold = await appointmentRepo.findById(TENANT, booking.payload.appointmentId as string);
+    expect(spoken).toBe(
+      spokenAutonomousBookConfirm(timeReadbackFromHold(hold!.scheduledStart.toISOString(), TZ)),
+    );
+    await vi.waitFor(async () => {
+      const events = await auditRepo.findByEntity(TENANT, 'proposal', booking.id);
+      expect(events.find((e) => e.eventType === 'autonomous_booking_undo_sms')?.metadata).toMatchObject({
+        status: 'failed',
+      });
+    });
+  });
+
+  it('every live lane verdict is audited (router parity)', async () => {
+    const { proposals, auditRepo } = await bookOnLiveCall({ laneUndo: undoChannel() });
+    const events = await auditRepo.findByEntity(TENANT, 'proposal', proposals[0]!.id);
+    expect(events.find((e) => e.eventType === 'autonomous_booking_lane_evaluated')?.metadata).toMatchObject({
+      eligible: false,
+      reason: 'owner_cell_missing',
+    });
   });
 
   it('owner cell but NO UNDO channel wired: draft booking, undo_channel_unavailable, honest line', async () => {
