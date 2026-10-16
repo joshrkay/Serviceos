@@ -132,7 +132,7 @@ Migration `231_tenant_settings_autonomous_booking` (`db/schema.ts:5839-5851`): `
 
 ### Part 3
 10. Consent ask on booking path: reuse `pendingConsentCapture` after the lane-eligible utterance when `customers.sms_consent!==true`, so the "I'll text you a confirmation" promise is legal under `block`.
-11. Voice-consent capture: new `recordVoiceConsentFromVoice` writing `{kind:'recording'…}`? No — add kind `'voice'` to the CHECK and `resolveOutboundConsent.voice` reading the ledger; today only `consent_status` (operator-set) grants calls.
+11. Voice-consent capture: new `recordVoiceConsentFromVoice` writing `consent_events { kind: 'voice', state: 'granted', source: 'voice', voice_session_id, purpose: 'dropped_call_callback' }` (CHECK gains `'voice'`; new `purpose` column). **`resolveOutboundConsent` is unchanged** — its generic voice branch keeps reading only `customers.consent_status`, so a narrowly worded dropped-call grant never becomes standing consent for owner click-to-call or any other outbound leg. The callback service instead validates the exact `consent_event_id` bound to its `voice_callback_jobs` row (same tenant, same `voice_session_id`, purpose `dropped_call_callback`, inside the window, no later revocation) before dialling. See the plan's U8 "scoped, not standing" paragraph; an earlier draft of this item proposed reading the ledger from the generic resolver, which that paragraph supersedes.
 12. AI outbound leg: `telephony/outbound-ai-call-service.ts` (clone of `initiateOutboundCall` with `Url=/api/telephony/outbound-answer`, `StatusCallback`, `MachineDetection=Enable`), new `voice_sessions.channel='voice_outbound'` session seeded with `customerId`, `classifyCall` rule for outbound.
 
 ### DB columns / migrations

@@ -293,8 +293,15 @@ flowchart LR
     existing `(tenant_id, call_sid, session_id, turn_index)` upsert key, called from the
     adapter's first-frame branch (the same `awaitingFirstAudioFrame` branch that observes the
     histogram) for `first_audio_at`/`reply_gap_ms` and from the filler-start branch for
-    `first_audible_at`. No timestamp is ever fabricated: a turn that never reaches a real frame
-    keeps those columns null and is excluded from the percentiles. Realtime therefore ends up
+    `first_audible_at`. **The update is chained behind the insert, never raced against it:**
+    `persistTurn` keeps the in-flight `recordTurn` promise per `turnIndex` on the session
+    (`pendingTurnPersist`, cleared on settle), and the adapter's stamp call is
+    `pendingTurnPersist.get(turnIndex).then(() => markReplyAudio(...))`, so a cached or fast
+    reply whose first frame beats a slow insert still lands its stamps after the row exists.
+    If the chained update still affects zero rows (the row was deleted underneath it) the
+    sample is counted in `voice_reply_stamp_lost_total` and logged with the key, so a silent
+    drop is visible rather than assumed away. No timestamp is ever fabricated: a turn that never
+    reaches a real frame keeps those columns null and is excluded from the percentiles. Realtime therefore ends up
     with all four; Gather writes
     `stt_final_at` (webhook receipt) and `transport = 'gather'` only: returning TwiML is not
     audio (Twilio still receives it, synthesises Polly and starts playout), so `first_audio_at`
@@ -317,7 +324,9 @@ flowchart LR
     `packages/api/test/integration/voice-latency-summary.test.ts` (pins the new columns: a
     turn written through `recordTurn` at append time and then `markReplyAudio` on the first
     frame yields the expected `reply_gap_ms`; a turn whose `markReplyAudio` never arrives keeps
-    `first_audio_at` null and is excluded; `markReplyAudio` for an unknown key updates nothing;
+    `first_audio_at` null and is excluded; a first frame that arrives while the insert is still
+    pending (delayed `recordTurn` promise) still stamps because the update is chained behind
+    it; a zero-row update increments `voice_reply_stamp_lost_total` and never inserts;
     a Gather turn leaves `first_audio_at`, `first_audible_at` and `reply_gap_ms` null and is
     excluded from the percentiles while counted in the Gather share).
 - **Approach:** no behaviour change on the call. Per-tenant ramp through `voice_realtime` for
@@ -456,8 +465,9 @@ flowchart LR
 - **Test scenarios:**
   - Happy: tenant preset B → streaming socket opened with B's id; Gather TwiML carries B's Polly
     voice; B's filler clip plays.
-  - Edge: no preset → env default; preset without rendered fillers → default-voice clip; Spanish
-    line uses the multilingual model with B's id.
+  - Edge: no preset → env default; preset whose fillers are not yet rendered → **no filler**,
+    `voice_filler_miss_total{voice_id}` incremented, reply still in B's voice (the default clip
+    is never substituted); Spanish line uses the multilingual model with B's id.
   - Failure: preview synthesis fails → 502 with safe copy, step still saves.
   - Integration: the column written by `PUT /voice` is read back by the resolver.
 - **Verification:** two tenants with different presets produce audibly different greetings on a
@@ -814,9 +824,12 @@ flowchart LR
     a returning customer who already granted SMS consent would otherwise reach a booking with
     no callback question and no `voice` row, and a drop on that call could never select the AI
     callback. For that caller the booking path arms `callback_consent_ask` alone (the same
-    single-purpose line as (b)) before the lane proposal is minted, unless a non-withdrawn
-    `voice` consent row with `purpose = 'dropped_call_callback'` already exists for the
-    customer, in which case nothing is asked. One ask per session at most, consumed on both
+    single-purpose line as (b)) before the lane proposal is minted. **A grant from an earlier
+    call is never reused to skip the ask:** the callback service below binds the consent event
+    to the job's `voice_session_id`, so an old event could not authorise this call's callback
+    and a drop would silently fall back to SMS. The only thing that suppresses the ask is a
+    `dropped_call_callback` grant already recorded **for this session** (which is the
+    once-per-session rule, not a reuse rule). One ask per session at most, consumed on both
     transports (the U6 Gather consumer). `tts-copy.ts` gains `callback_consent_ask` and the
     combined `booking_sms_and_callback_consent_ask` (EN+ES); `handlePendingConsentCapture` grant → new `recordVoiceConsentFromVoice` writing
     `consent_events { kind: 'voice', state: 'granted', source: 'voice', voice_session_id,
@@ -847,8 +860,9 @@ flowchart LR
   - Tests: `packages/api/test/ai/voice-turn/callback-consent-arming.test.ts` (armed with the
     booking ask on the booking path and written as two rows on grant; armed alone when a
     callback proposal or call-me-back task is created; armed alone on the booking path for a
-    customer with `sms_consent = true` and no existing callback grant, and not at all when a
-    non-withdrawn `dropped_call_callback` row already exists; never armed on a lookup,
+    customer with `sms_consent = true`, and still armed when that customer holds a
+    `dropped_call_callback` grant from an earlier session (old grants never suppress the
+    ask), but not when this session already recorded one; never armed on a lookup,
     out-of-scope or E1 call; at most once per session; consumed on Gather), `packages/api/test/voice/outbound-consent.voice-kind.test.ts` (a
     `dropped_call_callback` grant authorises only the job that references it; click-to-call and
     a second callback job for the same number are refused),

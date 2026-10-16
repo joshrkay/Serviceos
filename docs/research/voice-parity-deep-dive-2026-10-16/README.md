@@ -67,7 +67,7 @@ lookup surface, which already has the default-deny allowlist and telemetry a new
 | Classify context (vertical then plan sections, sequential) | S | 1 / 10 / 80 | `Promise.all` |
 | Classify LLM (3.3k-token prompt, llama-3.1-8b via OpenRouter; deadline 4 s default, **12 s in production**, 3 retries) | S | 500 / 1,000 / 4,000 | speculative classify on stable interim; maxTokens 1024→256 |
 | Gates + entity resolution (1–3 selects) | S | 5 / 30 / 300 | memoise |
-| `executeSideEffects` (audit insert, proposal insert + audit, hold) before any audio | S | 10 / 40 / 300 | persist after audio starts |
+| `executeSideEffects` (audit insert, proposal insert + audit, hold) before any audio | S | 10 / 40 / 300 | overlap synthesis with the inserts; release audio only after the proposal insert commits (U2 item 5) |
 | ElevenLabs WebSocket handshake, **new socket per spoken line** | S | 150 / 250 / 400 | pre-connect at STT-final, keep per call |
 | ElevenLabs TTFB (`eleven_turbo_v2_5`, whole text in one message) | S | 150 / 250 / 800 | `eleven_flash_v2_5` |
 | μ-law encode, send, Twilio playout | S | 100 / 150 / 250 | — |
