@@ -1471,10 +1471,22 @@ flowchart LR
     before `calls.create` has returned the CallSid to us, and a webhook carrying only an
     unknown CallSid has no tenant, job, consent event or `customerId` to seed a row from.
     The service therefore creates the `voice_sessions` row **first** (tenant, `channel
-    'voice_outbound'`, `customerId`, `callback_job_id`, `consent_event_id`, `call_sid NULL`) —
-    **`callback_job_id UUID NULL REFERENCES voice_callback_jobs(id)` and `consent_event_id
-    UUID NULL REFERENCES consent_events(id)` are two new nullable columns on
-    `voice_sessions`, declared in this unit's migration beside `escalation_state`, mapped in
+    'voice_outbound'`, `customerId`, `callback_job_id`, `consent_event_id`,
+    `twilio_account_sid`, `call_sid NULL`) —
+    **`callback_job_id UUID NULL REFERENCES voice_callback_jobs(id)`, `consent_event_id
+    UUID NULL REFERENCES consent_events(id)` and `twilio_account_sid TEXT NULL` are three
+    new nullable columns on `voice_sessions`, declared in this unit's migration beside
+    `escalation_state`** — the account SID because the stream upgrade and `handleStart`
+    both require the runtime session to be bound to the account that owns the call
+    (`twilio-mediastream-server.ts:147-154`; `mediastream-adapter.ts:1346-1354` closes
+    `authenticated_call_mismatch` when `session.twilioAccountSid` differs from the
+    authenticated one), and a hydrating replica has nowhere else to get it: the credential
+    decision `authTokenGetter` returns carries the token and tenant, not the account SID
+    (`twilio-signature.ts:52-65`). The outbound service knows the SID before it dials — it
+    is the `creds.accountSid` it authenticates the REST call with
+    (`outbound-call-service.ts:261-266`) — and writes it into the row it pre-creates; the
+    inbound path writes the webhook's `AccountSid`, which it already pins on the runtime
+    session (`twilio-adapter.ts:1080-1084`), into the awaited B2 row. **Mapped in
     `pg-voice-session.ts` (`create`, `markEnded`'s upsert and the row reader) and pinned on
     real Postgres by `test/integration/outbound-session-correlation.test.ts`, because the
     current table has neither and a mocked pool would not notice** (the job row exists
@@ -1550,8 +1562,12 @@ flowchart LR
     privileged, tenant-less lookup is introduced; a real tenant naming another tenant's
     CallSid finds no row under RLS and is rejected 403 as today. It then calls the same
     shared `establishSession` to register a runtime session under the row's id with
-    `twilioAccountSid`, `customerId`, `direction` and the job and consent linkage;
-    `handleStart` then finds it locally. A row with no CallSid yet, an ended row, or no row
+    `twilioAccountSid` **taken from the row's `twilio_account_sid`**, `customerId`,
+    `direction` and the job and consent linkage, and binds `authenticatedCall` to that SID
+    exactly as a local hit does; a row whose `twilio_account_sid` is null, or differs from
+    the `AccountSid` the upgrade presented, hydrates nothing and is rejected 403, so the
+    `handleStart` mismatch check (`:1346-1354`) is satisfied by construction rather than
+    skipped. `handleStart` then finds it locally. A row with no CallSid yet, an ended row, or no row
     hydrates nothing and the upgrade is rejected as today. The server keeps accepting the
     legacy `/stream/<callSid>` path with today's local-only resolution for calls whose TwiML
     was emitted before the deploy, and drops it once no such call can be live. Hydration is exact for the outbound leg because nothing but the row
@@ -1660,14 +1676,17 @@ flowchart LR
     to `confirmed` and the call proceeds, or no correlated webhook by the reconcile job →
     session ended `failed`, job `dial_failed` / `dial_unconfirmed_expired`; `/outbound-answer`
     for an ended session → `<Hangup/>`, audit, no stream; the correlation columns
-    (`voice_sessions.callback_job_id`, `consent_event_id`, `voice_callback_jobs.outbound_session_id`,
-    `dial_state`, `failure_reason`) are written and read back on real Postgres;
+    (`voice_sessions.callback_job_id`, `consent_event_id`, `twilio_account_sid`,
+    `voice_callback_jobs.outbound_session_id`, `dial_state`, `failure_reason`) are written
+    and read back on real Postgres;
     the WS upgrade and `start` frame for the outbound CallSid resolve the hydrated runtime
     session, whose id equals the persisted row's, and a retry of `/outbound-answer` does
     not register a second runtime session; an upgrade on `/stream/<tenantId>/<callSid>`
     arriving at a process with an empty store verifies against the path tenant's
     credential, reads the row under that tenant's RLS context, hydrates the runtime session
-    and takes the stream, while an upgrade for an ended row, an unbound row, a forged tenant
+    with the row's `twilio_account_sid` bound, passes `handleStart`'s
+    `authenticated_call_mismatch` check and takes the stream, while a row with a null or
+    different `twilio_account_sid` is rejected 403, while an upgrade for an ended row, an unbound row, a forged tenant
     segment (signature failure), or a real tenant naming another tenant's CallSid (no row
     under RLS) is rejected 403 and hydrates nothing, and the test asserts no query ran
     without `app.current_tenant_id` set; `/outbound-answer`
