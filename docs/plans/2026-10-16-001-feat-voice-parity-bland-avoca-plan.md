@@ -1572,8 +1572,14 @@ flowchart LR
     (the generic voice branch still reads only `customers.consent_status`), and the callback
     service validates the exact `consent_event_id` bound to its `voice_callback_jobs` row (same
     tenant, same `voice_session_id`, purpose `dropped_call_callback`, inside the window, no
-    later revocation, **and `voice_callback_jobs.target_e164` equal to the event's
-    `phone_normalized`** — `consent_events` already stores the number that granted, so the
+    later revocation, **and `normalizeConsentPhone(voice_callback_jobs.target_e164)` equal to
+    the event's `phone_normalized`** — compared in *normalised* form, because
+    `normalizeConsentPhone` strips every non-digit including the leading `+`
+    (`compliance/consent-events.ts:51-53`) while `isOutboundAllowed` accepts only `+1` plus
+    ten digits (`voice/outbound-allowlist.ts:8-12`), so a literal equality between the job's
+    E.164 value and the ledger's digit string would fail on every job, and storing the
+    ledger's digit string on the job would fail the outbound gate on every job instead —
+    `consent_events` already stores the number that granted, so the
     grant authorises a call to that number only; a job whose target was derived from the wrong
     field or mutated after enqueue is refused with `callback_target_mismatch` and audited)
     **and runs a fresh `tenant_dnc_list` lookup on `target_e164` immediately before dialling**,
@@ -1583,8 +1589,13 @@ flowchart LR
     when the ledger append fails, so a STOP after the grant can exist as a DNC row with no
     `revoked` event, and a validator that bypasses the generic gate would otherwise dial a
     listed number. DNC hit → job `outcome = 'dnc_listed'`, no retry, audited. All of this runs
-    before dialling. The enqueue path sets `target_e164` from the event's `phone_normalized`,
-    never from a second source, so the check is a tripwire rather than the only guard. The owner click-to-call path and any future outbound
+    before dialling. The enqueue path sets `target_e164` by converting the event's
+    `phone_normalized` back to canonical E.164 (`+` plus the digits; a bare ten-digit NANP
+    value gains its `1`), never from a second source, so the job holds what
+    `isOutboundAllowed` and Twilio need and the validator compares normalised forms;
+    `test/voice/callback-target-e164.test.ts` pins both directions (a ledger value of
+    `15551234567` enqueues `+15551234567` and validates; a job whose stored target differs
+    by any digit is refused). The check is a tripwire rather than the only guard. The owner click-to-call path and any future outbound
     leg never see the callback grant as consent.
   - **Branch in recovery.** `voice/recovery/detect-dropped.ts`, `workers/dropped-call-worker.ts`
     — consent row + `block` mode + tenant `voice_callback_enabled` + inside window → enqueue one
@@ -1820,20 +1831,32 @@ flowchart LR
     process that dies after `markEnded` commits but before the job transition or the
     fallback enqueue would leave a session with `ended_at` set, a job that is still
     non-terminal, and no text — and every reconciler above looks only at *open* sessions, so
-    nothing would ever come back for it. So every finaliser (the terminal-status handler,
-    the delayed adapter-lost job, each reconciler pass and the definitive-rejection path)
-    commits the session transition, the `voice_callback_jobs` transition and a
-    **`voice_callback_fallbacks` outbox row** (`job_id` PRIMARY KEY REFERENCES
-    voice_callback_jobs, `tenant_id`, `target_e164`, `body`, `sent_at NULL`, `attempts`;
-    FORCE RLS) in **one** transaction keyed on the same `ended_at IS NULL` guard, and the
-    SMS is delivered by a worker that claims unsent outbox rows and stamps `sent_at` with
-    the provider message id — the `job_id` primary key is the idempotency: a redelivered
-    terminal status finds the guard false and writes nothing, a worker retry finds
-    `sent_at` set and sends nothing, and a crash between commit and send leaves an unsent
-    row the worker picks up. `test/integration/callback-fallback-outbox.test.ts` pins that a
-    failure injected after the session commit leaves no half-finalised state (either all
-    three rows are written or none), and that the fallback is sent once across redelivery,
-    worker retry and reconciler overlap. The `ended_at IS NULL`
+    nothing would ever come back for it. So every finaliser commits the session transition
+    and the `voice_callback_jobs` transition in **one** transaction keyed on the same
+    `ended_at IS NULL` guard, and the **no-contact** finalisers only — definitive rejection,
+    a terminal unanswered status, the unconfirmed and lost-terminal reconciler passes, and
+    `stream_never_started` — write a **`voice_callback_fallbacks` outbox row** (`job_id`
+    PRIMARY KEY REFERENCES voice_callback_jobs, `tenant_id`, `target_e164`, `body`, `sent_at
+    NULL`, `attempts`; FORCE RLS) in that same transaction. The delayed adapter-lost
+    finaliser and the adapter's own teardown never write one, because the customer was
+    spoken to: adapter-lost's "no fallback" is enforced by the absence of the row, not by a
+    flag the worker has to honour. The SMS is delivered by a worker that claims unsent
+    outbox rows and sends with `idempotencyKey: 'callback-fallback:<job_id>'` on the
+    `SmsMessage` (`notifications/delivery-provider.ts:46-47` — the provider dedupes on it
+    within ~24 h, the same field the customer-message service passes through at
+    `twilio-customer-message-service.ts:92`), then stamps `sent_at` with the provider message
+    id. Two layers make it once: the `job_id` primary key means a redelivered terminal
+    status finds the guard false and writes nothing and a worker retry after `sent_at`
+    sends nothing; the provider key means a crash **after** the provider accepted the send
+    but **before** `sent_at` was stamped — the one gap a database key cannot close — re-sends
+    with the same key and the provider drops it, so the customer still receives one text.
+    `test/integration/callback-fallback-outbox.test.ts` pins that a failure injected after
+    the session commit leaves no half-finalised state (either all three rows are written or
+    none), that the fallback is sent once across redelivery, worker retry and reconciler
+    overlap, that a crash injected after the provider accepted the send but before
+    `sent_at` was stamped retries with the same `idempotencyKey` and the provider's dedupe
+    leaves exactly one message, and that an adapter-lost finalisation writes no outbox row
+    and sends no text. The `ended_at IS NULL`
     guard on the answer-side UPDATE is what makes the late case safe (above). The `voice_callback_jobs` UNIQUE on tenant + session
     keeps the job singular.
     `proposals/surface.ts` outbound surface with the inbound allowed set;
