@@ -374,7 +374,10 @@ flowchart LR
     `GET /api/voice/quality` — 7-day p50/p95 of `reply_gap_ms` and first-audible from the new
     columns, per tenant, **filtered to `transport = 'realtime'`**; the response also carries the
     share of **calls** on Gather in the window — `COUNT(DISTINCT session_id) FILTER (WHERE
-    transport = 'gather') / COUNT(DISTINCT session_id)`, a session counting as degraded if any
+    transport = 'gather')::numeric / NULLIF(COUNT(DISTINCT session_id), 0)` (the cast is
+    load-bearing: two bare `COUNT`s divide as integers in Postgres, so a 3-of-4 window would
+    report 0 rather than 75 % and the card would hide partial degradation; `NULLIF` makes an
+    empty window `null`, shown as "no calls", instead of a division error), a session counting as degraded if any
     of its turns ran on Gather — shown on the card as "unmeasured on N % of calls", because a
     turn-based share and a call-based label diverge whenever call lengths differ (one long
     realtime call would make many short degraded calls look insignificant); the turn share is
@@ -1420,8 +1423,18 @@ flowchart LR
     E1 lines.
   - `packages/api/src/telephony/transfer-screening.ts`, `whisper-route.ts` — whisper names the
     reason and the schedule bucket.
-  - `packages/api/src/escalations/outcome-route.ts` — persist to `voice_sessions`
-    (`escalation_id TEXT NULL` column) and audit instead of returning 200 on nothing.
+  - `packages/api/src/escalations/outcome-route.ts` — persist to `voice_sessions` and audit
+    instead of returning 200 on nothing. The route's `resolved | hung_up | needs_callback`
+    (`outcome-route.ts:6`) are **not** values of `voice_sessions.outcome` (its CHECK lists
+    only the call outcomes, `schema.ts:1573`), so the unit adds typed columns rather than
+    overloading it: `escalation_id TEXT NULL`, **`escalation_outcome TEXT NULL CHECK
+    (escalation_outcome IN ('resolved', 'hung_up', 'needs_callback'))`,
+    `escalation_outcome_at TIMESTAMPTZ NULL` and `escalation_outcome_by UUID NULL REFERENCES
+    users(id)`**, mapped in `pg-voice-session.ts` and pinned on real Postgres by
+    `test/integration/escalation-outcome.test.ts`; the route writes all three in one UPDATE
+    keyed on the session and the dispatcher's user id, `needs_callback` also creates the
+    call-me-back task, and the Interactions page's Transferred filter and outcome badge read
+    `escalation_outcome`, never `outcome`.
   - `packages/api/src/routes/voice.ts` — `GET /api/voice/recordings/by-call/:callSid/audio`
     reusing the `:716-760` handler body (tenant-scoped, presigned, short TTL, 410 on purged).
   - `packages/web/src/components/interactions/InteractionsPage.tsx` — Transferred filter, outcome
@@ -1721,8 +1734,10 @@ flowchart LR
     socket-teardown finaliser is the one that should end it — so this handler **defers to
     it, but does not abstain**: the adapter may be gone (its replica died before teardown and
     this webhook landed on another), so the handler enqueues a 15 s delayed job that runs
-    `UPDATE … SET ended_at = NOW(), outcome = COALESCE(outcome, 'completed'), failure_reason
-    = 'adapter_lost' WHERE id = $session AND ended_at IS NULL` and marks the job terminal
+    `UPDATE … SET ended_at = NOW(), outcome = COALESCE(outcome, 'completed'), ended_reason
+    = 'adapter_lost' WHERE id = $session AND ended_at IS NULL` — `ended_reason` being the
+    column `voice_sessions` already has (`schema.ts:1809`); `failure_reason` exists only on
+    `voice_callback_jobs` and receives the same string there — and marks the job terminal
     `completed` with **no** fallback (the customer was spoken to). In the normal case the
     adapter's finaliser has already stamped `ended_at` long before the delay elapses and the
     job affects zero rows; the conditional guard means the two can never both finalise. A
@@ -1733,7 +1748,8 @@ flowchart LR
     but the upgrade or the `start` frame was rejected or never arrived, so no adapter exists
     to run that finaliser — is this handler's to finalise: `… WHERE id = $session AND
     stream_started_at IS NULL AND ended_at IS NULL` ends the session (`outcome = 'failed'`,
-    `failure_reason = 'stream_never_started'`), marks the job terminal and fires the
+    `ended_reason = 'stream_never_started'` on the session, `failure_reason =
+    'stream_never_started'` on the job), marks the job terminal and fires the
     one-time fallback, because the customer picked up and heard nothing. Without this the status
     callback would bind the CallSid and the "still unbound" reconciliation would never
     close the row, leaving the job non-terminal, `ended_at` null and the customer who did
