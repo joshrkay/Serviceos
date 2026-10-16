@@ -496,9 +496,15 @@ flowchart LR
      (`test/telephony/media-streams/realtime-human-handoff.test.ts:67-70` models exactly
      this), so the adapter sets `clearInFlight` before sending `clear` and treats mark acks
      that arrive while it is set as clear-echoes that **do not advance** `lastAckedMark`; the
-     flag clears on resume or on the confirmed barge-in. If a final confirms the interruption
-     within 2 s, the pause becomes a real barge-in: close the context, drop the buffer. If
-     not, resume by re-sending the buffer from the first frame after `resumeFrom` and
+     flag clears on resume or on the confirmed barge-in. **The 2 s is a silence timer, not a
+     deadline**: it is armed on the gated interim and re-armed on every subsequent interim or
+     VAD speech event, so a caller who keeps talking keeps the reply paused for as long as
+     they speak — Deepgram cannot emit a final until the caller stops and the endpointing
+     delay expires, so a fixed deadline would resume the reply into the middle of a
+     multi-second interruption, which is the talk-over this item exists to remove. If a final
+     arrives (at any time), the pause becomes a real barge-in: close the context, drop the
+     buffer. If 2 s pass with **no** interim, no VAD speech and no final, the interruption was
+     false: resume by re-sending the buffer from the first frame after `resumeFrom` and
      continuing the live stream — no re-synthesis, so the resumed audio is byte-identical to
      what was cut and nothing the caller never heard is skipped. Hold lines and the disclosure never
      enter the pause path (they are protected above). `packages/api/src/settings/settings.ts` +
@@ -522,8 +528,10 @@ flowchart LR
     `packages/api/test/telephony/media-streams/barge-in-gate.test.ts` (levels; gated interim →
     cursor snapshotted, `clear` sent, context stays open, frames after the snapshot retained;
     the mock echoes every outstanding mark on `clear` and those echoes do not move the
-    cursor; no final in 2 s → resume re-sends exactly the retained frames from the snapshot,
-    including the audio whose marks were echoed, then the live tail; final within 2 s →
+    cursor; 2 s of silence after the interim → resume re-sends exactly the retained frames
+    from the snapshot, including the audio whose marks were echoed, then the live tail;
+    continuous interims for 4 s then a final → no resume at any point, then a real barge-in;
+    interims at 1.5 s and 3 s then silence → resume only at 5 s; final within 2 s →
     context closed and buffer dropped; disclosure and E1
     protected; interrupted turn's reply discarded; resume after 2 s with no transcript),
     `packages/api/test/integration/voice-barge-in-level-setting.test.ts`; Layer 2 scripts under
@@ -629,7 +637,14 @@ flowchart LR
     'pending'`, `embedding = NULL`, `index_attempts = 0`, `last_index_error = NULL`,
     `indexed_at = NULL` in the same write, so a revision never inherits the previous
     revision's exhausted retry budget or stale failure text. The embed job carries the
-    `content_rev` it was enqueued for, and **both** worker transitions are conditional on it:
+    `content_rev` it was enqueued for, and **every** worker transition is conditional on it,
+    the claim included: the worker claims the row with `UPDATE … SET index_status =
+    'indexing' WHERE id = $1 AND content_rev = $rev AND index_status IN ('pending',
+    'failed') RETURNING id`, and a zero-row claim means the job is stale (an edit bumped the
+    revision, or another job already holds it) and it exits without calling the provider —
+    otherwise a delayed revision-1 job could move the freshly reset revision-2 row to
+    `indexing`, its terminal update would then miss, and the revision-2 job would find the
+    row unclaimable, leaving the FAQ stuck. The terminal transitions keep the same guard:
     `UPDATE … SET index_status = 'indexed', embedding = $v, indexed_at = NOW() WHERE id = $1
     AND content_rev = $rev` (and the same guard on the `failed` transition); an UPDATE that
     affects zero rows means the owner edited mid-flight, the stale result is dropped, and the
@@ -676,7 +691,9 @@ flowchart LR
     skips it, the retry succeeds → `indexed` with `indexed_at`; five failures → stays `failed`
     and the sheet shows the error; an edit to a five-times-failed row resets attempts, error
     and `indexed_at` and gets a fresh budget; an edit while a job is in flight → the stale
-    job's completion affects zero rows and the row is indexed by the new revision's job only.
+    job's completion affects zero rows and the row is indexed by the new revision's job only;
+    a stale job that only *starts* after the edit → its claim affects zero rows, it never
+    calls the provider, and the new revision's job claims and indexes the row.
   - Integration: RLS denies cross-tenant reads on both tables; raw select pins the columns.
 - **Verification:** a new tenant completes the step under five minutes from pack defaults.
 
@@ -768,7 +785,15 @@ flowchart LR
      per minute at the busiest tenant and costs nothing measurable; two concurrent calls for
      overlapping windows with different starts (2:00–3:00 and 2:30–3:30) therefore also
      serialise, and the second sees the first's hold. A pre-hold failure rolls the job back. `CreateAppointmentExecutionHandler` /
-     `CreateBookingExecutionHandler` promote the job (`provisional = false`) at execution.
+     `CreateBookingExecutionHandler` promote the job (`provisional = false`) at execution —
+     **except that promotion never makes a test job visible**: `jobs` gains `is_test BOOLEAN
+     NOT NULL DEFAULT FALSE`, set by the same writers that set `appointments.is_test` (item
+     7), and the board, job lists, digests and search exclude `is_test` rows exactly as they
+     exclude provisional ones, so the executed onboarding test job stays hidden between
+     execution and go-live, and stays hidden forever if the owner abandons onboarding. The
+     reaper's provisional pass also sweeps `is_test` jobs (and their appointments) older than
+     the test window when no `test_booking_verified_at` was stamped, and go-live or reject
+     cleanup cancels them as item 7 says.
      Cleanup is durable and does not depend on a hold existing: `workers/hold-reaper-worker.ts`
      gains a sibling pass over `jobs WHERE provisional AND created_at < now() - hold TTL` that
      removes any such job whose hold is expired, cancelled **or absent** and whose proposal is
@@ -932,8 +957,10 @@ flowchart LR
     `packages/web/src/components/onboarding/v2/steps/TestBookingStep.test.tsx`,
     `packages/api/test/integration/test-booking-verify.test.ts` (linkage columns; a browser
     preview and an attested-owner phone test both classify as `caller`, pass the lane gate,
-    mint a lane proposal and execute to an `is_test` appointment; an attested owner call
-    outside a started test keeps `owner_line` and never enters the lane; verify
+    mint a lane proposal and execute to an `is_test` appointment whose job is `is_test` and absent from the board, job
+    list, digest and search after execution; an abandoned test → reaper sweeps the job and
+    appointment; an attested owner call outside a started test keeps `owner_line` and never
+    enters the lane; verify
     inside the undo window, with the hold still pending and the proposal `approved`, returns
     409 `TEST_BOOKING_NOT_EXECUTED`; after the handler clears the hold and the proposal is
     `executed` it stamps; a canceled or undone test booking never stamps),
@@ -1226,8 +1253,15 @@ flowchart LR
     `telephony/emergency-page-retry.ts:54-55` and no setting exists for the option to write.
     `twilio-adapter.ts:1994` passes the tenant's values through the existing
     `EmergencyPageLadderDeps.intervalMs` / `maxPages`, which `armEmergencyPageLadder` already
-    prefers over the constants, so the worker's payload carries the tenant cadence and the
-    constants become the schema defaults; replay in U9 resolves the same two keys), `packages/api/src/onboarding/scenarios/apply-answer.ts`
+    prefers over the constants — **converting `emergency_page_interval_sec * 1000` first**,
+    because the dep is milliseconds and the ladder divides it by 1,000 for the queue delay
+    (`emergency-page-retry.ts:119-131`); passing the stored `120` straight through would
+    schedule the whole ladder about 120 ms apart. The settings reader exposes
+    `emergencyPageIntervalMs` already multiplied so no caller ever sees seconds. The worker's
+    payload then carries the tenant cadence and the constants become the schema defaults;
+    replay in U9 resolves the same two keys. `test/telephony/emergency-page-retry.tenant-cadence.test.ts`
+    pins that a tenant at 120 s / 3 pages enqueues with `delaySeconds: 120` and `intervalMs:
+    120000`, and that the stricter 60 s / 5 pages pair yields `delaySeconds: 60`), `packages/api/src/onboarding/scenarios/apply-answer.ts`
     (tap → typed write + audit; speech → existing extractor → clarification or write; free
     text → FAQ entry, standing-instruction candidate, or white-space note).
   - `packages/api/src/ai/voice-quality/corpus/schema.ts` and ~12 core scripts — optional
