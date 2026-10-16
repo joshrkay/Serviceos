@@ -305,11 +305,18 @@ flowchart LR
     normal call the adapter drops frames until the disclosure has played, so Deepgram's offsets
     start later than Twilio's by exactly that dropped interval, and anchoring through the
     Twilio timestamp would shift `last_word_at` earlier and inflate both `endpoint_delay_ms`
-    and `reply_gap_ms` by the length of the greeting. The adapter forwards every frame once
-    capture is enabled and never pauses forwarding mid-call, so one anchor holds for the
-    session; `latency-observe.test.ts` pins that the anchor is taken at the first forwarded
-    sample, not at the `start` frame, and that frames dropped before `captureEnabled` do not
-    move it.
+    and `reply_gap_ms` by the length of the greeting. **The anchor belongs to a Deepgram
+    session, not to the call**: `switchLanguage` (`mediastream-adapter.ts:2498-2590`) and the
+    same-language recovery path finish the current Deepgram session, drop media during the
+    reopen, and start a new one whose offsets restart at zero, so the adapter keeps a
+    `deepgramGeneration` counter, bumps it on every reopen, and takes a fresh
+    `deepgramAnchorMs` on the first sample forwarded to that generation; each `final` event
+    carries the generation it came from and is stamped with that generation's anchor, and a
+    late event from a finished generation is not used for timing. `latency-observe.test.ts`
+    pins that the anchor is taken at the first forwarded sample, not at the `start` frame,
+    that frames dropped before `captureEnabled` do not move it, and that a language switch
+    mid-call re-anchors so a post-switch turn's gap is measured from its own last word, not
+    from near the start of the call.
     `endpoint_delay_ms = stt_final_at − last_word_at` is kept as its own column because it is
     exactly the number U2 item 2 changes, and the card shows it beside the gap. Gather turns
     have no stream clock and leave `last_word_at`, `endpoint_delay_ms` null. The table today has only
@@ -465,7 +472,19 @@ flowchart LR
      (low: ≥ 3 words or confidence ≥ 0.85; medium default: ≥ 2 words or ≥ 0.75; high: any
      interim); protect `holdBargeInUntilPlayed` lines (E1) and the disclosure explicitly, not
      only by the capture-disabled accident; on a gated interim that yields no final within 2 s,
-     resume the paused reply from the last mark. `packages/api/src/settings/settings.ts` +
+     resume the paused reply from the last mark — **which needs an audio source the current
+     lifecycle destroys**: `bargeIn()` (`:3535`) sends Twilio `clear` (discarding its
+     buffer), empties the adapter queue and, under item 1, closes the ElevenLabs context and
+     drops its late chunks, so the remainder of the reply no longer exists anywhere. A gated
+     interim therefore takes a new **pause** path instead of `bargeIn()`: send `clear` (the
+     only way to stop playback promptly), but keep the ElevenLabs context open and keep
+     draining its chunks, and retain every frame from the last acked mark onward in a
+     `pausedReply` PCM buffer (bounded by the utterance; one reply at a time). If a final
+     confirms the interruption within 2 s, the pause becomes a real barge-in: close the
+     context, drop the buffer. If not, resume by re-sending the buffer from the first frame
+     after the last acked mark and continuing the live stream — no re-synthesis, so the
+     resumed audio is byte-identical to what was cut. Hold lines and the disclosure never
+     enter the pause path (they are protected above). `packages/api/src/settings/settings.ts` +
      `packages/api/src/db/schema.ts` (`voice_barge_in_level`), `packages/web/src/components/settings/CallRoutingSheet.tsx`.
   - Tests: `packages/api/test/ai/tts/elevenlabs-persistent-socket.test.ts` (two sequential
     utterances on one mock connection: one WebSocket open, two `context_id`s, each flushed and
@@ -481,7 +500,10 @@ flowchart LR
     (hit, miss, exactly one proposal, cost-cap respected), `packages/api/test/ai/voice-turn/side-effects-overlap.test.ts`
     (synthesis starts before the insert resolves; no frame is released before it; an insert
     failure discards the buffered audio and speaks the failure copy),
-    `packages/api/test/telephony/media-streams/barge-in-gate.test.ts` (levels; disclosure and E1
+    `packages/api/test/telephony/media-streams/barge-in-gate.test.ts` (levels; gated interim →
+    `clear` sent, context stays open, frames after the last acked mark retained; no final in
+    2 s → resume re-sends exactly the retained frames then the live tail; final within 2 s →
+    context closed and buffer dropped; disclosure and E1
     protected; interrupted turn's reply discarded; resume after 2 s with no transcript),
     `packages/api/test/integration/voice-barge-in-level-setting.test.ts`; Layer 2 scripts under
     `corpus/scripts/08-ambiguity/` for mid-sentence pause (no clip), background speech (no
@@ -900,11 +922,17 @@ flowchart LR
     re-enters `escalateToHuman` with `reason: 'low_confidence'` and advances only the
     rotation cursor, so without more the second emergency number would never be dialled.
     `escalateToHuman` therefore writes `voice_sessions.escalation_state JSONB`
-    (`{ reason, emergencyTargets, emergencyIndex, screened }`) when it dials from the
-    emergency list, and `/dial-result` reads it: while `emergencyIndex + 1 <
-    emergencyTargets.length` it re-enters with `reason: 'emergency_dispatch'` and the next
-    index (the `screenedLeg` flag carried as today), and only once the list is exhausted does
-    it fall into the existing rotation cascade; the state is cleared when a leg answers.
+    (`{ kind: 'emergency' | 'scheduled', reason, targets, index, screened }`) whenever it
+    dials from a configured list rather than the rotation, and `/dial-result` reads it: while
+    `index + 1 < targets.length` it re-enters with the same `reason` and the next index (the
+    `screenedLeg` flag carried as today), and only once the list is exhausted does it fall
+    through; the state is cleared when a leg answers. For `kind: 'emergency'` the list is
+    `transfer_targets.emergency` and exhaustion falls into the existing rotation cascade. For
+    `kind: 'scheduled'` (an ordinary transfer resolved to `open` or `after_hours`) the list is
+    `[scheduled target, overflow]` when `overflow` is a number, because today the single-line
+    branch of `/dial-result` (`routes/telephony.ts:955-967`) sends an unanswered configured
+    transfer straight to callback collection and would never dial `overflow`; exhaustion, or
+    an `overflow` of `'voicemail'` / `'callback'`, takes that existing branch.
     `CallRoutingSheet.tsx` gains an ordered emergency list (add, remove, reorder; ≥44 px)
     beside the three single targets.
   - `packages/api/src/telephony/twilio-adapter.ts:728` — `<Gather input="speech dtmf">`;
@@ -938,7 +966,9 @@ flowchart LR
     `packages/api/test/routes/recordings.by-call.test.ts` (cross-tenant 404, expired 403),
     `packages/web/src/components/interactions/InteractionsPage.transferred.test.tsx`,
     `e2e/interactions-playback-mobile.spec.ts`,
-    `packages/api/test/integration/transfer-targets-and-outcomes.test.ts`; Layer 1: a bucket 07
+    `packages/api/test/integration/transfer-targets-and-outcomes.test.ts` (unanswered `open`
+    target → `/dial-result` dials `overflow` before any callback prompt; `overflow =
+    'callback'` → callback prompt as today; answered leg clears `escalation_state`); Layer 1: a bucket 07
     press-0 script and the transfer-with-context script (tracker row 11).
 - **Patterns to follow:** the #1676 hand-off hardening; `recording-control.ts` pause segments;
   `docs/solutions/logic-errors/escalation-per-user-phone-fallback-loop.md`;

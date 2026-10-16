@@ -159,8 +159,11 @@ Most of this is composition. The new parts are small and each has a natural home
   tenant's settings and speak it. The same call later becomes *regression replay*: "you changed
   your after-hours policy; here are the three scenarios it affects, listen."
 - **Typed setting keys the interview needs and the product lacks:** `booking_required_fields`,
-  `quote_policy`, `services_not_offered`, `transfer_targets` (U7), per-tenant emergency terms.
-  Each is a column with a Zod shape, not a prompt string.
+  `quote_policy`, `transfer_targets.emergency` (U7), per-tenant emergency terms. Each is a
+  column with a Zod shape, not a prompt string. `services_not_offered` is **not** a new key:
+  the interview writes U4's existing `tenant_business_answers.services_not_offered` through
+  the U4 repository, the same column the FSM's out-of-scope check and the Knowledge sheet
+  use, so there is one store and one set of writers (plan U9).
 - **White-space log** (`onboarding_whitespace_notes`): the asks the agent could not satisfy,
   per tenant, with the scenario they arose in. This is the demand signal for the roadmap and
   it is free.
