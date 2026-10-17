@@ -876,8 +876,9 @@ export interface VoiceTurnProcessorDeps {
    */
   laneUndo?: LaneUndoChannel;
   /**
-   * D-015 — the P0-035 slot-conflict check run before a live-call hold. The
-   * live lane auto-approves only a slot this checked (`slot_conflict`).
+   * D-015 — the P0-035 slot-conflict check run before a live-call hold. A
+   * busy slot gets no hold; without the check the live lane never
+   * auto-approves (`conflict_check_unavailable`).
    */
   slotConflictChecker?: SlotConflictChecker;
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;

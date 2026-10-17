@@ -23,6 +23,7 @@ import {
   decideInitialStatus,
   InMemoryProposalRepository,
   LANE_BOOKING_BOOKED_STATUSES,
+  laneBookingMachineApproved,
   laneBookingUndoneByOwner,
   VALID_PROPOSAL_TYPES,
   type ProposalStatus,
@@ -386,6 +387,36 @@ describe('digest auto-booked rows (InMemoryProposalRepository mirror of the Post
     );
     expect(rows.map((r) => r.id).sort()).toEqual(booked.map((p) => p.id).sort());
     expect(LANE_BOOKING_BOOKED_STATUSES).toContain('execution_failed');
+  });
+
+  // Value: protects=a lane booking createProposal approves at birth carries approvedAt === createdAt, which the digest keys on;
+  //   fails_when=createProposal stamps approvedAt from a different clock read than createdAt;
+  //   why_new=focused review of pass 3: every digest test set both timestamps by hand; seam=none;
+  //   no_claim=the Postgres insert (digest-reflection integration)
+  it('createProposal stamps a born-approved lane booking with approvedAt === createdAt', async () => {
+    const lane = { eligible: true as const, threshold: 0.95 };
+    const proposal = createProposal({
+      tenantId: 't-1',
+      proposalType: 'create_booking',
+      payload: { appointmentId: 'appt-1' },
+      summary: 'Booking',
+      createdBy: 'calling-agent',
+      confidenceScore: 0.97,
+      sourceTrustTier: 'autonomous',
+      autonomousLane: lane,
+      sourceContext: { autonomousLaneEvaluation: lane },
+    });
+    expect(proposal.status).toBe('approved');
+    expect(laneBookingMachineApproved(proposal)).toBe(true);
+
+    const repo = new InMemoryProposalRepository();
+    await repo.create(proposal);
+    const rows = await repo.findAutonomousLaneApprovedForDay(
+      't-1',
+      new Date(proposal.createdAt.getTime() - 60_000),
+      new Date(proposal.createdAt.getTime() + 60_000),
+    );
+    expect(rows.map((r) => r.id)).toEqual([proposal.id]);
   });
 
   it('counts an owner UNDO before execution (status) or after it (ownerUndo stamp), not a bare cancellation', () => {

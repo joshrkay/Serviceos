@@ -293,9 +293,11 @@ export interface CallingAgentContext {
    */
   lastIntentConfidence?: number;
   /**
-   * D-015 — whether `lastIntentConfidence` came from the model ('model') or a
-   * deterministic short-circuit's pinned constant ('rule'). The live-call
-   * autonomous booking lane trusts only a model's confidence.
+   * D-015 — where `lastIntentConfidence` came from: the primary model
+   * ('model'), a failover model ('fallback_model'), or a deterministic
+   * short-circuit or post-gateway override's pinned value ('rule'); see
+   * IntentClassification.confidenceSource. The live-call autonomous booking
+   * lane trusts only 'model'.
    */
   lastIntentConfidenceSource?: ConfidenceSource;
   /**

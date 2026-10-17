@@ -63,6 +63,8 @@ async function makeApp(opts: {
   summary?: string;
   /** The customer on file's display name. */
   customerDisplayName?: string;
+  /** How long ago an 'approved' proposal was approved (default: now, inside the undo window). */
+  approvedAgoMs?: number;
 }) {
   const customerOnFile = opts.customerDisplayName
     ? ({ ...customer, displayName: opts.customerDisplayName } as Customer)
@@ -101,7 +103,9 @@ async function makeApp(opts: {
   const proposal: Proposal = await proposalRepo.create({
     ...base,
     status: opts.proposalStatus,
-    ...(opts.proposalStatus === 'approved' ? { approvedAt: new Date() } : {}),
+    ...(opts.proposalStatus === 'approved'
+      ? { approvedAt: new Date(Date.now() - (opts.approvedAgoMs ?? 0)) }
+      : {}),
     ...(opts.proposalStatus === 'executed'
       ? { executedAt: new Date(), resultEntityId: appointment.id }
       : {}),
@@ -340,6 +344,46 @@ describe('/public/proposals/one-tap-undo', () => {
     const stored = await proposalRepo.findById(TENANT, proposal.id);
     expect(stored?.status).toBe('executed');
     expect(stored?.sourceContext?.ownerUndo).toMatchObject({ phase: 'post_execution_compensated' });
+  });
+
+  // Value: protects=an owner UNDO that lands after the 5 s window but before execution still reaches the digest;
+  //   fails_when=the fallback cancel skips the ownerUndo stamp (status stays 'approved', then executes);
+  //   why_new=focused review of pass 3: the digest no longer reads canceled appointments; seam=none;
+  //   no_claim=the execution sweep's timing
+  it('undo after the window closed but before execution: cancel, audit and the ownerUndo stamp', async () => {
+    const { app, proposalRepo, auditRepo, appointmentRepo, appointment, proposal } = await makeApp({
+      proposalStatus: 'approved',
+      approvedAgoMs: 60_000,
+    });
+    const { token } = mint(proposal.id);
+
+    const res = await redeem(app, token);
+    expect(res.status).toBe(200);
+    expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).toBe('canceled');
+    const stored = await proposalRepo.findById(TENANT, proposal.id);
+    expect(stored?.status).toBe('approved');
+    expect(stored?.sourceContext?.ownerUndo).toMatchObject({ phase: 'pre_execution' });
+    const types = (await auditRepo.findByEntity(TENANT, 'proposal', proposal.id)).map((e) => e.eventType);
+    expect(types).toContain('autonomous_booking_undone');
+  });
+
+  // Value: protects=a failed stamp write never turns a completed UNDO into a 500 or drops its audit;
+  //   fails_when=the stamp is written before the audit with no error handling;
+  //   why_new=the stamp was added between the apology and the audit; seam=none; no_claim=retry behaviour
+  it('a failed ownerUndo stamp write still answers 200 and keeps the audit', async () => {
+    const { app, proposalRepo, auditRepo, appointmentRepo, appointment, proposal } = await makeApp({
+      proposalStatus: 'executed',
+    });
+    proposalRepo.update = async () => {
+      throw new Error('db down');
+    };
+    const { token } = mint(proposal.id);
+
+    const res = await redeem(app, token);
+    expect(res.status).toBe(200);
+    expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).toBe('canceled');
+    const types = (await auditRepo.findByEntity(TENANT, 'proposal', proposal.id)).map((e) => e.eventType);
+    expect(types).toContain('autonomous_booking_undone');
   });
 
   it('double-tap is idempotent: second tap returns success without double-cancelling or re-texting', async () => {

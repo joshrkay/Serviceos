@@ -115,6 +115,8 @@ async function bookOnLiveCall(opts: {
   mutateSession?: (session: VoiceSession) => void;
   /** Serve the classifier from a failover stage. */
   fallbackStage?: string;
+  /** Runs between the two bookings of `bookTwice` (e.g. the owner's UNDO cancel). */
+  betweenBookings?: (repos: { appointmentRepo: InMemoryAppointmentRepository; proposalRepo: InMemoryProposalRepository }) => Promise<void>;
   /** The caller's customer record (display name for the owner's UNDO text). */
   customerDisplayName?: string;
 }) {
@@ -190,6 +192,7 @@ async function bookOnLiveCall(opts: {
 
   let fx: SideEffect[] = [];
   for (let i = 0; i < (opts.bookTwice ? 2 : 1); i++) {
+    if (i === 1) await opts.betweenBookings?.({ appointmentRepo, proposalRepo });
     await processor.speechTurn({
       session,
       speechResult: 'My furnace stopped heating, can someone come Tuesday at 2pm?',
@@ -310,6 +313,32 @@ describe('live-call booking (U3) — D-015 owner-cell gate and owner UNDO', () =
     // The second hold is refused as the customer's own busy slot: a draft
     // with no lane verdict, never a second auto-approval.
     expect(proposals[1]!.proposalType).toBe('create_appointment');
+    expect(proposals[1]!.status).toBe('draft');
+    expect(autonomousLaneEvaluationFor(proposals[1]!)).toBeUndefined();
+    await vi.waitFor(() => expect(laneUndo.sendSms).toHaveBeenCalledTimes(1));
+  });
+
+  // Value: protects=a slot the owner already undid on this call is never auto-booked again from the canceled hold;
+  //   fails_when=the hold hands back the canceled appointment as live and the lane approves it;
+  //   why_new=focused review of pass 3: the removed duplicate guard covered this case; seam=none;
+  //   no_claim=the UNDO route itself (route tests)
+  it('the owner undoes the booking mid-call and the caller asks again: a draft, no second UNDO text', async () => {
+    const laneUndo = undoChannel();
+    const { proposals } = await bookOnLiveCall({
+      ownerPhone: OWNER_CELL,
+      laneUndo,
+      bookTwice: true,
+      betweenBookings: async ({ appointmentRepo, proposalRepo }) => {
+        // The owner's one-tap UNDO cancels the held appointment.
+        const [first] = await proposalRepo.findByTenant(TENANT);
+        await appointmentRepo.update(TENANT, first!.payload.appointmentId as string, {
+          status: 'canceled',
+          holdPendingApproval: false,
+        });
+      },
+    });
+    expect(proposals).toHaveLength(2);
+    expect(proposals[0]!.status).toBe('approved');
     expect(proposals[1]!.status).toBe('draft');
     expect(autonomousLaneEvaluationFor(proposals[1]!)).toBeUndefined();
     await vi.waitFor(() => expect(laneUndo.sendSms).toHaveBeenCalledTimes(1));

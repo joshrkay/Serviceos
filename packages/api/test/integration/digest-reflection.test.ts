@@ -41,6 +41,7 @@ import { PgCorrectionLessonRepository } from '../../src/learning/corrections/pg-
 import { buildCorrectionLesson } from '../../src/learning/corrections/correction-lesson';
 import { computeDigestPayload, type DigestComputeDeps } from '../../src/digest/digest-service';
 import {
+  createProposal,
   laneBookingUndoneByOwner,
   type Proposal,
   type ProposalStatus,
@@ -234,6 +235,36 @@ describe('Postgres integration — digest reflection sections (N-005)', () => {
       10,
     );
     expect(leaked).toHaveLength(0);
+  });
+
+  // Value: protects=a lane booking createProposal approved at birth is found by the real query (approved_at = created_at);
+  //   fails_when=createProposal or the insert stamps approved_at and created_at from different clocks;
+  //   why_new=focused review of pass 3: every row here set both timestamps by hand; seam=none;
+  //   no_claim=which call site created it
+  it('findAutonomousLaneApprovedForDay finds a born-approved createProposal() lane booking as persisted', async () => {
+    const own = await createTestTenant(pool);
+    const lane = { eligible: true as const, threshold: 0.95 };
+    const born = createProposal({
+      tenantId: own.tenantId,
+      proposalType: 'create_booking',
+      payload: { appointmentId: crypto.randomUUID() },
+      summary: 'Auto-booked furnace repair',
+      createdBy: own.userId,
+      confidenceScore: 0.97,
+      sourceTrustTier: 'autonomous',
+      autonomousLane: lane,
+      sourceContext: { autonomousLaneEvaluation: lane },
+    });
+    expect(born.status).toBe('approved');
+    await proposalRepo.create(born);
+
+    const rows = await proposalRepo.findAutonomousLaneApprovedForDay!(
+      own.tenantId,
+      new Date(born.createdAt.getTime() - 60_000),
+      new Date(born.createdAt.getTime() + 60_000),
+      10,
+    );
+    expect(rows.map((r) => r.id)).toEqual([born.id]);
   });
 
   // Value: protects=an owner UNDO after execution reaches the digest through the stamp the route writes;
