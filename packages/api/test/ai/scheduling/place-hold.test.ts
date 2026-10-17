@@ -85,6 +85,66 @@ describe('placeAppointmentHold', () => {
   });
 });
 
+describe('placeAppointmentHold — idempotent replay at a different time', () => {
+  // Value: protects=a repeated idempotency key never reports the NEW time while returning the OLD hold;
+  //   fails_when=placeAppointmentHold trusts the requested window instead of the persisted row's;
+  //   why_new=the live call's key is per session+job, so a second booking for the job hit the first hold; seam=none;
+  //   no_claim=Postgres ON CONFLICT behaviour (in-memory repo mirrors it)
+  it('refuses (hold_time_mismatch) when the key matches an existing hold at another time', async () => {
+    const repo = new InMemoryAppointmentRepository();
+    const { start, end } = futureDates();
+    const first = await placeAppointmentHold(
+      { appointmentRepo: repo },
+      { tenantId: 't1', jobId: JOB_ID, scheduledStart: start, scheduledEnd: end, timezone: 'America/New_York', createdBy: 'sys', idempotencyKey: 'k-1' },
+    );
+    expect(first.ok).toBe(true);
+
+    const later = new Date(start.getTime() + 2 * 24 * 60 * 60 * 1000);
+    const again = await placeAppointmentHold(
+      { appointmentRepo: repo },
+      { tenantId: 't1', jobId: JOB_ID, scheduledStart: later, scheduledEnd: new Date(later.getTime() + 3600000), timezone: 'America/New_York', createdBy: 'sys', idempotencyKey: 'k-1' },
+    );
+    expect(again).toEqual({ ok: false, failed: 'hold_time_mismatch' });
+  });
+
+  it('a replay at the SAME time still returns the existing hold', async () => {
+    const repo = new InMemoryAppointmentRepository();
+    const { start, end } = futureDates();
+    const args = { tenantId: 't1', jobId: JOB_ID, scheduledStart: start, scheduledEnd: end, timezone: 'America/New_York', createdBy: 'sys', idempotencyKey: 'k-2' };
+    const first = await placeAppointmentHold({ appointmentRepo: repo }, args);
+    const again = await placeAppointmentHold({ appointmentRepo: repo }, args);
+    expect(first.ok && again.ok && again.appointmentId === first.appointmentId).toBe(true);
+  });
+});
+
+describe('resolveAndPlaceAppointmentHold — slot-conflict check', () => {
+  const now = new Date('2026-08-03T16:00:00Z');
+  const base = { tenantId: 't1', jobId: JOB_ID, customerId: 'cust-1', dateTimeDescription: 'next Tuesday at 2pm', timezone: 'America/New_York', now, createdBy: 'sys' };
+
+  // Value: protects=a slot the caller is already busy in is never held, and a hold says whether its slot was checked;
+  //   fails_when=the conflict check is skipped, runs after the write, or conflictChecked is reported without a check;
+  //   why_new=the live call held slots with no conflict check; seam=none; no_claim=the checker's own overlap rules
+  it('a busy slot places no hold (slot_conflict)', async () => {
+    const repo = new InMemoryAppointmentRepository();
+    const result = await resolveAndPlaceAppointmentHold(
+      { appointmentRepo: repo, slotConflictChecker: { check: async () => ({ ok: false, conflict: 'customer_busy', appointmentId: 'a-busy' }) } as never },
+      base,
+    );
+    expect(result).toEqual({ ok: false, failed: 'slot_conflict' });
+    expect(await repo.findByDateRange('t1', new Date(0), new Date('2100-01-01'))).toHaveLength(0);
+  });
+
+  it('a free slot is held and reports conflictChecked: true; no checker reports false', async () => {
+    const checked = await resolveAndPlaceAppointmentHold(
+      { appointmentRepo: new InMemoryAppointmentRepository(), slotConflictChecker: { check: async () => ({ ok: true }) } as never },
+      base,
+    );
+    expect(checked.ok && checked.conflictChecked).toBe(true);
+    const unchecked = await resolveAndPlaceAppointmentHold({ appointmentRepo: new InMemoryAppointmentRepository() }, base);
+    expect(unchecked.ok && unchecked.conflictChecked === false).toBe(true);
+  });
+});
+
 describe('resolveAndPlaceAppointmentHold', () => {
   it('resolves a spoken phrase and places the hold, returning the resolved window', async () => {
     const repo = new InMemoryAppointmentRepository();

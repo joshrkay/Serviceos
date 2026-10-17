@@ -33,6 +33,7 @@ import {
   resolveDateTime,
 } from './resolve-datetime';
 import { isRuntimeTimezone } from '../../shared/timezone';
+import type { SlotConflictChecker } from '../tasks/slot-conflict-checker';
 import type { AppointmentTypeValue } from '@ai-service-os/shared';
 
 /** Default tentative-hold window — a 24h approval window (matches the task). */
@@ -50,7 +51,19 @@ export type PlaceHoldFailure =
    */
   | 'timezone_unconfigured'
   | 'job_not_owned'
-  | 'hold_write_failed';
+  | 'hold_write_failed'
+  /**
+   * The P0-035 check refused the window: the customer is busy then (no
+   * technician is passed here, so only the customer is checked), or the
+   * check could not read the calendar (`could_not_verify`).
+   */
+  | 'slot_conflict'
+  /**
+   * The idempotency key matched an existing hold at a DIFFERENT time (a second
+   * booking for the same job on one call). Never report the new time over the
+   * old row.
+   */
+  | 'hold_time_mismatch';
 
 /**
  * #1045 / PRD 3.12 — the back-to-back drivability check on the hold path.
@@ -84,6 +97,12 @@ export interface PlaceHoldDeps {
    * `travel_time` warning on the hold instead of being promised blind.
    */
   feasibility?: FeasibilityDependencies;
+  /**
+   * D-015 — when wired, `resolveAndPlaceAppointmentHold` runs the P0-035
+   * slot-conflict check BEFORE writing the hold and refuses a busy slot. The
+   * result reports `conflictChecked` so the autonomous lane can require it.
+   */
+  slotConflictChecker?: SlotConflictChecker;
 }
 
 export interface PlaceHoldArgs {
@@ -155,6 +174,9 @@ export async function placeAppointmentHold(
       },
       deps.appointmentRepo,
     );
+    if (held.scheduledStart.getTime() !== args.scheduledStart.getTime()) {
+      return { ok: false, failed: 'hold_time_mismatch' };
+    }
     const feasibility = await checkHoldFeasibility(deps.feasibility, args.tenantId, held);
     return { ok: true, appointmentId: held.id, holdExpiryAt, feasibility };
   } catch {
@@ -258,7 +280,7 @@ export async function resolveAndPlaceAppointmentHold(
   deps: PlaceHoldDeps,
   args: ResolveAndPlaceHoldArgs,
 ): Promise<
-  | { ok: true; appointmentId: string; holdExpiryAt: Date; feasibility: HoldFeasibility; scheduledStart: string; scheduledEnd: string; timezone: string; arrival?: { startUtc: string; endUtc: string } }
+  | { ok: true; appointmentId: string; holdExpiryAt: Date; feasibility: HoldFeasibility; scheduledStart: string; scheduledEnd: string; timezone: string; arrival?: { startUtc: string; endUtc: string }; conflictChecked: boolean }
   | { ok: false; failed: PlaceHoldFailure }
 > {
   // NO DEFAULT ZONE. This is the autonomous live-call close: it writes a real
@@ -285,6 +307,17 @@ export async function resolveAndPlaceAppointmentHold(
       ? { startUtc: resolved.arrivalWindowStartUtc, endUtc: resolved.arrivalWindowEndUtc }
       : undefined;
 
+  // Before the write, so the new hold can never be its own conflict.
+  if (deps.slotConflictChecker && args.customerId) {
+    const conflict = await deps.slotConflictChecker.check({
+      tenantId: args.tenantId,
+      windowStart: new Date(resolved.startUtc),
+      windowEnd: new Date(resolved.endUtc),
+      customerId: args.customerId,
+    });
+    if (!conflict.ok) return { ok: false, failed: 'slot_conflict' };
+  }
+
   const held = await placeAppointmentHold(deps, {
     tenantId: args.tenantId,
     jobId: args.jobId,
@@ -310,5 +343,6 @@ export async function resolveAndPlaceAppointmentHold(
     scheduledEnd: resolved.endUtc,
     timezone: resolved.timezone,
     ...(arrival ? { arrival } : {}),
+    conflictChecked: Boolean(deps.slotConflictChecker && args.customerId),
   };
 }

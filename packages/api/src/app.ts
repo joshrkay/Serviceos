@@ -403,13 +403,18 @@ export { detectLanguage } from './ai/orchestration/language-detector';
 import { detectLanguage as detectInitialCallLanguage } from './ai/orchestration/language-detector';
 import { identifyCaller } from './ai/skills/identify-caller';
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
-import { createVoiceActionRouterWorker, INTENT_TO_PROPOSAL_TYPE } from './workers/voice-action-router';
+import {
+  autonomousBookingSettingsFrom,
+  createVoiceActionRouterWorker,
+  INTENT_TO_PROPOSAL_TYPE,
+} from './workers/voice-action-router';
 import { PgEntityResolver } from './ai/resolution/pg-entity-resolver';
 import { AliasFirstEntityResolver } from './ai/resolution/alias-first-entity-resolver';
 import { PgEntityAliasRepository } from './learning/entity-aliases/pg-entity-alias';
 import { createEntityAliasCandidateService } from './learning/entity-aliases/candidate-service';
 import { createEntityAliasesRouter } from './routes/entity-aliases';
 import { DefaultSlotConflictChecker } from './ai/tasks/slot-conflict-checker';
+import { buildLaneUndoChannel } from './proposals/lane-undo-sms';
 import { DefaultAvailabilityFinder } from './ai/tasks/availability-finder';
 import { RespondToReviewTaskHandler } from './ai/tasks/review-response-task';
 import { runExecutionSweep } from './workers/execution-worker';
@@ -1668,6 +1673,17 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         await oneTapDelivery.sendSms({ to, body, recipientClass: 'owner' });
       }
     : undefined;
+  // D-015 — the owner one-tap UNDO for lane-approved bookings, shared by the
+  // memo router and the live call. Wired only when it can deliver (in
+  // production: a configured SMS provider and an https, non-localhost API
+  // origin); otherwise both lanes report undo_channel_unavailable.
+  const laneUndoChannel = buildLaneUndoChannel({
+    nodeEnv: config.NODE_ENV,
+    apiBaseUrl: oneTapApiBaseUrl,
+    smsConfigured: deliveryWiring.smsConfigured,
+    sendSms: oneTapSmsSender,
+    secret: oneTapSecret,
+  });
   // Owner/backup-supervisor phone for the unsupervised SMS: tenant_settings
   // owner_phone first, then the backup supervisor's mobile_number.
   const resolveUnsupervisedOwnerPhone = async (tenantId: string): Promise<string | null> => {
@@ -2903,16 +2919,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     auditRepo,
     // UB-D / D-015 — lane settings; the router consults this ONLY for
     // booking-classified segments.
-    autonomousBookingResolver: async (tenantId: string) => {
-      const s = await settingsRepo.findByTenant(tenantId);
-      if (!s) return undefined;
-      return {
-        enabled: s.autonomousBookingEnabled ?? false,
-        ...(s.autonomousBookingThreshold !== undefined
-          ? { threshold: s.autonomousBookingThreshold }
-          : {}),
-      };
-    },
+    autonomousBookingResolver: async (tenantId: string) =>
+      autonomousBookingSettingsFrom(await settingsRepo.findByTenant(tenantId)),
     // D-015 amendment — platform-wide kill switch, checked before tenant
     // opt-in by evaluateAutonomousBookingLane.
     autonomousBookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
@@ -2988,9 +2996,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
       // UB-D / D3 — one-tap UNDO link for lane auto-approved bookings
-      // (minted with the same one-tap secret).
-      buildUndoUrl: (token: string) =>
-        `${oneTapApiBaseUrl}/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`,
+      // (minted with the same one-tap secret), only when the channel can
+      // deliver; without it the router's lane refuses autonomy.
+      ...(laneUndoChannel ? { laneUndo: laneUndoChannel } : {}),
       resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
       resolveRouting: async (tenantId: string) =>
         (await settingsRepo.findByTenant(tenantId))?.unsupervisedProposalRouting,
@@ -4150,6 +4158,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
     },
+    // D-015 — the live-call lane auto-books only a slot the P0-035 check
+    // found free (the same checker the memo router's task uses).
+    slotConflictChecker,
+    // D-015 — owner one-tap UNDO for a lane-approved live-call booking: the
+    // same sender, secret and undo link as the memo router's UNDO. Without
+    // them the live lane refuses autonomy (undo_channel_unavailable).
+    ...(laneUndoChannel ? { laneUndo: laneUndoChannel } : {}),
   };
   const twilioAdapter = new TwilioGatherAdapter(twilioAdapterDeps);
 

@@ -1090,6 +1090,8 @@ function transitionIntentCapture(
         // the `...context` spread above would leak the previous run and the
         // eventual create_proposal would link to the WRONG ai_runs record.
         lastAiRunId: event.aiRunId,
+        // Same rule: a re-classification replaces the prior turn's source.
+        lastIntentConfidenceSource: event.confidenceSource,
         // The caller's own words for this turn — the only place a contract
         // field the classifier never extracts (update_job's status) can come
         // from once the confirm turn replaces the transcript's last line with
@@ -1485,6 +1487,9 @@ function transitionIntentConfirm(
             // sets proposals.ai_run_id to an actual row (FK-satisfied), not
             // null. Omitted when the classify call had no persisted run.
             ...(context.lastAiRunId ? { aiRunId: context.lastAiRunId } : {}),
+            ...(context.lastIntentConfidenceSource
+              ? { confidenceSource: context.lastIntentConfidenceSource }
+              : {}),
             // The caller's words for the REQUEST turn (not this "yes"), for
             // the payload fields that exist nowhere else — see
             // `lastUtterance` on CallingAgentContext (types.ts). The

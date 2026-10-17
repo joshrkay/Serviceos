@@ -48,6 +48,9 @@ describe('buildLaneInputFromSettings', () => {
     slotWithinBusinessHours: true,
     customerId: 'cust-1',
     confidenceScore: 0.97,
+    ownerPhone: '+15555550100',
+    undoChannelAvailable: true,
+    slotConflictFree: true,
     payload: { appointmentId: 'appt-1' },
   };
 
@@ -66,6 +69,15 @@ describe('buildLaneInputFromSettings', () => {
       settings: { enabled: true, threshold: 0.95 },
     });
     expect(eval_.eligible).toBe(true);
+  });
+
+  it('an opted-in tenant with no owner cell on file never books autonomously', () => {
+    const eval_ = buildLaneInputFromSettings({
+      ...base,
+      settings: { enabled: true, threshold: 0.95 },
+      ownerPhone: undefined,
+    });
+    expect(eval_).toEqual({ eligible: false, reason: 'owner_cell_missing' });
   });
 
   it('negotiation flag blocks the lane', () => {

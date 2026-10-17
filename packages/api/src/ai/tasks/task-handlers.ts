@@ -117,6 +117,13 @@ export interface TaskContext {
    */
   autonomousBooking?: {
     settings: { enabled: boolean; threshold?: number };
+    /**
+     * `tenant_settings.owner_phone`, the number the owner UNDO SMS goes to.
+     * No number on file ⇒ the lane reports `owner_cell_missing`.
+     */
+    ownerPhone: string | null | undefined;
+    /** True only when the entry point can send the owner UNDO SMS. */
+    undoChannelAvailable: boolean;
     inboundReceptionistSource: boolean;
     pendingReferenceCount: number;
     platformDisabled?: boolean;
