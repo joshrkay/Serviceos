@@ -403,7 +403,11 @@ export { detectLanguage } from './ai/orchestration/language-detector';
 import { detectLanguage as detectInitialCallLanguage } from './ai/orchestration/language-detector';
 import { identifyCaller } from './ai/skills/identify-caller';
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
-import { createVoiceActionRouterWorker, INTENT_TO_PROPOSAL_TYPE } from './workers/voice-action-router';
+import {
+  autonomousBookingSettingsFrom,
+  createVoiceActionRouterWorker,
+  INTENT_TO_PROPOSAL_TYPE,
+} from './workers/voice-action-router';
 import { PgEntityResolver } from './ai/resolution/pg-entity-resolver';
 import { AliasFirstEntityResolver } from './ai/resolution/alias-first-entity-resolver';
 import { PgEntityAliasRepository } from './learning/entity-aliases/pg-entity-alias';
@@ -2915,18 +2919,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     auditRepo,
     // UB-D / D-015 — lane settings; the router consults this ONLY for
     // booking-classified segments.
-    autonomousBookingResolver: async (tenantId: string) => {
-      const s = await settingsRepo.findByTenant(tenantId);
-      if (!s) return undefined;
-      return {
-        enabled: s.autonomousBookingEnabled ?? false,
-        ...(s.autonomousBookingThreshold !== undefined
-          ? { threshold: s.autonomousBookingThreshold }
-          : {}),
-        // The lane's owner cell: owner_phone only, never the backup supervisor.
-        ownerPhone: s.ownerPhone ?? null,
-      };
-    },
+    autonomousBookingResolver: async (tenantId: string) =>
+      autonomousBookingSettingsFrom(await settingsRepo.findByTenant(tenantId)),
     // D-015 amendment — platform-wide kill switch, checked before tenant
     // opt-in by evaluateAutonomousBookingLane.
     autonomousBookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
@@ -3004,7 +2998,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // UB-D / D3 — one-tap UNDO link for lane auto-approved bookings
       // (minted with the same one-tap secret), only when the channel can
       // deliver; without it the router's lane refuses autonomy.
-      ...(laneUndoChannel ? { buildUndoUrl: laneUndoChannel.buildUndoUrl } : {}),
+      ...(laneUndoChannel ? { laneUndo: laneUndoChannel } : {}),
       resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
       resolveRouting: async (tenantId: string) =>
         (await settingsRepo.findByTenant(tenantId))?.unsupervisedProposalRouting,

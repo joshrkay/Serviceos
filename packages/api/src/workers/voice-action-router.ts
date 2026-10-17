@@ -12,7 +12,7 @@ import {
   AUTONOMOUS_LANE_PROPOSAL_TYPES,
   autonomousLaneEvaluationFor,
 } from '../proposals/autonomous-lane';
-import { sendLaneUndoSms } from '../proposals/lane-undo-sms';
+import { sendLaneUndoSms, type LaneUndoChannel } from '../proposals/lane-undo-sms';
 import { createAuditEvent } from '../audit/audit';
 import {
   askForExecutabilityGaps,
@@ -23,7 +23,11 @@ import { renderProposalSms, renderChainSms } from '../proposals/sms/render';
 import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
 import type { AuditRepository } from '../audit/audit';
-import type { SettingsRepository, UnsupervisedProposalRouting } from '../settings/settings';
+import type {
+  SettingsRepository,
+  TenantSettings,
+  UnsupervisedProposalRouting,
+} from '../settings/settings';
 import type { CurrentQuoteResolver } from '../conversations/negotiation/current-quote-resolver';
 import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
@@ -189,12 +193,41 @@ export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
     kind: OutboundAnchorKind;
   }) => Promise<void>;
   /**
-   * UB-D / D3 — builds the public one-tap UNDO URL for a lane-approved
-   * booking's owner SMS (mirrors `buildApproveUrl`; production wires
-   * `/public/proposals/one-tap-undo?token=…`). The undo token is minted
-   * with the same `secret` the approve tokens use.
+   * UB-D / D3 — the owner one-tap UNDO channel for a lane-approved booking,
+   * validated by `buildLaneUndoChannel` (sender, secret, public undo link)
+   * and checked per booking with `canDeliver()`. Absent or undeliverable,
+   * the lane reports `undo_channel_unavailable`.
    */
-  buildUndoUrl?: (token: string) => string;
+  laneUndo?: LaneUndoChannel;
+}
+
+/** The router's D-015 lane settings, read from one tenant_settings row. */
+export interface AutonomousBookingRouterSettings {
+  enabled: boolean;
+  threshold?: number;
+  ownerPhone?: string | null;
+}
+
+/**
+ * D-015 — the lane settings from a tenant_settings row. The owner cell is
+ * `owner_phone` only, never the backup supervisor's mobile (unlike the
+ * unsupervised-routing SMS, which falls back to it): the UNDO SMS must reach
+ * the owner.
+ */
+export function autonomousBookingSettingsFrom(
+  s: Pick<
+    TenantSettings,
+    'autonomousBookingEnabled' | 'autonomousBookingThreshold' | 'ownerPhone'
+  > | null | undefined,
+): AutonomousBookingRouterSettings | undefined {
+  if (!s) return undefined;
+  return {
+    enabled: s.autonomousBookingEnabled ?? false,
+    ...(s.autonomousBookingThreshold !== undefined
+      ? { threshold: s.autonomousBookingThreshold }
+      : {}),
+    ownerPhone: s.ownerPhone ?? null,
+  };
 }
 
 export interface VoiceActionRouterDeps {
@@ -314,7 +347,7 @@ export interface VoiceActionRouterDeps {
    */
   autonomousBookingResolver?: (
     tenantId: string,
-  ) => Promise<{ enabled: boolean; threshold?: number; ownerPhone?: string | null } | undefined>;
+  ) => Promise<AutonomousBookingRouterSettings | undefined>;
   /**
    * D-015 amendment — platform-wide kill switch for the autonomous booking
    * lane (config.AUTONOMOUS_BOOKING_DISABLED === 'true'). Threaded onto
@@ -1832,13 +1865,8 @@ async function processSegment(
             // The owner cell is tenant_settings.owner_phone only (never the
             // backup supervisor's mobile), read from the same settings row.
             ownerPhone: autonomousBookingSettings.ownerPhone,
-            // The lane is safe only if the owner UNDO SMS can actually be
-            // minted and sent (the UNDO block below needs all three).
-            undoChannelAvailable: Boolean(
-              deps.unsupervisedRouting?.sendSms &&
-                deps.unsupervisedRouting.secret &&
-                deps.unsupervisedRouting.buildUndoUrl,
-            ),
+            // The lane is safe only if the owner UNDO SMS can go out now.
+            undoChannelAvailable: deps.unsupervisedRouting?.laneUndo?.canDeliver() === true,
             inboundReceptionistSource: Boolean(customerId),
             pendingReferenceCount: annotation.pendingReferences.length,
             ...(deps.autonomousBookingPlatformDisabled ? { platformDisabled: true } : {}),
@@ -2723,9 +2751,9 @@ export function createVoiceActionRouterWorker(
           outcome.proposal.status === 'approved' &&
           autonomousLaneEvaluationFor(outcome.proposal)?.eligible === true
         ) {
-          const ur = deps.unsupervisedRouting;
+          const laneUndo = deps.unsupervisedRouting.laneUndo;
           try {
-            if (ur.sendSms && ur.secret && ur.buildUndoUrl) {
+            if (laneUndo) {
               const ownerPhone = outcome.laneOwnerPhone;
               if (ownerPhone) {
                 // The summary is buildResolvedSummary's "{work} — {resolved
@@ -2734,7 +2762,7 @@ export function createVoiceActionRouterWorker(
                 // (the UNDO is the link, not a Y/N), and OutboundAnchorKind
                 // is a DB-CHECKed union that a new kind would re-migrate.
                 await sendLaneUndoSms(
-                  { sendSms: ur.sendSms, secret: ur.secret, buildUndoUrl: ur.buildUndoUrl },
+                  laneUndo,
                   {
                     proposalId: outcome.proposal.id,
                     tenantId,

@@ -57,13 +57,21 @@ leaves a draft/held booking for the owner. Common ineligible reasons:
   non-localhost origin in production)
 - The caller-ID match is not STIR A-attested, or the customer was created on this call
   (`no_verified_customer`)
-- The slot conflicts with the customer's or technician's other appointments, or the
-  conflict check is not wired (`slot_conflict`)
-- The same slot was already auto-booked on this call (`duplicate_booking`)
+- The owner UNDO SMS cannot go out right now: the outbound SMS kill switch is off
+  (`TELEPHONY_ENABLED=false`, also `undo_channel_unavailable`)
+- The slot-conflict check did not run, e.g. not wired (`conflict_check_unavailable`).
+  A slot the check finds busy (the customer already booked then, or the check could
+  not read the calendar) gets no hold and no lane verdict: the call leaves a draft
+  (a memo asks a clarification)
+- The session was flagged for a prompt-injection attempt (`session_flagged`)
+- The booking came from a rebook offer (a "yes" after the agent offered to rebook a
+  canceled visit): its confidence scored the move/cancel request, so it is never
+  trusted (`below_threshold`)
 - The caller is speaking Spanish (`language_unsupported`; the confirmation copy is
   English-only)
-- The intent was matched by a fixed phrase rule rather than the model, so there is no
-  model confidence (`below_threshold`)
+- The intent was matched by a fixed phrase rule, pinned by an override, or answered
+  by a failover model rather than the primary model, so there is no trusted model
+  confidence (`below_threshold`)
 - Confidence below threshold
 - Missing customer / job / time resolution
 - Slot outside business hours

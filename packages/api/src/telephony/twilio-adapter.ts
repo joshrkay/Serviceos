@@ -2880,9 +2880,6 @@ export class TwilioGatherAdapter {
             utterance: opts.speechResult,
             entities: classifierEvent.entities,
             confidence: classifierEvent.confidence,
-            ...(classifierEvent.confidenceSource
-              ? { confidenceSource: classifierEvent.confidenceSource }
-              : {}),
           },
           opts.tenantId,
         );

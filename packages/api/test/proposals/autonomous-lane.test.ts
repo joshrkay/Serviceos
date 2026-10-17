@@ -19,8 +19,13 @@ import {
   type EvaluateAutonomousLaneInput,
 } from '../../src/proposals/autonomous-lane';
 import {
+  createProposal,
   decideInitialStatus,
+  InMemoryProposalRepository,
+  LANE_BOOKING_BOOKED_STATUSES,
+  laneBookingUndoneByOwner,
   VALID_PROPOSAL_TYPES,
+  type ProposalStatus,
   type ProposalType,
   type TrustTier,
 } from '../../src/proposals/proposal';
@@ -90,7 +95,7 @@ describe('evaluateAutonomousBookingLane — every gate blocks independently', ()
     ['no owner cell on file', { ownerPhone: null }, 'owner_cell_missing'],
     ['blank owner cell', { ownerPhone: '   ' }, 'owner_cell_missing'],
     [
-      'owner UNDO SMS cannot be sent (sender, secret or link unwired)',
+      'owner UNDO SMS cannot be sent (unwired, or the SMS kill switch is off)',
       { undoChannelAvailable: false },
       'undo_channel_unavailable',
     ],
@@ -100,8 +105,8 @@ describe('evaluateAutonomousBookingLane — every gate blocks independently', ()
       'owner_cell_missing',
     ],
     ['caller language without localized booking copy', { callerLanguageSupported: false }, 'language_unsupported'],
-    ['slot conflicts with an existing appointment, or was never checked', { slotConflictFree: false }, 'slot_conflict'],
-    ['the same slot was already auto-booked on this call', { slotAlreadyAutoBooked: true }, 'duplicate_booking'],
+    ['the slot-conflict check did not run', { slotConflictFree: false }, 'conflict_check_unavailable'],
+    ['the prompt-injection guard flagged the session', { flags: { injection: true } }, 'session_flagged'],
     [
       'tenant opt-in checked BEFORE the owner cell',
       { settings: { enabled: false }, ownerPhone: null },
@@ -342,5 +347,55 @@ describe('decideInitialStatus × autonomous lane', () => {
       supervisorPresent: true,
     });
     expect(withLane).toBe(withoutLane);
+  });
+});
+
+describe('digest auto-booked rows (InMemoryProposalRepository mirror of the Postgres query)', () => {
+  // Value: protects=the in-memory mirror counts exactly what Postgres counts: machine-approved lane bookings in a booked status;
+  //   fails_when=the mirror drifts from the Postgres status list or approved_at = created_at predicate;
+  //   why_new=the mirror had no test (digest tests mock the repo); seam=none; no_claim=the SQL itself (digest-reflection integration)
+  it('returns machine-approved lane bookings in every booked status, never held or human-approved ones', async () => {
+    const repo = new InMemoryProposalRepository();
+    const created = new Date('2026-07-10T15:00:00.000Z');
+    const lane = { autonomousLaneEvaluation: { eligible: true, threshold: 0.95 } };
+    const make = (status: ProposalStatus, approvedAt?: Date) =>
+      repo.create({
+        ...createProposal({
+          tenantId: 't-1',
+          proposalType: 'create_booking',
+          payload: {},
+          summary: 'Booking',
+          createdBy: 'voice',
+          sourceContext: lane,
+        }),
+        status,
+        createdAt: created,
+        updatedAt: created,
+        approvedAt,
+      });
+    const booked = await Promise.all(
+      LANE_BOOKING_BOOKED_STATUSES.map((status) => make(status, created)),
+    );
+    await make('ready_for_review');
+    await make('executed', new Date(created.getTime() + 3_600_000));
+
+    const rows = await repo.findAutonomousLaneApprovedForDay(
+      't-1',
+      new Date('2026-07-10T00:00:00.000Z'),
+      new Date('2026-07-11T00:00:00.000Z'),
+    );
+    expect(rows.map((r) => r.id).sort()).toEqual(booked.map((p) => p.id).sort());
+    expect(LANE_BOOKING_BOOKED_STATUSES).toContain('execution_failed');
+  });
+
+  it('counts an owner UNDO before execution (status) or after it (ownerUndo stamp), not a bare cancellation', () => {
+    expect(laneBookingUndoneByOwner({ status: 'undone', sourceContext: {} })).toBe(true);
+    expect(
+      laneBookingUndoneByOwner({
+        status: 'executed',
+        sourceContext: { ownerUndo: { at: '2026-07-10T16:00:00.000Z', phase: 'post_execution_compensated' } },
+      }),
+    ).toBe(true);
+    expect(laneBookingUndoneByOwner({ status: 'executed', sourceContext: {} })).toBe(false);
   });
 });

@@ -21,7 +21,7 @@ import type { EstimateRepository } from '../estimates/estimate';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { ProposalRepository, Proposal, ProposalStatus } from '../proposals/proposal';
-import { missingFieldsFor } from '../proposals/proposal';
+import { laneBookingUndoneByOwner, missingFieldsFor } from '../proposals/proposal';
 import type { CustomerRepository } from '../customers/customer';
 import type { SettingsRepository } from '../settings/settings';
 import type { CorrectionLessonRepository } from '../learning/corrections/correction-lesson';
@@ -151,15 +151,19 @@ export interface DigestSupervisorChecks {
 
 /**
  * D-015 amendment — "Auto-booked: N appointment(s)" reflection. `undone` is a
- * real signal (status 'undone' AT GENERATION TIME, same snapshot caveat as
- * unsureAbout/DigestUnsureOutcome) — a real owner one-tap UNDO on an
- * autonomous-lane booking sets this status (proposals/one-tap-undo.ts), so
- * unlike WS6's dropped `flaggedFixed` this count is not an approximation.
+ * real signal AT GENERATION TIME (same snapshot caveat as
+ * unsureAbout/DigestUnsureOutcome): only the owner's one-tap UNDO counts,
+ * before execution (status 'undone') or after it (the route's
+ * `sourceContext.ownerUndo` stamp). A later cancellation by the customer or
+ * from the app is not an UNDO, so this count is not an approximation.
  */
 export interface DigestAutonomousBookings {
-  /** Autonomous-lane-eligible proposals created today (capped at DIGEST_MAX_AUTONOMOUS_BOOKINGS). */
+  /**
+   * Lane bookings the machine booked today (`findAutonomousLaneApprovedForDay`;
+   * capped at DIGEST_MAX_AUTONOMOUS_BOOKINGS).
+   */
   count: number;
-  /** Of those, status 'undone' at generation time. */
+  /** Of those, undone by the owner's one-tap UNDO (`laneBookingUndoneByOwner`). */
   undone: number;
 }
 
@@ -1046,30 +1050,14 @@ export async function computeDigestPayload(
   // D-015 amendment — "Auto-booked: N appointment(s)" reflection. Omitted
   // when no autonomous-lane bookings ran today (count===0), per the "omit if
   // zero" convention shared with unsureAbout/learnedToday/supervisorChecks.
-  // Undone = undone before execution (status 'undone') OR after it: the
-  // owner's UNDO then cancels the appointment and the proposal stays
-  // 'executed', which is the common case once the 5 s window has passed.
-  const undoneFlags = await Promise.all(
-    autonomousLaneProposals.map(async (p) => {
-      if (p.status === 'undone') return true;
-      const appointmentId =
-        typeof p.resultEntityId === 'string' && p.resultEntityId
-          ? p.resultEntityId
-          : typeof p.payload?.appointmentId === 'string'
-            ? p.payload.appointmentId
-            : undefined;
-      if (!appointmentId) return false;
-      const appointment = await deps.appointmentRepo
-        .findById(tenantId, appointmentId)
-        .catch(() => null);
-      return appointment?.status === 'canceled';
-    }),
-  );
+  // Undone = the owner's UNDO before execution (status 'undone') or after
+  // it (the 'executed' proposal's ownerUndo stamp — the common case once the
+  // 5 s window has passed). Read from the rows already loaded: no lookups.
   const autonomousBookings: DigestAutonomousBookings | undefined =
     autonomousLaneProposals.length > 0
       ? {
           count: autonomousLaneProposals.length,
-          undone: undoneFlags.filter(Boolean).length,
+          undone: autonomousLaneProposals.filter(laneBookingUndoneByOwner).length,
         }
       : undefined;
 

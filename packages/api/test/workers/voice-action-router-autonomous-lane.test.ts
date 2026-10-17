@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  autonomousBookingSettingsFrom,
   createVoiceActionRouterWorker,
   holdIfUnsupervised,
 } from '../../src/workers/voice-action-router';
@@ -191,9 +192,12 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
     laneOwnerPhone?: string | null;
     /** The owner-or-backup number the routing SMS goes to. */
     resolveOwnerPhone?: (tenantId: string) => Promise<string | null | undefined>;
-    /** Leave the one-tap signing secret unwired (no UNDO link can be minted). */
-    noUndoSecret?: boolean;
+    /** Leave the owner UNDO channel unwired (buildLaneUndoChannel returned undefined). */
+    noUndoChannel?: boolean;
+    /** The UNDO channel's runtime check (false: the outbound SMS kill switch is off). */
+    undoCanDeliver?: boolean;
   }) {
+    const sendSms = opts.sendSms ?? (async () => {});
     const resolveOwnerPhone = opts.resolveOwnerPhone ?? (async () => '+15125550100');
     return createVoiceActionRouterWorker({
     // Production always resolves a tenant zone; a booking without one now
@@ -215,10 +219,19 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
         : {}),
       unsupervisedRouting: {
         auditRepo,
-        sendSms: opts.sendSms ?? (async () => {}),
-        ...(opts.noUndoSecret ? {} : { secret: SECRET }),
+        sendSms,
+        secret: SECRET,
         buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
-        buildUndoUrl: (token) => `https://api.example.com/undo?token=${token}`,
+        ...(opts.noUndoChannel
+          ? {}
+          : {
+              laneUndo: {
+                sendSms,
+                secret: SECRET,
+                buildUndoUrl: (token: string) => `https://api.example.com/undo?token=${token}`,
+                canDeliver: () => opts.undoCanDeliver ?? true,
+              },
+            }),
         resolveOwnerPhone,
         resolveRouting: async () => 'queue_and_sms',
       },
@@ -408,17 +421,22 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
   });
 
   // Value: protects=the lane never auto-approves a booking whose owner UNDO SMS cannot be sent;
-  //   fails_when=the router stops passing undoChannelAvailable, or computes it without the signing secret;
-  //   why_new=router tests always wired sender, secret and undo link; seam=none;
+  //   fails_when=the router stops passing undoChannelAvailable, or ignores the channel's runtime check;
+  //   why_new=router tests always wired the channel; red-team pass 3 found the SMS kill switch ignored; seam=none;
   //   no_claim=the production env actually setting ONE_TAP_APPROVE_SECRET
-  it('UNDO channel not wired (no signing secret): the booking queues for review as undo_channel_unavailable', async () => {
-    const worker = makeWorker({ noUndoSecret: true });
+  it.each([
+    ['not wired', { noUndoChannel: true }],
+    ['wired but the outbound SMS kill switch is off', { undoCanDeliver: false }],
+  ])('UNDO channel %s: the booking queues for review as undo_channel_unavailable', async (_name, opts) => {
+    const sendSms = vi.fn(async (_to: string, _body: string) => {});
+    const worker = makeWorker({ sendSms, ...opts });
 
     await expect(worker.handle(bookingMessage(), silentLogger())).resolves.toBeUndefined();
 
     const { status, evaluation } = await laneVerdict();
     expect(status).toBe('ready_for_review');
     expect(evaluation).toMatchObject({ eligible: false, reason: 'undo_channel_unavailable' });
+    expect(sendSms.mock.calls.some(([, body]) => body.includes('UNDO'))).toBe(false);
   });
 
   // Value: protects=the UNDO SMS goes to the exact number the lane checked, with no second lookup that can fail after approval;
@@ -440,5 +458,26 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
     const { status } = await laneVerdict();
     expect(status).toBe('approved');
     expect(sendSms).toHaveBeenCalledWith('+15125550100', expect.stringContaining('Tap to UNDO'));
+  });
+});
+
+describe('autonomousBookingSettingsFrom (app.ts lane resolver)', () => {
+  // Value: protects=the lane's owner cell is tenant_settings.owner_phone only, never the backup supervisor's mobile;
+  //   fails_when=the resolver falls back to the backup supervisor (as the unsupervised-routing SMS does);
+  //   why_new=the router tests inject ownerPhone straight into a mocked resolver; seam=none;
+  //   no_claim=the settings row read (settings-repository tests)
+  it('reads owner_phone only: a backup supervisor on file never stands in for the owner cell', () => {
+    expect(
+      autonomousBookingSettingsFrom({
+        autonomousBookingEnabled: true,
+        autonomousBookingThreshold: 0.97,
+        ownerPhone: undefined,
+        backupSupervisorUserId: 'user-backup',
+      } as never),
+    ).toEqual({ enabled: true, threshold: 0.97, ownerPhone: null });
+    expect(
+      autonomousBookingSettingsFrom({ autonomousBookingEnabled: true, ownerPhone: '+15125550100' } as never),
+    ).toEqual({ enabled: true, ownerPhone: '+15125550100' });
+    expect(autonomousBookingSettingsFrom(null)).toBeUndefined();
   });
 });

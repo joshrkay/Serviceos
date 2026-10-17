@@ -52,7 +52,11 @@ export type PlaceHoldFailure =
   | 'timezone_unconfigured'
   | 'job_not_owned'
   | 'hold_write_failed'
-  /** The P0-035 check found the caller or technician busy in that window. */
+  /**
+   * The P0-035 check refused the window: the customer is busy then (no
+   * technician is passed here, so only the customer is checked), or the
+   * check could not read the calendar (`could_not_verify`).
+   */
   | 'slot_conflict'
   /**
    * The idempotency key matched an existing hold at a DIFFERENT time (a second

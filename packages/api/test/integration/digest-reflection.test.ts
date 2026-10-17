@@ -10,7 +10,10 @@
  *   - ProposalRepository.findAutonomousLaneApprovedForDay (D-015 amendment):
  *     the JSONB predicate
  *     `source_context->'autonomousLaneEvaluation'->>'eligible' = 'true'`
- *     + created_at window + tenant (RLS) scoping.
+ *     + the booked-status list (`status = ANY($4::text[])`) + machine approval
+ *     at creation (`approved_at = created_at`) + created_at window + tenant
+ *     (RLS) scoping; and the one-tap UNDO's `sourceContext.ownerUndo` stamp
+ *     round-trips through update().
  *   - ProposalRepository.findAppliedInstructionsForDay (WS10): the JSONB
  *     predicate `payload->'_meta' ? 'appliedStandingInstructions' AND
  *     jsonb_array_length(payload->'_meta'->'appliedStandingInstructions') > 0`
@@ -37,7 +40,11 @@ import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgCorrectionLessonRepository } from '../../src/learning/corrections/pg-correction-lesson';
 import { buildCorrectionLesson } from '../../src/learning/corrections/correction-lesson';
 import { computeDigestPayload, type DigestComputeDeps } from '../../src/digest/digest-service';
-import type { Proposal, ProposalStatus } from '../../src/proposals/proposal';
+import {
+  laneBookingUndoneByOwner,
+  type Proposal,
+  type ProposalStatus,
+} from '../../src/proposals/proposal';
 import type { Estimate } from '../../src/estimates/estimate';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import type { PaymentRepository } from '../../src/invoices/payment';
@@ -161,11 +168,24 @@ describe('Postgres integration — digest reflection sections (N-005)', () => {
     expect(rows[0].confidenceFactors).toEqual(['ambiguous scope']);
   });
 
-  it('findAutonomousLaneApprovedForDay returns only today\'s eligible-lane proposals, tenant-scoped (D-015 amendment)', async () => {
+  it('findAutonomousLaneApprovedForDay returns only today\'s machine-booked lane proposals, tenant-scoped (D-015 amendment)', async () => {
+    const lane = { autonomousLaneEvaluation: { eligible: true, threshold: 0.95 } };
+    // Born approved: createProposal stamps approvedAt with the createdAt instant.
     const eligibleToday = makeProposal({
       status: 'approved',
+      approvedAt: IN_DAY,
       summary: 'Auto-booked AC repair',
-      sourceContext: { autonomousLaneEvaluation: { eligible: true, threshold: 0.95 } },
+      sourceContext: lane,
+    });
+    // Every later state of a machine-booked lane booking still counts.
+    const laterStates = (['executing', 'executed', 'execution_failed', 'undone'] as const).map(
+      (status) => makeProposal({ status, approvedAt: IN_DAY, sourceContext: lane }),
+    );
+    // Held for review, then approved by a human an hour later: not auto-booked.
+    const humanApprovedLater = makeProposal({
+      status: 'executed',
+      approvedAt: new Date(IN_DAY.getTime() + 60 * 60 * 1000),
+      sourceContext: lane,
     });
     const ineligibleToday = makeProposal({
       status: 'ready_for_review',
@@ -189,6 +209,8 @@ describe('Postgres integration — digest reflection sections (N-005)', () => {
     await proposalRepo.create(ineligibleToday);
     await proposalRepo.create(eligibleYesterday);
     await proposalRepo.create(noStamp);
+    for (const p of laterStates) await proposalRepo.create(p);
+    await proposalRepo.create(humanApprovedLater);
 
     const rows = await proposalRepo.findAutonomousLaneApprovedForDay!(
       tenant.tenantId,
@@ -196,8 +218,10 @@ describe('Postgres integration — digest reflection sections (N-005)', () => {
       DAY_END,
       10,
     );
-    expect(rows.map((r) => r.id)).toEqual([eligibleToday.id]);
-    expect(rows[0].sourceContext).toMatchObject({
+    expect(rows.map((r) => r.id).sort()).toEqual(
+      [eligibleToday.id, ...laterStates.map((p) => p.id)].sort(),
+    );
+    expect(rows.find((r) => r.id === eligibleToday.id)?.sourceContext).toMatchObject({
       autonomousLaneEvaluation: { eligible: true, threshold: 0.95 },
     });
 
@@ -210,6 +234,35 @@ describe('Postgres integration — digest reflection sections (N-005)', () => {
       10,
     );
     expect(leaked).toHaveLength(0);
+  });
+
+  // Value: protects=an owner UNDO after execution reaches the digest through the stamp the route writes;
+  //   fails_when=update() drops or replaces source_context, or the stamp is not read back as an owner UNDO;
+  //   why_new=the digest now counts post-execution UNDOs from this stamp, not appointment lookups; seam=none;
+  //   no_claim=the route's own decision to stamp (one-tap-undo route tests)
+  it('the one-tap UNDO stamp on an executed lane booking round-trips through update() (D-015 digest)', async () => {
+    const booked = makeProposal({
+      status: 'executed',
+      approvedAt: IN_DAY,
+      sourceContext: { autonomousLaneEvaluation: { eligible: true, threshold: 0.95 } },
+    });
+    await proposalRepo.create(booked);
+    expect(laneBookingUndoneByOwner(booked)).toBe(false);
+
+    await proposalRepo.update(tenant.tenantId, booked.id, {
+      sourceContext: {
+        ...booked.sourceContext,
+        ownerUndo: { at: IN_DAY.toISOString(), phase: 'post_execution_compensated' },
+      },
+    });
+
+    const stored = await proposalRepo.findById(tenant.tenantId, booked.id);
+    expect(stored?.status).toBe('executed');
+    expect(stored?.sourceContext).toMatchObject({
+      autonomousLaneEvaluation: { eligible: true, threshold: 0.95 },
+      ownerUndo: { phase: 'post_execution_compensated' },
+    });
+    expect(laneBookingUndoneByOwner(stored!)).toBe(true);
   });
 
   it('findAppliedInstructionsForDay returns only today\'s applied-instruction proposals, tenant-scoped (WS10)', async () => {

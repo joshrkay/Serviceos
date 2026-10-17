@@ -20,6 +20,7 @@ import request from 'supertest';
 import {
   createOneTapUndoRouter,
   AUTONOMOUS_UNDO_APOLOGY_SMS,
+  AUTONOMOUS_UNDO_FAILED_EXECUTION_APOLOGY_SMS,
 } from '../../src/routes/one-tap-undo';
 import { createOneTapUndoToken } from '../../src/proposals/one-tap-undo';
 import { createInMemoryNonceStore } from '../../src/proposals/auto-approve';
@@ -58,7 +59,14 @@ async function makeApp(opts: {
   proposalStatus: 'approved' | 'executed' | 'ready_for_review' | 'executing' | 'execution_failed';
   proposalType?: 'create_booking' | 'add_note';
   onDnc?: boolean;
+  /** The proposal's summary (on the live path it can carry caller-spoken text). */
+  summary?: string;
+  /** The customer on file's display name. */
+  customerDisplayName?: string;
 }) {
+  const customerOnFile = opts.customerDisplayName
+    ? ({ ...customer, displayName: opts.customerDisplayName } as Customer)
+    : customer;
   const proposalRepo = new InMemoryProposalRepository();
   const auditRepo = new InMemoryAuditRepository();
   const appointmentRepo = new InMemoryAppointmentRepository();
@@ -86,7 +94,7 @@ async function makeApp(opts: {
     tenantId: TENANT,
     proposalType: opts.proposalType ?? 'create_booking',
     payload: { appointmentId: appointment.id },
-    summary: 'AC repair — tomorrow 2pm',
+    summary: opts.summary ?? 'AC repair — tomorrow 2pm',
     confidenceScore: 0.97,
     createdBy: 'voice',
   });
@@ -137,7 +145,7 @@ async function makeApp(opts: {
           id === JOB_ID ? ({ id: JOB_ID, customerId: CUSTOMER_ID } as never) : null,
       } as unknown as Pick<JobRepository, 'findById'>,
       customerRepo: {
-        findById: async (_t: string, id: string) => (id === CUSTOMER_ID ? customer : null),
+        findById: async (_t: string, id: string) => (id === CUSTOMER_ID ? customerOnFile : null),
       } as unknown as Pick<CustomerRepository, 'findById'>,
       customerMessageDeps,
     }),
@@ -193,7 +201,9 @@ describe('/public/proposals/one-tap-undo', () => {
     const { token } = mint(proposal.id);
 
     const busy = await redeem(app, token);
-    expect(busy.status).toBe(503);
+    // A busy booking, not a server error: no 5xx for the error reporter.
+    expect(busy.status).toBe(409);
+    expect(busy.headers['retry-after']).toBeDefined();
     expect(busy.text).toContain('Try again');
     expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).not.toBe('canceled');
 
@@ -208,8 +218,11 @@ describe('/public/proposals/one-tap-undo', () => {
     expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).toBe('canceled');
   });
 
-  it('a booking whose execution failed after the caller was told "booked" is still canceled with the apology', async () => {
-    const { app, appointmentRepo, appointment, proposal, sendSms } = await makeApp({
+  // Value: protects=a lane booking whose execution failed is still undone, with an apology that claims no confirmation went out;
+  //   fails_when=the route refuses it, or texts "the appointment we just confirmed", or audits it as an executed compensation;
+  //   why_new=execution_failed was added to the undoable statuses; seam=none; no_claim=the customer's actual prior messages
+  it('a booking whose execution failed is canceled with the neutral apology and its own audit phase', async () => {
+    const { app, auditRepo, appointmentRepo, appointment, proposal, sendSms } = await makeApp({
       proposalStatus: 'execution_failed',
     });
     const { token } = mint(proposal.id);
@@ -218,6 +231,62 @@ describe('/public/proposals/one-tap-undo', () => {
     expect(res.status).toBe(200);
     expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).toBe('canceled');
     expect(sendSms).toHaveBeenCalledTimes(1);
+    expect((sendSms.mock.calls[0][0] as { body: string }).body).toBe(
+      AUTONOMOUS_UNDO_FAILED_EXECUTION_APOLOGY_SMS,
+    );
+    const undone = (await auditRepo.findByEntity(TENANT, 'proposal', proposal.id)).find(
+      (e) => e.eventType === 'autonomous_booking_undone',
+    );
+    expect(undone?.metadata).toMatchObject({ phase: 'post_execution_failed_compensated' });
+  });
+
+  // Value: protects=a HEAD (link scanner) never cancels a booking or spends the link;
+  //   fails_when=the route acts on any method but POST (Express routes HEAD to the GET handler);
+  //   why_new=red-team pass 3 reproduced a HEAD cancel; seam=none; no_claim=which scanners send HEAD
+  it('HEAD changes nothing and leaves the link usable', async () => {
+    const { app, proposalRepo, appointmentRepo, appointment, proposal, sendSms } = await makeApp({
+      proposalStatus: 'executed',
+    });
+    const { token } = mint(proposal.id);
+
+    const head = await request(app).head('/public/proposals/one-tap-undo').query({ token });
+    expect(head.status).toBe(200);
+    expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).not.toBe('canceled');
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe('executed');
+    expect(sendSms).not.toHaveBeenCalled();
+
+    const res = await redeem(app, token);
+    expect(res.status).toBe(200);
+    expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).toBe('canceled');
+  });
+
+  // Value: protects=the confirm page names the booking from verified records, HTML-escaped;
+  //   fails_when=it renders the proposal summary (caller-spoken on the live path) or drops escapeHtml;
+  //   why_new=the GET confirm page is new; seam=none; no_claim=how phones render the page
+  it('the confirm page names the customer on file and the time, escaped, never the proposal summary', async () => {
+    const { app, proposal } = await makeApp({
+      proposalStatus: 'executed',
+      summary: 'Schedule appointment for Spoken Name',
+      customerDisplayName: `<script>alert(1)</script> "O'Neil" & co`,
+    });
+    const { token } = mint(proposal.id);
+
+    const res = await request(app).get('/public/proposals/one-tap-undo').query({ token });
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('Spoken Name');
+    expect(res.text).not.toContain('<script>alert(1)</script>');
+    expect(res.text).toContain('&lt;script&gt;alert(1)&lt;/script&gt; &quot;O&#39;Neil&quot; &amp; co');
+    // The held time, in the appointment's zone (America/New_York in the fixture).
+    expect(res.text).toMatch(/ at \d{1,2}:\d{2}\s?[AP]M/);
+  });
+
+  it('GET for a booking that never went live answers 409 with no confirm form', async () => {
+    const { app, proposal } = await makeApp({ proposalStatus: 'ready_for_review' });
+    const { token } = mint(proposal.id);
+
+    const res = await request(app).get('/public/proposals/one-tap-undo').query({ token });
+    expect(res.status).toBe(409);
+    expect(res.text).not.toContain('<form method="post"');
   });
 
 
@@ -244,7 +313,7 @@ describe('/public/proposals/one-tap-undo', () => {
   });
 
   it('undo AFTER execution: compensating cancel + fixed-template apology SMS + audit', async () => {
-    const { app, auditRepo, appointmentRepo, appointment, proposal, sendSms } = await makeApp({
+    const { app, proposalRepo, auditRepo, appointmentRepo, appointment, proposal, sendSms } = await makeApp({
       proposalStatus: 'executed',
     });
     const { token } = mint(proposal.id);
@@ -267,6 +336,10 @@ describe('/public/proposals/one-tap-undo', () => {
       phase: 'post_execution_compensated',
       appointmentId: appointment.id,
     });
+    // 'executed' stays terminal, so the proposal carries the owner's UNDO for the digest.
+    const stored = await proposalRepo.findById(TENANT, proposal.id);
+    expect(stored?.status).toBe('executed');
+    expect(stored?.sourceContext?.ownerUndo).toMatchObject({ phase: 'post_execution_compensated' });
   });
 
   it('double-tap is idempotent: second tap returns success without double-cancelling or re-texting', async () => {

@@ -16,17 +16,22 @@
  *     primitive the cancel execution handler uses) and the customer gets a
  *     FIXED-TEMPLATE apology SMS (no LLM; consent/DNC-gated via
  *     `sendCustomerMessage`). This is compensation, not resurrection —
- *     'executed' stays terminal in the proposal lifecycle.
+ *     'executed' stays terminal in the proposal lifecycle, so the proposal
+ *     is stamped `sourceContext.ownerUndo` for the digest's undone count.
+ *   - proposal 'execution_failed': the same compensating cancel, with a
+ *     neutral apology (no confirmation is claimed) and its own audit phase.
  *
  * Idempotent: the nonce is single-use AND an appointment-status guard makes
  * a double-tap return success without double-cancelling (the already-undone
  * check runs on a NON-consuming peek, so a second tap never errors).
  *
- * A GET only renders a confirm page: SMS link previews and carrier scanners
- * issue GETs, so a GET must never cancel a booking or spend the link. The
- * confirm button POSTs the same token. A booking the executor holds
- * ('executing') or that never went live is answered BEFORE the nonce is
- * consumed, so the owner's real tap is never wasted.
+ * Only a POST acts. A GET (or HEAD, which Express routes to the GET
+ * handler) renders a confirm page naming the booking from verified records:
+ * SMS link previews and scanners fetch links, so a fetch must never cancel
+ * a booking or spend the link. The confirm button POSTs the same token. A
+ * booking the executor holds ('executing') or that never went live is
+ * answered BEFORE the nonce is consumed, so the owner's real tap is never
+ * wasted.
  *
  * Mounted under `/public/proposals` next to the one-tap approve route
  * (unauthenticated but token-gated), with the same minimal mobile HTML
@@ -36,7 +41,11 @@ import { Router, Request, Response, urlencoded } from 'express';
 import { verifyOneTapUndoToken } from '../proposals/one-tap-undo';
 import { AUTONOMOUS_LANE_PROPOSAL_TYPES } from '../proposals/autonomous-lane';
 import { undoProposal } from '../proposals/actions';
-import type { Proposal, ProposalRepository } from '../proposals/proposal';
+import {
+  LANE_BOOKING_LIVE_STATUSES,
+  type Proposal,
+  type ProposalRepository,
+} from '../proposals/proposal';
 import {
   updateAppointment,
   type Appointment,
@@ -51,6 +60,8 @@ import {
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import type { Role } from '../auth/rbac';
 import { createLogger } from '../logging/logger';
+import { formatForReadback } from '../ai/scheduling/resolve-datetime';
+import { undoConfirmPage } from './one-tap-undo-pages';
 
 const logger = createLogger({
   service: 'one-tap-undo',
@@ -69,6 +80,19 @@ export const AUTONOMOUS_UNDO_APOLOGY_SMS =
   'We’re sorry — the appointment we just confirmed had to be canceled. ' +
   'We’ll reach out shortly to find a time that works.';
 
+/** The same apology for a booking whose execution failed: it claims no confirmation. */
+export const AUTONOMOUS_UNDO_FAILED_EXECUTION_APOLOGY_SMS =
+  'We’re sorry — the appointment we set up for you had to be canceled. ' +
+  'We’ll reach out shortly to find a time that works.';
+
+type UndoPhase =
+  | 'pre_execution'
+  | 'post_execution_compensated'
+  | 'post_execution_failed_compensated';
+
+/** Seconds the owner should wait before tapping again while the booking executes. */
+const EXECUTING_RETRY_AFTER_SECONDS = 5;
+
 export interface OneTapUndoRouterDeps {
   proposalRepo: ProposalRepository;
   appointmentRepo: AppointmentRepository;
@@ -81,7 +105,7 @@ export interface OneTapUndoRouterDeps {
    * DISTINCT source ('one_tap_undo') so the two nonce spaces can't collide.
    */
   consumeNonce: (nonce: string) => boolean | Promise<boolean>;
-  /** Appointment → job → customer resolution for the apology SMS. */
+  /** Appointment → job → customer resolution for the apology SMS and confirm page. */
   jobRepo?: Pick<JobRepository, 'findById'>;
   customerRepo?: Pick<CustomerRepository, 'findById'>;
   /**
@@ -89,32 +113,6 @@ export interface OneTapUndoRouterDeps {
    * Optional: absent ⇒ the cancel still happens, the apology is skipped.
    */
   customerMessageDeps?: CustomerMessageDeliveryDeps;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-/** The GET interstitial; the button POSTs the same token. ≥44px tap target. */
-function undoConfirmPage(summary: string, token: string, action: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Undo this booking?</title>
-<style>body{font-family:system-ui,sans-serif;margin:0;padding:48px 24px;text-align:center;color:#111}
-h1{font-size:1.4rem}p{color:#555}
-button{min-height:44px;padding:12px 32px;font-size:1rem;border:0;border-radius:8px;
-background:#111;color:#fff;cursor:pointer}</style></head>
-<body><h1>Undo this booking?</h1>
-<p>${escapeHtml(summary)}</p>
-<form method="post" action="${escapeHtml(action)}">
-<input type="hidden" name="token" value="${escapeHtml(token)}">
-<button type="submit">Undo booking</button>
-</form></body></html>`;
 }
 
 function page(title: string, body: string): string {
@@ -139,12 +137,36 @@ function appointmentIdFor(proposal: Proposal): string | undefined {
 export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
   const router = Router();
 
-  const sendApology = async (tenantId: string, appointment: Appointment): Promise<void> => {
-    if (!deps.customerMessageDeps || !deps.jobRepo || !deps.customerRepo) return;
+  const customerFor = async (tenantId: string, appointment: Appointment) => {
+    if (!deps.jobRepo || !deps.customerRepo) return null;
+    const job = await deps.jobRepo.findById(tenantId, appointment.jobId);
+    if (!job?.customerId) return null;
+    return deps.customerRepo.findById(tenantId, job.customerId);
+  };
+
+  /**
+   * The confirm page names the booking from verified records: the customer
+   * on file and the held time. Never the proposal summary, which on the live
+   * call path carries the name the caller spoke.
+   */
+  const describeBooking = async (
+    tenantId: string,
+    appointment: Appointment | null,
+  ): Promise<string> => {
+    if (!appointment) return 'This booking';
+    const when = formatForReadback(appointment.scheduledStart.toISOString(), appointment.timezone);
+    const customer = await customerFor(tenantId, appointment).catch(() => null);
+    return customer?.displayName ? `${customer.displayName} — ${when}` : when;
+  };
+
+  const sendApology = async (
+    tenantId: string,
+    appointment: Appointment,
+    smsBody: string,
+  ): Promise<void> => {
+    if (!deps.customerMessageDeps) return;
     try {
-      const job = await deps.jobRepo.findById(tenantId, appointment.jobId);
-      if (!job?.customerId) return;
-      const customer = await deps.customerRepo.findById(tenantId, job.customerId);
+      const customer = await customerFor(tenantId, appointment);
       if (!customer) return;
       // sendCustomerMessage applies the sms_consent + DNC gates and is
       // itself best-effort; the per-appointment idempotency key means a
@@ -155,7 +177,7 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
         entityType: 'appointment_cancel',
         entityId: appointment.id,
         channels: ['sms'],
-        smsBody: AUTONOMOUS_UNDO_APOLOGY_SMS,
+        smsBody,
         idempotencyKeyPrefix: `one-tap-undo:${appointment.id}`,
       });
     } catch (err) {
@@ -169,7 +191,7 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
   const auditUndone = async (
     tenantId: string,
     proposalId: string,
-    phase: 'pre_execution' | 'post_execution_compensated',
+    phase: UndoPhase,
     appointmentId?: string,
   ): Promise<void> => {
     await deps.auditRepo.create(
@@ -279,34 +301,39 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
       return;
     }
 
-    // A GET (link preview, scanner or the owner's first tap) only confirms.
-    if (req.method === 'GET') {
-      res
-        .status(200)
-        .type('html')
-        .send(undoConfirmPage(proposal.summary, token, `${req.baseUrl}${req.path}`));
-      return;
-    }
-
     // Answer the states that cannot be undone yet, or ever, BEFORE spending
-    // the link, so a retry or a later tap still works.
+    // the link, so a retry or a later tap still works. A booking the executor
+    // holds is busy, not a server error: 409 + Retry-After, never a 5xx.
     if (proposal.status === 'executing') {
       res
-        .status(503)
+        .status(409)
+        .set('Retry-After', String(EXECUTING_RETRY_AFTER_SECONDS))
         .type('html')
         .send(page('Almost done booking', 'Try again in a moment — the booking is being finalized.'));
       return;
     }
-    if (
-      proposal.status !== 'approved' &&
-      proposal.status !== 'executed' &&
-      proposal.status !== 'execution_failed'
-    ) {
+    if (!LANE_BOOKING_LIVE_STATUSES.includes(proposal.status)) {
       // rejected / ready_for_review / draft — the booking never went live.
       res
         .status(409)
         .type('html')
         .send(page('Nothing to undo', 'This booking is not active — check your review queue.'));
+      return;
+    }
+
+    // Only a POST acts. A GET (link preview, scanner or the owner's first
+    // tap) and a HEAD (routed to the GET handler, req.method 'HEAD') confirm.
+    if (req.method !== 'POST') {
+      res
+        .status(200)
+        .type('html')
+        .send(
+          undoConfirmPage(
+            await describeBooking(peeked.tenantId, appointment),
+            token,
+            `${req.baseUrl}${req.path}`,
+          ),
+        );
       return;
     }
 
@@ -375,8 +402,13 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
     }
 
     // 'executed' or 'execution_failed'. Compensating flow: the caller was
-    // told the booking is confirmed (and the confirmation may have gone
-    // out), so cancel the appointment and send the fixed-template apology.
+    // told the booking is confirmed (and after execution the confirmation
+    // may have gone out), so cancel the appointment and send the
+    // fixed-template apology. A failed execution claims no confirmation.
+    const executionFailed = proposal.status === 'execution_failed';
+    const phase: UndoPhase = executionFailed
+      ? 'post_execution_failed_compensated'
+      : 'post_execution_compensated';
     if (!appointment) {
       res
         .status(404)
@@ -397,8 +429,20 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
         .send(page('Could not undo', 'Something went wrong — cancel it from the app.'));
       return;
     }
-    await sendApology(tenantId, appointment);
-    await auditUndone(tenantId, proposal.id, 'post_execution_compensated', appointment.id);
+    await sendApology(
+      tenantId,
+      appointment,
+      executionFailed ? AUTONOMOUS_UNDO_FAILED_EXECUTION_APOLOGY_SMS : AUTONOMOUS_UNDO_APOLOGY_SMS,
+    );
+    // The proposal's status stays terminal, so the owner's UNDO is stamped on
+    // it: the digest counts it from this stamp in its one query.
+    await deps.proposalRepo.update(tenantId, proposal.id, {
+      sourceContext: {
+        ...(proposal.sourceContext ?? {}),
+        ownerUndo: { at: new Date().toISOString(), phase },
+      },
+    });
+    await auditUndone(tenantId, proposal.id, phase, appointment.id);
     res
       .status(200)
       .type('html')

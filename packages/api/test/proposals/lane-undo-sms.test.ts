@@ -22,6 +22,7 @@ describe('sendLaneUndoSms', () => {
         sendSms,
         secret: SECRET,
         buildUndoUrl: (token) => `https://api.example.com/undo?token=${token}`,
+        canDeliver: () => true,
       },
       {
         proposalId: 'prop-1',
@@ -50,7 +51,7 @@ describe('sendLaneUndoSms', () => {
 describe('buildLaneUndoChannel', () => {
   const sendSms = async () => {};
   const base = {
-    nodeEnv: 'prod',
+    nodeEnv: 'prod' as const,
     apiBaseUrl: 'https://api.rivet.example',
     smsConfigured: true,
     sendSms,
@@ -70,6 +71,32 @@ describe('buildLaneUndoChannel', () => {
     expect(buildLaneUndoChannel({ ...base, apiBaseUrl: 'https://localhost:3000' })).toBeUndefined();
     expect(buildLaneUndoChannel({ ...base, secret: undefined })).toBeUndefined();
     expect(buildLaneUndoChannel({ ...base, sendSms: undefined })).toBeUndefined();
+  });
+
+  // Value: protects=the lane stops auto-approving while the outbound SMS kill switch silences every owner UNDO text;
+  //   fails_when=the channel reports deliverable with TELEPHONY_ENABLED=false, or reads the switch only at boot;
+  //   why_new=red-team pass 3: the kill switch suppressed UNDO sends while lanes kept auto-approving; seam=none;
+  //   no_claim=the switch's own suppression (gated-message-delivery tests)
+  it('canDeliver follows the outbound SMS kill switch at call time, not at boot', () => {
+    let enabled = true;
+    const channel = buildLaneUndoChannel({ ...base, outboundSmsEnabled: () => enabled });
+    expect(channel?.canDeliver()).toBe(true);
+    enabled = false;
+    expect(channel?.canDeliver()).toBe(false);
+  });
+
+  it('defaults to the TELEPHONY_ENABLED kill switch', () => {
+    const channel = buildLaneUndoChannel(base);
+    const prior = process.env.TELEPHONY_ENABLED;
+    try {
+      process.env.TELEPHONY_ENABLED = 'false';
+      expect(channel?.canDeliver()).toBe(false);
+      delete process.env.TELEPHONY_ENABLED;
+      expect(channel?.canDeliver()).toBe(true);
+    } finally {
+      if (prior === undefined) delete process.env.TELEPHONY_ENABLED;
+      else process.env.TELEPHONY_ENABLED = prior;
+    }
   });
 
   it('dev keeps the in-memory sender and a localhost link', () => {

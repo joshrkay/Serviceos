@@ -2,7 +2,13 @@ import { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 import { PgBaseRepository } from '../db/pg-base';
-import { Proposal, ProposalRepository, ProposalStatus, ProposalType } from './proposal';
+import {
+  LANE_BOOKING_BOOKED_STATUSES,
+  Proposal,
+  ProposalRepository,
+  ProposalStatus,
+  ProposalType,
+} from './proposal';
 
 function mapRow(row: Record<string, unknown>): Proposal {
   return {
@@ -231,11 +237,16 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
              AND created_at >= $2 AND created_at < $3
              AND source_context->'autonomousLaneEvaluation'->>'eligible' = 'true'
              -- Actually auto-booked: a lane-eligible booking stored for review
-             -- (supervisor cap, executability hold) never was.
-             AND status IN ('approved', 'executing', 'executed', 'undone')
+             -- (supervisor cap, executability hold) never was, and one a
+             -- human approved later has approved_at after created_at
+             -- (laneBookingMachineApproved).
+             AND status = ANY($4::text[])
+             AND approved_at = created_at
            ORDER BY created_at DESC
-           ${typeof limit === 'number' ? 'LIMIT $4' : ''}`,
-        typeof limit === 'number' ? [tenantId, from, to, limit] : [tenantId, from, to],
+           ${typeof limit === 'number' ? 'LIMIT $5' : ''}`,
+        typeof limit === 'number'
+          ? [tenantId, from, to, LANE_BOOKING_BOOKED_STATUSES, limit]
+          : [tenantId, from, to, LANE_BOOKING_BOOKED_STATUSES],
       );
       return result.rows.map(mapRow);
     });

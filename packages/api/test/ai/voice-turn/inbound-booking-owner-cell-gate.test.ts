@@ -16,7 +16,11 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { configureSupervisorCreationHook } from '../../../src/proposals/supervisor/hook';
 import { STIR_VERSTAT_FULL_ATTESTATION } from '../../../src/telephony/stir-attestation';
 import { createVoiceTurnProcessor } from '../../../src/ai/voice-turn';
-import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
+import {
+  VoiceSessionStore,
+  type VoiceSession,
+} from '../../../src/ai/agents/customer-calling/voice-session-store';
+import { DefaultSlotConflictChecker } from '../../../src/ai/tasks/slot-conflict-checker';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
 import { autonomousLaneEvaluationFor } from '../../../src/proposals/autonomous-lane';
@@ -39,8 +43,11 @@ const CALLER_PHONE = '+15125550100';
 const CUSTOMER_ID = '22222222-3333-4444-5555-666666666666';
 const JOB_ID = '33333333-3333-4333-8333-333333333333';
 
-/** Classifier verdict (0.97, above the tenant's 0.95 lane threshold), then "yes"; repeats per booking. */
-function bookingGateway(): LLMGateway {
+/**
+ * Classifier verdict (0.97, above the tenant's 0.95 lane threshold), then "yes"; repeats per booking.
+ * `fallbackStage` marks every response as served by a failover stage.
+ */
+function bookingGateway(opts: { fallbackStage?: string } = {}): LLMGateway {
   const contents = [
     JSON.stringify({
       intentType: 'create_appointment',
@@ -61,6 +68,7 @@ function bookingGateway(): LLMGateway {
       provider: 'mock',
       tokenUsage: { input: 1, output: 1, total: 2 },
       latencyMs: 1,
+      ...(opts.fallbackStage ? { degraded: true, fallbackStage: opts.fallbackStage } : {}),
     } satisfies LLMResponse)),
   } as unknown as LLMGateway;
 }
@@ -80,11 +88,12 @@ const jobResolver: EntityResolver = {
 
 const OWNER_CELL = '+15125550888';
 
-function undoChannel() {
+function undoChannel(opts: { canDeliver?: boolean } = {}) {
   return {
     sendSms: vi.fn(async (_to: string, _body: string) => {}),
     secret: 'test-one-tap-secret',
     buildUndoUrl: (token: string) => `https://api.example.com/undo?token=${token}`,
+    canDeliver: () => opts.canDeliver ?? true,
   };
 }
 
@@ -100,6 +109,12 @@ async function bookOnLiveCall(opts: {
   language?: 'en' | 'es';
   /** Book the same slot twice on one call. */
   bookTwice?: boolean;
+  /** Use the production P0-035 checker over this call's repos instead of a stub. */
+  realConflictChecker?: boolean;
+  /** Adjust the identified session before the booking turns. */
+  mutateSession?: (session: VoiceSession) => void;
+  /** Serve the classifier from a failover stage. */
+  fallbackStage?: string;
   /** The caller's customer record (display name for the owner's UNDO text). */
   customerDisplayName?: string;
 }) {
@@ -136,11 +151,23 @@ async function bookOnLiveCall(opts: {
   const verstat = opts.stirVerstat === undefined ? STIR_VERSTAT_FULL_ATTESTATION : opts.stirVerstat;
   if (verstat) session.stirVerstat = verstat;
   if (opts.language) session.language = opts.language;
-  const checker = opts.slotConflictChecker === undefined ? FREE_SLOT : opts.slotConflictChecker;
+  opts.mutateSession?.(session);
+  const checker = opts.realConflictChecker
+    ? new DefaultSlotConflictChecker({
+        appointmentRepo,
+        assignmentRepo: { findByAppointment: async () => [] } as never,
+        jobRepo: {
+          findById: async (_t: string, id: string) =>
+            id === JOB_ID ? ({ id: JOB_ID, customerId: CUSTOMER_ID } as never) : null,
+        } as never,
+      })
+    : opts.slotConflictChecker === undefined
+      ? FREE_SLOT
+      : opts.slotConflictChecker;
 
   const processor = createVoiceTurnProcessor({
     store,
-    gateway: bookingGateway(),
+    gateway: bookingGateway(opts.fallbackStage ? { fallbackStage: opts.fallbackStage } : {}),
     businessName: 'Rivet HVAC',
     systemActorId: 'calling-agent',
     auditRepo,
@@ -215,7 +242,7 @@ describe('live-call booking (U3) — D-015 owner-cell gate and owner UNDO', () =
     expect(laneUndo.sendSms).not.toHaveBeenCalled();
   });
 
-  it('no slot-conflict check wired: the hold waits for review (slot_conflict)', async () => {
+  it('no slot-conflict check wired: the hold waits for review (conflict_check_unavailable)', async () => {
     const { proposals } = await bookOnLiveCall({
       ownerPhone: OWNER_CELL,
       laneUndo: undoChannel(),
@@ -224,7 +251,7 @@ describe('live-call booking (U3) — D-015 owner-cell gate and owner UNDO', () =
     expect(proposals[0]!.status).toBe('draft');
     expect(autonomousLaneEvaluationFor(proposals[0]!)).toEqual({
       eligible: false,
-      reason: 'slot_conflict',
+      reason: 'conflict_check_unavailable',
     });
   });
 
@@ -266,16 +293,101 @@ describe('live-call booking (U3) — D-015 owner-cell gate and owner UNDO', () =
     expect(laneUndo.sendSms).not.toHaveBeenCalled();
   });
 
+  // Value: protects=booking the same slot twice on one call auto-approves it once and texts the owner once;
+  //   fails_when=the conflict check stops seeing the call's own first hold, or the live path skips it;
+  //   why_new=the first version pinned a duplicate guard the real checker made unreachable; seam=none;
+  //   no_claim=technician conflicts (the live path passes no technician)
   it('booking the same slot twice on one call auto-approves it once and texts the owner once', async () => {
     const laneUndo = undoChannel();
-    const { proposals } = await bookOnLiveCall({ ownerPhone: OWNER_CELL, laneUndo, bookTwice: true });
-    expect(proposals).toHaveLength(2);
-    expect(proposals.map((p) => p.status)).toEqual(['approved', 'draft']);
-    expect(autonomousLaneEvaluationFor(proposals[1]!)).toEqual({
-      eligible: false,
-      reason: 'duplicate_booking',
+    const { proposals } = await bookOnLiveCall({
+      ownerPhone: OWNER_CELL,
+      laneUndo,
+      bookTwice: true,
+      realConflictChecker: true,
     });
+    expect(proposals).toHaveLength(2);
+    expect(proposals[0]!.status).toBe('approved');
+    // The second hold is refused as the customer's own busy slot: a draft
+    // with no lane verdict, never a second auto-approval.
+    expect(proposals[1]!.proposalType).toBe('create_appointment');
+    expect(proposals[1]!.status).toBe('draft');
+    expect(autonomousLaneEvaluationFor(proposals[1]!)).toBeUndefined();
     await vi.waitFor(() => expect(laneUndo.sendSms).toHaveBeenCalledTimes(1));
+  });
+
+  // Value: protects=only a caller-ID identity nobody can fake on this call takes the lane;
+  //   fails_when=the live path drops the callerCreatedThisCall, rejected-identity or session-match check;
+  //   why_new=only the attestation check was tested; seam=none; no_claim=how the identity check decides
+  it.each([
+    ['the customer was created on this call', (s: VoiceSession) => { s.callerCreatedThisCall = true; }],
+    ['the identity check rejected the caller', (s: VoiceSession) => { s.callerIdentity = 'rejected'; }],
+    [
+      "the booking's customer is not the caller-ID match",
+      (s: VoiceSession) => { s.customerId = '99999999-3333-4444-5555-666666666666'; },
+    ],
+  ])('%s: never books autonomously (no_verified_customer)', async (_name, mutateSession) => {
+    const laneUndo = undoChannel();
+    const { proposals } = await bookOnLiveCall({ ownerPhone: OWNER_CELL, laneUndo, mutateSession });
+    const booking = proposals.find((p) => p.proposalType === 'create_booking')!;
+    expect(booking.status).toBe('draft');
+    expect(autonomousLaneEvaluationFor(booking)).toEqual({
+      eligible: false,
+      reason: 'no_verified_customer',
+    });
+    expect(laneUndo.sendSms).not.toHaveBeenCalled();
+  });
+
+  // Value: protects=the lane trusts only the primary model's confidence;
+  //   fails_when=the live path accepts any confidence source but 'model' (a failover model's self-score);
+  //   why_new=live tests only fed primary-model turns; seam=none; no_claim=which failover stages exist
+  it('a booking classified by a failover model never auto-approves (below_threshold)', async () => {
+    const laneUndo = undoChannel();
+    const { proposals } = await bookOnLiveCall({
+      ownerPhone: OWNER_CELL,
+      laneUndo,
+      fallbackStage: 'cheaper-model',
+    });
+    expect(proposals[0]!.status).toBe('draft');
+    expect(autonomousLaneEvaluationFor(proposals[0]!)).toEqual({
+      eligible: false,
+      reason: 'below_threshold',
+    });
+    expect(laneUndo.sendSms).not.toHaveBeenCalled();
+  });
+
+  // Value: protects=a session the injection guard flagged never auto-books on its model confidence;
+  //   fails_when=the live path stops passing injectionFlagged into the lane flags;
+  //   why_new=red-team pass 3: the lane ignored the injection flag; seam=none; no_claim=the injection scan itself
+  it('a prompt-injection-flagged session never auto-approves (session_flagged)', async () => {
+    const laneUndo = undoChannel();
+    const { proposals } = await bookOnLiveCall({
+      ownerPhone: OWNER_CELL,
+      laneUndo,
+      mutateSession: (s) => {
+        (s.machine.currentContext as { injectionFlagged?: boolean }).injectionFlagged = true;
+      },
+    });
+    expect(proposals[0]!.status).toBe('draft');
+    expect(autonomousLaneEvaluationFor(proposals[0]!)).toEqual({
+      eligible: false,
+      reason: 'session_flagged',
+    });
+    expect(laneUndo.sendSms).not.toHaveBeenCalled();
+  });
+
+  // Value: protects=the lane stops auto-approving while the outbound SMS kill switch silences the owner's UNDO;
+  //   fails_when=the live path checks only that the channel is wired, not that it can deliver now;
+  //   why_new=red-team pass 3 reproduced auto-approval with TELEPHONY_ENABLED=false; seam=none;
+  //   no_claim=the kill switch's own suppression
+  it('UNDO channel wired but the SMS kill switch is off: draft, undo_channel_unavailable, no SMS', async () => {
+    const laneUndo = undoChannel({ canDeliver: false });
+    const { proposals } = await bookOnLiveCall({ ownerPhone: OWNER_CELL, laneUndo });
+    expect(proposals[0]!.status).toBe('draft');
+    expect(autonomousLaneEvaluationFor(proposals[0]!)).toEqual({
+      eligible: false,
+      reason: 'undo_channel_unavailable',
+    });
+    expect(laneUndo.sendSms).not.toHaveBeenCalled();
   });
 
   it('opted-in tenant with NO owner cell: draft booking, honest "team will confirm" line, owner_cell_missing, no SMS', async () => {
@@ -301,9 +413,9 @@ describe('live-call booking (U3) — D-015 owner-cell gate and owner UNDO', () =
     expect(laneUndo.sendSms).not.toHaveBeenCalled();
   });
 
-  it('owner cell AND a wired UNDO channel: the booking auto-confirms, the caller hears "You\'re booked", the owner gets one UNDO text', async () => {
+  it('owner cell AND a wired UNDO channel: the booking auto-confirms, the caller hears "You\'re booked", the owner gets one UNDO text, both audited', async () => {
     const laneUndo = undoChannel();
-    const { proposals, spoken, appointmentRepo } = await bookOnLiveCall({
+    const { proposals, spoken, appointmentRepo, auditRepo } = await bookOnLiveCall({
       ownerPhone: OWNER_CELL,
       laneUndo,
     });
@@ -312,6 +424,17 @@ describe('live-call booking (U3) — D-015 owner-cell gate and owner UNDO', () =
     const booking = proposals[0]!;
     expect(autonomousLaneEvaluationFor(booking)).toEqual({ eligible: true, threshold: 0.95 });
     expect(booking.status).toBe('approved');
+    // The eligible verdict and the sent UNDO are both audited.
+    await vi.waitFor(async () => {
+      const events = await auditRepo.findByEntity(TENANT, 'proposal', booking.id);
+      expect(events.find((e) => e.eventType === 'autonomous_booking_lane_evaluated')?.metadata).toMatchObject({
+        eligible: true,
+        threshold: 0.95,
+      });
+      expect(events.find((e) => e.eventType === 'autonomous_booking_undo_sms')?.metadata).toMatchObject({
+        status: 'sent',
+      });
+    });
     const hold = await appointmentRepo.findById(TENANT, booking.payload.appointmentId as string);
     expect(spoken).toBe(
       spokenAutonomousBookConfirm(timeReadbackFromHold(hold!.scheduledStart.toISOString(), TZ)),

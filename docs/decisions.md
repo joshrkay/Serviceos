@@ -232,18 +232,26 @@ traffic keeps its structural reason):
   safe (voice-parity plan, design review 2026-10-15);
 - an UNDO channel that can deliver (`undo_channel_unavailable`): a sender and the
   one-tap secret, and in production a configured SMS provider and an https,
-  non-localhost API origin (`proposals/lane-undo-sms.ts` `buildLaneUndoChannel`);
-- a slot-conflict check that ran before the hold and found the slot free
-  (`slot_conflict`); localized caller copy (`language_unsupported`); and no earlier
-  auto-approval of the same slot on the call (`duplicate_booking`).
+  non-localhost API origin (`proposals/lane-undo-sms.ts` `buildLaneUndoChannel`),
+  checked per booking against the outbound SMS kill switch (`TELEPHONY_ENABLED=false`
+  silences owner texts, so it also stops autonomous approval);
+- a slot-conflict check that ran before the hold (`conflict_check_unavailable`; a slot
+  the check finds busy is refused before the lane runs, as a draft on the call or a
+  clarification on a memo); and localized caller copy (`language_unsupported`).
 
-The live call can now auto-approve: it passes the classifier confidence only when a
-model produced it (`IntentClassification.confidenceSource`; a phrase rule's pinned
-0.95 never counts), takes the lane's customer only from an A-attested caller-ID match
-not created on the call, speaks the pending line whenever the stored booking is not
-approved, and sends the owner a fire-and-forget, audited UNDO naming the customer on
-record and the held time. The one-tap UNDO link confirms on GET and acts only on POST,
-so SMS link previews cannot cancel bookings. The D-019 on-call close composes the
+The live call can now auto-approve: it passes the classifier confidence only when the
+primary model produced it (`IntentClassification.confidenceSource` 'model'; a phrase
+rule's pinned 0.95, a post-gateway override, a failover model's score and a rebook
+offer's borrowed confidence never count), takes the lane's customer only from an
+A-attested caller-ID match not created on the call, treats a prompt-injection-flagged
+session as `session_flagged`, speaks the pending line whenever the stored booking is
+not approved, and sends the owner a fire-and-forget, audited UNDO naming the customer
+on record and the held time. The one-tap UNDO link acts only on POST: a GET or HEAD
+(SMS link previews, scanners) renders a confirm page naming the customer on file and
+the time, and only for a booking that can still be undone. The digest's "Auto-booked:
+N, M undone" counts bookings the machine approved at creation (`approvedAt` equal to
+`createdAt`; a held booking a human approved later is not auto-booked) and counts an
+owner UNDO after execution from the `sourceContext.ownerUndo` stamp the route writes. The D-019 on-call close composes the
 D-015 gates without the autonomy-only ones (`evaluateBookingLaneForOwnerApproval`):
 every close is owner-approved. A tenant that opted in with no owner cell now gets its
 bookings queued for review instead of auto-approved.

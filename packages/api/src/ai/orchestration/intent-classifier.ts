@@ -1098,13 +1098,15 @@ export interface IntentClassification {
    */
   aiRunId?: string;
   /**
-   * D-015 — where `confidence` came from: 'model' when the LLM classified
-   * this turn, 'rule' when a deterministic short-circuit pinned it (e.g. the
-   * new-booking phrase match's constant 0.95). The autonomous booking lane
-   * only trusts a model's confidence. Stamped on every result by
+   * D-015 — where `confidence` came from: 'model' when the primary LLM
+   * classified this turn, 'fallback_model' when a failover model did (its
+   * self-reported confidence is uncalibrated), 'rule' when a deterministic
+   * path pinned it (the new-booking phrase match's constant 0.95, or a
+   * post-gateway override such as the sign-up floor). The autonomous
+   * booking lane only trusts 'model'. Stamped on every result by
    * `classifyIntent`.
    */
-  confidenceSource?: 'model' | 'rule';
+  confidenceSource?: ConfidenceSource;
   /**
    * Story 3.4 — the intent-taxonomy version that produced this classification
    * (`INTENT_TAXONOMY_VERSION`). Stamped on every result by `classifyIntent`;
@@ -2898,20 +2900,39 @@ export async function classifyIntent(
   // Story 3.4 — single choke point that stamps the taxonomy version on every
   // classification, regardless of which of classifyIntentRaw's return paths
   // (short-circuit, override, low-confidence, unknown, success) produced it.
-  const trace = { modelCalled: false };
+  const trace: ClassifyTrace = { modelCalled: false, pinned: false, fallbackModel: false };
   const result = await classifyIntentRaw(transcript, context, gateway, trace);
   result.taxonomyVersion = INTENT_TAXONOMY_VERSION;
-  // No post-gateway path pins create_appointment's confidence, so for the
-  // D-015 lane "the model was called" means "the model produced it".
-  result.confidenceSource = trace.modelCalled ? 'model' : 'rule';
+  result.confidenceSource =
+    !trace.modelCalled || trace.pinned ? 'rule' : trace.fallbackModel ? 'fallback_model' : 'model';
   return result;
 }
+
+/** D-015 — what produced a classification's confidence. */
+export type ConfidenceSource = 'model' | 'fallback_model' | 'rule';
+
+/** Where classifyIntentRaw's confidence came from, for `confidenceSource`. */
+interface ClassifyTrace {
+  /** The LLM was called. */
+  modelCalled: boolean;
+  /** A post-gateway override pinned the confidence (sign-up floor, inventory mapping). */
+  pinned: boolean;
+  /** A failover stage (cheaper model, fallback provider) answered, not the primary model. */
+  fallbackModel: boolean;
+}
+
+/** Gateway stages whose content is the primary model's own output. */
+const PRIMARY_MODEL_STAGES: ReadonlySet<string | undefined> = new Set([
+  undefined,
+  'primary',
+  'cached',
+]);
 
 async function classifyIntentRaw(
   transcript: string,
   context: ClassifyContext,
   gateway: LLMGateway,
-  trace: { modelCalled: boolean },
+  trace: ClassifyTrace,
 ): Promise<IntentClassification> {
   // Cheap short-circuit: empty / whitespace transcripts never trigger an LLM call.
   if (!transcript || transcript.trim().length === 0) {
@@ -3235,6 +3256,7 @@ async function classifyIntentRaw(
     },
   });
 
+  trace.fallbackModel = !PRIMARY_MODEL_STAGES.has(response.fallbackStage);
   const tokenUsage = response.tokenUsage
     ? { input: response.tokenUsage.input, output: response.tokenUsage.output }
     : undefined;
@@ -3259,6 +3281,7 @@ async function classifyIntentRaw(
     isCreateCustomerSignupPhrasing(transcript) && !context.callerIsExistingCustomer;
   if (!parsed) {
     if (signupOverride) {
+      trace.pinned = true;
       const result: IntentClassification = {
         intentType: 'create_customer',
         confidence: 0.85,
@@ -3283,6 +3306,7 @@ async function classifyIntentRaw(
       (parsed.intentType === 'create_customer' &&
         parsed.confidence < SIGNUP_INTENT_ACT_THRESHOLD))
   ) {
+    trace.pinned = true;
     const overridden: IntentClassification = {
       intentType: 'create_customer',
       confidence: Math.max(0.85, parsed.confidence),
@@ -3351,6 +3375,7 @@ async function classifyIntentRaw(
   ) {
     const entities: ExtractedEntities = { ...(parsed.extractedEntities ?? {}) };
     if (!entities.expenseCategory) entities.expenseCategory = 'materials';
+    trace.pinned = true;
     const mapped: IntentClassification = {
       intentType: 'log_expense',
       confidence: Math.max(parsed.confidence, 0.8),

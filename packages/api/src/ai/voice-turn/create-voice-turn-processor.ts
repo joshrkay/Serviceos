@@ -2869,9 +2869,6 @@ export function createVoiceTurnProcessor(
                 typeof fx.payload.confidence === 'number'
                   ? fx.payload.confidence
                   : undefined;
-              const laneApprovedThisCall = (session.laneApprovedAppointmentIds ?? []).includes(
-                hold.appointmentId,
-              );
               const laneEval = buildLaneInputFromSettings({
                 platformDisabled: process.env.AUTONOMOUS_BOOKING_DISABLED === 'true',
                 settings: {
@@ -2881,10 +2878,9 @@ export function createVoiceTurnProcessor(
                     : {}),
                 },
                 ownerPhone: settings?.ownerPhone,
-                undoChannelAvailable: deps.laneUndo !== undefined,
+                undoChannelAvailable: deps.laneUndo?.canDeliver() === true,
                 slotConflictFree: hold.conflictChecked,
                 callerLanguageSupported: sessionLanguage(session) === 'en',
-                slotAlreadyAutoBooked: laneApprovedThisCall,
                 confidenceScore: laneConfidence,
                 customerId: laneCustomerId,
                 holdExpiryAt: hold.holdExpiryAt,
@@ -2893,6 +2889,7 @@ export function createVoiceTurnProcessor(
                 pendingReferenceCount: 0,
                 negotiationFlagged:
                   session.machine.currentContext.negotiationFlagged === true,
+                injectionFlagged: session.machine.currentContext.injectionFlagged === true,
                 payload: bookingPayload,
               });
               laneSourceStamp = laneStampIfPresent(laneEval) as
@@ -3044,20 +3041,14 @@ export function createVoiceTurnProcessor(
       const held = await holdForExecutability(tenantId, proposal, deps.approvalReferenceChecks);
       const stored = await deps.proposalRepo.create(held.proposal);
       session.proposalIds.push(stored.id);
-      if (autonomousLaneForCreate) {
-        if (stored.status === 'approved') {
-          // F10 — this slot has had its one auto-approval on this call.
-          const appointmentId = stored.payload.appointmentId;
-          if (typeof appointmentId === 'string') {
-            (session.laneApprovedAppointmentIds ??= []).push(appointmentId);
-          }
-        } else if (bookingPendingUtterance) {
-          // The lane said yes but the booking was stored for review (the
-          // supervisor's cap, an executability hold): never "you're booked".
-          bookingUtterance = bookingPendingUtterance;
-        }
+      if (autonomousLaneForCreate && stored.status !== 'approved' && bookingPendingUtterance) {
+        // The lane said yes but the booking was stored for review (the
+        // supervisor's cap, an executability hold): never "you're booked".
+        bookingUtterance = bookingPendingUtterance;
       }
-      // D-015 — every live lane verdict is audited, as the router does.
+      // D-015 — every live lane verdict is audited, as the router does. A
+      // slot the conflict check found busy never reaches the lane: its hold
+      // is refused and the booking is drafted without a verdict.
       const laneVerdict = autonomousLaneEvaluationFor(stored);
       if (laneVerdict && deps.auditRepo) {
         await deps.auditRepo
@@ -5006,8 +4997,6 @@ export function createVoiceTurnProcessor(
       entities: Record<string, unknown>;
       /** The classifier's confidence for this request, carried into the rebook. */
       confidence: number;
-      /** Where that confidence came from (D-015: the lane trusts only 'model'). */
-      confidenceSource?: 'model' | 'rule';
     },
     tenantId: string,
   ): Promise<SideEffect[] | null> {
@@ -5087,7 +5076,6 @@ export function createVoiceTurnProcessor(
       cancelledAppointmentId: stale.id,
       entities: bookingEntities,
       confidence: turn.confidence,
-      ...(turn.confidenceSource ? { confidenceSource: turn.confidenceSource } : {}),
     };
     const offerPayload = {
       template: 'rebook_offer',
@@ -5147,7 +5135,9 @@ export function createVoiceTurnProcessor(
         entities: { ...pending.entities },
         confidence: pending.confidence,
         utterance: pending.heldUtterance,
-        ...(pending.confidenceSource ? { confidenceSource: pending.confidenceSource } : {}),
+        // No confidenceSource: this confidence scored a move/cancel/confirm
+        // request, not a booking, so the D-015 lane never trusts it — a
+        // rebook is always a draft for the owner.
       };
       effects.push(...session.machine.dispatch(booking));
       if (session.machine.currentState === 'entity_resolution') {
@@ -6569,9 +6559,6 @@ export function createVoiceTurnProcessor(
             utterance: speechResult,
             entities: classifierEvent.entities,
             confidence: classifierEvent.confidence,
-            ...(classifierEvent.confidenceSource
-              ? { confidenceSource: classifierEvent.confidenceSource }
-              : {}),
           },
           tenantId,
         );
