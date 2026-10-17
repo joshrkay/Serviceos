@@ -13,10 +13,12 @@
  * still born blocked — the sanction is the analog of the owner's one-tap).
  *
  * This module is PURE — no I/O. It is a SIBLING of autonomous-lane.ts, not an
- * extension: D-015's gate set stays untouched. It COMPOSES
- * evaluateAutonomousBookingLane for the create_booking leg (so the calendar /
- * hold / customer gates are enforced exactly once, in one place) and layers the
- * close-specific gates on top.
+ * extension: D-015's gate set stays untouched. It COMPOSES the D-015 gates for
+ * the create_booking leg through evaluateBookingLaneForOwnerApproval (so the
+ * calendar / hold / customer gates are enforced exactly once, in one place; the
+ * autonomy-only gates (autonomous-lane.ts `AutonomyOnlyInput`) are skipped
+ * because D-019 makes every close owner-approved)
+ * and layers the close-specific gates on top.
  *
  * Gate order (first-failing wins; eligibility requires every gate to pass):
  *   platform_disabled (AUTONOMOUS_CLOSE_DISABLED — checked FIRST, independent of
@@ -37,7 +39,7 @@
  * sourceContext.autonomousCloseEvaluation for the audit trail.
  */
 import {
-  evaluateAutonomousBookingLane,
+  evaluateBookingLaneForOwnerApproval,
   type EvaluateAutonomousLaneInput,
   type AutonomousLaneIneligibleReason,
 } from './autonomous-lane';
@@ -89,7 +91,14 @@ export interface EvaluateAutonomousCloseInput {
    * empty here — the close lane checks live-session flags itself (last gate) so
    * the audit reason is `session_flagged`, not `booking_lane_ineligible`.
    */
-  booking: Omit<EvaluateAutonomousLaneInput, 'flags'>;
+  booking: Omit<
+    EvaluateAutonomousLaneInput,
+    | 'flags'
+    | 'ownerPhone'
+    | 'undoChannelAvailable'
+    | 'slotConflictFree'
+    | 'callerLanguageSupported'
+  >;
   /** Live-session risk flags — any true blocks the close (checked LAST). */
   flags?: {
     vulnerability?: boolean;
@@ -132,7 +141,7 @@ export function evaluateAutonomousCloseLane(
     return { eligible: false, reason: 'hold_expired' };
   }
   // Compose the D-015 booking lane (flags forced empty — checked here last).
-  const booking = evaluateAutonomousBookingLane({ ...input.booking, flags: {} });
+  const booking = evaluateBookingLaneForOwnerApproval({ ...input.booking, flags: {} });
   if (!booking.eligible) {
     return { eligible: false, reason: 'booking_lane_ineligible', bookingReason: booking.reason };
   }

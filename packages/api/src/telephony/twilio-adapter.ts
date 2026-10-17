@@ -491,6 +491,13 @@ export interface TwilioAdapterDeps {
    * drift from VoiceTurnProcessorDeps.
    */
   autonomousClose?: VoiceTurnProcessorDeps['autonomousClose'];
+  /**
+   * D-015 — owner one-tap UNDO for a lane-approved live-call booking.
+   * Processor-only pass-through, typed by reference like autonomousClose.
+   */
+  laneUndo?: VoiceTurnProcessorDeps['laneUndo'];
+  /** D-015 — the P0-035 slot-conflict check before a live-call hold. */
+  slotConflictChecker?: VoiceTurnProcessorDeps['slotConflictChecker'];
 }
 
 /**
@@ -2588,6 +2595,9 @@ export class TwilioGatherAdapter {
             // Thread the classify call's REAL ai_runs id so a proposal born
             // from this intent links to its run row (proposals.ai_run_id FK).
             ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
+            ...(classification.confidenceSource
+              ? { confidenceSource: classification.confidenceSource }
+              : {}),
           };
         } else {
           // Low / unknown intent → intent_classified so FSM uses

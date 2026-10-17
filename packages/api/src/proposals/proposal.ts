@@ -29,6 +29,45 @@ export type ProposalStatus =
   | 'undone';
 export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'update_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item' | 'adopt_entity_alias' | 'update_brand_voice' | 'record_refund' | 'apply_credit' | 'send_customer_message' | 'create_change_order' | 'create_service_agreement' | 'add_material' | 'add_catalog_item';
 
+/**
+ * D-015 — a lane booking that went live: approved, mid-execution, executed,
+ * or failed in execution after the caller was told it was booked. The
+ * owner's one-tap UNDO acts on exactly these.
+ */
+export const LANE_BOOKING_LIVE_STATUSES: readonly ProposalStatus[] = [
+  'approved',
+  'executing',
+  'executed',
+  'execution_failed',
+];
+
+/** What the digest counts as auto-booked: live, or already undone by the owner. */
+export const LANE_BOOKING_BOOKED_STATUSES: readonly ProposalStatus[] = [
+  ...LANE_BOOKING_LIVE_STATUSES,
+  'undone',
+];
+
+/**
+ * The machine approved this proposal at creation: `createProposal` stamps a
+ * born-approved proposal's `approvedAt` with the same instant as its
+ * `createdAt` (D9 undo window), while a human approval of a held proposal
+ * stamps `approvedAt` later. The digest counts only these lane bookings as
+ * auto-booked.
+ */
+export function laneBookingMachineApproved(p: Pick<Proposal, 'approvedAt' | 'createdAt'>): boolean {
+  return p.approvedAt !== undefined && p.approvedAt.getTime() === p.createdAt.getTime();
+}
+
+/**
+ * The owner undid this lane booking: before execution (status 'undone') or
+ * after it, when the one-tap route cancels the appointment and stamps
+ * `sourceContext.ownerUndo` because 'executed' stays terminal.
+ */
+export function laneBookingUndoneByOwner(p: Pick<Proposal, 'status' | 'sourceContext'>): boolean {
+  const stamp = p.sourceContext?.ownerUndo;
+  return p.status === 'undone' || (typeof stamp === 'object' && stamp !== null);
+}
+
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
   'update_customer',
@@ -551,7 +590,9 @@ export function decideInitialStatus(input: {
    * UB-D / D-015 — autonomous booking lane. Set ONLY by the
    * inbound-receptionist booking call sites after
    * `evaluateAutonomousBookingLane` passed every gate (tenant opt-in,
-   * booking capture types only, clean resolution, live held slot in
+   * booking capture types only, the autonomy-only gates of
+   * `AutonomyOnlyInput` (owner cell, deliverable UNDO channel, caller
+   * language, conflict check ran), clean resolution, live held slot in
    * business hours, no session flags). When present-and-eligible AND the
    * tenant is unsupervised (threshold resolution returned null), the lane's
    * dedicated (stricter) threshold is used instead of categorically
@@ -956,12 +997,14 @@ export interface ProposalRepository {
     limit?: number,
   ): Promise<Proposal[]>;
   /**
-   * D-015 amendment — proposals created in [from, to) that took the
-   * autonomous booking lane (`sourceContext.autonomousLaneEvaluation.eligible
-   * === true`). Drives the digest "Auto-booked: N appointment(s)"
-   * reflection. Newest first, capped at `limit`. Optional so partial test
-   * doubles still satisfy the interface; the digest falls back to an empty
-   * section when it is absent.
+   * D-015 amendment — lane bookings created in [from, to) that the machine
+   * actually booked: lane-eligible (`sourceContext.autonomousLaneEvaluation
+   * .eligible === true`), approved at creation (`laneBookingMachineApproved`;
+   * a held booking a human approved later is not), and in
+   * `LANE_BOOKING_BOOKED_STATUSES`. Drives the digest "Auto-booked: N
+   * appointment(s)" reflection. Newest first, capped at `limit`. Optional so
+   * partial test doubles still satisfy the interface; the digest falls back
+   * to an empty section when it is absent.
    */
   findAutonomousLaneApprovedForDay?(
     tenantId: string,
@@ -1463,7 +1506,10 @@ export class InMemoryProposalRepository implements ProposalRepository {
         return (
           !!evaluation &&
           typeof evaluation === 'object' &&
-          (evaluation as Record<string, unknown>).eligible === true
+          (evaluation as Record<string, unknown>).eligible === true &&
+          // Actually auto-booked (mirrors the Postgres query).
+          LANE_BOOKING_BOOKED_STATUSES.includes(p.status) &&
+          laneBookingMachineApproved(p)
         );
       })
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())

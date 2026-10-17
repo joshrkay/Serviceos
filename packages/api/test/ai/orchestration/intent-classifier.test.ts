@@ -1625,6 +1625,66 @@ describe('A02 — draft_estimate routing determinism (2026-08-29 live sweep)', (
 describe('D01 — new-booking routing determinism (2026-08-30 live sweep)', () => {
   const inappContext = { tenantId: 't1' };
 
+  // Value: protects=a confidence a deterministic phrase rule pinned is marked 'rule', a model's is marked 'model';
+  //   fails_when=classifyIntent stops stamping confidenceSource, or stamps 'model' on a short-circuit;
+  //   why_new=the D-015 live lane must not treat a rule's constant 0.95 as model confidence; seam=none;
+  //   no_claim=which post-gateway overrides pin confidence (none produce create_appointment today)
+  it('stamps confidenceSource: rule for a deterministic short-circuit, model when the LLM classified', async () => {
+    const rule = await classifyIntent(
+      "I'd like to book a new customer for a diagnostic visit",
+      inappContext,
+      mockGateway('{"intentType":"unknown","confidence":0.3}'),
+    );
+    expect(rule.confidenceSource).toBe('rule');
+
+    const model = await classifyIntent(
+      'my furnace quit, can someone come out Tuesday afternoon',
+      inappContext,
+      mockGateway('{"intentType":"create_appointment","confidence":0.93}'),
+    );
+    expect(model.intentType).toBe('create_appointment');
+    expect(model.confidenceSource).toBe('model');
+  });
+
+  // Value: protects=only the primary model's own score is marked 'model';
+  //   fails_when=a post-gateway override's pinned floor, or a failover model's self-score, is stamped 'model';
+  //   why_new=pass-3 review: the field claimed 'model' whenever the gateway was called; seam=none;
+  //   no_claim=failover stages other than the two named
+  it('stamps rule when a post-gateway override pins the confidence, fallback_model for a failover answer', async () => {
+    const signup = await classifyIntent(
+      "I'd like to sign up as a new customer",
+      inappContext,
+      mockGateway('{"intentType":"unknown","confidence":0.2}'),
+    );
+    expect(signup.intentType).toBe('create_customer');
+    expect(signup.confidenceSource).toBe('rule');
+
+    const inventory = await classifyIntent(
+      'log inventory: 20 feet of copper pipe',
+      inappContext,
+      mockGateway('{"intentType":"add_note","confidence":0.6}'),
+    );
+    expect(inventory.intentType).toBe('log_expense');
+    expect(inventory.confidenceSource).toBe('rule');
+
+    for (const fallbackStage of ['cheaper-model', 'fallback-provider']) {
+      const gateway = {
+        complete: vi.fn(async () => ({
+          content: '{"intentType":"create_appointment","confidence":0.99}',
+          model: 'fallback-model',
+          provider: 'mock',
+          tokenUsage: { input: 1, output: 1, total: 2 },
+          latencyMs: 1,
+          degraded: true,
+          fallbackStage,
+        } satisfies LLMResponse)),
+      } as unknown as LLMGateway;
+      const failover = await classifyIntent('my furnace quit, can someone come out Tuesday', inappContext, gateway);
+      expect(failover.intentType).toBe('create_appointment');
+      expect(failover.confidenceSource).toBe('fallback_model');
+    }
+  });
+
   it('the exact D01 opening utterance routes to create_appointment with NO LLM call', async () => {
     // Live evidence: this turn either took the sign-up override into
     // create_customer, or came back low-confidence, which left the whole

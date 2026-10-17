@@ -228,6 +228,34 @@ describe('RV-140/RV-142 — emergency_detected handler', () => {
   });
 });
 
+describe('D-015 — intent confidence source threading', () => {
+  // Value: protects=create_proposal tells the live lane whether its confidence came from the model or a phrase rule, per turn;
+  //   fails_when=the source is not carried, or a prior turn's 'model' leaks onto a rule-classified turn;
+  //   why_new=the live lane must never trust a deterministic short-circuit's pinned 0.95; seam=none;
+  //   no_claim=the classifier's own stamping (intent-classifier.test.ts)
+  it('a rule-classified turn after a model one carries rule onto create_proposal (no inheritance)', () => {
+    const first = transition(
+      'intent_capture',
+      { type: 'intent_classified', intentType: 'book_service', entities: {}, confidence: 0.9, confidenceSource: 'model' },
+      baseContext,
+    );
+    expect(first.updatedContext.lastIntentConfidenceSource).toBe('model');
+
+    const second = transition(
+      'intent_capture',
+      { type: 'intent_classified', intentType: 'book_service', entities: {}, confidence: 0.95, confidenceSource: 'rule' },
+      first.updatedContext,
+    );
+    const confirmed = transition(
+      'intent_confirm',
+      { type: 'confirmed' },
+      { ...second.updatedContext, currentIntent: 'book_service', extractedEntities: {} },
+    );
+    const proposal = confirmed.sideEffects.find((fx) => fx.type === 'create_proposal');
+    expect((proposal!.payload as { confidenceSource?: string }).confidenceSource).toBe('rule');
+  });
+});
+
 describe('ai_run_id threading across turns (PR #664 finding A)', () => {
   // A confirmed classify captures its ai_runs id into context.lastAiRunId so
   // the eventual create_proposal links the proposal to the REAL run. The bug:
