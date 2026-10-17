@@ -211,6 +211,31 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
     );
   };
 
+  /**
+   * Stamps the owner's UNDO on a proposal whose status cannot record it, for
+   * the digest. Best-effort, after the audit: a failed write never turns a
+   * completed UNDO into an error.
+   */
+  const stampOwnerUndo = async (
+    tenantId: string,
+    proposal: Proposal,
+    phase: UndoPhase,
+  ): Promise<void> => {
+    try {
+      await deps.proposalRepo.update(tenantId, proposal.id, {
+        sourceContext: {
+          ...(proposal.sourceContext ?? {}),
+          ownerUndo: { at: new Date().toISOString(), phase },
+        },
+      });
+    } catch (err) {
+      logger.warn('one-tap undo: ownerUndo stamp failed', {
+        proposalId: proposal.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
   const handler = async (req: Request, res: Response): Promise<void> => {
     const token =
       typeof req.query.token === 'string'
@@ -364,9 +389,10 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
     if (proposal.status === 'approved') {
       // Inside the 5-second undo window (rare — the owner beat the
       // executor): the EXISTING undo path. If the window just closed or the
-      // proposal raced to 'executed', fall through to the compensating
-      // cancel below — a canceled appointment can never be confirmed by the
-      // create_booking execution handler, so cancelling is safe either way.
+      // proposal raced to 'executed', the hold is canceled here directly — a
+      // canceled appointment can never be confirmed by the create_booking
+      // execution handler, so cancelling is safe either way.
+      let undoneInWindow = false;
       try {
         await undoProposal(
           deps.proposalRepo,
@@ -376,8 +402,9 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
           ONE_TAP_UNDO_ACTOR_ROLE,
           deps.auditRepo,
         );
+        undoneInWindow = true;
       } catch (err) {
-        logger.warn('one-tap undo: undoProposal failed, falling back to compensating cancel', {
+        logger.warn('one-tap undo: undoProposal failed, cancelling the hold directly', {
           proposalId: proposal.id,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -394,6 +421,10 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
         );
       }
       await auditUndone(tenantId, proposal.id, 'pre_execution', appointment?.id);
+      // The window closed before the executor ran: the status stays
+      // 'approved' (then executes into the canceled appointment and fails),
+      // so the stamp is what tells the digest the owner undid it.
+      if (!undoneInWindow) await stampOwnerUndo(tenantId, proposal, 'pre_execution');
       res
         .status(200)
         .type('html')
@@ -434,15 +465,10 @@ export function createOneTapUndoRouter(deps: OneTapUndoRouterDeps): Router {
       appointment,
       executionFailed ? AUTONOMOUS_UNDO_FAILED_EXECUTION_APOLOGY_SMS : AUTONOMOUS_UNDO_APOLOGY_SMS,
     );
+    await auditUndone(tenantId, proposal.id, phase, appointment.id);
     // The proposal's status stays terminal, so the owner's UNDO is stamped on
     // it: the digest counts it from this stamp in its one query.
-    await deps.proposalRepo.update(tenantId, proposal.id, {
-      sourceContext: {
-        ...(proposal.sourceContext ?? {}),
-        ownerUndo: { at: new Date().toISOString(), phase },
-      },
-    });
-    await auditUndone(tenantId, proposal.id, phase, appointment.id);
+    await stampOwnerUndo(tenantId, proposal, phase);
     res
       .status(200)
       .type('html')

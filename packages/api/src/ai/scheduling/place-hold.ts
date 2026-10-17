@@ -41,6 +41,13 @@ export const DEFAULT_HOLD_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** An appointment in one of these no longer holds its slot. */
+const RELEASED_STATUSES: ReadonlySet<Appointment['status']> = new Set([
+  'canceled',
+  'completed',
+  'no_show',
+]);
+
 export type PlaceHoldFailure =
   | 'unresolved_datetime'
   /**
@@ -58,6 +65,12 @@ export type PlaceHoldFailure =
    * check could not read the calendar (`could_not_verify`).
    */
   | 'slot_conflict'
+  /**
+   * The idempotency key matched a hold that was already released (canceled,
+   * e.g. by the owner's one-tap UNDO mid-call, or finished): a replay must
+   * never hand it back as a live hold.
+   */
+  | 'hold_released'
   /**
    * The idempotency key matched an existing hold at a DIFFERENT time (a second
    * booking for the same job on one call). Never report the new time over the
@@ -176,6 +189,9 @@ export async function placeAppointmentHold(
     );
     if (held.scheduledStart.getTime() !== args.scheduledStart.getTime()) {
       return { ok: false, failed: 'hold_time_mismatch' };
+    }
+    if (RELEASED_STATUSES.has(held.status)) {
+      return { ok: false, failed: 'hold_released' };
     }
     const feasibility = await checkHoldFeasibility(deps.feasibility, args.tenantId, held);
     return { ok: true, appointmentId: held.id, holdExpiryAt, feasibility };

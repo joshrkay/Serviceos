@@ -115,6 +115,23 @@ describe('placeAppointmentHold — idempotent replay at a different time', () =>
     const again = await placeAppointmentHold({ appointmentRepo: repo }, args);
     expect(first.ok && again.ok && again.appointmentId === first.appointmentId).toBe(true);
   });
+
+  // Value: protects=a hold the owner already released (UNDO cancel) is never handed back as a live hold;
+  //   fails_when=the idempotent create returns the canceled row and the hold reports ok;
+  //   why_new=focused review of pass 3: a same-call rebook after an owner UNDO auto-booked a canceled appointment;
+  //   seam=none; no_claim=which cancel path released it
+  it('a replay whose hold was canceled is refused (hold_released), never handed back as live', async () => {
+    const repo = new InMemoryAppointmentRepository();
+    const { start, end } = futureDates();
+    const args = { tenantId: 't1', jobId: JOB_ID, scheduledStart: start, scheduledEnd: end, timezone: 'America/New_York', createdBy: 'sys', idempotencyKey: 'k-3' };
+    const first = await placeAppointmentHold({ appointmentRepo: repo }, args);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    await repo.update('t1', first.appointmentId, { status: 'canceled', holdPendingApproval: false });
+
+    const again = await placeAppointmentHold({ appointmentRepo: repo }, args);
+    expect(again).toEqual({ ok: false, failed: 'hold_released' });
+  });
 });
 
 describe('resolveAndPlaceAppointmentHold — slot-conflict check', () => {
