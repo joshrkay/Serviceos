@@ -270,7 +270,13 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `packages/api/test/integration/onboarding-draft.test.ts`,
     `packages/api/test/integration/onboarding-voice-policy-handler.test.ts`
 - **Approach:** `POST /draft` creates the draft (idempotent per tenant; `GET /draft` reads it,
-  404 before). The trade, business name and optional cell it needs come from the demo-call
+  404 before). One row per tenant, so a re-run reopens that row rather than creating another:
+  `POST /draft/reopen` (U6) is allowed only when the draft is `approved` and every generated
+  proposal has executed; it re-assembles for the current trade and metro, pre-fills `choices`
+  from the live settings (greeting → override label; the enum keys → the option whose writes
+  match; prices → the current headline items), resets `status='draft'`, `proposal_ids=[]`,
+  bumps `version`, and emits `onboarding.draft_reopened`. The read-back then shows what is
+  live today and "That's right" mints proposals exactly as a first run does. The trade, business name and optional cell it needs come from the demo-call
   lead when there is one (U7) and otherwise from the v3 shell's first screen, "What should I
   answer as?" (U3), which asks exactly those three before the draft exists; the signup form is
   unchanged and the direct "Start free" path never reaches the shell without them. The response
@@ -469,6 +475,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     template lines whose current price equals their baseline move to the new pick; the seeder
     writes the baseline from now on); tests `packages/api/test/packs/reprice-seeded.test.ts`,
     `packages/api/test/integration/reprice-seeded.test.ts`
+  - modify `packages/api/src/proposals/execution/onboarding-handlers.ts`
+    (`OnboardingTenantSettingsExecutionHandler`: when the pack is already active, call
+    `repriceSeeded` with the payload's prices instead of the first-run `activatePackWithSeed`,
+    which skips existing names; integration test in `reprice-seeded.test.ts` runs the handler
+    against a seeded tenant and asserts the moved and untouched rows)
   - create `packages/api/src/onboarding/forwarding-probe.ts` and route
     `POST /api/onboarding/phone/forwarding-probe`; migration 314 also adds
     `tenant_settings.forwarding_confirmed_at` and `forwarding_verified_at`; tests
@@ -480,16 +491,27 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     states; the bank chip links to `POST /api/billing/connect/onboarding`)
   - modify `packages/web/src/routes.ts` (flip flag), delete `components/onboarding/v2/**` and
     its tests, `utils/onboarding-rerun.ts` callers updated to v3
-  - modify `packages/web/src/components/settings/SettingsPage.tsx:1131` ("Re-run setup" → v3)
+  - modify `packages/web/src/components/settings/SettingsPage.tsx:1131` ("Re-run setup" → v3,
+    which calls `POST /draft/reopen` first and lands on the read-back)
+  - modify `packages/api/src/onboarding/draft/routes.ts`, `repository.ts`, `approve.ts`
+    (`POST /draft/reopen` and the settings → choices pre-fill; refused with 409 while a
+    generated proposal is still executing); tests
+    `packages/api/test/onboarding/draft/reopen.test.ts`,
+    `packages/api/test/integration/onboarding-draft-reopen.test.ts`
   - tests: `packages/api/test/onboarding/forwarding-text.test.ts`,
     `packages/api/test/routes/onboarding-forwarding-text.route.test.ts`,
     `packages/web/src/components/home/HomePage.first-day.test.tsx`,
     `packages/web/src/components/onboarding/v3/NumberCard.test.tsx`,
     `e2e/onboarding-v3-day-one.spec.ts`
 - **Approach:** The `existing_number` choice decides the branch: "no" hides forwarding
-  entirely and the Rivet number is presented as the business number; "yes" sends the owner a
-  text with a `tel:` link that dials the carrier's forwarding code (table from
-  `steps/PhoneStep.tsx:28-35`) and shows a "calls still ring your cell" badge on the first-day
+  entirely and the Rivet number is presented as the business number; "yes" asks two more
+  things on the same turn, "What's that number?" (E.164, `tenant_settings.forwarding_source_number`)
+  and the carrier (chips from the table in `steps/PhoneStep.tsx:28-35`,
+  `tenant_settings.forwarding_carrier`), because a yes/no cannot be forwarded and the owner's
+  cell is not the business line. The text then goes to the owner's cell and says to dial the
+  code from the business phone (a `tel:` link only when that phone is the same device; a
+  landline gets the code to punch in), the probe calls the business number, not the cell, and
+  the badge says "calls still ring your cell" on the first-day
   screen until forwarding is confirmed. `twilioStatus` says nothing about the owner's carrier,
   so the badge has its own state: `tenant_settings.forwarding_confirmed_at`, set when the owner
   taps "I dialed it" on the first-day chip, and `forwarding_verified_at`, set by a probe
@@ -503,9 +525,12 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   skips consent), `components/home/ActivationCelebrationBanner.tsx` (first-run state),
   `docs/solutions/architecture-patterns/derive-shared-status-rule-across-frontends.md`.
 - **Test scenarios:**
-  - Happy path: re-run with a new price pick → the two headline catalog items and the template
-    lines that still carry the seeded amounts update, an owner-edited labor rate (and the
-    template line the owner changed) are untouched and the read-back says so;
+  - Happy path: re-run → `POST /draft/reopen` pre-fills the read-back with the live greeting,
+    posture, payment mode, hours, emergency target and prices; a new price pick → the two
+    headline catalog items and the template lines that still carry the seeded amounts update,
+    an owner-edited labor rate (and the template line the owner changed) are untouched and the
+    read-back says so; "yes" to an existing number → the business number and carrier are asked
+    and stored, the text says to dial from that phone, the probe calls that number;
     day-one owner → no forwarding turn, number card says "put it on the truck";
     established shop → forwarding text sent once, badge shown until the owner confirms or the
     probe lands; a probe that never arrives leaves the badge and re-shows the code.
