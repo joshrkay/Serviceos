@@ -13,6 +13,23 @@
  * Runs inside the `/api` request transaction (middleware/tenant-context.ts):
  * any thrown error turns into a >= 400 response and the middleware rolls the
  * whole thing back, so a half-approved draft cannot exist.
+ *
+ * Concurrency: the first statement is a locking read of the draft row
+ * (`getForTenantForUpdate`), and the proposals are built only from the row it
+ * returns. A PUT /choices or a second approve therefore waits on the lock and
+ * sees the committed outcome: a PUT that wins is IN the payload; an approve
+ * that loses finds the draft `approved` and returns the winner's proposal ids
+ * (`approvedNow: false`) without minting anything. An optional `expectedVersion`
+ * lets a client that rendered version N refuse to approve a newer draft
+ * (DraftVersionConflictError, before anything is minted); `markApproved`
+ * re-checks the same version as the second guard. On an already-approved draft
+ * the same field is compared with the version the CURRENT approval attempt
+ * started from (`version - 1`): equal or absent is the idempotent 200, anything
+ * else is a stale confirmation and answers the same conflict. The version names
+ * the attempt: approval moves it by one and so does every successful retry
+ * (retry.ts), because a retry opens a new undo window. A tab that rendered the
+ * original approval is therefore refused once a retry has run, which is
+ * intended; sending no expectedVersion stays the idempotent 200.
  */
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';
@@ -26,7 +43,7 @@ import { isRuntimeTimezone } from '../../shared/timezone';
 import { CHOICE_KEYS, type AnyChoiceKey, type ChoiceWrites, type OptionKey } from '../choices/schema';
 import type { AssembledChoice, AssembledOption } from '../choices/assemble';
 import type { PriceTier } from '../choices/price-tiers';
-import type { OnboardingDraft, OnboardingDraftRepository } from './repository';
+import { DraftNotFoundError, DraftVersionConflictError, type OnboardingDraft, type OnboardingDraftRepository } from './repository';
 
 export const ONBOARDING_READBACK_SURFACE = 'onboarding_readback';
 
@@ -89,6 +106,15 @@ export function buildDraftProposals(draft: OnboardingDraft, actorId: string): Dr
       hourlyRateCents: price.prices.hourlyRateCents,
       tripFeeCents: price.prices.tripFeeCents,
       timezone: tz,
+      // The cell is a fact about the owner, not a choice. Omitted (never null)
+      // when absent so the handler writes nothing and cannot clear a stored
+      // number. The OWNER_PHONE_REQUIRED gate is deliberately absent until the
+      // web read-back asks for the number: both emergency options ring the
+      // owner, so a gate now would make every draft without a cell unapprovable
+      // (a gate with nothing to lift it can never be approved). Its place is
+      // right after the TIMEZONE_REQUIRED check, reading
+      // byKey.get('emergency_target').writes.emergencyTarget.
+      ...(draft.ownerPhone ? { ownerPhone: draft.ownerPhone } : {}),
     },
     summary: `Set up ${draft.businessName}: ${price.label}`,
     confidenceScore: 1,
@@ -132,11 +158,28 @@ export async function approveDraft(
   deps: ApproveDraftDeps,
   tenantId: string,
   actor: { userId: string; role: Role },
+  opts: { expectedVersion?: number } = {},
 ): Promise<ApproveDraftResult> {
-  const draft = await deps.draftRepo.getForTenant(tenantId);
-  if (!draft) throw new ValidationError('DRAFT_NOT_FOUND');
+  const draft = await deps.draftRepo.getForTenantForUpdate(tenantId);
+  if (!draft) throw new DraftNotFoundError(tenantId);
   if (draft.status === 'approved') {
+    // Idempotent re-tap, a lost-response retry, or the loser of an approve race:
+    // the winner's ids, nothing minted. Approval bumped the version by one, so
+    // with no retry since, `version - 1` is the version it was approved FROM: no
+    // expectedVersion or that one is the same client confirming again (200).
+    // Any other value is a stale tab (or one ahead of the row) confirming a
+    // read-back that is not what was approved: refuse it, reporting `version - 1`.
+    // A retry (retry.ts) bumps the version again, so after one `version - 1` is
+    // the version that retry started from and the original confirmation lands
+    // here too: the retry opened a new undo window that tab never rendered.
+    const approvedFrom = draft.version - 1;
+    if (opts.expectedVersion !== undefined && opts.expectedVersion !== approvedFrom) {
+      throw new DraftVersionConflictError(opts.expectedVersion, approvedFrom);
+    }
     return { draft, proposalIds: draft.proposalIds, approvedNow: false };
+  }
+  if (opts.expectedVersion !== undefined && opts.expectedVersion !== draft.version) {
+    throw new DraftVersionConflictError(opts.expectedVersion, draft.version);
   }
 
   const inputs = buildDraftProposals(draft, actor.userId);
@@ -163,7 +206,7 @@ export async function approveDraft(
     throw new ConflictError(`DRAFT_APPROVAL_FAILED: ${reasons}`);
   }
 
-  const approved = await deps.draftRepo.markApproved(tenantId, ids);
+  const approved = await deps.draftRepo.markApproved(tenantId, ids, draft.version);
   await deps.auditRepo.create(
     createAuditEvent({
       tenantId,
@@ -172,7 +215,7 @@ export async function approveDraft(
       eventType: 'onboarding.draft_approved',
       entityType: 'onboarding_draft',
       entityId: approved.id,
-      metadata: { proposalIds: ids, choices: resolveChoices(draft).map((r) => ({ key: r.settingKey, source: r.source })) },
+      metadata: { proposalIds: ids, draftVersion: draft.version, choices: resolveChoices(draft).map((r) => ({ key: r.settingKey, source: r.source })) },
     }),
   );
   return { draft: approved, proposalIds: ids, approvedNow: true };

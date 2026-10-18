@@ -44,6 +44,8 @@ export class InvalidPhoneNumberError extends ValidationError {
  *
  * Rejects (throws InvalidPhoneNumberError):
  *   - input containing letters or otherwise unexpected characters
+ *   - a leading "+" that is not "+1" followed by the 10 national digits
+ *     (so "+47 912 34 567" is never mistaken for a bare US number)
  *   - numbers that are too short / too long to be a US number
  *   - a US area code or exchange code that starts with 0 or 1 (invalid NANP)
  */
@@ -67,6 +69,18 @@ export function normalizeMobileE164(input: string): string {
   const hadPlus = raw.startsWith('+');
   const digits = raw.replace(/\D/g, '');
 
+  // A leading "+" announces a country code, so it must be the US one: "+1" and
+  // the 10 national digits, 11 digits in all. Anything else is not ours. The
+  // length checks below cannot catch it on their own: "+47 912 34 567" has
+  // exactly ten digits, which would otherwise be read as a bare NANP number
+  // and stored as the unrelated US number "+14791234567".
+  if (hadPlus && !(digits.length === 11 && digits.startsWith('1'))) {
+    throw new InvalidPhoneNumberError(
+      `Invalid phone number: "${input}" is not a US (+1) number`,
+      input,
+    );
+  }
+
   // Resolve to the 10 significant NANP digits (area code + 7-digit number).
   let national: string;
   if (digits.length === 10) {
@@ -76,17 +90,6 @@ export function normalizeMobileE164(input: string): string {
   } else {
     throw new InvalidPhoneNumberError(
       `Invalid phone number: "${input}" is not a valid US (10-digit) number`,
-      input,
-    );
-  }
-
-  // A leading "+" that wasn't a "+1" country code is bogus (e.g. "+44..."
-  // arriving with only 10 digits, or "+1234"). The length checks above
-  // already reject most of these; guard the remaining ambiguous case where
-  // a "+" prefixed something that wasn't the US country code.
-  if (hadPlus && digits.length === 11 && !digits.startsWith('1')) {
-    throw new InvalidPhoneNumberError(
-      `Invalid phone number: "${input}" is not a US (+1) number`,
       input,
     );
   }

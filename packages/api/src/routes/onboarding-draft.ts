@@ -5,7 +5,16 @@
  *                                 a repeat call may still record a changed clientTimezone)
  *   GET    /                      read it
  *   PUT    /choices/:settingKey   stage a choice (compare-and-swap on version)
- *   POST   /approve               "That's right": mint onboarding_* proposals and approve them
+ *   PUT    /owner-phone           add or change the owner's cell (compare-and-swap on version)
+ *   POST   /approve               "That's right": lock the draft row, mint onboarding_* proposals and
+ *                                 approve them (optional expectedVersion; repeat taps are idempotent)
+ *   POST   /retry                 re-queue the proposals whose execution failed (lock the draft row,
+ *                                 reset each execution_failed one to draft and approve it again for a
+ *                                 fresh undo window; 409 DRAFT_NOT_APPROVED, then 409 DRAFT_RETRY_UNSAFE
+ *                                 when a listed proposal is undone/rejected/expired/missing (nothing is
+ *                                 re-queued), then 409 DRAFT_RETRY_NOTHING_FAILED when none failed;
+ *                                 a successful retry is a new approval attempt and moves the draft
+ *                                 `version` by one, the response carries it, a refused one moves nothing)
  *
  * Owner-only, like POST /api/onboarding/pack and the conversation lane: every
  * write here ends in config-change proposals against the tenant's settings.
@@ -26,7 +35,9 @@ import { metroForPhone } from '../compliance/us-geography';
 import { assembleTypicalShop } from '../onboarding/choices/assemble';
 import type { RegionalPriceTierRepository } from '../onboarding/choices/price-tiers';
 import { ChoiceKeySchema, WritesNotAllowedError } from '../onboarding/choices/schema';
-import { CreateDraftInputSchema, StageChoiceBodySchema } from '../onboarding/draft/contracts';
+import { ApproveDraftBodySchema, CreateDraftInputSchema, SetOwnerPhoneBodySchema, StageChoiceBodySchema } from '../onboarding/draft/contracts';
+import { parseOwnerPhone } from '../onboarding/draft/owner-phone';
+import { maskPhone } from '../telephony/twilio-call-control';
 import {
   DraftAlreadyApprovedError,
   DraftNotFoundError,
@@ -34,6 +45,7 @@ import {
   type OnboardingDraftRepository,
 } from '../onboarding/draft/repository';
 import { approveDraft } from '../onboarding/draft/approve';
+import { retryFailedDraftProposals } from '../onboarding/draft/retry';
 
 export interface OnboardingDraftRouterDeps {
   draftRepo: OnboardingDraftRepository;
@@ -41,6 +53,17 @@ export interface OnboardingDraftRouterDeps {
   proposalRepo: ProposalRepository;
   auditRepo: AuditRepository;
   approvalReferenceChecks?: ApprovalReferenceCheck[];
+}
+
+/** One mapping from repository errors to HTTP errors, shared by PUT /choices and POST /approve. */
+function rethrowDraftError(err: unknown, tenantId: string): never {
+  if (err instanceof WritesNotAllowedError) throw new ValidationError(err.message);
+  if (err instanceof DraftNotFoundError) throw new NotFoundError('OnboardingDraft', tenantId);
+  if (err instanceof DraftVersionConflictError) {
+    throw new ConflictError(`VERSION_CONFLICT: expected ${err.expected}, found ${err.actual}; re-read the draft`);
+  }
+  if (err instanceof DraftAlreadyApprovedError) throw new ConflictError('DRAFT_APPROVED: the draft is already approved');
+  throw err;
 }
 
 export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Router {
@@ -59,6 +82,13 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
       if (clientTimezone !== undefined && !isRuntimeTimezone(clientTimezone)) {
         throw new ValidationError(`clientTimezone "${clientTimezone}" is not a recognized IANA timezone`);
       }
+
+      // Validated before the existing-draft lookup so a malformed cell is always a
+      // 400 naming `phone` and nothing is created. On a repeat call for an existing
+      // draft the value is otherwise ignored: PUT /owner-phone is the only way to
+      // change it later, so a re-rendered first screen cannot overwrite a number
+      // the owner corrected.
+      const ownerPhone = body.phone === undefined ? null : parseOwnerPhone(body.phone, 'phone');
 
       const existing = await draftRepo.getForTenant(tenantId);
       if (existing) {
@@ -106,6 +136,7 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
         businessName: body.businessName,
         ownerFirstName: body.ownerFirstName ?? null,
         clientTimezone: clientTimezone ?? null,
+        ownerPhone,
         assembled,
       });
       await auditRepo.create(
@@ -121,6 +152,7 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
             trade: draft.trade,
             metroCode: draft.metroCode,
             priceSource: assembled.priceSource,
+            hasOwnerPhone: draft.ownerPhone !== null,
             metroCandidates: assembled.metroCandidates,
           },
         }),
@@ -152,13 +184,7 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
       try {
         draft = await draftRepo.stageChoice(tenantId, keyParse.data, body.choice, body.version);
       } catch (err) {
-        if (err instanceof WritesNotAllowedError) throw new ValidationError(err.message);
-        if (err instanceof DraftNotFoundError) throw new NotFoundError('OnboardingDraft', tenantId);
-        if (err instanceof DraftVersionConflictError) {
-          throw new ConflictError(`VERSION_CONFLICT: expected ${err.expected}, found ${err.actual}; re-read the draft`);
-        }
-        if (err instanceof DraftAlreadyApprovedError) throw new ConflictError('DRAFT_APPROVED: the draft is already approved');
-        throw err;
+        rethrowDraftError(err, tenantId);
       }
 
       await auditRepo.create(
@@ -176,21 +202,77 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
     }),
   );
 
+  router.put(
+    '/owner-phone',
+    ...guards,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const body = validate(SetOwnerPhoneBodySchema, req.body);
+      const ownerPhone = parseOwnerPhone(body.ownerPhone, 'ownerPhone');
+
+      let draft;
+      try {
+        draft = await draftRepo.setOwnerPhone(tenantId, ownerPhone, body.version);
+      } catch (err) {
+        rethrowDraftError(err, tenantId);
+      }
+
+      // The full number never goes into audit metadata or logs.
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role as Role,
+          eventType: 'onboarding.owner_phone_set',
+          entityType: 'onboarding_draft',
+          entityId: draft.id,
+          metadata: { ownerPhone: maskPhone(ownerPhone), version: draft.version },
+        }),
+      );
+      res.json({ draft });
+    }),
+  );
+
   router.post(
     '/approve',
     ...guards,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
-      const existing = await draftRepo.getForTenant(tenantId);
-      if (!existing) throw new NotFoundError('OnboardingDraft', tenantId);
-      const result = await approveDraft(
+      // Express 5 leaves req.body undefined when no body was sent.
+      const body = validate(ApproveDraftBodySchema, req.body ?? {});
+      let result;
+      try {
+        result = await approveDraft(
+          {
+            draftRepo,
+            proposalRepo,
+            auditRepo,
+            ...(approvalReferenceChecks ? { approvalOptions: { referenceChecks: approvalReferenceChecks } } : {}),
+          },
+          tenantId,
+          { userId: req.auth!.userId, role: req.auth!.role as Role },
+          { expectedVersion: body.expectedVersion },
+        );
+      } catch (err) {
+        rethrowDraftError(err, tenantId);
+      }
+      res.json(result);
+    }),
+  );
+
+  // The request body carries nothing and is ignored. Errors are plain AppErrors (404/409).
+  router.post(
+    '/retry',
+    ...guards,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await retryFailedDraftProposals(
         {
           draftRepo,
           proposalRepo,
           auditRepo,
           ...(approvalReferenceChecks ? { approvalOptions: { referenceChecks: approvalReferenceChecks } } : {}),
         },
-        tenantId,
+        req.auth!.tenantId,
         { userId: req.auth!.userId, role: req.auth!.role as Role },
       );
       res.json(result);
