@@ -966,10 +966,22 @@ flowchart LR
       A structural test lists every call site of each external provider client's write methods
       (Twilio Messages and Calls, both email providers, QuickBooks, Stripe, Langfuse). It fails
       when a call site is not wrapped in the fence, so a new writer can't skip it.
-    - **A recipient match refuses only work that predates the erase.** A recipient-only match
-      refuses any send whose source record (the queued reminder, the lead, the callback task) was
-      created before the tombstone. A send sourced from a record created after the erase is a new
-      contact, and the normal consent and do-not-contact rules govern it.
+    - **A recipient match fences only the subject's own work, by provenance, not by time.** A
+      household can share a phone or an email, so a recipient hash alone can't say whose send it
+      is, and neither can creation time. So:
+      - A send whose source record links to a customer is fenced by that customer's id only. A
+        reminder for customer B is never fenced by customer A's recipient hash, even when they
+        share a number.
+      - When the erase finds an identifier-linked source row that has no customer link (a lead or
+        callback task it scrubs, or one it puts on the candidate list), it records that row's id in
+        the tombstone.
+      - A customerless send is refused when its source row is one of those recorded ids.
+      - A customerless send that matches the recipient hash but whose source row isn't recorded is
+        ambiguous. It is held, not refused, and goes onto the owner-confirmed candidate list. The
+        owner either releases it ("this is someone else") or drops it. Nothing is suppressed
+        indefinitely without a decision.
+      - A send from a source created after the erase is a new contact, and the normal consent and
+        do-not-contact rules govern it.
     - **Each writer drains for its own worst case.** The erase waits out each fenced writer's own
       worst-case duration, not just the gateway deadline:
       - the gateway: the maximum gateway deadline
@@ -988,9 +1000,13 @@ flowchart LR
         inside its first QuickBooks create when the erase starts. Either the erase sees the claim,
         waits, then finds and anonymizes the QuickBooks customer, or the create is refused. It is
         never left holding the old name, email and phone.
-      - A recipient-only send that begins after phase 1 has fully committed, and is sourced from a
-        reminder created before the erase, is refused.
-      - A recipient-only send sourced from a lead created after the erase goes through.
+      - A customerless send that begins after phase 1 has fully committed, sourced from a lead the
+        erase scrubbed, is refused.
+      - A reminder for customer B, who shares customer A's household phone, still goes out after A
+        is erased.
+      - A customerless send whose source row the erase didn't record, matching the shared phone, is
+        held and candidate-listed. Releasing it sends it.
+      - A send sourced from a lead created after the erase goes through.
       - The structural test fails on a fixture provider call site that isn't wrapped.
   - **Fence outbound provider writes too, including ambiguous ones.** An outbound SMS can pass its
     tombstone check and then complete at Twilio after the provider cleanup has run.
