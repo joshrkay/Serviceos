@@ -13,7 +13,11 @@ import type { AiRunRepository } from '../ai-run';
 import type { LLMTraceExporter } from './trace-exporter';
 import { CircuitBreakerRegistry, DEFAULT_BREAKER } from './breaker';
 import { createTenantQuotaStore, DEFAULT_TIER_CONFIG } from './tenant-quota';
-import { composeResilienceStack, type ResilienceStackOptions } from './compose-resilience';
+import {
+  composeResilienceStack,
+  DEFAULT_FALLBACK_RESERVE_MS,
+  type ResilienceStackOptions,
+} from './compose-resilience';
 import {
   CachingGatewayWrapper,
   InMemoryCacheStore,
@@ -205,6 +209,8 @@ export function createLLMGateway(
     breakers: breakerRegistry,
     quota: quotaRegistry,
     fallbackProviders,
+    fallbackReserveMs:
+      opts.resilience?.fallbackReserveMs ?? resolveFallbackReserveMsFromEnv(),
   });
 
   const providers = new Map<string, LLMProvider>([[resilientProvider.name, resilientProvider]]);
@@ -382,6 +388,27 @@ function buildGatewayConfig(
   }
 
   return { defaultProvider: providerName };
+}
+
+/**
+ * AI_FALLBACK_RESERVE_MS — cap on the slice of a request's deadline held back
+ * for the fallback provider (GATEWAY-03; see `fallbackReserveFor`). A
+ * non-negative integer; 0 gives the primary the whole budget (the fallback then
+ * only runs after a FAST primary failure). Invalid values keep the default and
+ * warn on stderr. Exported for unit tests.
+ */
+export function resolveFallbackReserveMsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.AI_FALLBACK_RESERVE_MS?.trim();
+  if (!raw) return DEFAULT_FALLBACK_RESERVE_MS;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    process.stderr.write(
+      `[WARN] AI_FALLBACK_RESERVE_MS="${raw}" is not a non-negative integer — ` +
+        `using ${DEFAULT_FALLBACK_RESERVE_MS}ms\n`,
+    );
+    return DEFAULT_FALLBACK_RESERVE_MS;
+  }
+  return parsed;
 }
 
 /**

@@ -48,7 +48,12 @@ import {
   retryAfterMsFromError,
   type RetryPolicy,
 } from './retry';
-import { adoptDeadline, STAGE_BUDGETS } from './deadline';
+import {
+  adoptDeadline,
+  MIN_RETRY_BUDGET_MS,
+  STAGE_BUDGETS,
+  type DeadlineContext,
+} from './deadline';
 import {
   TenantQuotaRegistry,
   estimateTokens,
@@ -88,6 +93,29 @@ function isFailoverEligible(err: unknown): boolean {
     return false; // permanent 4xx — do not failover
   }
   return true;
+}
+
+/**
+ * Default cap on the slice of the shared deadline held back for the next
+ * provider in a failover chain (GATEWAY-03). Tunable per deploy with
+ * AI_FALLBACK_RESERVE_MS (0 disables the reserve).
+ */
+export const DEFAULT_FALLBACK_RESERVE_MS = 2_500;
+
+/**
+ * How much of `remainingMs` to hold back for the next provider when a fallback
+ * exists: at most a quarter of the budget, at most `reserveCapMs`, and nothing
+ * when that would be less than one viable attempt (MIN_RETRY_BUDGET_MS).
+ *
+ * The reserve only matters when the primary HANGS — a fast primary failure
+ * (5xx, refused socket, 429) leaves the fallback everything that is left
+ * anyway. A hang is the rare case, so the primary keeps at least three
+ * quarters of the caller's budget for the common success path (prod classify:
+ * 12s → 9.5s primary, 2.5s fallback). Exported for unit testing.
+ */
+export function fallbackReserveFor(remainingMs: number, reserveCapMs: number): number {
+  const reserve = Math.floor(Math.min(remainingMs / 4, Math.max(0, reserveCapMs)));
+  return reserve >= MIN_RETRY_BUDGET_MS ? reserve : 0;
 }
 
 // ─── ProviderRetryDeadlineWrapper ────────────────────────────────────────────
@@ -197,6 +225,11 @@ export class ProviderBreakerWrapper implements LLMProvider {
  * 4xx validation errors are re-thrown immediately without trying the next
  * provider — they indicate bad input, not provider health.
  *
+ * The whole chain runs inside ONE deadline (`request.deadlineMs`, adopting
+ * `request.signal`): each provider is handed what is left, the primary leaves
+ * a reserve for the next provider (`fallbackReserveFor`), and the chain stops
+ * advancing once less than a viable attempt remains (GATEWAY-03).
+ *
  * On full exhaustion (all providers failed with failover-eligible errors),
  * throws AppError with code LLM_PROVIDER_UNAVAILABLE (HTTP 503) — EXCEPT when
  * the last error was a provider throttle, which gets its own
@@ -210,12 +243,28 @@ export class ProviderBreakerWrapper implements LLMProvider {
 export class ProviderFailoverWrapper implements LLMProvider {
   readonly name: string;
 
-  constructor(private readonly providers: LLMProvider[]) {
+  constructor(
+    private readonly providers: LLMProvider[],
+    private readonly defaultDeadlineMs: number = STAGE_BUDGETS.defaultTotal,
+    private readonly fallbackReserveMs: number = DEFAULT_FALLBACK_RESERVE_MS,
+  ) {
     if (providers.length === 0) throw new Error('ProviderFailoverWrapper requires at least one provider');
     this.name = providers[0].name;
   }
 
   async complete(request: LLMRequest): Promise<LLMResponse> {
+    // GATEWAY-03: ONE deadline for the whole chain. Each provider gets a slice
+    // of what is left, never a fresh copy of the caller's budget — otherwise a
+    // hanging primary costs the full budget and the fallback another full one.
+    const deadline = adoptDeadline(request.deadlineMs ?? this.defaultDeadlineMs, request.signal);
+    try {
+      return await this.runChain(request, deadline);
+    } finally {
+      deadline.abort();
+    }
+  }
+
+  private async runChain(request: LLMRequest, deadline: DeadlineContext): Promise<LLMResponse> {
     const path: string[] = [];
     let lastErr: unknown;
     // The provider whose error this wrapper ends up surfacing. Every error
@@ -225,11 +274,24 @@ export class ProviderFailoverWrapper implements LLMProvider {
     // primary route (PR #975 finding 6).
     let lastProvider = this.name;
 
-    for (const provider of this.providers) {
+    for (let i = 0; i < this.providers.length; i++) {
+      const provider = this.providers[i];
+      const remainingMs = Math.floor(deadline.remainingMs());
+      const hasNext = i + 1 < this.providers.length;
+      // Leave the next provider a viable attempt if the budget allows one
+      // (a reserve is pointless when nothing comes after).
+      const sliceMs = hasNext
+        ? remainingMs - fallbackReserveFor(remainingMs, this.fallbackReserveMs)
+        : remainingMs;
+
       path.push(`${provider.name}:${request.model}`);
       lastProvider = provider.name;
       try {
-        const response = await provider.complete(request);
+        const response = await provider.complete({
+          ...request,
+          signal: deadline.signal,
+          deadlineMs: sliceMs,
+        });
         // Annotate the response with the accumulated providerPath
         return { ...response, providerPath: [...path] };
       } catch (err) {
@@ -240,14 +302,17 @@ export class ProviderFailoverWrapper implements LLMProvider {
           throw stampProviderAttemptTrail(err, { providerPath: path, lastProvider });
         }
 
-        // Record failover metric (from → to) if there is a next provider
-        const nextIndex = this.providers.indexOf(provider) + 1;
-        if (nextIndex < this.providers.length) {
-          gatewayFailoverTotal.inc({
-            from_provider: provider.name,
-            to_provider: this.providers[nextIndex].name,
-          });
+        // Stop advancing once the shared budget can't fit a viable attempt
+        // (or the caller aborted): starting the next provider would only
+        // overrun the caller-visible deadline to arrive at the same failure.
+        if (!hasNext || deadline.isExpired() || deadline.remainingMs() < MIN_RETRY_BUDGET_MS) {
+          break;
         }
+
+        gatewayFailoverTotal.inc({
+          from_provider: provider.name,
+          to_provider: this.providers[i + 1].name,
+        });
         // Continue to next provider
       }
     }
@@ -394,6 +459,12 @@ export interface ResilienceStackOptions {
 
   /** Default per-request deadline in ms. */
   defaultDeadlineMs?: number;
+
+  /**
+   * Cap (ms) on the slice of the shared deadline held back for the next
+   * provider in the failover chain. See `fallbackReserveFor`.
+   */
+  fallbackReserveMs?: number;
 }
 
 /**
@@ -420,6 +491,7 @@ export function composeResilienceStack(
     retryPolicy = DEFAULT_RETRY,
     fallbackProviders = [],
     defaultDeadlineMs = STAGE_BUDGETS.defaultTotal,
+    fallbackReserveMs = DEFAULT_FALLBACK_RESERVE_MS,
   } = options;
 
   // Wrap each provider (primary + any fallbacks) with retry+deadline+breaker
@@ -438,8 +510,12 @@ export function composeResilienceStack(
 
   const allProviders = [primary, ...fallbackProviders].map(wrapWithRetryAndBreaker);
 
-  // Failover wrapper across all providers
-  const failoverProvider = new ProviderFailoverWrapper(allProviders);
+  // Failover wrapper across all providers — owns the single end-to-end deadline.
+  const failoverProvider = new ProviderFailoverWrapper(
+    allProviders,
+    defaultDeadlineMs,
+    fallbackReserveMs,
+  );
 
   // Outermost: tenant quota enforcement
   return new ProviderTenantQuotaWrapper(failoverProvider, quota);
