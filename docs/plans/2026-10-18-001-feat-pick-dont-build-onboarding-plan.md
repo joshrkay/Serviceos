@@ -3233,7 +3233,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     the write fence does that for database writes and stored objects, and the delivery
     boundary does it for texts and emails (No external sends). The execution worker claims a proposal by table, not by queue
     message, so it registers nothing: it sets the same lease context, its handler's writes
-    pass the same fence, and the drain still lists the tenant's `executing` proposals.
+    pass the same fence, and the drain still lists the tenant's `executing` proposals (a reset
+  claim landing mid-execution can strand such a row behind that fence; see Deferred review
+  findings D7).
   - *Reset.* Between the claim and the row walk, each step fenced: (i) the claim has already
     replaced the generation, so nothing stamped earlier can pass the front-door check, no
     write transaction under the old generation can start, and nothing new starts under the old
@@ -3867,7 +3869,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 ### Deferred review findings (resolve at slice start)
 
 U6 and U7 are unbuilt (S5, and S6 which is decision-gated) and have taken many review rounds,
-so these six confirmed findings are recorded here with the direction to take rather than
+so these seven confirmed findings are recorded here with the direction to take rather than
 designed further. Each is exposed first by the Docker-gated, real-column test named below.
 
 - **D1. A platform tenant must exist (U7, S6; P1).** `phone_rate_limits.tenant_id` and
@@ -3947,6 +3949,26 @@ designed further. Each is exposed first by the Docker-gated, real-column test na
   the 70 s expiry, the fake Twilio sees the cancel request before the lease is released, and a
   call that went live between the status check and the cancel is not killed (the lease is
   renewed, not released).
+- **D7. A reset can strand an executing proposal behind its own fence (U7, S6; P1).** The
+  execution worker claims a proposal by table (`claimForExecution` in `pg-proposal.ts` sets
+  `status = 'executing'` with no registry row), so when a demo call ends while an external-I/O
+  proposal such as `create_booking` (`performsExternalIo`) is mid-handler, the reset claim
+  replaces the lease generation first, the handler's terminal status write then fails the
+  write fence and leaves the row `executing`, and the drain, which waits on that same status
+  and has no registry row to reap, runs to `DEMO_RESET_DRAIN_SECONDS` and returns the claim
+  without releasing the tenant (only the ~10 min `resetStaleExecuting` retry then touches the
+  row). *Direction:* proposal executions in a demo tenant register in the same in-flight
+  registry (`demo_inflight_jobs`) as other tenant jobs, taking the registry row in the SAME
+  transaction that moves the proposal to `executing` and heartbeating while the handler runs;
+  the reset's drain waits for those rows to clear or, past the heartbeat timeout, terminalizes
+  the proposal as failed or expired with `reason: 'reset'` itself, so no `executing` row can
+  be stranded behind a fence that rejects its own terminal write, and the generation changes
+  only after the drain has emptied or terminalized every registered execution. *First test:*
+  a demo call ends while a `create_booking` execution is mid-handler (latched): the reset
+  waits for it, the terminal status write succeeds under the old generation, the registry
+  empties, then the generation moves and the tenant is released; and with the handler stalled
+  past the heartbeat timeout the reset terminalizes the row itself and still releases the
+  tenant (no stranded `executing`).
 
 ## Sizing and sequencing
 
