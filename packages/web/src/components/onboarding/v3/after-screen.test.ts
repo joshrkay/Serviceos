@@ -43,9 +43,20 @@ describe('afterScreen', () => {
       expect(afterScreen({ ...status('identity') })).toBe('wait');
     });
 
-    it('only replaces the wait: once the setup has moved past the saved choices, its own screen wins', () => {
-      expect(afterScreen(withExecution('billing', 'failed'))).toBe('trial');
-      expect(afterScreen(withExecution('phone', 'stopped'))).toBe('number');
+    // The two saved changes go live independently: the settings can be done (the setup moves on to the trial)
+    // while the voice policy failed or was undone. The trial or a test call would then show a setup that is not
+    // the one the owner approved, so a change that did not go live outranks the next step.
+    it('outranks the next step: the setup moving on does not hide a change that did not go live', () => {
+      for (const step of ['billing', 'phone', 'ai_check', 'test_call'] as const) {
+        expect(afterScreen(withExecution(step, 'failed')), `${step} failed`).toBe('save_failed');
+        expect(afterScreen(withExecution(step, 'stopped')), `${step} stopped`).toBe('save_stopped');
+      }
+    });
+
+    it('lets the next step through again once nothing failed or stopped', () => {
+      for (const execution of ['pending', 'executing', 'executed', null, undefined] as const) {
+        expect(afterScreen(withExecution('billing', execution)), String(execution)).toBe('trial');
+      }
     });
   });
 });

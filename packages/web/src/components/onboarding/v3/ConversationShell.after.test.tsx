@@ -351,6 +351,28 @@ describe('ConversationShell after "That\'s right"', () => {
       expect(retries()).toHaveLength(0);
     });
 
+    it('does not move on to the trial while the other saved change did not go live: the settings are done but the voice policy failed', async () => {
+      const settingsDone = (execution: 'pending' | 'failed' | 'stopped') =>
+        statusAt('billing', {}, { draft: { status: 'approved', choicesAnswered: 7, version: 2, execution } });
+      stub(settingsDone('failed'), {
+        'POST /api/onboarding/draft/retry': () => {
+          world.status = settingsDone('pending');
+          return json(200, { draft: approved, retriedProposalIds: [approved.proposalIds[1]] });
+        },
+      });
+      renderShell();
+      await settle();
+
+      expect(heading()).toHaveTextContent("Something didn't save.");
+      expectFrame(3, 65, 'Not saved');
+      expect(screen.queryByRole('button', { name: /trial/i })).not.toBeInTheDocument();
+
+      // Once the retry has gone through, the setup carries on from where the status says it is.
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      await settle();
+      expect(screen.queryByText("Something didn't save.")).not.toBeInTheDocument();
+    });
+
     it('says one change was undone and offers the step-by-step setup as the only action, never a retry', async () => {
       stub(savedAs('stopped'));
       const { container } = renderShell();

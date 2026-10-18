@@ -8,13 +8,19 @@ import type { AfterStage } from './pacing';
  * check, then the test call), so the screen can never run ahead of the facts.
  *
  * `getting_ready` is the pre-state of the test call: the voice check has no
- * screen of its own. `save_failed` and `save_stopped` stand in for the wait when
- * the status says a saved change will not go live by waiting: it failed (a retry
- * can fix it), or it was undone or rejected (nothing here can finish it).
+ * screen of its own. `save_failed` and `save_stopped` are shown when the status
+ * says a saved change will not go live by waiting: it failed (a retry can fix
+ * it), or it was undone or rejected (nothing here can finish it). They outrank
+ * the next step, because the two saved changes go live independently: the
+ * settings can be done, and the setup on to the trial, while the voice policy
+ * failed, and a trial or test call would then show a setup the owner did not
+ * approve.
  */
 export type AfterScreen = 'wait' | 'save_failed' | 'save_stopped' | 'trial' | 'number' | 'getting_ready' | 'test_call';
 
 export function afterScreen(status: OnboardingStatusResponse | null): AfterScreen {
+  if (status?.draft?.execution === 'failed') return 'save_failed';
+  if (status?.draft?.execution === 'stopped') return 'save_stopped';
   switch (status?.currentStep) {
     case 'billing':
       return 'trial';
@@ -26,8 +32,6 @@ export function afterScreen(status: OnboardingStatusResponse | null): AfterScree
       return 'test_call';
     // signup, identity and pack are the saved choices going live; null is a finished setup (handed off).
     default:
-      if (status?.draft?.execution === 'failed') return 'save_failed';
-      if (status?.draft?.execution === 'stopped') return 'save_stopped';
       return 'wait';
   }
 }
