@@ -501,9 +501,12 @@ flowchart LR
           whose detection write failed would be cleared as `clean` with the card still in the
           audio.
 
-        When the call has no turns, it runs one Deepgram pre-recorded pass over the audio with
-        `redact=pci`. A recording is kept under the normal policy only after its scan has cleared
-        it.
+        The scan also always runs one Deepgram pre-recorded pass over the audio with `redact=pci`,
+        whatever the transcript shows. It can't be gated on a call having no turns: an outage can
+        drop just the turn that held the card number while later turns persist, and the transcript
+        can't prove it is complete. A recording is kept under the normal policy only after both
+        checks have cleared it. The audio pass costs one pre-recorded transcription per call
+        recording; that is the price of a fail-closed PCI control.
     - A `pci_detected` mark makes the retention worker purge that recording's audio promptly from S3
       and Twilio.
   - **PRIV-4**
@@ -537,6 +540,8 @@ flowchart LR
     - After recovery, the callback creates the row as `pci_scan = 'pending'`.
     - The ingestion scan marks it `pci_detected`, and the audio is purged on the PCI schedule.
     - A clean call clears to `clean` and keeps the normal policy.
+    - Partial loss: only the turn holding the card number fails to persist, while later turns do. The
+      audio pass still finds the card and marks the recording `pci_detected`.
     - Split failure: on the Gather path the detection write fails, but the transcript turn (already
       scrubbed to `[card number]`) is persisted. The scan marks the recording `pci_detected`; it
       never clears it.
@@ -622,6 +627,11 @@ flowchart LR
         - For a voicemail, that means the receipt-guarded lead leg (provider
           `twilio_voicemail_lead`, keyed on RecordingSid) as well as the recording and hand-off legs.
           A sweep that only inserts the recording would lose the lead.
+      - also resumes recordings that do have a `voice_recordings` row but no success receipt. The
+        upload and insert succeeded, then the transcription hand-off failed, and Twilio does not
+        retry the resulting 5xx. The sweep picks up from the stored S3 object and re-runs only the
+        legs still missing, so the voicemail still reaches transcription. It never re-fetches from
+        Twilio.
       - alerts through `alertOperator` on any recording it cannot ingest
     - Twilio connection-override retry parameters on the callback URL are optional. Use them only
       after confirming against Twilio's documentation that they apply to recording status callbacks.
@@ -650,6 +660,9 @@ flowchart LR
     ingests that recording exactly once.
   - The DB is down before `/voicemail-status` runs → after recovery, the sweep creates exactly one
     lead and one voicemail recording, and replaying the sweep creates neither again.
+  - The upload and insert succeed, then the hand-off fails before the success receipt. The sweep resumes
+    from the stored S3 object and hands the voicemail to transcription exactly once, with no Twilio
+    re-fetch.
 - **Verification:** no test path ends a call right after a "connect you" line.
 
 ### U6. Injection fences, alerting and eval gates — batch F, `fix/ai-hardening-injection-ops`
@@ -747,6 +760,9 @@ flowchart LR
     - one `executeAudited` command transaction
   - **Scrub:**
     - the `customers` row and `customer_contacts`
+    - the customer's `service_locations`: street, city, postal code, latitude/longitude and access
+      notes, all linked by `customer_id` (`schema.ts:338-352`). Anonymize these rather than delete
+      them, because jobs and appointments still reference the rows.
     - SMS conversations and message bodies
     - customer-linked notes
     - `call_transcript_turns`, `call_summaries`, `knowledge_chunks` by source
@@ -780,6 +796,8 @@ flowchart LR
   erases them, and asserts:
   - each store is scrubbed, including a pre-linkage `ai_runs` row found only by content and a linked
     row found by `correlation_id`
+  - the customer's `service_locations` rows keep their ids but lose street, city, postal code,
+    coordinates and access notes
   - with two customers sharing a full name, the other customer's row is untouched
   - a row that matches only a household-shared phone lands on the candidate list and is scrubbed only
     after confirmation
