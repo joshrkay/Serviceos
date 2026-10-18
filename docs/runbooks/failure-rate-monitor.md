@@ -60,6 +60,36 @@ benign version, so one row breaches. Severity is `warning` rather than
 `critical` because the work has already failed — what this page buys is the
 diagnosability that was missing, not a live outage response.
 
+### 4. `ai_task_failure_rate:<task_type>:<tenant_id>` — critical (OBS-4)
+
+Rule 1 is a cross-tenant aggregate. One tenant whose every classify is
+rejected by its quota bucket is diluted by healthy tenants' traffic and never
+breaches rule 1 unless that tenant is more than `FAILURE_MONITOR_RATE_MAX` of
+platform volume. This rule is the same non-completion rate over the same
+settled window, grouped by **tenant and task**, behind its own floor
+`FAILURE_MONITOR_TENANT_MIN_RUNS` (default 10 — lower than the platform floor
+because one tenant's volume is a fraction of the platform's).
+
+When rule 1 already breaches for a task type, the per-tenant breaches of that
+task are **subsumed**: logged, not paged. The platform page is the
+self-explaining one, and a platform outage must not fan out into one page per
+tenant. Per-tenant pages have their own per-tick cap of
+`FAILURE_MONITOR_MAX_TASK_ALERTS`, worst rate first, and their cooldown is
+keyed per tenant **and** task.
+
+### 5. `ai_spend_window` — critical (OBS-4)
+
+Platform-wide `SUM(ai_runs.cost_micro_cents)` over the same settled window,
+compared against `FAILURE_MONITOR_SPEND_MAX_CENTS` (integer cents; default 2000;
+0 turns the rule off). A sweep that regresses into re-calling the model in a
+loop but **completing** every call — the supervisor_annotate storm shape,
+succeeding — keeps every failure-rate rule at 0%; only the bill moves. The page
+names the top three tenants and task types by spend. Unpriced runs (an unknown
+model price, `cost_micro_cents` NULL) count 0, so the rule can under-count but
+never fabricate. It keys on the cross-tenant total because per-tenant spend is
+already bounded by the gateway's quota buckets; a loop that fans out across
+tenants is not.
+
 ## How it reaches a human
 
 The **same `alertOperator` seam the SLO monitor uses**
@@ -74,8 +104,9 @@ The **same `alertOperator` seam the SLO monitor uses**
 Both monitors share one `alertOperator` instance, so they also share its
 per-rule cooldown (`SLO_ALERT_COOLDOWN_MIN`, default 60 min). The task-failure
 rule keys its cooldown **per task type**
-(`ai_task_failure_rate:supervisor_annotate`), so one noisy task cannot mask
-another.
+(`ai_task_failure_rate:supervisor_annotate`), and the per-tenant rule per task
+**and** tenant (`ai_task_failure_rate:classify_intent:<tenant_id>`), so one
+noisy task or tenant cannot mask another.
 
 ## Why it cannot become the incident
 
@@ -120,6 +151,32 @@ GROUP BY 1, 2 ORDER BY 3 DESC;
 strings. If another task type is also breaching at higher volume, that one is
 probably the cause and this one is collateral; fix the noisy one first.
 
+**`ai_task_failure_rate:<task>:<tenant_id>`** — one tenant, not the platform.
+Check `error_message` for that tenant's runs first: quota / token-budget
+strings mean the tenant has outgrown the standard classify bucket (every
+tenant currently gets `classifier_standard` — concurrency 2 — because nothing
+sets `tenantTier`); anything else is specific to that tenant's data or
+configuration.
+
+```sql
+SELECT task_type, status, LEFT(error_message, 60) AS error, COUNT(*)
+FROM ai_runs
+WHERE tenant_id = '<tenant_id>' AND created_at > NOW() - INTERVAL '1 hour'
+GROUP BY 1, 2, 3 ORDER BY 4 DESC;
+```
+
+**`ai_spend_window`** — the alert details name the top tenants and task types.
+A single task type carrying almost all of the spend at 100% completion is a
+loop; find the caller that re-enqueues on success. Spend is per settled window,
+so compare against the same window a day earlier before deciding it is growth:
+
+```sql
+SELECT task_type, COUNT(*), SUM(cost_micro_cents) / 1000000.0 AS cents
+FROM ai_runs
+WHERE created_at > NOW() - INTERVAL '35 minutes'
+GROUP BY 1 ORDER BY 3 DESC NULLS LAST;
+```
+
 **`proposal_execution_stalled`** — the sample ids are in the alert details.
 Check the execution worker is alive and the queue is draining
 (`queue_staleness` in [`slo-alerts.md`](./slo-alerts.md) covers the queue side).
@@ -134,4 +191,7 @@ All knobs are env vars with defaults (`packages/api/src/shared/config.ts`,
 documented in `.env.production.example`). Raise `FAILURE_MONITOR_MIN_RUNS` if a
 low-traffic task pages on small denominators; raise `FAILURE_MONITOR_RATE_MAX`
 only with a recorded reason — healthy task types sit near 0, and the incidents
-this exists for were 0.85 and 1.00.
+this exists for were 0.85 and 1.00. Raise `FAILURE_MONITOR_TENANT_MIN_RUNS` if a
+small tenant pages on a handful of calls. Set `FAILURE_MONITOR_SPEND_MAX_CENTS`
+to roughly three times a busy half-hour's normal spend; 0 turns the spend rule
+off, which also stops the `ai_spend_window_micro_cents` gauge updating.

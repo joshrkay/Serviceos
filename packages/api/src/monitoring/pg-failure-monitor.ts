@@ -12,8 +12,13 @@
  * unnoticed; it must not itself add load during exactly that storm. Every
  * query here is an aggregate over a bounded, indexed predicate (migration 263
  * `263_failure_monitor_indexes`):
- *   - the ai_runs aggregate is a half-open created_at range served by an
- *     INCLUDE index, so it is an index-ONLY scan (no heap access);
+ *   - the platform ai_runs aggregate is a half-open created_at range served
+ *     by an INCLUDE index, so it is an index-ONLY scan (no heap access);
+ *   - the per-tenant ai_runs aggregate (OBS-4) walks the SAME created_at
+ *     range off the same index, then fetches the heap for tenant_id and
+ *     cost_micro_cents (not in the INCLUDE list; a (tenant_id, created_at)
+ *     index cannot drive a cross-tenant range). Bounded by the window, so
+ *     the cost is one heap fetch per gateway call in the last ~30 minutes;
  *   - both proposal probes hit PARTIAL indexes whose WHERE clause matches the
  *     query predicate exactly, so on a healthy system they touch ~0 rows;
  *   - the only non-aggregate reads are id samples with a hard LIMIT.
@@ -23,6 +28,7 @@ import { PgBaseRepository } from '../db/pg-base';
 import type {
   ProposalExecutionCounts,
   TaskRunCounts,
+  TenantTaskRunCounts,
 } from '../workers/failure-rate-monitor';
 
 /** Hard cap on sample ids returned per proposal check — context, not a listing. */
@@ -66,6 +72,52 @@ export class PgFailureMonitorRepository extends PgBaseRepository {
         completed: Number(r.completed),
         failed: Number(r.failed),
         unresolved: Number(r.unresolved),
+      }));
+    });
+  }
+
+  /**
+   * OBS-4 — the same settled window grouped by tenant_id AND task_type, with
+   * the window spend per row. One tenant's outage is invisible to the
+   * platform aggregate above once healthy tenants dilute it; this is the
+   * read that makes it visible. SUM(cost_micro_cents) treats an unpriced
+   * run (NULL — unknown model price) as 0, so spend can under-count but
+   * never fabricate; it is returned as a JS number (pg hands BIGINT back as
+   * a string).
+   */
+  async tenantTaskRunCounts(windowStart: Date, windowEnd: Date): Promise<TenantTaskRunCounts[]> {
+    return this.withCrossTenantSweep(async (client) => {
+      const res = await client.query<{
+        tenant_id: string;
+        task_type: string;
+        total: string;
+        completed: string;
+        failed: string;
+        unresolved: string;
+        cost_micro_cents: string;
+      }>(
+        `SELECT
+           tenant_id,
+           task_type,
+           COUNT(*) AS total,
+           COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+           COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+           COUNT(*) FILTER (WHERE status IN ('pending', 'running')) AS unresolved,
+           COALESCE(SUM(cost_micro_cents), 0) AS cost_micro_cents
+         FROM ai_runs
+         WHERE created_at >= $1
+           AND created_at < $2
+         GROUP BY tenant_id, task_type`,
+        [windowStart, windowEnd],
+      );
+      return res.rows.map((r) => ({
+        tenantId: r.tenant_id,
+        taskType: r.task_type,
+        total: Number(r.total),
+        completed: Number(r.completed),
+        failed: Number(r.failed),
+        unresolved: Number(r.unresolved),
+        costMicroCents: Number(r.cost_micro_cents),
       }));
     });
   }

@@ -12,6 +12,8 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   evaluateTaskFailureRate,
+  evaluateTenantTaskFailureRate,
+  evaluateWindowSpend,
   evaluateStalledExecutions,
   evaluateSilentExecutionFailures,
   runFailureRateMonitor,
@@ -20,6 +22,7 @@ import {
   type FailureRateMonitorDeps,
   type ProposalExecutionCounts,
   type TaskRunCounts,
+  type TenantTaskRunCounts,
 } from '../../src/workers/failure-rate-monitor';
 import { createAlertOperator } from '../../src/monitoring/alert-operator';
 import type { Logger } from '../../src/logging/logger';
@@ -32,6 +35,8 @@ const thresholds: FailureMonitorThresholds = {
   maxTaskAlerts: 3,
   proposalStaleMin: 15,
   proposalLookbackHours: 24,
+  tenantMinRuns: 10,
+  spendMaxCents: 2000,
 };
 
 const noopLogger: Logger = {
@@ -46,6 +51,22 @@ const noopLogger: Logger = {
 
 function counts(over: Partial<TaskRunCounts>): TaskRunCounts {
   return { taskType: 'classify_intent', total: 0, completed: 0, failed: 0, unresolved: 0, ...over };
+}
+
+const TENANT_A = '11111111-1111-4111-8111-111111111111';
+const TENANT_B = '22222222-2222-4222-8222-222222222222';
+
+function tenantCounts(over: Partial<TenantTaskRunCounts>): TenantTaskRunCounts {
+  return {
+    tenantId: TENANT_A,
+    taskType: 'classify_intent',
+    total: 0,
+    completed: 0,
+    failed: 0,
+    unresolved: 0,
+    costMicroCents: 0,
+    ...over,
+  };
 }
 
 const healthyProposals: ProposalExecutionCounts = {
@@ -177,6 +198,7 @@ describe('runFailureRateMonitor', () => {
   ): FailureRateMonitorDeps & { alert: ReturnType<typeof vi.fn> } => {
     return {
       getTaskRunCounts: vi.fn().mockResolvedValue([]),
+      getTenantTaskRunCounts: vi.fn().mockResolvedValue([]),
       getProposalExecutionCounts: vi.fn().mockResolvedValue(healthyProposals),
       alert: vi.fn().mockResolvedValue(undefined),
       thresholds,
@@ -194,6 +216,8 @@ describe('runFailureRateMonitor', () => {
     const result = await runFailureRateMonitor(deps);
     expect(result.evaluated).toEqual([
       'ai_task_failure_rate',
+      'ai_tenant_task_failure_rate',
+      'ai_spend_window',
       'proposal_execution_stalled',
       'proposal_execution_failed_silently',
     ]);
@@ -295,6 +319,7 @@ describe('runFailureRateMonitor — failure containment', () => {
   ): FailureRateMonitorDeps & { alert: ReturnType<typeof vi.fn> } =>
     ({
       getTaskRunCounts: vi.fn().mockResolvedValue([]),
+      getTenantTaskRunCounts: vi.fn().mockResolvedValue([]),
       getProposalExecutionCounts: vi.fn().mockResolvedValue(healthyProposals),
       alert: vi.fn().mockResolvedValue(undefined),
       thresholds,
@@ -305,6 +330,7 @@ describe('runFailureRateMonitor — failure containment', () => {
   it('a thrown error inside the check does not escape', async () => {
     const deps = buildDeps({
       getTaskRunCounts: vi.fn().mockRejectedValue(new Error('db down')),
+      getTenantTaskRunCounts: vi.fn().mockRejectedValue(new Error('db down')),
       getProposalExecutionCounts: vi.fn().mockRejectedValue(new Error('db down')),
     });
     // Resolves, does not reject.
@@ -319,6 +345,7 @@ describe('runFailureRateMonitor — failure containment', () => {
   it('is failure-soft per rule: one read throwing does not abort the others', async () => {
     const deps = buildDeps({
       getTaskRunCounts: vi.fn().mockRejectedValue(new Error('ai_runs read exploded')),
+      getTenantTaskRunCounts: vi.fn().mockRejectedValue(new Error('ai_runs read exploded')),
       getProposalExecutionCounts: vi.fn().mockResolvedValue({
         stalledExecuting: 2,
         failedWithoutError: 0,
@@ -431,6 +458,7 @@ describe('suppression via the shared alertOperator cooldown', () => {
     getTaskRunCounts: async () => [
       counts({ taskType: 'supervisor_annotate', total: 285, completed: 0, unresolved: 285 }),
     ],
+    getTenantTaskRunCounts: async () => [],
     getProposalExecutionCounts: async () => healthyProposals,
     alert,
     thresholds,
@@ -477,5 +505,274 @@ describe('suppression via the shared alertOperator cooldown', () => {
     // Same tick, same cooldown window — still two distinct pages.
     await runFailureRateMonitor(deps);
     expect(captured).toHaveLength(2);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OBS-4 — per-tenant non-completion rate. The platform rule is a cross-tenant
+// aggregate, so one tenant's total outage is diluted by healthy tenants'
+// traffic and never breaches unless that tenant is >25% of platform volume.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('evaluateTenantTaskFailureRate', () => {
+  it('fires on one tenant failing 100% at its own floor, keyed per task AND tenant', () => {
+    const r = evaluateTenantTaskFailureRate(
+      tenantCounts({ total: 12, completed: 0, failed: 12 }),
+      thresholds,
+    );
+    expect(r).not.toBeNull();
+    expect(r!.breached).toBe(true);
+    expect(r!.rule).toBe(`ai_task_failure_rate:classify_intent:${TENANT_A}`);
+    expect(r!.value).toBe(1);
+    expect(r!.severity).toBe('critical');
+    expect(r!.details.tenantId).toBe(TENANT_A);
+  });
+
+  it('has its OWN volume floor, below the platform floor (12 runs: platform null, tenant breaches)', () => {
+    const row = tenantCounts({ total: 12, completed: 0, failed: 12 });
+    expect(evaluateTaskFailureRate(row, thresholds)).toBeNull(); // platform floor is 20
+    expect(evaluateTenantTaskFailureRate(row, thresholds)!.breached).toBe(true); // tenant floor is 10
+    expect(
+      evaluateTenantTaskFailureRate(tenantCounts({ total: 9, completed: 0, failed: 9 }), thresholds),
+    ).toBeNull();
+  });
+
+  it('does not fire at or below the rate threshold', () => {
+    const r = evaluateTenantTaskFailureRate(
+      tenantCounts({ total: 40, completed: 30, failed: 10 }),
+      thresholds,
+    );
+    expect(r!.value).toBeCloseTo(0.25);
+    expect(r!.breached).toBe(false);
+  });
+});
+
+describe('runFailureRateMonitor — OBS-4 per-tenant rule', () => {
+  const buildDeps = (
+    overrides: Partial<FailureRateMonitorDeps> = {},
+  ): FailureRateMonitorDeps & { alert: ReturnType<typeof vi.fn> } =>
+    ({
+      getTaskRunCounts: vi.fn().mockResolvedValue([]),
+      getTenantTaskRunCounts: vi.fn().mockResolvedValue([]),
+      getProposalExecutionCounts: vi.fn().mockResolvedValue(healthyProposals),
+      alert: vi.fn().mockResolvedValue(undefined),
+      thresholds,
+      logger: noopLogger,
+      ...overrides,
+    }) as FailureRateMonitorDeps & { alert: ReturnType<typeof vi.fn> };
+
+  it('a single tenant failing 100% inside a healthy platform pages the per-tenant rule, not the platform rule', async () => {
+    // Tenant A: 12 classify_intent calls, all rejected (quota / budget).
+    // Tenant B: 60 calls, all completed. Platform-wide that is 12/72 = 16.7%
+    // non-completion — UNDER the 25% threshold, so the platform rule is quiet.
+    // This is exactly the dilution OBS-4 describes.
+    const deps = buildDeps({
+      getTaskRunCounts: vi
+        .fn()
+        .mockResolvedValue([counts({ taskType: 'classify_intent', total: 72, completed: 60, failed: 12 })]),
+      getTenantTaskRunCounts: vi.fn().mockResolvedValue([
+        tenantCounts({ tenantId: TENANT_A, total: 12, completed: 0, failed: 12 }),
+        tenantCounts({ tenantId: TENANT_B, total: 60, completed: 60 }),
+      ]),
+    });
+    const result = await runFailureRateMonitor(deps);
+    expect(result.breached).toEqual([`ai_task_failure_rate:classify_intent:${TENANT_A}`]);
+    expect(deps.alert).toHaveBeenCalledTimes(1);
+    expect(deps.alert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rule: `ai_task_failure_rate:classify_intent:${TENANT_A}`,
+        severity: 'critical',
+        details: expect.objectContaining({ tenantId: TENANT_A, total: 12, completed: 0 }),
+      }),
+    );
+    expect(deps.alert).not.toHaveBeenCalledWith(
+      expect.objectContaining({ rule: 'ai_task_failure_rate:classify_intent' }),
+    );
+  });
+
+  it('reads the per-tenant aggregate over the SAME settled window as the platform rule', async () => {
+    const getTenantTaskRunCounts = vi.fn().mockResolvedValue([]);
+    await runFailureRateMonitor(
+      buildDeps({ getTenantTaskRunCounts, now: () => new Date('2026-07-24T12:00:00Z') }),
+    );
+    expect(getTenantTaskRunCounts).toHaveBeenCalledWith(
+      new Date('2026-07-24T11:25:00Z'),
+      new Date('2026-07-24T11:55:00Z'),
+    );
+  });
+
+  it('a platform-wide breach subsumes the per-tenant breaches of that task: one page, not one per tenant', async () => {
+    // Every tenant is down because the task itself is down. The platform
+    // page says so; fanning out one page per tenant would be the storm this
+    // monitor exists to avoid.
+    const deps = buildDeps({
+      getTaskRunCounts: vi
+        .fn()
+        .mockResolvedValue([counts({ taskType: 'classify_intent', total: 72, completed: 0, failed: 72 })]),
+      getTenantTaskRunCounts: vi.fn().mockResolvedValue([
+        tenantCounts({ tenantId: TENANT_A, total: 12, completed: 0, failed: 12 }),
+        tenantCounts({ tenantId: TENANT_B, total: 60, completed: 0, failed: 60 }),
+      ]),
+    });
+    const result = await runFailureRateMonitor(deps);
+    expect(deps.alert).toHaveBeenCalledTimes(1);
+    expect(deps.alert).toHaveBeenCalledWith(
+      expect.objectContaining({ rule: 'ai_task_failure_rate:classify_intent' }),
+    );
+    // Subsumed breaches stay visible in the result (and the log), unpaged.
+    expect(result.breached).toEqual([
+      'ai_task_failure_rate:classify_intent',
+      `ai_task_failure_rate:classify_intent:${TENANT_A}`,
+      `ai_task_failure_rate:classify_intent:${TENANT_B}`,
+    ]);
+    expect(result.suppressedByCap).toEqual([]);
+  });
+
+  it('caps per-tenant pages per tick (worst first), separately from the platform cap', async () => {
+    const tenants = ['a', 'b', 'c', 'd', 'e'].map((suffix, i) =>
+      tenantCounts({
+        tenantId: `tenant-${suffix}`,
+        taskType: 'draft_estimate',
+        total: 20,
+        completed: i,
+        failed: 20 - i,
+      }),
+    );
+    const deps = buildDeps({
+      // Platform-wide 100 runs, 90 non-complete: draft_estimate breaches
+      // ONLY for a different task so the per-tenant ones are not subsumed.
+      getTaskRunCounts: vi
+        .fn()
+        .mockResolvedValue([counts({ taskType: 'summarize_conversation', total: 100, completed: 0, failed: 100 })]),
+      getTenantTaskRunCounts: vi.fn().mockResolvedValue(tenants),
+    });
+    const result = await runFailureRateMonitor(deps);
+    // 1 platform page + 3 of 5 tenant pages (maxTaskAlerts=3 each).
+    expect(deps.alert).toHaveBeenCalledTimes(4);
+    expect(result.suppressedByCap).toEqual([
+      'ai_task_failure_rate:draft_estimate:tenant-d',
+      'ai_task_failure_rate:draft_estimate:tenant-e',
+    ]);
+    expect(result.breached).toHaveLength(6);
+  });
+
+  it('cooldown is keyed per tenant through the real alertOperator, so one tenant cannot mask another', async () => {
+    const clock = 1_700_000_000_000;
+    const captured: string[] = [];
+    const alertOperator = createAlertOperator({
+      sentry: {
+        captureMessage: (msg: string) => {
+          captured.push(msg);
+        },
+      } as never,
+      delivery: null,
+      alertSmsTo: undefined,
+      cooldownMs: 60 * 60 * 1000,
+      logger: noopLogger,
+      now: () => clock,
+    });
+    const deps = buildDeps({
+      alert: alertOperator,
+      now: () => new Date(clock),
+      getTaskRunCounts: vi
+        .fn()
+        .mockResolvedValue([counts({ taskType: 'classify_intent', total: 500, completed: 476, failed: 24 })]),
+      getTenantTaskRunCounts: vi.fn().mockResolvedValue([
+        tenantCounts({ tenantId: TENANT_A, total: 12, completed: 0, failed: 12 }),
+        tenantCounts({ tenantId: TENANT_B, total: 12, completed: 0, failed: 12 }),
+        tenantCounts({ tenantId: 'healthy', total: 476, completed: 476 }),
+      ]),
+    });
+    await runFailureRateMonitor(deps);
+    expect(captured).toHaveLength(2);
+    expect(captured[0]).toContain(`ai_task_failure_rate:classify_intent:${TENANT_A}`);
+    expect(captured[1]).toContain(`ai_task_failure_rate:classify_intent:${TENANT_B}`);
+    // Same tick, same cooldown window — nothing re-pages.
+    await runFailureRateMonitor(deps);
+    expect(captured).toHaveLength(2);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OBS-4 — platform spend. A loop that re-calls the model but COMPLETES every
+// call keeps rule 1 at 0%; only the bill moves.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('evaluateWindowSpend', () => {
+  it('breaches over the cap with 100% completion, naming the top tenants and tasks', () => {
+    // 1,500 completed supervisor_annotate runs at 2 cents each = 3,000 cents
+    // in one window; threshold 2,000 cents.
+    const r = evaluateWindowSpend(
+      [
+        tenantCounts({ tenantId: TENANT_A, taskType: 'supervisor_annotate', total: 1500, completed: 1500, costMicroCents: 1500 * 2_000_000 }),
+        tenantCounts({ tenantId: TENANT_B, taskType: 'classify_intent', total: 60, completed: 60, costMicroCents: 60 * 700_000 }),
+      ],
+      thresholds,
+    );
+    expect(r).not.toBeNull();
+    expect(r!.breached).toBe(true);
+    expect(r!.rule).toBe('ai_spend_window');
+    expect(r!.value).toBe(3_042_000_000);
+    expect(r!.details.totalCents).toBe(3042);
+    expect(r!.details.thresholdCents).toBe(2000);
+    expect(r!.details.topTenants).toBe(`${TENANT_A}=3000.00c,${TENANT_B}=42.00c`);
+    expect(r!.details.topTaskTypes).toBe('supervisor_annotate=3000.00c,classify_intent=42.00c');
+    expect(r!.severity).toBe('critical');
+  });
+
+  it('is quiet at or under the cap (breach is strictly above), and unpriced runs count 0', () => {
+    const atCap = evaluateWindowSpend(
+      [tenantCounts({ costMicroCents: 2000 * 1_000_000 })],
+      thresholds,
+    );
+    expect(atCap!.breached).toBe(false);
+    expect(evaluateWindowSpend([tenantCounts({ costMicroCents: 0 })], thresholds)!.breached).toBe(false);
+    expect(evaluateWindowSpend([], thresholds)!.value).toBe(0);
+  });
+
+  it('is off when the threshold is 0', () => {
+    expect(
+      evaluateWindowSpend([tenantCounts({ costMicroCents: 10 ** 12 })], { ...thresholds, spendMaxCents: 0 }),
+    ).toBeNull();
+  });
+});
+
+describe('runFailureRateMonitor — OBS-4 spend rule', () => {
+  it('pages ai_spend_window on a completing runaway loop while every failure rule stays quiet', async () => {
+    const rows = [
+      tenantCounts({ tenantId: TENANT_A, taskType: 'supervisor_annotate', total: 1500, completed: 1500, costMicroCents: 1500 * 2_000_000 }),
+    ];
+    const deps: FailureRateMonitorDeps & { alert: ReturnType<typeof vi.fn> } = {
+      getTaskRunCounts: vi
+        .fn()
+        .mockResolvedValue([counts({ taskType: 'supervisor_annotate', total: 1500, completed: 1500 })]),
+      getTenantTaskRunCounts: vi.fn().mockResolvedValue(rows),
+      getProposalExecutionCounts: vi.fn().mockResolvedValue(healthyProposals),
+      alert: vi.fn().mockResolvedValue(undefined),
+      thresholds,
+      logger: noopLogger,
+    };
+    const result = await runFailureRateMonitor(deps);
+    expect(result.breached).toEqual(['ai_spend_window']);
+    expect(deps.alert).toHaveBeenCalledTimes(1);
+    expect(deps.alert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rule: 'ai_spend_window',
+        severity: 'critical',
+        details: expect.objectContaining({ totalCents: 3000, thresholdCents: 2000 }),
+      }),
+    );
+  });
+
+  it('does not evaluate the spend rule when it is turned off', async () => {
+    const deps: FailureRateMonitorDeps = {
+      getTaskRunCounts: vi.fn().mockResolvedValue([]),
+      getTenantTaskRunCounts: vi.fn().mockResolvedValue([tenantCounts({ costMicroCents: 10 ** 12 })]),
+      getProposalExecutionCounts: vi.fn().mockResolvedValue(healthyProposals),
+      alert: vi.fn().mockResolvedValue(undefined),
+      thresholds: { ...thresholds, spendMaxCents: 0 },
+      logger: noopLogger,
+    };
+    const result = await runFailureRateMonitor(deps);
+    expect(result.evaluated).not.toContain('ai_spend_window');
+    expect(result.breached).toEqual([]);
   });
 });

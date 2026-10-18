@@ -361,6 +361,18 @@ export const aiTaskRunsObserved = new Gauge({
 });
 
 /**
+ * OBS-4 — platform-wide ai_runs spend (micro-cents; divide by 1,000,000 for
+ * cents) over the last evaluated failure-monitor window. Unlabelled on
+ * purpose: per-tenant attribution rides in the alert details, never in a
+ * metric label (raw tenant_id is deliberately not a label anywhere here).
+ */
+export const aiSpendWindowMicroCents = new Gauge({
+  name: 'ai_spend_window_micro_cents',
+  help: 'SUM(ai_runs.cost_micro_cents) over the last evaluated failure-monitor window, platform-wide (unpriced runs count 0)',
+  registers: [metricsRegistry],
+});
+
+/**
  * FAIL-VIS — silent proposal-execution findings. `check` is
  * `stalled_executing` (stuck in `executing` past the staleness bound) or
  * `failed_without_error` (terminal `execution_failed` carrying a NULL

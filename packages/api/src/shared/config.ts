@@ -212,6 +212,16 @@ const configSchema = z.object({
   // Lookback (hours) for proposals that reached `execution_failed` with a
   // NULL `execution_error` — a terminal failure state carrying no reason.
   FAILURE_MONITOR_PROPOSAL_LOOKBACK_HOURS: z.coerce.number().positive().default(24),
+  // OBS-4 — volume floor for the PER-TENANT non-completion rule
+  // (ai_task_failure_rate:<task>:<tenant>). Lower than FAILURE_MONITOR_MIN_RUNS
+  // because one tenant's volume is a fraction of the platform's; the platform
+  // floor would silence exactly the diluted outage this rule exists for.
+  FAILURE_MONITOR_TENANT_MIN_RUNS: z.coerce.number().int().positive().default(10),
+  // OBS-4 — platform-wide ai_runs spend (integer cents) over one window above
+  // which `ai_spend_window` pages. Catches a loop that re-calls the model and
+  // COMPLETES every call (invisible to every failure-rate rule). 0 turns the
+  // rule off.
+  FAILURE_MONITOR_SPEND_MAX_CENTS: z.coerce.number().int().min(0).default(2000),
   // QUALITY-2026-07-12 WS5 — Microsoft Presidio PII redaction backend for
   // training-asset ingestion. Two separate REST services (matching Presidio's
   // standard deployment): the Analyzer detects PII spans, the Anonymizer
