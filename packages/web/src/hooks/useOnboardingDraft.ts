@@ -26,8 +26,6 @@ export interface UseOnboardingDraftResult {
   version: number | null;
   /** True until the first load (and any create) settles. */
   loading: boolean;
-  /** No draft exists and no create input was given: the shell must ask for one. */
-  missing: boolean;
   /** Owner-facing, one line. Cleared by the next successful action. */
   error: string | null;
   /** One-line, non-fatal: the draft was refreshed because another writer got there first. */
@@ -42,7 +40,7 @@ export interface UseOnboardingDraftResult {
 
 /**
  * Load-or-create the tenant's onboarding draft and keep it in step with the
- * server. With `createInput` null it only reads (a 404 sets `missing`); with an
+ * server. With `createInput` null it only reads (a 404 leaves `draft` null); with an
  * input it creates the draft when none exists. The create is idempotent on the
  * API, and the browser timezone is always sent: approval refuses a draft that
  * has no zone, and a guessed zone would misbook every appointment.
@@ -54,7 +52,6 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
   const apiFetch = useApiClient();
   const [draft, setDraft] = useState<OnboardingDraft | null>(null);
   const [loading, setLoading] = useState(true);
-  const [missing, setMissing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [approving, setApproving] = useState(false);
@@ -70,7 +67,6 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
   const commit = useCallback((next: OnboardingDraft | null) => {
     draftRef.current = next;
     setDraft(next);
-    setMissing(next === null);
   }, []);
 
   const load = useCallback(
@@ -153,11 +149,11 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
           commit(res.draft);
           return res;
         } catch (err) {
-          if (err instanceof OnboardingDraftApiError && err.status === 409) {
-            if (await refresh()) setNotice(CONFLICT_NOTICE);
-          } else {
-            setError(SAVE_ERROR);
-          }
+          // A 409 here is DRAFT_APPROVAL_FAILED (the transaction rolled back, the
+          // draft is still a draft) — not a version race, so no "refreshed" notice.
+          // Re-read so the shell shows the server's state, then ask for a re-tap.
+          if (err instanceof OnboardingDraftApiError && err.status === 409) await refresh();
+          setError(SAVE_ERROR);
           return null;
         } finally {
           setApproving(false);
@@ -166,5 +162,5 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
     [apiFetch, commit, refresh, serially],
   );
 
-  return { draft, version: draft?.version ?? null, loading, missing, error, notice, approving, stage, approve, reload };
+  return { draft, version: draft?.version ?? null, loading, error, notice, approving, stage, approve, reload };
 }

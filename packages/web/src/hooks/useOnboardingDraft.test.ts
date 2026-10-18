@@ -67,17 +67,15 @@ describe('useOnboardingDraft', () => {
     ]);
     expect(result.current.draft?.businessName).toBe('Walsh Plumbing');
     expect(result.current.version).toBe(1);
-    expect(result.current.missing).toBe(false);
     expect(result.current.error).toBeNull();
   });
 
-  it('reports a missing draft without creating one when there is no create input', async () => {
+  it('leaves the draft null without creating one when there is no create input', async () => {
     stubFetch([json(404, { error: 'NOT_FOUND', message: 'OnboardingDraft not found' })]);
     const { result } = renderHook(() => useOnboardingDraft(null));
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     expect(result.current.draft).toBeNull();
-    expect(result.current.missing).toBe(true);
     expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(['GET /api/onboarding/draft']);
   });
 
@@ -91,7 +89,6 @@ describe('useOnboardingDraft', () => {
 
     expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(['GET /api/onboarding/draft', 'POST /api/onboarding/draft']);
     expect(calls[1].body).toEqual({ ...CREATE, clientTimezone: BROWSER_TZ });
-    expect(result.current.missing).toBe(false);
   });
 
   it('does not create when a draft already exists, even with a create input', async () => {
@@ -190,7 +187,7 @@ describe('useOnboardingDraft', () => {
     expect(result.current.approving).toBe(false);
   });
 
-  it('re-reads the draft when approve hits a 409', async () => {
+  it('on a 409 from approve re-reads the draft and reports a plain save error, not a refresh notice', async () => {
     stubFetch([
       json(200, { draft: draftJson }),
       json(409, { error: 'CONFLICT', message: 'DRAFT_APPROVAL_FAILED: p1: stale' }),
@@ -205,7 +202,8 @@ describe('useOnboardingDraft', () => {
     });
     expect(res).toBeNull();
     expect(result.current.version).toBe(5);
-    expect(result.current.notice).toMatch(/\S/);
+    expect(result.current.error).toMatch(/\S/);
+    expect(result.current.notice).toBeNull();
   });
 
   it('reports a load failure and retries on reload', async () => {
