@@ -952,6 +952,33 @@ flowchart LR
       followed by a re-scan that comes back clean.
     - Test: a gateway call is in flight when the erase starts. It completes afterwards, and its
       output is never persisted or exported.
+  - **Fence outbound provider writes too, including ambiguous ones.** An outbound SMS can pass its
+    tombstone check and then complete at Twilio after the provider cleanup has run.
+    `notifications/send-service.ts:750-816` calls Twilio first and writes the `message_dispatches`
+    row, with the returned SID, only afterwards. If Twilio accepts the message but our client times
+    out, the catch path records a `failed` row with no SID. Nothing links the message to the
+    subject, so a SID-only cleanup can't find it, and the erase would report success while Twilio
+    still holds the recipient and the body. So:
+    - Every customer-facing outbound send checks the tombstone immediately before the provider
+      call, at the point where the claim flips to `sending` (`markProviderStarting`). It refuses
+      the send when the tombstone matches. This covers SMS/MMS, email and outbound calls, on every
+      path, including the direct Send Estimate/Invoice routes that no send claim wraps today.
+    - Before the provider call, the send writes a durable write-ahead dispatch row with status
+      `sending`. The row records the recipient, the sending number or address, the `customer_id`,
+      a hash of the body and `attempt_started_at`. A success fills in the SID and marks it `sent`.
+      A timeout, connection reset or 5xx without a SID marks it `ambiguous`, not `failed`.
+    - After the tombstone, the erase waits out the provider client timeout for any `sending` row
+      linked to the subject. Then it reconciles every `ambiguous` or still-`sending` row with the
+      provider:
+      - It lists Twilio Messages filtered by that row's From and To, over a `DateSent` window from
+        `attempt_started_at` to the client timeout plus clock skew.
+      - It matches them by the body hash.
+      - A match is linked by our own write-ahead row, not by the number alone, so it is deleted
+        like any linked SID.
+    - A row that can't be reconciled yet, for example because the provider list lags, leaves the
+      Twilio messages store `incomplete` and fires `alertOperator`. A retry job re-runs the
+      reconciliation. The erase never reports success until the row clears or the owner closes it
+      from the candidate list.
   - **Scrub:**
     - the `customers` row and `customer_contacts`
     - `customer_custom_field_values`: the arbitrary `value` column (`schema.ts:4733-4741`) can hold
@@ -1016,6 +1043,14 @@ flowchart LR
     - a message from a shared household number that isn't linked to the subject is left alone and
       listed as a candidate
     - a failure at any provider marks that store `incomplete` and alerts
+  - erase versus in-flight outbound SMS, against a mocked Twilio Messages API:
+    - A send is held at the provider when the erase starts, and Twilio accepts it afterwards. The
+      erase finds it through the write-ahead row and deletes it.
+    - Twilio accepts a send but the client times out, so the dispatch row is `ambiguous`. The erase
+      reconciles it by From, To, the time window and the body hash, and deletes the message.
+    - A send that starts after the tombstone is refused, and no provider call is made.
+    - An ambiguous row with no match leaves the store `incomplete`, alerts, and the erase does not
+      report success.
   - after an erase, the exporter still sends unrelated traces, so the drain did not shut it down
   - a drain failure marks Langfuse `incomplete`
   - with phase 1 committed, an in-flight writer in another connection sees the tombstone and drops
