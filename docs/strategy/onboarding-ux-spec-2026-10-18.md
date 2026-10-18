@@ -2,7 +2,7 @@
 title: "The first conversation: UX spec for voice-first onboarding"
 date: 2026-10-18
 status: UX design spec (screen-by-screen; pairs with the clickable canvas)
-prototype: https://claude.ai/artifact/9z7PNaRXpD7c8Rk4ptKnXz (private canvas, 10 phone screens, tap the primary button to advance)
+prototype: https://claude.ai/artifact/9z7PNaRXpD7c8Rk4ptKnXz (private canvas, 15 phone screens in three rows; the third row is the 'pick, don't build' pass)
 companions:
   - docs/strategy/onboarding-redesign-service-first-2026-10-18.md (the why: jobs, principles, decisions)
   - docs/research/voice-onboarding-ux-patterns-2026-10-18.md (the evidence: voice UI and onboarding best practice)
@@ -195,6 +195,71 @@ hidden until they have data.
 Just-in-time asks live here, not in onboarding: Stripe Connect when the first bill is about to
 go out, calendar connection when the first job is booked, accounting sync when the first month
 closes, team members when a second name is mentioned.
+
+## 3b. Second pass: pick, don't build
+
+The screens above still open Act 1 with "tell me about your business", which asks the owner
+to compose answers from nothing, just out loud. The founder's correction on 2026-10-18: we
+already know how the majority of a plumbing or HVAC shop runs. So Rivet should start from a
+finished shop and ask the owner to choose between two sensible options, not to describe
+anything. Five screens on the canvas's third row show this; they replace screens 2 and 3 and
+sit between the demo call and the read-back.
+
+### How it works
+
+1. **Assemble before asking.** From the trade (chips on screen 0) and the metro (from the area
+   code of the cell they typed, confirmed in one word if ambiguous), Rivet assembles a complete,
+   typical shop: greeting, trip fee and hourly rate, hours, booking posture, payment method,
+   emergency routing, services not offered. This is the trade pack plus a regional price tier.
+   The owner sees it as a finished card ("Walsh Plumbing is already set up") with "Most shops"
+   marks on the rows that came from the typical case.
+2. **Seven this-or-this choices.** Each is one screen: Rivet's question as the heading, two
+   large option cards, the common one marked "Most shops like yours", and under each option
+   what Rivet would actually say or do if it is picked. The owner taps a card or says "first"
+   or "second". The mic stays live; "Neither, I'll say it" is the free-speech override, and
+   "Keep the rest as is" jumps to the read-back at any point.
+3. **The seven:** how I answer the phone · what you charge to come out · book it or hold it ·
+   how you get paid · when I can book (hours) · who I ring in an emergency · after hours.
+   Established shops get an eighth: "Do you already have a business number?" which opens the
+   forwarding path. Each writes the same typed settings as before.
+4. **Read-back, then scenarios.** Unchanged. The read-back now shows seven rows the owner has
+   already seen, so it takes ten seconds.
+
+### Why this is better than open questions
+
+- A finite, two-option set is the strongest pattern in the voice research (Alexa, Google):
+  recognition is near perfect on "first" and "second", and every option shown is also spoken.
+- It keeps the owner in judge mode, not author mode. Picking between $89 and $129 is a decision a
+  day-one owner can make with confidence. Naming a trip fee from nothing is not.
+- The consequence is visible before the choice. Every card says what Rivet will say to a
+  caller, so there is no gap between a setting and its effect.
+- It shortens the conversation. Seven taps or seven spoken words, under three minutes, versus
+  five minutes of free speech plus extraction plus correction.
+- Free speech still exists where it earns its place: the override on each card, the scenario
+  interview's "anything else I should know about calls like this", and the first-day home.
+
+### What it needs that the repo lacks
+
+- **Regional price tiers.** Packs carry one sample price per trade. "Most Cleveland plumbers
+  charge $89" needs a per-metro table, founder-curated for launch metros, with a sensible
+  national default elsewhere. Until the table exists the cards say "Typical for plumbers" and
+  drop the city.
+- **Option pairs per setting.** A small, typed table of (setting, option A, option B, Rivet's
+  line for each) per trade. This is content, not code, and the scenario library's
+  `ownerFacing` block is the natural home.
+- **Metro from area code.** A lookup, with one spoken confirmation when the area code spans
+  cities or the owner's cell is from elsewhere ("You're in Cleveland, right?").
+
+### The screens, briefly
+
+| Screen | Rivet says | Options (A is "most shops") | Writes |
+|---|---|---|---|
+| Ready | "Walsh Plumbing is already set up. I built it the way most Cleveland plumbing shops run. Seven quick choices make it yours." | "Make it mine, 7 choices" / "Looks right as is, skip the choices" | nothing yet |
+| Greeting | "How should I answer your phone?" | "Walsh Plumbing, how can I help?" / "Thanks for calling Walsh Plumbing. What's going on today?" (both playable) | greeting text |
+| Price | "What do you charge to come out?" | $89 then $150/hr / $129 then $185/hr, each with the sentence Rivet would say | trip fee, hourly rate; pack prices follow |
+| Booking | "When someone wants a repair, do I book it or hold it for you?" | Book it on the call / Hold it for me | `autonomous_booking_enabled` |
+| Paid | "When a job's done, how do you want to get paid?" | Text them a pay link / Collect on the spot | payment method; bank connection asked at first bill |
+| Hours, Emergency, After hours | same pattern | | hours, `transfer_targets.emergency`, `after_hours_voice_mode` |
 
 ## 4. Copy rules
 

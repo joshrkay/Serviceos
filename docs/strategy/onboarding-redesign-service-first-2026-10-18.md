@@ -73,10 +73,11 @@ competitor's onboarding serves (see competitor section).
 
 ## Seven design principles
 
-1. **Conversation is the surface. Forms are the fallback.** Today the form is default and the
-   conversation is a toggle. Invert it. Every step is a question Rivet asks out loud and on
-   screen; the owner answers by voice, by tapping a chip, or by typing. A "show me the form"
-   link exists for the person in a loud truck cab, and that is the only place the form lives.
+1. **Start from a finished shop. Pick, don't build.** We know how most plumbing and HVAC shops
+   run. Rivet assembles a complete, typical shop from the trade and the metro before asking
+   anything, then walks seven this-or-this choices, each showing what Rivet would say if
+   picked. The owner answers by tapping a card or saying "first" or "second". Free speech is
+   the override ("Neither, I'll say it"), not the default. Forms do not appear at all.
 2. **Ask about situations, not settings.** "Should I book jobs on the call, or hold them for
    you?" instead of `autonomous_booking_enabled`. "When it's 9pm and someone's basement is
    flooding, who do I ring?" instead of `after_hours_voice_mode`. Every answer is still a typed
