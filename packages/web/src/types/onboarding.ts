@@ -7,6 +7,8 @@
  * packages/api/src/shared/contracts.ts for the API-side mirror).
  */
 
+import type { OnboardingDraftExecution } from '@ai-service-os/shared';
+
 export type OnboardingStepId =
   | 'signup'
   | 'identity'
@@ -29,6 +31,14 @@ export interface OnboardingStep {
   blockers?: string[];
   metadata?: Record<string, unknown>;
 }
+
+/**
+ * Where an approved draft's saved changes are on their way to going live (the
+ * status `draft.execution` fact; mirrors DRAFT_EXECUTION_STATES in the API).
+ * `failed` can be fixed by a retry; `stopped` cannot (a change was undone,
+ * rejected or expired), so the shell offers no retry for it.
+ */
+export type { OnboardingDraftExecution };
 
 export type SubscriptionStatusValue =
   | 'trialing'
@@ -55,6 +65,14 @@ export interface OnboardingStatusResponse {
   /** ISO-8601 timestamp of tenants.created_at. Lets the client tell a brand-new
    * account (welcome tour) from an established user (what's-new changelog). */
   accountCreatedAt?: string;
+  /** The "pick, don't build" draft, once the tenant has one. */
+  draft?: {
+    status: 'draft' | 'approved';
+    choicesAnswered: number;
+    version: number;
+    /** Additive: absent from an API that predates it, null while the draft is still being edited. */
+    execution?: OnboardingDraftExecution | null;
+  };
 }
 
 export interface DayHours {

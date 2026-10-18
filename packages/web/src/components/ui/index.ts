@@ -47,6 +47,8 @@ export { Tooltip } from './tooltip';
 export type { TooltipProps, TooltipSide } from './tooltip';
 export { Progress } from './progress';
 export type { ProgressProps } from './progress';
+export { OptionCard } from './option-card';
+export type { OptionCardProps, OptionCardOption } from './option-card';
 // Re-exported from the top-level component so the calm "nothing here" /
 // "all clear" pattern is discoverable alongside the other primitives.
 export { EmptyState } from '../EmptyState';
