@@ -7,6 +7,9 @@ companions:
   - docs/strategy/scenario-interview-onboarding.md (Act 2 below)
   - docs/research/competitive-onboarding-narrative-2026-10-18.md (the competitor evidence)
   - figma-export/imports/design-vision-brief.md (the March design vision, never built for onboarding)
+  - docs/strategy/onboarding-ux-spec-2026-10-18.md (the screen-by-screen UX spec)
+  - https://claude.ai/artifact/9z7PNaRXpD7c8Rk4ptKnXz (clickable prototype, 10 phone screens; private until shared)
+  - docs/research/voice-onboarding-ux-patterns-2026-10-18.md (voice UI and onboarding evidence)
 tags: [onboarding, jobs-to-be-done, voice-first, design-language, narrative, competitive]
 ---
 
@@ -98,6 +101,10 @@ competitor's onboarding serves (see competitor section).
    first customer? Just tell me about them." Empty cards are replaced by what Rivet will do.
 
 ## The proposed flow: one conversation in four acts
+
+The screen-by-screen version of this flow, with turn states, copy rules and the settings each
+answer writes, is `docs/strategy/onboarding-ux-spec-2026-10-18.md`; the clickable prototype is
+linked in the companions above.
 
 Time target: under twelve minutes for the day-one owner, under fifteen for an established
 shop. Every act is resumable and skippable with a visible default.
