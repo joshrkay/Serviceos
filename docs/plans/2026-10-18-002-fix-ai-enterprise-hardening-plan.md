@@ -989,6 +989,28 @@ flowchart LR
       - Test: a transcription is held at its provider while the erase runs. Its completion write is
         refused by the trigger, the recording's transcript and metadata stay blank, and the job
         doesn't retry.
+    - **Presigned uploads are writers too, and they outlive the request.** `/api/files/upload-url`
+      creates the `files` row and returns a presigned PUT URL (`routes/files.ts:80-114`), valid for
+      `DEFAULT_UPLOAD_EXPIRES_SECONDS` (300s, `files/storage-provider.ts:69`). The client uploads
+      the bytes directly to S3 later, so no application writer is in flight to drain. An erase can
+      delete the still-empty key and its row, report success, and then the client uploads. That
+      leaves a customer object no re-scan can find. So:
+      - **Fence every `generateUploadUrl`.** Signing goes through the fence, and after the
+        tombstone it is refused for the subject. The call sites are `routes/files.ts`,
+        `routes/job-files.ts`, `routes/job-photos.ts`, `routes/attachments.ts`,
+        `telephony/recording-webhook.ts` and `telephony/voicemail-status-route.ts`. The structural
+        test lists `generateUploadUrl` among the provider write methods, so a new call site has to
+        go through the fence too.
+      - **Keep issued keys until their URLs expire.** The erase keeps the storage key of every
+        subject `files` row it deletes, whether or not the upload happened, along with when its
+        URL was issued.
+        - After the latest issued URL's expiry plus clock skew, it deletes each key again.
+        - Then a HEAD request confirms each key is gone.
+        - Until then the S3 store is `incomplete`, and the result says it finishes once
+          outstanding upload links expire, within about five minutes.
+      - Test: an upload URL is issued, the erase runs, and the client PUTs the bytes afterwards,
+        before the URL expires. The re-delete removes the object, and the erase reports success
+        only after the HEAD check.
     - **A recipient match fences only the subject's own work, by provenance, not by time.** A
       household can share a phone or an email, so a recipient hash alone can't say whose send it
       is, and neither can creation time. So:
@@ -1196,10 +1218,26 @@ flowchart LR
     enable a $100 ceiling and spend another $100.
     - Every attempt is reserved and settled in the ledger whether or not a ceiling is set. With a
       null ceiling, the reserve step just skips the comparison.
-    - At deploy, an idempotent one-time seed sets the current month's `spent` for every tenant from
-      that month's `ai_runs.cost_micro_cents`. It only seeds a month that has no ledger row yet.
+    - **Spend from before the ledger existed is recomputed, never seeded once.** A one-time seed
+      guarded by "no ledger row yet" would miss a charge that an old-version or already-dispatched
+      request writes to `ai_runs` during a rolling deploy, after the seed ran, and the ledger would
+      understate the month for good. So:
+      - Each `ai_runs` row records the `attempt_id` of its reservation. Rows written by an old
+        version, before the ledger existed, have none.
+      - The ledger keeps `pre_ledger_spent` separate from `spent`. A reconcile step sets it by
+        recomputing `SUM(cost_micro_cents)` over the month's `ai_runs` rows that have no
+        `attempt_id`.
+      - The reconcile is a recompute, not an increment. Running it again is exactly-once by
+        construction, a late pre-ledger write is picked up on the next run, and nothing is counted
+        twice, because ledger-era runs carry their `attempt_id`.
+      - It runs when a cap is enabled, on every reserve for a capped tenant whose last reconcile is
+        older than a short interval, and periodically.
+      - The cap compares `spent + pre_ledger_spent + reserved`.
+      - Once the deploy completes and the maximum gateway deadline has passed, no old writer
+        remains. `pre_ledger_spent` is then final for the month, and the next month starts at zero.
     - Rows with a null cost (unpriced models) are counted into `unpriced_runs` on the ledger row.
-      The settings response shows that count, so the owner can see the seeded figure is a floor.
+      The settings response shows that count, so the owner can see the pre-ledger figure is a
+      floor.
     - Enabling a cap takes effect at once against the month's real spend. When `spent` is already
       over the new ceiling, the settings response says so in plain words, and new AI work is
       refused.
@@ -1301,7 +1339,10 @@ flowchart LR
     - A completion delivered twice settles once.
     - A reaper racing a late completion produces exactly one transition.
   - **Integration (mid-month cap):** a tenant has $90 of `ai_runs` cost this month, all from before
-    deploy. After the seed, it enables a $100 cap, and a $15 worst-case call is refused.
+    deploy. After a reconcile, it enables a $100 cap, and a $15 worst-case call is refused.
+  - **Integration (rolling deploy):** an old-version request writes a $20 `ai_runs` cost, with no
+    `attempt_id`, after the first reconcile. The next reconcile adds it exactly once, and a second
+    reconcile changes nothing.
 
 ## Owner decisions and actions (not code)
 
