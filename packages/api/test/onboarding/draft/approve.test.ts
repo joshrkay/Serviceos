@@ -214,12 +214,30 @@ describe('approveDraft (lock, version check, idempotence)', () => {
     expect(policy.payload).toMatchObject({ voiceGreeting: "Thanks for calling Walsh Plumbing. What's going on today?" });
   });
 
-  it('an already approved draft returns the first call\'s ids, mints nothing, and ignores a stale expectedVersion', async () => {
+  it('an already approved draft returns the first call\'s ids and mints nothing, with no expectedVersion or the version it was approved from', async () => {
     const h = await approveHarness();
     const first = await approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: h.draft.version });
-    const second = await approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: h.draft.version });
-    expect(second.approvedNow).toBe(false);
-    expect(second.proposalIds).toEqual(first.proposalIds);
+    const retap = await approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: h.draft.version });
+    const bare = await approveDraft(h.deps, TENANT, ACTOR);
+    for (const second of [retap, bare]) {
+      expect(second.approvedNow).toBe(false);
+      expect(second.proposalIds).toEqual(first.proposalIds);
+    }
+    expect(await h.proposalRepo.findByTenant(TENANT)).toHaveLength(2);
+    expect(await approvedAudits(h.auditRepo)).toHaveLength(1);
+  });
+
+  it('an already approved draft refuses any other expectedVersion with DraftVersionConflictError (stale tab or ahead of the row), minting nothing', async () => {
+    const h = await approveHarness();
+    const first = await approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: h.draft.version });
+    const approvedFrom = first.draft.version - 1;
+    // Tab A rendered an older read-back; tab B's changes and approval moved the draft on.
+    const stale = approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: approvedFrom - 1 });
+    await expect(stale).rejects.toBeInstanceOf(DraftVersionConflictError);
+    await expect(stale).rejects.toMatchObject({ expected: approvedFrom - 1, actual: approvedFrom });
+    // The approved row's own version is not "the version it was approved from" either.
+    await expect(approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: first.draft.version })).rejects.toBeInstanceOf(DraftVersionConflictError);
+    await expect(approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: first.draft.version + 5 })).rejects.toBeInstanceOf(DraftVersionConflictError);
     expect(await h.proposalRepo.findByTenant(TENANT)).toHaveLength(2);
     expect(await approvedAudits(h.auditRepo)).toHaveLength(1);
   });

@@ -54,14 +54,15 @@ export const SetOwnerPhoneBodySchema = z
  * optimistic-concurrency token: the draft `version` the read-back the owner is
  * looking at was rendered from. When omitted the row lock alone serialises
  * approve against PUT /choices and against another approve. Additive and
- * optional, so a client that posts `{}` keeps working.
+ * optional, so a client that posts `{}` keeps working. On an already-approved
+ * draft it is compared with the version the draft was approved from: equal or
+ * omitted is the idempotent 200, anything else is 409 VERSION_CONFLICT.
  */
 export const ApproveDraftBodySchema = z
   .object({
     expectedVersion: z.number().int().positive().optional(),
   })
   .strict();
-export type ApproveDraftBody = z.infer<typeof ApproveDraftBodySchema>;
 
 /** Partial on purpose: an owner mid-way through has staged some keys, not all. */
 export const ChoicesRecordSchema = z.partialRecord(ChoiceKeySchema, StagedChoiceSchema);
