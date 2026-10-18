@@ -13,8 +13,6 @@ import draftJson from './draft.plumbing-cle.json';
  */
 export const plumbingCleDraft: OnboardingDraft = OnboardingDraftSchema.parse(draftJson);
 
-export const plumbingCleDraftJson: unknown = draftJson;
-
 export function withDraft(patch: Partial<OnboardingDraft>): OnboardingDraft {
   return { ...plumbingCleDraft, ...patch };
 }

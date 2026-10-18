@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ONBOARDING_CORE_CHOICE_KEYS, type OnboardingDraft } from '@ai-service-os/shared';
 import { plumbingCleDraft, withChoices } from './__fixtures__';
-import { answeredCount, coreTurns, firstUnanswered, landingTarget, makeItMineTarget, nextUnanswered } from './turns';
+import { answeredCount, coreTurns, landingTarget, makeItMineTarget, nextUnanswered } from './turns';
 
 const [GREETING, PRICE, POSTURE, PAID, HOURS, EMERGENCY, AFTER] = ONBOARDING_CORE_CHOICE_KEYS;
 
@@ -34,17 +34,6 @@ describe('turns', () => {
     expect(answeredCount(withChoices(plumbingCleDraft, { existing_number: { option: 'a' } }))).toBe(0);
   });
 
-  it('finds the first unanswered turn in registry order', () => {
-    expect(firstUnanswered(plumbingCleDraft)).toBe(GREETING);
-    expect(firstUnanswered(withChoices(plumbingCleDraft, { [GREETING]: { option: 'a' }, [PRICE]: { option: 'a' }, [POSTURE]: { option: 'b' } }))).toBe(PAID);
-    expect(firstUnanswered(withChoices(plumbingCleDraft, { [PRICE]: { option: 'a' } }))).toBe(GREETING);
-  });
-
-  it('has no unanswered turn once all seven are staged', () => {
-    const all = Object.fromEntries(ONBOARDING_CORE_CHOICE_KEYS.map((k) => [k, { option: 'a' as const }]));
-    expect(firstUnanswered(withChoices(plumbingCleDraft, all))).toBeNull();
-  });
-
   it('moves on to the next unanswered turn after the current one, skipping answered ones', () => {
     expect(nextUnanswered(plumbingCleDraft, GREETING)).toBe(PRICE);
     const draft = withChoices(plumbingCleDraft, { [PAID]: { option: 'a' }, [HOURS]: { option: 'b' } });
@@ -68,6 +57,10 @@ describe('where the owner goes', () => {
       screen: 'turn',
       key: PAID,
     });
+  });
+
+  it('"Make it mine" asks in registry order, so an answer to a later turn does not skip an earlier one', () => {
+    expect(makeItMineTarget(withChoices(plumbingCleDraft, { [PRICE]: { option: 'a' } }))).toEqual({ screen: 'turn', key: GREETING });
   });
 
   it('"Make it mine" goes to the read-back when all seven are already answered', () => {

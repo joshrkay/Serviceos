@@ -31,8 +31,8 @@ export function answeredCount(draft: OnboardingDraft): number {
   return coreTurns(draft).length - unanswered(draft).length;
 }
 
-/** Where "Make it mine" lands, and where a returning owner picks up. Null when every turn is answered. */
-export function firstUnanswered(draft: OnboardingDraft): OnboardingCoreChoiceKey | null {
+/** The first turn still to answer, in registry order. Null when every turn is answered. */
+function firstUnanswered(draft: OnboardingDraft): OnboardingCoreChoiceKey | null {
   return unanswered(draft)[0] ?? null;
 }
 

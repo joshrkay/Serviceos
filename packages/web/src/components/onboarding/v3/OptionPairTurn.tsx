@@ -13,8 +13,6 @@ import {
   type TypedOverride,
 } from './typed-answer';
 
-export type { TypedOverride } from './typed-answer';
-
 export interface OptionPairTurnProps {
   /** Rivet's question, its support line and the two options, all from the assembled draft. */
   choice: AssembledOnboardingChoice;

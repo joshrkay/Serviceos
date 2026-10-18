@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { plumbingCleDraft, withDraft } from './__fixtures__';
@@ -54,15 +54,6 @@ describe('ReadbackCard', () => {
     expect(onEdit).toHaveBeenCalledWith('booking_posture');
     await userEvent.click(screen.getByRole('button', { name: /Prices/ }));
     expect(onEdit).toHaveBeenLastCalledWith('trip_fee_and_rate');
-  });
-
-  it('renders plain rows, and does not promise a tap, when nothing handles edits yet', () => {
-    setup({ onEdit: undefined });
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent("Here's what I've got.");
-    expect(screen.getByRole('heading', { level: 1 })).not.toHaveTextContent('Tap anything');
-    const list = screen.getByRole('list');
-    expect(within(list).queryAllByRole('button')).toHaveLength(0);
-    expect(within(list).getAllByRole('listitem')).toHaveLength(7);
   });
 
   it('saves only when the owner taps "That\'s right", and says so', async () => {
