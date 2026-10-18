@@ -483,6 +483,19 @@ flowchart LR
       - When the recording row is created, it inherits `pci_detected` from that record.
       - The retention worker and the LCR-04 reconciliation sweep both consult it, so a recording
         whose callback never arrives is still purged from Twilio.
+    - **Fail closed when the detection can't be persisted.** If the DB is down when Deepgram reports
+      a redaction, the write fails. `redact=pci` has already hidden the digits, so the Luhn check
+      can't catch it later. Three layers close that gap:
+      - Retry the detection write in-process, with backoff, for the rest of the call.
+      - If the write still hasn't landed, pause the live recording through the existing
+        `RecordingControl.pauseRecording` seam. That is a Twilio API call and needs no DB.
+      - **The main control is at ingestion.** Every recording row is created with a
+        `pci_scan = 'pending'` state, and the retention worker treats `pending` like
+        `pci_detected`, keeping it only for the short PCI period. An ingestion-time scan then clears
+        each recording to `clean` or marks it `pci_detected`. It looks for Deepgram redaction
+        markers or Luhn hits in the call's persisted transcript turns. When the call has no turns,
+        it runs one Deepgram pre-recorded pass over the audio with `redact=pci`. A recording is
+        kept under the normal policy only after its scan has cleared it.
     - A `pci_detected` mark makes the retention worker purge that recording's audio promptly from S3
       and Twilio.
   - **PRIV-4**
@@ -510,6 +523,12 @@ flowchart LR
   - **Integration (PCI before callback):** a PAN is detected mid-call, then the process restarts before
     the recording callback. The `pci_detections` record survives, the recording row created later
     inherits `pci_detected`, and its audio is purged from S3 and Twilio.
+  - **Integration (persist fails):**
+    - The detection write fails because the DB is down.
+    - The live recording is paused.
+    - After recovery, the callback creates the row as `pci_scan = 'pending'`.
+    - The ingestion scan marks it `pci_detected`, and the audio is purged on the PCI schedule.
+    - A clean call clears to `clean` and keeps the normal policy.
 - **Verification:** a PAN read aloud never reaches `ai_runs`, `call_transcript_turns` or the provider
   payload in tests.
 
@@ -762,8 +781,16 @@ flowchart LR
       reservations.
   - **Reserve before dispatch, atomically, then reconcile.** A plain check before dispatch followed by
     a charge on completion lets concurrent requests near the ceiling all pass and overshoot it.
-    - Before dispatch, reserve the call's worst-case cost: estimated input tokens plus `maxTokens`,
-      at that model's prices. Do it in one atomic step: either a single conditional
+    - Before dispatch, reserve the call's worst-case cost at that model's prices: an upper bound on
+      input tokens, plus `maxTokens`. Do not use the fairness quota's `estimateTokens`
+      (`ceil(chars / 4)`, `tenant-quota.ts`), which undercounts multilingual and punctuation-heavy
+      text and leaves out chat framing.
+      - Bound the input by its UTF-8 byte length. For a byte-level BPE tokenizer, the token count
+        can never exceed the byte count.
+      - Add a per-message framing allowance, and each image's maximum token charge.
+      - An exact tokenizer for the model family may replace the byte bound only if a test proves it
+        never undercounts.
+    - Do the reservation in one atomic step: either a single conditional
       `UPDATE … SET reserved = reserved + $cost WHERE spent + reserved + $cost <= cap RETURNING …` on
       a per-tenant monthly ledger row, or a Lua script in the same style as
       `redis-tenant-quota.ts`.
@@ -775,7 +802,12 @@ flowchart LR
       streaming started — has no usage object, so charge the full worst-case reservation and mark it
       `unreconciled`. Otherwise outage retries would be free in the ledger and could exceed the cap.
       This is the same definitive-no-call rule as the onboarding plan's demo-call budget (D11).
-    - A failover hop reserves at the fallback model's price before it dispatches.
+    - **Reserve every physical dispatch, not every logical call.** `ProviderRetryDeadlineWrapper`
+      can send another attempt to the same provider after a timeout
+      (`compose-resilience.ts:118-125`). The first attempt may already have been billed, and if the
+      retry succeeds, only the retry's usage comes back.
+      - The reservation, and the ambiguous-failure charge, wrap each attempt inside the retry loop.
+      - A failover hop reserves again at the fallback model's price.
     - A reservation carries a lease expiry. A crashed process can't say whether its call went out, so
       an expired lease is charged at worst case and marked `unreconciled`; it is not released.
     - **Fail closed on unpriced models.** A worst-case reservation can't be computed without a price.
@@ -791,6 +823,10 @@ flowchart LR
 - **Test scenarios:**
   - **Unit:** a call is admitted under the cap and rejected over it.
   - **Unit:** failover is charged once.
+  - **Unit:** a timeout followed by a successful retry leaves the ledger with attempt 1's worst-case
+    charge plus attempt 2's actual cost.
+  - **Unit:** an input that tokenizes far above `chars / 4` (dense punctuation or CJK) still reserves at
+    least its true cost.
   - **Concurrency:** N requests start together just below the ceiling. Admitted reservations never
     exceed the cap, and every rejection is typed.
   - **Unit:** an expired lease is charged at worst case and marked `unreconciled`.
