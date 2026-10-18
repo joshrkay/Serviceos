@@ -15,6 +15,8 @@ import { describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { EventEmitter } from 'node:events';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import type { Pool, PoolClient, QueryResult } from 'pg';
 import {
   withTenantTransaction,
@@ -22,6 +24,8 @@ import {
   currentTenantContext,
   withRequestSavepoint,
   runAfterCommit,
+  commitRequestTransactionAndBegin,
+  type TenantContext,
 } from '../../src/middleware/tenant-context';
 import { PgBaseRepository } from '../../src/db/pg-base';
 import { asyncRoute } from '../../src/middleware/async-route';
@@ -959,5 +963,212 @@ describe('withRequestSavepoint', () => {
     expect(calls.some((q) => q.startsWith('ROLLBACK TO SAVEPOINT'))).toBe(true);
     // The outer transaction is NOT rolled back — only the savepoint is.
     expect(calls).not.toContain('ROLLBACK');
+  });
+});
+
+/**
+ * TI-01 — work that outlives the request (a `void` spawn such as the in-app
+ * session summary, or route code still running after it responded) inherits
+ * the request's AsyncLocalStorage entry. From the moment the transaction
+ * starts settling, that entry's client is no longer the request's to use:
+ * COMMIT is already queued on it, and once it is released pg-pool hands it
+ * (LIFO) to the next checkout — often another tenant's transaction, under
+ * that tenant's RLS identity. A closed entry must read as absent, so every
+ * reuse site falls back to its own pooled transaction.
+ */
+describe('TI-01 — a settled request context is never reused', () => {
+  class LateRepo extends PgBaseRepository {
+    markCompleted(tenantId: string): Promise<unknown> {
+      return this.withTenant(tenantId, (client) =>
+        client.query("UPDATE ai_runs SET status = 'completed' WHERE tenant_id = $1", [tenantId]),
+      );
+    }
+  }
+  const isLateUpdate = (c: CapturedQuery): boolean => c.sql.startsWith('UPDATE ai_runs');
+
+  function expectOwnTenantTransaction(calls: CapturedQuery[], client: PoolClient, tenantId: string): void {
+    const own = calls.filter((c) => c.client === client);
+    expect(own[0].sql).toBe('BEGIN');
+    expect(own[1].sql).toMatch(/set_config\('app\.current_tenant_id'/i);
+    expect(own[1].params[0]).toBe(tenantId);
+    expect(own.map((c) => c.sql)).toContain('COMMIT');
+  }
+
+  it('a write that lands after the response opens its own tenant transaction, never the released request client', async () => {
+    const { pool, calls, clients } = makeMockPool();
+    const repo = new LateRepo(pool);
+    let late: Promise<unknown> | undefined;
+    const app = buildApp(pool, async (req, res) => {
+      const tenantId = req.auth!.tenantId;
+      // What `void this.runSummary(session)` does: a background write that
+      // lands after the route has answered (gateway.complete → updateStatus).
+      late = new Promise((r) => setTimeout(r, 5)).then(() => repo.markCompleted(tenantId));
+      res.json({ ok: true });
+    });
+
+    const response = await request(app).get('/protected/echo').set('x-test-tenant', TENANT_A);
+    await late;
+
+    expect(response.status).toBe(200);
+    const requestClient = clients[0];
+    const update = calls.find(isLateUpdate)!;
+    expect(update.client).not.toBe(requestClient);
+    // Nothing reached the request client after its COMMIT.
+    const onRequestClient = calls.filter((c) => c.client === requestClient).map((c) => c.sql);
+    expect(onRequestClient[onRequestClient.length - 1]).toBe('COMMIT');
+    expectOwnTenantTransaction(calls, update.client, TENANT_A);
+  });
+
+  it('closes when the settle STARTS: a statement issued while COMMIT is in flight is not queued behind it', async () => {
+    // Between COMMIT being enqueued and release() the client still belongs to
+    // the request, but a statement queued now would run AFTER the COMMIT — on
+    // a bare connection, as the privileged principal with no tenant GUC.
+    const { pool, calls, clients } = makeMockPool({
+      onCommit: () =>
+        new Promise<void>((r) => {
+          setImmediate(r);
+        }),
+    });
+    const repo = new LateRepo(pool);
+    let late: Promise<unknown> | undefined;
+    const app = buildApp(pool, async (req, res) => {
+      res.json({ ok: true });
+      // `res.json` → `res.end` has just enqueued COMMIT on the request client.
+      late = repo.markCompleted(req.auth!.tenantId);
+    });
+
+    await request(app).get('/protected/echo').set('x-test-tenant', TENANT_A);
+    await late;
+
+    const update = calls.find(isLateUpdate)!;
+    expect(update.client).not.toBe(clients[0]);
+    expectOwnTenantTransaction(calls, update.client, TENANT_A);
+  });
+
+  it('a request rolled back by a client disconnect does not hand its client to work still running', async () => {
+    const { pool, calls, clients } = makeMockPool();
+    const repo = new LateRepo(pool);
+    const res = new EventEmitter() as unknown as express.Response & EventEmitter;
+    (res as any).statusCode = 200;
+    (res as any).locals = {};
+    const req = {
+      auth: { userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner' },
+    } as unknown as AuthenticatedRequest;
+
+    let late: Promise<unknown> | undefined;
+    const next = vi.fn(() => {
+      late = new Promise((r) => setTimeout(r, 5)).then(() => repo.markCompleted(TENANT_A));
+    });
+    await withTenantTransaction(pool)(req, res as unknown as express.Response, next);
+    (res as unknown as EventEmitter).emit('close');
+    await late;
+
+    expect(calls.filter((c) => c.client === clients[0]).map((c) => c.sql)).toContain('ROLLBACK');
+    const update = calls.find(isLateUpdate)!;
+    expect(update.client).not.toBe(clients[0]);
+    expectOwnTenantTransaction(calls, update.client, TENANT_A);
+  });
+
+  it('BEGIN failure: the error pipeline runs with no tenant context to reuse', async () => {
+    const failingClient = Object.assign(new EventEmitter(), {
+      query: vi.fn(async (sql: string) => {
+        if (sql === 'BEGIN') throw new Error('connection refused mid-handshake');
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    });
+    const pool = { connect: vi.fn(async () => failingClient) } as unknown as Pool;
+    let ctxInErrorHandler: unknown = 'unset';
+    const app = express();
+    app.use((req, _res, next) => {
+      (req as AuthenticatedRequest).auth = { userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner' };
+      next();
+    });
+    app.use('/api', withTenantTransaction(pool));
+    app.get('/api/x', (_req, res) => res.json({ reached: true }));
+    app.use((_err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      ctxInErrorHandler = currentTenantContext();
+      res.status(500).json({ error: 'INTERNAL_ERROR' });
+    });
+
+    const response = await request(app).get('/api/x');
+
+    expect(response.status).toBe(500);
+    expect(ctxInErrorHandler).toBeUndefined();
+    expect(failingClient.release).toHaveBeenCalledTimes(1);
+  });
+
+  describe('reuse sites treat a closed context as absent', () => {
+    const closedCtx = (client: PoolClient): TenantContext => ({ client, tenantId: TENANT_A, closed: true });
+    const unusableClient = {
+      query: vi.fn(async () => {
+        throw new Error('released client must not be queried');
+      }),
+    } as unknown as PoolClient;
+
+    it('currentTenantContext hides a closed context', () => {
+      const seen = tenantContextStore.run(closedCtx(unusableClient), () => currentTenantContext());
+      expect(seen).toBeUndefined();
+    });
+
+    it('PgBaseRepository.withTenantTransaction opens its own connection', async () => {
+      const { pool, calls, clients } = makeMockPool();
+      const repo = new LateRepo(pool);
+      await tenantContextStore.run(closedCtx(unusableClient), () => repo.markCompleted(TENANT_A));
+      expect((pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+      expectOwnTenantTransaction(calls, clients[0], TENANT_A);
+    });
+
+    it('runAfterCommit runs the effect immediately (a hook parked now would never fire)', () => {
+      let ran = false;
+      const res = { locals: {} } as unknown as express.Response;
+      tenantContextStore.run(closedCtx(unusableClient), () =>
+        runAfterCommit(res, () => {
+          ran = true;
+        }),
+      );
+      expect(ran).toBe(true);
+      expect(res.locals.afterCommitHooks).toBeUndefined();
+    });
+
+    it('withRequestSavepoint runs fn directly, with no SAVEPOINT on the released client', async () => {
+      const out = await tenantContextStore.run(closedCtx(unusableClient), () =>
+        withRequestSavepoint(async () => 'ran'),
+      );
+      expect(out).toBe('ran');
+    });
+
+    it('commitRequestTransactionAndBegin refuses rather than COMMIT/BEGIN a client it no longer owns', async () => {
+      await expect(
+        tenantContextStore.run(closedCtx(unusableClient), () => commitRequestTransactionAndBegin()),
+      ).rejects.toThrow(/settled/);
+    });
+
+    it('commitRequestTransactionAndBegin is still a no-op outside any request transaction', async () => {
+      await expect(commitRequestTransactionAndBegin()).resolves.toBeUndefined();
+    });
+  });
+
+  it('structural guard: production code reads the store only through the closed-aware accessor', () => {
+    // A raw `tenantContextStore.getStore()` reuses ctx.client without the
+    // closed check — the exact defect above. Route every reuse through
+    // `currentTenantContext()`; tenant-context.ts itself is the one owner.
+    const SRC = join(__dirname, '..', '..', 'src');
+    const sourceFiles = (dir: string): string[] =>
+      readdirSync(dir).flatMap((name) => {
+        const path = join(dir, name);
+        if (statSync(path).isDirectory()) return sourceFiles(path);
+        return path.endsWith('.ts') ? [path] : [];
+      });
+    const offenders = sourceFiles(SRC)
+      .filter((file) => relative(SRC, file) !== join('middleware', 'tenant-context.ts'))
+      .flatMap((file) =>
+        readFileSync(file, 'utf8')
+          .split('\n')
+          .map((line, i) => ({ line, at: `${relative(SRC, file)}:${i + 1}` }))
+          .filter(({ line }) => /tenantContextStore\.getStore\(/.test(line))
+          .map(({ at }) => at),
+      );
+    expect(offenders).toEqual([]);
   });
 });
