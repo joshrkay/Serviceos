@@ -31,6 +31,14 @@ const WEB_FUNNEL_EVENTS: AnalyticsEvent[] = [
   'test_call_initiated',
   'test_call_succeeded',
   'activation_celebrated',
+  // "Pick, don't build" onboarding (components/onboarding/v3); FUNNEL.md "v3".
+  'v3_ready_viewed',
+  'v3_turn_viewed',
+  'v3_choice_made',
+  'v3_keep_rest',
+  'v3_readback_viewed',
+  'v3_readback_edit',
+  'v3_approved',
 ];
 
 const REQUIRED_FIELDS = ['tenant_id', 'user_id', 'timestamp', 'source'] as const;
