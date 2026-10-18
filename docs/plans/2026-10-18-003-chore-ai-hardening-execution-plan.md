@@ -60,6 +60,11 @@ be alive and may push batch A or B at any time, so every batch start has to re-c
   without the implementer's notes. The orchestrator only verifies command output and never states
   a gate as green without it. (Alternative: orchestrator implements. Rejected: Josh's lean-coordinator
   rule, and review independence.)
+- **Model per role, chosen by the work.** Implementers and reviewers run on Opus: every batch touches
+  security, tenancy, money or live-call behaviour, and the reviewer must be at least as strong as the
+  implementer. Sonnet handles bounded lookups (origin checks, file-existence sweeps, CI log reads).
+  The orchestrator (Fable) verifies gates, coordinates merges and talks to Josh. Josh's instruction
+  2026-10-18: pick whichever model makes more sense per task.
 - **Two batches at a time, three waves, ordered by high-severity count.** 4 CPUs minus 2 for the
   orchestrator and Postgres gives two concurrent implementers. Wave 1: U5 (5 high) and U4 (3 high).
   Wave 2: U2 (2 high) and U1 (1 high). Wave 3: U3 (1 high) and U6 (0 high). The originating session
@@ -206,9 +211,12 @@ subscriptions while the next wave starts.
      from `origin/main`. Record the result.
   2. **Claim verification** (read-only, inside the implementer brief): run the E1 checklist for the
      unit; fold corrections into the implementer's working notes and later the PR body.
-  3. **Implement test-first**, one commit per finding or tight group,
+  3. **Implement test-first with the `tdd` skill**, one commit per finding or tight group,
      `fix(<area>): <defect in plain words>`, staging only changed files, trailers from the session's
-     system reminder. Grep `docs/solutions/` for the area first. Delete dead code the unit names.
+     system reminder. The seams are pre-agreed: the hardening plan's test scenarios for the unit.
+     Red before green, one vertical slice at a time, expected values from the finding's trigger,
+     never recomputed the way the code does. Grep `docs/solutions/` for the area first. Delete dead
+     code the unit names.
   4. **Local gate**, exact counts captured:
      `cd packages/api && npx tsc --project tsconfig.build.json --noEmit`;
      `npm run lint --workspace=packages/api`; `cd packages/api && npx vitest run` (full unit suite);
@@ -216,8 +224,10 @@ subscriptions while the next wave starts.
      `RLS_RUNTIME_ROLE=true`; `packages/web` and `packages/shared` tsc and vitest when touched;
      `npm run check:migration-keys --workspace=packages/api` and the migration-immutability test when
      a migration is added.
-  5. **Independent review.** A fresh reviewer agent gets the branch, the unit's findings and the
-     checklist below, not the implementer's conclusions. Blocking: a fix that does not hold on the
+  5. **Independent review with the `code-review` skill.** A fresh reviewer agent gets the branch,
+     the unit's findings as the spec, and the checklist below, not the implementer's conclusions. It
+     runs the two-axis review (Standards against CLAUDE.md and the handoff rules; Spec against the
+     finding IDs) and then the adversarial pass. Blocking: a fix that does not hold on the
      real production path; a caller regression; a broken invariant (integer cents, UTC, tenant_id and
      RLS, audit event on every mutation, gateway for every AI call, Zod proposal never auto-executed,
      catalog-grounded prices, entity resolver); a test that passes without the fix (reviewer reverts
