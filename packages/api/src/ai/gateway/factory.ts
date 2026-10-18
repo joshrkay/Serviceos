@@ -12,7 +12,7 @@ import type { AppConfig } from '../../shared/config';
 import type { AiRunRepository } from '../ai-run';
 import type { LLMTraceExporter } from './trace-exporter';
 import { CircuitBreakerRegistry, DEFAULT_BREAKER } from './breaker';
-import { createTenantQuotaStore, DEFAULT_TIER_CONFIG } from './tenant-quota';
+import { createTenantQuotaStore, resolveQuotaTierConfig } from './tenant-quota';
 import {
   composeResilienceStack,
   DEFAULT_FALLBACK_RESERVE_MS,
@@ -190,8 +190,12 @@ export function createLLMGateway(
   // U3c — cluster-wide per-tenant quota when REDIS_URL is set (sync-return +
   // async Redis upgrade); per-replica in-memory registry otherwise. Identical
   // semantics; the seam is the same as the WS cap / gateway cache.
+  // GATEWAY-01 — tiers come from AI_QUOTA_TIERS_JSON over the defaults; an
+  // invalid table throws here, so the API fails to boot rather than run on
+  // limits ops did not intend.
   const quotaRegistry =
-    opts.resilience?.quota ?? createTenantQuotaStore(process.env.REDIS_URL, DEFAULT_TIER_CONFIG);
+    opts.resilience?.quota ??
+    createTenantQuotaStore(process.env.REDIS_URL, resolveQuotaTierConfig());
 
   // Publish the breaker registry for the health endpoint.
   sharedBreakerRegistry = breakerRegistry;

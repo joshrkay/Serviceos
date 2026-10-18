@@ -50,6 +50,7 @@ import {
 } from './retry';
 import {
   adoptDeadline,
+  MAX_GATEWAY_DEADLINE_MS,
   MIN_RETRY_BUDGET_MS,
   STAGE_BUDGETS,
   type DeadlineContext,
@@ -116,6 +117,31 @@ export const DEFAULT_FALLBACK_RESERVE_MS = 2_500;
 export function fallbackReserveFor(remainingMs: number, reserveCapMs: number): number {
   const reserve = Math.floor(Math.min(remainingMs / 4, Math.max(0, reserveCapMs)));
   return reserve >= MIN_RETRY_BUDGET_MS ? reserve : 0;
+}
+
+/**
+ * Settle no later than `signal` aborts, even when `work` ignores the signal.
+ * Real adapters tear the HTTP request down on abort, but the per-tenant quota
+ * lease outside the failover chain is sized to the deadline, so the deadline
+ * must bound the hold for a provider that does not cooperate too. A late
+ * settlement of `work` is observed and dropped (no unhandled rejection).
+ */
+function settleByDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
 }
 
 // ─── ProviderRetryDeadlineWrapper ────────────────────────────────────────────
@@ -256,7 +282,12 @@ export class ProviderFailoverWrapper implements LLMProvider {
     // GATEWAY-03: ONE deadline for the whole chain. Each provider gets a slice
     // of what is left, never a fresh copy of the caller's budget — otherwise a
     // hanging primary costs the full budget and the fallback another full one.
-    const deadline = adoptDeadline(request.deadlineMs ?? this.defaultDeadlineMs, request.signal);
+    // Clamped to MAX_GATEWAY_DEADLINE_MS: the tenant-quota lease wrapping this
+    // chain is sized to that ceiling (GATEWAY-01).
+    const deadline = adoptDeadline(
+      Math.min(request.deadlineMs ?? this.defaultDeadlineMs, MAX_GATEWAY_DEADLINE_MS),
+      request.signal,
+    );
     try {
       return await this.runChain(request, deadline);
     } finally {
@@ -287,11 +318,10 @@ export class ProviderFailoverWrapper implements LLMProvider {
       path.push(`${provider.name}:${request.model}`);
       lastProvider = provider.name;
       try {
-        const response = await provider.complete({
-          ...request,
-          signal: deadline.signal,
-          deadlineMs: sliceMs,
-        });
+        const response = await settleByDeadline(
+          provider.complete({ ...request, signal: deadline.signal, deadlineMs: sliceMs }),
+          deadline.signal,
+        );
         // Annotate the response with the accumulated providerPath
         return { ...response, providerPath: [...path] };
       } catch (err) {

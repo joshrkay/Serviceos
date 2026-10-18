@@ -9,6 +9,8 @@
  * `acquire()`. After completion, `reconcile()` adjusts the bucket using the
  * actual token usage from the provider response.
  */
+import { z } from 'zod';
+import { AppError } from '../../shared/errors';
 import {
   tenantConcurrencyInFlight,
   tenantConcurrencyRejectTotal,
@@ -50,14 +52,29 @@ export const DEFAULT_TIER_CONFIG: Record<TenantTier, TenantQuotaTierConfig> = {
     refillTokensPerSec: 250,
     hardUpperBoundTokens: 300_000,
   },
+  // GATEWAY-01: this is the tier EVERY tenant's classify_intent runs on —
+  // nothing in the product maps a tenant's plan to a quota tier yet (plans
+  // differ by seats and included AI minutes only), so tenantTier is never set
+  // on gateway requests. Each live caller turn and each in-app command is one
+  // classify call, and the cap is cluster-wide per tenant. At 2, a third
+  // overlapping turn (three callers on the line, or two callers plus the owner
+  // typing) was rejected outright with no queueing. 8 matches the ordinary
+  // `standard` tier's in-flight cap: by Little's law, ~3s classify latency and
+  // a turn every ~10s per caller, 8 slots carry ~25 concurrent callers on
+  // average and 8 even when every turn runs to the 12s deadline. Sustained
+  // spend stays bounded by the bucket below (1,000 tok/s ≈ 400 classify
+  // calls/hour/tenant at ~9k tokens), not by this cap. Resize without a deploy
+  // via AI_QUOTA_TIERS_JSON.
   classifier_standard: {
-    maxConcurrency: 2,
+    maxConcurrency: 8,
     bucketCapacity: 600_000,
     refillTokensPerSec: 1_000,
     hardUpperBoundTokens: 1_200_000,
   },
+  // Kept above classifier_standard so wiring a plan → tier resolver later can
+  // only ever raise a tenant's classify concurrency.
   classifier_premium: {
-    maxConcurrency: 4,
+    maxConcurrency: 16,
     bucketCapacity: 1_200_000,
     refillTokensPerSec: 4_000,
     hardUpperBoundTokens: 4_000_000,
@@ -70,23 +87,103 @@ export const DEFAULT_TIER_CONFIG: Record<TenantTier, TenantQuotaTierConfig> = {
   },
 };
 
-export class TenantConcurrencyExceededError extends Error {
-  readonly code = 'TENANT_CONCURRENCY_EXCEEDED';
-  readonly retryAfterMs = 1_000;
+/** Wait hint on a concurrency rejection: a slot frees when any in-flight call ends. */
+const CONCURRENCY_RETRY_AFTER_MS = 1_000;
+
+/**
+ * Both quota rejections are typed 429 AppErrors (GATEWAY-01). The gateway
+ * rethrows an AppError unchanged, so `code` and `retryAfterMs` reach the
+ * caller: the voice path files them as quota (not a provider fault) and the
+ * in-app audit's CLASSIFIER_QUOTA_CODES match. As plain Errors they were
+ * re-wrapped as LLM_PROVIDER_ERROR 502 and both were lost.
+ */
+export class TenantConcurrencyExceededError extends AppError {
+  readonly retryAfterMs = CONCURRENCY_RETRY_AFTER_MS;
   constructor(public readonly tenantId: string) {
-    super(`Per-tenant concurrency cap exceeded for tenant ${tenantId}`);
+    super(
+      'TENANT_CONCURRENCY_EXCEEDED',
+      `Per-tenant concurrency cap exceeded for tenant ${tenantId}`,
+      429,
+      { retryAfterMs: CONCURRENCY_RETRY_AFTER_MS },
+    );
     this.name = 'TenantConcurrencyExceededError';
   }
 }
 
-export class TenantTokenBudgetExceededError extends Error {
-  readonly code = 'TENANT_TOKEN_BUDGET_EXCEEDED';
+export class TenantTokenBudgetExceededError extends AppError {
   readonly retryAfterMs: number;
   constructor(public readonly tenantId: string, retryAfterMs: number) {
-    super(`Per-tenant token budget exceeded for tenant ${tenantId}`);
+    super(
+      'TENANT_TOKEN_BUDGET_EXCEEDED',
+      `Per-tenant token budget exceeded for tenant ${tenantId}`,
+      429,
+      { retryAfterMs },
+    );
     this.retryAfterMs = retryAfterMs;
     this.name = 'TenantTokenBudgetExceededError';
   }
+}
+
+const tierConfigSchema = z
+  .object({
+    maxConcurrency: z.number().int().positive(),
+    bucketCapacity: z.number().int().positive(),
+    refillTokensPerSec: z.number().positive(),
+    hardUpperBoundTokens: z.number().int().positive(),
+  })
+  .strict();
+
+const tierOverridesSchema = z.record(
+  // Tier names are lowercase identifiers (e.g. classifier_standard).
+  z.string().regex(/^[a-z][a-z0-9_]*$/, 'tier names are lowercase identifiers'),
+  tierConfigSchema.partial(),
+);
+
+/**
+ * The effective quota tier table: DEFAULT_TIER_CONFIG with AI_QUOTA_TIERS_JSON
+ * merged over it, so a tier can be resized without a deploy. The env value is
+ * a JSON object of `{ "<tier>": { maxConcurrency?, bucketCapacity?,
+ * refillTokensPerSec?, hardUpperBoundTokens? } }`. A known tier may override
+ * any subset of fields; a NEW tier must give all four.
+ *
+ * Unlike AI_MODEL_PRICING_JSON (which fails safe to "unknown cost"), a bad
+ * value THROWS: a quota table that silently fell back to defaults would leave
+ * ops believing a tenant had been resized when it had not. The factory calls
+ * this while building the gateway, so the API refuses to boot instead.
+ */
+export function resolveQuotaTierConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, TenantQuotaTierConfig> {
+  const raw = env.AI_QUOTA_TIERS_JSON;
+  if (!raw || raw.trim() === '') return { ...DEFAULT_TIER_CONFIG };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `AI_QUOTA_TIERS_JSON is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const overrides = tierOverridesSchema.safeParse(parsed);
+  if (!overrides.success) {
+    throw new Error(`AI_QUOTA_TIERS_JSON is invalid: ${overrides.error.message}`);
+  }
+
+  const tiers: Record<string, TenantQuotaTierConfig> = { ...DEFAULT_TIER_CONFIG };
+  for (const [tier, fields] of Object.entries(overrides.data)) {
+    const base = Object.hasOwn(DEFAULT_TIER_CONFIG, tier) ? DEFAULT_TIER_CONFIG[tier] : {};
+    const merged = tierConfigSchema.safeParse({ ...base, ...fields });
+    if (!merged.success) {
+      throw new Error(
+        `AI_QUOTA_TIERS_JSON tier "${tier}" is not a built-in tier, so it needs all of ` +
+          `maxConcurrency, bucketCapacity, refillTokensPerSec, hardUpperBoundTokens: ` +
+          merged.error.message,
+      );
+    }
+    tiers[tier] = merged.data;
+  }
+  return tiers;
 }
 
 interface TenantState {

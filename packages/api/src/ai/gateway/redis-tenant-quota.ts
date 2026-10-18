@@ -29,6 +29,7 @@
 import { randomUUID } from 'crypto';
 import type { Redis } from 'ioredis';
 import { createRedisClient, registerRedisClientForShutdown } from '../../redis/redis-client';
+import { MAX_GATEWAY_DEADLINE_MS } from './deadline';
 import {
   tenantConcurrencyInFlight,
   tenantConcurrencyRejectTotal,
@@ -125,8 +126,17 @@ return 1`;
 /** Hash idle TTL — an idle tenant's bucket is evicted; a fresh key starts full
  *  (lenient, matches the in-memory state-pruning behavior). */
 const HASH_IDLE_MS = 30 * 60 * 1000;
-/** Lease TTL — a request that never releases (crash) frees its slot after this. */
-const DEFAULT_QUOTA_LEASE_TTL_MS = 5 * 60 * 1000;
+/** Slack on top of the longest hold: abort propagation + the release round-trip. */
+const QUOTA_LEASE_TTL_MARGIN_MS = 5_000;
+/**
+ * Lease TTL — a request that never releases (replica crash, or a release lost
+ * to a Redis blip) frees its slot after this. Just above the longest a lease
+ * can legitimately be held: the failover chain inside the lease is clamped to
+ * and settles by MAX_GATEWAY_DEADLINE_MS. It was 5 minutes, so two leaked
+ * leases blocked a tenant's (then 2-slot) classifier for that long
+ * (GATEWAY-01).
+ */
+export const DEFAULT_QUOTA_LEASE_TTL_MS = MAX_GATEWAY_DEADLINE_MS + QUOTA_LEASE_TTL_MARGIN_MS;
 
 export class RedisTenantQuotaStore implements QuotaStore {
   /** Per-replica fallback used when Redis is unavailable (fail-open-to-local). */
