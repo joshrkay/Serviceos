@@ -492,10 +492,18 @@ flowchart LR
       - **The main control is at ingestion.** Every recording row is created with a
         `pci_scan = 'pending'` state, and the retention worker treats `pending` like
         `pci_detected`, keeping it only for the short PCI period. An ingestion-time scan then clears
-        each recording to `clean` or marks it `pci_detected`. It looks for Deepgram redaction
-        markers or Luhn hits in the call's persisted transcript turns. When the call has no turns,
-        it runs one Deepgram pre-recorded pass over the audio with `redact=pci`. A recording is
-        kept under the normal policy only after its scan has cleared it.
+        each recording to `clean` or marks it `pci_detected`. It looks in the call's persisted
+        transcript turns for three positive signals:
+        - Deepgram's redaction markers
+        - remaining Luhn hits
+        - our own `[card number]` marker. `callerTranscriptText` scrubs before persisting, so on
+          the Gather path the digits are already gone. If the scan ignored our own marker, a call
+          whose detection write failed would be cleared as `clean` with the card still in the
+          audio.
+
+        When the call has no turns, it runs one Deepgram pre-recorded pass over the audio with
+        `redact=pci`. A recording is kept under the normal policy only after its scan has cleared
+        it.
     - A `pci_detected` mark makes the retention worker purge that recording's audio promptly from S3
       and Twilio.
   - **PRIV-4**
@@ -529,6 +537,9 @@ flowchart LR
     - After recovery, the callback creates the row as `pci_scan = 'pending'`.
     - The ingestion scan marks it `pci_detected`, and the audio is purged on the PCI schedule.
     - A clean call clears to `clean` and keeps the normal policy.
+    - Split failure: on the Gather path the detection write fails, but the transcript turn (already
+      scrubbed to `[card number]`) is persisted. The scan marks the recording `pci_detected`; it
+      never clears it.
 - **Verification:** a PAN read aloud never reaches `ai_runs`, `call_transcript_turns` or the provider
   payload in tests.
 
@@ -680,6 +691,19 @@ flowchart LR
         tenant), which pages whether or not prices are known
       - an "unpriced model in production" alert, raised when completed runs with null cost exceed a
         small floor, pointing at `AI_MODEL_PRICING_JSON`
+    - **Count every physical attempt, not only the logical call.** Take a provider that bills an
+      attempt, then times out, and then succeeds on the retry inside `ProviderRetryDeadlineWrapper`.
+      The `ai_runs` row records only the retry's usage, and the failure-rate rule sees a completion.
+      Volume rules built on `ai_runs` alone would therefore miss a spend loop driven by retries.
+      This must not depend on U8, which is optional.
+      - The retry wrapper reports, per logical call: physical attempts, ambiguous attempts (timeout
+        or reset after send), and each ambiguous attempt's worst-case token bound.
+      - The gateway persists these on the `ai_runs` row, in nullable integer columns added by an
+        idempotent migration.
+      - The token-volume rule adds ambiguous attempts at their bound.
+      - A retry-rate alert fires when attempts per call exceed a threshold.
+      - U3 also edits the retry wrapper. Keep this a minimal hook, and merge after U3 or resolve
+        against it.
     - All of these go through `alertOperator`.
   - **OBS-3**
     - **Gate each prompt family with an eval that exercises it.** Widening a path filter only starts a
@@ -702,6 +726,9 @@ flowchart LR
     sites.
   - **Unit:** the per-tenant, spend, token-volume and unpriced-model evaluators. A null-cost runaway
     loop still pages through the token-volume rule.
+  - **Unit:** a timeout followed by a successful retry is counted as two physical attempts, one of them
+    ambiguous. The token-volume rule includes the ambiguous attempt at its bound, and the retry-rate
+    alert fires past its threshold.
   - **Integration:** an aggregate test that seeds two tenants, one failing and one healthy, and expects
     only the failing tenant to alert.
   - **Workflow YAML:** it parses (actionlint if available), and the secret references match the
