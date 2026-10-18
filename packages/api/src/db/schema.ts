@@ -7676,6 +7676,40 @@ export const MIGRATIONS = {
       PRIMARY KEY (trade, metro_code)
     );
   `,
+
+  // The owner's pre-approval onboarding draft: the assembled typical shop plus
+  // the choices they have staged. One row per tenant. Nothing here reaches
+  // tenant_settings until POST /api/onboarding/draft/approve turns it into
+  // onboarding_* proposals and approves them; `version` is the compare-and-swap
+  // guard against two tabs staging at once. RLS like onboarding_session (195).
+  '311_onboarding_drafts': `
+    CREATE TABLE IF NOT EXISTS onboarding_drafts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      pack_id TEXT NOT NULL,
+      trade TEXT NOT NULL,
+      metro_code TEXT,
+      metro_name TEXT,
+      business_name TEXT NOT NULL,
+      owner_first_name TEXT,
+      client_timezone TEXT,
+      assembled JSONB NOT NULL,
+      choices JSONB NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved')),
+      version INTEGER NOT NULL DEFAULT 1,
+      proposal_ids JSONB NOT NULL DEFAULT '[]',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      approved_at TIMESTAMPTZ
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_onboarding_drafts_tenant
+      ON onboarding_drafts (tenant_id);
+    ALTER TABLE onboarding_drafts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE onboarding_drafts FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_onboarding_drafts ON onboarding_drafts;
+    CREATE POLICY tenant_isolation_onboarding_drafts ON onboarding_drafts
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
