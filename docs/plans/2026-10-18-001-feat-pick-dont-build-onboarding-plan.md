@@ -88,7 +88,13 @@ unowned position.
   still hold the seeded price needs the baseline: U6's migration adds a nullable
   `seeded_unit_price_cents` to `catalog_items` and to the estimate template line items, set by
   the seeder from then on; a row whose baseline is null or differs from its current price is
-  the owner's and is left alone.
+  the owner's and is left alone. A null baseline is therefore not a neutral default: a tenant
+  seeded before that migration would read as all owner-owned, and the re-run price card would
+  promise an update it could not make. So the migration backfills the baseline for existing
+  rows whose price exactly equals the seed price for the tenant's pack at the tenant's
+  resolved price tier (an exact match is an untouched seed; everything else stays null and
+  owner-owned), and the re-run flow offers repricing only when the tenant has at least one
+  baseline. A tenant with none is told its prices are its own and sees no price card (U6).
 - **Metro from area code is a static NPA→metro map in code**, extending
   `packages/api/src/compliance/us-geography.ts` which today maps area code to state only. One
   spoken confirmation when an NPA spans metros, and the inferred city is always visible and
@@ -151,9 +157,14 @@ tiers; import from a photo; pricing or plan changes.
 ## Repository invariants touched
 
 - **Human-approval gate / Zod proposals:** every settings write in this plan happens by
-  approving `onboarding_*` proposals (existing five plus new `onboarding_voice_policy`), each
-  with a Zod contract in `packages/api/src/proposals/contracts/onboarding.ts` and a handler in
-  `proposals/execution/onboarding-handlers.ts`. The draft row is pre-approval state only.
+  approving `onboarding_*` proposals. A draft approval mints exactly two of them,
+  `onboarding_tenant_settings` and the new `onboarding_voice_policy`, each with a Zod contract
+  in `packages/api/src/proposals/contracts/onboarding.ts` and a handler in
+  `proposals/execution/onboarding-handlers.ts`. The other existing types
+  (`onboarding_service_category`, `onboarding_estimate_template`, `onboarding_team_member`,
+  `onboarding_schedule`) stay with the FSM path: the pack seeder lands the catalog and
+  templates, and the voice-policy proposal carries the hours preset. The draft row is
+  pre-approval state only.
   Execution remains async after the 5 s undo window (`proposals/lifecycle.ts:53`); the
   read-back shows "Saving, tap to undo" for that window (the one tap is `POST /draft/undo`, U9;
   until it lands the screen says "Saving" with no button, as S2a shipped).
@@ -189,7 +200,8 @@ flowchart LR
 ```
 
 Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override}.ts`,
-`packages/api/src/onboarding/draft/{repository,routes,approve}.ts`. Web:
+`packages/api/src/onboarding/draft/{repository,approve}.ts`, router
+`packages/api/src/routes/onboarding-draft.ts`. Web:
 `packages/web/src/components/onboarding/v3/`.
 
 ## Implementation Units
@@ -240,14 +252,16 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 
 ### U2. Draft, choices and approve API; `onboarding_voice_policy` proposal
 - **Goal:** The pre-approval draft, typed choice staging, and the single-transaction
-  mint-and-approve on "That's right", plus the proposal contract for the settings the existing
-  five do not cover.
+  mint-and-approve on "That's right", plus `onboarding_voice_policy`, the proposal contract for
+  the settings no existing `onboarding_*` type carries.
 - **Requirements:** R3, R7
 - **Dependencies:** U1
 - **Files:**
   - modify `packages/api/src/db/schema.ts` (migration `311_onboarding_drafts`: `tenant_id`,
     `trade`, `metro_code`, `assembled JSONB`, `choices JSONB`, `status`, `version`, timestamps; RLS)
-  - create `packages/api/src/onboarding/draft/repository.ts`, `routes.ts`, `approve.ts`
+  - create `packages/api/src/onboarding/draft/repository.ts` and `approve.ts`
+    (`buildDraftProposals`, `approveDraft`), and the router
+    `packages/api/src/routes/onboarding-draft.ts`
   - create `packages/api/src/onboarding/draft/contracts.ts` (Zod for choices and overrides)
   - modify `packages/api/src/proposals/contracts/onboarding.ts` (add `onboarding_voice_policy`:
     greeting, `autonomous_booking_enabled`, `after_hours_voice_mode` as `voicemail|ai_answering`,
@@ -259,22 +273,23 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - modify `packages/api/src/proposals/execution/onboarding-handlers.ts` (handler; writes via
     `SettingsRepository`), `packages/api/src/settings/settings.ts` and `pg-settings.ts`
     (two new keys, migration `312`), `packages/api/src/shared/contracts.ts` (`updateSettingsSchema`)
-  - modify `packages/api/src/ai/orchestration/onboarding-conversation.ts` (extract
-    `buildOnboardingProposals(ctx)` so the FSM path and the draft path share one builder)
   - modify `packages/api/src/onboarding/derive-status.ts`, `load-facts.ts`, `contracts.ts`
     (additive facts `draftStatus`, `choicesAnswered`)
   - modify `packages/api/src/app.ts` (mount under `/api/onboarding/draft`)
-  - tests: `packages/api/test/onboarding/draft/{repository,approve,routes}.test.ts`,
+  - tests: `packages/api/test/onboarding/draft/{approve,wire-contract}.test.ts`,
+    `packages/api/test/routes/onboarding-draft.route.test.ts`,
     `packages/api/test/proposals/onboarding-voice-policy.test.ts`,
     `packages/api/test/onboarding/derive-status.test.ts` (extend),
-    `packages/api/test/integration/onboarding-draft.test.ts`,
+    `packages/api/test/integration/onboarding-draft-approve.test.ts`,
+    `packages/api/test/integration/onboarding-draft-repository.test.ts`,
     `packages/api/test/integration/onboarding-voice-policy-handler.test.ts`
 - **Approach:** `POST /draft` creates the draft (idempotent per tenant; `GET /draft` reads it,
   404 before). One row per tenant, so a re-run reopens that row rather than creating another:
   `POST /draft/reopen` (U6) is allowed only when the draft is `approved` and every generated
   proposal has executed; it re-assembles for the current trade and metro, pre-fills `choices`
   from the live settings (greeting → override label; the enum keys → the option whose writes
-  match; prices → the current headline items), resets `status='draft'`, `proposal_ids=[]`,
+  match; prices → the current headline items, repriced only while the tenant still has a
+  seeded baseline, U6), resets `status='draft'`, `proposal_ids=[]`,
   bumps `version`, and emits `onboarding.draft_reopened`. The read-back then shows what is
   live today and "That's right" mints proposals exactly as a first run does. The trade, business name and optional cell it needs come from the demo-call
   lead when there is one (U7) and otherwise from the v3 shell's first screen, "What should I
@@ -283,8 +298,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   is the assembled shop and the staged choices.
   `PUT /draft/choices/:settingKey` validates against the registry, stores `'a'|'b'|{override}`
   with a `version` compare-and-swap, emits `onboarding.choice_staged`. `POST /draft/approve`
-  runs in one tenant transaction: build proposals from draft (existing five types plus
-  `onboarding_voice_policy`), create them with surface `'onboarding_readback'`, call the same
+  runs in one tenant transaction: build exactly two proposals from the draft
+  (`buildDraftProposals`: `onboarding_tenant_settings` carrying name, city, pack, chosen prices
+  and timezone, and `onboarding_voice_policy` carrying the other staged settings; the
+  draft-only `existing_number` answer is never written), create them with surface
+  `'onboarding_readback'`, call the same
   batch-approve function `routes/proposals.ts:322` uses, and gate on its result: that helper
   reports per-item failures in `failed` and keeps the earlier approvals, so the route throws a
   `ConflictError` when `failed.length > 0` before the draft is touched, and the one tenant
@@ -299,10 +317,19 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   batch approve, `docs/solutions/logic-errors/whole-object-refine-mints-approve-to-fail-voice-proposals.md`
   (never mint a proposal that fails its own gate).
 - **Test scenarios:**
-  - Happy path: stage seven choices, approve → six proposal rows exist with
-    `surface='onboarding_readback'`, all `approved`, one audit trail, draft `approved`.
-  - Edge: approve with three choices unanswered → defaults (option A) used, no gated
-    proposal minted; stale `version` on PUT → 409; approve twice → second is a no-op 200.
+  - Happy path: stage choices, approve → exactly two proposal rows exist for the tenant,
+    `onboarding_tenant_settings` and `onboarding_voice_policy`, each with
+    `source_context.surface='onboarding_readback'` and the draft id, both `approved`; the
+    response's `proposalIds` has those two ids and equals the draft's `proposal_ids`; the draft
+    is `approved`; the audit trail is `onboarding.draft_created`, one `onboarding.choice_staged`
+    per PUT and one `onboarding.draft_approved`; `tenant_settings` is untouched until the
+    worker runs (pinned by `test/integration/onboarding-draft-approve.test.ts`). Unit:
+    `buildDraftProposals` returns only those two inputs and both payloads parse under their
+    Zod schemas; an answered `existing_number` never appears in either payload.
+  - Edge: approve with choices unanswered → each takes its `mostShops` default (option A
+    today), no gated proposal minted; no recorded timezone → 400 `TIMEZONE_REQUIRED`, zero
+    proposal rows, draft still `'draft'`; stale `version` on PUT → 409; approve twice → second
+    is a no-op 200 returning the same two ids.
   - Error: unknown `settingKey` → 400 naming the key; option `'c'` → 400; tenant without a
     draft calling approve → 404; non-owner → 403.
   - Integration: handler for `onboarding_voice_policy` writes `voice_greeting`,
@@ -429,13 +456,13 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     each classified to one of that key's allowed values from `ALLOWED_WRITES_BY_KEY` or a
     clarification; `BusinessProfileExtractor` is not involved. One clarification on low
     confidence)
-  - modify `packages/api/src/onboarding/draft/routes.ts` (`POST /draft/override/:settingKey`,
+  - modify `packages/api/src/routes/onboarding-draft.ts` (`POST /draft/override/:settingKey`,
     `POST /draft/override` with the setting-key classifier, `PUT /draft/metro`)
   - modify `packages/web/src/components/onboarding/v3/OptionPairTurn.tsx`, `ReadbackCard.tsx`
     (override turn UI reusing `TranscriptCard`)
   - tests: `packages/api/test/onboarding/choices/override.test.ts` (mocked gateway; one case
     per key, all seven, plus a clarification case per enum key),
-    `packages/api/test/onboarding/draft/routes.test.ts` (extend),
+    `packages/api/test/routes/onboarding-draft.route.test.ts` (extend),
     `packages/web/src/components/onboarding/v3/OverrideTurn.test.tsx`
 - **Approach:** From the read-back the correction turn opens from a tapped row, so the key is
   known (U3 made every row tappable). The generic "Tell me what to change" mic has no key, so it
@@ -469,12 +496,22 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Dependencies:** U3
 - **Files:**
   - modify `packages/web/src/components/onboarding/v3/NumberCard.tsx`, `ConversationShell.tsx`
-  - create migration `314_seeded_price_baseline` (`catalog_items.seeded_unit_price_cents`,
-    estimate template line items `seeded_unit_price_cents`, nullable) and
+  - create migration `314_seeded_price_baseline` (`catalog_items.seeded_unit_price_cents`
+    and a `seededUnitPriceCents` key on each estimate template line item inside the
+    `line_item_templates` JSONB, both nullable; `tenant_settings.seeded_baseline_backfilled_at`,
+    the per-tenant one-shot stamp for the backfill below) and
     `packages/api/src/packs/reprice-seeded.ts` (the re-run update path: headline items and
     template lines whose current price equals their baseline move to the new pick; the seeder
-    writes the baseline from now on); tests `packages/api/test/packs/reprice-seeded.test.ts`,
+    writes the baseline from now on; `backfillSeededBaselines(tenantId)` for tenants seeded
+    before 314; `hasSeededBaseline(tenantId)` for the re-run gate); tests
+    `packages/api/test/packs/reprice-seeded.test.ts`,
     `packages/api/test/integration/reprice-seeded.test.ts`
+  - modify `packages/api/src/packs/seed-pack-defaults.ts` (write the baseline on every seeded
+    row; export the pricing function so the backfill and the seeder share one rounding rule)
+    and `packages/api/src/db/migrate.ts` (after the SQL corpus, still under the migration
+    advisory lock, run `backfillSeededBaselines` for each tenant whose
+    `seeded_baseline_backfilled_at` is null); test: extend
+    `packages/api/test/integration/migration-replay-populated-db.test.ts`
   - modify `packages/api/src/proposals/execution/onboarding-handlers.ts`
     (`OnboardingTenantSettingsExecutionHandler`: when the pack is already active, call
     `repriceSeeded` with the payload's prices instead of the first-run `activatePackWithSeed`,
@@ -482,8 +519,25 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     against a seeded tenant and asserts the moved and untouched rows)
   - create `packages/api/src/onboarding/forwarding-probe.ts` and route
     `POST /api/onboarding/phone/forwarding-probe`; migration 314 also adds
-    `tenant_settings.forwarding_confirmed_at` and `forwarding_verified_at`; tests
+    `tenant_settings.forwarding_confirmed_at`, `forwarding_verified_at`,
+    `forwarding_source_number` (nullable text, E.164) and `forwarding_carrier` (nullable text,
+    CHECK in `verizon | att | tmobile | other`, added `NOT VALID` per
+    `docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md`); tests
     `packages/api/test/onboarding/forwarding-probe.test.ts`
+  - the forwarding answers travel the same road as the owner's cell (U10): a second migration
+    in the 314 range adds nullable `onboarding_drafts.forwarding_source_number` and
+    `forwarding_carrier`; modify `packages/api/src/onboarding/draft/contracts.ts` and
+    `repository.ts` (both fields on the draft: E.164 through the existing phone normaliser, and
+    the carrier enum above), `packages/api/src/routes/onboarding-draft.ts` (`PUT
+    /draft/forwarding` stages them, refused unless `existing_number` resolves to "yes"),
+    `packages/api/src/onboarding/draft/approve.ts` (carry `forwardingSourceNumber` and
+    `forwardingCarrier` on the `onboarding_tenant_settings` payload),
+    `packages/api/src/proposals/contracts/onboarding.ts` (both optional on that payload's Zod
+    schema), `proposals/execution/onboarding-handlers.ts` (`OnboardingTenantSettingsExecutionHandler`
+    writes both columns through `SettingsRepository`), and `packages/api/src/settings/settings.ts`
+    and `pg-settings.ts` (the two keys; not added to `updateSettingsSchema`); tests
+    `packages/api/test/onboarding/draft/forwarding.test.ts`,
+    `packages/api/test/integration/onboarding-draft-forwarding.test.ts`
   - create `packages/api/src/onboarding/forwarding-text.ts` (owner SMS with tap-to-dial carrier
     code via `notifications/owner-sms-sender.ts`), route `POST /api/onboarding/phone/forwarding-text`
   - modify `packages/web/src/components/home/HomeConversationPanel.tsx`, `HomePage.tsx`
@@ -493,10 +547,13 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     its tests, `utils/onboarding-rerun.ts` callers updated to v3
   - modify `packages/web/src/components/settings/SettingsPage.tsx:1131` ("Re-run setup" → v3,
     which calls `POST /draft/reopen` first and lands on the read-back)
-  - modify `packages/api/src/onboarding/draft/routes.ts`, `repository.ts`, `approve.ts`
+  - modify `packages/api/src/routes/onboarding-draft.ts`,
+    `packages/api/src/onboarding/draft/repository.ts`, `approve.ts`
     (`POST /draft/reopen` and the settings → choices pre-fill; refused with 409 unless every
     generated proposal has `executed`, so a `failed` set is retried through U9 first and a
-    second set is never minted beside failed rows); tests
+    second set is never minted beside failed rows; the response carries
+    `repricing: { available }`, and a reopened draft's approval leaves the prices off the
+    settings payload when it is false); tests
     `packages/api/test/onboarding/draft/reopen.test.ts`,
     `packages/api/test/integration/onboarding-draft-reopen.test.ts`
   - tests: `packages/api/test/onboarding/forwarding-text.test.ts`,
@@ -506,10 +563,16 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `e2e/onboarding-v3-day-one.spec.ts`
 - **Approach:** The `existing_number` choice decides the branch: "no" hides forwarding
   entirely and the Rivet number is presented as the business number; "yes" asks two more
-  things on the same turn, "What's that number?" (E.164, `tenant_settings.forwarding_source_number`)
-  and the carrier (chips from the table in `steps/PhoneStep.tsx:28-35`,
-  `tenant_settings.forwarding_carrier`), because a yes/no cannot be forwarded and the owner's
-  cell is not the business line. The text then goes to the owner's cell and says to dial the
+  things on the same turn, "What's that number?" (E.164) and the carrier (chips from the table
+  in `steps/PhoneStep.tsx:28-35`), because a yes/no cannot be forwarded and the owner's cell
+  is not the business line. Both answers are staged on the draft (`PUT /draft/forwarding`),
+  ride the `onboarding_tenant_settings` payload as `forwardingSourceNumber` and
+  `forwardingCarrier`, and are written to `tenant_settings.forwarding_source_number` and
+  `forwarding_carrier` by that proposal's handler when it executes, so the write is approved,
+  audited and undoable like the rest. Nothing else writes them: they are not in
+  `updateSettingsSchema`, and the staging endpoint writes the draft only. The shell holds until
+  the approval has executed (U9), so the text and the probe always read stored values. The
+  text then goes to the owner's cell and says to dial the
   code from the business phone (a `tel:` link only when that phone is the same device; a
   landline gets the code to punch in), the probe calls the business number, not the cell, and
   the badge says "calls still ring your cell" on the first-day
@@ -522,6 +585,33 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   First-day home replaces empty KPI cards with
   Rivet's spoken opener and three chips; the existing cards stay hidden until they have data.
   Delete v2 with a re-grep for every import (CLAUDE.md dead-code rule).
+- **Seeded-price baseline and the re-run gate:** A null baseline means "the owner's", so a
+  tenant seeded before migration 314 would have every price skipped by `repriceSeeded` while
+  the re-run card implied an update. Two rules close that. (1) Backfill:
+  `backfillSeededBaselines(tenantId)` sets the baseline on a catalog item or template line only
+  when its current price exactly equals the price the seeder would have written for that seed
+  name under a pricing the tenant could have been seeded with: the pack defaults (every tenant
+  the v2 wizard seeded, and any whose metro had no tier row); and, for a tenant with an
+  onboarding draft, `standard` or `premium` of its resolved price tier (the
+  `regional_price_tiers` row for the draft's `metro_code`, which came from the NPA→metro map,
+  else the `'US'` row, else the pack defaults; premium is standard × `PREMIUM_MULTIPLIER_BPS`)
+  or the pair on its approved `onboarding_tenant_settings` proposal (`hourlyRateCents`,
+  `tripFeeCents`, which also covers a free-speech override). An exact match is an untouched
+  seed; everything else keeps a null baseline and stays the owner's. The expected price comes
+  from the seeder's own pricing function, exported for this and not re-derived in SQL, so
+  there is one rounding rule; the one false positive, an owner who typed a seed price by hand,
+  gets a repricing the read-back names. The runner has no ledger and replays the corpus every
+  deploy, so the step writes only where the baseline is null, runs once per tenant in that
+  tenant's own transaction, and stamps `tenant_settings.seeded_baseline_backfilled_at`; a
+  tenant that fails is retried on the next deploy and a stamped one is never revisited (the
+  one-shot lesson of `194_thank_you_sms`). (2) Gate: `POST /draft/reopen` reports
+  `repricing.available`, derived and never stored, true when any non-archived catalog item or
+  template line of the tenant has a baseline (`hasSeededBaseline`). When it is false the price
+  turn says "Your prices are your own" and offers no repricing: the price row is read-only, the
+  reopened draft's approval leaves `hourlyRateCents` and `tripFeeCents` off the settings
+  payload (the first-run path, which requires them, is unchanged), and `repriceSeeded` is not
+  called. When it is true the owner picks as before, and rows the owner edited are still
+  reported as theirs.
 - **Patterns to follow:** `notifications/owner-sms-sender.ts` (`recipientClass: 'owner'`
   skips consent), `components/home/ActivationCelebrationBanner.tsx` (first-run state),
   `docs/solutions/architecture-patterns/derive-shared-status-rule-across-frontends.md`.
@@ -530,16 +620,37 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     posture, payment mode, hours, emergency target and prices; a new price pick → the two
     headline catalog items and the template lines that still carry the seeded amounts update,
     an owner-edited labor rate (and the template line the owner changed) are untouched and the
-    read-back says so; "yes" to an existing number → the business number and carrier are asked
-    and stored, the text says to dial from that phone, the probe calls that number;
+    read-back says so; "yes" to an existing number → the business number and carrier are asked,
+    staged on the draft, carried on the settings proposal and written to
+    `tenant_settings.forwarding_source_number` and `forwarding_carrier` when it executes, the
+    text says to dial from that phone, the probe calls that number;
     day-one owner → no forwarding turn, number card says "put it on the truck";
     established shop → forwarding text sent once, badge shown until the owner confirms or the
     probe lands; a probe that never arrives leaves the badge and re-shows the code.
   - Edge: owner taps "I'll do it later" → progress saved, badge persists across reload;
     first-day home with zero jobs → opener, three chips, two muted cards, no stat tiles.
+  - Edge (forwarding answers): staged on the draft but not approved → `tenant_settings`
+    forwarding columns still null; `existing_number` "no" → `PUT /draft/forwarding` refused and
+    neither key on the payload; approved and executed → both columns hold the staged values.
+  - Edge (legacy seeded tenants): rows seeded at the pack defaults, and separately rows seeded
+    at the tenant's `standard` tier, its `premium` tier or a free-speech pair (scaled rows
+    included), with a null baseline and an exactly matching price → after the backfill each has
+    its baseline and a new price pick reprices it; a legacy row the owner edited → baseline
+    stays null, the row is left alone and the read-back says it is theirs; a second deploy
+    replays the backfill → no baseline overwritten and a stamped tenant is not revisited.
+  - Edge (no baseline): a tenant whose rows all lack a baseline → `POST /draft/reopen` reports
+    `repricing.available = false`, the price turn says "Your prices are your own" and shows
+    no price card, and approval carries no prices; a tenant with at least one baseline sees
+    the repricing choice.
   - Error: SMS provider failure → the carrier code is shown inline with copy button as the
-    fallback and an event is recorded.
-  - Integration: route test proves the SMS body contains the right code for each carrier.
+    fallback and an event is recorded; a non-E.164 source number → 400 naming the field; a
+    carrier outside `verizon | att | tmobile | other` → 400.
+  - Integration: route test proves the SMS body contains the right code for each carrier; real
+    Postgres pins the new columns (`tenant_settings.forwarding_source_number`,
+    `forwarding_carrier` with its CHECK, `seeded_baseline_backfilled_at`;
+    `catalog_items.seeded_unit_price_cents`; the `onboarding_drafts` forwarding columns) and
+    the handler's write to them under RLS; the backfill runs against seeded and hand-edited
+    rows in a populated database (extending `migration-replay-populated-db.test.ts`).
 - **Verification:** `grep -r "onboarding/v2" packages/web/src` returns nothing; e2e passes for
   both branches; the forbidden-vocabulary test extends to `components/home`.
 
@@ -586,8 +697,12 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Requirements:** R3
 - **Dependencies:** U2
 - **Files:**
-  - modify `packages/api/src/onboarding/draft/routes.ts` (`POST /draft/undo`, `POST /draft/retry`),
+  - modify `packages/api/src/routes/onboarding-draft.ts` (`POST /draft/undo`, `POST /draft/retry`),
     `packages/api/src/onboarding/draft/approve.ts` (undo and retry helpers),
+    `packages/api/src/onboarding/draft/repository.ts` (read the draft `FOR UPDATE`),
+    `packages/api/src/proposals/proposal.ts` and `pg-proposal.ts` (`ProposalRepository` gains a
+    locking read of a proposal set by id, ordered, `FOR UPDATE`; the in-memory repo implements
+    it as a plain ordered read),
     `packages/api/src/onboarding/load-facts.ts` and `derive-status.ts` (the `draft` fact gains
     `execution: 'pending' | 'executing' | 'executed' | 'failed'`, derived from the generated
     proposals' statuses)
@@ -597,11 +712,22 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - tests: `packages/api/test/onboarding/draft/undo.test.ts`,
     `packages/api/test/onboarding/derive-status.test.ts` (extend),
     `packages/api/test/integration/onboarding-draft-undo.test.ts`, the v3 shell tests
-- **Approach:** `POST /draft/undo` runs in one tenant transaction: every proposal in
-  `proposal_ids` that is still `approved` and unexecuted is reverted with the same logic
-  `POST /api/proposals/:id/undo` uses, the draft returns to `'draft'` with `proposal_ids = []`,
-  and `onboarding.draft_undone` is emitted. If any proposal has already executed, undo is
-  refused with 409 and the shell says so; the inbox's per-proposal undo remains for that case.
+- **Approach:** `POST /draft/undo` runs in one tenant transaction that locks, then decides,
+  then writes. It takes `SELECT … FOR UPDATE` on the draft row and then on the proposals in
+  `proposal_ids` (ordered by id, so two undos cannot deadlock), and requires EVERY locked row
+  to still be `approved` and inside the undo window (`isInUndoWindow`, read from the locked
+  row). If any row is `executing`, `executed`, `execution_failed` or `undone`, if any window
+  has closed, or if a listed proposal is missing, it refuses with 409 and a typed reason
+  (`DRAFT_UNDO_REFUSED` naming the offending statuses, or `UNDO_WINDOW_CLOSED`), changes
+  nothing, and the shell says so; the inbox's per-proposal undo remains for the executed case.
+  Only then does it revert the whole set with the transition `POST /api/proposals/:id/undo`
+  makes (`approved → undone`), return the draft to `'draft'` with `proposal_ids = []`, and
+  emit `onboarding.draft_undone`. The lock is what closes the race at the five-second
+  boundary: the worker claims a row with `UPDATE … WHERE id = $1 AND status = 'approved'`
+  (`claimForExecution`), so a claim that arrives while undo holds the locks waits and then
+  matches nothing because the rows are `undone`, and a claim that committed first shows as
+  `executing` to the locked read and refuses the undo. The draft cannot reopen while a
+  generated proposal is applying or has applied.
   `POST /draft/retry` moves each of the set's `execution_failed` proposals along the only path
   `proposals/lifecycle.ts` allows (`execution_failed → draft`, then approved again with a fresh
   `approvedAt`), in one request transaction with a `proposal.retried` audit row, so the
@@ -612,14 +738,23 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Test scenarios:**
   - Happy path: approve → undo inside the window → every proposal reverted, settings untouched,
     draft `'draft'` and editable again, one audit row.
-  - Edge: one proposal already executed → 409, nothing changed; approve → all executed → fact
-    `executed` and the shell moves to billing.
+  - Edge: any one proposal `executing`, `executed` or `execution_failed` (one case each) →
+    409 `DRAFT_UNDO_REFUSED`, no row changed, draft still `approved`; the window closed on one
+    row → 409 `UNDO_WINDOW_CLOSED`, nothing changed; approve → all executed → fact `executed`
+    and the shell moves to billing.
+  - Race (the five-second boundary, two real connections): (a) the worker's
+    `claimForExecution` arrives after undo has locked the set → the claim blocks, undo commits,
+    the claim returns null, no handler runs and the draft is `'draft'`; (b) the claim commits
+    first → undo reads `executing`, refuses with 409, the draft stays `approved` and the
+    executing proposal finishes untouched. Never: draft `'draft'` while any generated proposal
+    is `executing` or `executed`.
   - Error: one proposal `execution_failed` → fact `failed`, the shell holds and offers retry;
     retry moves that one only through `draft → approved` with a new `approvedAt` (the others
     untouched), it executes after the fresh window, and the fact is `executed`.
   - Integration: real Postgres rows for the undo and for the mixed-status set.
-- **Verification:** no owner reaches the trial turn with a generated proposal unexecuted, and
-  one tap inside the window undoes the whole approval.
+- **Verification:** no owner reaches the trial turn with a generated proposal unexecuted, one
+  tap inside the window undoes the whole approval, and a tap that loses the race to the worker
+  changes nothing.
 
 ### U8. Runtime consumers for the policy keys the cards write
 - **Goal:** Every card's promise is behaviour, not a stored value. `payment_collection_mode`
@@ -749,8 +884,8 @@ previous one; the previous slice is merged first.
 | S1 | U1 + U2 | Choice registry, typical-shop assembly, regional tiers, draft/choices/approve API, `onboarding_voice_policy` proposal. Live API, integration-tested, no UI yet. | 7-10 days |
 | S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
-| S4 | U5 + U9 + U10 | Free-speech override, setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); whole-draft undo, execution tracking and retry; the owner's cell on the draft and the settings proposal. | 4-5 days |
-| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search, forwarding text with owner confirmation and probe, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target`, flag flipped, v2 deleted. | 7-9 days |
+| S4 | U5 + U9 + U10 | Free-speech override, setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); whole-draft undo (row-locked, all-or-nothing), execution tracking and retry; the owner's cell on the draft and the settings proposal. | 5-6 days |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search, forwarding text with owner confirmation and probe, forwarding answers on the draft and the settings proposal, seeded-price baseline with legacy backfill and the re-run repricing gate, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target`, flag flipped, v2 deleted. | 8-10 days |
 | S6 | U7 | Pre-signup demo call (founder decision first). | 6-9 days |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
