@@ -84,20 +84,55 @@ export interface DraftProposalsFact {
   statuses: string[];
 }
 
-const IN_FLIGHT_OR_DONE = new Set(['approved', 'executing', 'executed']);
+/**
+ * The only statuses a member of the approved set may hold while POST /draft/retry
+ * is allowed to touch the set: still on its way (`approved`, `executing`),
+ * finished (`executed`), or the failure retry exists for (`execution_failed`).
+ * Anything else (`undone`, `rejected`, `expired`, `draft`, `ready_for_review`, ...)
+ * is a member that will never run again and that retry cannot bring back
+ * (`undone` is terminal in lifecycle.ts).
+ */
+const RETRY_SAFE_STATUSES = new Set(['approved', 'executing', 'executed', 'execution_failed']);
+
+/** Stands in for a listed proposal whose row no longer exists. */
+export const MISSING_PROPOSAL = 'missing';
 
 /**
- * Derived execution state of an approved draft's proposals.
+ * Why POST /draft/retry must not touch this approved set: one entry per listed
+ * proposal that is outside {approved, executing, executed, execution_failed}
+ * (its status), plus one `missing` per listed proposal with no row. Empty means
+ * the set is whole and retry can complete it.
  *
- * - `failed`: any proposal is `execution_failed`. POST /draft/retry re-queues
- *   exactly those rows, so the shell offers a retry instead of waiting forever;
- *   wins over every other state.
- * - `stopped`: no proposal is `execution_failed`, but one is outside
- *   approved/executing/executed (undone or rejected from the inbox, expired, a
- *   stuck pre-approval status) or a listed proposal no longer exists. Retry
- *   cannot leave any of these (`undone` is terminal in lifecycle.ts), so the
- *   shell must not offer it; it also never waits forever. The whole-draft undo
- *   (plan U9, S4) is the way out.
+ * The single source of truth for both the derived `stopped` state below and the
+ * guard inside `retryFailedDraftProposals`, so the status can never invite a
+ * retry the endpoint refuses (or the reverse).
+ */
+export function retryBlockingStatuses(tracked: DraftProposalsFact): string[] {
+  const missing = Math.max(0, tracked.expected - tracked.statuses.length);
+  return [
+    ...tracked.statuses.filter((s) => !RETRY_SAFE_STATUSES.has(s)),
+    ...Array<string>(missing).fill(MISSING_PROPOSAL),
+  ];
+}
+
+/**
+ * Derived execution state of an approved draft's proposals. Order matters:
+ * `stopped` is decided BEFORE `failed`.
+ *
+ * - `stopped`: some listed proposal is outside approved/executing/executed/
+ *   execution_failed (undone or rejected from the inbox, expired, a stuck
+ *   pre-approval status) or no longer exists, WHETHER OR NOT another proposal
+ *   failed. Retry re-queues only the failed proposal, so with a sibling that can
+ *   never run it would execute that one alone after its fresh undo window:
+ *   half the approved configuration live ("executed + undone") with Settings as
+ *   the only way back. Retry therefore refuses such a set
+ *   (`DRAFT_RETRY_UNSAFE`) and the shell must not offer it; it also never waits
+ *   forever. The whole-draft undo (plan U9, S4) is the way out.
+ * - `failed`: the set is whole (every listed proposal is approved/executing/
+ *   executed/execution_failed) and at least one is `execution_failed`. POST
+ *   /draft/retry re-queues exactly those rows, which completes the pair, so the
+ *   shell offers a retry instead of waiting forever. `failed + executed` and
+ *   `failed + approved` are this case.
  * - `executed`: every listed proposal executed.
  * - `executing`: any executing, or some executed while others still wait for
  *   the worker (work is in flight, so the shell keeps saying "Saving").
@@ -112,9 +147,9 @@ export function deriveDraftExecution(
 ): DraftExecution | null {
   if (draftStatus !== 'approved') return null;
   if (!tracked || tracked.expected <= 0) return null;
-  const { expected, statuses } = tracked;
+  const { statuses } = tracked;
+  if (retryBlockingStatuses(tracked).length > 0) return 'stopped';
   if (statuses.some((s) => s === 'execution_failed')) return 'failed';
-  if (statuses.length < expected || statuses.some((s) => !IN_FLIGHT_OR_DONE.has(s))) return 'stopped';
   if (statuses.every((s) => s === 'executed')) return 'executed';
   if (statuses.some((s) => s === 'executing' || s === 'executed')) return 'executing';
   return 'pending';

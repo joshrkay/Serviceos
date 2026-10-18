@@ -150,9 +150,11 @@ export type SubscriptionStatusValue = z.infer<typeof SubscriptionStatusSchema>;
  * Where the approved draft's two proposals are on their way to execution
  * (derived on read, never stored): `pending` all approved and waiting for the
  * worker, `executing` work in flight, `executed` all done, `failed` a proposal
- * is in `execution_failed` (POST /draft/retry can re-queue it), `stopped` a
+ * is in `execution_failed` and every other one is approved/executing/executed
+ * (POST /draft/retry can re-queue it and the pair completes), `stopped` a
  * proposal will never run and retry cannot recover it (undone or rejected from
- * the inbox, expired, gone): the shell must not offer Retry for it. See
+ * the inbox, expired, gone), even when another one failed: the shell must not
+ * offer Retry for it (POST /draft/retry answers 409 DRAFT_RETRY_UNSAFE). See
  * `deriveDraftExecution` (derive-status.ts).
  */
 export const DRAFT_EXECUTION_STATES = ['pending', 'executing', 'executed', 'failed', 'stopped'] as const;

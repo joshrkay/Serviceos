@@ -354,6 +354,19 @@ describe('POST /retry', () => {
     expect(errText(res)).toMatch(/DRAFT_RETRY_NOTHING_FAILED/);
   });
 
+  it('a failed proposal next to an undone one is a 409 DRAFT_RETRY_UNSAFE and nothing is re-queued', async () => {
+    const [a, b] = await approved();
+    await fail(a);
+    await ctx.proposalRepo.update(TENANT_ID, b, { status: 'undone' });
+    const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
+    expect(res.status).toBe(409);
+    expect(errText(res)).toMatch(/DRAFT_RETRY_UNSAFE/);
+    expect((await ctx.proposalRepo.findById(TENANT_ID, a))?.status).toBe('execution_failed');
+    expect((await ctx.proposalRepo.findById(TENANT_ID, b))?.status).toBe('undone');
+    const retried = (await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 100 })).filter((e) => e.eventType === 'proposal.retried');
+    expect(retried).toHaveLength(0);
+  });
+
   it('a draft that is not approved yet is a 409 DRAFT_NOT_APPROVED', async () => {
     await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
     const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();

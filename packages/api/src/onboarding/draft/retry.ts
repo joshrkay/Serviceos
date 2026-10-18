@@ -26,10 +26,18 @@
  * The draft row itself is not written: it is frozen once approved and `version`
  * is the choice-staging compare-and-swap token.
  *
- * What retry cannot do: `undone` is terminal in lifecycle.ts, so a proposal the
- * owner undid from the inbox is not retryable and answers the same 409. The
- * status says so: such a draft derives `execution: 'stopped'`, not `failed`
- * (derive-status.ts), so the shell never offers a Retry that cannot work.
+ * What retry refuses: it re-queues ONLY the failed proposal, so it is safe only
+ * when the pair can still complete. If any listed proposal is outside
+ * approved/executing/executed/execution_failed (`undone` is terminal in
+ * lifecycle.ts; `rejected`, `expired`, `draft` never run on their own) or its row
+ * is gone, re-queueing just the failed one would, after its fresh undo window,
+ * execute it ALONE: half the approved configuration live, the other half dead,
+ * and Settings the only way back. That set answers 409 DRAFT_RETRY_UNSAFE and
+ * nothing is changed (a whole-draft reset or Settings is the way out). The status
+ * says the same: such a draft derives `execution: 'stopped'` even when a sibling
+ * failed (derive-status.ts, same `retryBlockingStatuses` check), so the shell
+ * never offers a Retry that cannot work. `failed + executed` and
+ * `failed + approved` stay retryable: the retry completes the pair.
  */
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';
@@ -40,6 +48,7 @@ import { canTransition } from '../../proposals/lifecycle';
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import type { Role } from '../../auth/rbac';
 import { ConflictError, NotFoundError } from '../../shared/errors';
+import { MISSING_PROPOSAL, retryBlockingStatuses } from '../derive-status';
 import type { OnboardingDraft, OnboardingDraftRepository } from './repository';
 
 /** Audit rows carry the old failure for the timeline, never an unbounded string. */
@@ -65,6 +74,29 @@ function nothingFailed(statuses: string[]): ConflictError {
   );
 }
 
+/** How an owner reads each status that makes a set unsafe to retry (never the raw status). */
+const BLOCKER_PHRASE: Record<string, string> = {
+  undone: 'was undone',
+  rejected: 'was declined',
+  expired: 'expired',
+  draft: 'was never approved',
+  ready_for_review: 'is still waiting for review',
+  [MISSING_PROPOSAL]: 'is missing',
+};
+
+/**
+ * The owner-facing 409 for a set retry must not touch. The sentence is plain
+ * words and the way out; the raw statuses ride in `details` for support and tests.
+ */
+function retryUnsafe(blockers: string[], statuses: string[], expected: number): ConflictError {
+  const reasons = [...new Set(blockers.map((b) => BLOCKER_PHRASE[b] ?? 'is not in a state that can be retried'))];
+  return new ConflictError(
+    `DRAFT_RETRY_UNSAFE: Retrying could leave your setup half saved, because ${reasons.map((r) => `part of it ${r}`).join(' and ')}. ` +
+      'Reset the whole setup, or finish it from Settings.',
+    { statuses, expected },
+  );
+}
+
 export async function retryFailedDraftProposals(
   deps: RetryDraftDeps,
   tenantId: string,
@@ -83,8 +115,20 @@ export async function retryFailedDraftProposals(
     const p = await proposalRepo.findById(tenantId, id);
     if (p) found.push(p);
   }
+  const statuses = found.map((p) => p.status);
+
+  // Check order: not approved (above), then unsafe, then nothing failed. Unsafe
+  // comes before nothing-failed because a set with a member retry cannot recover
+  // is never merely "nothing to do": the owner needs the way out (reset or
+  // Settings), and it matches the status, which says `stopped` for exactly these
+  // sets whether or not anything failed. NOTHING_FAILED is left for the benign
+  // sets (everything approved/executing/executed), e.g. the loser of a race
+  // between two retries. Nothing has been written when either one throws.
+  const blockers = retryBlockingStatuses({ expected: draft.proposalIds.length, statuses });
+  if (blockers.length > 0) throw retryUnsafe(blockers, statuses, draft.proposalIds.length);
+
   const failed = found.filter((p) => p.status === 'execution_failed');
-  if (failed.length === 0) throw nothingFailed(found.map((p) => p.status));
+  if (failed.length === 0) throw nothingFailed(statuses);
 
   // The edge retry relies on. If lifecycle.ts ever drops it this fails loudly
   // instead of resetting rows by a path the lifecycle no longer allows.
@@ -101,7 +145,7 @@ export async function retryFailedDraftProposals(
     previousError.set(p.id, p.executionError);
     moved.push(p.id);
   }
-  if (moved.length === 0) throw nothingFailed(found.map((p) => p.status));
+  if (moved.length === 0) throw nothingFailed(statuses);
 
   const result = await approveProposalsBatch(
     proposalRepo,

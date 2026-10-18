@@ -350,10 +350,12 @@ describe('deriveDraftExecution', () => {
     [['executed', 'approved'], 'executing'],
     [['executed', 'executing'], 'executing'],
     [['executed', 'executed'], 'executed'],
-    // Failed wins over everything else.
+    // `failed` only while retry can complete the pair: every OTHER member is
+    // still approved/executing/executed, so re-queueing the failed one finishes it.
     [['execution_failed', 'approved'], 'failed'],
     [['execution_failed', 'executing'], 'failed'],
     [['execution_failed', 'executed'], 'failed'],
+    [['approved', 'execution_failed'], 'failed'],
     [['execution_failed', 'execution_failed'], 'failed'],
     // States the owner can land in through the inbox. Retry cannot leave them
     // (POST /draft/retry only re-queues execution_failed), so they are `stopped`,
@@ -364,9 +366,17 @@ describe('deriveDraftExecution', () => {
     [['draft', 'approved'], 'stopped'],
     [['ready_for_review', 'executed'], 'stopped'],
     [['undone', 'undone'], 'stopped'],
-    // A retryable failure alongside a stopped one stays `failed`: retry has work to do.
-    [['execution_failed', 'undone'], 'failed'],
-    [['undone', 'execution_failed'], 'failed'],
+    // A failure next to a member retry cannot recover is `stopped`, NOT `failed`:
+    // re-queueing only the failed half would execute it while the other stays
+    // undone/rejected/expired, leaving half the approved configuration live.
+    [['execution_failed', 'undone'], 'stopped'],
+    [['undone', 'execution_failed'], 'stopped'],
+    [['execution_failed', 'rejected'], 'stopped'],
+    [['rejected', 'execution_failed'], 'stopped'],
+    [['execution_failed', 'expired'], 'stopped'],
+    [['expired', 'execution_failed'], 'stopped'],
+    [['execution_failed', 'draft'], 'stopped'],
+    [['execution_failed', 'ready_for_review'], 'stopped'],
   ])('approved draft with proposals %j is %s', (statuses, expected) => {
     expect(deriveDraftExecution('approved', tracked(statuses))).toBe(expected);
   });
@@ -374,8 +384,13 @@ describe('deriveDraftExecution', () => {
   it('a listed proposal that no longer exists (fewer rows than ids) is stopped, not failed', () => {
     expect(deriveDraftExecution('approved', tracked(['executed'], 2))).toBe('stopped');
     expect(deriveDraftExecution('approved', tracked([], 2))).toBe('stopped');
-    // ...but a retryable failure among the rows that remain is still failed.
-    expect(deriveDraftExecution('approved', tracked(['execution_failed'], 2))).toBe('failed');
+    // A failure among the rows that remain does not change that: the missing
+    // sibling cannot be re-queued, so retrying only the failed half would
+    // execute half the configuration. Stopped wins over failed.
+    expect(deriveDraftExecution('approved', tracked(['execution_failed'], 2))).toBe('stopped');
+    expect(deriveDraftExecution('approved', tracked(['execution_failed', 'approved'], 3))).toBe('stopped');
+    // The full set present and failed alongside a retryable sibling is still failed.
+    expect(deriveDraftExecution('approved', tracked(['execution_failed', 'executed'], 2))).toBe('failed');
   });
 
   it('an approved draft with nothing to track is null, never a vacuous executed', () => {

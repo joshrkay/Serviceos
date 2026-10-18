@@ -10,7 +10,9 @@
  *                                 approve them (optional expectedVersion; repeat taps are idempotent)
  *   POST   /retry                 re-queue the proposals whose execution failed (lock the draft row,
  *                                 reset each execution_failed one to draft and approve it again for a
- *                                 fresh undo window; 409 DRAFT_RETRY_NOTHING_FAILED when none failed)
+ *                                 fresh undo window; 409 DRAFT_NOT_APPROVED, then 409 DRAFT_RETRY_UNSAFE
+ *                                 when a listed proposal is undone/rejected/expired/missing (nothing is
+ *                                 re-queued), then 409 DRAFT_RETRY_NOTHING_FAILED when none failed)
  *
  * Owner-only, like POST /api/onboarding/pack and the conversation lane: every
  * write here ends in config-change proposals against the tenant's settings.

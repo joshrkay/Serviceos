@@ -184,6 +184,31 @@ describe('onboarding draft execution state (real DB)', () => {
       expect((await status()).status.draft?.execution).toBe('stopped');
     });
 
+    it('is stopped (not failed) when one half failed and the other is undone, rejected or expired, or its row is gone', async () => {
+      const [a, b] = await approvedDraft();
+      await pool.query(
+        `UPDATE proposals SET status = 'execution_failed', execution_error = 'boom', execution_retry_count = 3,
+                approved_at = NOW() - interval '1 hour' WHERE tenant_id = $1 AND id = $2`,
+        [tenant.tenantId, a],
+      );
+      // Retry could only re-queue the failed half, so it would execute alone.
+      for (const sibling of ['undone', 'rejected', 'expired']) {
+        await setStatus(b, sibling);
+        expect((await status()).status.draft?.execution, sibling).toBe('stopped');
+      }
+      // The same failure next to a half retry CAN complete the pair stays failed.
+      for (const sibling of ['approved', 'executing', 'executed']) {
+        await setStatus(b, sibling);
+        expect((await status()).status.draft?.execution, sibling).toBe('failed');
+      }
+
+      await pool.query(
+        `UPDATE onboarding_drafts SET proposal_ids = jsonb_build_array($2::text, $3::text) WHERE tenant_id = $1`,
+        [tenant.tenantId, a, crypto.randomUUID()],
+      );
+      expect((await status()).status.draft?.execution).toBe('stopped');
+    });
+
     it("never reads another tenant's proposals", async () => {
       const other = await createTestTenant(pool);
       const [a] = await approvedDraft();
@@ -318,16 +343,88 @@ describe('onboarding draft execution state (real DB)', () => {
       expect(await auditCounts()).toEqual(auditBefore);
     });
 
-    it('an undone proposal cannot be retried: 409, and it stays undone', async () => {
+    it('a failed proposal next to an approved one is retried (the pair can still complete)', async () => {
+      const [a, b] = await approvedDraft();
+      await failProposal(a);
+      const beforeB = await row(b);
+      expect((await status()).status.draft?.execution).toBe('failed');
+
+      const res = await retry();
+      expect(res.status).toBe(200);
+      expect(res.body.retriedProposalIds).toEqual([a]);
+      expect((await row(a)).status).toBe('approved');
+      expect(await row(b)).toEqual(beforeB);
+      expect((await status()).status.draft?.execution).toBe('pending');
+    });
+
+    it('an undone proposal cannot be retried: 409 DRAFT_RETRY_UNSAFE, and it stays undone', async () => {
       const [a] = await approvedDraft();
       await setStatus(a, 'undone');
       // The status says so too: `stopped`, which the shell renders without a Retry
       // button (retry only leaves `execution_failed`).
       expect((await status()).status.draft?.execution).toBe('stopped');
+      const before = await row(a);
+      const auditBefore = await auditCounts();
       const res = await retry();
       expect(res.status).toBe(409);
-      expect(JSON.stringify(res.body)).toContain('DRAFT_RETRY_NOTHING_FAILED');
+      expect(JSON.stringify(res.body)).toContain('DRAFT_RETRY_UNSAFE');
+      expect(await row(a)).toEqual(before);
       expect((await row(a)).status).toBe('undone');
+      expect(await auditCounts()).toEqual(auditBefore);
+    });
+
+    // The defect this pins: a failed proposal next to one that can never run used
+    // to derive `failed` and offer a Retry that re-queued only the failed half.
+    // After its fresh undo window that half executed alone ("executed + undone"),
+    // half the approved configuration live and only Settings to fix it.
+    it.each(['undone', 'rejected', 'expired'])(
+      'one failed + one %s: status is stopped, retry is 409 DRAFT_RETRY_UNSAFE, both rows are unchanged and nothing is audited',
+      async (sibling) => {
+        const [a, b] = await approvedDraft();
+        await failProposal(a);
+        await setStatus(b, sibling);
+        expect((await status()).status.draft?.execution).toBe('stopped');
+
+        const beforeA = await row(a);
+        const beforeB = await row(b);
+        const draftBefore = await draftRow();
+        const auditBefore = await auditCounts();
+
+        const res = await retry();
+
+        expect(res.status).toBe(409);
+        expect(JSON.stringify(res.body)).toContain('DRAFT_RETRY_UNSAFE');
+        expect(JSON.stringify(res.body)).toContain('Settings');
+        expect(await row(a)).toEqual(beforeA);
+        expect(await row(b)).toEqual(beforeB);
+        expect((await row(a)).status).toBe('execution_failed');
+        expect((await row(b)).status).toBe(sibling);
+        expect(await draftRow()).toEqual(draftBefore);
+        expect(await auditCounts()).toEqual(auditBefore);
+        expect((await auditCounts())['proposal.retried'] ?? 0).toBe(0);
+        expect((await auditCounts())['onboarding.draft_retry'] ?? 0).toBe(0);
+        // The worker never sees the failed half either, so it cannot run alone.
+        expect((await proposalRepo.findReadyForExecution(0)).map((p) => p.id)).not.toContain(a);
+      },
+    );
+
+    it('one failed + one listed proposal whose row is gone: 409 DRAFT_RETRY_UNSAFE and the failed row is unchanged', async () => {
+      const [a] = await approvedDraft();
+      await failProposal(a);
+      await pool.query(
+        `UPDATE onboarding_drafts SET proposal_ids = jsonb_build_array($2::text, $3::text) WHERE tenant_id = $1`,
+        [tenant.tenantId, a, crypto.randomUUID()],
+      );
+      expect((await status()).status.draft?.execution).toBe('stopped');
+      const before = await row(a);
+      const auditBefore = await auditCounts();
+
+      const res = await retry();
+
+      expect(res.status).toBe(409);
+      expect(JSON.stringify(res.body)).toContain('DRAFT_RETRY_UNSAFE');
+      expect(await row(a)).toEqual(before);
+      expect(await auditCounts()).toEqual(auditBefore);
     });
 
     it('a draft that was never approved is a 409 DRAFT_NOT_APPROVED', async () => {
