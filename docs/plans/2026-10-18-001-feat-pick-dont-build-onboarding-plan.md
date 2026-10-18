@@ -101,9 +101,10 @@ unowned position.
   row, so provenance is positive and per row by construction; a row seeded before 314 has none
   and is the owner's, always. Nothing infers a baseline for it, because the seeder kept no
   per-row record then and every trace it left is the absence of something (rule 4 of the
-  seeded-price baseline, U6). The re-run flow offers repricing only while a headline item
-  still holds its baseline, and a tenant with none, which includes every tenant seeded before
-  314, is told its prices are its own and sees no price card (U6). The re-run price card
+  seeded-price baseline, U6). The re-run flow offers repricing per item, only for a headline item
+  that still holds its baseline, and the price card shows exactly that effective change; a
+  tenant with none, which includes every tenant seeded before 314, is told its prices are its
+  own and sees no price card (U6). The re-run price card
   targets owners onboarding through the new flow; existing tenants already have real prices,
   and the cost of not offering them a re-price is far smaller than the cost of ever
   overwriting an owner's price.
@@ -817,7 +818,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     and rows seeded before 314 keep none and stay the owner's; the seeder and `repriceSeeded`
     are the only writers that set or move a baseline, and every other write of a headline
     item's price clears it (rule 2 of the seeded-price baseline below);
-    `hasRepriceableSeed(tenantId)` is the re-run gate; tests
+    `repriceableItems(tenantId, packId)` is the per-item re-run gate (trip fee and hourly
+    rate each `repriceable` or `owner`); tests
     `packages/api/test/packs/reprice-seeded.test.ts`,
     `packages/api/test/integration/reprice-seeded.test.ts`
   - modify `packages/api/src/packs/seed-pack-defaults.ts` (write `seed_key`, the baseline, the
@@ -853,8 +855,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md`), and
     the three columns that bind a stamp to its line: `forwarding_generation` (integer NOT NULL
     DEFAULT 0) and the pending probe's `forwarding_probe_generation` (nullable integer) and
-    `forwarding_probe_at` (nullable timestamptz), see Approach; tests
-    `packages/api/test/onboarding/forwarding-probe.test.ts`
+    `forwarding_probe_at` (nullable timestamptz), see Approach, and U8's nullable
+    `invoices.cleanup_claimed_at` (timestamptz, no index: the cleanup claim's per-link marker);
+    tests `packages/api/test/onboarding/forwarding-probe.test.ts`
   - the forwarding answers travel the same road as the owner's cell (U10): a second migration
     (315) adds nullable `onboarding_drafts.forwarding_source_number` and
     `forwarding_carrier`; modify `packages/api/src/onboarding/draft/contracts.ts` and
@@ -932,8 +935,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     generated proposal has `executed`, so a `failed` set is retried and a `stopped` or
     part-undone one is reset through U9 first (or, once part of it is live, edited in
     Settings), and a second set is never minted beside rows that did not run; the response carries
-    `repricing: { available }`, and a reopened draft's approval leaves the prices off the
-    settings payload when it is false); tests
+    the per-item `repricing` state (rule 3 of the seeded-price baseline), and a reopened
+    draft's approval leaves each owner-controlled item's price off the settings payload); the
+    `repricing` shape also goes in `packages/shared/src/contracts/onboarding-draft.ts`, kept
+    equal to the API's Zod by `wire-contract.test.ts`; tests
     `packages/api/test/onboarding/draft/reopen.test.ts`,
     `packages/api/test/integration/onboarding-draft-reopen.test.ts`
   - tests: `packages/api/test/onboarding/forwarding-text.test.ts`,
@@ -1175,16 +1180,29 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     it under Job types if you want them to match." Rows the statement does not touch keep both
     values, so an owner edit stays an edit.
 
-  (3) Gate. `POST /draft/reopen` reports `repricing.available`, derived and never stored, true
-  when any non-archived headline item of the draft's pack still holds its baseline
-  (`hasRepriceableSeed`, the statement's own predicate: `seed_key IS NOT NULL AND
-  seeded_unit_price_cents IS NOT NULL AND unit_price_cents = seeded_unit_price_cents`). A line
-  moves only through its item, so a baselined line under an edited item does not count. When it
-  is false the price turn says "Your prices are your own" and offers no repricing: the price
-  row is read-only, the reopened draft's approval leaves `hourlyRateCents` and `tripFeeCents`
-  off the settings payload (the first-run path, which requires them, is unchanged), and
-  `repriceSeeded` is not called. When it is true the owner picks as before, and rows the owner
-  edited are still reported as theirs.
+  (3) Gate, per item. `POST /draft/reopen` reports `repricing`, derived and never stored:
+  `{ available, tripFee: { state, currentCents }, hourlyRate: { state, currentCents } }`. An
+  item's `state` is `repriceable` when the draft's pack has a non-archived headline item for
+  that role (`<packId>:visit` is the trip fee, `<packId>:labor` the hourly rate) that still
+  holds its baseline (`repriceableItems`, the statement's own predicate per item: `seed_key =
+  <role key> AND archived_at IS NULL AND seeded_unit_price_cents IS NOT NULL AND
+  unit_price_cents = seeded_unit_price_cents`), and `owner` otherwise; `currentCents` is the
+  live item's price, null when the role has no live item. A line moves only through its item,
+  so a baselined line under an edited item does not count. The offer is per item, not "any":
+  the price card renders the effective result, the same pair `repriceSeeded` will apply. Both
+  repriceable: the normal combined card, each item as current to new. One repriceable: the card
+  shows only that item changing and names the other as kept ("Your hourly rate stays at $125;
+  trip fee would move to $95"), the option lines substitute only that item's price, and the
+  kept item's price is read-only. Neither: "Your prices are your own" and no card, and
+  `repriceSeeded` is not called. The reopened draft's approval builds the settings payload
+  from the same per-item states, re-derived at approval: it carries `tripFeeCents` and
+  `hourlyRateCents` only for `repriceable` items (the first-run path, which requires both, is
+  unchanged), so what is approved is what was rendered. An item that turns `owner` between the
+  render and the approval is still left by the statement's own predicate and named in the
+  read-back (rule 2). Wire compatibility is additive: `available` stays for one release as
+  "either item is `repriceable`" so a boolean-era client still parses the response, while the
+  server's per-item payload build means such a client cannot make an approval move an owner's
+  price.
 
   (4) No backfill: a row seeded before 314 is the owner's. The seeder wrote no per-row
   record of what it made, so a legacy row has no positive proof of provenance; the only
@@ -1317,9 +1335,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     template lines without the two keys) at any price, including a headline item priced
     exactly at the tenant's tier price, have NULL `seed_key` and baselines and keyless lines
     after the corpus applies over them, and still after a second deploy replays it. (b) A
-    re-run on that legacy tenant: `POST /draft/reopen` reports `repricing.available = false`,
-    the price turn shows no price card, approval carries no prices, `repriceSeeded` is not
-    called, and no catalog item or template line price changes. (c) A row the seeder writes
+    re-run on that legacy tenant: `POST /draft/reopen` reports both items `owner`
+    (`repricing.available = false`), the price turn shows no price card, approval carries no
+    prices, `repriceSeeded` is not called, and no catalog item or template line price changes. (c) A row the seeder writes
     after the migration carries `seed_key` and its baseline, and its template lines carry
     `seededUnitPriceCents` and `seededCatalogItemId`; a re-run with new prices moves the item
     and those lines while they are untouched. (d) A post-migration owner edit stops the
@@ -1328,9 +1346,29 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     it and the saved template at the owner's prices, and the read-back names them as theirs.
   - Edge (no baseline): a tenant whose headline items all lack a baseline (including each one
     the owner saved a price on), or, defensively, all differ from it → `POST /draft/reopen`
-    reports `repricing.available = false`, the price turn says "Your prices are your own" and
-    shows no price card, and approval carries no prices; a tenant with at least one headline
-    item still at its baseline sees the repricing choice.
+    reports both items `owner` (`repricing.available = false`), the price turn says "Your prices
+    are your own" and shows no price card, and approval carries no prices; a tenant with one
+    headline item still at its baseline sees the card for that item only (next scenario).
+  - Edge (per-item repricing renders the effective pair; unit in `reopen.test.ts` and
+    `reprice-seeded.test.ts` with repository doubles, the card in `ReadbackCard.test.tsx`, real
+    Postgres in `onboarding-draft-reopen.test.ts` and `integration/reprice-seeded.test.ts`, the
+    owner's edit through the real `PUT /api/catalog/items/:id`): a tenant seeded after 314.
+    (a) Both items at baseline → the response has `tripFee` and `hourlyRate` `repriceable` with
+    their current prices (`available = true`), the card shows both as current to new, the
+    approval payload carries `tripFeeCents` and `hourlyRateCents`, and execution moves both
+    items and their lines. (b) The owner saved the labor rate → `hourlyRate` is `owner` and
+    `tripFee` `repriceable`: the card shows only the trip fee changing and says "Your hourly
+    rate stays at $125; trip fee would move to $95" with no hourly pick offered, the payload
+    carries `tripFeeCents` and no `hourlyRateCents`, and after execution the trip fee item and
+    its lines hold the pick while the labor item and its lines are unchanged; the mirror case
+    (trip fee saved) renders and applies the hourly rate alone. (c) Both saved, or a legacy
+    tenant → both `owner`, `available = false`, no card, no prices in the payload,
+    `repriceSeeded` not called. In every case the payload's price keys equal the items the
+    card rendered as changing, and the prices read from the rows after execution equal the
+    rendered pair, the kept item's included. A Settings price save between the render and the
+    approval leaves that item and the read-back names it. `wire-contract.test.ts` pins the
+    `repricing` shape against the API's Zod, with `available` true exactly when either item is
+    `repriceable`.
   - Edge (owner cell on re-run): the first run stored cell A on the draft and in
     `tenant_settings.owner_phone`; the owner then changes it to B in Settings and taps Re-run
     setup → `POST /draft/reopen` leaves the draft's `owner_phone` = B (not A), the read-back
@@ -1391,7 +1429,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     real `PUT` → `seeded_unit_price_cents` is NULL straight after the save (read from the row,
     not inferred), a re-run with a new pick leaves that item and every line seeded from it, and
     the read-back names it as theirs; the owner who edits to 11,500 and then saves 11,000 back,
-    the seeded amount, ends the same way, and `repricing.available` counts neither item. (e) A
+    the seeded amount, ends the same way, and `repricing` reports neither item `repriceable`. (e) A
     headline item the owner only renamed, by a `PUT` whose body carries only `name` (the route
     takes a partial body), keeps its baseline, is still found by `seed_key` and moves; the same
     rename sent with `unitPriceCents`, as the Price Book form sends it, clears the baseline and
@@ -1443,7 +1481,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   staging tenant seeded after migration 314, a re-run after the owner saves a headline price in
   Settings, at a new amount or the seeded one, leaves that item and the job types seeded from it
   at the owner's price and says so,
-  and a re-run on a tenant seeded before it shows no price card; a re-run after the owner
+  and a re-run on a tenant seeded before it shows no price card; a re-run where only one
+  headline price is still the seeded one shows, and applies, only that item's change and names
+  the other as kept; a re-run after the owner
   changes the business name and timezone in Settings leaves both as the owner set them.
 
 ### U10. The owner's cell: on the draft, on the settings proposal, required when a choice rings it
@@ -2365,8 +2405,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     own transaction by both write sites of the key, the `onboarding_voice_policy` handler in
     `proposals/execution/onboarding-handlers.ts` and `PATCH /api/settings` in
     `routes/settings.ts`, through a new `afterWrite` option on `SettingsRepository.update`; and
-    `claimNextPaymentLink(client, tenantId, afterId)`, the per-link claim the job runs under the
-    payment-mode lock, see The job),
+    `claimNextPaymentLink(client, tenantId, afterId)`, the per-link claim the job runs under a
+    per-tenant cleanup mutex and the payment-mode lock, see The job),
     `packages/api/src/workers/deactivate-payment-links.ts` (the queue handler, registered in
     `app.ts`) and `packages/api/src/workers/payment-link-reconciliation-sweep.ts` (the daily
     backstop); modify `packages/api/src/queues/queue.ts` and `pg-queue.ts` (`sendOn(client,
@@ -2385,7 +2425,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `packages/api/src/invoices/invoice.ts` with `pg-invoice.ts` (`InvoiceRepository` gains
     `findOpenWithPaymentLink(tenantId, afterId, limit)`, and `setPaymentLinkIfPayable` gains
     the mode check under Attach-time revalidation, its in-memory twin taking an injected mode
-    lookup)
+    lookup; migration 314, U6's, also adds the nullable `invoices.cleanup_claimed_at
+    timestamptz` the cleanup claim writes, see The job; `clearPaymentLinkIfMatches` and
+    `setPaymentLinkIfPayable` set it NULL in the same `UPDATE` as the link columns, and a small
+    `releaseCleanupClaim(tenantId, id, linkId)` beside them does so only while the row still
+    holds that link)
   - modify the voice answer for payment questions and the emergency hand-off in
     `packages/api/src/voice/` (exact modules named at implementation; patterns:
     `voice/triage/context-preface.ts`, `voice/call-me-back/call-me-back.ts`)
@@ -2447,20 +2491,36 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     holds no lock). So the handler loops claim, act, advance until a claim says stop:
     - *Claim.* One short `withTenantConnection` transaction per link
       (`claimNextPaymentLink(client, tenantId, afterId)` in `invoices/payment-mode-change.ts`).
-      Its first statement is `pg_advisory_xact_lock_shared(hashtext($1))` on
-      `payment_mode:<tenantId>`, the key the settings write takes exclusively and the attach
-      takes shared, a statement of its own so that the reads after it see a snapshot from after
-      the grant. Then, as separate statements, it reads `payment_collection_mode` (the attach's
+      Its first statement is the cleanup mutex, `pg_advisory_xact_lock(hashtext($1))` on
+      `payment_cleanup:<tenantId>`, exclusive: two cleanups of one tenant (jobs from two mode
+      transitions, a retry beside the follow-up pass, separate worker replicas) take turns at
+      the claim and never read the same candidate. Its second statement, of its own so that the
+      reads after it see a snapshot from after the grant, is
+      `pg_advisory_xact_lock_shared(hashtext($1))` on `payment_mode:<tenantId>`, the key the
+      settings write takes exclusively and the attach takes shared. Then, as separate
+      statements, it reads `payment_collection_mode` (the attach's
       `COALESCE((SELECT payment_collection_mode FROM tenant_settings WHERE tenant_id = $1),
       'pay_link')`) and, only when that is `collect_on_site`, selects the next `open` or
       `partially_paid` invoice holding a link after the cursor
-      (`findOpenWithPaymentLink(tenantId, afterId, 1)`), then commits. The claim is the invoice
-      it returns, with its id and its link id. No column is written and no migration is added: a
-      persisted "claimed" marker would be one more state to clear when the owner switches back,
-      and the fence is the lock order, not a flag.
-      Shared, so claims and attaches of one tenant do not queue on each other; the exclusive
-      settings write waits for the claims and attaches in flight and then runs, and a claim that
-      starts after it reads the new mode. So every link a claim returns was stored before any
+      (`findOpenWithPaymentLink(tenantId, afterId, 1)`) whose `cleanup_claimed_at` is null or
+      older than the 10-minute lease, writes `cleanup_claimed_at = now()` on it, then commits.
+      The claim is the invoice it returns, with its id and its link id, and it is a durable
+      write: the transaction-scoped locks end at commit, before the Stripe call, and the marker is
+      what excludes a second claimer across that call, so a claimer that starts while the first
+      is in Stripe skips the link. The marker is reset by the clear-if-matches step on success
+      and by `releaseCleanupClaim` when the call fails (so the retry reclaims that link at once);
+      an expired lease is reclaimable, so a worker that crashed after its claim strands nothing:
+      the queue's redelivery of its job, or at the latest the daily sweep, retires the link;
+      and the attach's own `UPDATE` writes it NULL, so a stale marker never outlives its link.
+      The fence against the mode is still the lock order, not the marker: nothing but the claim
+      reads the marker, and it needs no clearing when the owner switches back.
+      The payment-mode key is shared, so a claim and an attach of one tenant do not queue on
+      each other; the exclusive settings write waits for the claims and attaches in flight and
+      then runs, and a claim that starts after it reads the new mode. The cleanup mutex is a
+      different key that only claims take, held for the claim transaction alone (the marker, not
+      a lock, spans the Stripe call), and always taken first, then the payment-mode key; the
+      settings write and the attach take only the payment-mode key, so there is no cycle and an
+      attach never waits on a cleanup. So every link a claim returns was stored before any
       switch that follows the claim, under a policy that read `collect_on_site` when it was
       claimed.
     - *Act.* Outside the transaction, so no Stripe call runs while a lock is held:
@@ -2468,8 +2528,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
       claimed invoice. That helper deactivates the link at Stripe under whichever account scope
       minted it, clears the columns only while they still hold that link id, and audits the
       invoice (`invoice.payment_link_deactivated`, or `_deactivation_failed` with the columns
-      kept). The cursor then moves past the claimed invoice whether or not the call succeeded,
-      so a failing invoice is not claimed again in the same run. A link attached after a switch
+      kept, and the claim released). The cursor then moves past the claimed invoice whether or
+      not the call succeeded, so a failing invoice is not claimed again in the same run. A link attached after a switch
       has a different id and cannot be in a claimed set: a later claim returns it only if that
       claim itself reads `collect_on_site`, and then retiring it is the policy.
     - *Superseded.* A claim that reads anything other than a successful `collect_on_site`
@@ -2483,7 +2543,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
       claimed while the policy read collect-on-site: at most one link per cleanup, replaced on
       demand, and a customer who opens it in that window sees Stripe's inactive page. Closing the
       gap would mean holding the lock across the Stripe call, which this plan refuses.
-    - *Unreadable.* A lock or mode read that throws rolls the claim back and claims nothing.
+    - *Unreadable.* Either lock or the mode read throwing rolls the claim back and claims nothing.
       The rule is the checkout's from the other side: an action needs proof of the policy that
       authorises it, so only a successful read of `collect_on_site` permits a deactivation, and an
       error is read as neither mode. The handler audits `invoice.payment_mode_unavailable` (tenant
@@ -2492,7 +2552,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 
     A claim that finds no further link ends the loop; one tenant-level event records the counts.
     If any invoice failed, the job throws after the loop so the queue retries only what is left:
-    a cleared invoice no longer qualifies, which is also what makes a re-run safe. A `pass: 1`
+    a cleared invoice no longer qualifies, and a link another claimer holds under an unexpired
+    lease is skipped, which together make a re-run, a retry beside the follow-up pass or a
+    second replica safe. A `pass: 1`
     job enqueues exactly one follow-up, in the transaction of its first claim, after that claim
     has read `collect_on_site` and before any Stripe call, with the claim's own client
     (`queue.sendOn`): `{ tenantId, pass: 2 }` with `delaySeconds: 120`, under a key of its own,
@@ -2536,10 +2598,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     same statement as the read would leave the read on a READ COMMITTED snapshot from before the
     grant). Shared on attach so concurrent checkouts of one tenant do not queue on each other;
     the cleanup job's claim takes the key shared too (The job), so the settings write is the
-    only exclusive holder. A write that starts while an attach is past its check waits for the
-    attach to commit, so its pass 1 finds the stored link, and an attach that starts after the
-    write reads `collect_on_site`, whether or not a settings row existed before. A key exists
-    for every tenant, where a row may not. (Rejected:
+    only exclusive holder of it (the claim's own exclusive key is the different
+    `payment_cleanup:<tenantId>`, which an attach never takes). A write that starts while an
+    attach is past its check waits for the attach to commit, so its pass 1 finds the stored
+    link, and an attach that starts after the write reads `collect_on_site`, whether or not a
+    settings row existed before. A key exists for every tenant, where a row may not. (Rejected:
     `SELECT … FROM tenants WHERE id = $1` with `FOR SHARE` on attach and `FOR NO KEY UPDATE` on
     the write, as `users/pg-user.ts` anchors owner removal on that row with `FOR UPDATE`. The
     row always exists, but billing and plan writes to it would queue behind every checkout.)
@@ -2676,13 +2739,38 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     the CAS, D's link is untouched, and the next checkout on A mints and stores a fresh link
     through the normal attach path (the columns are empty, so no "carries another link" refusal).
   - Mode change (claim statement order and lock scope; statement spy plus two connections): the
-    claim's `pg_advisory_xact_lock_shared` on `payment_mode:<tenantId>` runs before its mode read
-    and its link select, and the settings write, the attach and the claim all use the same key
-    text; two claims, or a claim and an attach, of one tenant do not block each other; a settings
-    write that starts while a claim is open waits for it to commit, and a claim that starts after
-    the write commits reads the new mode; while the provider fake is latched in a Stripe call, a
-    second connection takes the exclusive lock at once (no lock and no open transaction is held
-    across the Stripe call).
+    claim's exclusive `pg_advisory_xact_lock` on `payment_cleanup:<tenantId>` runs first, then
+    its `pg_advisory_xact_lock_shared` on `payment_mode:<tenantId>`, both before its mode read
+    and its link select, and the settings write, the attach and the claim use the same key text
+    for the payment-mode key; a claim and an attach of one tenant do not block each other; two
+    claims of one tenant take turns at the cleanup key; a settings write that starts while a
+    claim is open waits for it to commit, and a claim that starts after the write commits reads
+    the new mode; while the provider fake is latched in a Stripe call, a second connection takes
+    both exclusive locks at once (no lock and no open transaction is held across the Stripe call).
+  - Mode change (concurrent cleanups of one tenant; real Postgres, two connections, the provider
+    fake held at a latch, both interleavings, looped): a tenant with `open` invoices A, B and C
+    that each hold a link, and two cleanup jobs (the second transition's `pass: 1` beside the
+    first's `pass: 2`, and separately two replicas of the same job). One job's claim holds the
+    cleanup mutex while the other starts, and one is in its Stripe call while the other claims
+    → the two jobs claim disjoint links, the provider fake receives `deactivateLink` exactly once
+    per link, there is one `invoice.payment_link_deactivated` per invoice and no
+    `_deactivation_failed`, and `cleanup_claimed_at` is NULL on all three afterwards. Never: a
+    link deactivated twice or audited twice.
+  - Mode change (a retry beside the follow-up pass): the first job fails on B's call (the fake
+    fails once) and throws; the retry and the `pass: 2` job then run concurrently, in each order
+    → A and C are never deactivated a second time, B (its claim released on the failure) is
+    deactivated exactly once, and the audit holds one `_deactivated` for A and for C and one
+    `_deactivation_failed` followed by one `_deactivated` for B.
+  - Mode change (a crashed claimer; the lease): a worker claims A, its claim commits, and it
+    dies before its Stripe call (the handler killed at the latch) → `cleanup_claimed_at` stays
+    set; a second job inside the lease deactivates B and C and skips A (the fake is never called
+    for A); with the marker aged 9 minutes A is still skipped and aged 11 minutes the next claim
+    reclaims it, deactivates it once and clears the marker.
+  - Mode change (attach is independent of a running claim): a claim transaction is open and
+    holding both of its locks → a checkout's attach on invoice D (no link) completes without
+    waiting (a short lock timeout would fail the test) and its statements never touch
+    `payment_cleanup:<tenantId>`; an invoice whose link was cleared elsewhere with a marker still
+    set takes a fresh attach and reads NULL for the marker afterwards.
   - Mode change (cleanup mode unreadable or not collect-on-site): the lock or the mode read throws
     in the claim → the claim rolls back, nothing is deactivated, the provider fake is not called,
     no `pass: 2` row exists (it shares the claim's transaction), `invoice.payment_mode_unavailable`
@@ -2703,7 +2791,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Verification:** picking a card changes what the customer receives and what Rivet says, with
   a behaviour test per key, before the card copy is allowed to promise it; a pay link texted
   before a switch to collect-on-site no longer charges once the job has run (or, if the job
-  was lost, once the daily sweep has); a checkout that stalled across the switch never stores
+  was lost, once the daily sweep has); two cleanups of one tenant never deactivate a link twice
+  (a per-tenant cleanup mutex held for the claim, and a durable per-link claim with a 10-minute
+  lease across the Stripe call); a checkout that stalled across the switch never stores
   its link; a cleanup that is still running when the owner switches back stops at its next claim
   and never deactivates a link attached after the switch (no Stripe call runs under the lock, so
   at most the one link already claimed is retired, and it is replaced on demand); and a failed
@@ -3850,8 +3940,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   of every live link on open invoices (the job row is written in the settings transaction, with
   a follow-up pass and a daily reconciliation sweep behind it, each deactivation claimed under
   the same payment-mode lock so a switch back stops the cleanup instead of letting it kill a
-  link attached after the switch, and the link attach re-checks the mode so a checkout that
-  stalls across the switch stores nothing); a failed read of the mode never defaults to
+  link attached after the switch, and under a per-tenant cleanup mutex and a durable per-link
+  claim so concurrent cleanups never act on one link twice, and the link attach re-checks the
+  mode so a checkout that stalls across the switch stores nothing); a failed read of the mode never defaults to
   `pay_link` and never deactivates a link (U8).
 - **Voice-parity coupling.** Scenario turns (U9), voice preview persistence (U3) and verified
   test booking (U6) are rendered from existing facts until those units land; nothing in U1-U6
@@ -3983,7 +4074,7 @@ previous one; the previous slice is merged first.
 | S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`, until a retry bumps `version`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so, an approve sent from before a retry included); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover, even beside a failed one, and takes precedence over `failed`) and `POST /draft/retry` (guards in order: `DRAFT_NOT_APPROVED`, then `DRAFT_RETRY_UNSAFE` for a set holding such a proposal, failed member or not (`approved + undone` is unsafe, not nothing-failed), then `DRAFT_RETRY_NOTHING_FAILED` for the benign rest; the refusal changes nothing, because re-approving only the failed member would leave its sibling behind and the set would end `executed + undone`; a retry that passes the guards bumps the draft `version` by one in the same locked transaction as the re-queue, so one version names one approval attempt and a screen from before the retry cannot undo, reset or re-approve it (409 `VERSION_CONFLICT`), and `onboarding.draft_retry` records the version before and after; that set's way out is S4's reset, so until S4 the only way out is Settings and the shell offers no Start over). Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
 | S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`, refused with `DRAFT_METRO_LOCKED` once a choice is staged and rebuilding the assembled shop for the new metro in the same write, so the city and prices change together); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper, and a derived, optional `undoable` on the status draft block and on the retry response (S1b's retry response is unchanged), so the saving screen shows Undo only while the whole set is still inside its windows and a partial retry, which refreshes only the failed member, shows none; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, expires any still-`draft` or `ready_for_review` ones as `superseded_by_reset` (one `proposal.expired` row each, so none stays in the inbox or approvable; `approveProposal`'s write becomes conditional so an approve racing the reset cannot revive one), returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status (`reset` while no member is executed or executing and no `approved` member is past its undo window, else `settings`, for a failed member beside a terminal one as for any other `stopped` set) so the shell never offers a refused button; reset is also the way out of the set retry refuses as `DRAFT_RETRY_UNSAFE`; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body, and checked between `DRAFT_NOT_APPROVED` and `DRAFT_RETRY_UNSAFE`), made required once every client sends it. | 6-7 days (reset adds one) |
-| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps and bumps a forwarding generation that both stamps compare against, so a late probe or a stale tab's confirm for the old line is refused; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline (rows seeded after 314 only) and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep, each deactivation claimed under the payment-mode lock so a switch back stops the cleanup; no link minted and none deactivated on a failed mode read, and the link attach re-checks the mode under a per-tenant payment-mode lock, so a checkout that stalls across a switch stores none even when the switch is the tenant's first settings write), flag flipped, v2 deleted. | 12-15 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another, the per-link claim step a third) |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps and bumps a forwarding generation that both stamps compare against, so a late probe or a stale tab's confirm for the old line is refused; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline (rows seeded after 314 only) and the per-item re-run repricing gate (the reopen response reports each headline item `repriceable` or `owner`, the price card and the approval payload carry exactly the repriceable ones, and a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep, each deactivation claimed under the payment-mode lock so a switch back stops the cleanup, and under a per-tenant cleanup mutex with a durable per-link claim so concurrent cleanups never act on one link twice; no link minted and none deactivated on a failed mode read, and the link attach re-checks the mode under a per-tenant payment-mode lock, so a checkout that stalls across a switch stores none even when the switch is the tenant's first settings write), flag flipped, v2 deleted. | 12-15 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another, the per-link claim step a third) |
 | S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost) and renewing the lease's short pre-live expiry once, from the first `ringing` or `in-progress` callback, in that same statement (the `Calls` response binds and never renews, so a call Twilio is still queueing cannot start the clock), with the `Calls` request bounded at 10 s, reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces, with every text and email for a demo tenant refused at the delivery boundary; a daily call-and-cents budget is reserved atomically before every `Calls` request, in the one transaction that also spends the visitor's one-call-a-day allowance and takes the lease, so a refused visitor keeps the allowance, and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a transactional handoff outbox written in the finalizing transaction together with the signup-handoff row its token validates against, and sent by a queue worker under a stable idempotency key, so a crash before the send is retried and never loses the handoff, and retired unsent once its link is within a minute of expiring, no tenant writes). | 12-16 days (the token and bind add one, the budget another, the late-callback handoff a third, the outbox and its sender a fourth, the lease renewal, the demo-tenant send suppression and the transactional allowance a fifth) |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
