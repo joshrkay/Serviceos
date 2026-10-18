@@ -74,6 +74,8 @@ The highest-impact themes:
 
 Each batch has its own branch and pull request, isolated test database, test-first implementation and
 independent review. CLAUDE.md applies in full.
+The executable plan, with per-batch rulings, files, test scenarios, gate and merge order, is
+`docs/plans/2026-10-18-002-fix-ai-enterprise-hardening-plan.md`.
 
 | Batch | Branch | Findings |
 |---|---|---|
@@ -126,8 +128,10 @@ The batches surface these but cannot settle them in code.
 ## Findings
 
 Each entry gives the verified severity, the verifier's verdict, the batch that fixes it, and the fix
-being implemented (the verifier's corrected fix where it differs from the auditor's). The audit's full
-working is kept in the session's verification record, so the file:line hops quoted here are excerpts.
+being implemented (the verifier's corrected fix where it differs from the auditor's). Entries here are
+excerpts. The complete auditor and verifier output for every finding (trigger, impact, evidence, fix,
+test, verdict, reasoning, corrected fix) is in `ai-enterprise-readiness-audit-2026-10-18.findings.json`
+next to this file.
 
 ### Tenant isolation in the AI path
 
