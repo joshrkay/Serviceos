@@ -10,7 +10,7 @@ import { isExplicitRerun } from '../../../utils/onboarding-rerun';
 import { Button, Spinner } from '../../ui';
 import { OnboardingShell } from '../v2/OnboardingShell';
 import { AfterApproval } from './AfterApproval';
-import { AnswerAsScreen } from './AnswerAsScreen';
+import { AnswerAsScreen, type AnswerAsInput } from './AnswerAsScreen';
 import { OptionPairTurn } from './OptionPairTurn';
 import { READBACK_PROGRESS, READY_PROGRESS, highestSeen, minutesLeft, turnProgress } from './pacing';
 import { ReadbackCard } from './ReadbackCard';
@@ -63,7 +63,10 @@ function Conversation() {
   const { user } = useUser();
   const status = useOnboardingStatus(3000);
   const [createInput, setCreateInput] = useState<CreateOnboardingDraftBody | null>(null);
-  const { draft, loading, error, notice, approving, stage, approve, reload } = useOnboardingDraft(createInput);
+  // What the owner last sent from the form. The form opens on it again whenever they come back to it
+  // (the API refused the cell, or they chose to change their answers), so nothing typed is ever lost.
+  const [answers, setAnswers] = useState<AnswerAsInput | null>(null);
+  const { draft, loading, error, cellProblem, notice, approving, stage, approve, reload } = useOnboardingDraft(createInput);
   // The owner's own navigation; null until they move, then the draft decides where a returning owner opens.
   const [nav, setNav] = useState<Place | null>(null);
   // What the owner last tried to save: the turn they answered, or "That's right". The hook's one error and
@@ -124,8 +127,9 @@ function Conversation() {
     setNav(next);
   };
 
-  const startDraft = (input: Pick<CreateOnboardingDraftBody, 'packId' | 'businessName' | 'phone'>) => {
+  const startDraft = (input: AnswerAsInput) => {
     const ownerFirstName = user?.firstName?.trim().slice(0, 60);
+    setAnswers(input);
     setCreateInput({ ...input, ...(ownerFirstName ? { ownerFirstName } : {}) });
   };
 
@@ -215,10 +219,22 @@ function Conversation() {
             <Button fullWidth size="lg" className="h-14 rounded-2xl text-[17px] font-semibold" onClick={() => void reload()}>
               Try again
             </Button>
+            {/* Trying again resends the same answers; if they were the problem, the owner needs a way to change them. */}
+            {createInput ? (
+              <Button
+                fullWidth
+                variant="outline"
+                size="lg"
+                className="mt-2.5 h-14 rounded-2xl text-[17px] font-semibold"
+                onClick={() => setCreateInput(null)}
+              >
+                Change my answers
+              </Button>
+            ) : null}
           </div>
         </>
       )}
-      {screen === 'answer_as' && <AnswerAsScreen onSubmit={startDraft} />}
+      {screen === 'answer_as' && <AnswerAsScreen onSubmit={startDraft} initial={answers ?? undefined} cellProblem={cellProblem} />}
       {screen === 'ready' && draft && (
         <ReadyScreen draft={draft} onMakeItMine={makeItMine} onKeepAsIs={() => goTo({ screen: 'readback' })} />
       )}

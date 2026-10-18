@@ -28,6 +28,11 @@ export interface UseOnboardingDraftResult {
   loading: boolean;
   /** Owner-facing, one line. Cleared by the next successful action. */
   error: string | null;
+  /**
+   * The API's own words for why it refused the cell on create (a 400 naming `phone`). The owner can
+   * fix that on the form, so it is not `error`, whose only way on is to retry the same request.
+   */
+  cellProblem: string | null;
   /** One-line, non-fatal: the draft was refreshed because another writer got there first. */
   notice: string | null;
   approving: boolean;
@@ -45,6 +50,9 @@ export interface UseOnboardingDraftResult {
  * API, and the browser timezone is always sent: approval refuses a draft that
  * has no zone, and a guessed zone would misbook every appointment.
  *
+ * A create the API refuses over the cell (400 naming `phone`) is not a load failure: it comes back as
+ * `cellProblem` with no `error`, so the shell can return to the form and let the owner correct the number.
+ *
  * Writes carry the draft `version`. On a 409 VERSION_CONFLICT the hook re-reads
  * the draft and sets a one-line `notice` instead of failing the owner.
  */
@@ -53,6 +61,7 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
   const [draft, setDraft] = useState<OnboardingDraft | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [cellProblem, setCellProblem] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [approving, setApproving] = useState(false);
 
@@ -73,6 +82,7 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
     async (isStale: () => boolean) => {
       setLoading(true);
       setError(null);
+      setCellProblem(null);
       try {
         let next = await getDraft(apiFetch);
         if (!next && input) {
@@ -81,8 +91,12 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
           next = await backfillTimezone(apiFetch, next, input?.clientTimezone);
         }
         if (!isStale()) commit(next);
-      } catch {
-        if (!isStale()) setError(LOAD_ERROR);
+      } catch (err) {
+        if (!isStale()) {
+          const refusedCell = err instanceof OnboardingDraftApiError && err.status === 400 ? err.issueMessage('phone') : null;
+          if (refusedCell) setCellProblem(refusedCell);
+          else setError(LOAD_ERROR);
+        }
       } finally {
         if (!isStale()) setLoading(false);
       }
@@ -180,7 +194,7 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
     [apiFetch, commit, refresh, serially],
   );
 
-  return { draft, version: draft?.version ?? null, loading, error, notice, approving, stage, approve, reload };
+  return { draft, version: draft?.version ?? null, loading, error, cellProblem, notice, approving, stage, approve, reload };
 }
 
 

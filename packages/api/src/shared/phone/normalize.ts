@@ -12,6 +12,10 @@ import { ValidationError } from '../errors';
  * Both the storage path and the lookup path MUST funnel raw input through
  * `normalizeMobileE164()` so the stored value and the lookup key agree.
  *
+ * The onboarding form decides valid/invalid before it sends the cell with a
+ * mirror of these rules (packages/web/src/components/onboarding/v3/cell-number.ts,
+ * pinned by the same cases as normalize.test.ts). Change one, change both.
+ *
  * Scope: US/North-American (NANP) numbers only. We accept the common ways
  * a human or upstream system might present a US number and reject anything
  * that is obviously not one (letters, wrong length) with a typed error so

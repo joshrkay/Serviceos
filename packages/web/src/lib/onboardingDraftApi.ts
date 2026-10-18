@@ -24,32 +24,57 @@ import type { ApiFetch } from './apiClient';
 
 const DRAFT_PATH = '/api/onboarding/draft';
 
+/** One field the API refused, in its own words (`details.issues[]` of a 400). */
+interface DraftFieldIssue {
+  path: string;
+  message: string;
+}
+
 /** A failed draft call. `versionConflict` means another writer changed the draft first. */
 export class OnboardingDraftApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly versionConflict: boolean;
+  /** Per-field reasons from a 400; empty for every other failure. */
+  readonly issues: readonly DraftFieldIssue[];
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, issues: readonly DraftFieldIssue[] = []) {
     super(message);
     this.name = 'OnboardingDraftApiError';
     this.status = status;
     this.code = code;
     this.versionConflict = status === 409 && message.startsWith('VERSION_CONFLICT');
+    this.issues = issues;
   }
+
+  /** The API's reason it refused the field at `path`, or null when it named no such field. */
+  issueMessage(path: string): string | null {
+    return this.issues.find((issue) => issue.path === path)?.message ?? null;
+  }
+}
+
+function readIssues(details: unknown): DraftFieldIssue[] {
+  const issues = (details as { issues?: unknown } | null | undefined)?.issues;
+  if (!Array.isArray(issues)) return [];
+  return issues.flatMap((issue: unknown) => {
+    const { path, message } = (issue ?? {}) as { path?: unknown; message?: unknown };
+    return typeof path === 'string' && typeof message === 'string' ? [{ path, message }] : [];
+  });
 }
 
 async function failure(res: Response): Promise<OnboardingDraftApiError> {
   let code = 'HTTP_ERROR';
   let message = `HTTP ${res.status}`;
+  let issues: DraftFieldIssue[] = [];
   try {
-    const body = (await res.json()) as { error?: unknown; message?: unknown };
+    const body = (await res.json()) as { error?: unknown; message?: unknown; details?: unknown };
     if (typeof body.error === 'string') code = body.error;
     if (typeof body.message === 'string') message = body.message;
+    issues = readIssues(body.details);
   } catch {
     // Non-JSON error body: keep the status-only message.
   }
-  return new OnboardingDraftApiError(res.status, code, message);
+  return new OnboardingDraftApiError(res.status, code, message, issues);
 }
 
 async function parse<T>(res: Response, schema: { safeParse(v: unknown): { success: true; data: T } | { success: false } }): Promise<T> {

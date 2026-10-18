@@ -23,6 +23,7 @@ import { ReadyScreen } from './ReadyScreen';
 import { TurnFrame } from './TurnFrame';
 
 const LONG_NAME = 'WalshAndSonsPlumbingHeatingAndCoolingOfGreaterClevelandOhio';
+const REFUSED_CELL = 'That does not look like a US cell number. Include the 10-digit area code, for example (216) 555-0100.';
 
 function choiceFor(key: OnboardingCoreChoiceKey): AssembledOnboardingChoice {
   const choice = plumbingCleDraft.assembled.choices.find((c) => c.settingKey === key);
@@ -64,6 +65,20 @@ describe('v3 mobile layout contract', () => {
       () => <ReadbackCard draft={plumbingCleDraft} approving={false} error={null} notice={null} onApprove={vi.fn()} onEdit={vi.fn()} />,
     ],
     ['What should I answer as', () => <AnswerAsScreen onSubmit={vi.fn()} />],
+    [
+      'What should I answer as: a cell that is not a US number',
+      () => <AnswerAsScreen onSubmit={vi.fn()} initial={{ packId: 'plumbing', businessName: LONG_NAME, phone: '+44 7911 123456' }} />,
+    ],
+    [
+      'What should I answer as: the API refused the cell',
+      () => (
+        <AnswerAsScreen
+          onSubmit={vi.fn()}
+          initial={{ packId: 'plumbing', businessName: LONG_NAME, phone: '(216) 555-0142' }}
+          cellProblem={REFUSED_CELL}
+        />
+      ),
+    ],
     ['Turn: two cards', () => turn('booking_posture', { staged: { option: 'b' } })],
     ['Turn: two cards with Type instead', () => turn('greeting', { typeable: true })],
     ['Turn: editing from the read-back', () => turn('payment_collection_mode', { staged: { option: 'a' }, editing: true })],
@@ -88,6 +103,27 @@ describe('v3 mobile layout contract', () => {
       expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
     });
   }
+
+  it('the cell field and what is said under it wrap at 320px, for the why, a wrong number and a refusal alike', () => {
+    for (const props of [
+      {},
+      { initial: { phone: '+44 7911 123456' } },
+      { initial: { phone: '(216) 555-0142' }, cellProblem: REFUSED_CELL },
+    ]) {
+      const { container, unmount } = render(
+        <TurnFrame minutesLeft={5} progress={0.5}>
+          <AnswerAsScreen onSubmit={vi.fn()} {...props} />
+        </TurnFrame>,
+      );
+      const cell = screen.getByLabelText('Your cell');
+      expectTapTarget(cell, 'Your cell');
+      const hint = container.querySelector('#v3-cell-hint') as HTMLElement;
+      expect(cell).toHaveAttribute('aria-describedby', 'v3-cell-hint');
+      expect(hint.className).toMatch(/(^|\s)break-words(\s|$)/);
+      expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+      unmount();
+    }
+  });
 
   it('the header escape hatch is a 44px target at the right of the header, with nothing fixed wider than 320px', async () => {
     const onSelect = vi.fn();

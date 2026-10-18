@@ -91,6 +91,70 @@ describe('useOnboardingDraft', () => {
     expect(calls[1].body).toEqual({ ...CREATE, clientTimezone: BROWSER_TZ });
   });
 
+  describe('when creating the draft is refused', () => {
+    const REASON = 'That does not look like a US cell number. Include the 10-digit area code, for example (216) 555-0100.';
+    const refusedPhone = () =>
+      json(400, { error: 'VALIDATION_ERROR', message: 'Validation failed', details: { issues: [{ path: 'phone', message: REASON }] } });
+    const withCell = (phone: string) => ({ ...CREATE, phone });
+    const notFound = () => json(404, { error: 'NOT_FOUND', message: 'OnboardingDraft not found' });
+
+    it('hands back the API\'s reason for the cell as cellProblem, not as a load error the owner can only retry', async () => {
+      stubFetch([notFound(), refusedPhone()]);
+      const { result } = renderHook(() => useOnboardingDraft(withCell('+44 7911 123456')));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      expect(result.current.cellProblem).toBe(REASON);
+      expect(result.current.error).toBeNull();
+      expect(result.current.draft).toBeNull();
+      expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(['GET /api/onboarding/draft', 'POST /api/onboarding/draft']);
+    });
+
+    it('creates the draft with the corrected cell, and the reason is gone', async () => {
+      stubFetch([notFound(), refusedPhone()]);
+      const { result, rerender } = renderHook(({ input }) => useOnboardingDraft(input), {
+        initialProps: { input: withCell('+44 7911 123456') },
+      });
+      await waitFor(() => expect(result.current.cellProblem).toBe(REASON));
+
+      responses.push(notFound(), json(201, { draft: draftJson, created: true }));
+      rerender({ input: withCell('(216) 555-0142') });
+      await waitFor(() => expect(result.current.draft).not.toBeNull());
+
+      expect(calls[3]).toMatchObject({ method: 'POST', body: { ...CREATE, phone: '(216) 555-0142', clientTimezone: BROWSER_TZ } });
+      expect(result.current.cellProblem).toBeNull();
+      expect(result.current.error).toBeNull();
+    });
+
+    it('keeps every other create failure a load error, with no reason for the cell', async () => {
+      for (const refusal of [
+        json(400, { error: 'VALIDATION_ERROR', message: 'Validation failed', details: { issues: [{ path: 'businessName', message: 'Too big' }] } }),
+        json(400, { error: 'VALIDATION_ERROR', message: 'Invalid request data', details: { fields: { phone: ['Too small'] } } }),
+        json(500, { error: 'INTERNAL', message: 'boom' }),
+        new Error('network down'),
+      ]) {
+        stubFetch([notFound(), refusal]);
+        const { result } = renderHook(() => useOnboardingDraft(withCell('(216) 555-0142')));
+        await waitFor(() => expect(result.current.loading).toBe(false));
+        expect(result.current.error).toMatch(/couldn't load your setup/);
+        expect(result.current.cellProblem).toBeNull();
+        expect(result.current.draft).toBeNull();
+      }
+    });
+
+    it('clears the reason when the owner tries again', async () => {
+      stubFetch([notFound(), refusedPhone()]);
+      const { result } = renderHook(() => useOnboardingDraft(withCell('+44 7911 123456')));
+      await waitFor(() => expect(result.current.cellProblem).toBe(REASON));
+
+      responses.push(notFound(), json(201, { draft: draftJson, created: true }));
+      await act(async () => {
+        await result.current.reload();
+      });
+      expect(result.current.cellProblem).toBeNull();
+      expect(result.current.draft).not.toBeNull();
+    });
+  });
+
   it('backfills the timezone on an existing unapproved draft that has none, through the idempotent create route', async () => {
     const zoneless = withDraft({ clientTimezone: null, ownerFirstName: 'Jenna' });
     stubFetch([json(200, { draft: zoneless }), json(200, { draft: withDraft({ clientTimezone: BROWSER_TZ, version: 2 }), created: false })]);

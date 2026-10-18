@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fullyAnsweredDraft, plumbingCleDraft, withChoices } from './__fixtures__';
 import { PLANS, statusAt } from './__fixtures__/after';
 import { _resetOnboardingStatusCacheForTests } from '../../../hooks/useOnboardingStatus';
+import { expectAllTapTargets } from '../../../test-utils/tap-target';
 
 const track = vi.hoisted(() => ({ trackFunnel: vi.fn(), track: vi.fn() }));
 vi.mock('../../../lib/analytics', () => track);
@@ -35,12 +36,18 @@ function statusBody(over: Record<string, unknown> = {}) {
 }
 
 type StageFault = 'error' | 'conflict';
+/** How the next creates of the draft go wrong: the API refuses the cell (400 naming `phone`), or something else fails. */
+type CreateFault = 'refused_cell' | 'error';
+
+const REFUSED_CELL = 'That does not look like a US cell number. Include the 10-digit area code, for example (216) 555-0100.';
 
 interface Server {
   draft: OnboardingDraft | null;
   status: object;
   /** Forced outcomes for the next staged choices, in order; after that the stub behaves. */
   stageFaults?: StageFault[];
+  /** Forced outcomes for the next creates of the draft, in order; after that the stub behaves. */
+  createFaults?: CreateFault[];
   /** Make "That's right" fail with a server error. */
   approveFails?: boolean;
   /** Hold the next staged choice until this settles, so a test can act while a save is in flight. */
@@ -76,6 +83,13 @@ function stubNetwork(initial: Server) {
         );
       }
       if (path === '/api/onboarding/draft' && method === 'POST') {
+        const fault = server.createFaults?.shift();
+        if (fault === 'error') return resolved(json(500, { error: 'INTERNAL', message: 'boom' }));
+        if (fault === 'refused_cell') {
+          return resolved(
+            json(400, { error: 'VALIDATION_ERROR', message: 'Validation failed', details: { issues: [{ path: 'phone', message: REFUSED_CELL }] } }),
+          );
+        }
         server.draft = server.draft ?? draftJson;
         return resolved(json(201, { draft: server.draft, created: true }));
       }
@@ -737,6 +751,70 @@ describe('ConversationShell', () => {
     });
   });
 
+  /** The new owner's form, filled in and sent. */
+  async function sendTheForm(cell = '(216) 555-0142') {
+    expect(await screen.findByRole('heading', { level: 1, name: 'What should I answer as?' })).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText('Business name'), 'Walsh Plumbing');
+    await userEvent.click(screen.getByRole('button', { name: 'Plumbing' }));
+    await userEvent.type(screen.getByLabelText('Your cell'), cell);
+    await userEvent.click(screen.getByRole('button', { name: 'Show me my shop' }));
+  }
+  const creates = () => requests.filter((r) => r.method === 'POST' && r.path === '/api/onboarding/draft');
+
+  it('needs the owner\'s cell before it will make the shop: the button stays off without one', async () => {
+    stubNetwork({ draft: null, status: statusBody() });
+    renderShell();
+    await screen.findByRole('heading', { level: 1, name: 'What should I answer as?' });
+    await userEvent.type(screen.getByLabelText('Business name'), 'Walsh Plumbing');
+    await userEvent.click(screen.getByRole('button', { name: 'Plumbing' }));
+    expect(screen.getByRole('button', { name: 'Show me my shop' })).toBeDisabled();
+    await userEvent.type(screen.getByLabelText('Your cell'), '+44 7911 123456');
+    expect(screen.getByRole('button', { name: 'Show me my shop' })).toBeDisabled();
+    await userEvent.type(screen.getByLabelText('Your cell'), '{Enter}');
+    expect(creates()).toHaveLength(0);
+  });
+
+  it('takes the owner back to the form with the API\'s reason when it refuses the cell, keeping what they typed', async () => {
+    stubNetwork({ draft: null, status: statusBody(), createFaults: ['refused_cell'] });
+    renderShell();
+    await sendTheForm();
+
+    // Not "I couldn't load your setup": the form, with the reason on the cell and nothing lost.
+    expect(await screen.findByRole('alert')).toHaveTextContent(REFUSED_CELL);
+    expect(screen.getByRole('heading', { level: 1, name: 'What should I answer as?' })).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load your setup/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Business name')).toHaveValue('Walsh Plumbing');
+    expect(screen.getByRole('button', { name: 'Plumbing' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText('Your cell')).toHaveValue('(216) 555-0142');
+    // The same cell is not sent again; a different one is.
+    expect(screen.getByRole('button', { name: 'Show me my shop' })).toBeDisabled();
+
+    await userEvent.clear(screen.getByLabelText('Your cell'));
+    await userEvent.type(screen.getByLabelText('Your cell'), '216-555-0199');
+    await userEvent.click(screen.getByRole('button', { name: 'Show me my shop' }));
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Walsh Plumbing is already set up.' })).toBeInTheDocument();
+    expect(creates().map((r) => (r.body as { phone?: string }).phone)).toEqual(['(216) 555-0142', '216-555-0199']);
+  });
+
+  it('lets an owner whose create failed some other way change their answers, not only resend them', async () => {
+    stubNetwork({ draft: null, status: statusBody(), createFaults: ['error'] });
+    const { container } = renderShell();
+    await sendTheForm();
+
+    expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent("I couldn't load your setup.");
+    expectAllTapTargets(container, 'load problem after a failed create');
+    await userEvent.click(screen.getByRole('button', { name: 'Change my answers' }));
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'What should I answer as?' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Business name')).toHaveValue('Walsh Plumbing');
+    expect(screen.getByRole('button', { name: 'Plumbing' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText('Your cell')).toHaveValue('(216) 555-0142');
+    await userEvent.click(screen.getByRole('button', { name: 'Show me my shop' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Walsh Plumbing is already set up.' })).toBeInTheDocument();
+    expect(creates()).toHaveLength(2);
+  });
+
   it('says so, and offers a retry, when the setup cannot be loaded', async () => {
     stubNetwork({ draft: draftJson, status: statusBody() });
     vi.stubGlobal(
@@ -749,6 +827,8 @@ describe('ConversationShell', () => {
     renderShell();
     expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent("I couldn't load your setup.");
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    // Nothing was typed yet, so there are no answers to change.
+    expect(screen.queryByRole('button', { name: 'Change my answers' })).not.toBeInTheDocument();
   });
 
   it('sends a finished setup home', async () => {

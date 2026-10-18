@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import type { CreateOnboardingDraftBody } from '@ai-service-os/shared';
 import { Button } from '../../ui';
 import { cn } from '../../ui/utils';
+import { isUsCellNumber } from './cell-number';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
 
 const TRADES = [
@@ -14,30 +15,50 @@ const TRADES = [
 const FIELD =
   'min-h-11 w-full rounded-2xl border-[1.5px] border-foreground/20 bg-card px-4 py-3.5 text-lg text-foreground placeholder:text-muted-foreground focus-visible:border-primary focus-visible:outline-none';
 
+export type AnswerAsInput = Required<Pick<CreateOnboardingDraftBody, 'packId' | 'businessName' | 'phone'>>;
+
 export interface AnswerAsScreenProps {
-  onSubmit: (input: Pick<CreateOnboardingDraftBody, 'packId' | 'businessName' | 'phone'>) => void;
+  onSubmit: (input: AnswerAsInput) => void;
+  /** What the owner typed last time, so coming back to the form never blanks it. Read once, when the form opens. */
+  initial?: Partial<AnswerAsInput>;
+  /**
+   * Why the API refused the cell in `initial` (its own owner-facing words). Read once, when the
+   * form opens: it stays on the field for as long as the field holds that same cell, and that
+   * cell is never sent again.
+   */
+  cellProblem?: string | null;
 }
+
+const CELL_WHY = 'I ring this number for emergencies, and your area code sets your prices. 10 digits with the area code.';
+const CELL_NOT_US = "That doesn't look like a US cell number. Include the area code, 10 digits.";
 
 /**
  * The one question Rivet cannot default: what to answer the phone as, and
- * which trade. Everything else is assembled from these two (and the cell's
- * area code, when given) before the owner is asked anything.
+ * which trade, plus the cell. The cell is required: until the later slice that
+ * asks for it on its own and gates approval on it, this is the only place the
+ * owner's number is given, and without it a booked job cannot be handed to the
+ * owner and an emergency has nowhere to ring. Its area code also picks the
+ * prices. Everything else is assembled from these before the owner is asked
+ * anything.
  */
-export function AnswerAsScreen({ onSubmit }: AnswerAsScreenProps) {
-  const [businessName, setBusinessName] = useState('');
-  const [packId, setPackId] = useState<string | null>(null);
-  const [cell, setCell] = useState('');
+export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: AnswerAsScreenProps) {
+  const [businessName, setBusinessName] = useState(initial?.businessName ?? '');
+  const [packId, setPackId] = useState<string | null>(initial?.packId ?? null);
+  const [cell, setCell] = useState(initial?.phone ?? '');
+  const [refusal] = useState(() => (cellProblem ? { cell: (initial?.phone ?? '').trim(), reason: cellProblem } : null));
 
   const name = businessName.trim();
-  const cellDigits = cell.replace(/\D/g, '').length;
-  // Skipped only when truly empty: letters or punctuation with no digits would pass as "skipped" and silently get national prices.
-  const cellOk = cell.trim() === '' || cellDigits >= 10;
-  const canSubmit = name.length > 0 && packId !== null && cellOk;
+  const typedCell = cell.trim();
+  const cellOk = isUsCellNumber(typedCell);
+  // The reason belongs to the cell that was refused, not to the field: another number clears it.
+  const refused = refusal !== null && typedCell === refusal.cell ? refusal.reason : null;
+  const cellProblemShown = refused ?? (typedCell !== '' && !cellOk ? CELL_NOT_US : null);
+  const canSubmit = name.length > 0 && packId !== null && cellOk && refused === null;
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (packId === null || !canSubmit) return;
-    onSubmit({ packId, businessName: name, ...(cell.trim() ? { phone: cell.trim() } : {}) });
+    onSubmit({ packId, businessName: name, phone: typedCell });
   };
 
   return (
@@ -104,11 +125,17 @@ export function AnswerAsScreen({ onSubmit }: AnswerAsScreenProps) {
             placeholder="(216) 555-0142"
             value={cell}
             onChange={(e) => setCell(e.target.value)}
+            aria-required="true"
+            aria-invalid={cellProblemShown !== null}
             aria-describedby="v3-cell-hint"
             className={FIELD}
           />
-          <p id="v3-cell-hint" className="text-sm text-muted-foreground">
-            {cellOk ? 'So I can match prices to your area. You can skip this.' : 'Include the area code, 10 digits.'}
+          <p
+            id="v3-cell-hint"
+            role={refused !== null ? 'alert' : undefined}
+            className={cn('break-words text-sm', cellProblemShown !== null ? 'text-destructive' : 'text-muted-foreground')}
+          >
+            {cellProblemShown ?? CELL_WHY}
           </p>
         </div>
       </div>

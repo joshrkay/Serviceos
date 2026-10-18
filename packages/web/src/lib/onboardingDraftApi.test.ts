@@ -112,6 +112,34 @@ describe('onboardingDraftApi', () => {
     await expect(getDraft(apiFetch)).rejects.toMatchObject({ code: 'UNEXPECTED_RESPONSE' });
   });
 
+  it('createDraft carries the per-field reasons of a 400, so the form can show the one for the cell', async () => {
+    const reason = 'That does not look like a US cell number. Include the 10-digit area code, for example (216) 555-0100.';
+    apiFetch.mockResolvedValueOnce(
+      json(400, { error: 'VALIDATION_ERROR', message: 'Validation failed', details: { issues: [{ path: 'phone', message: reason }] } }),
+    );
+    const err = await createDraft(apiFetch, { packId: 'plumbing', businessName: 'Walsh Plumbing', phone: '+44 7911 123456' }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(OnboardingDraftApiError);
+    expect(err).toMatchObject({ status: 400, code: 'VALIDATION_ERROR', issues: [{ path: 'phone', message: reason }] });
+    expect((err as OnboardingDraftApiError).issueMessage('phone')).toBe(reason);
+    expect((err as OnboardingDraftApiError).issueMessage('businessName')).toBeNull();
+  });
+
+  it('reads no reasons from an error body that has none, or whose details are not issues', async () => {
+    for (const body of [
+      { error: 'VALIDATION_ERROR', message: 'Invalid request data', details: { fields: { phone: ['Too small'] } } },
+      { error: 'VALIDATION_ERROR', message: 'Validation failed', details: { issues: 'phone' } },
+      { error: 'VALIDATION_ERROR', message: 'Validation failed', details: { issues: [{ path: 'phone' }, { message: 'x' }, null, 4] } },
+      { error: 'INTERNAL', message: 'boom' },
+    ]) {
+      apiFetch.mockResolvedValueOnce(json(400, body));
+      const err = (await createDraft(apiFetch, { packId: 'plumbing', businessName: 'Walsh' }).catch((e: unknown) => e)) as OnboardingDraftApiError;
+      expect(err.issues).toEqual([]);
+      expect(err.issueMessage('phone')).toBeNull();
+    }
+  });
+
   it('carries the API error code and message', async () => {
     apiFetch.mockResolvedValueOnce(json(400, { error: 'VALIDATION_ERROR', message: 'TIMEZONE_REQUIRED: the browser timezone must be recorded' }));
     const err = await approveDraft(apiFetch).catch((e: unknown) => e);
