@@ -758,8 +758,25 @@ flowchart LR
     - owner-only and audited
     - an explicit human action, never an AI proposal
     - one `executeAudited` command transaction
+  - **Make the scope complete by construction, not by list.** Review keeps turning up one more
+    table that holds customer data, so the list below is only a starting point, not the
+    definition.
+    - Build an erase-coverage manifest in code. It names every table that references `customers`:
+      any `customer_id` foreign key, whether created in a table definition or added later by
+      `ALTER TABLE`.
+    - Classify each table, with a reason, as exactly one of:
+      - `scrub` (delete or blank its PII columns)
+      - `anonymize` (keep the row, drop the link and the PII)
+      - `keep` (a legal or financial retention reason)
+    - A schema test reads the live catalog (`information_schema` / `pg_constraint`) in the
+      Docker-gated suite. It fails when any customer-referencing table, or any newly added one, is
+      missing from the manifest. A future table therefore can't silently escape the erase.
+    - Free-text stores that can hold a customer's details without a foreign key (notes, messages,
+      transcripts, `ai_runs`) are listed in the manifest explicitly, with how each is matched.
   - **Scrub:**
     - the `customers` row and `customer_contacts`
+    - `customer_custom_field_values`: the arbitrary `value` column (`schema.ts:4733-4741`) can hold
+      gate codes, dates of birth or account references
     - the customer's `service_locations`: street, city, postal code, latitude/longitude and access
       notes, all linked by `customer_id` (`schema.ts:338-352`). Anonymize these rather than delete
       them, because jobs and appointments still reference the rows.
@@ -798,6 +815,9 @@ flowchart LR
     row found by `correlation_id`
   - the customer's `service_locations` rows keep their ids but lose street, city, postal code,
     coordinates and access notes
+  - a seeded `customer_custom_field_values` value is gone
+  - **schema coverage:** the manifest test fails when a test-only migration adds a new table with a
+    `customer_id` foreign key that the manifest doesn't list
   - with two customers sharing a full name, the other customer's row is untouched
   - a row that matches only a household-shared phone lands on the candidate list and is scrubbed only
     after confirmation
