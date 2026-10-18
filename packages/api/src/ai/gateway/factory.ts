@@ -25,6 +25,7 @@ import {
 } from './cache';
 import { createRedisCacheStore } from './redis-cache-store';
 import { findProviderModelMismatch } from './provider-model-compat';
+import { findUnpricedModels } from './model-pricing';
 import { DEFAULT_AI_ROUTING_CONFIG } from '../../config/ai-routing';
 import {
   FallbackModelMapProvider,
@@ -160,6 +161,7 @@ export function createLLMGateway(
     // Also stderr so Railway logs show it even without a structured logger.
     process.stderr.write(`[ERROR] ${mismatch.reason}\n`);
   }
+  warnOnUnpricedModels(modelsToCheck, 'primary', opts.logger);
 
   const primaryProvider = new OpenAICompatibleProvider({
     apiKey: config.AI_PROVIDER_API_KEY,
@@ -395,6 +397,27 @@ function buildGatewayConfig(
 }
 
 /**
+ * GATEWAY-04 — boot-time warning when a model the gateway will route to has no
+ * price. Unpriced models deliberately record `costMicroCents: null` (never a
+ * guessed price — model-pricing.ts), and OpenAI models are unpriced by default,
+ * so without this the default deploy's spend telemetry is null with no signal.
+ * Warn, never fail: a missing price must not take the AI down.
+ */
+function warnOnUnpricedModels(
+  models: ReadonlyArray<string | undefined>,
+  role: 'primary' | 'fallback',
+  logger?: LLMGatewayLogger,
+): void {
+  const unpriced = findUnpricedModels(models);
+  if (unpriced.length === 0) return;
+  const message =
+    `AI ${role} model(s) have no price — ai_runs.cost_micro_cents and the spend metric ` +
+    `will be null for their calls until AI_MODEL_PRICING_JSON covers them`;
+  logger?.info(message, { level: 'warn', role, models: unpriced });
+  process.stderr.write(`[WARN] ${message}: ${unpriced.join(', ')}\n`);
+}
+
+/**
  * AI_FALLBACK_RESERVE_MS — cap on the slice of a request's deadline held back
  * for the fallback provider (GATEWAY-03; see `fallbackReserveFor`). A
  * non-negative integer; 0 gives the primary the whole budget (the fallback then
@@ -460,6 +483,7 @@ export function buildFallbackProvidersFromEnv(
   });
 
   const tiers = resolveFallbackTierModelsFromEnv(env);
+  warnOnUnpricedModels([tiers.lightweight, tiers.standard, tiers.complex], 'fallback', logger);
   logger?.info('AI fallback provider wired', {
     host: parsedHost,
     lightweightModel: tiers.lightweight,
