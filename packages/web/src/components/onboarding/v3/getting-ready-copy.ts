@@ -11,8 +11,3 @@ const BLOCKER_COPY: Record<string, string> = {
 export function voiceBlockerCopy(blockers: string[] | undefined): string {
   return BLOCKER_COPY[blockers?.[0] ?? 'ai_verification_failed'] ?? "I couldn't get my voice ready. Try again.";
 }
-
-/** Why the retry or the skip did not go through. */
-export function voiceActionErrorCopy(status: number): string {
-  return status >= 500 ? "That didn't go through. Wait a minute and try again." : "That didn't go through. Try again.";
-}

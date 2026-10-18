@@ -1,4 +1,5 @@
 import type { OnboardingStatusResponse, OnboardingStep, OnboardingStepId } from '../../../types/onboarding';
+import type { AfterStage } from './pacing';
 
 /**
  * Which turn the owner is on once "That's right" has gone through and the
@@ -24,6 +25,23 @@ export function afterScreen(status: OnboardingStatusResponse | null): AfterScree
     // signup, identity and pack are the saved choices going live; null is a finished setup (handed off).
     default:
       return 'wait';
+  }
+}
+
+/** The header and progress stage for a screen: the voice getting ready is part of the test call, and a heard call is the end. */
+export function afterStage(screen: AfterScreen, saving: boolean, heard: boolean): AfterStage {
+  if (saving) return 'saving';
+  switch (screen) {
+    case 'wait':
+      return 'wait';
+    case 'trial':
+      return 'trial';
+    case 'number':
+      return 'number';
+    case 'getting_ready':
+      return 'test_call';
+    case 'test_call':
+      return heard ? 'open' : 'test_call';
   }
 }
 

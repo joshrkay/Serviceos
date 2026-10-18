@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { useApiClient } from '../../../lib/apiClient';
 import { Button } from '../../ui';
 import type { OnboardingStep } from '../../../types/onboarding';
-import { CONNECTION_ERROR } from './connection-copy';
-import { voiceActionErrorCopy, voiceBlockerCopy } from './getting-ready-copy';
+import { CONNECTION_ERROR, requestErrorCopy } from './connection-copy';
+import { voiceBlockerCopy } from './getting-ready-copy';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
 import { WaitScreen } from './WaitScreen';
 
@@ -38,7 +38,7 @@ export function GettingReadyTurn({ step, onChanged }: GettingReadyTurnProps) {
     try {
       const res = await apiFetch(PATH[action], { method: 'POST' });
       if (!res.ok) {
-        setError(voiceActionErrorCopy(res.status));
+        setError(requestErrorCopy(res.status));
         return;
       }
       onChanged();

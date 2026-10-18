@@ -9,7 +9,7 @@ import { trackFunnel, type AnalyticsEvent } from '../../../lib/analytics';
 import { isExplicitRerun } from '../../../utils/onboarding-rerun';
 import { Button, Spinner } from '../../ui';
 import { OnboardingShell } from '../v2/OnboardingShell';
-import { BillingStep } from '../v2/steps/BillingStep';
+import { AfterApproval } from './AfterApproval';
 import { AnswerAsScreen } from './AnswerAsScreen';
 import { OptionPairTurn } from './OptionPairTurn';
 import { READBACK_PROGRESS, READY_PROGRESS, highestSeen, minutesLeft, turnProgress } from './pacing';
@@ -19,7 +19,7 @@ import { SpeakerLine, RivetHeading, TurnFrame } from './TurnFrame';
 import { answeredCount, coreTurns, landingTarget, makeItMineTarget, nextUnanswered, type CoreTurn, type TurnTarget } from './turns';
 import { typedKind } from './typed-answer';
 
-type Screen = 'loading' | 'problem' | 'answer_as' | 'ready' | 'turn' | 'readback' | 'saving' | 'after';
+type Screen = 'loading' | 'problem' | 'answer_as' | 'ready' | 'turn' | 'readback' | 'saved';
 
 interface ScreenFrame {
   minutesLeft: number;
@@ -28,12 +28,10 @@ interface ScreenFrame {
 }
 
 /** Header and progress for the screens whose timing does not depend on the draft. */
-const STATIC_FRAME: Record<'loading' | 'problem' | 'answer_as' | 'saving' | 'after', ScreenFrame> = {
+const STATIC_FRAME: Record<'loading' | 'problem' | 'answer_as', ScreenFrame> = {
   loading: { minutesLeft: 7, progress: 0.05 },
   problem: { minutesLeft: 7, progress: 0.05 },
   answer_as: { minutesLeft: 7, progress: 0.05, statusLabel: 'Nothing saved yet' },
-  saving: { minutesLeft: 3, progress: 0.7, statusLabel: 'Saving' },
-  after: { minutesLeft: 3, progress: 0.8, statusLabel: 'Saved' },
 };
 
 const SCREEN_VIEWED: Partial<Record<Screen, AnalyticsEvent>> = {
@@ -49,7 +47,9 @@ const placeFor = (target: TurnTarget): Place => (target.screen === 'turn' ? { sc
 /**
  * "Pick, don't build" onboarding: one conversational surface. Rivet shows a
  * finished shop, the owner confirms it (or changes it), and the one tap on
- * "That's right" saves. A re-run of setup still opens the sidebar shell.
+ * "That's right" saves; the trial, the number and the test call follow in the
+ * same frame (AfterApproval). Only an explicit re-run of setup opens the
+ * sidebar shell.
  */
 export function ConversationShell() {
   const [params] = useSearchParams();
@@ -76,9 +76,11 @@ function Conversation() {
   const isComplete = status.data?.isComplete === true;
   const funnelContext = { tenantId, userId };
 
+  // Once the shop is saved, the hand-off home belongs to AfterApproval (it can wait for one last tap).
+  const savedShop = draft?.status === 'approved';
   useEffect(() => {
-    if (isComplete) void navigate('/', { replace: true });
-  }, [isComplete, navigate]);
+    if (isComplete && !savedShop) void navigate('/', { replace: true });
+  }, [isComplete, savedShop, navigate]);
 
   useEffect(() => {
     if (!saving) return;
@@ -94,7 +96,7 @@ function Conversation() {
 
   let screen: Screen;
   if (!draft) screen = loading ? 'loading' : error ? 'problem' : 'answer_as';
-  else if (draft.status === 'approved') screen = saving ? 'saving' : 'after';
+  else if (draft.status === 'approved') screen = 'saved';
   else if (!place) screen = 'ready';
   else screen = currentTurn ? 'turn' : 'readback';
 
@@ -171,13 +173,11 @@ function Conversation() {
     setSaving(true);
   };
 
-  if (isComplete) return null;
-
-  // Past "That's right": the saved choices go live, then the rest of setup is the existing steps.
-  const step = status.data?.currentStep ?? null;
-  if (screen === 'after' && status.data && step !== 'identity' && step !== 'pack' && step !== 'signup' && step !== 'billing') {
-    return <OnboardingShell />;
+  // Past "That's right": the trial, the number and the test call, in the same frame.
+  if (screen === 'saved') {
+    return <AfterApproval status={status} saving={saving} changeCount={draft?.proposalIds.length ?? 0} userId={userId} />;
   }
+  if (isComplete) return null;
 
   const frame = frameFor(screen, turns.length, draft ? answeredCount(draft) : 0, editing);
   // Never backwards: going back to change an answer does not lower the line.
@@ -231,21 +231,12 @@ function Conversation() {
           onEdit={editFromReadback}
         />
       )}
-      {screen === 'saving' && draft && <SavingLine count={draft.proposalIds.length} />}
-      {screen === 'after' &&
-        (step === 'billing' ? (
-          <div className="mt-7">
-            <BillingStep />
-          </div>
-        ) : (
-          <SavingLine count={draft?.proposalIds.length ?? 0} settling />
-        ))}
     </TurnFrame>
   );
 }
 
 /** Header and progress for a screen. Ready and the read-back bracket the turns; the turns count down what is left. */
-function frameFor(screen: Screen, total: number, answered: number, editing: boolean): ScreenFrame {
+function frameFor(screen: Exclude<Screen, 'saved'>, total: number, answered: number, editing: boolean): ScreenFrame {
   switch (screen) {
     case 'ready':
       return { minutesLeft: minutesLeft(total), progress: READY_PROGRESS, statusLabel: 'Nothing saved yet' };
@@ -261,18 +252,4 @@ function frameFor(screen: Screen, total: number, answered: number, editing: bool
     default:
       return STATIC_FRAME[screen];
   }
-}
-
-function SavingLine({ count, settling = false }: { count: number; settling?: boolean }) {
-  return (
-    <>
-      <SpeakerLine />
-      <RivetHeading>{settling ? 'Getting your shop ready.' : 'Saving your choices.'}</RivetHeading>
-      <p role="status" className="mt-3 text-base leading-[1.45] text-secondary-foreground">
-        {count > 0
-          ? `Saving ${count} ${count === 1 ? 'change' : 'changes'}. They go live in a few seconds.`
-          : 'This takes a few seconds.'}
-      </p>
-    </>
-  );
 }

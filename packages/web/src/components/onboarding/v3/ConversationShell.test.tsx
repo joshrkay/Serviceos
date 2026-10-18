@@ -11,13 +11,13 @@ import { MemoryRouter, Route, Routes } from 'react-router';
 import type { OnboardingDraft } from '@ai-service-os/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fullyAnsweredDraft, plumbingCleDraft, withChoices } from './__fixtures__';
+import { PLANS, statusAt } from './__fixtures__/after';
 import { _resetOnboardingStatusCacheForTests } from '../../../hooks/useOnboardingStatus';
 
 const track = vi.hoisted(() => ({ trackFunnel: vi.fn(), track: vi.fn() }));
 vi.mock('../../../lib/analytics', () => track);
 vi.mock('../../../hooks/useUndoableApproval', () => ({ UNDO_WINDOW_MS: 200 }));
 vi.mock('../v2/OnboardingShell', () => ({ OnboardingShell: () => <div>v2 shell</div> }));
-vi.mock('../v2/steps/BillingStep', () => ({ BillingStep: () => <div>billing step</div> }));
 
 import { ConversationShell } from './ConversationShell';
 
@@ -38,7 +38,7 @@ type StageFault = 'error' | 'conflict';
 
 interface Server {
   draft: OnboardingDraft | null;
-  status: Record<string, unknown>;
+  status: object;
   /** Forced outcomes for the next staged choices, in order; after that the stub behaves. */
   stageFaults?: StageFault[];
   /** Make "That's right" fail with a server error. */
@@ -67,6 +67,7 @@ function stubNetwork(initial: Server) {
       const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Request['body']) : undefined;
       requests.push({ method, path, body });
       if (path === '/api/onboarding/status') return resolved(json(200, server.status));
+      if (path === '/api/onboarding/billing/plans') return resolved(json(200, { plans: PLANS }));
       if (path === '/api/onboarding/draft' && method === 'GET') {
         return resolved(
           server.draft ? json(200, { draft: server.draft }) : json(404, { error: 'NOT_FOUND', message: 'OnboardingDraft not found' }),
@@ -601,36 +602,43 @@ describe('ConversationShell', () => {
     expect(track.trackFunnel.mock.calls.filter(([e]) => e === 'v3_approved')).toHaveLength(1);
   });
 
-  it('after the saving window continues into the existing billing step once the choices are live', async () => {
-    stubNetwork({ draft: draftJson, status: statusBody({ currentStep: 'billing' }) });
+  it('after the saving window continues into the trial, in the same frame, once the choices are live', async () => {
+    stubNetwork({ draft: draftJson, status: statusAt('billing') });
     renderShell();
     await userEvent.click(await screen.findByRole('button', { name: 'Looks right as is, skip the choices' }));
     await userEvent.click(await screen.findByRole('button', { name: "That's right" }));
 
     expect(await screen.findByText(/Saving 2 changes/)).toBeInTheDocument();
-    expect(await screen.findByText('billing step')).toBeInTheDocument();
+    expect(screen.getByText('Saving')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: /start your free trial/ })).toBeInTheDocument();
+    expect(await screen.findByRole('radio', { name: /Starter/ })).toBeInTheDocument();
     expect(screen.getByText('About 3 minutes left')).toBeInTheDocument();
+    expect(progress()).toBe('70');
+    expect(screen.queryByText('v2 shell')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Keep the rest as is|Back/ })).not.toBeInTheDocument();
   });
 
   it('keeps waiting, not guessing, while the saved choices have not gone live yet', async () => {
-    stubNetwork({ draft: approvedJson, status: statusBody({ currentStep: 'identity' }) });
+    stubNetwork({ draft: approvedJson, status: statusAt('identity') });
     renderShell();
     expect(await screen.findByRole('heading', { level: 1, name: 'Getting your shop ready.' })).toBeInTheDocument();
-    expect(screen.queryByText('billing step')).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
     expect(screen.queryByText('v2 shell')).not.toBeInTheDocument();
   });
 
-  it('resumes an already-saved shop at billing with no saving window', async () => {
-    stubNetwork({ draft: approvedJson, status: statusBody({ currentStep: 'billing' }) });
+  it('resumes an already-saved shop at the trial with no saving window', async () => {
+    stubNetwork({ draft: approvedJson, status: statusAt('billing') });
     renderShell();
-    expect(await screen.findByText('billing step')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: /start your free trial/ })).toBeInTheDocument();
     expect(screen.queryByText(/Saving 2 changes/)).not.toBeInTheDocument();
   });
 
-  it('hands the rest of setup to the existing steps once billing is done', async () => {
-    stubNetwork({ draft: approvedJson, status: statusBody({ currentStep: 'phone' }) });
+  it('carries on to the number in the same frame once the trial is done, never into the old shell', async () => {
+    stubNetwork({ draft: approvedJson, status: statusAt('phone') });
     renderShell();
-    expect(await screen.findByText('v2 shell')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Getting your number.' })).toBeInTheDocument();
+    expect(screen.getByText('About 2 minutes left')).toBeInTheDocument();
+    expect(screen.queryByText('v2 shell')).not.toBeInTheDocument();
   });
 
   it('asks what to answer as when there is no draft, then creates it with the browser timezone', async () => {

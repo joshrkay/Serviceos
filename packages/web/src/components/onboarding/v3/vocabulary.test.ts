@@ -24,9 +24,17 @@ function shippedSources(dir: string): string[] {
   });
 }
 
-/** Import paths are code, not copy: `@ai-service-os/shared` is a package name. */
-function withoutModulePaths(line: string): string {
-  return line.replace(/(\bfrom\s*|\bimport\s*\(?\s*)'[^']*'/g, '$1\'\'');
+/**
+ * What an owner could read on a line. Import paths and the API's route paths are
+ * code, not copy: `@ai-service-os/shared` is a package name, and
+ * `/api/onboarding/ai-check/retry` is a URL the API owns and nobody here can
+ * rename. Only a quoted string that starts with `/api/` is blanked; the rest of
+ * the line is still scanned.
+ */
+function ownerFacing(line: string): string {
+  return line
+    .replace(/(\bfrom\s*|\bimport\s*\(?\s*)'[^']*'/g, '$1\'\'')
+    .replace(/(['"`])\/api\/[^'"`]*\1/g, '$1$1');
 }
 
 describe('v3 vocabulary', () => {
@@ -37,13 +45,29 @@ describe('v3 vocabulary', () => {
     expect(names).toEqual(expect.arrayContaining(['ConversationShell.tsx', 'ReadyScreen.tsx', 'ReadbackCard.tsx', 'AnswerAsScreen.tsx']));
   });
 
+  describe('the scan itself', () => {
+    const says = (word: string, line: string) => new RegExp(`\\b${word}\\b`, 'i').test(ownerFacing(line));
+
+    it('does not mistake a package name or a route path for copy', () => {
+      expect(says('AI', "import { Money } from '@ai-service-os/shared';")).toBe(false);
+      expect(says('AI', "retry: '/api/onboarding/ai-check/retry',")).toBe(false);
+      expect(says('AI', 'const url = `/api/onboarding/ai-check/skip`;')).toBe(false);
+    });
+
+    it('still catches the word anywhere else on a line, even beside a route', () => {
+      expect(says('AI', '<h1>Verifying your AI</h1>')).toBe(true);
+      expect(says('AI', "apiFetch('/api/voice/go-live'); setNote('Your AI is on.');")).toBe(true);
+      expect(says('Stripe', "const note = 'Stripe will ask for a card'; // '/api/onboarding/billing/plans'")).toBe(true);
+    });
+  });
+
   for (const word of FORBIDDEN) {
     it(`never says "${word}"`, () => {
       const pattern = new RegExp(`\\b${word}\\b`, 'i');
       const offenders = files.flatMap((file) =>
         readFileSync(file, 'utf8')
           .split('\n')
-          .map((text, i) => ({ file: file.slice(here.length + 1), line: i + 1, text: withoutModulePaths(text).trim() }))
+          .map((text, i) => ({ file: file.slice(here.length + 1), line: i + 1, text: ownerFacing(text).trim() }))
           .filter((l) => pattern.test(l.text)),
       );
       expect(offenders).toEqual([]);

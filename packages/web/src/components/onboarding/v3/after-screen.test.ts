@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { OnboardingStatusResponse, OnboardingStep, OnboardingStepId } from '../../../types/onboarding';
-import { afterScreen, phoneNumberOf, stepOf } from './after-screen';
+import { afterScreen, afterStage, phoneNumberOf, stepOf } from './after-screen';
 
 function status(currentStep: OnboardingStepId | null, steps: OnboardingStep[] = []): OnboardingStatusResponse {
   return { steps, currentStep, isComplete: currentStep === null, voiceAgentLive: false, tenantId: 't', subscriptionStatus: null };
@@ -44,5 +44,25 @@ describe('stepOf and phoneNumberOf', () => {
     expect(phoneNumberOf(status('phone', [{ id: 'phone', status: 'current', metadata: { phoneNumber: '' } }]))).toBeNull();
     expect(phoneNumberOf(status('phone', [{ id: 'phone', status: 'current', metadata: { phoneNumber: 5551234 } }]))).toBeNull();
     expect(phoneNumberOf(null)).toBeNull();
+  });
+});
+
+describe('afterStage', () => {
+  it('is saving for as long as the undo window is open, whichever screen the status would show', () => {
+    for (const screen of ['wait', 'trial', 'number', 'getting_ready', 'test_call'] as const) {
+      expect(afterStage(screen, true, false)).toBe('saving');
+    }
+  });
+
+  it('gives each screen its place in the header, with the voice getting ready counted as the test call', () => {
+    expect(afterStage('wait', false, false)).toBe('wait');
+    expect(afterStage('trial', false, false)).toBe('trial');
+    expect(afterStage('number', false, false)).toBe('number');
+    expect(afterStage('getting_ready', false, false)).toBe('test_call');
+    expect(afterStage('test_call', false, false)).toBe('test_call');
+  });
+
+  it('is open once the call was heard', () => {
+    expect(afterStage('test_call', false, true)).toBe('open');
   });
 });
