@@ -524,18 +524,25 @@ flowchart LR
     - A `pci_detected` mark makes the retention worker purge that recording's audio promptly from S3
       and Twilio.
     - **Backfill what is already stored.** Everything above guards writes from now on. Card numbers
-      captured before this ships would stay in every store still inside its retention window.
+      captured before this ships would stay in every store still holding them. That includes rows
+      older than the retention window: recordings on legal hold, and the transcripts, chunks and
+      embeddings derived from them, are exempt from purging (`recording-retention-worker.ts:20-21`,
+      `:191-194`). The backfill therefore isn't bounded by the retention window. A scrub removes
+      only the card number and keeps the record, so it doesn't conflict with a hold.
       - Add a bounded, resumable, one-time job that runs per tenant, in batches, under the tenant
         transaction.
-      - It runs the same scrubber over the text stores still in that window: `call_transcript_turns`,
+      - It runs the same scrubber over every remaining row of the designated text stores, whatever
+        its age: `call_transcript_turns`,
         `voice_sessions.transcript`, `voice_recordings.transcript` with its
         `raw_transcript_retention`, `knowledge_chunks.content` and `content_scrubbed`, and the
         `ai_runs` input/output snapshots. Every designated column is covered; the context builder
         sends `content_scrubbed` back to the model (`context-builder.ts:189`).
       - It deletes or regenerates the embedding of every knowledge chunk it changes, so a vector
         built from the card number can't keep matching.
-      - It sets every recording still in the window to `pci_scan = 'pending'`, so the audio pass
-        covers recordings made before the deploy too.
+      - It sets every remaining recording, legal-hold ones included, to `pci_scan = 'pending'`, so
+        the audio pass covers recordings made before the deploy too. A held recording that is found
+        to contain a card number is kept, because of the hold, but flagged and audited for the
+        owner. Whether held audio can be redacted is a legal call for the owner.
       - It writes one audit event per tenant, with the redaction counts.
       - It is idempotent: a re-run changes nothing further.
   - **PRIV-4**
@@ -585,6 +592,8 @@ flowchart LR
       chunk's embedding is regenerated or removed.
     - A recording made before the deploy is set to `pending` and goes through the audio pass.
     - A second run changes nothing.
+    - A legal-hold recording older than the retention window has its transcript, chunks and embedding
+      scrubbed. The recording is flagged and audited, not deleted.
 - **Verification:** a PAN read aloud never reaches `ai_runs`, `call_transcript_turns` or the provider
   payload in tests.
 
@@ -1007,6 +1016,15 @@ flowchart LR
       - Add a per-message framing allowance, and each image's maximum token charge.
       - An exact tokenizer for the model family may replace the byte bound only if a test proves it
         never undercounts.
+    - **Bound the final wire payload, not the gateway's view of it.** For a `responseFormat: 'json'`
+      request whose messages don't mention JSON, the provider adapter injects
+      `JSON_MODE_SYSTEM_INSTRUCTION` downstream of the gateway (`openai-compatible.ts:63-69`,
+      `:369-372`). A bound computed from the original messages misses that text and its framing.
+      - Each provider adapter therefore exposes the payload it will actually send, with every
+        injected instruction, transformation and framing included, for example through a
+        `buildWireRequest()` it also uses itself.
+      - The reservation is computed from that payload.
+      - A test covers JSON-mode injection on byte-dense input.
     - Do the reservation in one atomic step: either a single conditional
       `UPDATE … SET reserved = reserved + $cost WHERE spent + reserved + $cost <= cap RETURNING …` on
       a per-tenant monthly ledger row, or a Lua script in the same style as
