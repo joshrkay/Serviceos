@@ -19,15 +19,14 @@ import {
   RetryOnboardingDraftResponseSchema,
   StageOnboardingChoiceBodySchema,
 } from '@ai-service-os/shared';
-import * as apiOnboardingContracts from '../../../src/onboarding/contracts';
+import { DRAFT_EXECUTION_STATES } from '../../../src/onboarding/contracts';
 import { assembleTypicalShop } from '../../../src/onboarding/choices/assemble';
 import { InMemoryRegionalPriceTierRepository } from '../../../src/onboarding/choices/price-tiers';
 import { ALL_CHOICE_KEYS, CHOICE_KEYS } from '../../../src/onboarding/choices/schema';
 import { REGISTRY_TRADES } from '../../../src/onboarding/choices/registry';
 import { metroForPhone } from '../../../src/compliance/us-geography';
 import { InMemoryOnboardingDraftRepository } from '../../../src/onboarding/draft/repository';
-import * as apiDraftContracts from '../../../src/onboarding/draft/contracts';
-import { CreateDraftInputSchema, StageChoiceBodySchema } from '../../../src/onboarding/draft/contracts';
+import { ApproveDraftBodySchema, CreateDraftInputSchema, StageChoiceBodySchema } from '../../../src/onboarding/draft/contracts';
 
 const TENANT_ID = '00000000-0000-0000-0000-0000000000a1';
 const CLE = { standard: { tripFeeCents: 8900, hourlyRateCents: 15000 }, premium: { tripFeeCents: 12900, hourlyRateCents: 18500 } };
@@ -87,7 +86,7 @@ describe('onboarding draft wire contract (api <-> shared)', () => {
     );
     expect(OnboardingDraftSchema.parse(overTheWire(s3))).toEqual(overTheWire(s3));
 
-    const approved = await repo.markApproved(TENANT_ID, ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222']);
+    const approved = await repo.markApproved(TENANT_ID, ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'], s3.version);
     const wire = overTheWire(approved);
     expect(OnboardingDraftSchema.parse(wire)).toEqual(wire);
   });
@@ -137,7 +136,7 @@ describe('onboarding draft wire contract (api <-> shared)', () => {
   it('parses the retry response with a real approved draft', async () => {
     const { repo, draft } = await buildDraft('plumbing', '(216) 555-0142');
     const ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
-    const approved = overTheWire(await repo.markApproved(TENANT_ID, ids));
+    const approved = overTheWire(await repo.markApproved(TENANT_ID, ids, draft.version));
     const parsed = RetryOnboardingDraftResponseSchema.parse({ draft: approved, retriedProposalIds: [ids[1]] });
     expect(parsed.retriedProposalIds).toEqual([ids[1]]);
     expect(RetryOnboardingDraftResponseSchema.safeParse({ draft: overTheWire(draft) }).success).toBe(false);
@@ -151,20 +150,15 @@ describe('onboarding draft wire contract (api <-> shared)', () => {
       [{ expectedVersion: 1.5 }, false],
       [{ expectedVersion: 1, extra: 1 }, false],
     ];
-    // The API's own schema arrives with the approve lock; until then the table above is the pin.
-    const api = (apiDraftContracts as Record<string, unknown>).ApproveDraftBodySchema as { safeParse(v: unknown): { success: boolean } } | undefined;
     for (const [body, ok] of cases) {
       expect(ApproveOnboardingDraftBodySchema.safeParse(body).success, JSON.stringify(body)).toBe(ok);
-      if (api) expect(api.safeParse(body).success, `api ${JSON.stringify(body)}`).toBe(ok);
+      expect(ApproveDraftBodySchema.safeParse(body).success, `api ${JSON.stringify(body)}`).toBe(ok);
     }
   });
 
-  it('keeps the execution states equal to the API list once the API reports them', () => {
+  it('keeps the execution states equal to the API list', () => {
     expect([...ONBOARDING_DRAFT_EXECUTION_STATES]).toEqual(['pending', 'executing', 'executed', 'failed', 'stopped']);
-    // The status draft fact gains `execution` in the same change as DRAFT_EXECUTION_STATES; until the API
-    // here has it, the literal list above is the pin.
-    const api = (apiOnboardingContracts as Record<string, unknown>).DRAFT_EXECUTION_STATES;
-    if (api !== undefined) expect([...ONBOARDING_DRAFT_EXECUTION_STATES]).toEqual([...(api as readonly string[])]);
+    expect([...ONBOARDING_DRAFT_EXECUTION_STATES]).toEqual([...DRAFT_EXECUTION_STATES]);
   });
 
   it('keeps the shared choice-key and trade lists equal to the API registry', () => {
