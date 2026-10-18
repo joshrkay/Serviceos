@@ -210,6 +210,12 @@ subscriptions while the next wave starts.
 - **Dependencies:** E2; for each batch the hardening plan's unit section is the spec.
 - **Files:** per batch, the hardening plan's "Files" list for that unit; test files next to each
   module plus new `packages/api/test/integration/` files where the unit names them.
+- **Wave work packages (the per-batch spec the implementer and reviewer both work from):**
+  `docs/plans/ai-hardening-waves/wave-<n>-batch-<K>-U<u>.md`, one per batch. Each restates the
+  batch's findings in full (locations, trigger, impact, evidence, verifier reasoning, the fix that
+  wins, the audit's test specification), fixes the build order inside the batch, states file
+  ownership against the concurrent batch, lists per-finding acceptance criteria, the gate commands,
+  the reviewer checklist and the PR body skeleton.
 - **Approach:**
   1. **Origin check.** `git ls-remote origin 'refs/heads/fix/ai-hardening-*'` and list open PRs. If
      the batch's branch exists with an open PR, check it out and continue that PR; otherwise start
