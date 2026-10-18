@@ -7719,6 +7719,18 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS payment_collection_mode TEXT
         CHECK (payment_collection_mode IS NULL OR payment_collection_mode IN ('pay_link', 'collect_on_site'));
   `,
+
+  // "Pick, don't build" onboarding — the owner's cell on the draft, E.164.
+  // Nullable until the owner gives one; carried on the onboarding_tenant_settings
+  // proposal at approval and written to tenant_settings.owner_phone by its
+  // handler. RLS (311) is inherited by the new column. `[+]` rather than an
+  // escaped plus: inside this template literal a backslash-plus loses its
+  // backslash.
+  '313_onboarding_drafts_owner_phone': `
+    ALTER TABLE onboarding_drafts
+      ADD COLUMN IF NOT EXISTS owner_phone TEXT
+        CHECK (owner_phone IS NULL OR owner_phone ~ '^[+][1-9][0-9]{7,14}$');
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

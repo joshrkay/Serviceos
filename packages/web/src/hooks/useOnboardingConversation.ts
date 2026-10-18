@@ -116,7 +116,7 @@ export interface UseOnboardingConversationResult {
  * mis-booking postmortem, migration 263). Sending nothing makes the server
  * gate the proposal and ask — the safe failure, not the silent one.
  */
-function browserTimezoneOrUndefined(): string | undefined {
+export function browserTimezoneOrUndefined(): string | undefined {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
   } catch {

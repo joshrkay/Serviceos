@@ -15,6 +15,9 @@ export const PROPOSAL_EVENT_TYPES = [
   // this registry stays a complete inventory of proposal.* event types.
   'proposal.execution_timed_out',
   'proposal.edited',
+  // Emitted by onboarding/draft/retry.ts through logProposalEvent when the owner
+  // re-queues a proposal whose execution failed (execution_failed -> draft -> approved).
+  'proposal.retried',
 ] as const;
 
 export type ProposalEventType = (typeof PROPOSAL_EVENT_TYPES)[number];

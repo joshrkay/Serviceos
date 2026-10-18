@@ -441,7 +441,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       if (updates?.executedByRole !== undefined)    { setClauses.push(`executed_by_role = $${p++}`); params.push(updates.executedByRole); }
       if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
       if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
-      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p++}`);        params.push(updates.undoneBy); }
+      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p}`);         params.push(updates.undoneBy); }
 
       const result = await client.query(
         `UPDATE proposals SET ${setClauses.join(', ')}
@@ -496,13 +496,34 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       if (updates?.executedBy !== undefined)        { setClauses.push(`executed_by = $${p++}`);      params.push(updates.executedBy); }
       if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
       if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
-      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p++}`);        params.push(updates.undoneBy); }
+      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p}`);         params.push(updates.undoneBy); }
 
       const result = await client.query(
         `UPDATE proposals SET ${setClauses.join(', ')}
          WHERE tenant_id = $1 AND id = $2 AND status = ANY($3::text[])
          RETURNING *`,
         params
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
+  /**
+   * Owner-driven retry: execution_failed -> draft in ONE conditional UPDATE that
+   * also clears the stale attempt state (see ProposalRepository.resetFailedForRetry
+   * for why updateStatusIf cannot). Runs on the request client when there is one,
+   * so the caller's draft row lock is held to commit.
+   */
+  async resetFailedForRetry(tenantId: string, id: string): Promise<Proposal | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE proposals
+            SET status = 'draft', approved_at = NULL, execution_error = NULL,
+                claimed_by = NULL, claimed_at = NULL, execution_retry_count = 0,
+                updated_at = NOW()
+          WHERE tenant_id = $1 AND id = $2 AND status = 'execution_failed'
+          RETURNING *`,
+        [tenantId, id]
       );
       return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
     });

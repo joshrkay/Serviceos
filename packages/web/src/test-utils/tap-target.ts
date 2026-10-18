@@ -3,7 +3,7 @@ import { expect } from 'vitest';
 /**
  * Mobile bar (CLAUDE.md): every tap target is ≥44×44. jsdom can't measure
  * layout, so component tests pin the CSS class contract instead — `size-11`,
- * or `min-h-11` plus `min-w-11` (a control that stretches to its container
+ * or `min-h-11` (or taller) plus `min-w-11` (a control that stretches to its container
  * with `w-full` / `flex-1` is wide enough by construction). The measured
  * check lives in e2e/page-tap-targets-mobile.spec.ts (#1398).
  */
@@ -11,7 +11,10 @@ function meetsTapTarget(el: Element): boolean {
   const cls = el.getAttribute('class') ?? '';
   const has = (token: string) => new RegExp(`(^|\\s)${token}(\\s|$)`).test(cls);
   const minH = /(^|\s)min-h-\[(\d+)px\](\s|$)/.exec(cls);
-  const tall = has('size-11') || has('min-h-11') || (!!minH && Number(minH[2]) >= 44);
+  // Tailwind's spacing steps are 4px: min-h-11 is 44px, min-h-14 (the choice cards) is 56px.
+  const minHStep = /(^|\s)min-h-(\d+)(\s|$)/.exec(cls);
+  const tall =
+    has('size-11') || (!!minHStep && Number(minHStep[2]) >= 11) || (!!minH && Number(minH[2]) >= 44);
   const minW = /(^|\s)min-w-\[(\d+)px\](\s|$)/.exec(cls);
   const wide =
     has('size-11') || has('min-w-11') || has('w-full') || has('flex-1') || (!!minW && Number(minW[2]) >= 44);
@@ -58,7 +61,7 @@ export function expectAllTapTargets(root: ParentNode, what: string): void {
     const name =
       el.getAttribute('aria-label') ??
       el.getAttribute('placeholder') ??
-      (el.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 40);
+      el.textContent.trim().replace(/\s+/g, ' ').slice(0, 40);
     offenders.push(`${el.tagName.toLowerCase()} "${name}" class="${el.getAttribute('class') ?? ''}"`);
   }
   expect(offenders, `${what}: controls under 44×44`).toEqual([]);

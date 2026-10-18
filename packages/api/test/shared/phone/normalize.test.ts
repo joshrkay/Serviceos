@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeMobileE164, InvalidPhoneNumberError } from '../../../src/shared/phone/normalize';
+import { normalizeBusinessPhoneE164, normalizeMobileE164, InvalidPhoneNumberError } from '../../../src/shared/phone/normalize';
 
 describe('P1-022 normalizeMobileE164', () => {
   it('normalizes (555) 123-4567 to E.164', () => {
@@ -32,6 +32,29 @@ describe('P1-022 normalizeMobileE164', () => {
     expect(new Set(out)).toEqual(new Set(['+15551234567']));
   });
 
+  // A leading "+" is a country code. Ten digits after it used to be read as a bare
+  // NANP number, so a Norwegian +47 912 34 567 became the unrelated US +14791234567
+  // and, as an owner phone, would have rung a stranger for emergency calls.
+  it.each(['+47 912 34 567', '+4791234567', '+5551234567', '+44 7911 123456'])(
+    'rejects %j: a plus-prefixed number that is not +1 is never read as a US number',
+    (raw) => {
+      expect(() => normalizeMobileE164(raw)).toThrow(InvalidPhoneNumberError);
+      expect(() => normalizeMobileE164(raw)).toThrow(/is not a US \(\+1\) number/);
+    },
+  );
+
+  it('rejects a plus-prefixed number with a leading 1 but only ten digits (the 1 would be its area code)', () => {
+    expect(() => normalizeMobileE164('+1555123456')).toThrow(InvalidPhoneNumberError);
+    expect(() => normalizeMobileE164('+1 (555) 123-456')).toThrow(InvalidPhoneNumberError);
+  });
+
+  it.each(['+1 (216) 555-0100', '+12165550100', '216-555-0100', '1 (216) 555-0100', '(216) 555-0100', '216.555.0100', '2165550100'])(
+    'still normalises the US form %j to +12165550100',
+    (raw) => {
+      expect(normalizeMobileE164(raw)).toBe('+12165550100');
+    },
+  );
+
   it('rejects letters ("abc") with a typed error', () => {
     expect(() => normalizeMobileE164('abc')).toThrow(InvalidPhoneNumberError);
   });
@@ -62,5 +85,18 @@ describe('P1-022 normalizeMobileE164', () => {
       expect(err).toBeInstanceOf(InvalidPhoneNumberError);
       expect((err as InvalidPhoneNumberError).input).toBe('abc');
     }
+  });
+});
+
+describe('normalizeBusinessPhoneE164 (falls back to the international form)', () => {
+  it('keeps a plus-prefixed ten-digit foreign number as itself, not as a US number', () => {
+    expect(normalizeBusinessPhoneE164('+47 912 34 567')).toBe('+4791234567');
+  });
+
+  it('still normalises the US forms and refuses what it cannot dial', () => {
+    expect(normalizeBusinessPhoneE164('(216) 555-0100')).toBe('+12165550100');
+    expect(normalizeBusinessPhoneE164('+1 216 555 0100')).toBe('+12165550100');
+    expect(normalizeBusinessPhoneE164('abc')).toBeNull();
+    expect(normalizeBusinessPhoneE164('+1234')).toBeNull();
   });
 });

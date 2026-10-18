@@ -222,11 +222,190 @@ describe('onboarding draft routes', () => {
     expect(res.status).toBe(404);
   });
 
+  describe('POST approve expectedVersion', () => {
+    const errText = (res: { body: unknown }) => JSON.stringify(res.body);
+    const approvedAudits = async () =>
+      (await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 50 })).filter((a) => a.eventType === 'onboarding.draft_approved');
+
+    it('approves when expectedVersion matches the draft', async () => {
+      const created = await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+      const res = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: created.body.draft.version });
+      expect(res.status).toBe(200);
+      expect(res.body.approvedNow).toBe(true);
+      expect(await ctx.proposalRepo.findByTenant(TENANT_ID)).toHaveLength(2);
+    });
+
+    it('a stale expectedVersion is 409 VERSION_CONFLICT naming expected and found, and nothing is minted', async () => {
+      await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+      await request(ctx.app).put('/api/onboarding/draft/choices/greeting').send({ choice: { option: 'b' }, version: 1 });
+      const res = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: 1 });
+      expect(res.status).toBe(409);
+      expect(errText(res)).toMatch(/VERSION_CONFLICT/);
+      expect(errText(res)).toMatch(/expected 1, found 2/);
+      expect(await ctx.proposalRepo.findByTenant(TENANT_ID)).toHaveLength(0);
+      const got = await request(ctx.app).get('/api/onboarding/draft');
+      expect(got.body.draft.status).toBe('draft');
+      expect(got.body.draft.choices.greeting).toEqual({ option: 'b' });
+      expect(await approvedAudits()).toHaveLength(0);
+    });
+
+    it('an expectedVersion ahead of the row is the same 409', async () => {
+      await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+      const res = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: 9 });
+      expect(res.status).toBe(409);
+      expect(errText(res)).toMatch(/VERSION_CONFLICT/);
+      expect(await ctx.proposalRepo.findByTenant(TENANT_ID)).toHaveLength(0);
+    });
+
+    it('no body at all and {} both approve (lock-only mode)', async () => {
+      await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+      const noBody = await request(ctx.app).post('/api/onboarding/draft/approve');
+      expect(noBody.status).toBe(200);
+      expect(noBody.body.approvedNow).toBe(true);
+      const empty = await request(ctx.app).post('/api/onboarding/draft/approve').send({});
+      expect(empty.status).toBe(200);
+      expect(empty.body.approvedNow).toBe(false);
+    });
+
+    it.each([[{ expectedVersion: 'x' }], [{ expectedVersion: 0 }], [{ expectedVersion: 1.5 }], [{ bogus: 1 }]])(
+      'rejects %j with 400 and mints nothing',
+      async (body) => {
+        await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+        const res = await request(ctx.app).post('/api/onboarding/draft/approve').send(body);
+        expect(res.status).toBe(400);
+        expect(await ctx.proposalRepo.findByTenant(TENANT_ID)).toHaveLength(0);
+      },
+    );
+
+    it('a second approve with a now-stale expectedVersion is still the idempotent 200', async () => {
+      const created = await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+      const v = created.body.draft.version;
+      const first = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: v });
+      const second = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: v });
+      expect(second.status).toBe(200);
+      expect(second.body.approvedNow).toBe(false);
+      expect(second.body.proposalIds).toEqual(first.body.proposalIds);
+      expect(await ctx.proposalRepo.findByTenant(TENANT_ID)).toHaveLength(2);
+    });
+
+    it('PUT keeps its codes through the shared error mapping: DRAFT_APPROVED after approve, VERSION_CONFLICT when stale', async () => {
+      await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+      const stale = await request(ctx.app).put('/api/onboarding/draft/choices/greeting').send({ choice: { option: 'a' }, version: 7 });
+      expect(stale.status).toBe(409);
+      expect(errText(stale)).toMatch(/VERSION_CONFLICT/);
+      const approved = await request(ctx.app).post('/api/onboarding/draft/approve').send({});
+      const after = await request(ctx.app).put('/api/onboarding/draft/choices/greeting').send({ choice: { option: 'a' }, version: approved.body.draft.version });
+      expect(after.status).toBe(409);
+      expect(errText(after)).toMatch(/DRAFT_APPROVED/);
+    });
+  });
+
   it('every route is owner-only', async () => {
     const { app } = buildApp('dispatcher');
     expect((await request(app).get('/api/onboarding/draft')).status).toBe(403);
     expect((await request(app).post('/api/onboarding/draft').send(CREATE)).status).toBe(403);
     expect((await request(app).put('/api/onboarding/draft/choices/greeting').send({ choice: { option: 'a' }, version: 1 })).status).toBe(403);
     expect((await request(app).post('/api/onboarding/draft/approve').send({})).status).toBe(403);
+  });
+});
+
+describe('POST /retry', () => {
+  const errText = (res: { body: unknown }) => JSON.stringify(res.body);
+  let ctx: ReturnType<typeof buildApp>;
+
+  beforeEach(() => {
+    ctx = buildApp();
+  });
+
+  async function approved(): Promise<string[]> {
+    await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+    const res = await request(ctx.app).post('/api/onboarding/draft/approve').send({});
+    return [...res.body.proposalIds].sort();
+  }
+  const fail = (id: string) =>
+    ctx.proposalRepo.update(TENANT_ID, id, { status: 'execution_failed', approvedAt: new Date(Date.now() - 3_600_000), executionError: 'boom' });
+
+  it('re-queues the failed proposal and answers { draft, retriedProposalIds }', async () => {
+    const [a, b] = await approved();
+    await fail(a);
+    const approvedVersion = (await ctx.draftRepo.getForTenant(TENANT_ID))!.version;
+    const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
+    expect(res.status).toBe(200);
+    expect(res.body.retriedProposalIds).toEqual([a]);
+    expect(res.body.draft.status).toBe('approved');
+    // The response names the new attempt: one version past the approval, and it is what GET now returns.
+    expect(res.body.draft.version).toBe(approvedVersion + 1);
+    expect((await request(ctx.app).get('/api/onboarding/draft')).body.draft.version).toBe(approvedVersion + 1);
+    expect((await ctx.proposalRepo.findById(TENANT_ID, a))?.status).toBe('approved');
+    expect((await ctx.proposalRepo.findById(TENANT_ID, b))?.status).toBe('approved');
+  });
+
+  it('a second immediate retry is a 409 (the row is approved now): no double enqueue', async () => {
+    const [a] = await approved();
+    await fail(a);
+    expect((await request(ctx.app).post('/api/onboarding/draft/retry').send()).status).toBe(200);
+    const again = await request(ctx.app).post('/api/onboarding/draft/retry').send();
+    expect(again.status).toBe(409);
+    expect(errText(again)).toMatch(/DRAFT_RETRY_NOTHING_FAILED/);
+    const retried = (await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 100 })).filter((e) => e.eventType === 'proposal.retried');
+    expect(retried).toHaveLength(1);
+  });
+
+  it('nothing failed is a 409 DRAFT_RETRY_NOTHING_FAILED and the version does not move', async () => {
+    await approved();
+    const before = (await ctx.draftRepo.getForTenant(TENANT_ID))!;
+    const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
+    expect(res.status).toBe(409);
+    expect(errText(res)).toMatch(/DRAFT_RETRY_NOTHING_FAILED/);
+    expect(await ctx.draftRepo.getForTenant(TENANT_ID)).toEqual(before);
+  });
+
+  it('a tab that rendered the original approval is refused after a retry: approve with its expectedVersion is a 409 VERSION_CONFLICT', async () => {
+    const created = await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+    const v = created.body.draft.version;
+    const first = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: v });
+    const [a] = [...first.body.proposalIds].sort();
+    await fail(a);
+
+    expect((await request(ctx.app).post('/api/onboarding/draft/retry').send()).status).toBe(200);
+
+    const stale = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: v });
+    expect(stale.status).toBe(409);
+    expect(errText(stale)).toMatch(/VERSION_CONFLICT/);
+    const bare = await request(ctx.app).post('/api/onboarding/draft/approve').send({});
+    expect(bare.status).toBe(200);
+    expect(bare.body.approvedNow).toBe(false);
+    expect(await ctx.proposalRepo.findByTenant(TENANT_ID)).toHaveLength(2);
+  });
+
+  it('a failed proposal next to an undone one is a 409 DRAFT_RETRY_UNSAFE and nothing is re-queued', async () => {
+    const [a, b] = await approved();
+    await fail(a);
+    await ctx.proposalRepo.update(TENANT_ID, b, { status: 'undone' });
+    const draftBefore = await ctx.draftRepo.getForTenant(TENANT_ID);
+    const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
+    expect(res.status).toBe(409);
+    expect(errText(res)).toMatch(/DRAFT_RETRY_UNSAFE/);
+    expect((await ctx.proposalRepo.findById(TENANT_ID, a))?.status).toBe('execution_failed');
+    expect((await ctx.proposalRepo.findById(TENANT_ID, b))?.status).toBe('undone');
+    expect(await ctx.draftRepo.getForTenant(TENANT_ID)).toEqual(draftBefore);
+    const retried = (await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 100 })).filter((e) => e.eventType === 'proposal.retried');
+    expect(retried).toHaveLength(0);
+  });
+
+  it('a draft that is not approved yet is a 409 DRAFT_NOT_APPROVED', async () => {
+    await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+    const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
+    expect(res.status).toBe(409);
+    expect(errText(res)).toMatch(/DRAFT_NOT_APPROVED/);
+  });
+
+  it('no draft is a 404', async () => {
+    expect((await request(ctx.app).post('/api/onboarding/draft/retry').send()).status).toBe(404);
+  });
+
+  it('is owner-only', async () => {
+    const { app } = buildApp('dispatcher');
+    expect((await request(app).post('/api/onboarding/draft/retry').send()).status).toBe(403);
   });
 });
