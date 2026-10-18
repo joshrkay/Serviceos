@@ -85,6 +85,62 @@ describe('P12-004 — resolveAutoApproveThreshold', () => {
       }),
     ).toBe(DEFAULT_AUTO_APPROVE_THRESHOLDS.tech);
   });
+
+  // OVAS-04 — with no mode threaded, the resolver returned the legacy 0.9
+  // BEFORE it read the tenant override, so an owner's "require review"
+  // setting was silently skipped on any surface that lacked a mode.
+  describe('OVAS-04 — no mode threaded: the tenant override is not dropped', () => {
+    it('an all-strict override {supervisor:1, tech:1, both:1} is honoured', () => {
+      expect(
+        resolveAutoApproveThreshold({
+          supervisorPresent: true,
+          tenantOverride: { supervisor: 1, tech: 1, both: 1 },
+        }),
+      ).toBe(1);
+    });
+
+    it('a single-mode override {tech: 1} is honoured (strictest defined value wins)', () => {
+      expect(
+        resolveAutoApproveThreshold({ supervisorPresent: true, tenantOverride: { tech: 1 } }),
+      ).toBe(1);
+      expect(
+        resolveAutoApproveThreshold({
+          supervisorPresent: true,
+          tenantOverride: { supervisor: 0.93, both: 0.97 },
+        }),
+      ).toBe(0.97);
+    });
+
+    it('a permissive override never lowers the no-mode threshold below the legacy 0.9', () => {
+      expect(
+        resolveAutoApproveThreshold({ supervisorPresent: true, tenantOverride: { supervisor: 0.5 } }),
+      ).toBe(LEGACY_AUTO_APPROVE_THRESHOLD);
+    });
+
+    it('no override (or an empty one) keeps the legacy 0.9 exactly', () => {
+      expect(resolveAutoApproveThreshold({ supervisorPresent: true, tenantOverride: {} })).toBe(
+        LEGACY_AUTO_APPROVE_THRESHOLD,
+      );
+    });
+
+    it('the unsupervised hard-block still beats the backstop', () => {
+      expect(
+        resolveAutoApproveThreshold({ supervisorPresent: false, tenantOverride: { tech: 1 } }),
+      ).toBeNull();
+    });
+
+    it('decideInitialStatus: a 0.92 capture proposal with no mode no longer auto-approves under an all-1.0 override', () => {
+      expect(
+        decideInitialStatus({
+          proposalType: 'draft_invoice',
+          sourceTrustTier: 'autonomous',
+          confidenceScore: 0.92,
+          supervisorPresent: true,
+          tenantThresholdOverride: { supervisor: 1, tech: 1, both: 1 },
+        }),
+      ).toBe('draft');
+    });
+  });
 });
 
 // ───────────────────────────────────────────────────────────────────────────

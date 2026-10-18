@@ -7,7 +7,11 @@ import { assertValidProposalPayload } from '../proposals/contracts';
 import { INTENT_TO_PROPOSAL_TYPE } from '../proposals/voice-intent-map';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
-import { holdIfCallerCannotApprove } from '../proposals/caller-approval-gate';
+import {
+  AUTO_APPROVE_DIRECT_PERMISSION,
+  holdIfCallerCannotApprove,
+} from '../proposals/caller-approval-gate';
+import type { Mode } from '../proposals/auto-approve';
 import { getSupervisorReviewGate } from '../ai/supervisor/review-gate';
 import {
   AUTONOMOUS_LANE_PROPOSAL_TYPES,
@@ -497,6 +501,14 @@ export interface VoiceActionRouterDeps {
    * throw → held, never self-executing.
    */
   resolveMemberRole?: (tenantId: string, userId: string) => Promise<string | null>;
+  /**
+   * OVAS-04 — the memo creator's `users.current_mode`, threaded as the
+   * proposal's supervisorMode so the per-mode thresholds and the tenant's
+   * per-mode override apply to memos exactly as they do to chat (which reads
+   * req.auth.mode). Absent / null / a throw → no mode; the resolver then
+   * applies the strictest defined override (never the bare legacy 0.9).
+   */
+  resolveMemberMode?: (tenantId: string, userId: string) => Promise<Mode | null>;
   /**
    * U3 — lookup-skill execution deps for E-lane answers (per-skill adapter
    * in workers/voice-lookup-answer.ts). Absent → lookup intents keep the
@@ -1816,6 +1828,15 @@ async function processSegment(
     classification.intentType,
   );
 
+  // OVAS-02 / OVAS-04 — the memo creator, read once: its mode sets the
+  // auto-approve threshold below, its role gates an auto-approval after.
+  // Only an auto-approvable type ever needs either.
+  const memoCreator = memoCreatorResolver(deps, tenantId, recordingId, log);
+  const supervisorMode =
+    AUTO_APPROVE_DIRECT_PERMISSION[handler.taskType] !== undefined
+      ? await memoCreator.mode()
+      : undefined;
+
   const context: TaskContext = {
     tenantId,
     userId,
@@ -1893,10 +1914,10 @@ async function processSegment(
     // `voice-hold:<recordingId>` so a concurrent redelivery can't double-book.
     ...(params.applyDedup && recordingId ? { recordingId } : {}),
     ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+    ...(supervisorMode ? { supervisorMode } : {}),
   };
 
   const { proposal } = await handler.handle(context);
-  const memoCreator = memoCreatorResolver(deps, tenantId, recordingId, log);
   // P8 — references that matched nothing are stamped on sourceContext so
   // the review UI prompts "pick from the list or create new" instead of
   // the operator discovering a dangling name at execution time.
@@ -2019,10 +2040,12 @@ export function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolea
  */
 interface MemoCreator {
   role(): Promise<string | null>;
+  /** OVAS-04 — users.current_mode; undefined when unresolvable. */
+  mode(): Promise<Mode | undefined>;
 }
 
 function memoCreatorResolver(
-  deps: Pick<VoiceActionRouterDeps, 'voiceRepo' | 'resolveMemberRole'>,
+  deps: Pick<VoiceActionRouterDeps, 'voiceRepo' | 'resolveMemberRole' | 'resolveMemberMode'>,
   tenantId: string,
   recordingId: string | undefined,
   log: Logger,
@@ -2054,6 +2077,19 @@ function memoCreatorResolver(
           error: err instanceof Error ? err.message : String(err),
         });
         return null;
+      }
+    },
+    async mode() {
+      const userId = await id();
+      if (!userId || !deps.resolveMemberMode) return undefined;
+      try {
+        return (await deps.resolveMemberMode(tenantId, userId)) ?? undefined;
+      } catch (err) {
+        log.warn('voice-action-router: memo creator mode lookup failed — strictest tenant rule applies', {
+          recordingId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return undefined;
       }
     },
   };

@@ -110,7 +110,7 @@ import {
   type MeTenantSettings,
   type UserModeService,
 } from './routes/me';
-import { setUserModeLoader } from './middleware/auth';
+import { setUserModeLoader, resolveUserMode } from './middleware/auth';
 import {
   setSupervisorPresenceLoader,
   pgSupervisorPresenceLoader,
@@ -3019,6 +3019,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     voiceRepo,
     // OVAS-02 — the memo creator's DB role gates auto-approval (same loader).
     resolveMemberRole: resolveVoiceMemberRole,
+    // OVAS-04 — and their current_mode sets the threshold (req.auth.mode's loader).
+    resolveMemberMode: (tenantId: string, userId: string) => resolveUserMode(userId, tenantId),
     // Same object the assistant-chat router gets — see `lookupAnswerDeps`.
     lookupAnswers: lookupAnswerDeps,
     // B5.5 — en_route ("on my way") voice leg: userRepo resolves the memo

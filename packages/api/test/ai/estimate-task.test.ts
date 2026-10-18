@@ -1130,3 +1130,70 @@ describe('OVAS-03 — jobId is authored from verified entities, never the model'
     expect(system).toMatch(/Never output a "jobId"/);
   });
 });
+
+// ─── OVAS-04 (item 2): the clarification gate does not depend on the threshold
+//
+// CLARIFICATION_REVIEW_CONFIDENCE_CAP (0.5) promises an open-questions or
+// flagged-at-the-cap draft "always lands in 'draft'", but the draft's _meta
+// was stamped from the capped score — 'medium' at 0.5 — so a tenant threshold
+// at or below 0.5 auto-approved it. The 'low' stamp hard-blocks auto-approval
+// whatever the threshold. Ambiguities already gated by a missingFields entry
+// the card's one-tap pick clears (catalog match, customer) keep 'medium' — see
+// the P22 catalog-grounding tests above, which pin exactly that.
+describe('OVAS-04 — a clarification-pending or flagged draft never auto-approves, at any threshold', () => {
+  const permissive = {
+    supervisorPresent: true,
+    supervisorMode: 'supervisor' as const,
+    tenantThresholdOverride: { supervisor: 0.5 },
+  };
+
+  function missingQuantityJson(): string {
+    return JSON.stringify({
+      // Catalog-grounded line, no quantity — the missing_quantity question.
+      lineItems: [{ description: 'Pipe repair', quantity: 0, unitPrice: 7460 }],
+      confidence_score: 0.95,
+    });
+  }
+
+  it('a missing_quantity clarification with a 0.5 tenant threshold is not approved and is stamped low', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: missingQuantityJson() });
+    const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
+
+    const { proposal } = await handler.handle(makeContext(permissive));
+
+    const clar = proposal.payload.clarification as { needed: boolean; ambiguityCodes: string[] };
+    expect(clar.needed).toBe(true);
+    expect(clar.ambiguityCodes).toContain('missing_quantity');
+    expect((proposal.payload._meta as { overallConfidence: string }).overallConfidence).toBe('low');
+    expect(proposal.status).not.toBe('approved');
+  });
+
+  it('a draft flagged for review at the loop cap with a 0.5 tenant threshold is not approved', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: missingQuantityJson() });
+    const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
+
+    const { proposal } = await handler.handle(makeContext({ ...permissive, clarificationCount: 3 }));
+
+    const clar = proposal.payload.clarification as { flaggedForReview: boolean };
+    expect(clar.flaggedForReview).toBe(true);
+    expect((proposal.payload._meta as { overallConfidence: string }).overallConfidence).toBe('low');
+    expect(proposal.status).not.toBe('approved');
+  });
+
+  it('a clean, grounded draft under the same 0.5 threshold still auto-approves (no over-blocking)', async () => {
+    const stub = new StubProvider('stub');
+    stub.setResponse({
+      content: JSON.stringify({
+        lineItems: [{ description: 'Pipe repair', quantity: 1, unitPrice: 7460 }],
+        confidence_score: 0.95,
+      }),
+    });
+    const handler = new EstimateTaskHandler(makeGateway(stub), await groundedCatalog());
+
+    const { proposal } = await handler.handle(makeContext(permissive));
+
+    expect(proposal.status).toBe('approved');
+  });
+});

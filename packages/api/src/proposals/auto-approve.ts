@@ -149,7 +149,8 @@ export interface ResolveThresholdInput {
  * Resolution order (when `supervisorPresent !== false`):
  *   1. tenantOverride[mode]   (per-tenant, per-mode override)
  *   2. DEFAULT_AUTO_APPROVE_THRESHOLDS[mode]   (locked product default)
- *   3. LEGACY_AUTO_APPROVE_THRESHOLD          (mode unknown)
+ *   3. mode unknown: max(LEGACY_AUTO_APPROVE_THRESHOLD, every defined
+ *      tenantOverride value) — OVAS-04, the override is never dropped
  */
 export function resolveAutoApproveThreshold(
   input: ResolveThresholdInput = {},
@@ -190,7 +191,15 @@ export function resolveAutoApproveThreshold(
         );
       }
     }
-    return LEGACY_AUTO_APPROVE_THRESHOLD;
+    // OVAS-04 — never DROP the tenant's override just because the caller
+    // could not name a mode: the strictest defined override value (floored
+    // at the legacy default, never below it) still applies. Before this, a
+    // tenant that set "require review" ({supervisor:1, tech:1, both:1}) got
+    // the legacy 0.9 on every surface that threaded no mode.
+    const overrides = Object.values(input.tenantOverride ?? {}).filter(
+      (v): v is number => typeof v === 'number',
+    );
+    return Math.max(LEGACY_AUTO_APPROVE_THRESHOLD, ...overrides);
   }
 
   const override = input.tenantOverride?.[input.supervisorMode];

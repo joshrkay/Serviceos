@@ -20,6 +20,7 @@ import {
   detectEstimateAmbiguities,
   decideEstimateClarification,
   EstimateDraftSignals,
+  type EstimateAmbiguityCode,
 } from '../clarification/estimate-clarification';
 import {
   buildStandingInstructionsSection,
@@ -34,10 +35,35 @@ import {
 
 /**
  * Story 7.2 — confidence ceiling for a draft that still has open clarifications
- * or was flagged for review at the loop cap. Sits well below every auto-approve
- * threshold so such a draft always lands in 'draft' for a human to review.
+ * or was flagged for review at the loop cap. Sits well below every default
+ * auto-approve threshold; the threshold-independent guarantee that such a
+ * draft never auto-approves is its `_meta.overallConfidence: 'low'` stamp
+ * (OVAS-04 — a tenant threshold can be set at or below this cap).
  */
 const CLARIFICATION_REVIEW_CONFIDENCE_CAP = 0.5;
+
+/**
+ * OVAS-04 — ambiguities already gated by a `missingFields` entry that the
+ * review card's one-tap resolution CLEARS (an ambiguous catalog pick, the
+ * customer picker). A sticky 'low' stamp on those would outlive the fix and
+ * keep blocking chain-set / SMS approval after the pick (see the
+ * catalog-grounding note on `overallConfidence` below), so they rely on their
+ * own gate. Every other ambiguity behind an open question or a loop-cap flag
+ * (missing quantity, no / vague lines) had only the numeric cap, which a
+ * tenant threshold at or below it defeated — those are stamped 'low'.
+ */
+const CARD_GATED_AMBIGUITIES: ReadonlySet<EstimateAmbiguityCode> = new Set<EstimateAmbiguityCode>([
+  'ambiguous_catalog_match',
+  'missing_customer',
+]);
+
+function clarificationWithoutOwnGate(
+  clarification: { action: string; flaggedForReview: boolean },
+  ambiguities: readonly { code: EstimateAmbiguityCode }[],
+): boolean {
+  const open = clarification.action === 'clarify' || clarification.flaggedForReview;
+  return open && ambiguities.some((a) => !CARD_GATED_AMBIGUITIES.has(a.code));
+}
 
 const ESTIMATE_SYSTEM_PROMPT = `You are an estimate generation assistant for a field service company.
 Given the conversation context and entity information, generate a structured estimate.
@@ -393,9 +419,16 @@ export class EstimateTaskHandler implements TaskHandler {
       // persisted 'low' stamp would keep blocking chain-set/SMS approval
       // after the ambiguity is resolved. Uncatalogued lines have nothing to
       // resolve, so their 'low' stamp is rightly permanent.
-      overallConfidence: catalogOutcome?.anyUncatalogued
-        ? 'low'
-        : getConfidenceLevel(confidenceScore),
+      //
+      // OVAS-04 — the same hard block for a draft with open clarification
+      // questions, or flagged for review at the loop cap, over an ambiguity
+      // that has no gate of its own (see CARD_GATED_AMBIGUITIES). The 0.5 cap
+      // above only held while the tenant threshold stayed above it; an owner
+      // threshold of 0.5 auto-approved these 'medium' drafts.
+      overallConfidence:
+        catalogOutcome?.anyUncatalogued || clarificationWithoutOwnGate(clarification, ambiguities)
+          ? 'low'
+          : getConfidenceLevel(confidenceScore),
       ...(Object.keys(signals.fieldConfidence).length > 0
         ? { fieldConfidence: signals.fieldConfidence }
         : {}),
