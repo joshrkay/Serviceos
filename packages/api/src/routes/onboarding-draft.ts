@@ -8,6 +8,9 @@
  *   PUT    /owner-phone           add or change the owner's cell (compare-and-swap on version)
  *   POST   /approve               "That's right": lock the draft row, mint onboarding_* proposals and
  *                                 approve them (optional expectedVersion; repeat taps are idempotent)
+ *   POST   /retry                 re-queue the proposals whose execution failed (lock the draft row,
+ *                                 reset each execution_failed one to draft and approve it again for a
+ *                                 fresh undo window; 409 DRAFT_RETRY_NOTHING_FAILED when none failed)
  *
  * Owner-only, like POST /api/onboarding/pack and the conversation lane: every
  * write here ends in config-change proposals against the tenant's settings.
@@ -38,6 +41,7 @@ import {
   type OnboardingDraftRepository,
 } from '../onboarding/draft/repository';
 import { approveDraft } from '../onboarding/draft/approve';
+import { retryFailedDraftProposals } from '../onboarding/draft/retry';
 
 export interface OnboardingDraftRouterDeps {
   draftRepo: OnboardingDraftRepository;
@@ -248,6 +252,25 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
       } catch (err) {
         rethrowDraftError(err, tenantId);
       }
+      res.json(result);
+    }),
+  );
+
+  // The request body carries nothing and is ignored. Errors are plain AppErrors (404/409).
+  router.post(
+    '/retry',
+    ...guards,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const result = await retryFailedDraftProposals(
+        {
+          draftRepo,
+          proposalRepo,
+          auditRepo,
+          ...(approvalReferenceChecks ? { approvalOptions: { referenceChecks: approvalReferenceChecks } } : {}),
+        },
+        req.auth!.tenantId,
+        { userId: req.auth!.userId, role: req.auth!.role as Role },
+      );
       res.json(result);
     }),
   );

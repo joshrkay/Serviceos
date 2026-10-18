@@ -115,7 +115,9 @@ const OWNER_REQUIRED_DAILY_WEB_ACTIONS = 1;
 // approval. Each is a one-time activation act on the setup surface itself.
 // U10 (S1 follow-ups): +1 onboarding — PUT /api/onboarding/draft/owner-phone,
 // one-time, the owner's own cell on the setup draft.
-const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 12;
+// U9x (S1 follow-ups): +1 onboarding — POST /api/onboarding/draft/retry, the
+// setup surface's "Something didn't save. Try again." after a failed execution.
+const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 13;
 // #1386: +2 (PUT/DELETE /api/settings/e1-script — occasional, reviewed E1 script).
 // #1402 §13: +1 (POST /api/users/:id/deactivate — occasional, offboarding).
 // #1563: +1 (POST /api/onboarding/phone/change — occasional, Settings → Phone).
@@ -124,7 +126,7 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 12;
 // Hardening: +7 occasional (QuickBooks connect/disconnect/sync + Google
 // Business connect/delete now require settings:update; operator-hours PUT +
 // phone/retry now require owner — previously open to any member).
-const OWNER_ONLY_ROUTES = 77;
+const OWNER_ONLY_ROUTES = 78;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 

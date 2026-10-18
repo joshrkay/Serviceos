@@ -94,12 +94,12 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **77** |
+| Owner-only routes in code | **78** |
 | `cadence: daily` | **2** |
-| `cadence: onboarding` | **12** |
+| `cadence: onboarding` | **13** |
 | `cadence: occasional` | **63** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
-| `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **12** |
+| `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **13** |
 
 A PR that raises `ownerRequiredDailyWebActions` has to edit the number in the
 contract test, which is the point: adding an owner-only, non-SMS-reachable
@@ -109,12 +109,12 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 77,
+  "ownerOnlyRoutes": 78,
   "daily": 2,
-  "onboarding": 12,
+  "onboarding": 13,
   "occasional": 63,
   "ownerRequiredDailyWebActions": 1,
-  "ownerRequiredOnboardingWebActions": 12
+  "ownerRequiredOnboardingWebActions": 13
 }
 ```
 
@@ -137,6 +137,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `PUT /api/onboarding/draft/choices/:settingKey` | onboarding | Stages one this-or-this setup choice (tap or spoken "first"/"second") on the draft, compare-and-swap on version. | false | none | Reviewed: one-time activation. The choice is spoken or tapped on the setup surface; voice is the surface's own input, not the voice agent, and nothing is written to settings until the read-back is approved. |
 | `POST /api/onboarding/draft/approve` | onboarding | "That's right": mints onboarding_tenant_settings and onboarding_voice_policy from the draft and approves them in the request transaction. The owner's business is not configured until this runs. | false | none | Reviewed: one-time activation and the one approval that configures the whole business; a deliberate on-screen act after a spoken read-back, matching POST /api/voice/go-live. |
 | `PUT /api/onboarding/draft/owner-phone` | onboarding | Adds or changes the owner's cell on the setup draft (compare-and-swap on version); it is the number emergency calls ring and approval carries to settings. | false | none | Reviewed: one-time activation; the number is typed on the setup surface, nothing reaches settings until the read-back is approved, and SMS cannot be the channel for the number that SMS identity is later checked against. |
+| `POST /api/onboarding/draft/retry` | onboarding | Re-queues only the setup proposals whose execution failed after "That's right", so the owner is not stuck waiting on a save that will never finish. | false | none | Reviewed: one-time activation recovery on the setup surface's own "Something didn't save. Try again." action; it re-approves the owner's own already-approved proposals through the normal undo window and execution worker, and SMS has no setup-draft context to retry from. |
 | `POST /api/billing/connect/onboarding` | onboarding | Stripe Connect onboarding. Until it is done the tenant cannot take card payments, which is half of the time-to-cash metric. | false | none | Reviewed: one-time activation; Stripe's hosted onboarding is a browser flow by construction. |
 | `POST /api/voice/go-live` | onboarding | Flips the tenant's voice agent live. Until it is called the AI answers nothing, so it is the last forced step of activation. | false | none | Reviewed: one-time activation. Deliberately a considered on-screen act — the owner is handing their phone line to an AI. |
 | `PUT /api/settings/texting-registration/` | onboarding | US A2P 10DLC registration (#1564): the owner submits the business's legal name, EIN, address and authorized contact once; Rivet (as ISV) registers the Brand and campaign with the carriers. Until it is approved the tenant's texts are unregistered 10DLC traffic. | false | none | Reviewed: one-time activation. The carriers vet exact legal identity data (legal name must match the EIN record), so this is a deliberate form entry, not a spoken or SMS action; the long carrier review that follows needs no owner action (the worker polls it). |

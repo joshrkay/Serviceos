@@ -508,6 +508,27 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  /**
+   * Owner-driven retry: execution_failed -> draft in ONE conditional UPDATE that
+   * also clears the stale attempt state (see ProposalRepository.resetFailedForRetry
+   * for why updateStatusIf cannot). Runs on the request client when there is one,
+   * so the caller's draft row lock is held to commit.
+   */
+  async resetFailedForRetry(tenantId: string, id: string): Promise<Proposal | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE proposals
+            SET status = 'draft', approved_at = NULL, execution_error = NULL,
+                claimed_by = NULL, claimed_at = NULL, execution_retry_count = 0,
+                updated_at = NOW()
+          WHERE tenant_id = $1 AND id = $2 AND status = 'execution_failed'
+          RETURNING *`,
+        [tenantId, id]
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
   async update(
     tenantId: string,
     id: string,

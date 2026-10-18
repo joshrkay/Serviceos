@@ -308,3 +308,65 @@ describe('onboarding draft routes', () => {
     expect((await request(app).post('/api/onboarding/draft/approve').send({})).status).toBe(403);
   });
 });
+
+describe('POST /retry', () => {
+  const errText = (res: { body: unknown }) => JSON.stringify(res.body);
+  let ctx: ReturnType<typeof buildApp>;
+
+  beforeEach(() => {
+    ctx = buildApp();
+  });
+
+  async function approved(): Promise<string[]> {
+    await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+    const res = await request(ctx.app).post('/api/onboarding/draft/approve').send({});
+    return [...res.body.proposalIds].sort();
+  }
+  const fail = (id: string) =>
+    ctx.proposalRepo.update(TENANT_ID, id, { status: 'execution_failed', approvedAt: new Date(Date.now() - 3_600_000), executionError: 'boom' });
+
+  it('re-queues the failed proposal and answers { draft, retriedProposalIds }', async () => {
+    const [a, b] = await approved();
+    await fail(a);
+    const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
+    expect(res.status).toBe(200);
+    expect(res.body.retriedProposalIds).toEqual([a]);
+    expect(res.body.draft.status).toBe('approved');
+    expect((await ctx.proposalRepo.findById(TENANT_ID, a))?.status).toBe('approved');
+    expect((await ctx.proposalRepo.findById(TENANT_ID, b))?.status).toBe('approved');
+  });
+
+  it('a second immediate retry is a 409 (the row is approved now): no double enqueue', async () => {
+    const [a] = await approved();
+    await fail(a);
+    expect((await request(ctx.app).post('/api/onboarding/draft/retry').send()).status).toBe(200);
+    const again = await request(ctx.app).post('/api/onboarding/draft/retry').send();
+    expect(again.status).toBe(409);
+    expect(errText(again)).toMatch(/DRAFT_RETRY_NOTHING_FAILED/);
+    const retried = (await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 100 })).filter((e) => e.eventType === 'proposal.retried');
+    expect(retried).toHaveLength(1);
+  });
+
+  it('nothing failed is a 409 DRAFT_RETRY_NOTHING_FAILED', async () => {
+    await approved();
+    const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
+    expect(res.status).toBe(409);
+    expect(errText(res)).toMatch(/DRAFT_RETRY_NOTHING_FAILED/);
+  });
+
+  it('a draft that is not approved yet is a 409 DRAFT_NOT_APPROVED', async () => {
+    await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+    const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
+    expect(res.status).toBe(409);
+    expect(errText(res)).toMatch(/DRAFT_NOT_APPROVED/);
+  });
+
+  it('no draft is a 404', async () => {
+    expect((await request(ctx.app).post('/api/onboarding/draft/retry').send()).status).toBe(404);
+  });
+
+  it('is owner-only', async () => {
+    const { app } = buildApp('dispatcher');
+    expect((await request(app).post('/api/onboarding/draft/retry').send()).status).toBe(403);
+  });
+});
