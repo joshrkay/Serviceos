@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button } from '../../ui';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
 import { DEFAULT_WAIT, WAIT_LINE, waitStage, type WaitStage, type WaitThresholds } from './wait-copy';
@@ -21,7 +21,10 @@ export interface WaitScreenProps {
   support?: ReactNode;
   thresholds?: WaitThresholds;
   /** Offered once it is clearly slow. Absent: there is nothing to try again, so no button. */
-  onRetry?: () => void;
+  onRetry?: () => void | Promise<void>;
+  /** "Try again" where a real retry is sent; "Check again" where it only looks at the status once more. */
+  retryLabel?: 'Try again' | 'Check again';
+  /** The caller is already working on the retry (it holds the state itself). An async onRetry is held here as well. */
   retrying?: boolean;
   /** Owner-facing, one line: why the retry did not work. */
   retryError?: string | null;
@@ -35,10 +38,40 @@ export interface WaitScreenProps {
 
 /**
  * A turn that waits on the server. Quiet at first; "Still with you." after four
- * seconds; "This is taking longer than usual." and a Try again once it is slow.
+ * seconds; "This is taking longer than usual." and a retry button once it is slow.
  */
-export function WaitScreen({ heading, support, thresholds, onRetry, retrying = false, retryError, slowNote, slowAction, children }: WaitScreenProps) {
+export function WaitScreen({
+  heading,
+  support,
+  thresholds,
+  onRetry,
+  retryLabel = 'Try again',
+  retrying = false,
+  retryError,
+  slowNote,
+  slowAction,
+  children,
+}: WaitScreenProps) {
   const stage = useWaitStage(thresholds);
+  const [working, setWorking] = useState(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  // An async retry shows the button working until it settles, so a tap is seen to do something.
+  const retry = () => {
+    if (!onRetry || working) return;
+    const result = onRetry();
+    if (!result) return;
+    setWorking(true);
+    const done = () => {
+      if (mounted.current) setWorking(false);
+    };
+    result.then(done, done);
+  };
   return (
     <>
       <SpeakerLine />
@@ -60,8 +93,8 @@ export function WaitScreen({ heading, support, thresholds, onRetry, retrying = f
           </p>
         ) : null}
         {stage === 'taking_longer' && onRetry ? (
-          <Button fullWidth size="lg" className="h-14 rounded-2xl text-[17px] font-semibold" loading={retrying} onClick={onRetry}>
-            Try again
+          <Button fullWidth size="lg" className="h-14 rounded-2xl text-[17px] font-semibold" loading={retrying || working} onClick={retry}>
+            {retryLabel}
           </Button>
         ) : null}
         {stage === 'taking_longer' ? slowAction : null}

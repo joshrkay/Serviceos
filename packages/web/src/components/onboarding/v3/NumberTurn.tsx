@@ -12,8 +12,8 @@ import { WaitScreen } from './WaitScreen';
 export interface NumberTurnProps {
   /** The phone step from the onboarding status; undefined before the first status. */
   step: OnboardingStep | undefined;
-  /** Something changed on the server (a number was asked for): check the status again. */
-  onChanged: () => void;
+  /** Something changed on the server (a number was asked for): check the status again. May be async, so the waiting screen can show it is checking. */
+  onChanged: () => void | Promise<void>;
 }
 
 const PRIMARY = 'h-14 whitespace-normal rounded-2xl text-[17px] font-semibold';
@@ -42,7 +42,7 @@ export function NumberTurn({ step, onChanged }: NumberTurnProps) {
         setAskError(phoneRetryErrorCopy(res.status, body.error));
         return;
       }
-      onChanged();
+      void onChanged();
     } catch {
       setAskError(CONNECTION_ERROR);
     } finally {
@@ -57,6 +57,7 @@ export function NumberTurn({ step, onChanged }: NumberTurnProps) {
         support={view.pendingNumber ? `Claiming ${formatPhone(view.pendingNumber)}.` : 'A local number usually takes about 30 seconds.'}
         thresholds={NUMBER_WAIT}
         onRetry={onChanged}
+        retryLabel="Check again"
       />
     );
   }

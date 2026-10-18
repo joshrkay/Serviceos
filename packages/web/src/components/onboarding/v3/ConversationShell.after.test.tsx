@@ -129,7 +129,7 @@ describe('ConversationShell after "That\'s right"', () => {
   });
 
   describe('while the saved choices go live', () => {
-    it('says it is getting the shop ready, then that it is still here, then admits it is slow and offers Try again', async () => {
+    it('says it is getting the shop ready, then that it is still here, then admits it is slow and offers Check again', async () => {
       stub(statusAt('identity'));
       const { container } = renderShell();
       await settle();
@@ -145,7 +145,7 @@ describe('ConversationShell after "That\'s right"', () => {
       expect(screen.queryByText('Still with you.')).not.toBeInTheDocument();
       await tick(1);
       expect(screen.getByRole('status')).toHaveTextContent('Still with you.');
-      expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Check again' })).not.toBeInTheDocument();
 
       await tick(15_999);
       expect(screen.queryByText('This is taking longer than usual.')).not.toBeInTheDocument();
@@ -155,11 +155,13 @@ describe('ConversationShell after "That\'s right"', () => {
       // Honest about it: the choices may not have saved, and there is a way out that is not another look at the same status.
       expect(screen.getByText(/Some of your choices may not have saved/)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Go through setup step by step' })).toBeInTheDocument();
+      // It only looks at the status again, so it does not claim to retry anything.
+      expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
       expectAllTapTargets(container, 'the slow wait');
 
-      // Try again asks the API again, and the shop is live: the trial takes over.
+      // Check again asks the API again, and the shop is live: the trial takes over.
       world.status = statusAt('billing');
-      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
       await settle();
       expect(heading()).toHaveTextContent(/start your free trial/);
       expect(requests.filter((r) => r === 'GET /api/onboarding/status').length).toBeGreaterThan(1);

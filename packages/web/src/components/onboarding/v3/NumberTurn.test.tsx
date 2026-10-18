@@ -65,10 +65,12 @@ describe('NumberTurn', () => {
       act(() => void vi.advanceTimersByTime(4_000));
       expect(screen.getByText('Still with you.')).toBeInTheDocument();
       act(() => void vi.advanceTimersByTime(25_999));
-      expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Check again' })).not.toBeInTheDocument();
       act(() => void vi.advanceTimersByTime(1));
       expect(screen.getByText('This is taking longer than usual.')).toBeInTheDocument();
-      screen.getByRole('button', { name: 'Try again' }).click();
+      // Nothing is sent from here, so it is not called "Try again".
+      expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+      screen.getByRole('button', { name: 'Check again' }).click();
       // It only checks the status again; nothing is bought by waiting.
       expect(onChanged).toHaveBeenCalledTimes(1);
       expect(requests).toEqual([]);

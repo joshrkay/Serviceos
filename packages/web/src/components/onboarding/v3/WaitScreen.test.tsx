@@ -94,4 +94,42 @@ describe('WaitScreen', () => {
     // The button names itself "Loading Try again" while it works.
     expect(screen.getByRole('button', { name: /Try again/ })).toBeDisabled();
   });
+
+  it('can call the button "Check again" where it only looks again and sends nothing', () => {
+    render(<WaitScreen heading="Getting your number." thresholds={NUMBER_WAIT} onRetry={vi.fn()} retryLabel="Check again" />);
+    advance(30_000);
+    expect(screen.getByRole('button', { name: 'Check again' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+  });
+
+  it('shows the button working while an async retry runs, then ready again, so a tap is seen to do something', async () => {
+    let finish: () => void = () => {};
+    const onRetry = vi.fn(() => new Promise<void>((resolve) => {
+        finish = resolve;
+      }));
+    render(<WaitScreen heading="Getting your shop ready." onRetry={onRetry} retryLabel="Check again" />);
+    advance(20_000);
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    expect(screen.getByRole('button', { name: /Check again/ })).toBeDisabled();
+    // A second tap while it works does not ask again.
+    fireEvent.click(screen.getByRole('button', { name: /Check again/ }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+
+    await act(() => {
+      finish();
+      return Promise.resolve();
+    });
+    expect(screen.getByRole('button', { name: 'Check again' })).toBeEnabled();
+  });
+
+  it('is ready again when the retry rejects', async () => {
+    const onRetry = vi.fn(() => Promise.reject(new Error('offline')));
+    render(<WaitScreen heading="Getting your shop ready." onRetry={onRetry} />);
+    advance(20_000);
+    await act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      return Promise.resolve();
+    });
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled();
+  });
 });
