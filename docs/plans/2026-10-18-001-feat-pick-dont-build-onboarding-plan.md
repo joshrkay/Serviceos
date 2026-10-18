@@ -74,8 +74,12 @@ unowned position.
   `regional_price_tiers(trade, metro_code, tier JSONB in cents, source, updated_at)`, no
   `tenant_id` (platform-owned like `tenants`), founder-curated per launch metro, `'US'` as the
   fallback row; absent that, `*_LINE_ITEM_DEFAULTS` apply and the copy drops the city. The
-  owner's price choice becomes a multiplier passed into `seed-pack-defaults.ts`, not a second
-  seed set. That holds for a first run only: the seeder skips any catalog item or template
+  owner's price choice travels as `hourlyRateCents` and `tripFeeCents` on the
+  `onboarding_tenant_settings` payload (optional, integer cents) and the execution handler
+  threads them into `activatePackWithSeed`, so the seeder has the chosen prices when it runs
+  after the undo window: the headline visit and labor items land at exactly those cents and
+  every other seeded price scales by the hourly ratio. No second seed set. That holds for a
+  first run only: the seeder skips any catalog item or template
   whose canonical name already exists, so on U6's "Re-run setup" the price card does not
   re-seed. It updates the pack's two headline items (visit fee, labor rate) and the estimate
   template line items that carry those same seeded amounts, in each case only while the row
@@ -212,7 +216,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   ("Do you already have a business number?"), asked of every owner as the last turn: nothing
   collected before it says whether a shop is established, so this answer is what decides the
   forwarding or day-one branch in U6, and a day-one owner clears it in one tap. (U3's first
-  slices ask the seven; the eighth turn lands with U6.) `assembleTypicalShop(trade, metro)` returns the shop with option
+  slices ask the seven; the eighth turn lands with U6.) The `generic` registry is content only:
+  a "Something else" owner's pack id is `other`, which is in `SEEDABLE_PACK_IDS` and accepted
+  by the `verticalPacks` contract, so approval works for every trade the first screen offers.
+  `assembleTypicalShop(trade, metro)` returns the shop with option
   A values resolved from the tier (or national default), `mostShops` marks, and the rendered
   `rivetLine` per option with `{businessName}` and `{tripFee}` substituted. The multiplier for
   option B is an integer-cents function with one rounding rule, unit-tested.
@@ -545,7 +552,12 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Files:**
   - modify `packages/api/src/invoices/invoice-payment-link.ts` and the invoice send path in
     `packages/api/src/invoices/payment.ts` (read `paymentCollectionMode` from settings; no
-    link and a collect-on-site note when `collect_on_site`)
+    link and a collect-on-site note when `collect_on_site`), and every customer-facing path
+    that mints or shows a pay link, which must honour the same mode: `POST
+    /public/invoices/:token/checkout` and `PublicInvoiceService.getOrCreateCheckoutUrl`
+    (`packages/api/src/routes/public-invoices.ts`, `invoices/public-invoice-service.ts`) and
+    the portal's link generation in `packages/api/src/routes/public-portal.ts` (refuse with
+    409 `COLLECT_ON_SITE`, and omit the pay button from the public invoice and portal pages)
   - modify the voice answer for payment questions and the emergency hand-off in
     `packages/api/src/voice/` (exact modules named at implementation; patterns:
     `voice/triage/context-preface.ts`, `voice/call-me-back/call-me-back.ts`)
@@ -559,8 +571,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   handlers in `proposals/execution/handlers.ts`.
 - **Test scenarios:**
   - Happy path: `collect_on_site` → issued invoice has no pay link and the customer message
-    says the tech collects on site; `pay_link` → unchanged behaviour. `owner_cell_then_text` →
-    hand-off rings the owner, then texts on no answer.
+    says the tech collects on site; the public invoice page and portal show no pay button and
+    `POST /public/invoices/:token/checkout` answers 409; `pay_link` → unchanged behaviour.
+    `owner_cell_then_text` → hand-off rings the owner, then texts on no answer.
   - Edge: key unset → today's behaviour; mode changed between issue and send → the value at
     send time wins, audited.
   - Error: settings read fails → fall back to default and record an event, never block the
