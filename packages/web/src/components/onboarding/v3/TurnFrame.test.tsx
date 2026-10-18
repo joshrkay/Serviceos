@@ -32,4 +32,19 @@ describe('TurnFrame header', () => {
     expect(screen.getByText('About 1 minute left')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Back' })).toBeInTheDocument();
   });
+
+  it('shows no countdown when it is given no minutes (a screen that is not part of setup)', () => {
+    const { container } = render(<TurnFrame progress={0}>{null}</TurnFrame>);
+    expect(container.querySelector('header')!.textContent).not.toMatch(/minute/);
+  });
+
+  it('shows a busy escape as disabled, says one moment, and ignores taps', async () => {
+    const onSelect = vi.fn();
+    render(<TurnFrame minutesLeft={1} progress={0.9} escape={{ label: "I'll test later", onSelect, busy: true }}>{null}</TurnFrame>);
+    const escape = screen.getByRole('button', { name: 'One moment…' });
+    expect(escape).toBeDisabled();
+    expect(escape).toHaveAttribute('aria-busy', 'true');
+    await userEvent.click(escape);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
 });

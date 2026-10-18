@@ -251,7 +251,7 @@ function Conversation() {
 /** The route guard sends a removed teammate here; Rivet tells them what happened and offers the one way out. */
 function AccessRemoved({ onSignOut }: { onSignOut: () => void }) {
   return (
-    <TurnFrame minutesLeft={0} progress={0}>
+    <TurnFrame progress={0}>
       <div role="alert">
         <SpeakerLine />
         <RivetHeading>Your access was removed.</RivetHeading>

@@ -13,8 +13,13 @@ export interface TestCallTurnProps {
   phoneNumber: string | null;
   /** The owner's pack, which picks the scenario Rivet asks them to act out. */
   packId?: string | null;
-  /** The test call was heard during this visit: ask to open for business. */
-  heard: boolean;
+  /**
+   * How the call step ended during this visit: the call was heard, or the owner chose to test later. Either way
+   * the owner makes the one call that opens the phones. Null: still waiting for the call.
+   */
+  closing: Closing | null;
+  /** The phones are already open (the server opens them itself when a test call ends). */
+  voiceAgentLive: boolean;
   tenantId: string | null;
   userId: string | null | undefined;
   /** "I'll test later" lives in the header; when it fails, the reason is shown here. */
@@ -23,15 +28,17 @@ export interface TestCallTurnProps {
   onOpened: () => void;
 }
 
+export type Closing = 'heard' | 'skipped';
+
 /** After this long with no call, say so and what to do (the original test-call step waits as long). */
 const WAITED_LONG_MS = 60_000;
 
 const ACTION = 'h-14 whitespace-normal rounded-2xl text-[17px] font-semibold';
 
 /** "Now you call me." Then, once the call is heard, "Ready to open for business?" */
-export function TestCallTurn({ phoneNumber, packId, heard, tenantId, userId, testLaterError, onOpened }: TestCallTurnProps) {
-  return heard ? (
-    <OpenForBusiness onOpened={onOpened} />
+export function TestCallTurn({ phoneNumber, packId, closing, voiceAgentLive, tenantId, userId, testLaterError, onOpened }: TestCallTurnProps) {
+  return closing ? (
+    <OpenForBusiness closing={closing} alreadyOpen={voiceAgentLive} onOpened={onOpened} />
   ) : (
     <CallMe phoneNumber={phoneNumber} packId={packId} tenantId={tenantId} userId={userId} testLaterError={testLaterError} />
   );
@@ -115,7 +122,7 @@ function CallMe({ phoneNumber, packId, tenantId, userId, testLaterError }: Pick<
   );
 }
 
-function OpenForBusiness({ onOpened }: Pick<TestCallTurnProps, 'onOpened'>) {
+function OpenForBusiness({ closing, alreadyOpen, onOpened }: Pick<TestCallTurnProps, 'onOpened'> & { closing: Closing; alreadyOpen: boolean }) {
   const apiFetch = useApiClient();
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -143,12 +150,21 @@ function OpenForBusiness({ onOpened }: Pick<TestCallTurnProps, 'onOpened'>) {
     }
   };
 
+  const skipped = closing === 'skipped';
   return (
     <>
       <SpeakerLine />
-      <RivetHeading>I got your call. Ready to open for business?</RivetHeading>
+      <RivetHeading>
+        {alreadyOpen
+          ? "I got your call. You're open for business."
+          : skipped
+            ? 'No problem. Ready to open for business anyway?'
+            : 'I got your call. Ready to open for business?'}
+      </RivetHeading>
       <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">
-        Every job I book lands for your OK: one tap to confirm, one tap to undo, and you can always hear the call.
+        {skipped
+          ? "Until you open, I send every caller to voicemail. You can also open any time from Settings."
+          : 'Every job I book lands for your OK: one tap to confirm, one tap to undo, and you can always hear the call.'}
       </p>
 
       <div className="min-h-6 flex-1" />
@@ -159,9 +175,22 @@ function OpenForBusiness({ onOpened }: Pick<TestCallTurnProps, 'onOpened'>) {
             {error}
           </p>
         ) : null}
-        <Button fullWidth size="lg" className={ACTION} loading={opening} onClick={() => void open()}>
-          That&apos;s right. Open for business.
-        </Button>
+        {alreadyOpen ? (
+          <Button fullWidth size="lg" className={ACTION} onClick={onOpened}>
+            Take me home
+          </Button>
+        ) : (
+          <>
+            <Button fullWidth size="lg" className={ACTION} loading={opening} onClick={() => void open()}>
+              That&apos;s right. Open for business.
+            </Button>
+            {skipped ? (
+              <Button fullWidth variant="outline" size="lg" className={ACTION} disabled={opening} onClick={onOpened}>
+                Not yet
+              </Button>
+            ) : null}
+          </>
+        )}
       </div>
     </>
   );

@@ -43,6 +43,24 @@ describe('WaitScreen', () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
+  it('adds its slow note and way out only once it is clearly slow', () => {
+    render(
+      <WaitScreen
+        heading="Getting your shop ready."
+        onRetry={vi.fn()}
+        slowNote="Some of your choices may not have saved."
+        slowAction={<button type="button">Go through setup step by step</button>}
+      />,
+    );
+    advance(19_999);
+    expect(screen.queryByText('Some of your choices may not have saved.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Go through setup step by step' })).not.toBeInTheDocument();
+    advance(1);
+    expect(screen.getByText('Some of your choices may not have saved.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Go through setup step by step' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
   it('offers no retry when there is nothing to retry, however long it takes', () => {
     render(<WaitScreen heading="Getting your number." />);
     advance(60_000);

@@ -52,6 +52,8 @@ describe('ConversationShell: removed teammate', () => {
     renderShell();
     expect(await screen.findByRole('heading', { level: 1, name: 'Your access was removed.' })).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent(/deactivated your account/);
+    // A setup countdown means nothing to someone locked out of setup.
+    expect(document.querySelector('header')).not.toHaveTextContent(/minute/);
     expect(screen.queryByText(/couldn.t load your setup/i)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
 

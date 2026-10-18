@@ -2,13 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useApiClient } from '../../../lib/apiClient';
 import { invalidateOnboardingStatusCache, type OnboardingStatusResult } from '../../../hooks/useOnboardingStatus';
-import { trackFunnel, type AnalyticsEvent } from '../../../lib/analytics';
+import { track, trackFunnel, type AnalyticsEvent } from '../../../lib/analytics';
+import { ONBOARDING_RERUN_PATH } from '../../../utils/onboarding-rerun';
+import { Button } from '../../ui';
 import { afterScreen, afterStage, phoneNumberOf, stepOf, type AfterScreen } from './after-screen';
 import { CONNECTION_ERROR, requestErrorCopy } from './connection-copy';
 import { GettingReadyTurn } from './GettingReadyTurn';
 import { NumberTurn } from './NumberTurn';
 import { AFTER_PACING, highestSeen, type AfterStage } from './pacing';
-import { TestCallTurn } from './TestCallTurn';
+import { TestCallTurn, type Closing } from './TestCallTurn';
 import { useTestCallArrival } from './test-call-arrival';
 import { TrialTurn } from './TrialTurn';
 import { RivetHeading, SpeakerLine, TurnFrame } from './TurnFrame';
@@ -47,7 +49,9 @@ const STATUS_LABEL: Record<AfterStage, string> = {
  * the hand-off home. Which turn shows is derived from the onboarding status the
  * API computes, so it can never run ahead of what is true. The one place it
  * stays on a screen after setup is complete: the owner has just heard their
- * test call and has not yet said "Open for business".
+ * test call (or put it off) and has not yet answered "Open for business?". The
+ * server opens the phones itself when a test call ends, so that screen reads
+ * the live flag instead of assuming it is still off.
  */
 export function AfterApproval({ status, saving, changeCount, packId, userId }: AfterApprovalProps) {
   const navigate = useNavigate();
@@ -65,13 +69,21 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
   const returnNotice = useBillingReturn(refetch);
   const heard = useTestCallArrival(stepOf(data, 'test_call')?.status ?? null);
   const [opened, setOpened] = useState(false);
+  const [skipped, setSkipped] = useState(false);
   const [testLater, setTestLater] = useState<string | null>(null);
+  const [skipping, setSkipping] = useState(false);
   const testingLater = useRef(false);
   const highestProgress = useRef(0);
+  const lowestMinutes = useRef(Infinity);
 
   const isComplete = data?.isComplete === true;
-  // Setup is done, but the owner has not yet opened for business: stay for that one tap.
-  const awaitingOpen = heard && !opened && data?.voiceAgentLive !== true;
+  const voiceAgentLive = data?.voiceAgentLive === true;
+  // How the call step ended during this visit; a visit that finds setup finished never replays it.
+  const closing: Closing | null = heard ? 'heard' : skipped ? 'skipped' : null;
+  // Setup is done, but the owner has not yet answered "open for business?": stay for that one tap. A heard call
+  // always waits (the server may already have opened the phones; the screen says so). Putting the call off only
+  // waits while the phones are still closed, because that is the one place the owner is told answering is off.
+  const awaitingOpen = !opened && (heard || (skipped && !voiceAgentLive));
   const handOff = isComplete && !awaitingOpen;
 
   useEffect(() => {
@@ -84,6 +96,21 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
     if (wasSaving.current && !saving) void refetch();
     wasSaving.current = saving;
   }, [saving, refetch]);
+
+  // Setup finished during this visit: the first time a status that was not complete says it is. A visit that
+  // opens on a finished setup is not a completion (same rule as the sidebar shell).
+  const wasIncomplete = useRef(false);
+  useEffect(() => {
+    if (data?.isComplete === false) {
+      wasIncomplete.current = true;
+      return;
+    }
+    if (data?.isComplete && wasIncomplete.current) {
+      wasIncomplete.current = false;
+      track('onboarding_completed', { voiceAgentLive: data.voiceAgentLive });
+      trackFunnel('wizard_completed', { tenantId, userId }, { voice_agent_live: data.voiceAgentLive });
+    }
+  }, [data?.isComplete, data?.voiceAgentLive, tenantId, userId]);
 
   const screen: AfterScreen = isComplete ? 'test_call' : afterScreen(data);
 
@@ -119,6 +146,7 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
   const testCallLater = () => {
     if (testingLater.current) return;
     testingLater.current = true;
+    setSkipping(true);
     setTestLater(null);
     void (async () => {
       try {
@@ -127,31 +155,46 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
           setTestLater(requestErrorCopy(res.status));
           return;
         }
+        setSkipped(true);
         await refetch();
       } catch {
         setTestLater(CONNECTION_ERROR);
       }
     })().finally(() => {
       testingLater.current = false;
+      setSkipping(false);
     });
   };
 
   if (handOff) return null;
 
-  const stage = afterStage(screen, saving, heard);
+  const stage = afterStage(screen, saving, closing !== null);
   const pacing = AFTER_PACING[stage];
-  // Never backwards, whatever a late status says.
+  // Never backwards, whatever a late status says: not the line, and not the minutes.
   highestProgress.current = highestSeen(highestProgress.current, pacing.progress);
+  lowestMinutes.current = Math.min(lowestMinutes.current, pacing.minutesLeft);
   // No way out of the trial (a card is needed for the number) or of getting the number; the call can wait.
   const escape =
-    !saving && screen === 'test_call' && !heard ? { label: "I'll test later", onSelect: testCallLater } : undefined;
+    !saving && screen === 'test_call' && !closing
+      ? { label: "I'll test later", onSelect: testCallLater, busy: skipping }
+      : undefined;
 
   return (
-    <TurnFrame minutesLeft={pacing.minutesLeft} progress={highestProgress.current} statusLabel={STATUS_LABEL[stage]} escape={escape}>
+    <TurnFrame minutesLeft={lowestMinutes.current} progress={highestProgress.current} statusLabel={STATUS_LABEL[stage]} escape={escape}>
       {saving ? (
         <SavingLine count={changeCount} />
       ) : screen === 'wait' ? (
-        <WaitScreen heading="Getting your shop ready." support="This takes a few seconds." onRetry={() => void refetch()} />
+        <WaitScreen
+          heading="Getting your shop ready."
+          support="This takes a few seconds."
+          onRetry={() => void refetch()}
+          slowNote="Some of your choices may not have saved. You can try again, or go through setup step by step."
+          slowAction={
+            <Button fullWidth variant="outline" size="lg" className="h-14 rounded-2xl text-[17px] font-semibold" onClick={() => void navigate(ONBOARDING_RERUN_PATH)}>
+              Go through setup step by step
+            </Button>
+          }
+        />
       ) : screen === 'trial' ? (
         <TrialTurn
           notice={returnNotice}
@@ -165,11 +208,16 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
         <TestCallTurn
           phoneNumber={phoneNumber}
           packId={packId}
-          heard={heard}
+          closing={closing}
+          voiceAgentLive={voiceAgentLive}
           tenantId={tenantId}
           userId={userId}
           testLaterError={testLater}
-          onOpened={() => setOpened(true)}
+          onOpened={() => {
+            setOpened(true);
+            // The phones are open now: leave the next screen a status that says so, not the one cached before the tap.
+            void refetch();
+          }}
         />
       )}
     </TurnFrame>

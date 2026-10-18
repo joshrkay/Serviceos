@@ -2,7 +2,8 @@ import type { ReactNode } from 'react';
 import { cn } from '../../ui/utils';
 
 export interface TurnFrameProps {
-  minutesLeft: number;
+  /** Absent on a screen that is not part of setup (a removed teammate's dead end): no countdown to show. */
+  minutesLeft?: number;
   /** Right-hand header text: what is true about the owner's answers right now. */
   statusLabel?: string;
   /** 0 to 1. Only ever moves forward. */
@@ -12,7 +13,12 @@ export interface TurnFrameProps {
    * is". It takes the right-hand slot, and the status label moves under the
    * minutes so both stay on screen without a taller header.
    */
-  escape?: { label: string; onSelect: () => void };
+  escape?: {
+    label: string;
+    onSelect: () => void;
+    /** The request behind the tap is in flight: the button says so and ignores further taps. */
+    busy?: boolean;
+  };
   children: ReactNode;
 }
 
@@ -34,20 +40,22 @@ export function TurnFrame({ minutesLeft, statusLabel, progress, escape, children
           {escape ? (
             <>
               <div className="flex min-w-0 flex-col">
-                <span>{minutesLeftLabel(minutesLeft)}</span>
+                {minutesLeft === undefined ? null : <span>{minutesLeftLabel(minutesLeft)}</span>}
                 {statusLabel ? <span>{statusLabel}</span> : null}
               </div>
               <button
                 type="button"
                 onClick={escape.onSelect}
-                className="min-h-11 min-w-11 shrink-0 rounded-lg px-1 text-right text-sm font-medium text-foreground underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                disabled={escape.busy}
+                aria-busy={escape.busy || undefined}
+                className="min-h-11 min-w-11 shrink-0 rounded-lg px-1 text-right text-sm font-medium text-foreground underline disabled:opacity-60 underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
               >
-                {escape.label}
+                {escape.busy ? 'One moment…' : escape.label}
               </button>
             </>
           ) : (
             <>
-              <span>{minutesLeftLabel(minutesLeft)}</span>
+              {minutesLeft === undefined ? null : <span>{minutesLeftLabel(minutesLeft)}</span>}
               {statusLabel ? <span className="flex min-h-11 items-center text-right">{statusLabel}</span> : null}
             </>
           )}

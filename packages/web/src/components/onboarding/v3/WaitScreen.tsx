@@ -25,6 +25,10 @@ export interface WaitScreenProps {
   retrying?: boolean;
   /** Owner-facing, one line: why the retry did not work. */
   retryError?: string | null;
+  /** Once it is clearly slow: what Rivet adds about the waiting (e.g. that the choices may not have saved). */
+  slowNote?: string;
+  /** Once it is clearly slow: a way out other than waiting (a button), under the retry. */
+  slowAction?: ReactNode;
   /** More controls under the retry (a way out). */
   children?: ReactNode;
 }
@@ -33,7 +37,7 @@ export interface WaitScreenProps {
  * A turn that waits on the server. Quiet at first; "Still with you." after four
  * seconds; "This is taking longer than usual." and a Try again once it is slow.
  */
-export function WaitScreen({ heading, support, thresholds, onRetry, retrying = false, retryError, children }: WaitScreenProps) {
+export function WaitScreen({ heading, support, thresholds, onRetry, retrying = false, retryError, slowNote, slowAction, children }: WaitScreenProps) {
   const stage = useWaitStage(thresholds);
   return (
     <>
@@ -43,6 +47,9 @@ export function WaitScreen({ heading, support, thresholds, onRetry, retrying = f
       <p role="status" className="mt-3 min-h-6 text-base leading-[1.45] text-secondary-foreground">
         {WAIT_LINE[stage]}
       </p>
+      {stage === 'taking_longer' && slowNote ? (
+        <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">{slowNote}</p>
+      ) : null}
 
       <div className="min-h-6 flex-1" />
 
@@ -57,6 +64,7 @@ export function WaitScreen({ heading, support, thresholds, onRetry, retrying = f
             Try again
           </Button>
         ) : null}
+        {stage === 'taking_longer' ? slowAction : null}
         {children}
       </div>
     </>

@@ -36,7 +36,8 @@ function stub() {
 function renderTurn(over: Partial<TestCallTurnProps> = {}) {
   const props: TestCallTurnProps = {
     phoneNumber: NUMBER,
-    heard: false,
+    closing: null,
+    voiceAgentLive: false,
     tenantId: 'tenant-1',
     userId: 'user-1',
     testLaterError: null,
@@ -138,7 +139,7 @@ describe('TestCallTurn', () => {
 
   describe('once the call was heard', () => {
     it('asks to open for business, and says what happens on the first real call', () => {
-      const { container } = renderTurn({ heard: true });
+      const { container } = renderTurn({ closing: 'heard' });
       const heading = screen.getByRole('heading', { level: 1, name: 'I got your call. Ready to open for business?' });
       expect(heading.textContent!.split(/\s+/).length).toBeLessThan(20);
       expect(
@@ -153,7 +154,7 @@ describe('TestCallTurn', () => {
     });
 
     it('opens for business through the real go-live route, records it, and tells the shell', async () => {
-      const { props } = renderTurn({ heard: true });
+      const { props } = renderTurn({ closing: 'heard' });
       await userEvent.click(screen.getByRole('button', { name: "That's right. Open for business." }));
       await waitFor(() => expect(props.onOpened).toHaveBeenCalledTimes(1));
       expect(requests).toEqual(['POST /api/voice/go-live']);
@@ -166,7 +167,7 @@ describe('TestCallTurn', () => {
         new Promise<Response>((resolve) => {
           finish = resolve;
         });
-      const { props } = renderTurn({ heard: true });
+      const { props } = renderTurn({ closing: 'heard' });
       await userEvent.dblClick(screen.getByRole('button', { name: /Open for business/ }));
       expect(requests).toEqual(['POST /api/voice/go-live']);
       finish(json(200, { voiceAgentLive: true }));
@@ -175,7 +176,7 @@ describe('TestCallTurn', () => {
 
     it('says the trial has to be active when the API answers 402, and stays here', async () => {
       goLive = () => json(402, { error: 'BILLING_REQUIRED', message: 'Active subscription required' });
-      const { props } = renderTurn({ heard: true });
+      const { props } = renderTurn({ closing: 'heard' });
       await userEvent.click(screen.getByRole('button', { name: "That's right. Open for business." }));
       expect(await screen.findByRole('alert')).toHaveTextContent("Your trial isn't active yet. Give it a minute, then try again.");
       expect(props.onOpened).not.toHaveBeenCalled();
@@ -185,19 +186,57 @@ describe('TestCallTurn', () => {
 
     it('says it could not open for any other refusal, without the API\'s words', async () => {
       goLive = () => json(500, { error: 'INTERNAL', message: 'pool exhausted' });
-      renderTurn({ heard: true });
+      renderTurn({ closing: 'heard' });
       await userEvent.click(screen.getByRole('button', { name: "That's right. Open for business." }));
       const alert = await screen.findByRole('alert');
       expect(alert).toHaveTextContent("I couldn't open for business just now. Try again.");
       expect(alert.textContent).not.toMatch(/pool/);
     });
 
+    it('when the server already opened the phones, says so and goes home with one tap, without a request', async () => {
+      const { props } = renderTurn({ closing: 'heard', voiceAgentLive: true });
+      expect(screen.getByRole('heading', { level: 1, name: "I got your call. You're open for business." })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: "That's right. Open for business." })).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Take me home' }));
+      expect(props.onOpened).toHaveBeenCalledTimes(1);
+      expect(requests).toEqual([]);
+      expect(analytics.track).not.toHaveBeenCalled();
+    });
+
     it('says so when the connection drops', async () => {
       goLive = () => Promise.reject(new TypeError('Failed to fetch'));
-      const { props } = renderTurn({ heard: true });
+      const { props } = renderTurn({ closing: 'heard' });
       await userEvent.click(screen.getByRole('button', { name: "That's right. Open for business." }));
       expect(await screen.findByRole('alert')).toHaveTextContent("I couldn't reach the server. Check your connection and try again.");
       expect(props.onOpened).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('once the owner put the call off', () => {
+    it('says answering is off and offers to open anyway, or not yet', async () => {
+      const { container, props } = renderTurn({ closing: 'skipped' });
+      expect(screen.getByRole('heading', { level: 1, name: 'No problem. Ready to open for business anyway?' })).toBeInTheDocument();
+      expect(screen.getByText(/Until you open, I send every caller to voicemail/)).toBeInTheDocument();
+      expectAllTapTargets(container, 'skipped');
+
+      await userEvent.click(screen.getByRole('button', { name: 'Not yet' }));
+      expect(props.onOpened).toHaveBeenCalledTimes(1);
+      expect(requests).toEqual([]);
+      expect(analytics.track).not.toHaveBeenCalled();
+    });
+
+    it('opens through the real go-live route when the owner says yes', async () => {
+      const { props } = renderTurn({ closing: 'skipped' });
+      await userEvent.click(screen.getByRole('button', { name: "That's right. Open for business." }));
+      await waitFor(() => expect(props.onOpened).toHaveBeenCalledTimes(1));
+      expect(requests).toEqual(['POST /api/voice/go-live']);
+      expect(analytics.track).toHaveBeenCalledWith('voice_agent_turned_on');
+    });
+
+    it('has no "Not yet" once the phones are open, and no mention of voicemail', () => {
+      renderTurn({ closing: 'skipped', voiceAgentLive: true });
+      expect(screen.queryByRole('button', { name: 'Not yet' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Take me home' })).toBeInTheDocument();
     });
   });
 
@@ -205,7 +244,10 @@ describe('TestCallTurn', () => {
     const waiting = renderTurn();
     expect(waiting.container.textContent).not.toMatch(/stripe|twilio|\bAI\b|agent|dashboard|verify|provisioning|proposal/i);
     waiting.unmount();
-    const heard = renderTurn({ heard: true });
+    const heard = renderTurn({ closing: 'heard' });
     expect(heard.container.textContent).not.toMatch(/stripe|twilio|\bAI\b|agent|dashboard|verify|provisioning|proposal/i);
+    heard.unmount();
+    const skipped = renderTurn({ closing: 'skipped' });
+    expect(skipped.container.textContent).not.toMatch(/stripe|twilio|\bAI\b|agent|dashboard|verify|provisioning|proposal/i);
   });
 });

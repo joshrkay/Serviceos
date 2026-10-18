@@ -32,7 +32,7 @@ stamps the four fields uniformly. The server activation event passes them in
 | 6 | `wizard_step_phone` | `OnboardingShell.tsx` | client | user reaches the `phone` step | `step` |
 | 7 | `wizard_step_voice` | `OnboardingShell.tsx` | client | user reaches the `ai_check` (voice) step | `step` |
 | 7b | `wizard_step_calendar` | `CalendarChoicePanel.tsx` | client | user chooses a calendar provider (google/builtin) | `provider` |
-| 8 | `wizard_completed` | `OnboardingShell.tsx` (alongside existing `onboarding_completed`) | client | `isComplete` flips true | `voice_agent_live` |
+| 8 | `wizard_completed` | `OnboardingShell.tsx` (alongside existing `onboarding_completed`); v3: `v3/AfterApproval.tsx` (same pair) | client | `isComplete` is seen to flip from false to true during the visit (a visit that opens on a finished setup does not fire it); in v3 that is the call being heard or "I'll test later" | `voice_agent_live` |
 | 9 | `test_call_initiated` | `web/.../onboarding/v2/steps/TestCallStep.tsx`; v3: `v3/TestCallTurn.tsx` | client | user taps the number / copies it (call intent) | — |
 | 10 | `test_call_succeeded` | `TestCallStep.tsx`; v3: `v3/AfterApproval.tsx` | client | test_call step flips to `done` (inbound detected) | — |
 | 11 | `first_real_call_received` **[ACTIVATION]** | `api/.../voice/activation.ts` (called from `app.ts onSessionEnded`) | server | first real inbound call after go-live (idempotent once/tenant) | `inbound_call_count` |
@@ -84,7 +84,7 @@ After the read-back the same frame carries the trial, the number and the test ca
 the funnel continues without a gap: `v3_approved` -> `v3_trial_viewed` -> `v3_trial_started`
 (the checkout itself is the server's `plan_selected`; the trial going live is the Stripe
 webhook) -> `v3_number_viewed` -> `v3_number_ready` -> `v3_test_call_viewed` ->
-`test_call_initiated` -> `test_call_succeeded`. The two test-call events keep the meaning
+`test_call_initiated` -> `test_call_succeeded` -> `wizard_completed` (a skipped call reaches `wizard_completed` without `test_call_succeeded`). The two test-call events keep the meaning
 they have in the sidebar shell (the intent to call is a tap on the number or the copy
 button, once per visit; the success is the step being seen to flip to `done`, never replayed
 by a visit that finds it already done), so the series stays comparable across both shells.

@@ -152,6 +152,9 @@ describe('ConversationShell after "That\'s right"', () => {
       await tick(1);
       expect(screen.getByRole('status')).toHaveTextContent('This is taking longer than usual.');
       expect(screen.queryByText('Still with you.')).not.toBeInTheDocument();
+      // Honest about it: the choices may not have saved, and there is a way out that is not another look at the same status.
+      expect(screen.getByText(/Some of your choices may not have saved/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Go through setup step by step' })).toBeInTheDocument();
       expectAllTapTargets(container, 'the slow wait');
 
       // Try again asks the API again, and the shop is live: the trial takes over.
@@ -160,6 +163,21 @@ describe('ConversationShell after "That\'s right"', () => {
       await settle();
       expect(heading()).toHaveTextContent(/start your free trial/);
       expect(requests.filter((r) => r === 'GET /api/onboarding/status').length).toBeGreaterThan(1);
+    });
+
+    it('keeps the slow note and the step-by-step way out off the screen until it is slow, and the way out opens the step-by-step setup', async () => {
+      stub(statusAt('identity'));
+      renderShell();
+      await settle();
+      await tick(19_999);
+      expect(screen.queryByText(/may not have saved/)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Go through setup step by step' })).not.toBeInTheDocument();
+      await tick(1);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Go through setup step by step' }));
+      await settle();
+      expect(where()).toBe('/onboarding?rerun=1');
+      expect(screen.getByText('v2 shell')).toBeInTheDocument();
     });
 
     it('moves on by itself when a later poll says the choices are live', async () => {
@@ -234,11 +252,22 @@ describe('ConversationShell after "That\'s right"', () => {
     expect(where()).toBe('/onboarding');
     expect(fired('test_call_succeeded')).toEqual([['test_call_succeeded', expect.objectContaining({ tenantId: statusAt('billing').tenantId })]]);
 
+    // Setup finished here, so the funnel's completion step is recorded: once, with the phones still closed.
+    expect(track.track.mock.calls.filter(([e]) => e === 'onboarding_completed')).toEqual([['onboarding_completed', { voiceAgentLive: false }]]);
+    expect(fired('wizard_completed')).toEqual([
+      ['wizard_completed', { tenantId: statusAt('billing').tenantId, userId: undefined }, { voice_agent_live: false }],
+    ]);
+
+    // Opening for business asks the API for the status again, so what the next page reads is not the cached one from before the tap.
+    const statusRequests = () => requests.filter((r) => r === 'GET /api/onboarding/status').length;
+    const before = statusRequests();
     fireEvent.click(screen.getByRole('button', { name: "That's right. Open for business." }));
     await settle();
     expect(requests).toContain('POST /api/voice/go-live');
+    expect(statusRequests()).toBeGreaterThan(before);
     expect(screen.getByText('home page')).toBeInTheDocument();
     expect(track.track).toHaveBeenCalledWith('voice_agent_turned_on');
+    expect(fired('wizard_completed')).toHaveLength(1);
 
     // Once each, however many polls they were on screen for.
     for (const event of ['v3_trial_viewed', 'v3_number_viewed', 'v3_number_ready', 'v3_test_call_viewed', 'test_call_succeeded']) {
@@ -255,10 +284,56 @@ describe('ConversationShell after "That\'s right"', () => {
     await nextPoll();
     expect(heading()).toHaveTextContent(/start your free trial/);
     expect(progress()).toBe('80');
+    expect(screen.getByText('About 2 minutes left')).toBeInTheDocument();
+    expect(screen.queryByText('About 3 minutes left')).not.toBeInTheDocument();
+  });
+
+  describe('when the server opens the phones itself as the test call ends', () => {
+    it('still shows "I got your call", says the phones are open, and hands off only on the tap', async () => {
+      stub(statusAt('test_call', phoneDone));
+      renderShell();
+      await settle();
+      expect(heading()).toHaveTextContent('Now you call me.');
+
+      // The call ends: the poll that says it was heard also says the phones are open.
+      world.status = { ...statusAt(null, phoneDone), voiceAgentLive: true };
+      await nextPoll();
+      expect(heading()).toHaveTextContent("I got your call. You're open for business.");
+      expectFrame(1, 100, 'Ready to open');
+      expect(where()).toBe('/onboarding');
+      expect(fired('test_call_succeeded')).toHaveLength(1);
+
+      // It stays put on later polls, however long the owner takes.
+      await nextPoll();
+      await nextPoll();
+      expect(heading()).toHaveTextContent("I got your call. You're open for business.");
+
+      fireEvent.click(screen.getByRole('button', { name: 'Take me home' }));
+      await settle();
+      expect(screen.getByText('home page')).toBeInTheDocument();
+      // The server did it, so there is nothing to ask it to do again, and nothing the owner turned on.
+      expect(requests).not.toContain('POST /api/voice/go-live');
+      expect(track.track).not.toHaveBeenCalledWith('voice_agent_turned_on');
+      expect(track.track).toHaveBeenCalledWith('onboarding_completed', { voiceAgentLive: true });
+      expect(fired('wizard_completed').map(([, , extra]) => extra)).toEqual([{ voice_agent_live: true }]);
+    });
+
+    it('goes on to offer the button when the poll lands between the server\'s two writes, and the phones open a poll later', async () => {
+      stub(statusAt('test_call', phoneDone));
+      renderShell();
+      await settle();
+      world.status = statusAt(null, phoneDone);
+      await nextPoll();
+      expect(screen.getByRole('button', { name: "That's right. Open for business." })).toBeInTheDocument();
+      world.status = { ...world.status, voiceAgentLive: true };
+      await nextPoll();
+      expect(heading()).toHaveTextContent("I got your call. You're open for business.");
+      expect(where()).toBe('/onboarding');
+    });
   });
 
   describe('"I\'ll test later"', () => {
-    it('skips the test call through the real route and hands off, without saying the call was heard', async () => {
+    it('skips the test call through the real route, then tells the owner answering is off and offers to open anyway', async () => {
       stub(statusAt('test_call', phoneDone));
       renderShell();
       await settle();
@@ -268,9 +343,72 @@ describe('ConversationShell after "That\'s right"', () => {
       await settle();
 
       expect(requests).toContain('POST /api/onboarding/test-call/skip');
-      expect(screen.getByText('home page')).toBeInTheDocument();
+      expect(heading()).toHaveTextContent('No problem. Ready to open for business anyway?');
+      expect(screen.getByText(/I send every caller to voicemail/)).toBeInTheDocument();
+      expect(headerEscape()).toBeNull();
+      expect(where()).toBe('/onboarding');
       expect(fired('test_call_succeeded')).toHaveLength(0);
+      // Setup is finished, and that is recorded, even though the call was never heard.
+      expect(fired('wizard_completed')).toHaveLength(1);
+
+      fireEvent.click(screen.getByRole('button', { name: "That's right. Open for business." }));
+      await settle();
+      expect(requests).toContain('POST /api/voice/go-live');
+      expect(screen.getByText('home page')).toBeInTheDocument();
+      expect(track.track).toHaveBeenCalledWith('voice_agent_turned_on');
+    });
+
+    it('lets the owner leave answering off: "Not yet" hands off without opening anything', async () => {
+      stub(statusAt('test_call', phoneDone));
+      renderShell();
+      await settle();
+      fireEvent.click(screen.getByRole('button', { name: "I'll test later" }));
+      await settle();
+      fireEvent.click(screen.getByRole('button', { name: 'Not yet' }));
+      await settle();
+      expect(screen.getByText('home page')).toBeInTheDocument();
       expect(requests).not.toContain('POST /api/voice/go-live');
+    });
+
+    it('hands off straight away when the phones were already open', async () => {
+      stub(statusAt('test_call', phoneDone), {
+        'POST /api/onboarding/test-call/skip': () => {
+          world.status = { ...statusAt(null, { ...phoneDone, test_call: { status: 'skipped' } }), voiceAgentLive: true };
+          return json(200, { ok: true });
+        },
+      });
+      renderShell();
+      await settle();
+      fireEvent.click(screen.getByRole('button', { name: "I'll test later" }));
+      await settle();
+      expect(screen.getByText('home page')).toBeInTheDocument();
+      expect(requests).not.toContain('POST /api/voice/go-live');
+    });
+
+    it('shows the skip is working while the request is out, and sends it once however often it is tapped', async () => {
+      let finish: (r: Response) => void = () => {};
+      stub(statusAt('test_call', phoneDone), {
+        'POST /api/onboarding/test-call/skip': () =>
+          new Promise<Response>((resolve) => {
+            finish = (r) => {
+              world.status = statusAt(null, { ...phoneDone, test_call: { status: 'skipped' } });
+              resolve(r);
+            };
+          }) as unknown as Response,
+      });
+      renderShell();
+      await settle();
+      fireEvent.click(screen.getByRole('button', { name: "I'll test later" }));
+      await settle();
+      const busy = screen.getByRole('button', { name: 'One moment…' });
+      expect(busy).toBeDisabled();
+      expect(busy).toHaveAttribute('aria-busy', 'true');
+      fireEvent.click(busy);
+      expect(requests.filter((r) => r === 'POST /api/onboarding/test-call/skip')).toHaveLength(1);
+
+      finish(json(200, { ok: true }));
+      await settle();
+      expect(heading()).toHaveTextContent('No problem. Ready to open for business anyway?');
     });
 
     it('stays on the call and says so when the skip does not go through', async () => {
@@ -282,6 +420,9 @@ describe('ConversationShell after "That\'s right"', () => {
       expect(screen.getByRole('alert')).toHaveTextContent("That didn't go through. Wait a minute and try again.");
       expect(heading()).toHaveTextContent('Now you call me.');
       expect(where()).toBe('/onboarding');
+      // The button is back, not stuck on "One moment…".
+      expect(screen.getByRole('button', { name: "I'll test later" })).toBeEnabled();
+      expect(fired('wizard_completed')).toHaveLength(0);
     });
   });
 
@@ -319,9 +460,10 @@ describe('ConversationShell after "That\'s right"', () => {
       renderShell();
       await settle();
       expect(screen.getByText('home page')).toBeInTheDocument();
-      for (const event of ['v3_test_call_viewed', 'test_call_succeeded', 'v3_number_ready', 'v3_number_viewed', 'v3_trial_viewed']) {
+      for (const event of ['v3_test_call_viewed', 'test_call_succeeded', 'v3_number_ready', 'v3_number_viewed', 'v3_trial_viewed', 'wizard_completed']) {
         expect(fired(event), event).toHaveLength(0);
       }
+      expect(track.track).not.toHaveBeenCalledWith('onboarding_completed', expect.anything());
     });
 
     it('does not report the number as new to a visit that picks up at the test call', async () => {
