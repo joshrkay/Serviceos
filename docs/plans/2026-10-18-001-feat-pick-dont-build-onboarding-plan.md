@@ -78,7 +78,12 @@ unowned position.
   seed set.
 - **Metro from area code is a static NPA→metro map in code**, extending
   `packages/api/src/compliance/us-geography.ts` which today maps area code to state only. One
-  spoken confirmation when an NPA spans metros.
+  spoken confirmation when an NPA spans metros, and the inferred city is always visible and
+  changeable: a cell can keep the area code of a former city, so a unique NPA is a guess, not a
+  fact. The Ready screen names the city it priced for ("the way most Cleveland plumbing shops
+  run") with a one-tap "Not Cleveland?" that takes a typed or spoken city and re-assembles
+  (`PUT /draft/metro`, allowed while no choice is staged; lands with U5's overrides). When the
+  owner skips, the national tier applies and the copy drops the city.
 - **Keep the seven step ids; add facts.** `contracts.ts:150` hard-codes `.length(7)` and
   mobile consumes it. `derive-status.ts` gains `draftStatus` and `choicesAnswered` facts; the
   new shell derives its own turn list client-side from facts plus draft. (Alternative: a new
@@ -193,8 +198,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Approach:** Each registry entry is `{ settingKey, question, options: [{ key: 'a'|'b', label,
   rivetLine (template), writes }], mostShops }`; a module-load Zod parse fails fast. The seven
   keys: `greeting`, `trip_fee_and_rate`, `booking_posture`, `payment_collection_mode`,
-  `booking_hours`, `emergency_target`, `after_hours_mode`; an eighth, `existing_number`,
-  only for established shops. `assembleTypicalShop(trade, metro)` returns the shop with option
+  `booking_hours`, `emergency_target`, `after_hours_mode`; an eighth, `existing_number`
+  ("Do you already have a business number?"), asked of every owner as the last turn: nothing
+  collected before it says whether a shop is established, so this answer is what decides the
+  forwarding or day-one branch in U6, and a day-one owner clears it in one tap. (U3's first
+  slices ask the seven; the eighth turn lands with U6.) `assembleTypicalShop(trade, metro)` returns the shop with option
   A values resolved from the tier (or national default), `mostShops` marks, and the rendered
   `rivetLine` per option with `{businessName}` and `{tripFee}` substituted. The multiplier for
   option B is an integer-cents function with one rounding rule, unit-tested.
@@ -227,7 +235,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - modify `packages/api/src/proposals/contracts/onboarding.ts` (add `onboarding_voice_policy`:
     greeting, `autonomous_booking_enabled`, `after_hours_voice_mode` as `voicemail|ai_answering`,
     emergency target written to `transfer_number` until U7's `transfer_targets.emergency`
-    exists, `quote_policy` new key, `payment_collection_mode` new key)
+    exists, `payment_collection_mode` new key; `quote_policy` is not added, no S1 card writes
+    it). The runtime consumers of the new keys are U8, not U2: a stored value with no reader is
+    a card that lies.
   - modify `packages/api/src/proposals/execution/onboarding-handlers.ts` (handler; writes via
     `SettingsRepository`), `packages/api/src/settings/settings.ts` and `pg-settings.ts`
     (two new keys, migration `312`), `packages/api/src/shared/contracts.ts` (`updateSettingsSchema`)
@@ -380,14 +390,20 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     each classified to one of that key's allowed values from `ALLOWED_WRITES_BY_KEY` or a
     clarification; `BusinessProfileExtractor` is not involved. One clarification on low
     confidence)
-  - modify `packages/api/src/onboarding/draft/routes.ts` (`POST /draft/override/:settingKey`)
+  - modify `packages/api/src/onboarding/draft/routes.ts` (`POST /draft/override/:settingKey`,
+    `POST /draft/override` with the setting-key classifier, `PUT /draft/metro`)
   - modify `packages/web/src/components/onboarding/v3/OptionPairTurn.tsx`, `ReadbackCard.tsx`
     (override turn UI reusing `TranscriptCard`)
   - tests: `packages/api/test/onboarding/choices/override.test.ts` (mocked gateway; one case
     per key, all seven, plus a clarification case per enum key),
     `packages/api/test/onboarding/draft/routes.test.ts` (extend),
     `packages/web/src/components/onboarding/v3/OverrideTurn.test.tsx`
-- **Approach:** The override endpoint picks the extractor by `settingKey`, calls it through
+- **Approach:** From the read-back the correction turn opens from a tapped row, so the key is
+  known (U3 made every row tappable). The generic "Tell me what to change" mic has no key, so it
+  first runs a setting-key classifier (one gateway call returning one of the eight keys or
+  `unclear`; `unclear` asks "Which one?" with the row labels as chips) and only then the keyed
+  extractor; `POST /draft/override` without a key is that classifier. The override endpoint
+  picks the extractor by `settingKey`, calls it through
   the gateway with the spoken or typed text, and on confidence ≥ 0.7 stages `{override}` with
   the rendered Rivet line; below that it returns one clarifying question (the same
   `MAX_CLARIFICATIONS_PER_STATE` idea, capped at one here), then offers typing. Overrides are
@@ -448,6 +464,42 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Verification:** `grep -r "onboarding/v2" packages/web/src` returns nothing; e2e passes for
   both branches; the forbidden-vocabulary test extends to `components/home`.
 
+### U8. Runtime consumers for the policy keys the cards write
+- **Goal:** Every card's promise is behaviour, not a stored value. `payment_collection_mode`
+  decides whether an issued invoice goes out with a pay link ("Text them a pay link") or is
+  marked collect-on-site with no link ("Collect on the spot"), and what Rivet answers when a
+  caller asks how to pay; `emergency_target` decides the emergency hand-off (owner cell, or
+  owner cell then a text) in the voice hand-off path.
+- **Requirements:** R2
+- **Dependencies:** U2
+- **Files:**
+  - modify `packages/api/src/invoices/invoice-payment-link.ts` and the invoice send path in
+    `packages/api/src/invoices/payment.ts` (read `paymentCollectionMode` from settings; no
+    link and a collect-on-site note when `collect_on_site`)
+  - modify the voice answer for payment questions and the emergency hand-off in
+    `packages/api/src/voice/` (exact modules named at implementation; patterns:
+    `voice/triage/context-preface.ts`, `voice/call-me-back/call-me-back.ts`)
+  - tests: `packages/api/test/invoices/payment-collection-mode.test.ts`,
+    `packages/api/test/voice/emergency-target.handler.test.ts` (mocked gateway/repos),
+    `packages/api/test/integration/payment-collection-mode.test.ts`
+- **Approach:** Read both keys through `SettingsRepository` at the point of behaviour, default
+  to today's behaviour when unset (pay link; owner cell), so tenants that never answered the
+  cards are unchanged. Audit the invoice send with the mode used.
+- **Patterns to follow:** D-039/D-040 (absent key = default), the existing invoice send
+  handlers in `proposals/execution/handlers.ts`.
+- **Test scenarios:**
+  - Happy path: `collect_on_site` → issued invoice has no pay link and the customer message
+    says the tech collects on site; `pay_link` → unchanged behaviour. `owner_cell_then_text` →
+    hand-off rings the owner, then texts on no answer.
+  - Edge: key unset → today's behaviour; mode changed between issue and send → the value at
+    send time wins, audited.
+  - Error: settings read fails → fall back to default and record an event, never block the
+    invoice.
+  - Integration: a tenant with `collect_on_site` issues an invoice against real Postgres and the
+    stored message carries no link.
+- **Verification:** picking a card changes what the customer receives and what Rivet says, with
+  a behaviour test per key, before the card copy is allowed to promise it.
+
 ### U7. Pre-signup "hear it answer" demo call (decision-gated)
 - **Goal:** A visitor enters a cell and trade on the landing page, receives a sixty-second
   call answered as their business that books a sample job, then a signup text.
@@ -465,22 +517,29 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `ai/skills/disclose-recording.ts` copy pattern for the consent line,
     `voice/outbound-allowlist.ts` NANP and premium checks, `leads/lead-service.ts`
   - web: `docs/marketing/landing-page.html` CTA pair and a `packages/web` public page
-    `components/public/HearItAnswer.tsx`
+    `components/public/HearItAnswer.tsx`; modify `packages/web/src/components/auth/SignupPage.tsx`
+    (forward the handoff token) and the Clerk signup webhook handler in `packages/api/src/`
+    (copy it onto the tenant)
   - tests: `packages/api/test/demo/{service,routes,limits}.test.ts`,
     `packages/api/test/integration/demo-calls.test.ts`, `e2e/hear-it-answer.spec.ts`
 - **Approach:** The outbound leg dials the visitor from the platform number and connects it
   to the real inbound turn processor running against a per-trade fixture tenant, so the
   visitor hears exactly what customers will. A canned `<Say>/<Gather>` script is the fallback
   if fixture tenants prove awkward. Consent line first; two-layer rate limits; daily spend cap;
-  a lead row in a platform marketing tenant; the signup SMS carries the draft seed (trade,
-  name, metro) so `GET /draft` in U2 starts from it.
+  a lead row in a platform marketing tenant. The signup SMS link carries a signed, single-use
+  handoff token (HMAC over `lead_id` and an expiry, stored on the lead row, consumed once);
+  `SignupPage` forwards it into Clerk unsafe metadata, the Clerk signup webhook copies it onto
+  the new tenant, and `POST /draft` reads the lead's trade, name and metro by that token and
+  marks it used. A missing, reused or expired token is ignored and the shell asks (U3's first
+  screen); the SMS itself never carries the seed facts.
 - **Patterns to follow:** D-037 (buy nothing for a tire-kicker), `docs/solutions/logic-errors/click-to-call-gate-requires-global-twilio-sid.md`.
 - **Test scenarios:**
   - Happy path: valid US cell + plumbing → call created with consent TwiML first, `demo_calls`
     row, lead row, signup SMS after hang-up.
   - Edge: same number twice in a day → 429 with a friendly message; premium or non-NANP
     number → 400; kill switch on → 503 and the landing CTA hides.
-  - Error: Twilio 5xx → row `status='failed'`, no SMS, no lead.
+  - Error: Twilio 5xx → row `status='failed'`, no SMS, no lead; handoff token reused or
+    expired → ignored, the shell asks for name and trade.
   - Integration: `demo_calls` has no `tenant_id` and is not subject to RLS; rate limiter keyed
     to the sentinel tenant persists across restarts.
 - **Verification:** cost per completed demo call measured in staging before the landing CTA
@@ -522,8 +581,8 @@ previous one; the previous slice is merged first.
 | S1 | U1 + U2 | Choice registry, typical-shop assembly, regional tiers, draft/choices/approve API, `onboarding_voice_policy` proposal. Live API, integration-tested, no UI yet. | 7-10 days |
 | S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
-| S4 | U5 | Free-speech override and correction turn. | 1-2 days |
-| S5 | U6 | Day-one branch, number flow, forwarding text, first-day home, flag flipped, v2 deleted. | 4-5 days |
+| S4 | U5 | Free-speech override, setting-key routing for the read-back mic, metro change (`PUT /draft/metro`). | 2-3 days |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search, forwarding text, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target`, flag flipped, v2 deleted. | 6-8 days |
 | S6 | U7 | Pre-signup demo call (founder decision first). | 6-9 days |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
