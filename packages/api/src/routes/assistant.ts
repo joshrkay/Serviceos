@@ -95,6 +95,7 @@ import {
 } from '../ai/orchestration/assistant-honesty-guard';
 import { chatBulkMoneyRefusal, chatLifeSafetyReply } from '../ai/orchestration/chat-safety-guards';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
+import { withClassifierRun } from '../ai/tasks/task-handlers';
 // Money/edit/send handlers are no longer constructed inline here — both
 // dispatch maps resolve them from the shared handler-registry below.
 // B5 — the scheduling-family / create_job / invoice-follow-up intents this
@@ -3822,7 +3823,7 @@ async function generateAssistantReply(
           const segment = step.text;
           // "…and send it": the invoice it sends is the one this turn drafts.
           const tailParentIndex = step.sendInvoiceTail ? chainTypes.lastIndexOf('draft_invoice') : -1;
-          let segClass: Pick<IntentClassification, 'intentType' | 'extractedEntities' | 'tokenUsage'>;
+          let segClass: Pick<IntentClassification, 'intentType' | 'extractedEntities' | 'tokenUsage' | 'aiRunId'>;
           if (step.sendInvoiceTail) {
             if (tailParentIndex < 0) {
               // The invoice half became a send of an invoice that already
@@ -3979,6 +3980,8 @@ async function generateAssistantReply(
             undraftedSegments.push(segment);
             continue;
           }
+          // OBS-2 — the classifier run that routed this segment.
+          Object.assign(proposal, withClassifierRun(proposal, segClass.aiRunId));
           stampVerifiedIds(proposal, segVerifiedIds);
           applyVerifiedIdsToPayload(proposal, segVerifiedIds);
           dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
@@ -4241,6 +4244,9 @@ async function generateAssistantReply(
             ? { images: chatImages }
             : {}),
         });
+        // OBS-2 — the classifier run that routed this turn (aiRunId is the
+        // drafting run's).
+        Object.assign(proposal, withClassifierRun(proposal, classification.aiRunId));
         stampVerifiedIds(proposal, verifiedIds);
         applyVerifiedIdsToPayload(proposal, verifiedIds);
         dropUnverifiedIds(

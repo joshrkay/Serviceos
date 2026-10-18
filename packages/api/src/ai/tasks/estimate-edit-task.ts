@@ -1,4 +1,4 @@
-import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
+import { TaskHandler, TaskContext, TaskResult, draftingRunLink, draftingRunMetadata } from './task-handlers';
 import { taskMessageForPrompt } from './task-input';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
@@ -225,6 +225,8 @@ export class EstimateEditTaskHandler implements TaskHandler {
         { role: 'user', content: this.buildUserMessage(context, catalogItems) },
       ],
       responseFormat: 'json',
+      // OBS-2 — ai_runs.correlation_id → this conversation.
+      ...draftingRunMetadata(context),
     });
 
     const parsed = tryParseJson(llmResponse.content);
@@ -332,6 +334,8 @@ export class EstimateEditTaskHandler implements TaskHandler {
       tenantId: context.tenantId,
       proposalType: this.taskType,
       payload,
+      // OBS-2 — the drafting run that authored this payload.
+      ...draftingRunLink(llmResponse),
       summary: context.message,
       confidenceScore,
       confidenceFactors,

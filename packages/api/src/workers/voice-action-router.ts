@@ -78,7 +78,7 @@ import {
   EntityResolver,
 } from '../ai/resolution/entity-resolver';
 import { resolveVoiceEntityReferences } from '../ai/agents/customer-calling/entity-resolution';
-import { TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
+import { TaskHandler, TaskContext, TaskResult, withClassifierRun } from '../ai/tasks/task-handlers';
 import type { StandingInstruction } from '../instructions/standing-instructions';
 import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
 // B5 — the "core" intent taxonomy's task handlers are now built by the
@@ -1917,7 +1917,10 @@ async function processSegment(
     ...(supervisorMode ? { supervisorMode } : {}),
   };
 
-  const { proposal } = await handler.handle(context);
+  const { proposal: drafted } = await handler.handle(context);
+  // OBS-2 — the drafting run is the proposal's aiRunId; keep the classifier
+  // run that routed this segment reachable too.
+  const proposal = withClassifierRun(drafted, classification.aiRunId);
   // P8 — references that matched nothing are stamped on sourceContext so
   // the review UI prompts "pick from the list or create new" instead of
   // the operator discovering a dangling name at execution time.

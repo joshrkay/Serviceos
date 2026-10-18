@@ -1,4 +1,4 @@
-import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
+import { TaskHandler, TaskContext, TaskResult, draftingRunLink, draftingRunMetadata } from './task-handlers';
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway, type LLMContentPart } from '../gateway/gateway';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
@@ -255,6 +255,8 @@ export class EstimateTaskHandler implements TaskHandler {
           : { role: 'user', content: userMessage },
       ],
       responseFormat: 'json',
+      // OBS-2 — ai_runs.correlation_id → this conversation.
+      ...draftingRunMetadata(context),
     });
 
     const parsed = tryParseEstimateJson(llmResponse.content);
@@ -478,6 +480,8 @@ export class EstimateTaskHandler implements TaskHandler {
       tenantId: context.tenantId,
       proposalType: this.taskType,
       payload,
+      // OBS-2 — the drafting run that authored this payload.
+      ...draftingRunLink(llmResponse),
       summary: context.message,
       confidenceScore,
       confidenceFactors,
