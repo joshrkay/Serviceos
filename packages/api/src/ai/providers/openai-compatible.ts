@@ -1,6 +1,10 @@
 import OpenAI from 'openai';
 import type { LLMProvider, LLMRequest, LLMResponse, LLMMessage } from '../gateway/gateway';
-import { EmptyProviderResponseError, ProviderRateLimitError } from '../gateway/retry';
+import {
+  EmptyProviderResponseError,
+  ProviderNetworkError,
+  ProviderRateLimitError,
+} from '../gateway/retry';
 
 type OpenAIChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 type OpenAIContentPart = OpenAI.Chat.Completions.ChatCompletionContentPart;
@@ -231,7 +235,10 @@ export function parseProviderRetryAfterMs(headers: unknown): number | undefined 
  * about, preserving the provider's own type/code/message rather than
  * flattening it.
  *
- * Only 429 needs normalizing today:
+ * Two shapes need normalizing:
+ *   - Connection failures (`APIConnectionError`, no status, the network error
+ *     in `cause`) become a `ProviderNetworkError` that `classifyError` treats
+ *     as transient — with SDK retries off, nothing else retries them.
  *   - 401/403 already carry `status`, so `classifyError` → 'permanent' and
  *     `isFailoverEligible` → false: they fail fast and loudly with the
  *     provider's own "Incorrect API key provided…" text. Nothing to fix.
@@ -245,6 +252,26 @@ export function parseProviderRetryAfterMs(headers: unknown): number | undefined 
  */
 export function normalizeProviderError(err: unknown, providerName: string): unknown {
   if (!err || typeof err !== 'object') return err;
+  // GATEWAY-02: no HTTP answer at all (reset / refused / DNS / the client's own
+  // transport timeout). APIConnectionTimeoutError is a subclass, so it lands
+  // here too. APIUserAbortError (our own AbortSignal) is NOT a subclass and
+  // passes through untouched, so it keeps classifying as a local deadline.
+  if (err instanceof OpenAI.APIConnectionError) {
+    const cause = (err as { cause?: unknown }).cause as
+      | { code?: unknown; message?: unknown }
+      | undefined;
+    const causeCode = typeof cause?.code === 'string' ? cause.code : undefined;
+    const detail =
+      typeof cause?.message === 'string' && cause.message.length > 0
+        ? cause.message
+        : err.message;
+    return new ProviderNetworkError({
+      providerName,
+      message: `Provider ${providerName} network error: ${detail}`,
+      causeCode,
+      cause: err,
+    });
+  }
   const status = (err as { status?: unknown }).status;
   if (status !== 429) return err;
   if (err instanceof ProviderRateLimitError) return err;
