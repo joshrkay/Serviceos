@@ -75,7 +75,11 @@ unowned position.
   `tenant_id` (platform-owned like `tenants`), founder-curated per launch metro, `'US'` as the
   fallback row; absent that, `*_LINE_ITEM_DEFAULTS` apply and the copy drops the city. The
   owner's price choice becomes a multiplier passed into `seed-pack-defaults.ts`, not a second
-  seed set.
+  seed set. That holds for a first run only: the seeder skips any catalog item or template
+  whose canonical name already exists, so on U6's "Re-run setup" the price card does not
+  re-seed. It updates the pack's two headline items (visit fee, labor rate) only while they
+  still carry the price the seeder set, leaves anything the owner has edited alone, and the
+  read-back says which happened ("Your labor rate is yours; I left it").
 - **Metro from area code is a static NPA→metro map in code**, extending
   `packages/api/src/compliance/us-geography.ts` which today maps area code to state only. One
   spoken confirmation when an NPA spans metros, and the inferred city is always visible and
@@ -234,10 +238,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - create `packages/api/src/onboarding/draft/contracts.ts` (Zod for choices and overrides)
   - modify `packages/api/src/proposals/contracts/onboarding.ts` (add `onboarding_voice_policy`:
     greeting, `autonomous_booking_enabled`, `after_hours_voice_mode` as `voicemail|ai_answering`,
-    emergency target written to `transfer_number` until U7's `transfer_targets.emergency`
-    exists, `payment_collection_mode` new key; `quote_policy` is not added, no S1 card writes
-    it). The runtime consumers of the new keys are U8, not U2: a stored value with no reader is
-    a card that lies.
+    `emergency_target` persisted as `escalation_settings.emergency_target`, a typed posture
+    (`owner_cell` | `owner_cell_then_text`) separate from the E.164 `transfer_number`, which
+    stays the number to ring; `payment_collection_mode` new column (migration 312);
+    `quote_policy` is not added, no S1 card writes it). The runtime consumers of the new keys
+    are U8, not U2: a stored value with no reader is a card that lies.
   - modify `packages/api/src/proposals/execution/onboarding-handlers.ts` (handler; writes via
     `SettingsRepository`), `packages/api/src/settings/settings.ts` and `pg-settings.ts`
     (two new keys, migration `312`), `packages/api/src/shared/contracts.ts` (`updateSettingsSchema`)
@@ -282,7 +287,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     draft calling approve → 404; non-owner → 403.
   - Integration: handler for `onboarding_voice_policy` writes `voice_greeting`,
     `autonomous_booking_enabled`, `escalation_settings.after_hours_voice_mode`,
-    `transfer_number`, `quote_policy`, `payment_collection_mode` to real columns under RLS;
+    `escalation_settings.emergency_target`, `payment_collection_mode` and the booking-hours
+    preset to real columns under RLS, merging `escalation_settings` rather than replacing it;
     derive-status still returns exactly seven steps.
 - **Verification:** a fresh tenant goes draft → seven PUTs → approve → settings visible via
   `GET /api/settings` after the undo window, with the status contract unchanged for mobile.
@@ -349,13 +355,20 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `HTMLAudioElement` player; barge-in pauses playback on first non-empty partial)
   - create `packages/web/src/lib/option-matcher.ts` ("first", "second", "the first one",
     "number two", "a", "b", option label fuzzy match)
-  - modify `packages/web/src/hooks/useTTS.ts` (becomes the fallback)
+  - modify `packages/web/src/hooks/useTTS.ts` (becomes the fallback),
+    `packages/api/src/routes/voice.ts` (`POST /api/voice/tts/batch`, `GET /api/voice/tts/clip/:hash`)
   - tests: `packages/api/test/routes/voice-tts-voice-param.test.ts`,
     `packages/api/test/ai/tts/clip-cache.test.ts`,
     `packages/web/src/lib/option-matcher.test.ts`, `packages/web/src/hooks/useRivetVoice.test.ts`,
     `e2e/onboarding-v3-voice-webkit.spec.ts` (WebKit autoplay and mic spike)
 - **Approach:** Option-pair lines are static per trade and voice, so the server caches clips
-  and the client prefetches the next turn's two clips while the current one plays. Output
+  and the client prefetches the next turn's clips while the current one plays. The budget
+  matters: `POST /api/voice/tts` is limited to 20 requests per user per minute
+  (`routes/voice.ts`), and seven headings plus fourteen option clips would hit it for a fast
+  owner. So the prefetch asks for a whole turn at once (`POST /api/voice/tts/batch`: question
+  plus two options, one request, counted once) and cached clips are served by content hash from
+  `GET /api/voice/tts/clip/:hash`, which never counts (a miss falls back to the limited POST).
+  A full pass is eight counted requests, with a test that counts them. Output
   fallback order: ElevenLabs clip → `speechSynthesis` → silent heading with type-in. Input:
   voice → tap (always rendered) → "Type instead". Option labels are passed to Deepgram as
   `keyterms`. The first clip plays from the "Make it mine" tap gesture to satisfy iOS autoplay,
@@ -453,7 +466,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   skips consent), `components/home/ActivationCelebrationBanner.tsx` (first-run state),
   `docs/solutions/architecture-patterns/derive-shared-status-rule-across-frontends.md`.
 - **Test scenarios:**
-  - Happy path: day-one owner → no forwarding turn, number card says "put it on the truck";
+  - Happy path: re-run with a new price pick → the two headline catalog items update when
+    unedited since seeding, an owner-edited labor rate is untouched and the read-back says so;
+    day-one owner → no forwarding turn, number card says "put it on the truck";
     established shop → forwarding text sent once, badge shown until `twilioStatus` reports
     forwarding verified.
   - Edge: owner taps "I'll do it later" → progress saved, badge persists across reload;
@@ -527,11 +542,14 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   visitor hears exactly what customers will. A canned `<Say>/<Gather>` script is the fallback
   if fixture tenants prove awkward. Consent line first; two-layer rate limits; daily spend cap;
   a lead row in a platform marketing tenant. The signup SMS link carries a signed, single-use
-  handoff token (HMAC over `lead_id` and an expiry, stored on the lead row, consumed once);
-  `SignupPage` forwards it into Clerk unsafe metadata, the Clerk signup webhook copies it onto
-  the new tenant, and `POST /draft` reads the lead's trade, name and metro by that token and
-  marks it used. A missing, reused or expired token is ignored and the shell asks (U3's first
-  screen); the SMS itself never carries the seed facts.
+  handoff token (HMAC over `lead_id` and an expiry). Migration 313 also adds a platform table
+  `signup_handoffs(token_hash PK, lead_id, tenant_id NULL, expires_at, consumed_at)`:
+  `SignupPage` forwards the token into Clerk unsafe metadata, the Clerk signup webhook sets
+  `tenant_id` on the matching unexpired row, and `POST /draft` consumes it atomically
+  (`UPDATE … SET consumed_at = now() WHERE tenant_id = $1 AND consumed_at IS NULL AND
+  expires_at > now() RETURNING lead_id`) to read the lead's trade, name and metro. No row, a
+  consumed row or an expired one means the shell asks (U3's first screen); the SMS itself never
+  carries the seed facts and the token is stored only as a hash.
 - **Patterns to follow:** D-037 (buy nothing for a tire-kicker), `docs/solutions/logic-errors/click-to-call-gate-requires-global-twilio-sid.md`.
 - **Test scenarios:**
   - Happy path: valid US cell + plumbing → call created with consent TwiML first, `demo_calls`
