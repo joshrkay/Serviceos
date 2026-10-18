@@ -94,6 +94,15 @@ also the unowned position in the market.
 - **New web tree, same route.** `components/onboarding/v3/` behind a flag at the lazy import
   in `packages/web/src/routes.ts:67`; `OnboardingShell.tsx` is a step router whose body serves
   seven step components and would be 90 % deleted by evolution.
+- **No mocked seams; vertical slices; test-first.** (Founder direction, 2026-10-18.) Nothing is
+  built against a mocked API or stubbed service to be "connected later". Each unit is a
+  vertical slice: contract in `packages/shared`, API with Docker-gated integration tests
+  against real Postgres, web against the real API, Playwright against the real stack via the
+  repo's verify skills, all in the same PR, releasable behind the flag on its own. Tests are
+  written before the code they prove (red, green, refactor); the LLM gateway is the one seam
+  unit tests may stub, per CLAUDE.md, and every DB-touching change still has an integration
+  test that pins real columns. (Alternative: a web lane on mocks in parallel with the API,
+  rejected: the integration cost lands later and larger.)
 - **The demo call is last and decision-gated.** It needs platform Twilio credentials, a
   tenant-less public route, fixture tenants per trade, consent and rate limits. Screen 7's
   in-app "hear it" delivers most of the value without telephony.
@@ -261,8 +270,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Goal:** One surface for the whole flow: Ready, seven option-pair turns, read-back, trial,
   number, test call, with tap and type on every turn and funnel events.
 - **Requirements:** R2, R4, R7, R8
-- **Dependencies:** U2 contract (build against mocks in parallel), U4 for voice (renders
-  without it)
+- **Dependencies:** U2 complete and deployed behind the flag (no mock lane); U4 for voice
+  (renders without it)
 - **Files:**
   - create `packages/web/src/components/onboarding/v3/ConversationShell.tsx`,
     `ReadyScreen.tsx`, `OptionPairTurn.tsx`, `ReadbackCard.tsx`, `TranscriptCard.tsx`,
@@ -275,7 +284,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `OptionPairTurn.test.tsx`, `ReadbackCard.test.tsx`, `useOnboardingDraft.test.ts`,
     `packages/web/src/components/ui/option-card.test.tsx` (class contract: `min-h-11`, no
     overflow), `e2e/onboarding-v3-mobile.spec.ts` (320 px and 390 px viewports)
-- **Approach:** The shell reads `useOnboardingStatus` (existing, polls for phone and billing
+- **Approach:** Built against the live U2 endpoints with types imported from `packages/shared`;
+  no fixture server. The shell reads `useOnboardingStatus` (existing, polls for phone and billing
   waits) and `useOnboardingDraft`, and derives the turn list client-side: ready → unanswered
   choices in registry order → read-back → billing (existing `/billing/checkout-session`) →
   number (`/phone/available` candidate shown earlier, bought on "That works") → test call
@@ -480,15 +490,24 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 
 ## Sizing and sequencing
 
-| Unit | Size | Lane |
-|---|---|---|
-| U1 Registry, assembly, tiers | M (3-5 days) | A, day 1 |
-| U2 Draft and approve API | M (4-5 days) | A, after U1 |
-| U3 v3 shell | L (6-9 days) | B, day 1 on mocks |
-| U4 Voice I/O | M (4-5 days) | C, day 1 (WebKit spike first) |
-| U5 Override | S (1-2 days) | A, after U2 |
-| U6 Day-one, number, home, retire v2 | M (4-5 days) | B, after U3 |
-| U7 Demo call | L (6-9 days) | after U2 and U4, decision-gated |
+Vertical slices, each one PR, each releasable behind the `onboarding_v3` flag, each test-first
+with integration and end-to-end coverage in the same PR. No slice starts on a mock of a
+previous one; the previous slice is merged first.
 
-Two engineers: U1-U6 in about five weeks; U7 adds about two. One engineer: eight to ten weeks
-for U1-U6. Sizes assume the voice-parity plan proceeds separately.
+| Slice | Units | What ships | Size |
+|---|---|---|---|
+| S1 | U1 + U2 | Choice registry, typical-shop assembly, regional tiers, draft/choices/approve API, `onboarding_voice_policy` proposal. Live API, integration-tested, no UI yet. | 7-10 days |
+| S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
+| S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
+| S4 | U5 | Free-speech override and correction turn. | 1-2 days |
+| S5 | U6 | Day-one branch, number flow, forwarding text, first-day home, flag flipped, v2 deleted. | 4-5 days |
+| S6 | U7 | Pre-signup demo call (founder decision first). | 6-9 days |
+
+Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
+second engineer shortens S2 and S3 only where the API they depend on is already merged.
+
+Per-slice definition of done: failing tests written first; `npx tsc --project
+tsconfig.build.json --noEmit` clean in `packages/api`; unit, integration
+(`npm run test:integration`) and the relevant Playwright spec green; the API verify skill
+(`Serviceos/packages/api:verify`) or web verify skill (`Serviceos/packages/web:verify`) run
+against the slice; dead code removed; funnel events documented in `FUNNEL.md`.
