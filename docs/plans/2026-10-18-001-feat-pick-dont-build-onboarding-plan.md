@@ -248,8 +248,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `booking_hours`, `emergency_target`, `after_hours_mode`; an eighth, `existing_number`
   ("Do you already have a business number?"), asked of every owner as the last turn: nothing
   collected before it says whether a shop is established, so this answer is what decides the
-  forwarding or day-one branch in U6, and a day-one owner clears it in one tap. (U3's first
-  slices ask the seven; the eighth turn lands with U6.) The `generic` registry is content only:
+  forwarding or day-one branch in U6, and a day-one owner clears it in one tap. It has no
+  default, and its answer is staged only by `PUT /draft/forwarding`, in one write with the
+  number and carrier a "yes" needs (U6). (U3's first slices ask the seven; the eighth turn
+  lands with U6.) The `generic` registry is content only:
   a "Something else" owner's pack id is `other`, which is in `SEEDABLE_PACK_IDS` and accepted
   by the `verticalPacks` contract, so approval works for every trade the first screen offers.
   `assembleTypicalShop(trade, metro)` returns the shop with option
@@ -307,8 +309,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Approach:** `POST /draft` creates the draft (idempotent per tenant; `GET /draft` reads it,
   404 before). One row per tenant, so a re-run reopens that row rather than creating another:
   `POST /draft/reopen` (U6) is allowed only when the draft is `approved` and every generated
-  proposal has executed (a set that failed, stopped or was part-undone from the inbox goes
-  through U9's retry or `POST /draft/reset` first, never a reopen); it re-assembles for the
+  proposal has executed (a set that failed goes through U9's retry, and one that stopped or
+  was part-undone from the inbox, a failed member beside an undone one included, through
+  `POST /draft/reset`, first, never a reopen); it re-assembles for the
   current trade and metro, pre-fills `choices`
   from the live settings (greeting → override label; the enum keys → the option whose writes
   match; prices → the current headline items, repriced only while the tenant still has a
@@ -375,8 +378,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `buildDraftProposals` returns only those two inputs and both payloads parse under their
     Zod schemas; an answered `existing_number` never appears in either payload as a key (its
     effect, the settings payload's `forwarding` field, is U6's).
-  - Edge: approve with choices unanswered → each takes its `mostShops` default (option A
-    today), no gated proposal minted; no recorded timezone → 400 `TIMEZONE_REQUIRED`, zero
+  - Edge: approve with the seven choices unanswered → each takes its `mostShops` default
+    (option A today; the eighth, existing number, has none and stays unanswered, U6), no gated
+    proposal minted; no recorded timezone → 400 `TIMEZONE_REQUIRED`, zero
     proposal rows, draft still `'draft'`; stale `version` on PUT → 409; approve twice → second
     is a no-op 200 returning the same two ids (as S1 shipped; U11 keeps it, for a repeat that
     carries the version the draft was approved from or none, and adds the lock and the version
@@ -439,7 +443,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Happy path: mocked draft with seven entries → seven turns → read-back shows seven rows →
     "That's right" calls approve → trial screen.
   - Edge: three choices pre-answered (resume) → shell opens on the fourth; "Keep the rest as
-    is" from turn two → read-back with defaults marked "Most shops"; 320 px viewport → no
+    is" from turn two → read-back with defaults marked "Most shops" (the eighth question,
+    existing number, has no default: it stays unanswered and reads "Not set", U6); 320 px viewport → no
     horizontal scroll, all targets ≥ 44 px.
   - Error: approve 409 (stale version) → re-fetch draft and re-render read-back with a one-line
     notice; phone `available` empty → "Pick a different area code" path.
@@ -695,17 +700,27 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     (315) adds nullable `onboarding_drafts.forwarding_source_number` and
     `forwarding_carrier`; modify `packages/api/src/onboarding/draft/contracts.ts` and
     `repository.ts` (both fields on the draft: E.164 through the existing phone normaliser, and
-    the carrier enum above; staging the `existing_number` answer "no" nulls both draft columns
-    in that same locked write, so the draft never holds a number beside a "no"),
-    `packages/api/src/routes/onboarding-draft.ts` (`PUT
-    /draft/forwarding` stages them, refused unless `existing_number` resolves to "yes", and
-    written through U11's locked-write helper so it takes the row lock, is refused once the
-    draft is approved and bumps `version`),
+    the carrier enum above; the `existing_number` answer and its pair are staged in ONE write,
+    so the draft never holds a "yes" without both fields, a number beside a "no", or a pair
+    beside an unanswered question),
+    `packages/api/src/routes/onboarding-draft.ts` (`PUT /draft/forwarding` is the only way to
+    stage the `existing_number` answer, with a strict union body: `{ answer: 'yes',
+    sourceNumber, carrier, version }` or `{ answer: 'no', version }`. A "yes" that omits
+    either field is a 400 naming it, and a "no" that carries one is a 400. It is one request
+    and one version compare-and-swap, written through U11's locked-write helper, so it takes
+    the row lock, is refused once the draft is approved, bumps `version` once and sets the
+    answer together with both columns; a "no" nulls them in that same write.
+    `PUT /draft/choices/existing_number` is refused with a 400 naming `/draft/forwarding`, so
+    no second path can stage the bare answer),
     `packages/api/src/onboarding/draft/approve.ts` (carry ONE `forwarding` field on the
     `onboarding_tenant_settings` payload, three-valued on purpose: `{ sourceNumber, carrier }`
-    when `existing_number` is "yes" and both are staged, the literal `null` when it is "no"
-    ("clear the line"), and no `forwarding` key at all when the question was never answered or
-    "yes" has no pair yet, which means "untouched"),
+    when `existing_number` is "yes", the literal `null` when it is "no" ("clear the line"),
+    and no `forwarding` key at all only when the question was never answered, which means
+    "untouched". A "yes" without a complete pair is never built into a payload: approval
+    refuses it first with a recoverable 400 `FORWARDING_DETAILS_REQUIRED` (zero proposal rows,
+    draft still `'draft'`). The staging endpoint cannot produce that state, so the refusal is
+    defence in depth for a row written some other way (a hand edit, a restore, a future writer
+    that skips the rule); reopen below pre-fills "yes" only when both live columns are set),
     `packages/api/src/proposals/contracts/onboarding.ts` (`forwarding` optional on that
     payload's Zod schema as a union of a strict `{ sourceNumber: E.164, carrier: enum }` and
     `z.null()`, so absent and `null` stay different through validation and through the
@@ -720,9 +735,19 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `packages/api/src/settings/settings.ts` and `pg-settings.ts` (the four keys, each accepting
     an explicit `null` to clear, as the deposit keys already do, with `undefined` meaning
     untouched; not added to `updateSettingsSchema`); tests
-    `packages/api/test/onboarding/draft/forwarding.test.ts`,
-    `packages/api/test/integration/onboarding-draft-forwarding.test.ts` (the stamp-clearing
-    and clear-on-"no" cases below run here, against real Postgres)
+    `packages/api/test/onboarding/draft/forwarding.test.ts`, `approve.test.ts` (extend),
+    `packages/api/test/integration/onboarding-draft-forwarding.test.ts` (the stamp-clearing,
+    clear-on-"no", atomic-staging and refused-approval cases below run here, against real
+    Postgres)
+  - modify `packages/web/src/components/onboarding/v3/ReadbackCard.tsx` and
+    `ConversationShell.tsx` (the `existing_number` row reads "Not set" while the question is
+    unanswered, and tapping it re-asks it; a 400 `FORWARDING_DETAILS_REQUIRED` turns the
+    read-back into the question again: the number and carrier fields render above "That's
+    right", and filling them calls `PUT /draft/forwarding` with `answer: 'yes'` and the pair,
+    after which the next approve succeeds). The refusal and the control that lifts it ship in
+    the same PR, as U10's `OWNER_PHONE_REQUIRED` and its prompt do: a gate with nothing to lift
+    it is a capability that can never be approved (#909); test
+    `packages/web/src/components/onboarding/v3/ReadbackCard.test.tsx` (extend)
   - create `packages/api/src/onboarding/forwarding-text.ts` (owner SMS with tap-to-dial carrier
     code via `notifications/owner-sms-sender.ts`), route `POST /api/onboarding/phone/forwarding-text`
   - modify `packages/web/src/components/home/HomeConversationPanel.tsx`, `HomePage.tsx`
@@ -754,9 +779,19 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   entirely and the Rivet number is presented as the business number; "yes" asks two more
   things on the same turn, "What's that number?" (E.164) and the carrier (chips from the table
   in `steps/PhoneStep.tsx:28-35`), because a yes/no cannot be forwarded and the owner's cell
-  is not the business line. Both answers are staged on the draft (`PUT /draft/forwarding`),
-  ride the `onboarding_tenant_settings` payload as the one `forwarding` field
-  (`{ sourceNumber, carrier }`), and are written to `tenant_settings.forwarding_source_number` and
+  is not the business line. Tapping "yes" only reveals those two fields; nothing is sent
+  until both are filled, and then ONE `PUT /draft/forwarding` carries `{ answer: 'yes',
+  sourceNumber, carrier }` ("no" is `{ answer: 'no' }`), so the answer and its pair are staged
+  in a single version-CAS write or not at all. An interrupted write (a dropped connection, a
+  closed tab, a `VERSION_CONFLICT` that sends the shell to re-read) leaves the question exactly
+  as it was, unanswered or the earlier answer, never a "yes" without its pair, and the turn
+  asks again. "Keep the rest as is" (U3) does not answer it either: this question has no
+  default, so the escape hatch leaves it UNANSWERED (not "yes") and the read-back shows the row
+  as "Not set", tappable, so the owner can still answer before "That's right". An unanswered
+  question selects neither branch: approval proceeds without touching the stored forwarding
+  line, no forwarding text is sent and no badge shows. The staged answer rides the
+  `onboarding_tenant_settings` payload as the one `forwarding` field (`{ sourceNumber,
+  carrier }` for a "yes"), and is written to `tenant_settings.forwarding_source_number` and
   `forwarding_carrier` by that proposal's handler when it executes, so the write is approved,
   audited and undoable like the rest. Nothing else writes them: they are not in
   `updateSettingsSchema`, and the staging endpoint writes the draft only. The shell holds until
@@ -786,14 +821,20 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `forwarding_carrier` and both stamps in place (the handler cannot tell "not asked" from
   "answered no"); status, the probe and reopen would then keep treating an abandoned line as
   configured. So the payload's `forwarding` field has three states, and the draft is what tells
-  them apart. A "yes" with its pair staged approves as `{ sourceNumber, carrier }`. A "no"
-  approves as the literal `null`, and the handler clears `forwarding_source_number`,
-  `forwarding_carrier`, `forwarding_confirmed_at` and `forwarding_verified_at` in one write, so
-  there is no moment with the number gone and a stamp left, or the reverse. No key means
-  untouched: `existing_number` was never answered (a first run that skipped the turn, or a
-  draft approved before the eighth turn shipped; the question has no default) or "yes" has no
-  pair staged yet, and nothing stored changes. On a re-run, reopen pre-fills the answer from the
-  live columns: "yes" with the stored number and carrier when `forwarding_source_number` is set
+  them apart. A "yes" approves as `{ sourceNumber, carrier }` (it cannot be staged without its
+  pair, above). A "no" approves as the literal `null`, and the handler clears
+  `forwarding_source_number`, `forwarding_carrier`, `forwarding_confirmed_at` and
+  `forwarding_verified_at` in one write, so there is no moment with the number gone and a stamp
+  left, or the reverse. No key means untouched: `existing_number` was never answered (a first
+  run that skipped the turn or took "Keep the rest as is", or a draft approved before the
+  eighth turn shipped; the question has no default), and nothing stored changes. A "yes"
+  without a complete pair is not a fourth state: approval refuses it
+  (`FORWARDING_DETAILS_REQUIRED`) instead of dropping the key, because dropping it would approve
+  a draft whose owner said they have an existing number and reach the established-shop branch
+  with no stored line, where the text and the probe both answer `FORWARDING_NOT_CONFIGURED` and
+  the promised forwarding setup is silently skipped. On a re-run, reopen pre-fills the answer
+  from the live columns: "yes" with the stored number and carrier when both
+  `forwarding_source_number` and `forwarding_carrier` are set
   (re-approved as it stands, the value equals the stored one and leaves both stamps alone),
   unanswered otherwise; an established shop that flips that answer to "no" is the case the
   `null` exists for. The text, the probe and the badge key on `forwarding_source_number` being
@@ -883,12 +924,44 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Edge: owner taps "I'll do it later" → progress saved, badge persists across reload;
     first-day home with zero jobs → opener, three chips, two muted cards, no stat tiles.
   - Edge (forwarding answers): staged on the draft but not approved → `tenant_settings`
-    forwarding columns still null; `existing_number` "no" → `PUT /draft/forwarding` refused and
-    the payload carries `forwarding: null` (not omission: `buildDraftProposals` output has the
-    key with the value `null`, and so does the proposal row's stored JSON after a round trip);
-    approved and executed → both columns hold the staged values;
-    `PUT /draft/forwarding` after approval → 409 `DRAFT_APPROVED`, and its race with approve is
-    the forwarding row of U11's writer-vs-approve test.
+    forwarding columns still null; `PUT /draft/forwarding { answer: 'no' }` → both draft
+    columns null, and the payload carries `forwarding: null` (not omission:
+    `buildDraftProposals` output has the key with the value `null`, and so does the proposal
+    row's stored JSON after a round trip); approved and executed → both columns hold the
+    staged values; `PUT /draft/forwarding` after approval → 409 `DRAFT_APPROVED`, and its race
+    with approve is the forwarding row of U11's writer-vs-approve test.
+  - Edge (a "yes" cannot exist without its pair; real Postgres): `PUT /draft/forwarding` with
+    `{ answer: 'yes', version }` alone, with only `sourceNumber`, with only `carrier`, with a
+    non-E.164 number, with a carrier outside the four, `{ answer: 'no', sourceNumber }` and any
+    extra key → 400 naming the field, and the draft is exactly as it was (answer, both
+    columns, `version`, no audit row); `PUT /draft/choices/existing_number` with either option
+    → 400 naming `/draft/forwarding`, draft unchanged. A complete "yes" is one request: the
+    answer and both columns are set together, `version` is up by exactly one and there is one
+    audit row, the number masked; a stale `version` → 409 `VERSION_CONFLICT` with all three
+    exactly as before; a fault injected between the answer write and the column write leaves
+    none of them changed. "Yes" then "no" nulls both columns in the same write; "no" then
+    "yes" sets the pair in the same write. Shell test: tapping "yes" sends nothing, the two
+    fields appear, and one request leaves when both are filled; closing the tab with only one
+    filled leaves the draft unanswered and the turn asks again on reload.
+  - Edge ("Keep the rest as is" leaves the question unanswered; shell test plus integration):
+    an owner who answers the first turns and taps "Keep the rest as is" before the eighth →
+    the draft's `existing_number` is unanswered (not "yes", not "no"; both columns null) and
+    the read-back shows the row as "Not set", tappable. "That's right" → approve succeeds with
+    the usual two proposals, the settings payload has no `forwarding` key, and after execution
+    the four `tenant_settings` forwarding columns are exactly as they were (a stored line and
+    its stamps included); no forwarding text is sent and no badge shows. Answering the "Not
+    set" row at the read-back stages the pair in one write, and the next approve carries it.
+  - Gate (a corrupted "yes" without a complete pair is refused, recoverably; real Postgres,
+    shell test): a draft whose answer is "yes" with both columns null, one with only the number,
+    and one with only the carrier (all written by raw SQL, since the endpoint cannot produce
+    them) → `POST /draft/approve` 400 `FORWARDING_DETAILS_REQUIRED`, zero proposal rows, draft
+    still `'draft'` at the same `version`, no `onboarding.draft_approved` row, and nothing
+    minted (a repo double asserts no proposal create call). The shell test drives that 400 and
+    asserts the read-back renders the number and carrier fields above "That's right"; filling
+    them calls `PUT /draft/forwarding` with `answer: 'yes'` and the pair, the next approve
+    succeeds with `forwarding: { sourceNumber, carrier }` in the payload, and after execution
+    both columns hold the pair. Gate and fields are one PR: the shell test fails if approve can
+    answer `FORWARDING_DETAILS_REQUIRED` while the read-back has no field to answer it.
   - Edge (forwarding re-run clears the old line's stamps): a tenant with source number A,
     carrier `verizon` and both `forwarding_confirmed_at` and `forwarding_verified_at` set; a
     re-run approved with source number B → after execution the columns hold B and `verizon`
@@ -910,8 +983,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     the first-day state shows no forwarding badge. "No" then "yes" on a tenant with nothing
     stored → both columns hold the staged pair and both stamps stay null (the badge shows until
     the owner confirms or a probe lands). A payload with no `forwarding` key (`existing_number`
-    never answered, or "yes" with no pair staged) → all four columns exactly as they were,
-    stamps included, whatever their values. "Yes" re-approved with the stored number and
+    never answered, including after "Keep the rest as is") → all four columns exactly as they
+    were, stamps included, whatever their values. "Yes" re-approved with the stored number and
     carrier → columns and stamps untouched. Reopen on a tenant with no
     `forwarding_source_number` leaves `existing_number` unanswered. Unit (`forwarding.test.ts`,
     the payload schema): `forwarding` absent, `null` and a value all parse and stay distinct;
@@ -1074,7 +1147,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   not move past the saving screen until every generated proposal has executed, and an approval
   that cannot finish (one proposal failed, or the owner undid one of the pair from the inbox)
   has a way out that works: retry, a reset back to an editable draft, or a pointer to Settings
-  when part of it is already live.
+  when part of it is already live. Retry is only for a failure that nothing else accompanies:
+  a failed proposal beside an undone, rejected, expired or missing one goes to reset, because
+  re-approving the failed one alone would leave the other behind.
 - **Requirements:** R3
 - **Dependencies:** U2
 - **Files:**
@@ -1082,7 +1157,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     takes no body; `POST /draft/undo` and `POST /draft/reset` in S4, each with a required
     `{ expectedVersion }`, and S4 gives retry the same field); create
     `packages/api/src/onboarding/draft/retry.ts`
-    (`retryFailedDraftProposals`, S1b; S4 adds its `expectedVersion` comparison); modify `packages/api/src/onboarding/draft/approve.ts`
+    (`retryFailedDraftProposals`, S1b, including its `DRAFT_RETRY_UNSAFE` refusal of a set that
+    holds a terminal not-applied member; S4 adds its `expectedVersion` comparison); modify `packages/api/src/onboarding/draft/approve.ts`
     (the undo and reset helpers, S4, over one shared locked read of the draft and its
     proposals) and `packages/api/src/onboarding/draft/repository.ts` (undo and reset are draft
     writers under U11's invariant: each goes through the locked-write helper, declaring the
@@ -1092,13 +1168,17 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     'execution_failed'` that moves the row to `draft` and clears `approved_at`, the error, the
     claim and the retry count, so the re-approval gets a fresh undo window; S4: a locking read
     of a proposal set by id, ordered, `FOR UPDATE`, which the in-memory repo implements as a
-    plain ordered read), `proposals/pg-proposal-execution.ts` and `proposal-execution.ts` (S1b:
+    plain ordered read, and which retry uses for its safety check as undo and reset do for
+    theirs), `proposals/pg-proposal-execution.ts` and `proposal-execution.ts` (S1b:
     a retried execution replaces its earlier `failed` `proposal_executions` row under the same
     idempotency key), `proposals/audit.ts` (S1b: `proposal.retried`),
     `packages/api/src/onboarding/load-facts.ts` and `derive-status.ts` (S1b: the `draft` fact
     gains `execution: 'pending' | 'executing' | 'executed' | 'failed' | 'stopped'`, `null`
     while the draft is still being edited, derived by `deriveDraftExecution` from the
-    generated proposals' statuses; the raw statuses never leave the server); S4 adds an
+    generated proposals' statuses, with `stopped` taking precedence over `failed`: a terminal
+    not-applied member (`undone`, `rejected`, `expired`, a stuck pre-approval status, or a
+    listed proposal that no longer exists) makes the set `stopped` even beside a failed one;
+    the raw statuses never leave the server); S4 adds an
     optional, derived `recovery: 'reset' | 'settings'` beside it in the same block
     (`derive-status.ts` and `contracts.ts`, present only while `execution` is `failed` or
     `stopped`), and rewrites the `deriveDraftExecution` and `retry.ts` doc comments, which
@@ -1107,12 +1187,17 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     the window, which posts the `version` from the approve response; the wait screen holds while
     `execution` is `pending` or `executing`; on
     `failed`, "Something didn't save. Try again." → retry (posting the draft's `version`), plus "Start over" (reset) beneath it
-    when `recovery` is `reset`; on `stopped`, never Retry, since it cannot recover: with
+    when `recovery` is `reset` (a `failed` set holds no terminal member, since that reads
+    `stopped`); on `stopped`, never Retry, since it cannot recover (a failed proposal beside
+    an undone one included): with
     `recovery: 'reset'` copy that says part of the setup was undone and a "Start over" button
     that calls `POST /draft/reset` with the draft's `version` and then re-renders the
     read-back with the owner's answers intact, and with `recovery: 'settings'` copy that says
     part of it is already live and a link to the Settings page, no button; the same screen
-    answers a `DRAFT_RESET_REFUSED` the server reaches on a race the same way)
+    answers a `DRAFT_RESET_REFUSED` the server reaches on a race the same way, and a Retry tap
+    from a stale `failed` screen that the server answers `DRAFT_RETRY_UNSAFE` (the owner undid
+    the sibling from the inbox since the screen rendered) re-reads the status and renders the
+    `stopped` copy)
   - modify `packages/shared/src/contracts/onboarding-draft.ts` (S4: the undo and reset bodies
     `{ expectedVersion }`, retry's optional `expectedVersion`, and their typed refusals, kept
     equal to the API's Zod by `wire-contract.test.ts`)
@@ -1158,8 +1243,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 
   **Reset: the way out of a set that can no longer finish as one unit.** The inbox can undo
   ONE member of the approved pair (`approved → undone` inside the window). Every other escape
-  then rejects the set: undo wants every row `approved`, retry wants `execution_failed`, and
-  reopen (U6) wants every row `executed`; the fact reads `stopped`, and an owner who is sent
+  then rejects the set: undo wants every row `approved`, retry refuses a set that holds a
+  terminal member (`DRAFT_RETRY_UNSAFE`, below, which is also what keeps a failed member
+  beside an undone one from being re-queued alone), and reopen (U6) wants every row
+  `executed`; the fact reads `stopped`, and an owner who is sent
   to a whole-draft undo that refuses is stuck before billing. `POST /draft/reset` is the
   locked reconciliation for that case, and it is its own endpoint rather than a looser
   `/draft/undo` on purpose. Undo is the one-tap, all-or-nothing reversal inside the saving
@@ -1206,33 +1293,53 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   failed, or when every member is already out of the way. To keep the shell from offering a
   button the server will refuse, the status draft block carries `recovery`, derived from the
   same statuses: `'settings'` when any listed proposal is `executing` or `executed`, else
-  `'reset'`; the server stays the authority for the race and the window. Reopen keeps its own
+  `'reset'`; the server stays the authority for the race and the window. The rule is the same
+  whichever of `stopped` and `failed` the set reads as, so a failed member beside a terminal
+  one (which is `stopped`, below) gets `'reset'` whenever the reset can run, that is while
+  nothing is executed or executing, and `'settings'` once part of it is live. Reopen keeps its own
   precondition (`approved` and every proposal `executed`): it edits a live setup, so a failed,
   stopped or part-undone set is retried or reset here first and never reopened on top of rows
   that did not run.
 
-  `POST /draft/retry` locks the draft row, then moves each of the set's `execution_failed`
-  proposals along the only path `proposals/lifecycle.ts` allows (`execution_failed → draft`
-  through `resetFailedForRetry`, then approved again through the batch-approve helper with a
-  fresh `approvedAt`), in one request transaction with a `proposal.retried` audit row each, so
-  the worker's `approved` sweep picks them up after a fresh undo window; it emits
-  `onboarding.draft_retry`. Proposals that are not `execution_failed` are left alone; a draft
-  that is not approved is 409 `DRAFT_NOT_APPROVED`, and a set with nothing in
-  `execution_failed` is 409 `DRAFT_RETRY_NOTHING_FAILED` (a second retry racing the first
-  sees the first's outcome under the draft lock). The execution state is derived, never
-  stored: `failed` when any listed proposal is `execution_failed` (it wins over every other
-  state); `stopped` when none is but one is outside `approved | executing | executed` (undone
-  or rejected from the inbox, expired) or no longer exists, which retry cannot recover
-  (`undone` is terminal in `lifecycle.ts`), so the shell neither waits forever nor offers
-  Retry, and its recovery is `POST /draft/reset`, or the Settings page once part of the set is
-  live (`recovery`); `executed` when all are; `executing` when work is in flight; `pending` when all are
-  approved and none is picked up; and `null` while the draft is still being edited or lists
-  nothing, so a vacuous "executed" never opens billing.
+  `POST /draft/retry` locks the draft row and reads the set before it writes anything. A draft
+  that is not approved is 409 `DRAFT_NOT_APPROVED`; a set with nothing in `execution_failed`
+  is 409 `DRAFT_RETRY_NOTHING_FAILED` (a second retry racing the first sees the first's
+  outcome under the draft lock); and a set that holds a failed member AND a terminal
+  not-applied one is 409 `DRAFT_RETRY_UNSAFE`, naming the statuses, with nothing changed (no
+  row reset, no `proposal.retried`, no `onboarding.draft_retry`). A terminal not-applied member
+  is one retry cannot bring back: `undone`, `rejected` or `expired` (terminal in
+  `lifecycle.ts`), a stuck pre-approval `draft` or `ready_for_review`, or a listed proposal
+  that no longer exists. The refusal exists because retry re-approves only the failed member:
+  with an `undone` sibling left behind, the failed one would execute alone after its fresh
+  window and the set would end `executed + undone`, half the configuration live, which reset
+  refuses as `applied` and reopen refuses too. The way out of such a set is `POST /draft/reset`,
+  which accepts it while nothing is executed or executing (the failed member is already not
+  applied) and reverts whatever is still approved inside its window. Only when every member is
+  `approved`, `executing`, `executed` or `execution_failed` does retry move each
+  `execution_failed` proposal along the only path `proposals/lifecycle.ts` allows
+  (`execution_failed → draft` through `resetFailedForRetry`, then approved again through the
+  batch-approve helper with a fresh `approvedAt`), in one request transaction with a
+  `proposal.retried` audit row each, so the worker's `approved` sweep picks them up after a
+  fresh undo window; it emits `onboarding.draft_retry`. Proposals that are not
+  `execution_failed` are left alone. From S4 the safety check and the re-queue read the set
+  through the same ordered `FOR UPDATE` as undo and reset, so an inbox undo of the sibling
+  cannot land between the check and the re-queue. The execution state is derived, never
+  stored, and `stopped` takes precedence over `failed`: `stopped` when any listed proposal is a
+  terminal not-applied member (undone or rejected from the inbox, expired, a stuck
+  pre-approval status) or no longer exists, even when another member is `execution_failed`,
+  because retry cannot recover it (`undone` is terminal in `lifecycle.ts`), so the shell
+  neither waits forever nor offers Retry, and its recovery is `POST /draft/reset`, or the
+  Settings page once part of the set is live (`recovery`); `failed` when none is but one is
+  `execution_failed` (the rest `approved`, `executing`, `executed` or failed too), the one
+  state Retry is offered for; `executed` when all are; `executing` when work is in flight;
+  `pending` when all are approved and none is picked up; and `null` while the draft is still
+  being edited or lists nothing, so a vacuous "executed" never opens billing.
 
   Retry carries the version for the same reason as undo. `POST /draft/retry` also takes
   `{ expectedVersion }`, the approved draft's `version` as the failed screen rendered it; under
-  the draft lock, after the `approved` check, any other value is 409 `VERSION_CONFLICT` naming
-  both versions, nothing is reset and no `proposal.retried` row is written. Without it, a tab
+  the draft lock, after the `approved` check and before the set is read, any other value is 409
+  `VERSION_CONFLICT` naming both versions, nothing is reset and no `proposal.retried` row is
+  written. Without it, a tab
   still showing the failure of approval 1 could re-queue the failed proposals of a newer pair
   another tab approved after a reset. This is a change to the retry that #1694 ships, not part
   of it: that route reads no body (its handler calls `retryFailedDraftProposals` without
@@ -1288,10 +1395,32 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     400; no body → the behaviour #1694 shipped, until S4 makes the field required. A retry does
     not change the draft's `version`.
   - Error (stopped): a proposal undone from the inbox, one rejected, one expired and one
-    missing (one case each) → fact `stopped`, `POST /draft/retry` answers 409
-    `DRAFT_RETRY_NOTHING_FAILED`, and the shell offers no Retry and does not wait; a set with
-    one `execution_failed` and one `undone` → `failed`, and retry re-queues only the failed
-    one.
+    missing (one case each, the other member `approved`) → fact `stopped`, `POST /draft/retry`
+    answers 409 `DRAFT_RETRY_NOTHING_FAILED`, and the shell offers no Retry and does not wait.
+  - Retry refuses a failed member beside a terminal one (the finding's case; table-driven, real
+    Postgres): `execution_failed` + `undone` (and, one case each, + `rejected`, + `expired`, +
+    a stuck `draft`, + a listed id with no row) → fact `stopped`, never `failed`, with
+    `recovery: 'reset'`; `POST /draft/retry` → 409 `DRAFT_RETRY_UNSAFE` naming the statuses, and
+    nothing changes: the failed proposal is still `execution_failed` (not `draft`, not
+    `approved`), its `approved_at`, error and retry count are as they were, no
+    `proposal.retried` or `onboarding.draft_retry` row exists, the `proposal_executions` row is
+    untouched and the draft `version` is unchanged. The shell offers Start over and no Retry;
+    `POST /draft/reset` with the draft's `version` → 200 and an editable draft (the reset table
+    below). Never: `executed` + `undone`, the half-live set this refusal prevents (a test that
+    waits out the fresh window after a refused retry asserts the failed proposal never
+    executes).
+  - Retry still works when nothing terminal is in the set: `execution_failed` + `executed` →
+    fact `failed` with `recovery: 'settings'`, retry re-queues the failed one only
+    (`execution_failed → draft → approved` with a new `approvedAt`, one `proposal.retried`
+    row), it executes after the fresh window and the fact reads `executed`;
+    `execution_failed` + `approved` (the sibling still inside its window) → `failed` with
+    `recovery: 'reset'`, retry re-queues the failed one, and both end `executed`;
+    `execution_failed` + `executing` and `execution_failed` + `execution_failed` retry the
+    failed ones. Race (S4, two real connections, both orders, looped): an inbox undo of the
+    `approved` sibling of a failed member against `POST /draft/retry` → retry first, it
+    re-queues and the undo then lands on a plain split pair (`approved` + `undone`, the reset's
+    case); undo first, retry reads `undone` and answers `DRAFT_RETRY_UNSAFE`; never a retry
+    that passed its check on a stale read of the sibling.
   - Reset, the finding's case (an inbox-split pair): approve → both `approved` in the window,
     the owner undoes ONE of them from the inbox → fact `stopped` with `recovery: 'reset'`,
     retry 409 `DRAFT_RETRY_NOTHING_FAILED`, undo 409 `DRAFT_UNDO_REFUSED`; `POST /draft/reset`
@@ -1304,7 +1433,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Reset, other accepted sets (table-driven, one case per row, each ending editable with one
     `onboarding.draft_reset`): `undone` + `undone` (nothing left to revert), `rejected` +
     `approved` in the window, `expired` + `approved` in the window, `execution_failed` +
-    `undone`, `execution_failed` + `execution_failed`, a stray `draft` or `ready_for_review`
+    `undone` (the set retry refuses as `DRAFT_RETRY_UNSAFE`, so this row is its way out),
+    `execution_failed` + `execution_failed`, a stray `draft` or `ready_for_review`
     member + `undone`, and a listed id with no row + `approved` in the window; all `approved`
     in the window also resets (a superset of undo).
   - Reset, refused (nothing written in any case: draft still `approved`, `version` and every
@@ -1328,15 +1458,21 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     sibling racing the reset, both orders → both proposals end `undone`, the draft ends
     `'draft'`, and whichever lost the lock gets its own typed 409 or a no-op, never a
     half-written set.
-  - Status (`derive-status.test.ts`): `recovery` is `'settings'` for any `stopped` or `failed`
+  - Status (`derive-status.test.ts`): precedence: `execution_failed` beside `undone`,
+    `rejected`, `expired`, a stuck `draft` or a missing row → `stopped`, in either member order;
+    `execution_failed` beside `approved`, `executing`, `executed` or `execution_failed` →
+    `failed`; a lone terminal member beside `approved` → `stopped`. `recovery` is `'settings'` for any `stopped` or `failed`
     set holding an `executing` or `executed` proposal and `'reset'` for every other
     `stopped` or `failed` set, and is absent for `pending`, `executing`, `executed` and a
     draft still being edited.
   - Shell: `stopped` with `recovery: 'reset'` → Start over calls reset with the draft's
-    `version` and re-renders the read-back with the answers intact; `recovery: 'settings'` → the
+    `version` and re-renders the read-back with the answers intact (this is the screen a failed
+    member beside an undone one lands on); `recovery: 'settings'` → the
     Settings link and no reset call; `failed` → Retry always, and Start over only with
     `recovery: 'reset'`; a `DRAFT_RESET_REFUSED` reason `applied` from a stale screen swaps in
-    the Settings copy, and reason `executing` or `UNDO_WINDOW_CLOSED` keeps the wait screen.
+    the Settings copy, and reason `executing` or `UNDO_WINDOW_CLOSED` keeps the wait screen; a
+    Retry tap from a stale `failed` screen answered `DRAFT_RETRY_UNSAFE` re-reads the status
+    and renders the `stopped` copy with Start over, and does not repeat the call.
   - Shell (version): the undo button posts the `version` from the approve response and Retry
     posts the status block's `version`; a 409 `VERSION_CONFLICT` or `DRAFT_NOT_APPROVED` from
     either re-reads the status and renders whatever is current (another tab's saving screen, or
@@ -1347,7 +1483,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Verification:** no owner reaches the trial turn with a generated proposal unexecuted, one
   tap inside the window undoes the whole approval, a tap that loses the race to the worker
   changes nothing, and an approval the owner split from the inbox ends in an editable draft or
-  a pointer to Settings, never in a button the server refuses; and a tap made from a screen
+  a pointer to Settings, never in a button the server refuses; a failed proposal beside an
+  undone, rejected, expired or missing one is reset, never retried into a half-live setup
+  (`executed` + `undone`); and a tap made from a screen
   that no longer shows the current approval is refused with a 409 that changes nothing.
 
 ### U11. Draft write lock and approval compare-and-swap
@@ -2338,10 +2476,10 @@ previous one; the previous slice is merged first.
 |---|---|---|---|
 | S1 | U1 + U2 | Choice registry, typical-shop assembly, regional tiers, draft/choices/approve API, `onboarding_voice_policy` proposal. Live API, integration-tested, no UI yet. | 7-10 days |
 | S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
-| S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover) and `POST /draft/retry`. Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
+| S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover, even beside a failed one, and takes precedence over `failed`) and `POST /draft/retry` (it refuses a set holding such a proposal with 409 `DRAFT_RETRY_UNSAFE` and changes nothing, because re-approving only the failed member would leave its sibling behind and the set would end `executed + undone`; that set's way out is S4's reset). Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
-| S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status so the shell never offers a refused button; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body), made required once every client sends it. | 6-7 days (reset adds one) |
-| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft (through the locked-write helper) and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read), flag flipped, v2 deleted. | 10-12 days |
+| S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status (`reset` while no member is executed or executing, else `settings`, for a failed member beside a terminal one as for any other `stopped` set) so the shell never offers a refused button; reset is also the way out of the set retry refuses as `DRAFT_RETRY_UNSAFE`; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body), made required once every client sends it. | 6-7 days (reset adds one) |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read), flag flipped, v2 deleted. | 10-13 days (the forwarding-details gate and its read-back prompt add one) |
 | S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost), reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure. | 9-13 days (the token and bind add one, the budget another) |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
