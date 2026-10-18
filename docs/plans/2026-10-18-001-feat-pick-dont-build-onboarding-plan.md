@@ -336,7 +336,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `error` (`area_code_unavailable`) on the status poll; the number turn reacts to that
   transition by re-searching and offering the next candidate, "That one just went. Here's
   another.", with a test that drives the status from provisioning to error to a new candidate)
-  → test call
+  → the voice check (`ai_check`) as the test call's pre-state, never a screen of its own:
+  "Getting my voice ready." while it runs; on error, owner copy with Try again
+  (`/ai-check/retry`) and Skip for now (`/ai-check/skip`), the same recovery the v2 step had
+  (`GettingReadyTurn`, shipped in S2c) → test call
   (existing `TestCallStep` behaviour, re-skinned) → first-day home. Header: minutes left,
   escape hatch ("Keep the rest as is" → read-back). Every turn: heading is Rivet's line,
   option cards, mic (U4), "Type instead", "Neither, I'll say it" (U5). Copy follows the
@@ -466,6 +469,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     template lines whose current price equals their baseline move to the new pick; the seeder
     writes the baseline from now on); tests `packages/api/test/packs/reprice-seeded.test.ts`,
     `packages/api/test/integration/reprice-seeded.test.ts`
+  - create `packages/api/src/onboarding/forwarding-probe.ts` and route
+    `POST /api/onboarding/phone/forwarding-probe`; migration 314 also adds
+    `tenant_settings.forwarding_confirmed_at` and `forwarding_verified_at`; tests
+    `packages/api/test/onboarding/forwarding-probe.test.ts`
   - create `packages/api/src/onboarding/forwarding-text.ts` (owner SMS with tap-to-dial carrier
     code via `notifications/owner-sms-sender.ts`), route `POST /api/onboarding/phone/forwarding-text`
   - modify `packages/web/src/components/home/HomeConversationPanel.tsx`, `HomePage.tsx`
@@ -483,7 +490,13 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   entirely and the Rivet number is presented as the business number; "yes" sends the owner a
   text with a `tel:` link that dials the carrier's forwarding code (table from
   `steps/PhoneStep.tsx:28-35`) and shows a "calls still ring your cell" badge on the first-day
-  screen until the forwarding check passes. First-day home replaces empty KPI cards with
+  screen until forwarding is confirmed. `twilioStatus` says nothing about the owner's carrier,
+  so the badge has its own state: `tenant_settings.forwarding_confirmed_at`, set when the owner
+  taps "I dialed it" on the first-day chip, and `forwarding_verified_at`, set by a probe
+  (`POST /api/onboarding/phone/forwarding-probe` places a call from the platform number to the
+  old business number; the inbound handler records it if it arrives at the Rivet number within
+  20 s). Either clears the badge; a probe that never arrives keeps it and shows the code again.
+  First-day home replaces empty KPI cards with
   Rivet's spoken opener and three chips; the existing cards stay hidden until they have data.
   Delete v2 with a re-grep for every import (CLAUDE.md dead-code rule).
 - **Patterns to follow:** `notifications/owner-sms-sender.ts` (`recipientClass: 'owner'`
@@ -494,8 +507,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     lines that still carry the seeded amounts update, an owner-edited labor rate (and the
     template line the owner changed) are untouched and the read-back says so;
     day-one owner → no forwarding turn, number card says "put it on the truck";
-    established shop → forwarding text sent once, badge shown until `twilioStatus` reports
-    forwarding verified.
+    established shop → forwarding text sent once, badge shown until the owner confirms or the
+    probe lands; a probe that never arrives leaves the badge and re-shows the code.
   - Edge: owner taps "I'll do it later" → progress saved, badge persists across reload;
     first-day home with zero jobs → opener, three chips, two muted cards, no stat tiles.
   - Error: SMS provider failure → the carrier code is shown inline with copy button as the
@@ -503,6 +516,43 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Integration: route test proves the SMS body contains the right code for each carrier.
 - **Verification:** `grep -r "onboarding/v2" packages/web/src` returns nothing; e2e passes for
   both branches; the forbidden-vocabulary test extends to `components/home`.
+
+### U10. The owner's cell: on the draft, on the settings proposal, required when a choice rings it
+- **Goal:** An emergency choice of `owner_cell` or `owner_cell_then_text` always has an E.164
+  destination, and U6's forwarding text has a number to go to. Today the first screen's cell is
+  optional and used only to place the metro; nothing persists it.
+- **Requirements:** R4, R6
+- **Dependencies:** U2
+- **Files:**
+  - modify `packages/api/src/onboarding/draft/contracts.ts` and `repository.ts` (store
+    `owner_phone` E.164 on the draft from the first screen's cell, normalised with the existing
+    phone normaliser; `PUT /draft/owner-phone` to add or change it later), a migration in the
+    314 range adding `onboarding_drafts.owner_phone`
+  - modify `packages/api/src/onboarding/draft/approve.ts` (carry `ownerPhone` on the
+    `onboarding_tenant_settings` payload so the handler writes `tenant_settings.owner_phone`;
+    refuse approval with 400 `OWNER_PHONE_REQUIRED` when the resolved emergency choice rings
+    the owner and the draft has no number)
+  - modify `packages/web/src/components/onboarding/v3/ReadbackCard.tsx` and
+    `ConversationShell.tsx` (when the number is missing and needed, the read-back asks "Which
+    number should I ring in an emergency?" above "That's right", one typed field, server-side
+    validation; the first screen's cell stays optional)
+  - tests: `packages/api/test/onboarding/draft/owner-phone.test.ts`,
+    `packages/api/test/integration/onboarding-draft-owner-phone.test.ts`, the v3 shell tests
+- **Approach:** The cell is a fact about the owner, not a choice, so it lives on the draft and
+  travels on the settings proposal like the business name; the emergency card never promises a
+  ring that cannot happen. Approval, not staging, is the gate, so the owner can answer the seven
+  cards first and supply the number at the read-back.
+- **Patterns to follow:** `onboarding/draft/approve.ts` (`TIMEZONE_REQUIRED`), the identity
+  step's owner-phone normalisation in `routes/onboarding.ts`.
+- **Test scenarios:**
+  - Happy path: cell on the first screen → draft has it → approve → `tenant_settings.owner_phone`
+    set; no cell, emergency choice `owner_cell` → approve 400 `OWNER_PHONE_REQUIRED` → read-back
+    asks → `PUT /draft/owner-phone` → approve succeeds.
+  - Edge: no cell and an emergency override that rings nobody → approve succeeds; a non-E.164
+    value → 400 naming the field.
+  - Integration: the column round-trips under RLS and the payload reaches the handler.
+- **Verification:** no tenant can approve an owner-ringing emergency choice without a number on
+  file, and the number the owner typed is the one the hand-off rings.
 
 ### U9. Whole-draft undo, execution tracking and retry
 - **Goal:** "Saving, tap to undo" is one tap that undoes the whole approval, and onboarding does
@@ -526,8 +576,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `POST /api/proposals/:id/undo` uses, the draft returns to `'draft'` with `proposal_ids = []`,
   and `onboarding.draft_undone` is emitted. If any proposal has already executed, undo is
   refused with 409 and the shell says so; the inbox's per-proposal undo remains for that case.
-  `POST /draft/retry` re-queues only the set's `execution_failed` proposals for the execution
-  worker and emits `onboarding.draft_retry`. The execution state is derived, never stored.
+  `POST /draft/retry` moves each of the set's `execution_failed` proposals along the only path
+  `proposals/lifecycle.ts` allows (`execution_failed → draft`, then approved again with a fresh
+  `approvedAt`), in one request transaction with a `proposal.retried` audit row, so the
+  worker's `approved` sweep picks them up after a fresh undo window; it emits
+  `onboarding.draft_retry`. The execution state is derived, never stored.
 - **Patterns to follow:** `routes/proposals.ts` undo handler and `proposals/lifecycle.ts`,
   `workers/execution-worker.ts` retry semantics, D-039/D-040.
 - **Test scenarios:**
@@ -536,7 +589,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Edge: one proposal already executed → 409, nothing changed; approve → all executed → fact
     `executed` and the shell moves to billing.
   - Error: one proposal `execution_failed` → fact `failed`, the shell holds and offers retry;
-    retry re-queues that one only; after it executes the fact is `executed`.
+    retry moves that one only through `draft → approved` with a new `approvedAt` (the others
+    untouched), it executes after the fresh window, and the fact is `executed`.
   - Integration: real Postgres rows for the undo and for the mixed-status set.
 - **Verification:** no owner reaches the trial turn with a generated proposal unexecuted, and
   one tap inside the window undoes the whole approval.
@@ -669,8 +723,8 @@ previous one; the previous slice is merged first.
 | S1 | U1 + U2 | Choice registry, typical-shop assembly, regional tiers, draft/choices/approve API, `onboarding_voice_policy` proposal. Live API, integration-tested, no UI yet. | 7-10 days |
 | S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
-| S4 | U5 + U9 | Free-speech override, setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); whole-draft undo, execution tracking and retry. | 3-4 days |
-| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search, forwarding text, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target`, flag flipped, v2 deleted. | 6-8 days |
+| S4 | U5 + U9 + U10 | Free-speech override, setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); whole-draft undo, execution tracking and retry; the owner's cell on the draft and the settings proposal. | 4-5 days |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search, forwarding text with owner confirmation and probe, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target`, flag flipped, v2 deleted. | 7-9 days |
 | S6 | U7 | Pre-signup demo call (founder decision first). | 6-9 days |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
