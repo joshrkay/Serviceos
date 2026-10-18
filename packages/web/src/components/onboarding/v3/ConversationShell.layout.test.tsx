@@ -5,12 +5,17 @@
  * words wrap); the measured check at 320px and 390px is
  * e2e/onboarding-v3-ready-readback.spec.ts.
  */
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router';
 import type { AssembledOnboardingChoice, OnboardingCoreChoiceKey, StagedOnboardingChoice } from '@ai-service-os/shared';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { OnboardingStatusResult } from '../../../hooks/useOnboardingStatus';
+import type { OnboardingStatusResponse } from '../../../types/onboarding';
 import { expectAllTapTargets, expectTapTarget } from '../../../test-utils/tap-target';
 import { plumbingCleDraft, withDraft } from './__fixtures__';
+import { HERMETIC_PLANS_503, PLANS, json, statusAt } from './__fixtures__/after';
+import { AfterApproval } from './AfterApproval';
 import { AnswerAsScreen } from './AnswerAsScreen';
 import { OptionPairTurn } from './OptionPairTurn';
 import { ReadbackCard } from './ReadbackCard';
@@ -158,5 +163,129 @@ describe('v3 mobile layout contract', () => {
       expect(owner.className, owner.textContent).toMatch(/break-words|min-w-0/);
     }
     expectAllTapTargets(container, 'long turn');
+  });
+});
+
+/**
+ * The screens after "That's right", each rendered the way the shell renders it
+ * (AfterApproval with a status), in every state an owner can meet.
+ */
+describe('v3 mobile layout contract after "That\'s right"', () => {
+  const NUMBER = '+12165550180';
+  const phoneDone: Parameters<typeof statusAt>[1] = { phone: { status: 'done', metadata: { phoneNumber: NUMBER } } };
+  let plans: () => Response;
+
+  beforeEach(() => {
+    plans = () => json(200, { plans: PLANS });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        if (String(input) === '/api/onboarding/billing/plans') return Promise.resolve(plans());
+        throw new Error(`unexpected request ${String(input)}`);
+      }),
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function result(data: OnboardingStatusResponse | null): OnboardingStatusResult {
+    return { data, isLoading: false, error: null, accessRevoked: false, refetch: vi.fn(() => Promise.resolve()) };
+  }
+
+  function after(data: OnboardingStatusResponse | null, saving = false) {
+    return (
+      <MemoryRouter>
+        <AfterApproval status={result(data)} saving={saving} changeCount={2} userId="user-1" />
+      </MemoryRouter>
+    );
+  }
+
+  const claiming = statusAt('phone', { phone: { status: 'current', metadata: { lineState: 'claiming', pendingNumber: '+12165550199' } } });
+  const asking = statusAt('phone', { phone: { status: 'current', metadata: { lineState: 'awaiting_pick' } } });
+  const holding = statusAt('phone', { phone: { status: 'current', metadata: { phoneNumber: NUMBER } } });
+  const noNumber = statusAt('phone', { phone: { status: 'error', blockers: ['twilio_provisioning_failed'] } });
+  const voiceWaiting = statusAt('ai_check', { ...phoneDone, ai_check: { status: 'current', metadata: { verifying: true } } });
+  const voiceFailed = statusAt('ai_check', { ...phoneDone, ai_check: { status: 'error', blockers: ['ai_verification_failed'] } });
+
+  const screens: Array<[string, OnboardingStatusResponse | null, { saving?: boolean; ready?: () => Promise<unknown> }]> = [
+    ['Saving your choices', statusAt('identity'), { saving: true }],
+    ['Getting your shop ready', statusAt('identity'), {}],
+    ['Before the first status arrives', null, {}],
+    ['Trial: the plans', statusAt('billing'), { ready: () => screen.findByRole('radiogroup') }],
+    ['Trial: the plans cannot be shown', statusAt('billing'), { ready: () => screen.findByRole('alert') }],
+    ['Number: getting it', claiming, {}],
+    ['Number: asking for it', asking, {}],
+    ['Number: here it is', holding, {}],
+    ['Number: could not get one', noNumber, {}],
+    ['Voice: getting ready', voiceWaiting, {}],
+    ['Voice: could not get ready', voiceFailed, {}],
+    ['Test call: now you call me', statusAt('test_call', phoneDone), {}],
+    ['Test call: no number reported yet', statusAt('test_call'), {}],
+  ];
+
+  for (const [name, data, opts] of screens) {
+    it(`${name}: every control is a 44px target and nothing is wider than 320px`, async () => {
+      if (name.includes('cannot be shown')) plans = () => json(503, HERMETIC_PLANS_503);
+      const { container } = render(after(data, opts.saving));
+      if (opts.ready) await opts.ready();
+      expectAllTapTargets(container, name);
+      expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+      expect(container.querySelectorAll('h1')).toHaveLength(1);
+      expect(container.querySelector('main')?.className).toContain('max-w-[480px]');
+    });
+  }
+
+  it('Test call: "I\'ll test later" is a 44px target in the header, and a failed skip adds one line, not a wider page', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(json(500, { error: 'INTERNAL', message: 'boom' }))));
+    const { container } = render(after(statusAt('test_call', phoneDone)));
+    const later = screen.getByRole('button', { name: "I'll test later" });
+    expectTapTarget(later, "I'll test later");
+    expect(container.querySelector('header')).toContainElement(later);
+    expect(later.className).toMatch(/(^|\s)shrink-0(\s|$)/);
+    await userEvent.click(later);
+    await screen.findByRole('alert');
+    expectAllTapTargets(container, 'test call after a failed skip');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+  });
+
+  it('Open for business: the one button is a 44px target and the page is no wider than 320px', async () => {
+    const view = render(after(statusAt('test_call', phoneDone)));
+    // The call comes in while the owner is looking, and setup is complete.
+    view.rerender(after(statusAt(null, phoneDone)));
+    await screen.findByRole('button', { name: "That's right. Open for business." });
+    expectAllTapTargets(view.container, 'open for business');
+    expect(fixedWidths(view.container).filter((w) => w > 320)).toEqual([]);
+    expect(screen.queryByRole('button', { name: "I'll test later" })).not.toBeInTheDocument();
+  });
+
+  it('long numbers and plan names wrap instead of widening the page', async () => {
+    const long = '+4412345678901234567890';
+    const number = render(after(statusAt('phone', { phone: { status: 'current', metadata: { phoneNumber: long } } })));
+    expect((screen.getByText(long).closest('p') as HTMLElement).className).toMatch(/break-words/);
+    number.unmount();
+
+    const call = render(after(statusAt('test_call', { phone: { status: 'done', metadata: { phoneNumber: long } } })));
+    expect(screen.getByRole('link', { name: long }).className).toMatch(/break-words/);
+    call.unmount();
+
+    plans = () => json(200, { plans: [{ ...PLANS[0], name: 'WalshAndSonsPlumbingHeatingAndCoolingOfGreaterClevelandOhio' }] });
+    const trial = render(after(statusAt('billing')));
+    const row = await screen.findByRole('radio');
+    expect(row.querySelector('[class*="break-words"], [class*="min-w-0"]')).not.toBeNull();
+    expectAllTapTargets(trial.container, 'trial with a long plan name');
+  });
+
+  it('the headings are one breath: under twenty words on every screen', async () => {
+    for (const [name, data, opts] of screens) {
+      if (name.includes('cannot be shown')) plans = () => json(503, HERMETIC_PLANS_503);
+      else plans = () => json(200, { plans: PLANS });
+      const view = render(after(data, opts.saving));
+      if (opts.ready) await opts.ready();
+      await act(async () => {});
+      const words = (view.container.querySelector('h1')?.textContent ?? '').trim().split(/\s+/);
+      expect(words.length, name).toBeLessThan(20);
+      view.unmount();
+    }
   });
 });
