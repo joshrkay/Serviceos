@@ -59,7 +59,7 @@ export function ConversationShell() {
 
 function Conversation() {
   const navigate = useNavigate();
-  const { userId } = useAuth();
+  const { userId, signOut } = useAuth();
   const { user } = useUser();
   const status = useOnboardingStatus(3000);
   const [createInput, setCreateInput] = useState<CreateOnboardingDraftBody | null>(null);
@@ -173,6 +173,11 @@ function Conversation() {
     setSaving(true);
   };
 
+  // A deactivated teammate is sent here by the route guard: say why, not "check your connection".
+  if (status.accessRevoked) {
+    return <AccessRemoved onSignOut={() => void signOut({ redirectUrl: '/login' })} />;
+  }
+
   // Past "That's right": the trial, the number and the test call, in the same frame.
   if (screen === 'saved') {
     return <AfterApproval status={status} saving={saving} changeCount={draft?.proposalIds.length ?? 0} userId={userId} />;
@@ -231,6 +236,25 @@ function Conversation() {
           onEdit={editFromReadback}
         />
       )}
+    </TurnFrame>
+  );
+}
+
+/** The route guard sends a removed teammate here; Rivet tells them what happened and offers the one way out. */
+function AccessRemoved({ onSignOut }: { onSignOut: () => void }) {
+  return (
+    <TurnFrame minutesLeft={0} progress={0}>
+      <div role="alert">
+        <SpeakerLine />
+        <RivetHeading>Your access was removed.</RivetHeading>
+        <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">
+          An owner of this business deactivated your account. If you think that&apos;s a mistake, ask them to put you back.
+        </p>
+      </div>
+      <div className="min-h-6 flex-1" />
+      <Button fullWidth size="lg" className="h-14 rounded-2xl text-[17px] font-semibold" onClick={onSignOut}>
+        Sign out
+      </Button>
     </TurnFrame>
   );
 }
