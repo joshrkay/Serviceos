@@ -61,7 +61,7 @@ export function expectAllTapTargets(root: ParentNode, what: string): void {
     const name =
       el.getAttribute('aria-label') ??
       el.getAttribute('placeholder') ??
-      (el.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 40);
+      el.textContent.trim().replace(/\s+/g, ' ').slice(0, 40);
     offenders.push(`${el.tagName.toLowerCase()} "${name}" class="${el.getAttribute('class') ?? ''}"`);
   }
   expect(offenders, `${what}: controls under 44×44`).toEqual([]);
