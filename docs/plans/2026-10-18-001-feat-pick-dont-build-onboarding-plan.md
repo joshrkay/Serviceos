@@ -494,8 +494,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - modify `packages/web/src/components/settings/SettingsPage.tsx:1131` ("Re-run setup" → v3,
     which calls `POST /draft/reopen` first and lands on the read-back)
   - modify `packages/api/src/onboarding/draft/routes.ts`, `repository.ts`, `approve.ts`
-    (`POST /draft/reopen` and the settings → choices pre-fill; refused with 409 while a
-    generated proposal is still executing); tests
+    (`POST /draft/reopen` and the settings → choices pre-fill; refused with 409 unless every
+    generated proposal has `executed`, so a `failed` set is retried through U9 first and a
+    second set is never minted beside failed rows); tests
     `packages/api/test/onboarding/draft/reopen.test.ts`,
     `packages/api/test/integration/onboarding-draft-reopen.test.ts`
   - tests: `packages/api/test/onboarding/forwarding-text.test.ts`,
