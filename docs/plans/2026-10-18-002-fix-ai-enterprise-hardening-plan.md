@@ -446,7 +446,14 @@ flowchart LR
     - Keep the row, so the FKs from `proposals` and `supervisor_reviews` survive.
     - Scrub every task type, and write one audit event per tenant batch.
   - **PRIV-2**
-    - Delete the Twilio copy only after the S3 PUT and the DB insert succeed.
+    - Delete the Twilio copy only after the whole hand-off is durable. The S3 PUT and the DB insert are
+      not enough: in `voicemail-status-route.ts` an `onVoicemailPersisted` failure (the transcription
+      enqueue) deliberately returns 500 so the leg can be retried. If Twilio's copy were already gone,
+      the retry's fetch of `RecordingUrl` would 404 and the enqueue could never complete. So:
+      - The deletion boundary is the success receipt, recorded last.
+      - A retried delivery that finds the `voice_recordings` row and its stored S3 object reuses
+        them and goes straight to the hand-off; it never re-fetches from Twilio.
+      - `recording-webhook.ts` follows the same rule.
     - Build the URL from `recording_url`, which covers subaccounts. Treat 404 as done.
     - The sweep retries legacy and failed rows, and the purge audit records `twilioDeleted`.
     - Do NOT null `recording_url`; it is the idempotency key.
@@ -460,8 +467,15 @@ flowchart LR
       - `redactTextForExport`
       - `scrubPii`, whose residual detector also flags grouped digits
     - Add `redact=pci` to Deepgram.
-    - Mark the recording `pci_detected` so the retention worker purges its audio promptly from S3 and
-      Twilio.
+    - Treat Deepgram's own redaction as a positive detection. With `redact=pci`, Deepgram masks the
+      digits before our scrubber sees them, so the Luhn check alone would never flag a media-streams
+      call, and its audio would keep the card number for the full retention period.
+      - Detect Deepgram's redaction placeholder or entity signal in the transcript.
+      - Pin the exact format in a test, built from a recorded Deepgram response rather than a guess.
+      - Either signal, or a Luhn hit (the only detector on the Gather path, which has no upstream
+        redaction), marks the recording `pci_detected`.
+    - A `pci_detected` mark makes the retention worker purge that recording's audio promptly from S3
+      and Twilio.
   - **PRIV-4**
     - Every telephony greeting branch, including custom tenant greetings, includes a plain disclosure
       such as "I'm a virtual assistant".
@@ -603,10 +617,19 @@ flowchart LR
     - A platform spend rule on `SUM(cost_micro_cents)` against configured thresholds.
     - Both go through `alertOperator`.
   - **OBS-3**
-    - Widen `agent-path-smoke.yml` paths to every file that defines a prompt or routes a model; grep
-      for system prompts and `gateway.complete` call sites to build the list.
-    - Add the cost-capped `run-intent-eval.ts --live --gate` and the slot eval against the recorded
-      live baselines.
+    - **Gate each prompt family with an eval that exercises it.** Widening a path filter only starts a
+      job; a broken public-response, estimate-drafting or summary prompt passes an intent-only job.
+      - Build a map from prompt family to eval: grep for system prompts and `gateway.complete` call
+        sites.
+      - Intent classification and slot extraction use the cost-capped
+        `run-intent-eval.ts --live --gate` and the slot eval against the recorded live baselines.
+      - Add small, cost-capped, real-model golden checks for `draft_estimate`, the review-response
+        drafters and the session summary. Each check asserts that the output parses against its
+        schema and that every price is catalog-resolved, never invented. It also asserts that fenced
+        input is treated as data.
+      - Each family's paths trigger only the evals that exercise that family.
+      - Any family still without an eval is listed in the workflow file and the PR as ungated. The
+        gate claims nothing about it.
     - Add a skip-pass shim, so the check can be made required without hanging unrelated PRs.
 - **Test scenarios:**
   - **Unit:** an injection-shaped customer name is dropped from the glossary or fenced.
@@ -675,10 +698,25 @@ flowchart LR
       `UPDATE … SET reserved = reserved + $cost WHERE spent + reserved + $cost <= cap RETURNING …` on
       a per-tenant monthly ledger row, or a Lua script in the same style as
       `redis-tenant-quota.ts`.
-    - On completion or failure, release the reservation and charge the actual cost from
+    - On completion, release the reservation and charge the actual cost from
       `computeCostMicroCents`, in one step.
+    - **Only a failure that definitively never reached the provider releases the reservation.**
+      Examples: preflight rejection, quota rejection, a connection refused before send, a 4xx
+      validation error. An ambiguous failure — a timeout or connection reset after send, a 5xx after
+      streaming started — has no usage object, so charge the full worst-case reservation and mark it
+      `unreconciled`. Otherwise outage retries would be free in the ledger and could exceed the cap.
+      This is the same definitive-no-call rule as the onboarding plan's demo-call budget (D11).
     - A failover hop reserves at the fallback model's price before it dispatches.
-    - A reservation carries a lease expiry, so a crashed process's hold is reclaimed.
+    - A reservation carries a lease expiry. A crashed process can't say whether its call went out, so
+      an expired lease is charged at worst case and marked `unreconciled`; it is not released.
+    - **Fail closed on unpriced models.** A worst-case reservation can't be computed without a price.
+      U3 deliberately leaves unverified models unpriced (null, with a boot warning), and the default
+      `gpt-4o-mini` is not in the built-in table.
+      - For a tenant with a cap set, a request whose selected or fallback model has no verified price
+        is rejected with a typed error.
+      - The settings write that enables a cap is refused until every configured tier and fallback
+        model has a price, from the defaults or `AI_MODEL_PRICING_JSON`. The fail-closed path then
+        only fires on later misconfiguration.
   - Reject with a typed error that the voice path turns into its existing hold-line / Gather behaviour.
   - Alert at 80% through `alertOperator`.
 - **Test scenarios:**
@@ -686,7 +724,11 @@ flowchart LR
   - **Unit:** failover is charged once.
   - **Concurrency:** N requests start together just below the ceiling. Admitted reservations never
     exceed the cap, and every rejection is typed.
-  - **Unit:** an expired lease returns its reservation.
+  - **Unit:** an expired lease is charged at worst case and marked `unreconciled`.
+  - **Unit:** a definitive no-dispatch failure releases its reservation, and an ambiguous timeout keeps
+    the worst-case charge.
+  - **Unit:** a capped tenant's request to an unpriced model is rejected with a typed error.
+  - **Unit:** enabling a cap is refused while any configured model is unpriced.
   - **Integration:** the monthly window resets and the spend sum matches `ai_runs`.
 
 ## Owner decisions and actions (not code)
