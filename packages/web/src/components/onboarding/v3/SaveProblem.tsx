@@ -1,7 +1,18 @@
+import { useEffect, useRef } from 'react';
 import { Button } from '../../ui';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
 
 const ACTION_CLASS = 'h-14 rounded-2xl text-[17px] font-semibold whitespace-normal';
+
+/**
+ * These screens replace the wait, and the wait's status line goes with it. Focus
+ * moves onto the new heading so a screen-reader or keyboard owner is told.
+ */
+function useFocusOnMount() {
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => heading.current?.focus(), []);
+  return heading;
+}
 
 function StepByStep({ onSelect, primary }: { onSelect: () => void; primary: boolean }) {
   return (
@@ -27,10 +38,11 @@ export interface SaveFailedProps {
  * safe. Going step by step is the way out when trying again does not help.
  */
 export function SaveFailedScreen({ onRetry, retrying, error, onStepByStep }: SaveFailedProps) {
+  const heading = useFocusOnMount();
   return (
     <>
       <SpeakerLine />
-      <RivetHeading>Something didn&apos;t save.</RivetHeading>
+      <RivetHeading ref={heading}>Something didn&apos;t save.</RivetHeading>
       <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">
         Your answers are still here, and it&apos;s safe to try again.
       </p>
@@ -57,10 +69,11 @@ export function SaveFailedScreen({ onRetry, retrying, error, onStepByStep }: Sav
  * again cannot finish setup: the only way on is to go through it step by step.
  */
 export function SaveStoppedScreen({ onStepByStep }: { onStepByStep: () => void }) {
+  const heading = useFocusOnMount();
   return (
     <>
       <SpeakerLine />
-      <RivetHeading>One of your changes was undone.</RivetHeading>
+      <RivetHeading ref={heading}>One of your changes was undone.</RivetHeading>
       <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">
         I can&apos;t finish setup from here. You can go through it step by step instead.
       </p>

@@ -197,6 +197,11 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
     });
   };
 
+  // An error belongs to the try that caused it: once the status moves off a failed save, a later failure is a new one.
+  useEffect(() => {
+    if (screen !== 'save_failed') setRetryError(null);
+  }, [screen]);
+
   if (handOff) return null;
 
   const stage = afterStage(screen, saving, closing !== null);

@@ -298,6 +298,49 @@ describe('ConversationShell after "That\'s right"', () => {
       expect(retries()).toHaveLength(2);
     });
 
+    it('moves focus onto the new heading when the wait turns into a failed or an undone save, so the change is announced', async () => {
+      stub(savedAs('pending'));
+      renderShell();
+      await settle();
+      expect(heading()).toHaveTextContent('Getting your shop ready.');
+
+      world.status = savedAs('failed');
+      await nextPoll();
+      expect(heading()).toHaveTextContent("Something didn't save.");
+      expect(heading()).toHaveFocus();
+    });
+
+    it('moves focus onto the heading when the wait turns into an undone save', async () => {
+      stub(savedAs('pending'));
+      renderShell();
+      await settle();
+
+      world.status = savedAs('stopped');
+      await nextPoll();
+      expect(heading()).toHaveTextContent('One of your changes was undone.');
+      expect(heading()).toHaveFocus();
+    });
+
+    it('does not show an old retry error again when the failed save comes back after the wait', async () => {
+      stub(savedAs('failed'), {
+        'POST /api/onboarding/draft/retry': () => {
+          // The retry went through on the server but the answer never arrived.
+          world.status = savedAs('pending');
+          throw new TypeError('network down');
+        },
+      });
+      renderShell();
+      await settle();
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      await settle();
+      expect(heading()).toHaveTextContent('Getting your shop ready.');
+
+      world.status = savedAs('failed');
+      await nextPoll();
+      expect(heading()).toHaveTextContent("Something didn't save.");
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+
     it('lets the owner go through setup step by step instead, when trying again does not help', async () => {
       stub(savedAs('failed'));
       renderShell();
