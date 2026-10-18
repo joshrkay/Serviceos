@@ -83,8 +83,10 @@ unowned position.
   whose canonical name already exists, so on U6's "Re-run setup" the price card does not
   re-seed. It updates the pack's two headline items (visit fee, labor rate) and the estimate
   template line items that carry those same seeded amounts, in each case only while the row
-  still holds the price the seeder set; anything the owner has edited is left alone, and the
-  read-back says which happened ("Your labor rate is yours; I left it"). Knowing which rows
+  still holds the price the seeder set, and a row that moves takes the new pick as its
+  baseline in the same statement that writes its price, so a second re-run still sees an
+  untouched seed; anything the owner has edited is left alone, and the read-back says which
+  happened ("Your labor rate is yours; I left it"). Knowing which rows
   still hold the seeded price needs the baseline: U6's migration adds a nullable
   `seeded_unit_price_cents` to `catalog_items` and to the estimate template line items, set by
   the seeder from then on; a row whose baseline is null or differs from its current price is
@@ -172,7 +174,8 @@ tiers; import from a photo; pricing or plan changes.
 - **Audit events:** `onboarding.draft_created`, `onboarding.choice_staged`,
   `onboarding.draft_approved`, plus the existing proposal lifecycle events. U8 adds
   `invoice.payment_mode_unavailable` and reuses `invoice.payment_link_deactivated` with the
-  reason `payment_mode_changed`.
+  reason `payment_mode_changed`. U7 adds `demo_job_dropped` (a queued job refused by the
+  lease-generation check).
 - **Integer cents:** tier prices, trip fee and hourly rate are cents end to end; the price
   multiplier is applied in integer arithmetic with explicit rounding in one function.
 - **tenant_id + RLS:** `onboarding_drafts` carries `tenant_id` with RLS like
@@ -294,8 +297,14 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   proposal has executed; it re-assembles for the current trade and metro, pre-fills `choices`
   from the live settings (greeting → override label; the enum keys → the option whose writes
   match; prices → the current headline items, repriced only while the tenant still has a
-  seeded baseline, U6), resets `status='draft'`, `proposal_ids=[]`,
-  bumps `version`, and emits `onboarding.draft_reopened`. The read-back then shows what is
+  seeded baseline, U6; the owner's cell → the live `tenant_settings.owner_phone`, copied onto
+  the draft's `owner_phone` (U10) even when it is null, so a number the owner has since
+  changed or cleared in Settings replaces the one the draft captured at the first run and
+  U10's `ownerPhone` payload field cannot write the old number back over the newer edit),
+  resets `status='draft'`, `proposal_ids=[]`,
+  bumps `version`, and emits `onboarding.draft_reopened`. The pre-fill and the cell are read
+  from `tenant_settings` inside reopen's own locked write, before the read-back is shown. The
+  read-back then shows what is
   live today and "That's right" mints proposals exactly as a first run does. The trade, business name and optional cell it needs come from the demo-call
   lead when there is one (U7) and otherwise from the v3 shell's first screen, "What should I
   answer as?" (U3), which asks exactly those three before the draft exists; the signup form is
@@ -332,7 +341,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   exists and the execution worker runs it. S1 shipped without the lock; U11 closes both
   races and leaves the repeat-tap contract alone: a repeat approve stays S1's idempotent
   no-op 200 `approvedNow: false` carrying the stored proposal ids, and U11 adds only the row
-  lock and the optional `expectedVersion` check.
+  lock and the optional `expectedVersion` check. On an already approved draft that check is
+  what tells a retry of the same approval (200, as before) from a stale tab's approval (409
+  `VERSION_CONFLICT`); see U11.
 - **Patterns to follow:** `db/onboarding-session-repository.ts` and migration 195 (RLS
   table), `routes/onboarding-conversation.ts` (owner-only route shape), `routes/proposals.ts`
   batch approve, `docs/solutions/logic-errors/whole-object-refine-mints-approve-to-fail-voice-proposals.md`
@@ -350,8 +361,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Edge: approve with choices unanswered → each takes its `mostShops` default (option A
     today), no gated proposal minted; no recorded timezone → 400 `TIMEZONE_REQUIRED`, zero
     proposal rows, draft still `'draft'`; stale `version` on PUT → 409; approve twice → second
-    is a no-op 200 returning the same two ids (as S1 shipped; U11 keeps it and only adds the
-    lock and the version check).
+    is a no-op 200 returning the same two ids (as S1 shipped; U11 keeps it, for a repeat that
+    carries the version the draft was approved from or none, and adds the lock and the version
+    check, including the 409 for a stale tab on an approved draft).
   - Error: unknown `settingKey` → 400 naming the key; option `'c'` → 400; tenant without a
     draft calling approve → 404; non-owner → 403.
   - Integration: handler for `onboarding_voice_policy` writes `voice_greeting`,
@@ -569,7 +581,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `line_item_templates` JSONB, both nullable; `tenant_settings.seeded_baseline_backfilled_at`,
     the per-tenant one-shot stamp for the backfill below) and
     `packages/api/src/packs/reprice-seeded.ts` (the re-run update path: headline items and
-    template lines whose current price equals their baseline move to the new pick; the seeder
+    template lines whose current price equals their baseline move to the new pick, and a moved
+    row's baseline moves with it: price and baseline are written by the same `UPDATE`
+    (`unit_price_cents` and `seeded_unit_price_cents` on a catalog item, `defaultUnitPriceCents`
+    and `seededUnitPriceCents` on a template line), never in two statements; the seeder
     writes the baseline from now on; `backfillSeededBaselines(tenantId)` for tenants seeded
     before 314; `hasSeededBaseline(tenantId)` for the re-run gate); tests
     `packages/api/test/packs/reprice-seeded.test.ts`,
@@ -623,8 +638,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     which calls `POST /draft/reopen` first and lands on the read-back)
   - modify `packages/api/src/routes/onboarding-draft.ts`,
     `packages/api/src/onboarding/draft/repository.ts`, `approve.ts`
-    (`POST /draft/reopen` and the settings → choices pre-fill, written through U11's locked-write
-    helper with the `approved` status it requires; refused with 409 unless every
+    (`POST /draft/reopen` and the settings → choices pre-fill, plus the live
+    `tenant_settings.owner_phone` (null included) onto the draft's `owner_phone`, written
+    through U11's locked-write helper with the `approved` status it requires; refused with
+    409 unless every
     generated proposal has `executed`, so a `failed` set is retried through U9 first and a
     second set is never minted beside failed rows; the response carries
     `repricing: { available }`, and a reopened draft's approval leaves the prices off the
@@ -692,13 +709,23 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   reopened draft's approval leaves `hourlyRateCents` and `tripFeeCents` off the settings
   payload (the first-run path, which requires them, is unchanged), and `repriceSeeded` is not
   called. When it is true the owner picks as before, and rows the owner edited are still
-  reported as theirs.
+  reported as theirs. A third rule keeps the baseline true across re-runs: (3) the baseline
+  moves with the price. `repriceSeeded` writes a moved row's price and its baseline together,
+  one `UPDATE` per table: on a catalog item `SET unit_price_cents = $new,
+  seeded_unit_price_cents = $new`, on an estimate template it rewrites `defaultUnitPriceCents`
+  and `seededUnitPriceCents` together on each matching line of `line_item_templates`, under the
+  predicate `seeded_unit_price_cents IS NOT NULL AND unit_price_cents =
+  seeded_unit_price_cents` (the line's own pair for a template). The newly selected price is
+  the row's new seed. Moving only the price would leave the baseline at the first seed price,
+  so the next re-run would see price <> baseline, classify an untouched row as the owner's and
+  leave it ("I left it") while the card promised an update. Rows the predicate skips keep both
+  values, so an owner edit stays an edit.
 - **Patterns to follow:** `notifications/owner-sms-sender.ts` (`recipientClass: 'owner'`
   skips consent), `components/home/ActivationCelebrationBanner.tsx` (first-run state),
   `docs/solutions/architecture-patterns/derive-shared-status-rule-across-frontends.md`.
 - **Test scenarios:**
   - Happy path: re-run → `POST /draft/reopen` pre-fills the read-back with the live greeting,
-    posture, payment mode, hours, emergency target and prices; a new price pick → the two
+    posture, payment mode, hours, emergency target, prices and owner cell; a new price pick → the two
     headline catalog items and the template lines that still carry the seeded amounts update,
     an owner-edited labor rate (and the template line the owner changed) are untouched and the
     read-back says so; "yes" to an existing number → the business number and carrier are asked,
@@ -734,6 +761,28 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `repricing.available = false`, the price turn says "Your prices are your own" and shows
     no price card, and approval carries no prices; a tenant with at least one baseline sees
     the repricing choice.
+  - Edge (owner cell on re-run): the first run stored cell A on the draft and in
+    `tenant_settings.owner_phone`; the owner then changes it to B in Settings and taps Re-run
+    setup → `POST /draft/reopen` leaves the draft's `owner_phone` = B (not A), the read-back
+    shows B, and "That's right" → the settings payload carries B and after execution
+    `tenant_settings.owner_phone` is B (A is never written back over the edit). Settings
+    cleared to null → the draft's `owner_phone` is null (the explicit null replaces A), the
+    payload carries no `ownerPhone` and the handler leaves the column as it is (from S4 the
+    `OWNER_PHONE_REQUIRED` gate then asks for a number at the read-back if the emergency choice
+    rings the owner). Cell unchanged → draft and settings still agree. Integration
+    (`onboarding-draft-reopen.test.ts`): real columns under RLS, the settings read and the
+    draft write in one transaction.
+  - Edge (two successive re-runs; unit and, against real Postgres, integration): seeded at
+    labor 9,500 and trip 12,000 (each row's baseline equals its price); re-run 1 picks
+    11,000 and 14,000 → both headline items and the template lines that carried those
+    amounts hold the new prices and their baselines (`seeded_unit_price_cents`,
+    `seededUnitPriceCents`) equal the new prices, asserted in the same read; re-run 2 picks
+    12,500 and 15,000 with nothing edited in between → all of those rows move again and none
+    is reported as the owner's. Variant: the owner edits the labor rate to 11,500 between the
+    runs → re-run 2 leaves that item and its template line alone (11,500 <> baseline 11,000),
+    moves the untouched trip fee, and the read-back names the labor rate as theirs. A
+    statement that fails leaves price and baseline both at the old pick (the pair never
+    splits).
   - Error: SMS provider failure → the carrier code is shown inline with copy button as the
     fallback and an event is recorded; a non-E.164 source number → 400 naming the field; a
     carrier outside `verizon | att | tmobile | other` → 400.
@@ -789,7 +838,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   is safe: v3 stays behind the flag until S5, and the runtime consumer that rings the number
   (U8's `emergency_target`) also lands in S5, after the gate. The cell is a fact about the
   owner, not a choice, so it lives on the draft and travels on the settings proposal like the
-  business name. From S4, approval, not staging, is the gate, so the owner can answer the seven
+  business name. On a re-run the draft's cell is reopen's copy of the live setting (U6), so the
+  payload carries what Settings holds today, never the number the first run captured. From S4,
+  approval, not staging, is the gate, so the owner can answer the seven
   cards first and supply the number at the read-back. The refusal is a business rule, not a
   schema one: the emergency enum already rejects, at staging, any value outside the two
   options that ring the owner.
@@ -817,6 +868,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Integration: the column round-trips under RLS; the payload reaches the handler and writes
     `tenant_settings.owner_phone`; a payload without `ownerPhone` leaves an existing value
     untouched. The owner-phone `PUT` vs approve race is a row in U11's table-driven test.
+  - Re-run (lands with U6's reopen in S5): the draft's cell is the live
+    `tenant_settings.owner_phone`, null included, so approve never writes a stale number back
+    over a newer Settings edit; the case is U6's "Edge (owner cell on re-run)".
 - **Verification:** S1b: the number the owner typed, on the first screen or by `PUT`, is the one
   in `tenant_settings.owner_phone` after execution, and a draft without one still approves.
   S4: no tenant can approve an owner-ringing emergency choice without a number on file, and
@@ -935,7 +989,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     body and drops its own unlocked pre-read; one error mapper turns `DraftVersionConflictError`
     into 409 `VERSION_CONFLICT`, the code `PUT /draft/choices/:settingKey` already uses, and
     `DraftAlreadyApprovedError` into 409 `DRAFT_APPROVED` for every draft `PUT`; an already
-    approved draft on approve stays the idempotent 200 `approvedNow: false` with the stored ids)
+    approved draft on approve stays the idempotent 200 `approvedNow: false` with the stored ids
+    when the request carries no `expectedVersion` or the version the draft was approved from
+    (`version - 1`), and answers 409 `VERSION_CONFLICT` for any other)
   - modify `packages/web/src/lib/onboardingDraftApi.ts` and
     `packages/web/src/hooks/useOnboardingDraft.ts` (`approve` sends the draft's `version`)
   - tests: `packages/api/test/onboarding/draft/approve.test.ts` (extend),
@@ -957,11 +1013,20 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   whichever endpoint it came through; a write that took the lock first has bumped `version`,
   so an approval carrying the pre-write version gets `VERSION_CONFLICT` (and one carrying no
   version builds from the row exactly as the write left it). Under the lock, in this order:
-  no row → 404; `status = 'approved'` → 200
-  `{ approvedNow: false }` with the ids the row already carries, whatever the version (a double
-  tap or a retry after a lost response is a success, as S1 shipped); `expectedVersion` present
-  and `<>` the row's `version` → 409 `VERSION_CONFLICT` naming expected and found. Neither path
-  mints anything. A missing `expectedVersion` is accepted while older clients post `{}`: the
+  no row → 404; `status = 'approved'` → a repeat, and `expectedVersion` tells a retry from a
+  stale tab. An approved draft is frozen (every field writer refuses it, and undo and reopen
+  move it out of `approved`) and `markApproved` bumps `version` once, so the version an
+  approval was made from is always the approved row's `version - 1`. No `expectedVersion`
+  (older clients post `{}`) or `expectedVersion = version - 1` → 200 `{ approvedNow: false }`
+  with the ids the row already carries: a double tap, or a retry after a lost response, is a
+  success, as S1 shipped. Any other `expectedVersion` → 409 `VERSION_CONFLICT` naming the
+  version sent and the version the draft was approved from: that tab's read-back was stale
+  (another tab edited and approved after it rendered), so the call must not be answered as
+  though it had approved what that tab showed; the web re-reads and lands on the approved
+  state. S1b implements exactly this rule, the 409 included. For a draft still in `draft`,
+  `expectedVersion` present and `<>` the row's `version` → 409 `VERSION_CONFLICT` naming
+  expected and found. None of these paths mints anything. A missing `expectedVersion` is
+  accepted while older clients post `{}`: the
   row lock alone already serialises every writer against approve and approve against approve; S4 makes
   the field required once the web (S2) and mobile send it. Only then does `buildDraftProposals` run, from the
   locked row and never from an earlier read, followed by the mint, the batch approve and the
@@ -973,10 +1038,13 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   on every future caller remembering the lock, and the in-memory repository enforces the same
   predicate. Web: `useOnboardingDraft.approve` reads the version from the draft at run time (the
   hook's write queue already serialises it behind staged choices) and sends it. It already
-  re-reads on a 409; a `VERSION_CONFLICT` shows the existing one-line "your answers changed
-  somewhere else" notice and the owner re-taps on the refreshed read-back (U3 renders it). A
-  repeat tap or a retry after a lost response gets the idempotent 200 and the shell moves on
-  to "Saving" with the ids it carries.
+  re-reads on a 409; a `VERSION_CONFLICT` on a draft that is still `draft` shows the existing
+  one-line "your answers changed somewhere else" notice and the owner re-taps on the refreshed
+  read-back (U3 renders it). A `VERSION_CONFLICT` whose re-read shows the draft `approved` (a
+  stale tab) lands the shell on the approved state, which shows what was approved rather than
+  what the tab last rendered, with no re-tap. A repeat tap or a retry after a lost response
+  (same version) gets the idempotent 200 and the shell moves on to "Saving" with the ids it
+  carries.
 - **Patterns to follow:** `stageChoice` in `onboarding/draft/repository.ts` (lock, then
   compare, then write), U9's lock-then-decide-then-write undo, and
   `test/integration/onboarding-draft-repository.test.ts` for real-connection setup.
@@ -989,8 +1057,15 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     choices as the `PUT` left them, no `draft_approved` audit row; `expectedVersion` ahead of
     the row → the same; a non-integer `expectedVersion` → 400 naming the field; a missing one is accepted (the
     lock still serialises the writers) until S4 makes it required.
-  - Edge (already approved): approve again with any version → 200 `approvedNow: false` with the
-    same two ids, still exactly two proposal rows for the tenant and no new audit row.
+  - Edge (already approved): approve again with the version the draft was approved from
+    (`version - 1`: a double tap, or a retry after a lost response) → 200 `approvedNow: false`
+    with the same two ids, still exactly two proposal rows for the tenant and no new audit
+    row; the same with no `expectedVersion` (older clients) → the same 200.
+  - Edge (stale tab): tab A renders the read-back at version 5; tab B stages a change (the
+    draft goes to 6) and approves from 6 (the draft is `approved` at 7); tab A approves with 5
+    → 409 `VERSION_CONFLICT` naming 5 and 6, still exactly two proposal rows (B's), the draft
+    and its `proposal_ids` untouched, no new audit row; an `expectedVersion` ahead of the row's
+    → the same 409; after the re-read tab A sees `approved` and lands on the approved state.
   - Race, every draft writer vs approve (two real connections, both orders; table-driven over
     a `DRAFT_WRITERS` list in `onboarding-draft-writers-vs-approve.test.ts`: `PUT
     /draft/choices/:key`, the timezone write and `PUT /draft/owner-phone` from S1b, then `PUT
@@ -1006,26 +1081,35 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Race, writer vs writer (two connections, looped): an owner-phone `PUT` and a choice `PUT`
     concurrently → both applied in lock order, `version` up by two, neither field lost (each
     computes its change from the locked row, not a stale copy).
-  - Race, approve vs approve (two connections, same `expectedVersion`, repeated in a loop so
-    ordering luck cannot pass it): both return 200, the first with `approvedNow: true` and the one that waited behind the
-    lock with `approvedNow: false`; afterwards exactly one pair of `onboarding_*` proposals
+  - Race, approve vs approve (two connections, both carrying the same `expectedVersion`,
+    repeated in a loop so ordering luck cannot pass it): both return 200, the first with
+    `approvedNow: true` and the one that waited behind the lock with `approvedNow: false` (it
+    finds the draft approved and its `expectedVersion` equal to the row's `version - 1`, so it
+    is a retry, not a stale tab); afterwards exactly one pair of `onboarding_*` proposals
     exists for the draft (counted by `source_context.draftId`), its ids equal the draft's
-    `proposal_ids`, and both responses carry those same ids.
+    `proposal_ids`, and both responses carry those same ids. The same race with the second
+    approve carrying an older `expectedVersion` (a stale tab) → the first is 200
+    `approvedNow: true`, the second 409 `VERSION_CONFLICT`, and still exactly one pair.
   - Unit: `markApproved` with a stale version, or on a non-`draft` status, throws and writes
     nothing, identically in the Pg and in-memory repositories; `approveDraft` builds from the
     row `getForUpdate` returned (a repo double that changes the row after an earlier read proves
-    the earlier read is unused); every field writer refuses an `approved` draft, compares a
+    the earlier read is unused); `approveDraft` on an `approved` row returns the stored ids for
+    no `expectedVersion` or `version - 1` and throws `DraftVersionConflictError` for any other
+    (one parametrised case, Pg and in-memory); every field writer refuses an `approved` draft, compares a
     supplied `expectedVersion` and bumps `version` (one parametrised case per writer); a guard
     test reads `onboarding/draft/repository.ts` and fails if `UPDATE onboarding_drafts` appears
     anywhere but the helper.
   - Web: `approve` sends the hook's current version; a 409 `VERSION_CONFLICT` re-reads and sets
-    the notice; a repeat approve resolves as success with the same ids and leaves no error; a double tap
-    sends one request.
+    the notice; a 409 `VERSION_CONFLICT` whose re-read shows the draft `approved` (the stale
+    tab) lands on the approved state with no notice and no re-tap; a repeat approve resolves
+    as success with the same ids and leaves no error; a double tap sends one request.
   - Integration: all of the races above on real Postgres under RLS, in
     `packages/api/test/integration/`, as CLAUDE.md requires for a DB-touching change.
 - **Verification:** no interleaving of draft writes (any endpoint), a timezone write and one or
   more approvals yields proposals that differ from the approved draft's resolved choices, or more
-  than one proposal pair per draft.
+  than one proposal pair per draft; and a stale tab's approval of an already approved draft is
+  refused with 409 instead of being answered as an approval it never made, while a retry of the
+  same approval is still a 200.
 
 ### U8. Runtime consumers for the policy keys the cards write
 - **Goal:** Every card's promise is behaviour, not a stored value. `payment_collection_mode`
@@ -1233,24 +1317,30 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Dependencies:** U2, U4; voice-parity U3 for the preset voice on the call
 - **Files:**
   - modify `packages/api/src/integrations/credentials.ts` (explicit `PLATFORM_TWILIO_*`)
-  - create `packages/api/src/demo/{routes,service,script,lease,reset}.ts`, migration
+  - create `packages/api/src/demo/{routes,service,script,lease,reset,job-guard}.ts`, migration
     `313_demo_calls` (phone hash, trade, name, call_sid, status, lead_id; no `tenant_id`); the
-    same migration adds `demo_tenant_leases` (see Approach) and
-    `tenants.demo BOOLEAN NOT NULL DEFAULT false`
+    same migration adds `demo_tenant_leases` (see Approach), the sequence
+    `demo_lease_generation_seq` and `tenants.demo BOOLEAN NOT NULL DEFAULT false`
   - create the demo tenant pool per trade, each tenant cloned from that trade's fixture, via a
     seed script `packages/api/scripts/seed-demo-tenants.ts` (idempotent; pool size
     `DEMO_POOL_PER_TRADE`, default 3)
   - create `packages/api/src/workers/demo-lease-reaper.ts` (a leader-gated P0-009 sweep that
-    reclaims expired leases and finishes interrupted resets); extract the `information_schema`
-    table walk that `tenants/deprovision.ts` uses to purge a tenant into a shared helper that
-    takes a keep-list (deprovision passes none; `demo/reset.ts` passes `demo_tenant_leases`,
-    the tenant row and the audit trail)
+    reclaims expired leases and takes over resets whose heartbeat has gone stale); extract the
+    `information_schema` table walk that `tenants/deprovision.ts` uses to purge a tenant into a
+    shared helper that takes a keep-list, an optional batch size and a `beforeStep` fence hook
+    (deprovision passes none of them and keeps its single transaction; `demo/reset.ts` passes
+    `demo_tenant_leases`, the tenant row and the audit trail, bounded batches and the token
+    fence)
   - modify every sweep and report that lists tenants so it excludes `tenants.demo` (found by
     grepping `FROM tenants` and the tenant lister under `workers/`, `billing/`, `analytics/`
     and `metrics/`; at least `workers/setup-reminder-sweep.ts`, `trial-reminder-sweep.ts`,
     `dunning-sweep.ts`, `money-reconciliation.ts`, `overage-settlement-reconciliation.ts` and
     `billing/call-usage-billing.ts`), and the platform-admin tenant list
-  - modify `packages/api/src/app.ts` (public route with the `/public` IP limiter at :839),
+  - modify `packages/api/src/app.ts` (public route with the `/public` IP limiter at :839;
+    `handleQueueMessage` runs `demo/job-guard.ts` before any handler, and the queue is wrapped
+    so an enqueue for a demo tenant must carry a lease generation),
+    `packages/api/src/workers/execution-worker.ts` (a demo tenant's proposals are claimed only
+    under an `active`, unexpired lease),
     `packages/api/src/shared/rate-limit/phone-rate-limit.ts` (platform sentinel tenant, one
     call per number per day), `packages/api/src/flags/voice-flags.ts` (kill switch)
   - reuse `telephony/outbound-call-service.ts:266` REST pattern minus the customer bridge,
@@ -1260,9 +1350,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `components/public/HearItAnswer.tsx`; modify `packages/web/src/components/auth/SignupPage.tsx`
     (forward the handoff token) and the Clerk signup webhook handler in `packages/api/src/`
     (copy it onto the tenant)
-  - tests: `packages/api/test/demo/{service,routes,limits,lease,reset}.test.ts`,
+  - tests: `packages/api/test/demo/{service,routes,limits,lease,reset,job-guard}.test.ts`,
     `packages/api/test/integration/demo-calls.test.ts`,
     `packages/api/test/integration/demo-tenant-leases.test.ts`,
+    `packages/api/test/integration/demo-reset-fencing.test.ts`,
+    `packages/api/test/integration/demo-job-generation.test.ts`,
     `packages/api/test/integration/demo-tenants-excluded.test.ts`, `e2e/hear-it-answer.spec.ts`
 - **Approach:** The outbound leg dials the visitor from the platform number and connects it
   to the real inbound turn processor running against a demo tenant leased to that one call, so
@@ -1276,7 +1368,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   exactly one, as the first write of the request, by inserting a `demo_tenant_leases` row
   (`id`, `tenant_id`, `visitor_phone_hash`, `call_sid`, `leased_at`, `expires_at`, `state`
   (`active | resetting | released`, CHECK added `NOT VALID`), `reset_started_at`,
-  `released_at`) in one transaction: the tenant is picked `FOR UPDATE SKIP LOCKED` among the
+  `reset_heartbeat_at`, `reset_token` (the fencing token), `generation`, `released_at`) in one
+  transaction: the tenant is picked `FOR UPDATE SKIP LOCKED` among the
   trade's demo tenants with no unreleased lease, and a partial unique index on `tenant_id WHERE
   released_at IS NULL` is the backstop (it covers `active` and `resetting` alike), so two
   callers can never hold one tenant (a second, on `visitor_phone_hash` under the same
@@ -1289,32 +1382,104 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Release and reset.** The lease is the tenant's hold on the pool, so it is never touched
   until the tenant is clean. The call-status callback (completed, failed, busy, no-answer,
   canceled) and the reaper (every 30 s, for `active` leases past `expires_at`) can both fire
-  for one lease, so they end it through one function, `resetAndRelease`, that serialises them
-  in three steps. (1) Claim: `UPDATE demo_tenant_leases SET state = 'resetting',
-  reset_started_at = now() WHERE id = $1 AND state = 'active' RETURNING reset_started_at`; zero
-  rows means the other path holds the lease or it is already released, and this one does
-  nothing (the callback still answers Twilio 200). The reaper alone may also take over a
-  `resetting` claim older than 60 s, with the same UPDATE and `state = 'resetting' AND
-  reset_started_at < now() - interval '60 seconds'`; that is how a reset interrupted by a crash
-  finishes. (2) Reset. (3) Release: `UPDATE … SET state = 'released', released_at = now() WHERE
-  id = $1 AND state = 'resetting' AND reset_started_at = $claim`, so a resetter whose stale
-  claim was taken over cannot release the lease from under its successor. `released_at` is set
-  only here, after the reset, so the tenant stays unleasable (the picker and the partial unique
-  index both look at `released_at IS NULL`) through every step. Reset deletes the tenant's rows
-  from every table that carries a `tenant_id` (the shared deprovision table walk, so a table
-  added later is purged by default) except a keep-list handed to that walk: the tenant row
-  (`tenants`; deprovision's closing `DELETE FROM tenants` is not part of a reset),
-  **`demo_tenant_leases`** and the append-only audit trail (it stays, flagged by
-  `tenants.demo`). The lease table must be on the list because its `tenant_id` names this very
-  tenant: a walk that deleted it would erase the lease row while the reset is still running,
-  before `released_at` is set, so the tenant would look free mid-reset and, after a failed
-  reset, would sit free and still dirty. After the walk, reset re-seeds settings, catalog and
-  templates from the fixture with the clone function the seed script uses (the row delete and
-  the re-seed run in one transaction on the tenant) and deletes the tenant's stored objects the
-  way a purge does. A reset that fails at any step rolls the rows back, alerts, and returns the
-  claim (`state = 'active'`, `expires_at = now()`) so the reaper's next sweep retries it; the
+  for one lease, and a reset can outlive the process that began it, so they end the lease
+  through one function, `resetAndRelease`, built on a claim, a heartbeat and a fencing token.
+  (1) Claim: `UPDATE demo_tenant_leases SET state = 'resetting', reset_started_at = now(),
+  reset_heartbeat_at = now(), reset_token = gen_random_uuid(), generation =
+  nextval('demo_lease_generation_seq') WHERE id = $1 AND state = 'active' RETURNING
+  reset_token`; zero rows means the other path holds the lease or it is already released, and
+  this one does nothing (the callback still answers Twilio 200). The fresh `generation` is
+  the claim's first effect on queued work: it invalidates every job stamped before it (see
+  Queued work). `reset_token` is the resetter's fencing token for everything below.
+  (2) Heartbeat: while the reset runs, the resetter renews `reset_heartbeat_at` every 10 s
+  from its own pooled connection (`UPDATE … SET reset_heartbeat_at = now() WHERE id = $1 AND
+  state = 'resetting' AND reset_token = $token`); zero rows means it was taken over, and it
+  stops. The reaper alone may take over a `resetting` lease, and only when the heartbeat is
+  stale by 60 s (six missed beats): `UPDATE … SET reset_token = gen_random_uuid(),
+  reset_heartbeat_at = now() WHERE id = $1 AND state = 'resetting' AND reset_heartbeat_at <
+  now() - interval '60 seconds' RETURNING reset_token`. The age of the claim never justifies a
+  takeover, so a slow purge that is still alive is left alone, and a resetter that died is
+  replaced within about a minute: that is how a reset interrupted by a crash finishes.
+  (3) Fenced steps: a stale heartbeat is a judgement, not proof (a paused process or a
+  partitioned network can come back), so the heartbeat alone does not keep two resetters
+  apart. The token does. Every side effect of the reset carries it and is a no-op once the
+  lease's token has changed: each delete batch, the queue cancel, the re-seed and the
+  release runs as its own short transaction (a single statement for the release) that opens
+  with `SELECT 1 FROM demo_tenant_leases WHERE id = $1 AND state = 'resetting' AND
+  reset_token = $token FOR SHARE`; zero rows rolls the step back and the resetter stops
+  without writing again. `FOR SHARE` makes the check and the write one act: a takeover's token
+  `UPDATE` waits for a batch in flight to commit, so no write of the old resetter can land
+  after the successor holds the token, and the old resetter's next step fails its check. The
+  batches are bounded (the shared walk deletes one table at a time in chunks of
+  `DEMO_RESET_BATCH_ROWS`, default 1,000), so a share lock never holds a heartbeat back for
+  more than a few seconds; stored-object deletions run in fenced batches the same way.
+  (4) Release: `UPDATE … SET state = 'released', released_at = now() WHERE id = $1 AND state =
+  'resetting' AND reset_token = $token`, so a resetter whose claim was taken over cannot
+  release the lease from under its successor. `released_at` is set only here, after the
+  reset, so the tenant stays unleasable (the picker and the partial unique index both look at
+  `released_at IS NULL`) through every step.
+  The reset itself runs in this order, each step fenced: the queue cancel and drain (see
+  Queued work); then deletion of the tenant's rows from every table that carries a
+  `tenant_id` (the shared deprovision table walk, so a table added later is purged by
+  default) except a keep-list handed to that walk: the tenant row (`tenants`; deprovision's
+  closing `DELETE FROM tenants` is not part of a reset), **`demo_tenant_leases`** and the
+  append-only audit trail (it stays, flagged by `tenants.demo`). The lease table must be on
+  the list because its `tenant_id` names this very tenant: a walk that deleted it would erase
+  the lease row while the reset is still running, before `released_at` is set, so the tenant
+  would look free mid-reset and, after a failed reset, would sit free and still dirty. Then
+  the re-seed of settings, catalog and templates from the fixture with the clone function the
+  seed script uses, in one fenced transaction (the walk has emptied those tables, so a
+  repeated re-seed starts from empty and cannot duplicate), and the deletion of the tenant's
+  stored objects the way a purge does. A reset that fails at any step stops there, alerts and
+  returns the claim, fenced like every other write (`UPDATE … SET state = 'active',
+  expires_at = now() WHERE id = $1 AND state = 'resetting' AND reset_token = $token`), so the
+  reaper's next sweep retries the whole reset from the top; every step is safe to repeat (the
+  walk deletes what is left, the re-seed runs on empty tables). The batches commit
+  separately, so a failed reset leaves the tenant partly cleaned rather than rolled back; the
   lease stays unreleased throughout, so that tenant stays out of the pool and is never leased
-  dirty.
+  dirty. A returned claim has `expires_at = now()`, so nothing can start under it: the turn
+  processor and the generation stamp both require `state = 'active' AND expires_at > now()`.
+- **Queued work and the lease generation.** The table walk cannot see the queue:
+  `_queue_messages` has no `tenant_id` column (the tenant is a key inside the JSON `payload`,
+  `queues/pg-queue.ts`), and the walk finds tables by that column. A transcript, notification
+  or proposal-execution job created during a demo could otherwise run after the reset, or
+  after the tenant's next lease, against someone else's call. So queued work is fenced by a
+  generation, separately from the rows.
+  - *Stamp.* `demo_tenant_leases.generation` is a BIGINT drawn from
+    `demo_lease_generation_seq` when the lease is created and replaced by a fresh draw at the
+    reset's claim, so no two leases of a tenant, and no lease and its own reset, share a
+    value. Every job enqueued for a demo tenant carries `leaseGeneration` in its payload. The
+    generation travels in an async context (`demo/job-guard.ts`) set by whoever owns the
+    lease: the turn processor, from the `active`, unexpired lease found by `call_sid`, and
+    the queue guard, from the incoming payload before it calls a handler. The wrapper around
+    `queue.send` and `queue.sendOn` stamps from that context and refuses an enqueue for a
+    demo tenant (`tenants.demo`) made outside one. It never reads the lease table, so a
+    straggler from an old generation can only produce follow-ups stamped with its own old
+    generation, never a newer one.
+  - *Check.* Every queue message passes `handleQueueMessage` in `app.ts` before any handler
+    runs. When the payload's `tenantId` is a demo tenant, the guard requires `leaseGeneration`
+    to equal the `generation` of that tenant's unreleased lease while it is `active`; a
+    missing stamp, an older generation, a `resetting` or released lease, or no lease drops the
+    job: the message is deleted, the handler is never called and `demo_job_dropped` is
+    audited (job type, message id, stamped and current generation). Work claimed by table
+    follows the same rule: the execution worker claims a demo tenant's proposal only under an
+    `active`, unexpired lease. A job that a call queued and that had not run when the call
+    ended is dropped by design: the data it would act on is about to be wiped.
+  - *Reset.* Between the claim and the row walk, each step fenced: (i) the claim has already
+    bumped the generation, so nothing stamped earlier can pass the check and nothing new
+    starts under the old one; (ii) the queue cancel deletes the tenant's unclaimed rows,
+    `DELETE FROM _queue_messages WHERE payload->>'tenantId' = $1 AND attempts = 0` (a JSON-path
+    predicate, since there is no column; delayed jobs are unclaimed and go too); (iii) the
+    drain waits for in-flight work to finish or time out: every row of the tenant that has
+    been claimed and is still inside its visibility window (`attempts > 0 AND visible_at >
+    now()`, the queue's own definition of a job that may be running; it finishes when the row
+    is acknowledged and deleted, and times out when the window lapses) and every `executing`
+    proposal of the tenant, polled every second up to `DEMO_RESET_DRAIN_SECONDS` (the queue's
+    visibility timeout plus 15 s); (iv) the tenant's remaining queue rows are deleted. A job
+    still inside its window at the deadline fails the step (alert, claim returned, reaper
+    retries), so `released_at` is never set while a job may still be writing to the tenant,
+    and a hung handler keeps its own tenant out of the pool instead of leaking into the next
+    call.
 - **Pool exhausted.** When no demo tenant of the trade is free, the request is refused up front
   with 503 `DEMO_BUSY` and the page says "Every line is busy. Try again in a minute."; nothing
   is written (no lease, no `demo_calls` or lead row, no call, and the visitor's one-call-a-day
@@ -1359,19 +1524,54 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     tenant's row counts (audit and `demo_tenant_leases` excepted) and settings, catalog and
     templates equal the fixture; the lease row survives the walk, is `resetting` with
     `released_at` still null while the reset runs, and is `released` only after the reset
-    commits; at every point during the reset a concurrent lease attempt for that trade cannot
-    select the tenant. A failing reset (a fault injected after the row delete, after the
-    re-seed and during object deletion, one case each) rolls the rows back, leaves the lease
-    unreleased and returns the claim to `active`: the tenant stays out of the pool and is never
-    leased dirty until the reaper's retry succeeds.
+    completes; at every point during the reset a concurrent lease attempt for that trade cannot
+    select the tenant. A failing reset (a fault injected after the first delete batch, after
+    the row walk, after the re-seed and during object deletion, one case each) stops at that
+    step, leaves the lease unreleased and returns the claim to `active` with `expires_at =
+    now()`: the tenant stays out of the pool and is never leased dirty, and the reaper's retry
+    repeats the whole reset and releases a tenant equal to the fixture.
   - Isolation (callback vs reaper race): a lease past `expires_at` whose status callback lands
     while the reaper sweeps (two real connections, both orders, repeated in a loop) → exactly
     one of them wins the `active → resetting` claim and the other matches zero rows and does
     nothing; the reset runs once (counted on a reset spy), the lease is released once, the
     callback still answers 200, and a callback that arrives after the release matches nothing.
-    A `resetting` claim older than 60 s (the resetter died) is taken over by the reaper and
-    finished, and the original resetter's late release matches nothing (its claim token
-    differs), so a lease is never released twice or from under a newer claim.
+  - Isolation (heartbeat): a resetter that is slow but alive is never taken over: with a purge
+    slowed past 60 s and its heartbeat renewing every 10 s (fake clock), the reaper's takeover
+    `UPDATE` matches zero rows on every sweep. A resetter whose heartbeat stops is taken over
+    only once `reset_heartbeat_at` is 60 s stale; the token rotates and the reaper finishes the
+    reset.
+  - Isolation (takeover during a slow purge, two real connections, repeated in a loop):
+    resetter A claims and is mid-purge with its heartbeat paused; the heartbeat is aged past
+    60 s and the reaper (B) takes over, rotating the token. Exactly one resetter is writing
+    afterwards: A is stopped in turn before a delete batch, before the queue cancel, before
+    the re-seed and before the release (one case each), and in every case its next fenced step
+    finds the token changed, writes nothing and aborts; a statement spy shows no write under
+    A's token after B's takeover committed; a batch A has open when B tries to take over
+    finishes first (B's token `UPDATE` waits on A's `FOR SHARE` check) and A's following step
+    is refused. B re-seeds once and releases once, A's late release matches nothing, a
+    heartbeat refused for a changed token stops A, and the tenant equals the fixture.
+  - Isolation (queued work, generation): (a) a job enqueued before the reset is dropped after
+    it: a transcript job, a notification job and a follow-up queued during a call, then the
+    reset; the unclaimed rows are deleted by the queue cancel (found by `payload->>'tenantId'`,
+    since `_queue_messages` has no `tenant_id`), and a copy a consumer claimed before the bump
+    and receives again after it is dropped by the guard: the handler is never called, the
+    message is deleted and `demo_job_dropped` is audited with both generations, and the tenant
+    ends clean. (b) A job stamped with generation g1 that is delivered during the tenant's
+    next lease (g2) is dropped the same way, and so is one for a tenant with no active lease.
+    (c) A handler running under g1 that enqueues a follow-up after the bump produces a message
+    stamped g1 (its own context, not the lease table), which the guard drops. (d) An enqueue
+    for a demo tenant outside any lease context is refused. (e) A non-demo tenant's jobs pass
+    through the guard unchanged and unstamped. (f) The execution worker does not claim a demo
+    tenant's `approved` proposal once the lease is `resetting`.
+  - Isolation (in-flight job delays release): a handler blocked mid-run on a claimed message
+    when the reset starts (two real connections, a latch in the handler) → the reset claims,
+    bumps the generation, cancels the unclaimed rows and waits; `released_at` stays null and
+    the tenant stays unleasable while the handler runs; when the handler finishes and
+    acknowledges (or its visibility window lapses), the drain ends, the walk and re-seed run,
+    and only then is the lease released. A handler that never finishes: at the deadline the
+    reset fails that step, alerts and returns the claim to `active`, and the tenant stays out
+    of the pool until a later retry finds the drain clear. The same for a tenant's
+    `executing` proposal.
   - Isolation (expired lease reclaimed): a lease past `expires_at` with no status callback →
     the reaper resets, releases and the tenant is leasable again; an unexpired lease is never
     reclaimed.
@@ -1381,10 +1581,13 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     partial unique index; a demo
     tenant with an open invoice, an expired trial and an unfinished setup is selected by no
     tenant-listing sweep or report, and a guard test fails when a `FROM tenants` listing under
-    `workers/` or `billing/` neither filters `demo` nor is allow-listed.
+    `workers/` or `billing/` neither filters `demo` nor is allow-listed. The queue cancel and
+    drain run against the real `_queue_messages` table (no `tenant_id` column; the tenant is
+    read from `payload->>'tenantId'`) with rows in the unclaimed, claimed and backoff states,
+    so the JSON-path predicate is pinned on real columns and not on a mocked pool.
 - **Verification:** cost per completed demo call measured in staging before the landing CTA
-  ships; a staging run of concurrent demo calls on one trade shows distinct tenants and a clean
-  tenant after each; founder decision recorded in `docs/decisions.md`.
+  ships; a staging run of concurrent demo calls on one trade shows distinct tenants, a clean
+  tenant after each, and no job from one call running against the next; founder decision recorded in `docs/decisions.md`.
 
 ## Risks & Dependencies
 
@@ -1393,7 +1596,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `expectedVersion` (U11, closing the unlocked approve S1 shipped); every other draft writer
   takes the same lock, refuses once the draft is approved and bumps `version` through one
   shared helper (U11's invariant), so no late write can ride behind the approval's snapshot,
-  and the `version` CAS rejects stale tabs on choice writes.
+  and the `version` CAS rejects stale tabs on choice writes and on approve (a stale tab's
+  approve is a 409 even when another tab has already approved).
 - **Browser voice on real devices.** Tap is first-class everywhere, `answer_mode` is measured
   per turn, U4 spikes WebKit before U3 depends on it.
 - **Regional prices wrong or read as advice.** Founder-curated rows, "typical" copy, prices
@@ -1402,7 +1606,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `packages/api/test/onboarding/derive-status.test.ts` and the integration status test.
 - **Demo call cost, abuse, TCPA, cross-visitor leakage.** Phased last, consent first, two-layer
   limits, kill switch, spend cap; every live call holds its own demo tenant by lease and the
-  tenant is reset before anyone else can lease it (U7).
+  tenant is reset before anyone else can lease it (U7): the reset is heartbeat-renewed and
+  token-fenced, so a takeover leaves exactly one resetter writing, and queued work carries a
+  lease generation, so no job from one call runs against the next.
 - **Stale pay links after a policy switch, and a failed mode read.** A texted Stripe Payment
   Link stays chargeable until deactivated, so switching to collect-on-site queues deactivation
   of every live link on open invoices (the job row is written in the settings transaction, with
@@ -1431,11 +1637,11 @@ previous one; the previous slice is merged first.
 |---|---|---|---|
 | S1 | U1 + U2 | Choice registry, typical-shop assembly, regional tiers, draft/choices/approve API, `onboarding_voice_policy` proposal. Live API, integration-tested, no UI yet. | 7-10 days |
 | S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
-| S1b | U11 + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main`, in flight: approval row lock with optional `expectedVersion` and the one locked-write helper every draft writer goes through (choice, timezone, owner cell now; metro and forwarding join it as they land), with a repeat approve staying the idempotent 200; `owner_phone` stored on the draft on create, `PUT /draft/owner-phone`, the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status and `POST /draft/retry`. The web consumers (send the version, show a failed execution and retry) follow on S2. | 2 days |
+| S1b | U11 + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main`, in flight: approval row lock with optional `expectedVersion` and the one locked-write helper every draft writer goes through (choice, timezone, owner cell now; metro and forwarding join it as they land), with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so); `owner_phone` stored on the draft on create, `PUT /draft/owner-phone`, the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status and `POST /draft/retry`. The web consumers (send the version, show a failed execution and retry) follow on S2. | 2 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
 | S4 | U5 + rest of U9 + rest of U10 | Free-speech override, setting-key routing for the read-back mic, metro change (`PUT /draft/metro`, through the locked-write helper); whole-draft undo (row-locked, all-or-nothing) on U11's locked write; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; `expectedVersion` made required once every client sends it. | 4-5 days |
-| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search, forwarding text with owner confirmation and probe, forwarding answers on the draft (through the locked-write helper) and the settings proposal (a changed line clears the old confirm and probe stamps), seeded-price baseline with legacy backfill and the re-run repricing gate, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read), flag flipped, v2 deleted. | 9-11 days |
-| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, reset before reuse and excluded from owner, billing and analytics surfaces. | 7-10 days |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search, forwarding text with owner confirmation and probe, forwarding answers on the draft (through the locked-write helper) and the settings proposal (a changed line clears the old confirm and probe stamps), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read), flag flipped, v2 deleted. | 9-11 days |
+| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation) and excluded from owner, billing and analytics surfaces. | 7-10 days |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
 second engineer shortens S2 and S3 only where the API they depend on is already merged.
