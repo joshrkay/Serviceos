@@ -57,11 +57,23 @@ four required fields; `tenant_id` comes from the onboarding status (or the draft
 | Event | Where it fires | Trigger | Extra props |
 |---|---|---|---|
 | `v3_ready_viewed` | `ConversationShell.tsx` | the owner first sees the finished shop ("<Business> is already set up"); once per mount | `trade`, `metro` |
+| `v3_turn_viewed` | `ConversationShell.tsx` | one of the seven choice turns first appears; once per choice per mount, so reopening a turn from the read-back does not fire it again | `choice_key` |
+| `v3_choice_made` | `ConversationShell.tsx` | an answer was saved to the draft (the stage call succeeded; a failed or conflicted save does not fire). Fires again when the owner changes an answer from the read-back | `choice_key`, `answer_mode` (`tap` \| `type`), `option` (`a` \| `b` \| `override`), `is_most_shops` (bool) |
+| `v3_keep_rest` | `ConversationShell.tsx` | the owner taps "Keep the rest as is" in a turn's header and skips to the read-back with the typical answers | `answered_count` (0-7) |
 | `v3_readback_viewed` | `ConversationShell.tsx` | the owner first sees the read-back list; once per mount | `trade`, `metro` |
+| `v3_readback_edit` | `ConversationShell.tsx` | the owner taps a read-back row to change that choice | `choice_key` |
 | `v3_approved` | `ConversationShell.tsx` | "That's right" succeeded and this call saved the draft (a repeat tap on an already-saved draft does not fire) | `proposal_count` (2), `trade` |
 
-Drop-off reads as `v3_ready_viewed` with no `v3_readback_viewed`, or `v3_readback_viewed`
-with no `v3_approved`.
+`choice_key` is one of the seven core setting keys (`greeting`, `trip_fee_and_rate`,
+`booking_posture`, `payment_collection_mode`, `booking_hours`, `emergency_target`,
+`after_hours_mode`). These events carry IDs, enums, counts and booleans only: never the
+words the owner typed for a greeting, and never a price or a dollar amount.
+
+Drop-off reads as `v3_ready_viewed` with no `v3_turn_viewed`, a `v3_turn_viewed` for a
+choice with no `v3_choice_made` (the owner stalled on that turn), `v3_keep_rest` (how far
+they got before skipping, from `answered_count`), or `v3_readback_viewed` with no
+`v3_approved`. `v3_readback_edit` per tenant is the quality signal for the typical shop:
+how often the finished answer needed changing. `answer_mode` splits taps from typing.
 
 ### Generic per-step events (drive abandonment)
 

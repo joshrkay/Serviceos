@@ -7,6 +7,12 @@ export interface TurnFrameProps {
   statusLabel?: string;
   /** 0 to 1. Only ever moves forward. */
   progress: number;
+  /**
+   * A way out that is always in the header: on a choice turn, "Keep the rest as
+   * is". It takes the right-hand slot, and the status label moves under the
+   * minutes so both stay on screen without a taller header.
+   */
+  escape?: { label: string; onSelect: () => void };
   children: ReactNode;
 }
 
@@ -19,14 +25,32 @@ function minutesLeftLabel(minutes: number): string {
  * then the turn. Phone-first at 390px; centred at 480px on a desktop. No
  * sidebar, no step list.
  */
-export function TurnFrame({ minutesLeft, statusLabel, progress, children }: TurnFrameProps) {
+export function TurnFrame({ minutesLeft, statusLabel, progress, escape, children }: TurnFrameProps) {
   const percent = Math.round(Math.min(1, Math.max(0, progress)) * 100);
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-[480px] flex-col px-5 pb-7 pt-6 text-foreground">
       <header className="flex flex-col gap-2.5">
         <div className="flex items-center justify-between gap-3 text-sm text-muted-foreground">
-          <span>{minutesLeftLabel(minutesLeft)}</span>
-          {statusLabel ? <span className="flex min-h-11 items-center text-right">{statusLabel}</span> : null}
+          {escape ? (
+            <>
+              <div className="flex min-w-0 flex-col">
+                <span>{minutesLeftLabel(minutesLeft)}</span>
+                {statusLabel ? <span>{statusLabel}</span> : null}
+              </div>
+              <button
+                type="button"
+                onClick={escape.onSelect}
+                className="min-h-11 min-w-11 shrink-0 rounded-lg px-1 text-right text-sm font-medium text-foreground underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+              >
+                {escape.label}
+              </button>
+            </>
+          ) : (
+            <>
+              <span>{minutesLeftLabel(minutesLeft)}</span>
+              {statusLabel ? <span className="flex min-h-11 items-center text-right">{statusLabel}</span> : null}
+            </>
+          )}
         </div>
         <div
           role="progressbar"

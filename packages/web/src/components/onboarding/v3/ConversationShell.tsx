@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { useAuth, useUser } from '@clerk/clerk-react';
-import type { CreateOnboardingDraftBody } from '@ai-service-os/shared';
+import type { CreateOnboardingDraftBody, OnboardingCoreChoiceKey, StagedOnboardingChoice } from '@ai-service-os/shared';
 import { useOnboardingDraft } from '../../../hooks/useOnboardingDraft';
 import { useOnboardingStatus } from '../../../hooks/useOnboardingStatus';
 import { UNDO_WINDOW_MS } from '../../../hooks/useUndoableApproval';
@@ -11,11 +11,15 @@ import { Button, Spinner } from '../../ui';
 import { OnboardingShell } from '../v2/OnboardingShell';
 import { BillingStep } from '../v2/steps/BillingStep';
 import { AnswerAsScreen } from './AnswerAsScreen';
+import { OptionPairTurn } from './OptionPairTurn';
+import { READBACK_PROGRESS, READY_PROGRESS, highestSeen, minutesLeft, turnProgress } from './pacing';
 import { ReadbackCard } from './ReadbackCard';
 import { ReadyScreen } from './ReadyScreen';
 import { SpeakerLine, RivetHeading, TurnFrame } from './TurnFrame';
+import { answeredCount, coreTurns, landingTarget, makeItMineTarget, nextUnanswered, type CoreTurn, type TurnTarget } from './turns';
+import { typedKind } from './typed-answer';
 
-type Screen = 'loading' | 'problem' | 'answer_as' | 'ready' | 'readback' | 'saving' | 'after';
+type Screen = 'loading' | 'problem' | 'answer_as' | 'ready' | 'turn' | 'readback' | 'saving' | 'after';
 
 interface ScreenFrame {
   minutesLeft: number;
@@ -23,14 +27,12 @@ interface ScreenFrame {
   statusLabel?: string;
 }
 
-/** Header and progress per screen. Progress only moves forward. */
-const FRAME: Record<Screen, ScreenFrame> = {
+/** Header and progress for the screens whose timing does not depend on the draft. */
+const STATIC_FRAME: Record<'loading' | 'problem' | 'answer_as' | 'saving' | 'after', ScreenFrame> = {
   loading: { minutesLeft: 7, progress: 0.05 },
   problem: { minutesLeft: 7, progress: 0.05 },
   answer_as: { minutesLeft: 7, progress: 0.05, statusLabel: 'Nothing saved yet' },
-  ready: { minutesLeft: 6, progress: 0.15, statusLabel: 'Nothing saved yet' },
-  readback: { minutesLeft: 5, progress: 0.5, statusLabel: 'Waiting for your OK' },
-  saving: { minutesLeft: 4, progress: 0.7, statusLabel: 'Saving' },
+  saving: { minutesLeft: 3, progress: 0.7, statusLabel: 'Saving' },
   after: { minutesLeft: 3, progress: 0.8, statusLabel: 'Saved' },
 };
 
@@ -38,6 +40,11 @@ const SCREEN_VIEWED: Partial<Record<Screen, AnalyticsEvent>> = {
   ready: 'v3_ready_viewed',
   readback: 'v3_readback_viewed',
 };
+
+/** Where the owner is in the flow once they have left Ready: a choice turn (opened to answer, or to edit), or the read-back. */
+type Place = { screen: 'turn'; key: OnboardingCoreChoiceKey; editing: boolean } | { screen: 'readback' };
+
+const placeFor = (target: TurnTarget): Place => (target.screen === 'turn' ? { screen: 'turn', key: target.key, editing: false } : target);
 
 /**
  * "Pick, don't build" onboarding: one conversational surface. Rivet shows a
@@ -56,13 +63,17 @@ function Conversation() {
   const { user } = useUser();
   const status = useOnboardingStatus(3000);
   const [createInput, setCreateInput] = useState<CreateOnboardingDraftBody | null>(null);
-  const { draft, loading, error, notice, approving, approve, reload } = useOnboardingDraft(createInput);
-  // The owner's own navigation; null until they pick, then the draft decides.
-  const [picked, setPicked] = useState<'ready' | 'readback' | null>(null);
+  const { draft, loading, error, notice, approving, stage, approve, reload } = useOnboardingDraft(createInput);
+  // The owner's own navigation; null until they move, then the draft decides where a returning owner opens.
+  const [nav, setNav] = useState<Place | null>(null);
+  // The turn they last tried to answer: the hook's error and notice belong to that turn only.
+  const [tried, setTried] = useState<OnboardingCoreChoiceKey | null>(null);
+  const [staging, setStaging] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const tenantId = status.data?.tenantId ?? draft?.tenantId ?? null;
   const isComplete = status.data?.isComplete === true;
+  const funnelContext = { tenantId, userId };
 
   useEffect(() => {
     if (isComplete) void navigate('/', { replace: true });
@@ -74,10 +85,17 @@ function Conversation() {
     return () => clearTimeout(timer);
   }, [saving]);
 
+  const turns = draft ? coreTurns(draft) : [];
+  const landing = draft ? landingTarget(draft) : null;
+  const place: Place | null = nav ?? (landing ? placeFor(landing) : null);
+  const currentTurn = place?.screen === 'turn' ? turns.find((t) => t.settingKey === place.key) : undefined;
+  const editing = place?.screen === 'turn' && place.editing;
+
   let screen: Screen;
   if (!draft) screen = loading ? 'loading' : error ? 'problem' : 'answer_as';
   else if (draft.status === 'approved') screen = saving ? 'saving' : 'after';
-  else screen = picked ?? (Object.keys(draft.choices).length > 0 ? 'readback' : 'ready');
+  else if (!place) screen = 'ready';
+  else screen = currentTurn ? 'turn' : 'readback';
 
   const viewed = useRef<Set<Screen>>(new Set());
   useEffect(() => {
@@ -87,9 +105,58 @@ function Conversation() {
     trackFunnel(event, { tenantId, userId }, { trade: draft?.trade, metro: draft?.metroCode });
   }, [screen, tenantId, userId, draft?.trade, draft?.metroCode]);
 
+  // Once per turn per visit to this page, however many times it is opened (editing reopens turns).
+  const viewedTurns = useRef<Set<OnboardingCoreChoiceKey>>(new Set());
+  const turnKey = screen === 'turn' ? currentTurn?.settingKey : undefined;
+  useEffect(() => {
+    if (!turnKey || viewedTurns.current.has(turnKey)) return;
+    viewedTurns.current.add(turnKey);
+    trackFunnel('v3_turn_viewed', { tenantId, userId }, { choice_key: turnKey });
+  }, [turnKey, tenantId, userId]);
+
+  const highestProgress = useRef(0);
+
+  const goTo = (next: Place) => {
+    setTried(null);
+    setNav(next);
+  };
+
   const startDraft = (input: Pick<CreateOnboardingDraftBody, 'packId' | 'businessName' | 'phone'>) => {
     const ownerFirstName = user?.firstName?.trim().slice(0, 60);
     setCreateInput({ ...input, ...(ownerFirstName ? { ownerFirstName } : {}) });
+  };
+
+  const makeItMine = () => {
+    if (draft) goTo(placeFor(makeItMineTarget(draft)));
+  };
+
+  const keepTheRest = () => {
+    if (!draft || staging) return;
+    trackFunnel('v3_keep_rest', funnelContext, { answered_count: answeredCount(draft) });
+    goTo({ screen: 'readback' });
+  };
+
+  const editFromReadback = (key: OnboardingCoreChoiceKey) => {
+    trackFunnel('v3_readback_edit', funnelContext, { choice_key: key });
+    goTo({ screen: 'turn', key, editing: true });
+  };
+
+  /** Stage the owner's answer; move on only when it is saved. A failure stays here and the turn shows why. */
+  const answer = async (turn: CoreTurn, choice: StagedOnboardingChoice) => {
+    if (!draft || staging) return;
+    setStaging(true);
+    setTried(turn.settingKey);
+    const saved = await stage(turn.settingKey, choice).finally(() => setStaging(false));
+    if (!saved) return;
+    const tapped = 'option' in choice;
+    trackFunnel('v3_choice_made', funnelContext, {
+      choice_key: turn.settingKey,
+      answer_mode: tapped ? 'tap' : 'type',
+      option: tapped ? choice.option : 'override',
+      is_most_shops: tapped && choice.option === turn.mostShops,
+    });
+    const next = editing ? null : nextUnanswered(draft, turn.settingKey);
+    goTo(next ? { screen: 'turn', key: next, editing: false } : { screen: 'readback' });
   };
 
   const approveReadback = async () => {
@@ -110,9 +177,14 @@ function Conversation() {
     return <OnboardingShell />;
   }
 
-  const frame = FRAME[screen];
+  const frame = frameFor(screen, turns.length, draft ? answeredCount(draft) : 0, editing);
+  // Never backwards: going back to change an answer does not lower the line.
+  highestProgress.current = highestSeen(highestProgress.current, frame.progress);
+  const escape =
+    screen === 'turn' ? (editing ? { label: 'Back', onSelect: () => goTo({ screen: 'readback' }) } : { label: 'Keep the rest as is', onSelect: keepTheRest }) : undefined;
+
   return (
-    <TurnFrame minutesLeft={frame.minutesLeft} progress={frame.progress} statusLabel={frame.statusLabel}>
+    <TurnFrame minutesLeft={frame.minutesLeft} progress={highestProgress.current} statusLabel={frame.statusLabel} escape={escape}>
       {screen === 'loading' && (
         <div className="flex flex-1 items-center justify-center" role="status" aria-label="Getting your shop ready">
           <Spinner size="md" />
@@ -131,9 +203,21 @@ function Conversation() {
       )}
       {screen === 'answer_as' && <AnswerAsScreen onSubmit={startDraft} />}
       {screen === 'ready' && draft && (
-        // S2b puts the seven choice turns between these two screens; until then
-        // "Make it mine" goes straight to the read-back, like "Looks right as is".
-        <ReadyScreen draft={draft} onMakeItMine={() => setPicked('readback')} onKeepAsIs={() => setPicked('readback')} />
+        <ReadyScreen draft={draft} onMakeItMine={makeItMine} onKeepAsIs={() => goTo({ screen: 'readback' })} />
+      )}
+      {screen === 'turn' && draft && currentTurn && (
+        <OptionPairTurn
+          key={`${currentTurn.settingKey}:${editing ? 'edit' : 'ask'}`}
+          choice={currentTurn}
+          // Editing opens on what the read-back showed: the owner's answer, or the one most shops pick.
+          staged={draft.choices[currentTurn.settingKey] ?? (editing ? { option: currentTurn.mostShops } : undefined)}
+          busy={staging}
+          error={tried === currentTurn.settingKey ? error : null}
+          notice={tried === currentTurn.settingKey ? notice : null}
+          editing={editing}
+          onPick={(option) => void answer(currentTurn, { option })}
+          onTypeInstead={typedKind(currentTurn.settingKey) ? (override) => void answer(currentTurn, { override }) : undefined}
+        />
       )}
       {screen === 'readback' && draft && (
         <ReadbackCard
@@ -142,6 +226,7 @@ function Conversation() {
           error={error}
           notice={notice}
           onApprove={() => void approveReadback()}
+          onEdit={editFromReadback}
         />
       )}
       {screen === 'saving' && draft && <SavingLine count={draft.proposalIds.length} />}
@@ -155,6 +240,25 @@ function Conversation() {
         ))}
     </TurnFrame>
   );
+}
+
+/** Header and progress for a screen. Ready and the read-back bracket the turns; the turns count down what is left. */
+function frameFor(screen: Screen, total: number, answered: number, editing: boolean): ScreenFrame {
+  switch (screen) {
+    case 'ready':
+      return { minutesLeft: minutesLeft(total), progress: READY_PROGRESS, statusLabel: 'Nothing saved yet' };
+    case 'turn':
+      // Changing an answer from the read-back adds no work, so it reads like the read-back does.
+      return {
+        minutesLeft: minutesLeft(editing ? 0 : total - answered),
+        progress: turnProgress(answered, total),
+        statusLabel: 'Nothing saved yet',
+      };
+    case 'readback':
+      return { minutesLeft: minutesLeft(0), progress: READBACK_PROGRESS, statusLabel: 'Waiting for your OK' };
+    default:
+      return STATIC_FRAME[screen];
+  }
 }
 
 function SavingLine({ count, settling = false }: { count: number; settling?: boolean }) {

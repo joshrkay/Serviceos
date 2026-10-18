@@ -5,16 +5,41 @@
  * words wrap); the measured check at 320px and 390px is
  * e2e/onboarding-v3-ready-readback.spec.ts.
  */
-import { render } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import type { AssembledOnboardingChoice, OnboardingCoreChoiceKey, StagedOnboardingChoice } from '@ai-service-os/shared';
 import { describe, expect, it, vi } from 'vitest';
-import { expectAllTapTargets } from '../../../test-utils/tap-target';
+import { expectAllTapTargets, expectTapTarget } from '../../../test-utils/tap-target';
 import { plumbingCleDraft, withDraft } from './__fixtures__';
 import { AnswerAsScreen } from './AnswerAsScreen';
+import { OptionPairTurn } from './OptionPairTurn';
 import { ReadbackCard } from './ReadbackCard';
 import { ReadyScreen } from './ReadyScreen';
 import { TurnFrame } from './TurnFrame';
 
 const LONG_NAME = 'WalshAndSonsPlumbingHeatingAndCoolingOfGreaterClevelandOhio';
+
+function choiceFor(key: OnboardingCoreChoiceKey): AssembledOnboardingChoice {
+  const choice = plumbingCleDraft.assembled.choices.find((c) => c.settingKey === key);
+  if (!choice) throw new Error(`fixture has no ${key}`);
+  return choice;
+}
+
+/** A turn as the shell renders it, with the lines that can appear under the cards. */
+function turn(key: OnboardingCoreChoiceKey, over: { staged?: StagedOnboardingChoice; typeable?: boolean; editing?: boolean } = {}) {
+  return (
+    <OptionPairTurn
+      choice={choiceFor(key)}
+      staged={over.staged}
+      busy={false}
+      error="That didn't go through. Try again."
+      notice="Your answers changed somewhere else, so I refreshed them. Tap again."
+      editing={over.editing ?? false}
+      onPick={vi.fn()}
+      onTypeInstead={over.typeable ? vi.fn() : undefined}
+    />
+  );
+}
 
 /** Every `w-[Npx]` / `min-w-[Npx]` under the root, as numbers. */
 function fixedWidths(root: Element): number[] {
@@ -34,6 +59,21 @@ describe('v3 mobile layout contract', () => {
       () => <ReadbackCard draft={plumbingCleDraft} approving={false} error={null} notice={null} onApprove={vi.fn()} onEdit={vi.fn()} />,
     ],
     ['What should I answer as', () => <AnswerAsScreen onSubmit={vi.fn()} />],
+    ['Turn: two cards', () => turn('booking_posture', { staged: { option: 'b' } })],
+    ['Turn: two cards with Type instead', () => turn('greeting', { typeable: true })],
+    ['Turn: editing from the read-back', () => turn('payment_collection_mode', { staged: { option: 'a' }, editing: true })],
+    [
+      'Turn: typing the greeting',
+      () => turn('greeting', { typeable: true, staged: { override: { label: 'Walsh here', writes: { voiceGreeting: 'Walsh here' } } } }),
+    ],
+    [
+      'Turn: typing the prices',
+      () =>
+        turn('trip_fee_and_rate', {
+          typeable: true,
+          staged: { override: { label: '$120 to come out, then $175 an hour', writes: {}, prices: { tripFeeCents: 12000, hourlyRateCents: 17500 } } },
+        }),
+    ],
   ];
 
   for (const [name, screen] of screens) {
@@ -43,6 +83,36 @@ describe('v3 mobile layout contract', () => {
       expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
     });
   }
+
+  it('the header escape hatch is a 44px target at the right of the header, with nothing fixed wider than 320px', async () => {
+    const onSelect = vi.fn();
+    const { container } = render(
+      <TurnFrame minutesLeft={5} progress={0.2} statusLabel="Nothing saved yet" escape={{ label: 'Keep the rest as is', onSelect }}>
+        {null}
+      </TurnFrame>,
+    );
+    const escape = screen.getByRole('button', { name: 'Keep the rest as is' });
+    expectTapTarget(escape, 'Keep the rest as is');
+    expect(escape.className).toMatch(/(^|\s)shrink-0(\s|$)/);
+    expect(container.querySelector('header')).toContainElement(escape);
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+    await userEvent.click(escape);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+  });
+
+  it('a turn keeps its cards and its answer bar at full width, with Type instead and Next side by side', () => {
+    const { container } = render(<TurnFrame minutesLeft={5} progress={0.2} statusLabel="Nothing saved yet" escape={{ label: 'Keep the rest as is', onSelect: vi.fn() }}>{turn('greeting', { typeable: true })}</TurnFrame>);
+    for (const radio of screen.getAllByRole('radio')) {
+      expect(radio.className).toMatch(/(^|\s)min-h-14(\s|$)/);
+      expect(radio.className).toMatch(/(^|\s)w-full(\s|$)/);
+    }
+    const typeInstead = screen.getByRole('button', { name: 'Type instead' });
+    const next = screen.getByRole('button', { name: 'Next' });
+    expect(typeInstead.parentElement).toBe(next.parentElement);
+    expect(typeInstead.parentElement?.className).toMatch(/(^|\s)flex(\s|$)/);
+    expect(next.className).toMatch(/(^|\s)flex-1(\s|$)/);
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+  });
 
   it('the frame is one centred column, 480px at most, with no sidebar', () => {
     const { container } = render(<TurnFrame minutesLeft={6} progress={0.15}>{null}</TurnFrame>);
@@ -67,5 +137,26 @@ describe('v3 mobile layout contract', () => {
       const owner = el.closest('span, h1') as HTMLElement;
       expect(owner.className).toMatch(/break-words|min-w-0/);
     }
+  });
+
+  it('long answers on a turn wrap instead of widening the page', () => {
+    const long: AssembledOnboardingChoice = {
+      ...choiceFor('greeting'),
+      question: LONG_NAME,
+      options: [
+        { ...choiceFor('greeting').options[0], label: LONG_NAME, detail: LONG_NAME, rivetLine: LONG_NAME },
+        choiceFor('greeting').options[1],
+      ],
+    };
+    const { container, getAllByText } = render(
+      <TurnFrame minutesLeft={5} progress={0.2}>
+        <OptionPairTurn choice={long} busy={false} error={null} notice={null} editing={false} onPick={vi.fn()} />
+      </TurnFrame>,
+    );
+    for (const el of getAllByText(new RegExp(LONG_NAME))) {
+      const owner = el.closest('span, h1') as HTMLElement;
+      expect(owner.className, owner.textContent).toMatch(/break-words|min-w-0/);
+    }
+    expectAllTapTargets(container, 'long turn');
   });
 });
