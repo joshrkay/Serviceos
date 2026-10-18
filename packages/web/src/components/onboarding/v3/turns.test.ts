@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ONBOARDING_CORE_CHOICE_KEYS, type OnboardingDraft } from '@ai-service-os/shared';
 import { plumbingCleDraft, withChoices } from './__fixtures__';
-import { answeredCount, coreTurns, firstUnanswered, nextUnanswered } from './turns';
+import { answeredCount, coreTurns, firstUnanswered, landingTarget, makeItMineTarget, nextUnanswered } from './turns';
 
 const [GREETING, PRICE, POSTURE, PAID, HOURS, EMERGENCY, AFTER] = ONBOARDING_CORE_CHOICE_KEYS;
 
@@ -56,5 +56,38 @@ describe('turns', () => {
     expect(nextUnanswered(plumbingCleDraft, AFTER)).toBeNull();
     const draft = withChoices(plumbingCleDraft, { [EMERGENCY]: { option: 'a' }, [AFTER]: { option: 'a' } });
     expect(nextUnanswered(draft, HOURS)).toBeNull();
+  });
+});
+
+describe('where the owner goes', () => {
+  const all = Object.fromEntries(ONBOARDING_CORE_CHOICE_KEYS.map((k) => [k, { option: 'a' as const }]));
+
+  it('"Make it mine" opens the first unanswered turn', () => {
+    expect(makeItMineTarget(plumbingCleDraft)).toEqual({ screen: 'turn', key: GREETING });
+    expect(makeItMineTarget(withChoices(plumbingCleDraft, { [GREETING]: { option: 'a' }, [PRICE]: { option: 'b' }, [POSTURE]: { option: 'a' } }))).toEqual({
+      screen: 'turn',
+      key: PAID,
+    });
+  });
+
+  it('"Make it mine" goes to the read-back when all seven are already answered', () => {
+    expect(makeItMineTarget(withChoices(plumbingCleDraft, all))).toEqual({ screen: 'readback' });
+  });
+
+  it('a new draft opens on Ready, which is not a turn', () => {
+    expect(landingTarget(plumbingCleDraft)).toBeNull();
+  });
+
+  it('a returning owner picks up on the first unanswered turn', () => {
+    const draft = withChoices(plumbingCleDraft, { [GREETING]: { option: 'b' }, [PRICE]: { option: 'a' }, [POSTURE]: { option: 'b' } });
+    expect(landingTarget(draft)).toEqual({ screen: 'turn', key: PAID });
+  });
+
+  it('a returning owner who answered everything lands on the read-back', () => {
+    expect(landingTarget(withChoices(plumbingCleDraft, all))).toEqual({ screen: 'readback' });
+  });
+
+  it('an answer to the established-shop choice alone does not move the owner off Ready', () => {
+    expect(landingTarget(withChoices(plumbingCleDraft, { existing_number: { option: 'a' } }))).toBeNull();
   });
 });

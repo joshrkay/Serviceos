@@ -42,3 +42,20 @@ export function nextUnanswered(draft: OnboardingDraft, key: OnboardingCoreChoice
   const open = new Set(unanswered(draft));
   return order.slice(order.indexOf(key) + 1).find((k) => open.has(k)) ?? null;
 }
+
+/** A place in the turn flow: one of the choice turns, or the read-back that follows them. */
+export type TurnTarget = { screen: 'turn'; key: OnboardingCoreChoiceKey } | { screen: 'readback' };
+
+/** "Make it mine": the first unanswered turn, or straight to the read-back when nothing is left to ask. */
+export function makeItMineTarget(draft: OnboardingDraft): TurnTarget {
+  const key = firstUnanswered(draft);
+  return key ? { screen: 'turn', key } : { screen: 'readback' };
+}
+
+/**
+ * Where a returning owner opens. Null means Ready: nothing is answered yet, so
+ * the finished shop comes first. Otherwise they pick up where they left off.
+ */
+export function landingTarget(draft: OnboardingDraft): TurnTarget | null {
+  return answeredCount(draft) === 0 ? null : makeItMineTarget(draft);
+}
