@@ -113,7 +113,9 @@ const OWNER_REQUIRED_DAILY_WEB_ACTIONS = 1;
 // "Pick, don't build" onboarding (docs/plans/2026-10-18-001, slice S1): +4
 // onboarding — the draft create/read, one choice stage, and the read-back
 // approval. Each is a one-time activation act on the setup surface itself.
-const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 11;
+// U10 (S1 follow-ups): +1 onboarding — PUT /api/onboarding/draft/owner-phone,
+// one-time, the owner's own cell on the setup draft.
+const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 12;
 // #1386: +2 (PUT/DELETE /api/settings/e1-script — occasional, reviewed E1 script).
 // #1402 §13: +1 (POST /api/users/:id/deactivate — occasional, offboarding).
 // #1563: +1 (POST /api/onboarding/phone/change — occasional, Settings → Phone).
@@ -122,7 +124,7 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 11;
 // Hardening: +7 occasional (QuickBooks connect/disconnect/sync + Google
 // Business connect/delete now require settings:update; operator-hours PUT +
 // phone/retry now require owner — previously open to any member).
-const OWNER_ONLY_ROUTES = 76;
+const OWNER_ONLY_ROUTES = 77;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 

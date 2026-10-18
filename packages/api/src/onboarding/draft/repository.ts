@@ -18,6 +18,7 @@ import { PgBaseRepository } from '../../db/pg-base';
 import { tenantContextStore } from '../../middleware/tenant-context';
 import type { AssembledShop } from '../choices/assemble';
 import { ChoiceKeySchema, assertOverrideAllowedFor, type AnyChoiceKey } from '../choices/schema';
+import { OwnerPhoneE164Schema } from './owner-phone';
 import { ChoicesRecordSchema, DraftStatusSchema, StagedChoiceSchema, type ChoicesRecord, type DraftStatus, type StagedChoice } from './contracts';
 
 export class DraftNotFoundError extends Error {
@@ -49,6 +50,8 @@ export interface OnboardingDraft {
   businessName: string;
   ownerFirstName: string | null;
   clientTimezone: string | null;
+  /** The owner's cell, E.164; null until given. Written to tenant_settings.owner_phone on approval. */
+  ownerPhone: string | null;
   assembled: AssembledShop;
   choices: ChoicesRecord;
   status: DraftStatus;
@@ -67,6 +70,8 @@ export interface CreateDraftRecord {
   businessName: string;
   ownerFirstName: string | null;
   clientTimezone: string | null;
+  /** Canonical E.164 owner cell; omitted means none given yet. */
+  ownerPhone?: string | null;
   assembled: AssembledShop;
 }
 
@@ -93,6 +98,13 @@ export interface OnboardingDraftRepository {
    */
   setClientTimezone(tenantId: string, clientTimezone: string): Promise<OnboardingDraft>;
   /**
+   * Sets the owner's cell (canonical E.164; anything else is refused). Same
+   * contract as stageChoice: compare-and-swap on `version`, always bumps it
+   * (even for an identical value), refused once approved. Checked in that
+   * order, so an approved draft always answers DraftAlreadyApprovedError.
+   */
+  setOwnerPhone(tenantId: string, ownerPhone: string, expectedVersion: number): Promise<OnboardingDraft>;
+  /**
    * Marks approved and records the proposal ids, only if the draft is still
    * `draft` at `expectedVersion` (the version read under the lock). Throws
    * DraftNotFoundError / DraftAlreadyApprovedError / DraftVersionConflictError
@@ -111,6 +123,7 @@ interface DraftRow {
   business_name: string;
   owner_first_name: string | null;
   client_timezone: string | null;
+  owner_phone: string | null;
   assembled: unknown;
   choices: unknown;
   status: string;
@@ -132,6 +145,7 @@ function mapRow(row: DraftRow): OnboardingDraft {
     businessName: row.business_name,
     ownerFirstName: row.owner_first_name,
     clientTimezone: row.client_timezone,
+    ownerPhone: row.owner_phone,
     assembled: row.assembled as AssembledShop,
     choices: ChoicesRecordSchema.parse(row.choices ?? {}),
     status: DraftStatusSchema.parse(row.status),
@@ -169,8 +183,8 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
     return this.withTenant(tenantId, async (client) => {
       const inserted = await client.query<DraftRow>(
         `INSERT INTO onboarding_drafts
-           (tenant_id, pack_id, trade, metro_code, metro_name, business_name, owner_first_name, client_timezone, assembled)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+           (tenant_id, pack_id, trade, metro_code, metro_name, business_name, owner_first_name, client_timezone, assembled, owner_phone)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
          ON CONFLICT (tenant_id) DO NOTHING
          RETURNING *`,
         [
@@ -183,6 +197,7 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
           input.ownerFirstName,
           input.clientTimezone,
           JSON.stringify(input.assembled),
+          input.ownerPhone === undefined || input.ownerPhone === null ? null : OwnerPhoneE164Schema.parse(input.ownerPhone),
         ],
       );
       if (inserted.rows.length > 0) return mapRow(inserted.rows[0]);
@@ -244,6 +259,35 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
     });
   }
 
+  async setOwnerPhone(tenantId: string, ownerPhone: string, expectedVersion: number): Promise<OnboardingDraft> {
+    const phone = OwnerPhoneE164Schema.parse(ownerPhone);
+    return this.withTenant(tenantId, async (client) => {
+      const current = await client.query<Pick<DraftRow, 'status' | 'version'>>(
+        'SELECT status, version FROM onboarding_drafts WHERE tenant_id = $1 FOR UPDATE',
+        [tenantId],
+      );
+      if (current.rows.length === 0) throw new DraftNotFoundError(tenantId);
+      if (current.rows[0].status === 'approved') throw new DraftAlreadyApprovedError();
+      if (current.rows[0].version !== expectedVersion) {
+        throw new DraftVersionConflictError(expectedVersion, current.rows[0].version);
+      }
+      const updated = await client.query<DraftRow>(
+        `UPDATE onboarding_drafts
+            SET owner_phone = $2,
+                version = version + 1,
+                updated_at = NOW()
+          WHERE tenant_id = $1 AND version = $3
+          RETURNING *`,
+        [tenantId, phone, expectedVersion],
+      );
+      if (updated.rows.length === 0) {
+        // Cannot happen inside one transaction after FOR UPDATE; fail closed rather than return stale state.
+        throw new DraftVersionConflictError(expectedVersion, current.rows[0].version + 1);
+      }
+      return mapRow(updated.rows[0]);
+    });
+  }
+
   async markApproved(tenantId: string, proposalIds: string[], expectedVersion: number): Promise<OnboardingDraft> {
     return this.withTenant(tenantId, async (client) => {
       const updated = await client.query<DraftRow>(
@@ -292,6 +336,7 @@ export class InMemoryOnboardingDraftRepository implements OnboardingDraftReposit
       id: crypto.randomUUID(),
       tenantId,
       ...input,
+      ownerPhone: input.ownerPhone ?? null,
       choices: {},
       status: 'draft',
       version: 1,
@@ -322,6 +367,17 @@ export class InMemoryOnboardingDraftRepository implements OnboardingDraftReposit
     if (!d) throw new DraftNotFoundError(tenantId);
     if (d.status === 'approved') throw new DraftAlreadyApprovedError();
     const next: OnboardingDraft = { ...d, clientTimezone, version: d.version + 1, updatedAt: new Date() };
+    this.byTenant.set(tenantId, next);
+    return next;
+  }
+
+  async setOwnerPhone(tenantId: string, ownerPhone: string, expectedVersion: number): Promise<OnboardingDraft> {
+    const phone = OwnerPhoneE164Schema.parse(ownerPhone);
+    const d = this.byTenant.get(tenantId);
+    if (!d) throw new DraftNotFoundError(tenantId);
+    if (d.status === 'approved') throw new DraftAlreadyApprovedError();
+    if (d.version !== expectedVersion) throw new DraftVersionConflictError(expectedVersion, d.version);
+    const next: OnboardingDraft = { ...d, ownerPhone: phone, version: d.version + 1, updatedAt: new Date() };
     this.byTenant.set(tenantId, next);
     return next;
   }

@@ -204,6 +204,7 @@ describe('approveDraft (lock, version check, idempotence)', () => {
       create: (t, i) => h.repo.create(t, i),
       stageChoice: (t, k, c, v) => h.repo.stageChoice(t, k, c, v),
       setClientTimezone: (t, z) => h.repo.setClientTimezone(t, z),
+      setOwnerPhone: (t, p, v) => h.repo.setOwnerPhone(t, p, v),
       markApproved: (t, ids, v) => h.repo.markApproved(t, ids, v),
     };
     await approveDraft({ ...h.deps, draftRepo: double }, TENANT, ACTOR);
@@ -240,6 +241,7 @@ describe('approveDraft (lock, version check, idempotence)', () => {
       create: (t, i) => h.repo.create(t, i),
       stageChoice: (t, k, c, v) => h.repo.stageChoice(t, k, c, v),
       setClientTimezone: (t, z) => h.repo.setClientTimezone(t, z),
+      setOwnerPhone: (t, p, v) => h.repo.setOwnerPhone(t, p, v),
       markApproved: (t, ids, v) => h.repo.markApproved(t, ids, v),
     };
     await expect(approveDraft({ ...h.deps, draftRepo: spy }, TENANT, ACTOR)).rejects.toThrow(/TIMEZONE_REQUIRED/);

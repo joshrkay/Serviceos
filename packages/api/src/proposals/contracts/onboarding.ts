@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { isRuntimeTimezone } from '../../shared/timezone';
 import { isSeedablePackId } from '../../packs/seed-pack-defaults';
+import { isCanonicalOwnerPhone } from '../../onboarding/draft/owner-phone';
 import { ChoiceWritesSchema, type ChoiceWrites } from '../../onboarding/choices/schema';
 
 // Electrical and painting are accepted as basic second-class verticals; rich defaults are added separately.
@@ -60,6 +61,17 @@ export const onboardingTenantSettingsPayloadSchema = z.object({
     .refine(isRuntimeTimezone, {
       message: 'must be a recognized IANA timezone (e.g. "America/Phoenix")',
     })
+    .optional(),
+  /**
+   * The owner's cell from the onboarding draft, written to
+   * tenant_settings.owner_phone (the number emergency calls ring). ABSENT
+   * means untouched, never null. Canonical E.164 only, as defined by the same
+   * normaliser the identity step uses.
+   */
+  ownerPhone: z
+    .string()
+    .trim()
+    .refine(isCanonicalOwnerPhone, { message: 'must be a US phone number in E.164 form (e.g. "+15551234567")' })
     .optional(),
 });
 

@@ -99,6 +99,15 @@ export function buildDraftProposals(draft: OnboardingDraft, actorId: string): Dr
       hourlyRateCents: price.prices.hourlyRateCents,
       tripFeeCents: price.prices.tripFeeCents,
       timezone: tz,
+      // The cell is a fact about the owner, not a choice. Omitted (never null)
+      // when absent so the handler writes nothing and cannot clear a stored
+      // number. The OWNER_PHONE_REQUIRED gate is deliberately absent until the
+      // web read-back asks for the number: both emergency options ring the
+      // owner, so a gate now would make every draft without a cell unapprovable
+      // (a gate with nothing to lift it can never be approved). Its place is
+      // right after the TIMEZONE_REQUIRED check, reading
+      // byKey.get('emergency_target').writes.emergencyTarget.
+      ...(draft.ownerPhone ? { ownerPhone: draft.ownerPhone } : {}),
     },
     summary: `Set up ${draft.businessName}: ${price.label}`,
     confidenceScore: 1,

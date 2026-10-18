@@ -5,6 +5,7 @@
  *                                 a repeat call may still record a changed clientTimezone)
  *   GET    /                      read it
  *   PUT    /choices/:settingKey   stage a choice (compare-and-swap on version)
+ *   PUT    /owner-phone           add or change the owner's cell (compare-and-swap on version)
  *   POST   /approve               "That's right": lock the draft row, mint onboarding_* proposals and
  *                                 approve them (optional expectedVersion; repeat taps are idempotent)
  *
@@ -27,7 +28,9 @@ import { metroForPhone } from '../compliance/us-geography';
 import { assembleTypicalShop } from '../onboarding/choices/assemble';
 import type { RegionalPriceTierRepository } from '../onboarding/choices/price-tiers';
 import { ChoiceKeySchema, WritesNotAllowedError } from '../onboarding/choices/schema';
-import { ApproveDraftBodySchema, CreateDraftInputSchema, StageChoiceBodySchema } from '../onboarding/draft/contracts';
+import { ApproveDraftBodySchema, CreateDraftInputSchema, SetOwnerPhoneBodySchema, StageChoiceBodySchema } from '../onboarding/draft/contracts';
+import { parseOwnerPhone } from '../onboarding/draft/owner-phone';
+import { maskPhone } from '../telephony/twilio-call-control';
 import {
   DraftAlreadyApprovedError,
   DraftNotFoundError,
@@ -71,6 +74,13 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
       if (clientTimezone !== undefined && !isRuntimeTimezone(clientTimezone)) {
         throw new ValidationError(`clientTimezone "${clientTimezone}" is not a recognized IANA timezone`);
       }
+
+      // Validated before the existing-draft lookup so a malformed cell is always a
+      // 400 naming `phone` and nothing is created. On a repeat call for an existing
+      // draft the value is otherwise ignored: PUT /owner-phone is the only way to
+      // change it later, so a re-rendered first screen cannot overwrite a number
+      // the owner corrected.
+      const ownerPhone = body.phone === undefined ? null : parseOwnerPhone(body.phone, 'phone');
 
       const existing = await draftRepo.getForTenant(tenantId);
       if (existing) {
@@ -118,6 +128,7 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
         businessName: body.businessName,
         ownerFirstName: body.ownerFirstName ?? null,
         clientTimezone: clientTimezone ?? null,
+        ownerPhone,
         assembled,
       });
       await auditRepo.create(
@@ -133,6 +144,7 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
             trade: draft.trade,
             metroCode: draft.metroCode,
             priceSource: assembled.priceSource,
+            hasOwnerPhone: draft.ownerPhone !== null,
             metroCandidates: assembled.metroCandidates,
           },
         }),
@@ -176,6 +188,37 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
           entityType: 'onboarding_draft',
           entityId: draft.id,
           metadata: { settingKey: keyParse.data, choice: body.choice, version: draft.version },
+        }),
+      );
+      res.json({ draft });
+    }),
+  );
+
+  router.put(
+    '/owner-phone',
+    ...guards,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const body = validate(SetOwnerPhoneBodySchema, req.body);
+      const ownerPhone = parseOwnerPhone(body.ownerPhone, 'ownerPhone');
+
+      let draft;
+      try {
+        draft = await draftRepo.setOwnerPhone(tenantId, ownerPhone, body.version);
+      } catch (err) {
+        rethrowDraftError(err, tenantId);
+      }
+
+      // The full number never goes into audit metadata or logs.
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role as Role,
+          eventType: 'onboarding.owner_phone_set',
+          entityType: 'onboarding_draft',
+          entityId: draft.id,
+          metadata: { ownerPhone: maskPhone(ownerPhone), version: draft.version },
         }),
       );
       res.json({ draft });

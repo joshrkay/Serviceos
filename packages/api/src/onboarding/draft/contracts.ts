@@ -37,6 +37,19 @@ export const StageChoiceBodySchema = z
   .strict();
 
 /**
+ * Body of PUT /api/onboarding/draft/owner-phone. `ownerPhone` is whatever the
+ * owner typed; the route normalises it to E.164 (a value that does not
+ * normalise is a 400 naming `ownerPhone`). `version` is the same optimistic
+ * concurrency token as StageChoiceBodySchema.
+ */
+export const SetOwnerPhoneBodySchema = z
+  .object({
+    ownerPhone: z.string().min(1).max(40),
+    version: z.number().int().positive(),
+  })
+  .strict();
+
+/**
  * Body of POST /api/onboarding/draft/approve. `expectedVersion` is an optional
  * optimistic-concurrency token: the draft `version` the read-back the owner is
  * looking at was rendered from. When omitted the row lock alone serialises
@@ -63,7 +76,7 @@ export const CreateDraftInputSchema = z
     packId: z.string().min(1).max(40),
     businessName: z.string().min(1).max(120),
     ownerFirstName: z.string().min(1).max(60).optional(),
-    /** Owner cell, used only to place the metro. Not stored on the draft. */
+    /** Owner cell. Normalised to E.164 and stored on the draft as the owner's cell; it also places the metro. */
     phone: z.string().min(7).max(20).optional(),
     clientTimezone: z.string().min(1).max(64).optional(),
   })
