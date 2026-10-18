@@ -187,7 +187,9 @@ describe('ConversationShell', () => {
 
       // Turn 1: Rivet's own words, both options, the typical one marked, nothing selected, Next waiting.
       expect(await onTurn(0)).toBeInTheDocument();
-      expect(screen.getByText('Tap one to hear it. Say "first" or "second" to pick.')).toBeInTheDocument();
+      // Nothing here plays a greeting or listens, so no line promises it (S3 brings voice).
+      expect(screen.getByText('Pick the one that sounds right.')).toBeInTheDocument();
+      expect(screen.queryByText(/hear it|say "first"/i)).not.toBeInTheDocument();
       expect(screen.getAllByRole('radio')).toHaveLength(2);
       expect(screen.getAllByText('Most shops like yours')).toHaveLength(1);
       expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();

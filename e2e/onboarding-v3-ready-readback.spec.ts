@@ -177,7 +177,9 @@ for (const vp of viewports) {
       // Make it mine -> the first of the seven choices.
       await page.getByRole('button', { name: 'Make it mine, 7 choices' }).click();
       await expectTurn(page, QUESTIONS.greeting);
-      await expect(page.getByText('Tap one to hear it. Say "first" or "second" to pick.')).toBeVisible();
+      // The real registry copy: the owner reads two options and taps one; nothing here plays or listens.
+      await expect(page.getByText('Pick the one that sounds right.')).toBeVisible();
+      await expect(page.getByText(/hear it|say "first"/i)).toHaveCount(0);
       await expect(page.getByRole('radio')).toHaveCount(2);
       await expect(page.getByText('Most shops like yours')).toHaveCount(1);
       // The greeting options already are what Rivet says, so the line is not repeated under them.
