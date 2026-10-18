@@ -146,6 +146,20 @@ export const SubscriptionStatusSchema = z
   .nullable();
 export type SubscriptionStatusValue = z.infer<typeof SubscriptionStatusSchema>;
 
+/**
+ * Where the approved draft's two proposals are on their way to execution
+ * (derived on read, never stored): `pending` all approved and waiting for the
+ * worker, `executing` work in flight, `executed` all done, `failed` a proposal
+ * is in `execution_failed` and every other one is approved/executing/executed
+ * (POST /draft/retry can re-queue it and the pair completes), `stopped` a
+ * proposal will never run and retry cannot recover it (undone or rejected from
+ * the inbox, expired, gone), even when another one failed: the shell must not
+ * offer Retry for it (POST /draft/retry answers 409 DRAFT_RETRY_UNSAFE). See
+ * `deriveDraftExecution` (derive-status.ts).
+ */
+export const DRAFT_EXECUTION_STATES = ['pending', 'executing', 'executed', 'failed', 'stopped'] as const;
+export type DraftExecution = (typeof DRAFT_EXECUTION_STATES)[number];
+
 export const OnboardingStatusResponseSchema = z.object({
   steps: z.array(OnboardingStepSchema).length(7),
   currentStep: OnboardingStepIdSchema.nullable(),
@@ -169,6 +183,8 @@ export const OnboardingStatusResponseSchema = z.object({
       status: z.enum(['draft', 'approved']),
       choicesAnswered: z.number().int().min(0),
       version: z.number().int().positive(),
+      /** Additive: null while the draft is still being edited (or has nothing to track). */
+      execution: z.enum(DRAFT_EXECUTION_STATES).nullable().optional(),
     })
     .optional(),
 });

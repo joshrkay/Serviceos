@@ -30,6 +30,10 @@ describe('P2-006 — Proposal audit timeline and entity linkage', () => {
     proposalRepo = new InMemoryProposalRepository();
   });
 
+  it('registers the owner-driven retry of a failed execution', () => {
+    expect(PROPOSAL_EVENT_TYPES).toContain('proposal.retried');
+  });
+
   it('happy path — logs proposal event and retrieves timeline', async () => {
     const proposal = createProposal(baseInput);
     await proposalRepo.create(proposal);

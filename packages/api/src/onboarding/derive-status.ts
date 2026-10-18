@@ -1,5 +1,6 @@
 import type { PhoneLineState } from './phone-line';
 import type {
+  DraftExecution,
   OnboardingStatusResponse,
   OnboardingStepId,
   OnboardingStepStatus,
@@ -65,7 +66,93 @@ export interface OnboardingFacts {
    * `.length(7)` and mobile consumes it); the v3 shell derives its turns from
    * this plus the draft itself.
    */
-  draft?: { status: 'draft' | 'approved'; choicesAnswered: number; version: number } | null;
+  draft?: {
+    status: 'draft' | 'approved';
+    choicesAnswered: number;
+    version: number;
+    /** Present only for an approved draft: what the listed proposals look like right now. */
+    proposals?: DraftProposalsFact;
+  } | null;
+}
+
+/**
+ * The approved draft's proposals, as read: how many ids the draft lists and the
+ * status of each one that still exists (a missing row is `expected - statuses.length`).
+ */
+export interface DraftProposalsFact {
+  expected: number;
+  statuses: string[];
+}
+
+/**
+ * The only statuses a member of the approved set may hold while POST /draft/retry
+ * is allowed to touch the set: still on its way (`approved`, `executing`),
+ * finished (`executed`), or the failure retry exists for (`execution_failed`).
+ * Anything else (`undone`, `rejected`, `expired`, `draft`, `ready_for_review`, ...)
+ * is a member that will never run again and that retry cannot bring back
+ * (`undone` is terminal in lifecycle.ts).
+ */
+const RETRY_SAFE_STATUSES = new Set(['approved', 'executing', 'executed', 'execution_failed']);
+
+/** Stands in for a listed proposal whose row no longer exists. */
+export const MISSING_PROPOSAL = 'missing';
+
+/**
+ * Why POST /draft/retry must not touch this approved set: one entry per listed
+ * proposal that is outside {approved, executing, executed, execution_failed}
+ * (its status), plus one `missing` per listed proposal with no row. Empty means
+ * the set is whole and retry can complete it.
+ *
+ * The single source of truth for both the derived `stopped` state below and the
+ * guard inside `retryFailedDraftProposals`, so the status can never invite a
+ * retry the endpoint refuses (or the reverse).
+ */
+export function retryBlockingStatuses(tracked: DraftProposalsFact): string[] {
+  const missing = Math.max(0, tracked.expected - tracked.statuses.length);
+  return [
+    ...tracked.statuses.filter((s) => !RETRY_SAFE_STATUSES.has(s)),
+    ...Array<string>(missing).fill(MISSING_PROPOSAL),
+  ];
+}
+
+/**
+ * Derived execution state of an approved draft's proposals. Order matters:
+ * `stopped` is decided BEFORE `failed`.
+ *
+ * - `stopped`: some listed proposal is outside approved/executing/executed/
+ *   execution_failed (undone or rejected from the inbox, expired, a stuck
+ *   pre-approval status) or no longer exists, WHETHER OR NOT another proposal
+ *   failed. Retry re-queues only the failed proposal, so with a sibling that can
+ *   never run it would execute that one alone after its fresh undo window:
+ *   half the approved configuration live ("executed + undone") with Settings as
+ *   the only way back. Retry therefore refuses such a set
+ *   (`DRAFT_RETRY_UNSAFE`) and the shell must not offer it; it also never waits
+ *   forever. The whole-draft undo (plan U9, S4) is the way out.
+ * - `failed`: the set is whole (every listed proposal is approved/executing/
+ *   executed/execution_failed) and at least one is `execution_failed`. POST
+ *   /draft/retry re-queues exactly those rows, which completes the pair, so the
+ *   shell offers a retry instead of waiting forever. `failed + executed` and
+ *   `failed + approved` are this case.
+ * - `executed`: every listed proposal executed.
+ * - `executing`: any executing, or some executed while others still wait for
+ *   the worker (work is in flight, so the shell keeps saying "Saving").
+ * - `pending`: all approved, none picked up yet.
+ *
+ * `null` while the draft is still being edited, and when there is nothing to
+ * track: a vacuous "executed" must never open billing.
+ */
+export function deriveDraftExecution(
+  draftStatus: 'draft' | 'approved',
+  tracked?: DraftProposalsFact,
+): DraftExecution | null {
+  if (draftStatus !== 'approved') return null;
+  if (!tracked || tracked.expected <= 0) return null;
+  const { statuses } = tracked;
+  if (retryBlockingStatuses(tracked).length > 0) return 'stopped';
+  if (statuses.some((s) => s === 'execution_failed')) return 'failed';
+  if (statuses.every((s) => s === 'executed')) return 'executed';
+  if (statuses.some((s) => s === 'executing' || s === 'executed')) return 'executing';
+  return 'pending';
 }
 
 /**
@@ -175,6 +262,12 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
       : {}),
     ...(f.activatedAt ? { activatedAt: f.activatedAt.toISOString() } : {}),
     ...(f.tenantCreatedAt ? { accountCreatedAt: f.tenantCreatedAt.toISOString() } : {}),
-    ...(f.draft ? { draft: f.draft } : {}),
+    ...(f.draft ? { draft: toDraftStatus(f.draft) } : {}),
   };
+}
+
+/** The status response's draft block: the raw proposal statuses never leave the server. */
+function toDraftStatus(draft: NonNullable<OnboardingFacts['draft']>): NonNullable<OnboardingStatusResponse['draft']> {
+  const { proposals, ...rest } = draft;
+  return { ...rest, execution: deriveDraftExecution(draft.status, proposals) };
 }

@@ -66,6 +66,37 @@ describe('onboarding_voice_policy handler against real tenant_settings', () => {
     expect(audit.rows).toHaveLength(1);
   });
 
+  // POST /api/onboarding/draft/retry re-approves a proposal whose first run may have
+  // written part of its settings before failing, so a second execution must land on
+  // the same row, not duplicate or reject.
+  it('executes twice onto the same settings (a retry after a partial first run)', async () => {
+    const ctx: ExecutionContext = { tenantId: tenant.tenantId, executedBy: tenant.userId, executedByRole: 'owner' };
+    const payload = {
+      voiceGreeting: 'Walsh Plumbing, how can I help?',
+      autonomousBookingEnabled: false,
+      afterHoursVoiceMode: 'voicemail',
+      emergencyTarget: 'owner_cell_then_text',
+      paymentCollectionMode: 'pay_link',
+      bookingHoursPreset: 'mon_sat_7_5',
+    };
+    const read = () =>
+      pool.query(
+        `SELECT voice_greeting, autonomous_booking_enabled, escalation_settings, payment_collection_mode, business_hours
+           FROM tenant_settings WHERE tenant_id = $1`,
+        [tenant.tenantId],
+      );
+    expect((await handler.execute(proposal(payload), ctx)).success).toBe(true);
+    const first = (await read()).rows[0];
+    expect((await handler.execute(proposal(payload), ctx)).success).toBe(true);
+    const second = await read();
+    // One row. Everything the first run wrote is unchanged; the second run may only
+    // fill escalation defaults the first left unset, and a third run changes nothing.
+    expect(second.rows).toHaveLength(1);
+    expect(second.rows[0]).toMatchObject({ ...first, escalation_settings: expect.objectContaining(first.escalation_settings) });
+    expect((await handler.execute(proposal(payload), ctx)).success).toBe(true);
+    expect((await read()).rows[0]).toEqual(second.rows[0]);
+  });
+
   it('rejects an invalid payment_collection_mode at the column', async () => {
     await settingsRepo.update(tenant.tenantId, { paymentCollectionMode: 'pay_link' });
     await expect(

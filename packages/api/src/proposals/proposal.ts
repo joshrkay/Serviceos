@@ -1134,6 +1134,23 @@ export interface ProposalRepository {
       >
     >
   ): Promise<Proposal | null>;
+  /**
+   * Owner-driven retry of a failed execution (onboarding/draft/retry.ts): ONE
+   * atomic conditional write, valid only for status 'execution_failed'
+   * (lifecycle allows execution_failed -> draft). Moves the row to 'draft' and
+   * clears the stale attempt state: `approvedAt`, `executionError`, `claimedBy`,
+   * `claimedAt`, and `executionRetryCount` (back to 0).
+   *
+   * `updateStatusIf` cannot do this: it skips undefined values, so it can never
+   * null `approved_at`, and `transitionProposal` stamps `approvedAt` only when it
+   * is unset, so a stale value would make the re-approval reuse a closed undo
+   * window and the worker would run the proposal at once. A stale retry count
+   * would also let the next stale sweep terminalize the row immediately.
+   *
+   * Returns the reset row, or null when it is missing, another tenant's, or not
+   * execution_failed. Leaves `executedBy` / `executedByRole`: approval re-stamps them.
+   */
+  resetFailedForRetry(tenantId: string, id: string): Promise<Proposal | null>;
   update(
     tenantId: string,
     id: string,
@@ -1686,6 +1703,21 @@ export class InMemoryProposalRepository implements ProposalRepository {
     if (!proposal || proposal.tenantId !== tenantId) return null;
     if (!fromStatuses.includes(proposal.status)) return null;
     return this.updateStatus(tenantId, id, to, updates);
+  }
+
+  async resetFailedForRetry(tenantId: string, id: string): Promise<Proposal | null> {
+    const proposal = this.proposals.get(id);
+    if (!proposal || proposal.tenantId !== tenantId) return null;
+    if (proposal.status !== 'execution_failed') return null;
+    proposal.status = 'draft';
+    proposal.updatedAt = new Date();
+    delete proposal.approvedAt;
+    delete proposal.executionError;
+    delete proposal.claimedBy;
+    delete proposal.claimedAt;
+    proposal.executionRetryCount = 0;
+    this.proposals.set(id, proposal);
+    return { ...proposal };
   }
 
   async update(

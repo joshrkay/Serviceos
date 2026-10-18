@@ -37,6 +37,7 @@ import {
   LineItemTemplate,
   createTemplate,
 } from '../../templates/estimate-template';
+import { normalizeMobileE164 } from '../../shared/phone/normalize';
 import { VALID_VERTICAL_TYPES, VerticalType } from '../../shared/vertical-types';
 import { isRuntimeTimezone } from '../../shared/timezone';
 import type { PendingInvitationRepository } from '../../users/pending-invitation';
@@ -95,6 +96,9 @@ function isVerticalType(v: unknown): v is VerticalType {
 //     explicit 30 did — but the tenant is no longer recorded as having
 //     chosen a buffer it was never asked about. An owner who later sets one
 //     (Settings / PUT /identity) stores a real choice.
+//   - ownerPhone: OPTIONAL canonical E.164 cell from the "pick, don't build"
+//     draft, written to tenant_settings.owner_phone. Absent means the column is
+//     left untouched (the key is not passed at all); it is never defaulted.
 //   - timezone: REQUIRED, and gated at draft time by
 //     tenant-settings-proposer.ts so it is always supplied by the time the
 //     card is approvable. This handler previously omitted the key entirely,
@@ -190,6 +194,19 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
       return { success: false, error: `timezone is not a recognized IANA zone: ${timezone}` };
     }
 
+    // The owner's cell from the draft. Absent means untouched; a present value
+    // is re-normalised (idempotent on canonical input) so a bad payload fails
+    // before anything is written.
+    let ownerPhone: string | undefined;
+    if (payload.ownerPhone !== undefined) {
+      try {
+        if (typeof payload.ownerPhone !== 'string') throw new Error('not a string');
+        ownerPhone = normalizeMobileE164(payload.ownerPhone);
+      } catch {
+        return { success: false, error: 'ownerPhone must be a valid US phone number' };
+      }
+    }
+
     if (!this.settingsRepo || !this.packActivationRepo) {
       // WS3 — no synthetic success: fail before writing anything so a
       // partially-wired registry can't leave the tenant half-configured.
@@ -206,6 +223,10 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
         // #1201 — no jobBufferMinutes: never asked, so never written (see above).
         ...(hourlyRateCents !== undefined ? { hourlyRateCents } : {}),
         timezone,
+        // Load-bearing conditional spread: upsertIdentityFields treats the
+        // KEY'S PRESENCE as "write this value", so `ownerPhone: undefined`
+        // would write NULL and clear a number the owner already has.
+        ...(ownerPhone !== undefined ? { ownerPhone } : {}),
         bootstrapAiModel: resolveBootstrapAiModel(),
       });
       await this.auditRepo.create(
@@ -220,6 +241,8 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
             businessName: payload.businessName,
             ...(hourlyRateCents !== undefined ? { hourlyRateCents } : {}),
             timezone,
+            // Never the number itself.
+            ...(ownerPhone !== undefined ? { ownerPhoneSet: true } : {}),
             source: 'onboarding_conversation',
           },
         }),
