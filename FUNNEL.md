@@ -33,8 +33,8 @@ stamps the four fields uniformly. The server activation event passes them in
 | 7 | `wizard_step_voice` | `OnboardingShell.tsx` | client | user reaches the `ai_check` (voice) step | `step` |
 | 7b | `wizard_step_calendar` | `CalendarChoicePanel.tsx` | client | user chooses a calendar provider (google/builtin) | `provider` |
 | 8 | `wizard_completed` | `OnboardingShell.tsx` (alongside existing `onboarding_completed`) | client | `isComplete` flips true | `voice_agent_live` |
-| 9 | `test_call_initiated` | `web/.../onboarding/v2/steps/TestCallStep.tsx` | client | user taps the number / copies it (call intent) | — |
-| 10 | `test_call_succeeded` | `TestCallStep.tsx` | client | test_call step flips to `done` (inbound detected) | — |
+| 9 | `test_call_initiated` | `web/.../onboarding/v2/steps/TestCallStep.tsx`; v3: `v3/TestCallTurn.tsx` | client | user taps the number / copies it (call intent) | — |
+| 10 | `test_call_succeeded` | `TestCallStep.tsx`; v3: `v3/AfterApproval.tsx` | client | test_call step flips to `done` (inbound detected) | — |
 | 11 | `first_real_call_received` **[ACTIVATION]** | `api/.../voice/activation.ts` (called from `app.ts onSessionEnded`) | server | first real inbound call after go-live (idempotent once/tenant) | `inbound_call_count` |
 | 12 | `trial_to_paid` **[CONVERSION]** | `api/.../webhooks/routes.ts` (Stripe `customer.subscription.updated`, trialing→active) | server | trial converts to a paid subscription | `priorStatus` |
 
@@ -63,6 +63,11 @@ four required fields; `tenant_id` comes from the onboarding status (or the draft
 | `v3_readback_viewed` | `ConversationShell.tsx` | the owner first sees the read-back list; once per mount | `trade`, `metro` |
 | `v3_readback_edit` | `ConversationShell.tsx` | the owner taps a read-back row to change that choice | `choice_key` |
 | `v3_approved` | `ConversationShell.tsx` | "That's right" succeeded and this call saved the draft (a repeat tap on an already-saved draft does not fire) | `proposal_count` (2), `trade` |
+| `v3_trial_viewed` | `AfterApproval.tsx` | the trial turn ("start your free trial") first appears, after the saved choices have gone live; once per mount | none |
+| `v3_trial_started` | `AfterApproval.tsx` (raised by `TrialTurn.tsx`) | the owner taps "Start my free trial", before the payment page is requested, so an attempt that then failed still counts. The server's `plan_selected` counts the checkouts that were actually created | `plan` (`starter` \| `growth`) |
+| `v3_number_viewed` | `AfterApproval.tsx` | the number turn first appears (getting it, asking for it, or showing it); once per mount | none |
+| `v3_number_ready` | `AfterApproval.tsx` | the owner's number is known while they are on the number turn; once per mount. A visit that picks up later in the flow never saw the wait and does not fire it | none |
+| `v3_test_call_viewed` | `AfterApproval.tsx` | the test-call turn ("Now you call me.") first appears; the voice getting ready before it is not counted; once per mount | none |
 
 `choice_key` is one of the seven core setting keys (`greeting`, `trip_fee_and_rate`,
 `booking_posture`, `payment_collection_mode`, `booking_hours`, `emergency_target`,
@@ -74,6 +79,17 @@ choice with no `v3_choice_made` (the owner stalled on that turn), `v3_keep_rest`
 they got before skipping, from `answered_count`), or `v3_readback_viewed` with no
 `v3_approved`. `v3_readback_edit` per tenant is the quality signal for the typical shop:
 how often the finished answer needed changing. `answer_mode` splits taps from typing.
+
+After the read-back the same frame carries the trial, the number and the test call, so
+the funnel continues without a gap: `v3_approved` -> `v3_trial_viewed` -> `v3_trial_started`
+(the checkout itself is the server's `plan_selected`; the trial going live is the Stripe
+webhook) -> `v3_number_viewed` -> `v3_number_ready` -> `v3_test_call_viewed` ->
+`test_call_initiated` -> `test_call_succeeded`. The two test-call events keep the meaning
+they have in the sidebar shell (the intent to call is a tap on the number or the copy
+button, once per visit; the success is the step being seen to flip to `done`, never replayed
+by a visit that finds it already done), so the series stays comparable across both shells.
+`v3_number_viewed` to `v3_number_ready` is how long the owner waited for a number;
+`v3_trial_viewed` with no `v3_trial_started` is a trial the owner did not want to start.
 
 ### Generic per-step events (drive abandonment)
 
