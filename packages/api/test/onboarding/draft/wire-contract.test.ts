@@ -6,22 +6,27 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  ApproveOnboardingDraftBodySchema,
   ApproveOnboardingDraftResponseSchema,
   CreateOnboardingDraftBodySchema,
   CreateOnboardingDraftResponseSchema,
   ONBOARDING_CHOICE_KEYS,
   ONBOARDING_CORE_CHOICE_KEYS,
+  ONBOARDING_DRAFT_EXECUTION_STATES,
   ONBOARDING_REGISTRY_TRADES,
   OnboardingDraftResponseSchema,
   OnboardingDraftSchema,
+  RetryOnboardingDraftResponseSchema,
   StageOnboardingChoiceBodySchema,
 } from '@ai-service-os/shared';
+import * as apiOnboardingContracts from '../../../src/onboarding/contracts';
 import { assembleTypicalShop } from '../../../src/onboarding/choices/assemble';
 import { InMemoryRegionalPriceTierRepository } from '../../../src/onboarding/choices/price-tiers';
 import { ALL_CHOICE_KEYS, CHOICE_KEYS } from '../../../src/onboarding/choices/schema';
 import { REGISTRY_TRADES } from '../../../src/onboarding/choices/registry';
 import { metroForPhone } from '../../../src/compliance/us-geography';
 import { InMemoryOnboardingDraftRepository } from '../../../src/onboarding/draft/repository';
+import * as apiDraftContracts from '../../../src/onboarding/draft/contracts';
 import { CreateDraftInputSchema, StageChoiceBodySchema } from '../../../src/onboarding/draft/contracts';
 
 const TENANT_ID = '00000000-0000-0000-0000-0000000000a1';
@@ -115,6 +120,51 @@ describe('onboarding draft wire contract (api <-> shared)', () => {
     for (const body of stage) {
       expect(StageOnboardingChoiceBodySchema.safeParse(body).success, JSON.stringify(body)).toBe(StageChoiceBodySchema.safeParse(body).success);
     }
+  });
+
+  it('parses a real draft whether or not the API sends ownerPhone, and still rejects an unknown field', async () => {
+    const { draft } = await buildDraft('plumbing', '(216) 555-0142');
+    const wire = overTheWire(draft) as Record<string, unknown>;
+    // An API that predates the field omits it; one that has it sends E.164 or null. Both must parse.
+    const { ownerPhone: _omitted, ...without } = wire;
+    expect(OnboardingDraftSchema.parse(without)).toEqual(without);
+    for (const ownerPhone of [null, '+12165550142']) {
+      expect(OnboardingDraftSchema.parse({ ...wire, ownerPhone }).ownerPhone).toBe(ownerPhone);
+    }
+    expect(OnboardingDraftSchema.safeParse({ ...wire, surprise: true }).success).toBe(false);
+  });
+
+  it('parses the retry response with a real approved draft', async () => {
+    const { repo, draft } = await buildDraft('plumbing', '(216) 555-0142');
+    const ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
+    const approved = overTheWire(await repo.markApproved(TENANT_ID, ids));
+    const parsed = RetryOnboardingDraftResponseSchema.parse({ draft: approved, retriedProposalIds: [ids[1]] });
+    expect(parsed.retriedProposalIds).toEqual([ids[1]]);
+    expect(RetryOnboardingDraftResponseSchema.safeParse({ draft: overTheWire(draft) }).success).toBe(false);
+  });
+
+  it('accepts only an approve body the API accepts (optional expectedVersion, strict)', () => {
+    const cases: Array<[unknown, boolean]> = [
+      [{}, true],
+      [{ expectedVersion: 1 }, true],
+      [{ expectedVersion: 0 }, false],
+      [{ expectedVersion: 1.5 }, false],
+      [{ expectedVersion: 1, extra: 1 }, false],
+    ];
+    // The API's own schema arrives with the approve lock; until then the table above is the pin.
+    const api = (apiDraftContracts as Record<string, unknown>).ApproveDraftBodySchema as { safeParse(v: unknown): { success: boolean } } | undefined;
+    for (const [body, ok] of cases) {
+      expect(ApproveOnboardingDraftBodySchema.safeParse(body).success, JSON.stringify(body)).toBe(ok);
+      if (api) expect(api.safeParse(body).success, `api ${JSON.stringify(body)}`).toBe(ok);
+    }
+  });
+
+  it('keeps the execution states equal to the API list once the API reports them', () => {
+    expect([...ONBOARDING_DRAFT_EXECUTION_STATES]).toEqual(['pending', 'executing', 'executed', 'failed', 'stopped']);
+    // The status draft fact gains `execution` in the same change as DRAFT_EXECUTION_STATES; until the API
+    // here has it, the literal list above is the pin.
+    const api = (apiOnboardingContracts as Record<string, unknown>).DRAFT_EXECUTION_STATES;
+    if (api !== undefined) expect([...ONBOARDING_DRAFT_EXECUTION_STATES]).toEqual([...(api as readonly string[])]);
   });
 
   it('keeps the shared choice-key and trade lists equal to the API registry', () => {

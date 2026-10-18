@@ -5,6 +5,7 @@
  *   GET  /api/onboarding/draft                       -> { draft }
  *   PUT  /api/onboarding/draft/choices/:settingKey   -> { draft }
  *   POST /api/onboarding/draft/approve               -> { draft, proposalIds, approvedNow }
+ *   POST /api/onboarding/draft/retry                 -> { draft, retriedProposalIds }
  *
  * The API owns the source schemas (packages/api/src/onboarding/choices/schema.ts
  * and onboarding/draft/contracts.ts). These mirror what crosses the wire, with
@@ -152,9 +153,20 @@ export const OnboardingDraftSchema = z
     createdAt: z.iso.datetime(),
     updatedAt: z.iso.datetime(),
     approvedAt: z.iso.datetime().nullable(),
+    /**
+     * The owner's cell in E.164, once the API stores one. Optional on the wire:
+     * an API that predates the field omits it, and the schema is strict, so a
+     * required key would reject every draft from it.
+     */
+    ownerPhone: z.string().nullable().optional(),
   })
   .strict();
 export type OnboardingDraft = z.infer<typeof OnboardingDraftSchema>;
+
+/** Where an approved draft's proposals are on their way to execution (the status draft fact; derived, never stored). */
+export const ONBOARDING_DRAFT_EXECUTION_STATES = ['pending', 'executing', 'executed', 'failed', 'stopped'] as const;
+export const OnboardingDraftExecutionSchema = z.enum(ONBOARDING_DRAFT_EXECUTION_STATES);
+export type OnboardingDraftExecution = z.infer<typeof OnboardingDraftExecutionSchema>;
 
 /** Body of POST /api/onboarding/draft. */
 export const CreateOnboardingDraftBodySchema = z
@@ -162,7 +174,7 @@ export const CreateOnboardingDraftBodySchema = z
     packId: z.string().min(1).max(40),
     businessName: z.string().min(1).max(120),
     ownerFirstName: z.string().min(1).max(60).optional(),
-    /** Owner cell, used only to place the metro. Not stored on the draft. */
+    /** Owner cell: places the metro (the API also keeps the normalised number on the draft as `ownerPhone`). */
     phone: z.string().min(7).max(20).optional(),
     clientTimezone: z.string().min(1).max(64).optional(),
   })
@@ -198,3 +210,22 @@ export const ApproveOnboardingDraftResponseSchema = z
   })
   .strict();
 export type ApproveOnboardingDraftResponse = z.infer<typeof ApproveOnboardingDraftResponseSchema>;
+
+/**
+ * Body of POST /api/onboarding/draft/approve. `expectedVersion` is the draft
+ * version the read-back on screen was rendered from; the API answers 409
+ * VERSION_CONFLICT when the draft has moved on. Optional, so `{}` still works.
+ */
+export const ApproveOnboardingDraftBodySchema = z
+  .object({ expectedVersion: z.number().int().positive().optional() })
+  .strict();
+export type ApproveOnboardingDraftBody = z.infer<typeof ApproveOnboardingDraftBodySchema>;
+
+/** Response of POST /api/onboarding/draft/retry: the proposals that were re-queued. */
+export const RetryOnboardingDraftResponseSchema = z
+  .object({
+    draft: OnboardingDraftSchema,
+    retriedProposalIds: z.array(z.string()),
+  })
+  .strict();
+export type RetryOnboardingDraftResponse = z.infer<typeof RetryOnboardingDraftResponseSchema>;

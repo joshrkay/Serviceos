@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   ONBOARDING_CHOICE_KEYS,
+  ONBOARDING_DRAFT_EXECUTION_STATES,
+  ApproveOnboardingDraftBodySchema,
   ApproveOnboardingDraftResponseSchema,
   CreateOnboardingDraftBodySchema,
+  OnboardingDraftExecutionSchema,
   OnboardingDraftSchema,
+  RetryOnboardingDraftResponseSchema,
   StageOnboardingChoiceBodySchema,
   StagedOnboardingChoiceSchema,
 } from './onboarding-draft.js';
@@ -99,5 +103,34 @@ describe('onboarding draft wire contract', () => {
     const draft = { ...draftFixture(), status: 'approved', version: 2, proposalIds: ['p1', 'p2'], approvedAt: '2026-10-18T10:05:00.000Z' };
     const parsed = ApproveOnboardingDraftResponseSchema.parse({ draft, proposalIds: ['p1', 'p2'], approvedNow: true });
     expect(parsed.proposalIds).toHaveLength(2);
+  });
+
+  it('parses a draft with and without ownerPhone, so an API that predates the field still parses', () => {
+    expect(OnboardingDraftSchema.parse(draftFixture()).ownerPhone).toBeUndefined();
+    expect(OnboardingDraftSchema.parse({ ...draftFixture(), ownerPhone: '+12165550142' }).ownerPhone).toBe('+12165550142');
+    expect(OnboardingDraftSchema.parse({ ...draftFixture(), ownerPhone: null }).ownerPhone).toBeNull();
+    expect(OnboardingDraftSchema.safeParse({ ...draftFixture(), ownerPhone: 12165550142 }).success).toBe(false);
+    expect(OnboardingDraftSchema.safeParse({ ...draftFixture(), somethingNew: 1 }).success).toBe(false);
+  });
+
+  it('takes an optional positive-integer expectedVersion on the approve body and nothing else', () => {
+    expect(ApproveOnboardingDraftBodySchema.safeParse({}).success).toBe(true);
+    expect(ApproveOnboardingDraftBodySchema.safeParse({ expectedVersion: 3 }).success).toBe(true);
+    for (const bad of [{ expectedVersion: 0 }, { expectedVersion: 1.5 }, { expectedVersion: '3' }, { version: 3 }]) {
+      expect(ApproveOnboardingDraftBodySchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('parses the retry response and rejects a body that lacks the re-queued ids', () => {
+    const draft = { ...draftFixture(), status: 'approved', version: 2, proposalIds: ['p1', 'p2'], approvedAt: '2026-10-18T10:05:00.000Z' };
+    expect(RetryOnboardingDraftResponseSchema.parse({ draft, retriedProposalIds: ['p2'] }).retriedProposalIds).toEqual(['p2']);
+    expect(RetryOnboardingDraftResponseSchema.safeParse({ draft }).success).toBe(false);
+    expect(RetryOnboardingDraftResponseSchema.safeParse({ draft, retriedProposalIds: [], extra: 1 }).success).toBe(false);
+  });
+
+  it('lists the five execution states the status reports', () => {
+    expect([...ONBOARDING_DRAFT_EXECUTION_STATES]).toEqual(['pending', 'executing', 'executed', 'failed', 'stopped']);
+    expect(OnboardingDraftExecutionSchema.safeParse('failed').success).toBe(true);
+    expect(OnboardingDraftExecutionSchema.safeParse('execution_failed').success).toBe(false);
   });
 });
