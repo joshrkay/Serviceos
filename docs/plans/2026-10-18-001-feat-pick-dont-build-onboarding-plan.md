@@ -349,8 +349,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Edge: approve with choices unanswered → each takes its `mostShops` default (option A
     today), no gated proposal minted; no recorded timezone → 400 `TIMEZONE_REQUIRED`, zero
     proposal rows, draft still `'draft'`; stale `version` on PUT → 409; approve twice → second
-    is a no-op 200 returning the same two ids (as S1 shipped; U11 replaces this with 409
-    `DRAFT_APPROVED`).
+    is a no-op 200 returning the same two ids (as S1 shipped; U11 keeps it and only adds the
+    lock and the version check).
   - Error: unknown `settingKey` → 400 naming the key; option `'c'` → 400; tenant without a
     draft calling approve → 404; non-owner → 403.
   - Integration: handler for `onboarding_voice_policy` writes `voice_greeting`,
@@ -735,7 +735,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     validation; the first screen's cell stays optional)
   - tests: `packages/api/test/onboarding/draft/owner-phone.test.ts`,
     `packages/api/test/integration/onboarding-draft-owner-phone.test.ts`, the v3 shell tests
-- **Approach:** The cell is a fact about the owner, not a choice, so it lives on the draft and
+- **Approach:** The API half (the column, `PUT /draft/owner-phone`, the payload field and the
+  gate) ships in the S1 follow-ups PR; the read-back prompt ships with S4. The cell is a fact
+  about the owner, not a choice, so it lives on the draft and
   travels on the settings proposal like the business name; the emergency card never promises a
   ring that cannot happen. Approval, not staging, is the gate, so the owner can answer the seven
   cards first and supply the number at the read-back.
@@ -772,7 +774,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - tests: `packages/api/test/onboarding/draft/undo.test.ts`,
     `packages/api/test/onboarding/derive-status.test.ts` (extend),
     `packages/api/test/integration/onboarding-draft-undo.test.ts`, the v3 shell tests
-- **Approach:** `POST /draft/undo` runs in one tenant transaction that locks, then decides,
+- **Approach:** The derived `execution` fact and `POST /draft/retry` ship in the S1 follow-ups
+  PR; undo ships in S4. `POST /draft/undo` runs in one tenant transaction that locks, then decides,
   then writes. It takes `SELECT … FOR UPDATE` on the draft row and then on the proposals in
   `proposal_ids` (ordered by id, so two undos cannot deadlock), and requires EVERY locked row
   to still be `approved` and inside the undo window (`isInUndoWindow`, read from the locked
@@ -821,10 +824,12 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   A choice `PUT` racing an approval cannot change what is executed, and two concurrent
   approvals cannot both mint a proposal pair. Closes the gap S1 shipped with (see U2).
 - **Requirements:** R3
-- **Dependencies:** U2 (S1, merged). Lands first in S4: U9's undo reuses the locked read.
+- **Dependencies:** U2 (S1, merged). Ships early, in the "S1 follow-ups" PR together with U10's
+  API half and U9's execution fact and `POST /draft/retry` (see the slice table); U9's undo
+  reuses the locked read.
 - **Files:**
   - modify `packages/api/src/onboarding/draft/contracts.ts` (`ApproveDraftBodySchema`:
-    `{ expectedVersion }`, a positive integer, strict) and
+    `{ expectedVersion? }`, a positive integer, optional until every client sends it, strict) and
     `packages/shared/src/contracts/onboarding-draft.ts` (`ApproveOnboardingDraftBodySchema`),
     kept equal by `packages/api/test/onboarding/draft/wire-contract.test.ts` (extend)
   - modify `packages/api/src/onboarding/draft/repository.ts` (`getForUpdate(tenantId)`: the
@@ -835,8 +840,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - modify `packages/api/src/onboarding/draft/approve.ts` (`approveDraft` takes
     `expectedVersion`, locks first, and builds from the locked row)
   - modify `packages/api/src/routes/onboarding-draft.ts` (`POST /draft/approve` validates the
-    body and drops its own unlocked pre-read; maps the typed errors to 409 `VERSION_CONFLICT`
-    and 409 `DRAFT_APPROVED`, the codes `PUT /draft/choices/:settingKey` already uses)
+    body and drops its own unlocked pre-read; maps `DraftVersionConflictError` to 409
+    `VERSION_CONFLICT`, the code `PUT /draft/choices/:settingKey` already uses; an already
+    approved draft stays the idempotent 200 `approvedNow: false` with the stored ids)
   - modify `packages/web/src/lib/onboardingDraftApi.ts` and
     `packages/web/src/hooks/useOnboardingDraft.ts` (`approve` sends the draft's `version`)
   - tests: `packages/api/test/onboarding/draft/approve.test.ts` (extend),
@@ -850,10 +856,13 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `stageChoice` and `setClientTimezone` already take `FOR UPDATE` first, so a `PUT` that
   arrives during an approval blocks, then finds the draft approved and gets `DRAFT_APPROVED`;
   a `PUT` that took the lock first has bumped `version`, so the approval gets
-  `VERSION_CONFLICT`. Under the lock, in this order: no row → 404; `status = 'approved'` →
-  409 `DRAFT_APPROVED` (whatever the version); `version <> expectedVersion` → 409
-  `VERSION_CONFLICT` naming expected and found. Both refusals happen before anything is
-  minted, so they leave no proposal rows. Only then does `buildDraftProposals` run, from the
+  `VERSION_CONFLICT`. Under the lock, in this order: no row → 404; `status = 'approved'` → 200
+  `{ approvedNow: false }` with the ids the row already carries, whatever the version (a double
+  tap or a retry after a lost response is a success, as S1 shipped); `expectedVersion` present
+  and `<>` the row's `version` → 409 `VERSION_CONFLICT` naming expected and found. Neither path
+  mints anything. A missing `expectedVersion` is accepted while older clients post `{}`: the
+  row lock alone already serialises `PUT` against approve and approve against approve; S4 makes
+  the field required once the web (S2) and mobile send it. Only then does `buildDraftProposals` run, from the
   locked row and never from an earlier read, followed by the mint, the batch approve and the
   `failed.length` gate exactly as U2 describes. `markApproved` is the second guard, not the
   first: `UPDATE … WHERE id = $1 AND status = 'draft' AND version = $2`, and zero rows throws,
@@ -864,10 +873,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   predicate. Web: `useOnboardingDraft.approve` reads the version from the draft at run time (the
   hook's write queue already serialises it behind staged choices) and sends it. It already
   re-reads on a 409; a `VERSION_CONFLICT` shows the existing one-line "your answers changed
-  somewhere else" notice and the owner re-taps on the refreshed read-back (U3 renders it), and
-  a `DRAFT_APPROVED` whose re-read shows `status = 'approved'` is success, not an error: the
-  shell moves on to "Saving" with the proposal ids the draft carries. That covers a double tap
-  and a retry after a lost response.
+  somewhere else" notice and the owner re-taps on the refreshed read-back (U3 renders it). A
+  repeat tap or a retry after a lost response gets the idempotent 200 and the shell moves on
+  to "Saving" with the ids it carries.
 - **Patterns to follow:** `stageChoice` in `onboarding/draft/repository.ts` (lock, then
   compare, then write), U9's lock-then-decide-then-write undo, and
   `test/integration/onboarding-draft-repository.test.ts` for real-connection setup.
@@ -878,9 +886,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Edge (stale version): `expectedVersion` behind the row (a `PUT` landed after the read-back
     rendered) → 409 `VERSION_CONFLICT`, zero proposal rows, draft still `'draft'` with its
     choices as the `PUT` left them, no `draft_approved` audit row; `expectedVersion` ahead of
-    the row → the same; missing or non-integer `expectedVersion` → 400 naming the field.
-  - Edge (already approved): approve again with any version → 409 `DRAFT_APPROVED`, still
-    exactly two proposal rows for the tenant and no new audit row.
+    the row → the same; a non-integer `expectedVersion` → 400 naming the field; a missing one is accepted (the
+    lock still serialises the writers) until S4 makes it required.
+  - Edge (already approved): approve again with any version → 200 `approvedNow: false` with the
+    same two ids, still exactly two proposal rows for the tenant and no new audit row.
   - Race, `PUT` vs approve (two real connections, both orders): (a) the `PUT` takes the lock
     and commits first, then the approve that carries the pre-`PUT` version → `VERSION_CONFLICT`,
     no proposals, the staged choice is on the draft; (b) the approve takes the lock first and
@@ -888,17 +897,17 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     equal, field by field, the payloads of the two proposals that executed. Never: a proposal
     payload that differs from the committed draft's resolved choices.
   - Race, approve vs approve (two connections, same `expectedVersion`, repeated in a loop so
-    ordering luck cannot pass it): exactly one returns 200 and the other 409 `DRAFT_APPROVED`;
-    afterwards exactly one pair of `onboarding_*` proposals exists for the draft (counted by
-    `source_context.draftId`), its ids equal the draft's `proposal_ids`, and the loser's
-    response carries no ids.
+    ordering luck cannot pass it): both return 200, the first with `approvedNow: true` and the one that waited behind the
+    lock with `approvedNow: false`; afterwards exactly one pair of `onboarding_*` proposals
+    exists for the draft (counted by `source_context.draftId`), its ids equal the draft's
+    `proposal_ids`, and both responses carry those same ids.
   - Unit: `markApproved` with a stale version, or on a non-`draft` status, throws and writes
     nothing, identically in the Pg and in-memory repositories; `approveDraft` builds from the
     row `getForUpdate` returned (a repo double that changes the row after an earlier read proves
     the earlier read is unused).
   - Web: `approve` sends the hook's current version; a 409 `VERSION_CONFLICT` re-reads and sets
-    the notice; a 409 `DRAFT_APPROVED` whose re-read is `approved` resolves as success and
-    leaves no error; a double tap sends one request.
+    the notice; a repeat approve resolves as success with the same ids and leaves no error; a double tap
+    sends one request.
   - Integration: all of the races above on real Postgres under RLS, in
     `packages/api/test/integration/`, as CLAUDE.md requires for a DB-touching change.
 - **Verification:** no interleaving of choice writes, a timezone write and one or more
@@ -1206,8 +1215,9 @@ previous one; the previous slice is merged first.
 |---|---|---|---|
 | S1 | U1 + U2 | Choice registry, typical-shop assembly, regional tiers, draft/choices/approve API, `onboarding_voice_policy` proposal. Live API, integration-tested, no UI yet. | 7-10 days |
 | S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
+| S1b | U11 + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main`, in flight: approval row lock with optional `expectedVersion`; `owner_phone` on the draft, `PUT /draft/owner-phone`, the owner cell on the settings payload and the `OWNER_PHONE_REQUIRED` gate; `draft.execution` on the status and `POST /draft/retry`. The web consumers (send the version, ask for the cell, show a failed execution and retry) follow on S2. | 2 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
-| S4 | U5 + U9 + U10 + U11 | Approval compare-and-swap and row lock (`expectedVersion`, locked read, guarded `markApproved`; first in the slice, U9 reuses its locked read); free-speech override, setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); whole-draft undo (row-locked, all-or-nothing), execution tracking and retry; the owner's cell on the draft and the settings proposal. | 5.5-6.5 days |
+| S4 | U5 + rest of U9 + rest of U10 | Free-speech override, setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); whole-draft undo (row-locked, all-or-nothing) on U11's locked read; the read-back's owner-cell prompt; `expectedVersion` made required once every client sends it. | 4-5 days |
 | S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search, forwarding text with owner confirmation and probe, forwarding answers on the draft and the settings proposal, seeded-price baseline with legacy backfill and the re-run repricing gate, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, no link on a failed mode read), flag flipped, v2 deleted. | 9-11 days |
 | S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, reset before reuse and excluded from owner, billing and analytics surfaces. | 7-10 days |
 
