@@ -82,21 +82,26 @@ unowned position.
   first run only: the seeder skips any catalog item or template
   whose canonical name already exists, so on U6's "Re-run setup" the price card does not
   re-seed. It updates the pack's two headline items (visit fee, labor rate) and the estimate
-  template line items that carry those same seeded amounts, in each case only while the row
-  still holds the price the seeder set, and a row that moves takes the new pick as its
-  baseline in the same statement that writes its price, so a second re-run still sees an
-  untouched seed; anything the owner has edited is left alone, and the read-back says which
-  happened ("Your labor rate is yours; I left it"). Knowing which rows
-  still hold the seeded price needs the baseline: U6's migration adds a nullable
-  `seeded_unit_price_cents` to `catalog_items` and to the estimate template line items, set by
-  the seeder from then on; a row whose baseline is null or differs from its current price is
-  the owner's and is left alone. A null baseline is therefore not a neutral default: a tenant
-  seeded before that migration would read as all owner-owned, and the re-run price card would
-  promise an update it could not make. So the migration backfills the baseline for existing
-  rows whose price exactly equals the seed price for the tenant's pack at the tenant's
-  resolved price tier (an exact match is an untouched seed; everything else stays null and
-  owner-owned), and the re-run flow offers repricing only when the tenant has at least one
-  baseline. A tenant with none is told its prices are its own and sees no price card (U6).
+  template lines seeded from them, each only while the owner has not touched it. Ownership
+  is derived from the rows at the moment of the re-run and never stored a second time: a
+  headline item moves while its price still equals the baseline the seeder wrote, and a
+  template line moves only when its own price still equals its own baseline AND the catalog
+  item it was seeded from moved in the same statement. A template line stores no catalog item
+  id today, so U6's migration adds the link (a `seededCatalogItemId` key the seeder writes on
+  the line) beside the baselines; a line whose link cannot be established is the owner's. An
+  owner who edits a headline item therefore keeps the item and every line seeded from it at
+  their price, an owner who saves a template keeps that template, and a row that moves takes
+  the new pick as its baseline in the same statement that writes its price, so a second
+  re-run still sees an untouched seed. Anything left alone is named by the read-back
+  ("Your labor rate is yours; I left it"). A null baseline means "the owner's", so a tenant
+  seeded before the baseline existed would read as all owner-owned and the price card would
+  promise an update it could not make. The migration therefore backfills a baseline, but only
+  where the schema shows the row was made by the seeder and has not been written since
+  (`updated_at = created_at`, with the seeder's own audit record); a current price that merely
+  equals a seed price is not evidence, because an owner can type one by hand. Everything else
+  stays null and owner-owned, and the re-run flow offers repricing only while a headline item
+  still holds its baseline. A tenant with none is told its prices are its own and sees no
+  price card (U6).
 - **Metro from area code is a static NPA→metro map in code**, extending
   `packages/api/src/compliance/us-geography.ts` which today maps area code to state only. One
   spoken confirmation when an NPA spans metros, and the inferred city is always visible and
@@ -197,7 +202,10 @@ tiers; import from a photo; pricing or plan changes.
   `demo_write_rejected` (a write refused by the same check inside its own transaction),
   `demo_inflight_reaped` (a stale in-flight registry row removed), `demo_callsid_mismatch`
   (a validly signed callback, or the `Calls` response, presenting a second CallSid for a
-  lease) and `demo_budget_alert` (the daily call budget reaching 80% of a cap, or filling one).
+  lease), `demo_budget_alert` (the daily call budget reaching 80% of a cap, or filling one),
+  `demo_call_unconfirmed` (a `Calls` request whose outcome may have created a call, with its
+  reason) and `demo_call_unconfirmed_expired` (the reservation of such a call returned after
+  the callback window closed with no CallSid ever bound).
 - **Integer cents:** tier prices, trip fee and hourly rate are cents end to end; the price
   multiplier is applied in integer arithmetic with explicit rounding in one function.
 - **tenant_id + RLS:** `onboarding_drafts` carries `tenant_id` with RLS like
@@ -333,8 +341,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `POST /draft/reset`, first, never a reopen); it re-assembles for the
   current trade and metro, pre-fills `choices`
   from the live settings (greeting → override label; the enum keys → the option whose writes
-  match; prices → the current headline items, repriced only while the tenant still has a
-  seeded baseline, U6; the owner's cell → the live `tenant_settings.owner_phone`, copied onto
+  match; prices → the current headline items, repriced only while a headline item still holds
+  its seeded price, U6; the owner's cell → the live `tenant_settings.owner_phone`, copied onto
   the draft's `owner_phone` (U10) even when it is null, so a number the owner has since
   changed or cleared in Settings replaces the one the draft captured at the first run and
   U10's `ownerPhone` payload field cannot write the old number back over the newer edit),
@@ -768,28 +776,45 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `packages/api/test/onboarding/derive-status.test.ts` and `contracts.test.ts` (extend),
     `packages/api/test/integration/onboarding-status-failure-code.test.ts` (real
     `tenant_integrations` rows)
-  - create migration `314_seeded_price_baseline` (`catalog_items.seeded_unit_price_cents`
-    and a `seededUnitPriceCents` key on each estimate template line item inside the
-    `line_item_templates` JSONB, both nullable; `tenant_settings.seeded_baseline_backfilled_at`,
-    the per-tenant one-shot stamp for the backfill below) and
-    `packages/api/src/packs/reprice-seeded.ts` (the re-run update path: headline items and
-    template lines whose current price equals their baseline move to the new pick, and a moved
-    row's baseline moves with it: price and baseline are written by the same `UPDATE`
-    (`unit_price_cents` and `seeded_unit_price_cents` on a catalog item, `defaultUnitPriceCents`
-    and `seededUnitPriceCents` on a template line), never in two statements; the seeder
-    writes the baseline from now on; `backfillSeededBaselines(tenantId)` for tenants seeded
-    before 314; `hasSeededBaseline(tenantId)` for the re-run gate); tests
+  - create migration `314_seeded_price_baseline`: on `catalog_items`, a nullable `seed_key`
+    (`<packId>:visit` or `<packId>:labor`, so a renamed headline item is still found, with a
+    partial unique index on `(tenant_id, seed_key) WHERE seed_key IS NOT NULL AND archived_at
+    IS NULL`) and a nullable `seeded_unit_price_cents`, both written for the two headline items
+    only; on each estimate template line seeded from one of them, two keys inside the
+    `line_item_templates` JSONB, `seededUnitPriceCents` and `seededCatalogItemId` (the headline
+    item's id), present together or not at all, because a template line stores no catalog item
+    id today and the link must exist before ownership can be derived from it;
+    `tenant_settings.seeded_baseline_backfilled_at`, the per-tenant one-shot stamp for the
+    backfill below. Create `packages/api/src/packs/reprice-seeded.ts`: the re-run update path,
+    `repriceSeeded(tenantId, packId, pricing)`, which runs ONE statement per tenant in the
+    handler's transaction (a data-modifying CTE, see Approach in this unit): a headline item
+    whose price equals its baseline moves to the new pick, and a template line moves only when
+    its own price equals its own baseline AND its `seededCatalogItemId` is among the items that
+    statement just moved; a moved row's baseline moves with it in the same write
+    (`unit_price_cents` and `seeded_unit_price_cents` on an item, `defaultUnitPriceCents` and
+    `seededUnitPriceCents` on a line); it returns what it moved and what it left, each with
+    its reason, for the read-back. The seeder writes the keys, baselines and link from now on;
+    `backfillSeededBaselines(tenantId)` covers tenants seeded before 314, from evidence only;
+    `hasRepriceableSeed(tenantId)` is the re-run gate; tests
     `packages/api/test/packs/reprice-seeded.test.ts`,
     `packages/api/test/integration/reprice-seeded.test.ts`
-  - modify `packages/api/src/packs/seed-pack-defaults.ts` (write the baseline on every seeded
-    row; export the pricing function so the backfill and the seeder share one rounding rule)
+  - modify `packages/api/src/packs/seed-pack-defaults.ts` (write `seed_key`, the baseline, the
+    line baseline and the link on the headline rows and lines only, from one role rule shared
+    with `priceSeed`: a seed priced at the pack's visit or labor headline price is that role,
+    and a pack unit test pins that every pack has exactly one catalog seed per role; export
+    the seed definitions the backfill reads, the headline catalog seed names and the seed
+    template lines per role, so it never re-derives a price),
+    `packages/api/src/templates/estimate-template.ts` (`LineItemTemplate` gains the two
+    optional keys; `lineItemTemplateSchema` in `shared/contracts.ts` is deliberately left
+    alone, because it drops unknown keys and that is what takes a template the owner saves
+    through `PUT /api/templates/:id` out of repricing, pinned in `reprice-seeded.test.ts`)
     and `packages/api/src/db/migrate.ts` (after the SQL corpus, still under the migration
     advisory lock, run `backfillSeededBaselines` for each tenant whose
     `seeded_baseline_backfilled_at` is null); test: extend
     `packages/api/test/integration/migration-replay-populated-db.test.ts`
   - modify `packages/api/src/proposals/execution/onboarding-handlers.ts`
-    (`OnboardingTenantSettingsExecutionHandler`: when the pack is already active, call
-    `repriceSeeded` with the payload's prices instead of the first-run `activatePackWithSeed`,
+    (`OnboardingTenantSettingsExecutionHandler`: when a pack is already active, call
+    `repriceSeeded` for that pack with the payload's prices instead of the first-run `activatePackWithSeed`,
     which skips existing names; integration test in `reprice-seeded.test.ts` runs the handler
     against a seeded tenant and asserts the moved and untouched rows)
   - create `packages/api/src/onboarding/forwarding-probe.ts` and route
@@ -972,52 +997,137 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `provider_error` and `unknown` show their own copy with one explicit Try again
   (`POST /phone/retry`, on the owner's tap) and never re-search or offer a replacement number
   on their own.
-- **Seeded-price baseline and the re-run gate:** A null baseline means "the owner's", so a
-  tenant seeded before migration 314 would have every price skipped by `repriceSeeded` while
-  the re-run card implied an update. Two rules close that. (1) Backfill:
-  `backfillSeededBaselines(tenantId)` sets the baseline on a catalog item or template line only
-  when its current price exactly equals the price the seeder would have written for that seed
-  name under a pricing the tenant could have been seeded with: the pack defaults (every tenant
-  the v2 wizard seeded, and any whose metro had no tier row); and, for a tenant with an
-  onboarding draft, `standard` or `premium` of its resolved price tier (the
-  `regional_price_tiers` row for the draft's `metro_code`, which came from the NPA→metro map,
-  else the `'US'` row, else the pack defaults; premium is standard × `PREMIUM_MULTIPLIER_BPS`)
-  or the pair on its approved `onboarding_tenant_settings` proposal (`hourlyRateCents`,
-  `tripFeeCents`, which also covers a free-speech override). An exact match is an untouched
-  seed; everything else keeps a null baseline and stays the owner's. The expected price comes
-  from the seeder's own pricing function, exported for this and not re-derived in SQL, so
-  there is one rounding rule; the one false positive, an owner who typed a seed price by hand,
-  gets a repricing the read-back names. The runner has no ledger and replays the corpus every
-  deploy, so the step writes only where the baseline is null, runs once per tenant in that
-  tenant's own transaction, and stamps `tenant_settings.seeded_baseline_backfilled_at`; a
-  tenant that fails is retried on the next deploy and a stamped one is never revisited (the
-  one-shot lesson of `194_thank_you_sms`). (2) Gate: `POST /draft/reopen` reports
-  `repricing.available`, derived and never stored, true when any non-archived catalog item or
-  template line of the tenant has a baseline (`hasSeededBaseline`). When it is false the price
-  turn says "Your prices are your own" and offers no repricing: the price row is read-only, the
-  reopened draft's approval leaves `hourlyRateCents` and `tripFeeCents` off the settings
-  payload (the first-run path, which requires them, is unchanged), and `repriceSeeded` is not
-  called. When it is true the owner picks as before, and rows the owner edited are still
-  reported as theirs. A third rule keeps the baseline true across re-runs: (3) the baseline
-  moves with the price. `repriceSeeded` writes a moved row's price and its baseline together,
-  one `UPDATE` per table: on a catalog item `SET unit_price_cents = $new,
-  seeded_unit_price_cents = $new`, on an estimate template it rewrites `defaultUnitPriceCents`
-  and `seededUnitPriceCents` together on each matching line of `line_item_templates`, under the
-  predicate `seeded_unit_price_cents IS NOT NULL AND unit_price_cents =
-  seeded_unit_price_cents` (the line's own pair for a template). The newly selected price is
-  the row's new seed. Moving only the price would leave the baseline at the first seed price,
-  so the next re-run would see price <> baseline, classify an untouched row as the owner's and
-  leave it ("I left it") while the card promised an update. Rows the predicate skips keep both
-  values, so an owner edit stays an edit.
+- **Seeded-price baseline, derived ownership and the re-run gate:** A null baseline means "the
+  owner's", so a tenant seeded before migration 314 would have every price skipped by
+  `repriceSeeded` while the re-run card implied an update. Four rules close that and keep it
+  true across re-runs and across the two places a price lives.
+  (1) What carries a baseline. Only what `repriceSeeded` can move: the pack's two headline
+  catalog items (`seed_key`, `seeded_unit_price_cents`) and the template lines seeded from
+  them (`seededUnitPriceCents` and `seededCatalogItemId` inside `line_item_templates`). Nothing
+  else is stamped, so no other baseline exists to go stale. The real model has no durable link
+  between the two: a template line stores a description, quantity and price and no catalog item
+  id, and the seeder pairs a line with an item only by price value, inside `priceSeed`. So the
+  seeder writes the link in the run that creates the rows, from the same role rule: a template
+  line whose seed price is the pack's visit or labor price gets the id of that role's headline
+  item, created in that run or already carrying the pack's `seed_key`. When no such item exists
+  (the name was taken by a row the owner made, so the seeder skipped it) the line gets neither
+  key and is the owner's.
+  (2) Ownership is derived from the two rows at the moment of the re-run, and the two sides
+  move in one statement. `repriceSeeded(tenantId, packId, pricing)` is a single data-modifying
+  CTE in the handler's tenant transaction. `moved` updates the pack's headline items `WHERE
+  seed_key = ANY(<the pack's two keys>) AND archived_at IS NULL AND seeded_unit_price_cents IS
+  NOT NULL AND unit_price_cents = seeded_unit_price_cents`, setting `unit_price_cents = $pick,
+  seeded_unit_price_cents = $pick` and returning each id with the price it took. The
+  `UPDATE estimate_templates` that follows rewrites, inside `line_item_templates`, only the
+  lines whose `seededCatalogItemId` is in `moved` and whose own `defaultUnitPriceCents =
+  seededUnitPriceCents`, setting both keys to the price their item just took. A line therefore
+  moves if and only if its own price is untouched AND its item moved in that same statement.
+  One statement means an item and its lines are never moved apart, and a failure leaves price
+  and baseline both at the old pick on both sides. The newly selected price is the row's new
+  seed: moving only the price would leave the baseline at the first seed price, so the next
+  re-run would see price <> baseline, classify an untouched row as the owner's and leave it
+  ("I left it") while the card promised an update. What that decides when the owner has edited
+  something:
+  - *The owner edits a headline item* (`PUT /api/catalog/items/:id`, which writes only
+    `catalog_items` and stamps its `updated_at`). Its price no longer equals its baseline, so
+    it is not in `moved`, and every line seeded from it stays at its price even though the
+    line's own price still equals the line's own baseline. Judged by its own baseline alone,
+    that line would have moved by itself and future estimates would quote a different price
+    than the owner's catalog.
+  - *The owner edits a template* (`PUT /api/templates/:id`). A `PUT` that carries
+    `lineItemTemplates` rewrites them through `lineItemTemplateSchema`, a Zod object that drops
+    unknown keys, so the lines come back without the seed keys and every line of that template
+    is the owner's (a `PUT` that changes only the name or message leaves the lines and their
+    keys alone, and they still follow their item). The catalog item may still move, and so do
+    the lines of other templates seeded from it; the saved template keeps its price and the
+    read-back names the difference.
+  - *No link, or the item unavailable.* A line the seeder or the backfill could not link, and a
+    line whose item is archived, has no `seed_key` or is not in `moved`, stays: with no link
+    the line is the owner's.
+  - *Set back to the seeded number.* An owner who edits an item and then types the seeded price
+    again leaves a row that holds its baseline; it is treated as untouched, since the price is
+    the seeded one.
+  - *Read-back.* `repriceSeeded` returns what it moved and what it left, each with a reason
+    (`price_edited`, `job_type_edited`, `no_link`, `item_unavailable`) and, for a line that
+    stayed while its item moved, both numbers. The read-back says it in the owner's words and
+    claims nothing it did not do: "Your labor rate is yours; I left it" for an item, "I left your
+    Standard AC Repair job type the way you saved it" for a template, and for a difference
+    "Standard AC Repair still bills labor at $110 while your price book now says $125. Change
+    it under Job types if you want them to match." Rows the statement does not touch keep both
+    values, so an owner edit stays an edit.
+
+  (3) Gate. `POST /draft/reopen` reports `repricing.available`, derived and never stored, true
+  when any non-archived headline item of the draft's pack still holds its baseline
+  (`hasRepriceableSeed`, the statement's own predicate: `seed_key IS NOT NULL AND
+  seeded_unit_price_cents IS NOT NULL AND unit_price_cents = seeded_unit_price_cents`). A line
+  moves only through its item, so a baselined line under an edited item does not count. When it
+  is false the price turn says "Your prices are your own" and offers no repricing: the price
+  row is read-only, the reopened draft's approval leaves `hourlyRateCents` and `tripFeeCents`
+  off the settings payload (the first-run path, which requires them, is unchanged), and
+  `repriceSeeded` is not called. When it is true the owner picks as before, and rows the owner
+  edited are still reported as theirs.
+
+  (4) Backfill, from evidence of an untouched seed and never from a matching price.
+  `backfillSeededBaselines(tenantId)` stamps a legacy row only when the schema shows both that
+  the seeder made it and that nothing has written it since. A current price that equals a seed
+  price shows neither: an owner can type a seed price by hand, or edit a row to the value the
+  resolved tier happens to use, and a baseline stamped on that row would let a later re-run
+  overwrite an owner-controlled price. A row that fails any condition below keeps a null
+  baseline and is the owner's. The schema keeps no per-row seed record (the seeder writes
+  through the repositories, and its only audit trace is the aggregate `tenant.pack_activated`
+  event), so the evidence is what the repositories do guarantee:
+  - *Not written since it was seeded.* `PgCatalogItemRepository` creates a row with
+    `created_at` and `updated_at` from one timestamp and stamps `updated_at` on every `update`
+    and `archive`; no trigger exists and nothing else writes `catalog_items`. Audit rows would
+    not do here, because the learned-price correction ports call `catalogRepo.update` with no
+    `catalog_item.updated` row. An item qualifies only if `updated_at = created_at AND
+    archived_at IS NULL`. For a template the same test is on the row,
+    `estimate_templates.updated_at = created_at`, and it is all the evidence there is: the
+    lines sit in one JSONB value with no per-line history, so a legacy template is stamped
+    whole or not at all, and an edited template stays null. `incrementUsage` also stamps
+    `updated_at`, so a template instantiated into an estimate even once reads as written and
+    stays the owner's. That cost is accepted: fewer legacy rows reprice, none reprice wrongly.
+  - *Made by the seeder, not by the owner.* An item must carry the name of a headline seed of a
+    pack the tenant has a `pack_activations` row for (the seeder's own idempotency key; the
+    generic pack's names carry the trade label that its `tenant.pack_activated` row records as
+    `metadata.tradeLabel`, and no recorded label is no match), and exactly one of the tenant's
+    rows may qualify per role, else none is stamped. The tenant must also have an `audit_events`
+    row with `event_type = 'tenant.pack_activated'`, `entity_id` that pack id and
+    `(metadata->>'catalogItemsCreated')::int >= 1`, written at or after the item's
+    `created_at` (the seeder's record that it created catalog rows for the pack, written just
+    after them), and no `audit_events` row with `event_type = 'catalog_item.created'` and
+    `entity_id` equal to the item's id (the Catalog route and the voice add-item handler each
+    write one for every row they create; the seeder writes none). A template likewise: its
+    `(vertical_type, category_id, lower(name))` must match a seed template of an activated pack
+    (the seeder's idempotency key), the pack's `tenant.pack_activated` row must show
+    `templatesCreated >= 1` at or after the template's `created_at`, and no
+    `estimate_template.created` row may exist for its id (the three `createTemplate` call sites
+    each pass the audit repository).
+  - *What is stamped.* The row is shown unwritten since the seeder wrote it, so its current
+    price is the price the seeder wrote, whatever tier or free-speech pair that was. The
+    baseline is therefore that price and the backfill needs no tier lookup. A qualifying item
+    gets `seed_key` and `seeded_unit_price_cents`. On a qualifying template, each line the seed
+    definition marks as a headline line (matched by `sortOrder` and `description` in the
+    definition, never by the tenant's price) gets `seededUnitPriceCents` and a
+    `seededCatalogItemId` naming the stamped item of that pack and role; a line whose item was
+    not stamped gets neither.
+
+  The one write this evidence cannot see is a price changed by hand-run SQL that leaves
+  `updated_at` alone; no application path does that, since the two repositories are the only
+  writers of either table. The runner has no ledger and replays the corpus every deploy, so the
+  step writes only where the row has no `seed_key` (or, on a line, no baseline), runs once per
+  tenant in that tenant's own transaction, and stamps
+  `tenant_settings.seeded_baseline_backfilled_at`; a tenant that fails is retried on the next
+  deploy and a stamped one is never revisited (the one-shot lesson of `194_thank_you_sms`).
 - **Patterns to follow:** `notifications/owner-sms-sender.ts` (`recipientClass: 'owner'`
   skips consent), `components/home/ActivationCelebrationBanner.tsx` (first-run state),
   `docs/solutions/architecture-patterns/derive-shared-status-rule-across-frontends.md`.
 - **Test scenarios:**
   - Happy path: re-run → `POST /draft/reopen` pre-fills the read-back with the live greeting,
     posture, payment mode, hours, emergency target, prices and owner cell; a new price pick → the two
-    headline catalog items and the template lines that still carry the seeded amounts update,
-    an owner-edited labor rate (and the template line the owner changed) are untouched and the
-    read-back says so; "yes" to an existing number → the business number and carrier are asked,
+    headline catalog items and the template lines seeded from them update, an owner-edited
+    labor rate (with every template line seeded from it) and a job type the owner saved are
+    untouched and the read-back says so; "yes" to an existing number → the business number and carrier are asked,
     staged on the draft, carried on the settings proposal and written to
     `tenant_settings.forwarding_source_number` and `forwarding_carrier` when it executes, the
     text says to dial from that phone, the probe calls that number;
@@ -1093,16 +1203,33 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     the payload schema): `forwarding` absent, `null` and a value all parse and stay distinct;
     `{ sourceNumber }` alone, a non-E.164 number, a carrier outside the four and an extra key
     are rejected.
-  - Edge (legacy seeded tenants): rows seeded at the pack defaults, and separately rows seeded
-    at the tenant's `standard` tier, its `premium` tier or a free-speech pair (scaled rows
-    included), with a null baseline and an exactly matching price → after the backfill each has
-    its baseline and a new price pick reprices it; a legacy row the owner edited → baseline
-    stays null, the row is left alone and the read-back says it is theirs; a second deploy
-    replays the backfill → no baseline overwritten and a stamped tenant is not revisited.
-  - Edge (no baseline): a tenant whose rows all lack a baseline → `POST /draft/reopen` reports
-    `repricing.available = false`, the price turn says "Your prices are your own" and shows
-    no price card, and approval carries no prices; a tenant with at least one baseline sees
-    the repricing choice.
+  - Edge (legacy seeded tenants; the backfill stamps evidence, never a matching price; unit
+    in `reprice-seeded.test.ts` with a repository double, and Docker-gated in
+    `migration-replay-populated-db.test.ts` and `integration/reprice-seeded.test.ts` against
+    real `catalog_items`, `estimate_templates` and `audit_events` rows, the edits made through
+    the real `PUT /api/catalog/items/:id` and `PUT /api/templates/:id` routes). (a) A legacy
+    tenant (the real seeder, then the 314 columns and keys cleared, which is what a pre-314 row
+    looks like) never edited: each headline item (priced at
+    the pack defaults, and separately at the tenant's `standard` tier, its `premium` tier or a
+    free-speech pair) gets `seed_key` and a baseline equal to its price, each headline template
+    line in a template with `updated_at = created_at` gets its baseline and a
+    `seededCatalogItemId` naming that item, and a new price pick reprices them. (b) The same
+    tenant with the owner having edited a headline item to a value that EQUALS the resolved
+    tier's seed price (the false positive of inferring provenance from equality) → the item's
+    `updated_at` moved, so it keeps a null `seed_key` and baseline, the re-run leaves it and
+    the lines linked to it, and the read-back says it is theirs; the same edit made to a
+    template line through `PUT /api/templates/:id` → that template's lines keep null
+    baselines and links. (c) A template whose `updated_at` moved for any reason, including an
+    `incrementUsage` after the owner used it once → all of its lines stay null even though
+    their prices match the seed. (d) An owner-made item that carries a seed name and the seed
+    price (it has a `catalog_item.created` row), a tenant with no `tenant.pack_activated` row
+    for the pack (or one with `catalogItemsCreated = 0`), and two qualifying rows for one role
+    → no row is stamped. (e) A second deploy replays the backfill → no baseline overwritten
+    and a stamped tenant is not revisited; a tenant whose backfill failed is retried.
+  - Edge (no baseline): a tenant whose headline items all lack a baseline, or all differ from
+    it → `POST /draft/reopen` reports `repricing.available = false`, the price turn says "Your
+    prices are your own" and shows no price card, and approval carries no prices; a tenant
+    with at least one headline item still at its baseline sees the repricing choice.
   - Edge (owner cell on re-run): the first run stored cell A on the draft and in
     `tenant_settings.owner_phone`; the owner then changes it to B in Settings and taps Re-run
     setup → `POST /draft/reopen` leaves the draft's `owner_phone` = B (not A), the read-back
@@ -1120,11 +1247,30 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     amounts hold the new prices and their baselines (`seeded_unit_price_cents`,
     `seededUnitPriceCents`) equal the new prices, asserted in the same read; re-run 2 picks
     12,500 and 15,000 with nothing edited in between → all of those rows move again and none
-    is reported as the owner's. Variant: the owner edits the labor rate to 11,500 between the
-    runs → re-run 2 leaves that item and its template line alone (11,500 <> baseline 11,000),
-    moves the untouched trip fee, and the read-back names the labor rate as theirs. A
-    statement that fails leaves price and baseline both at the old pick (the pair never
-    splits).
+    is reported as the owner's. A statement that fails leaves price and baseline both at the
+    old pick, and no template line moved either (neither the pair nor the two sides ever
+    split: a fault injected after the catalog half of the CTE rolls back both).
+  - Edge (ownership is derived across the catalog and the templates; unit in
+    `reprice-seeded.test.ts` and Docker-gated in `integration/reprice-seeded.test.ts`, the
+    edits made through the real `PUT /api/catalog/items/:id` and `PUT /api/templates/:id`
+    routes, never by writing the columns). (a) The owner edits the labor rate to 11,500
+    between re-run 1 and re-run 2 → re-run 2 leaves that item AND every template line seeded
+    from it at 11,000 (each line's own price still equals its own baseline, so only the link
+    rule keeps it), moves the untouched trip fee and the lines seeded from it, and the read-back
+    names the labor rate as theirs and the job types that still bill $110 against a price book
+    of $115. A second re-run with the same pick changes nothing further. (b) The owner edits only a
+    template line (the `PUT` rewrites the array through `lineItemTemplateSchema`) → that
+    template keeps its price, the labor item moves if untouched, and the lines of the other
+    templates seeded from it move with it; the read-back names that job type. A unit pin shows
+    the schema drops `seededUnitPriceCents` and `seededCatalogItemId`, so nobody adds them
+    thinking they would be kept. (c) A line with no `seededCatalogItemId` (hand-added, or a
+    legacy line the backfill could not link), and one whose item is archived or has no
+    `seed_key`, is left alone even though its price equals its baseline, while its linked
+    siblings move. (d) The owner edits the item and then types the seeded number again → the
+    item is untouched and moves with its lines. (e) A headline item the owner only renamed
+    is still found by `seed_key` and moves. (f) A multi-pack tenant
+    (HVAC and plumbing): a pick for one pack moves that pack's items and lines only. (g) Each
+    pack, `other` included, has exactly one catalog seed per headline role (unit).
   - Error: SMS provider failure → the carrier code is shown inline with copy button as the
     fallback and an event is recorded; a non-E.164 source number → 400 naming the field; a
     carrier outside `verizon | att | tmobile | other` → 400.
@@ -1153,12 +1299,16 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Integration: route test proves the SMS body contains the right code for each carrier; real
     Postgres pins the new columns (`tenant_settings.forwarding_source_number`,
     `forwarding_carrier` with its CHECK, `seeded_baseline_backfilled_at`;
-    `catalog_items.seeded_unit_price_cents`; the `onboarding_drafts` forwarding columns) and
+    `catalog_items.seed_key` with its partial unique index and `seeded_unit_price_cents`; the
+    `onboarding_drafts` forwarding columns) and
     the handler's write to them under RLS (a value, an explicit `null` that clears the four
-    forwarding columns, and an absent key that leaves them alone); the backfill runs against seeded and hand-edited
-    rows in a populated database (extending `migration-replay-populated-db.test.ts`).
+    forwarding columns, and an absent key that leaves them alone); the backfill runs against
+    seeded, hand-edited and used rows in a populated database, with real `updated_at` values
+    and `audit_events` rows (extending `migration-replay-populated-db.test.ts`).
 - **Verification:** `grep -r "onboarding/v2" packages/web/src` returns nothing; e2e passes for
-  both branches; the forbidden-vocabulary test extends to `components/home`.
+  both branches; the forbidden-vocabulary test extends to `components/home`; on a seeded
+  staging tenant, a re-run after the owner edits a headline price in Settings leaves that item
+  and the job types seeded from it at the owner's price and says so.
 
 ### U10. The owner's cell: on the draft, on the settings proposal, required when a choice rings it
 - **Goal:** The owner's cell, optional on the first screen and used today only to place the
@@ -2301,10 +2451,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Dependencies:** U2, U4; U8 for `queue.sendOn`; voice-parity U3 for the preset voice on the call
 - **Files:**
   - modify `packages/api/src/integrations/credentials.ts` (explicit `PLATFORM_TWILIO_*`)
-  - create `packages/api/src/demo/{routes,service,script,lease,lease-token,reset,job-guard,inflight,write-fence,call-budget,handoff-outbox}.ts`,
+  - create `packages/api/src/demo/{routes,service,script,lease,lease-token,twilio-outcome,reset,job-guard,inflight,write-fence,call-budget,handoff-outbox}.ts`,
     migration `316_demo_calls` (313 went to the owner-cell column in S1b and 314-315 are S5's;
-    phone hash, trade, name, lease_id, call_sid, status, lead_id, and the budget reservation
-    the call holds: `budget_day`, `reserved_cents`, `budget_released_at`; no `tenant_id`); the
+    phone hash, trade, name, lease_id, call_sid, status, lead_id, `callback_deadline_at` (the
+    status token's `sexp`, written in the lease transaction), and the budget reservation the
+    call holds: `budget_day`, `reserved_cents`, `budget_released_at`; no `tenant_id`); the
     same migration adds `demo_handoff_outbox` (`id`, `demo_call_id` UNIQUE, `lead_id`,
     `idempotency_key` UNIQUE, `handoff_expires_at`, `created_at`, `sent_at` NULL until the
     provider accepts the message, `attempts`; no `tenant_id`; see Late status callbacks),
@@ -2320,8 +2471,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `DEMO_POOL_PER_TRADE`, default 3)
   - create `packages/api/src/workers/demo-lease-reaper.ts` (a leader-gated P0-009 sweep that
     reclaims expired leases, takes over resets whose heartbeat has gone stale, reaps
-    in-flight registry rows whose heartbeat has lapsed and re-enqueues handoff outbox rows
-    still pending after five minutes); create `packages/api/src/workers/send-demo-handoff.ts`
+    in-flight registry rows whose heartbeat has lapsed, re-enqueues handoff outbox rows
+    still pending after five minutes and returns the reservation of an unconfirmed call whose
+    callback window has closed); create `packages/api/src/workers/send-demo-handoff.ts`
     (the queue handler that sends the signup text from an outbox row); extract the
     `information_schema` table walk that `tenants/deprovision.ts` uses to purge a tenant into a
     shared helper that takes a keep-list, an optional batch size and a `beforeStep` fence hook
@@ -2353,7 +2505,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     (forward the handoff token), the Clerk signup webhook handler in `packages/api/src/` (bind
     the token to the new tenant) and `packages/api/src/routes/onboarding-draft.ts` (`POST /draft`
     consumes it to seed the draft)
-  - tests: `packages/api/test/demo/{service,routes,limits,lease,lease-token,reset,job-guard,inflight,write-fence,call-budget,handoff-outbox}.test.ts`,
+  - tests: `packages/api/test/demo/{service,routes,limits,lease,lease-token,twilio-outcome,reset,job-guard,inflight,write-fence,call-budget,handoff-outbox}.test.ts`,
     `packages/api/test/workers/send-demo-handoff.test.ts`,
     `packages/api/test/integration/demo-handoff-outbox.test.ts`,
     `packages/api/test/integration/demo-calls.test.ts`,
@@ -2386,9 +2538,58 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   is the call start plus the longest a demo can run: the call is created with a Twilio ring
   `Timeout` of 30 s and a `TimeLimit` of 90 s, and the lease adds 30 s of grace, 150 s in all,
   so a lease cannot lapse under a live call. The inbound turn processor gets its tenant from the
-  `active` lease its callback names (next paragraph), never from a trade-level lookup. A Twilio
-  failure on the `Calls` request releases the lease at once, and a definitive one also returns
-  the day's budget reservation (Daily budget, below).
+  `active` lease its callback names (next paragraph), never from a trade-level lookup. What the
+  `Calls` request did is classified before anything is released (next paragraph): only a
+  request that provably created no call releases the lease and returns the day's budget
+  reservation at once, and every other outcome keeps both until a callback or expiry settles it.
+- **Only a `Calls` request that provably created no call releases anything at once.**
+  `demo/twilio-outcome.ts` sorts what the request did into three outcomes before the lease or
+  the reservation is touched. The REST pattern at `telephony/outbound-call-service.ts:266` is
+  reused to build the request and not to judge it: that code marks every non-2xx and every
+  thrown error failed, which is right for a bridge call an owner can redial and wrong here,
+  because Twilio can accept a `Calls` request, create the call and still fail on the way back to
+  us. The request is never retried: a second request after an unconfirmed outcome could ring
+  the visitor twice.
+  - *Created.* A 2xx whose body parses and carries a `sid`. The sid is bound by the same
+    statement a callback uses, which pins the reservation, and the lease runs its course.
+  - *Not created*, the only outcome that releases at once. (a) The request failed before any
+    of it was written: a local failure (missing credentials, a number that fails the NANP and
+    premium checks, a token that cannot be minted; no request is made) or a connection error
+    raised before the request is written, matched on a closed list of Node `cause.code` values
+    (`ENOTFOUND`, `EAI_AGAIN`, `ECONNREFUSED`, `EHOSTUNREACH`, `ENETUNREACH` and the
+    certificate-verification failures `CERT_HAS_EXPIRED`, `UNABLE_TO_VERIFY_LEAF_SIGNATURE`
+    and `ERR_TLS_CERT_ALTNAME_INVALID`); a code not on the list is unconfirmed. (b) Twilio
+    answered with its own error body (JSON with `code`, `message` and a `status` equal to the
+    HTTP status) and the status is on a closed allow-list, `NOT_CREATED_RESPONSES`: 400, 401,
+    403, 404 and 429. These are rejections Twilio returns while validating the request
+    (parameters, credentials, permissions, the resource path, the rate limit). The list is this
+    plan's reading of Twilio's published error reference, not a guarantee Twilio gives, so
+    each entry is pinned from the reference or a staging probe before S6 ships, and an entry
+    that cannot be shown is dropped, which moves it to the next class. No 5xx is on the list.
+  - *Unconfirmed*, everything else: a timeout or abort (fetch does not say which phase was in
+    flight, so even a connect timeout counts), a reset or closed socket once the request was
+    written, any 5xx, a 2xx or 4xx whose body does not parse, a status not on the list, and a
+    process that dies after the reservation committed. A billable call may exist.
+
+  An unconfirmed outcome keeps the lease and the reservation. `demo_calls.status` becomes
+  `unconfirmed` (not terminal, so a callback's terminal status still replaces it), the reason
+  is audited as `demo_call_unconfirmed` (`timeout`, `reset_after_send`, `http_5xx`,
+  `unparsable_body`, `unlisted_response`; a dead process leaves the row in its initial status,
+  `initiating`, written in the lease transaction, which the sweep reads the same way), the
+  lead row stays so a late `completed` can still hand off, and
+  the visitor is answered as for a success ("calling you now") with the one-call-a-day
+  allowance spent. Then one of three things happens. (1) A callback carrying the lease token
+  arrives: it binds the CallSid and the call proceeds exactly like a created one, so the voice
+  URL answers as the leased tenant, a terminal status takes `resetAndRelease`'s claim, and the
+  bound CallSid pins the reservation. (2) No callback arrives by `expires_at`: the reaper
+  reclaims the lease through `resetAndRelease` as for any unanswered call, and the reservation
+  stays counted. (3) No callback arrives by `callback_deadline_at`, the first moment no callback
+  can bind any more (a status callback past `sexp` answers 200 and does nothing): the reaper's
+  sweep, run a fixed ten minutes later to outlast clock skew between instances, sets the row
+  `failed`, returns the reservation once and audits `demo_call_unconfirmed_expired`. A callback
+  between `expires_at` and the deadline binds the CallSid, finalizes the row through the
+  late-status path and pins the reservation, so a call that did exist is never missing from
+  the cap.
 - **Callbacks find the lease by a signed token, not by `call_sid`.** Twilio can answer the
   visitor and fetch the voice URL, or send a terminal status callback (`failed`, `busy`,
   `no-answer`, `completed`), before the outbound `Calls` request has returned to us and before
@@ -2398,10 +2599,12 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `expires_at` sweep. So the lease is named by something we mint before Twilio can call us, in
   this order. (1) The lease insert commits, `call_sid` still null. (2) `demo/lease-token.ts`
   mints a token over the lease id, the tenant id and two expiries: `exp`, equal to the
-  lease's `expires_at`, which gates voice turns and every tenant write, and `sexp`, the mint
-  time plus `DEMO_STATUS_TOKEN_TTL_HOURS` (default 24), which gates only the status callback
-  (see Late status callbacks): `base64url(payload).HMAC-SHA256(payload)` with a required discriminator
-  `a: 'demo_lease'`, verified with `timingSafeEqual`, the construction of
+  lease's `expires_at`, which gates voice turns and every tenant write, and `sexp`, equal to
+  `demo_calls.callback_deadline_at` (the lease transaction's time plus
+  `DEMO_STATUS_TOKEN_TTL_HOURS`, default 24, read from that column so the token and the sweep
+  below can never disagree), which gates only the status callback (see Late status callbacks):
+  `base64url(payload).HMAC-SHA256(payload)` with a required discriminator `a: 'demo_lease'`,
+  verified with `timingSafeEqual`, the construction of
   `proposals/one-tap-undo.ts` (the discriminator is why a one-tap approve or undo token cannot
   verify as this one), keyed by a platform secret `DEMO_LEASE_TOKEN_SECRET` read the way
   `ONE_TAP_APPROVE_SECRET` is in `app.ts` (explicit in prod and staging, a fixed dev fallback
@@ -2684,15 +2887,19 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     nothing. The day is the UTC date of an injected clock, so 00:00 UTC starts a new row and a
     full yesterday blocks nothing.
   - *Release.* The reservation is returned (`calls_reserved - 1` and `est_cost_cents -
-    reserved_cents` on the row of `budget_day`, not today's) only when the `Calls` request
-    fails definitively before any CallSid is bound: a Twilio response that created no call, or a
-    failure before the request was sent. It runs once, in the transaction that sets
-    `demo_calls.budget_released_at` (`WHERE budget_released_at IS NULL`, and only while the
-    lease's `call_sid` is still null), so a retried failure handler cannot decrement twice and a
-    callback that already bound a CallSid pins the reservation. An ambiguous outcome (a timeout after
-    the request left) keeps the reservation, because a call may exist and be billed; so does a
-    bound CallSid, answered or not, and a crash after the commit. The count therefore errs
-    toward the cap and never past it.
+    reserved_cents` on the row of `budget_day`, not today's) in exactly two cases. (1) The
+    `Calls` request provably created no call (the not-created outcome above: a failure before
+    the request was written, or a listed Twilio rejection). (2) An unconfirmed call's callback
+    window closed with no CallSid ever bound (`callback_deadline_at` plus the sweep's margin).
+    Each runs once, in the transaction that sets `demo_calls.budget_released_at` (`WHERE
+    budget_released_at IS NULL`, and only while the lease's `call_sid` is still null), so a
+    retried handler or a second sweep cannot decrement twice and a callback that already bound
+    a CallSid pins the reservation. Everything else keeps it: a bound CallSid, answered or not,
+    and every unconfirmed outcome until case (2) (a timeout after the request left, any 5xx, an
+    unparsable body, a crash after the commit), because a call may exist and be billed and a
+    callback can still bind until then. The count therefore errs toward the cap; the only call
+    it can miss is one that was created and delivered no callback for the whole window
+    (`DEMO_STATUS_TOKEN_TTL_HOURS`).
   - *Configuration and alerts.* `DEMO_CALLS_DAILY_CAP` (default 50), `DEMO_COST_DAILY_CAP_CENTS`
     (default 2500) and `DEMO_CALL_EST_COST_CENTS` (default 50: a per-call figure for the 90 s
     `TimeLimit`, which the staging measurement under Verification replaces) are integers read at
@@ -2726,9 +2933,12 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     row, lead row, signup SMS after hang-up.
   - Edge: same number twice in a day → 429 with a friendly message; premium or non-NANP
     number → 400; kill switch on → 503 and the landing CTA hides.
-  - Error: Twilio 5xx → row `status='failed'`, lease released, the day's budget reservation
-    returned, no SMS, no lead; handoff token reused or
-    expired → ignored, the shell asks for name and trade.
+  - Error (the request provably created no call; fake Twilio, one case each): Twilio's error
+    body at 400 (an invalid `To`), 401, 403, 404 and 429 → row `status='failed'`, the lease
+    released at once, the day's reservation returned, no SMS, no lead; a DNS failure, a refused
+    connection and a certificate failure (the fake never saw a byte) and a request that fails
+    local validation (no request is made) → the same.
+  - Error: handoff token reused or expired → ignored, the shell asks for name and trade.
   - Isolation (two concurrent callers get distinct tenants): two real connections leasing for
     the same trade, repeated in a loop → distinct demo tenants, and rows one call wrote are not
     visible under the other's tenant; a pool of N with N+1 concurrent callers → exactly one is
@@ -2750,12 +2960,38 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     one unit of cents, a full previous day does not refuse the new one, and the release of the
     23:59 reservation after midnight decrements the old day's row (`budget_day`), not the new
     one's.
-  - Daily budget (a failed `Calls` request returns the reservation): a definitive Twilio 4xx or
-    5xx with no CallSid → `calls_reserved` and `est_cost_cents` back to their prior values,
-    `budget_released_at` set, lease released; the failure handler run twice decrements once; a
-    timeout after the request left (a fake Twilio that accepted the call and never answered)
-    keeps the reservation; a bound CallSid keeps it through `no-answer`, `busy` and `failed`
-    callbacks; a process killed between the commit and the request leaves it spent.
+  - Daily budget (a request that created no call returns the reservation): the not-created
+    cases above → `calls_reserved` and `est_cost_cents` back to their prior values,
+    `budget_released_at` set, lease released; the failure handler run twice decrements once.
+    Unit (`twilio-outcome.test.ts`, a table): every `NOT_CREATED_RESPONSES` status with a
+    Twilio-shaped body and each listed connection code classify not-created; a 500, 502, 503,
+    504, a 409, a 4xx whose body is HTML or JSON without Twilio's shape, a listed status whose
+    `status` field disagrees with it, a 2xx without a `sid`, a timeout, an `ECONNRESET`, an
+    unlisted `cause.code` and a thrown non-Error classify unconfirmed, and nothing is
+    not-created by default.
+  - Unconfirmed, then a valid callback (a 5xx after accept; real Postgres, a fake Twilio that
+    creates the call and then answers 503): the visitor is answered as for a success,
+    `demo_calls.status='unconfirmed'`, the lease stays `active`, `calls_reserved` and
+    `est_cost_cents` are unchanged, `budget_released_at` is null, `demo_call_unconfirmed` is
+    audited with `http_5xx`, the lead row stays and the fake sees exactly one `Calls` request
+    (no retry). The voice callback with the lease token then binds the CallSid and the turn
+    processor answers as the leased tenant (not the busy line), the `completed` status callback
+    takes the claim, the reset runs once, the signup SMS goes once, and the counters still hold
+    the call. The same when the callback arrives before the 503 is returned.
+  - Unconfirmed, no callback (injected clock): after a 503 and silence, at `expires_at` the
+    reaper resets and releases the lease while the reservation is still counted; a `completed`
+    callback ten minutes later (inside `callback_deadline_at`) binds the CallSid, finalizes the
+    row, sends the signup SMS once and leaves the reservation counted. With no callback at all
+    the sweep leaves the row alone until `callback_deadline_at` plus its margin, then sets
+    `failed`, returns the reservation once on `budget_day`'s row (not today's after midnight)
+    and audits `demo_call_unconfirmed_expired`; a second sweep decrements nothing; a callback
+    after `sexp` answers 200 and changes nothing, so it cannot undercount.
+  - Unconfirmed, the other members (the 503 case's assertions, one case each): a fake that
+    accepted the call and never answered (a timeout), one that resets the socket after reading
+    the request, a 502, a 504, a 409 with a Twilio body, a 400 whose body is HTML, a 201 with a
+    truncated body, and a process killed between the reservation's commit and the request (the
+    row is left `initiating`) → each keeps the lease and the reservation; a bound CallSid keeps
+    the reservation through `no-answer`, `busy` and `failed` callbacks.
   - Daily budget (cap reached refuses without calling Twilio): with the day's row at its cap,
     requests from twenty distinct IPs and twenty distinct numbers (so neither limiter can be
     what refuses) each answer 503 `DEMO_BUSY` with the busy copy; the fake Twilio receives zero
@@ -2959,7 +3195,12 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     in a loop).
 - **Verification:** cost per completed demo call measured in staging before the landing CTA
   ships (the figure replaces the default `DEMO_CALL_EST_COST_CENTS` and sizes the first caps),
-  and a staging run past the daily cap is refused with no Twilio request; a staging run of concurrent demo calls on one trade shows distinct tenants, a clean
+  and a staging run past the daily cap is refused with no Twilio request; every
+  `NOT_CREATED_RESPONSES` entry pinned from Twilio's error reference or a staging probe (a
+  deliberately invalid `To`, a wrong auth token) and any entry that cannot be shown dropped, and
+  a staging run with the response path cut after Twilio accepts the request (a fault-injecting
+  proxy) shows the call still landing on its own lease and counted against the cap; a staging
+  run of concurrent demo calls on one trade shows distinct tenants, a clean
   tenant after each, and no job from one call running or writing against the next; a callback
   that arrives before the `Calls` response returns, including an early terminal one, still lands
   on its own lease, and a `completed` callback that arrives after the grace and the reaper's
@@ -2985,11 +3226,19 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   per turn, U4 spikes WebKit before U3 depends on it.
 - **Regional prices wrong or read as advice.** Founder-curated rows, "typical" copy, prices
   land only through approval and remain editable catalog items.
+- **A re-run moving a price the owner set.** A price moves only while the owner has not touched
+  it, judged on both sides: a template line follows its catalog item and never moves alone, a
+  template the owner saved is theirs, and a legacy row gets a baseline only when it was never
+  written since the seeder made it (U6). Where the schema cannot show that, the row stays the
+  owner's and the read-back says so.
 - **Status contract drift.** Additive facts only; `.length(7)` preserved; pinned by extending
   `packages/api/test/onboarding/derive-status.test.ts` and the integration status test.
 - **Demo call cost, abuse, TCPA, cross-visitor leakage.** Phased last, consent first, two-layer
   limits, kill switch, a daily call-and-cents budget reserved atomically before the Twilio
-  request (so rotating IPs and numbers cannot raise the total); every live call holds its own demo tenant by lease, named in
+  request (so rotating IPs and numbers cannot raise the total), kept through any `Calls`
+  outcome that may have created a call (a timeout, a reset, any 5xx) until a callback binds it
+  or the callback window closes, and returned at once only when the request provably created
+  none; every live call holds its own demo tenant by lease, named in
   both Twilio callback URLs by a signed token so a fast answer or an early terminal callback
   cannot miss it, and the tenant is reset before anyone else can lease it (U7): the reset is
   heartbeat-renewed and
@@ -3031,7 +3280,7 @@ previous one; the previous slice is merged first.
 | S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`, until a retry bumps `version`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so, an approve sent from before a retry included); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover, even beside a failed one, and takes precedence over `failed`) and `POST /draft/retry` (guards in order: `DRAFT_NOT_APPROVED`, then `DRAFT_RETRY_UNSAFE` for a set holding such a proposal, failed member or not (`approved + undone` is unsafe, not nothing-failed), then `DRAFT_RETRY_NOTHING_FAILED` for the benign rest; the refusal changes nothing, because re-approving only the failed member would leave its sibling behind and the set would end `executed + undone`; a retry that passes the guards bumps the draft `version` by one in the same locked transaction as the re-queue, so one version names one approval attempt and a screen from before the retry cannot undo, reset or re-approve it (409 `VERSION_CONFLICT`), and `onboarding.draft_retry` records the version before and after; that set's way out is S4's reset, so until S4 the only way out is Settings and the shell offers no Start over). Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
 | S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`, refused with `DRAFT_METRO_LOCKED` once a choice is staged and rebuilding the assembled shop for the new metro in the same write, so the city and prices change together); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status (`reset` while no member is executed or executing and no `approved` member is past its undo window, else `settings`, for a failed member beside a terminal one as for any other `stopped` set) so the shell never offers a refused button; reset is also the way out of the set retry refuses as `DRAFT_RETRY_UNSAFE`; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body, and checked between `DRAFT_NOT_APPROVED` and `DRAFT_RETRY_UNSAFE`), made required once every client sends it. | 6-7 days (reset adds one) |
-| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep, each deactivation claimed under the payment-mode lock so a switch back stops the cleanup; no link minted and none deactivated on a failed mode read, and the link attach re-checks the mode under a per-tenant payment-mode lock, so a checkout that stalls across a switch stores none even when the switch is the tenant's first settings write), flag flipped, v2 deleted. | 11-14 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another) |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep, each deactivation claimed under the payment-mode lock so a switch back stops the cleanup; no link minted and none deactivated on a failed mode read, and the link attach re-checks the mode under a per-tenant payment-mode lock, so a checkout that stalls across a switch stores none even when the switch is the tenant's first settings write), flag flipped, v2 deleted. | 12-15 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another, the per-link claim step a third) |
 | S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost), reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a transactional handoff outbox written in the finalizing transaction together with the signup-handoff row its token validates against, and sent by a queue worker under a stable idempotency key, so a crash before the send is retried and never loses the handoff, no tenant writes). | 11-15 days (the token and bind add one, the budget another, the late-callback handoff a third, the outbox and its sender a fourth) |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
