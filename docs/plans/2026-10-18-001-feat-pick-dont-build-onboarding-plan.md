@@ -195,9 +195,10 @@ tiers; import from a photo; pricing or plan changes.
   `onboarding_session` (migration 195). `regional_price_tiers` and `demo_calls` are
   platform tables with no `tenant_id`, admin-write only, the same posture as `tenants`;
   `demo_call_budget` (U7; one row per UTC day, no `tenant_id` at all), `demo_handoff_outbox`
-  (U7; no `tenant_id`), `demo_tenant_leases` and `demo_inflight_jobs` (U7) are the same kind of
-  platform table, and the last two's `tenant_id` only names the demo tenant a call or a running
-  job holds.
+  (U7; no `tenant_id`), `signup_handoffs` (U7; a nullable `tenant_id` that only names the tenant
+  a signup bound the token to), `demo_tenant_leases` and `demo_inflight_jobs` (U7) are the same
+  kind of platform table, and the last two's `tenant_id` only names the demo tenant a call or a
+  running job holds.
 - **LLM gateway:** the free-speech override calls the existing extractors through the gateway;
   the choice path makes no model call.
 - **Catalog resolver:** the trip fee and hourly rate land as catalog items via the pack
@@ -2017,7 +2018,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     same migration adds `demo_handoff_outbox` (`id`, `demo_call_id` UNIQUE, `lead_id`,
     `idempotency_key` UNIQUE, `handoff_expires_at`, `created_at`, `sent_at` NULL until the
     provider accepts the message, `attempts`; no `tenant_id`; see Late status callbacks),
-    `demo_call_budget` (`day` DATE primary key, `calls_reserved`,
+    `signup_handoffs` (`token_hash` PK, `lead_id`, `tenant_id` NULL until a signup binds it,
+    `expires_at`, `consumed_at` NULL; inserted with the outbox row, see Late status callbacks
+    and Consent, limits, handoff), `demo_call_budget` (`day` DATE primary key, `calls_reserved`,
     `calls_cap`, `est_cost_cents`, `cost_cap_cents`, all integers, CHECKs added `NOT VALID`; see
     Daily budget), `demo_tenant_leases` and `demo_inflight_jobs` (see Approach), a unique index
     on `demo_tenant_leases.call_sid WHERE call_sid IS NOT NULL`, the sequence
@@ -2057,14 +2060,16 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `voice/outbound-allowlist.ts` NANP and premium checks, `leads/lead-service.ts`
   - web: `docs/marketing/landing-page.html` CTA pair and a `packages/web` public page
     `components/public/HearItAnswer.tsx`; modify `packages/web/src/components/auth/SignupPage.tsx`
-    (forward the handoff token) and the Clerk signup webhook handler in `packages/api/src/`
-    (copy it onto the tenant)
+    (forward the handoff token), the Clerk signup webhook handler in `packages/api/src/` (bind
+    the token to the new tenant) and `packages/api/src/routes/onboarding-draft.ts` (`POST /draft`
+    consumes it to seed the draft)
   - tests: `packages/api/test/demo/{service,routes,limits,lease,lease-token,reset,job-guard,inflight,write-fence,call-budget,handoff-outbox}.test.ts`,
     `packages/api/test/workers/send-demo-handoff.test.ts`,
     `packages/api/test/integration/demo-handoff-outbox.test.ts`,
     `packages/api/test/integration/demo-calls.test.ts`,
     `packages/api/test/integration/demo-call-budget.test.ts`,
     `packages/api/test/integration/demo-callback-binding.test.ts`,
+    `packages/api/test/integration/demo-signup-handoff.test.ts`,
     `packages/api/test/integration/demo-tenant-leases.test.ts`,
     `packages/api/test/integration/demo-reset-fencing.test.ts`,
     `packages/api/test/integration/demo-job-generation.test.ts`,
@@ -2147,30 +2152,41 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   still 403 and `demo_callsid_mismatch`) and, in ONE platform transaction, sets the terminal
   status while the row holds none and, for `completed`, inserts the signup handoff into
   `demo_handoff_outbox` (`ON CONFLICT (demo_call_id) DO NOTHING`; a stable `idempotency_key`
-  of `demo-handoff:<demo_call_id>` and a `handoff_expires_at` are fixed on the row) and
-  enqueues a `send_demo_handoff` job with `queue.sendOn` on that same client (queue key
+  of `demo-handoff:<demo_call_id>` and a `handoff_expires_at` are fixed on the row), inserts
+  the `signup_handoffs` row that the link's token will be validated against, and enqueues a
+  `send_demo_handoff` job with `queue.sendOn` on that same client (queue key
   `send-demo-handoff:<demo_call_id>`). The callback sends nothing itself. A flag set before
   the send cannot be made safe: a process that dies after committing it and before calling
   the provider consumes the guard with nothing sent, and every retried callback then sees it
   consumed. With an outbox the row and the job commit together or not at all, a crash before
   the send leaves the row pending for the queue to redeliver, and `sent_at` is written only
-  after the provider accepts the message. The handler (`workers/send-demo-handoff.ts`, the
-  P0-009 pattern) returns if `sent_at` is set; otherwise it sends from the platform number with
-  the row's `idempotency_key` as the provider's idempotency token, then runs `UPDATE … SET
-  sent_at = now() WHERE id = $1 AND sent_at IS NULL`. A failed or ambiguous send (a timeout, a
-  crash after the provider accepted it) leaves `sent_at` null, and the retry carries the same
-  key and the same body (the link's handoff token is an HMAC over `lead_id` and the row's fixed
-  expiry), so the provider can collapse it instead of texting the visitor twice. Confirm at
-  implementation that the platform SMS call accepts an idempotency token, and take it to the
-  founder if it cannot, since an ambiguous send is then only at-least-once. A job that
-  dead-letters leaves its row pending, and the reaper's sweep re-enqueues it after five
+  after the provider accepts the message. The token's row exists before any message can:
+  `demo/handoff-outbox.ts`, the only place a handoff token or its hash is computed, derives the
+  token from `lead_id` and `handoff_expires_at`, and the same transaction inserts the
+  `signup_handoffs` row (`token_hash` the SHA-256 of that token, `lead_id`, `tenant_id` NULL,
+  `expires_at` the same `handoff_expires_at`, `consumed_at` NULL, `ON CONFLICT (token_hash) DO
+  NOTHING`) as a data-modifying CTE over the outbox insert's `RETURNING`. Only the callback
+  that inserted the outbox row inserts the handoff row, and the status, both rows and the job
+  commit or roll back together. A replay inserts neither: a fresh expiry computed on a replay
+  would hash to a different token, so the insert follows the outbox row and does not rely on
+  the conflict alone. The token itself is never stored, only its hash. The handler
+  (`workers/send-demo-handoff.ts`, the P0-009 pattern) returns if `sent_at` is set; otherwise
+  it sends from the platform number with the row's `idempotency_key` as the provider's
+  idempotency token, then runs `UPDATE … SET sent_at = now() WHERE id = $1 AND sent_at IS
+  NULL`. A failed or ambiguous send (a timeout, a crash after the provider accepted it) leaves
+  `sent_at` null, and the retry carries the same key and the same body (the link's handoff
+  token is an HMAC over `lead_id` and the row's fixed expiry, recomputed from the outbox row on
+  every attempt and never freshly generated, so its hash matches the `signup_handoffs` row
+  that already committed), so the provider can collapse it instead of texting the visitor
+  twice. Confirm at implementation that the platform SMS call accepts an idempotency token,
+  and take it to the founder if it cannot, since an ambiguous send is then only
+  at-least-once. A job that dead-letters leaves its row pending, and the reaper's sweep re-enqueues it after five
   minutes under a queue key of its own (`…:sweep:<UTC date>`). The payload is
   `{ demoCallId }` with no `tenantId`, so it is not a demo-tenant job and the generation guard
   does not apply (the lease is usually released before it runs). A replayed or concurrent
-  callback, and the on-time path, insert nothing a second time. Only while the lease is still
-  `active` does the callback also take `resetAndRelease`'s claim; once it is `resetting` or
-  `released` the callback finalizes
-  the row and stops: no tenant transaction, no lease context, no lease row write, no
+  callback, and the on-time path, insert no second outbox row, handoff row or job. Only while
+  the lease is still `active` does the callback also take `resetAndRelease`'s claim; once it
+  is `resetting` or `released` the callback finalizes the row and stops: no tenant transaction, no lease context, no lease row write, no
   demo-tenant queue message, so a late callback (even one arriving during the tenant's next
   lease, which names only its own old lease) cannot write tenant data. Voice turns and every
   tenant write still require an `active`, unexpired lease.
@@ -2403,15 +2419,17 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Consent, limits, handoff.** Consent line first; two-layer rate limits; the daily budget
   above, the only aggregate bound; a lead row in a platform marketing tenant. The signup SMS
   link carries a signed, single-use handoff token (HMAC over `lead_id` and an expiry). Migration 316 also adds a platform table
-  `signup_handoffs(token_hash PK, lead_id, tenant_id NULL, expires_at, consumed_at)`:
+  `signup_handoffs(token_hash PK, lead_id, tenant_id NULL, expires_at, consumed_at)`, whose
+  row is inserted by the `completed` status callback's platform transaction with the outbox
+  row, so it is committed before the handler can send the token (Late status callbacks, above):
   `SignupPage` forwards the token into Clerk unsafe metadata, the Clerk signup webhook binds
   it exclusively (`UPDATE … SET tenant_id = $2 WHERE token_hash = $1 AND tenant_id IS NULL
   AND expires_at > now()`; a second signup with the same token binds nothing and is logged),
   and `POST /draft` consumes it atomically
   (`UPDATE … SET consumed_at = now() WHERE tenant_id = $1 AND consumed_at IS NULL AND
-  expires_at > now() RETURNING lead_id`) to read the lead's trade, name and metro. No row, a
-  consumed row or an expired one means the shell asks (U3's first screen); the SMS itself never
-  carries the seed facts and the token is stored only as a hash.
+  expires_at > now() RETURNING lead_id`) to read the lead's trade, name and metro. No row (a
+  forged or mistyped token), a consumed row or an expired one means the shell asks (U3's first
+  screen); the SMS itself never carries the seed facts and the token is stored only as a hash.
 - **Patterns to follow:** D-037 (buy nothing for a tire-kicker), `docs/solutions/logic-errors/click-to-call-gate-requires-global-twilio-sid.md`.
 - **Test scenarios:**
   - Happy path: valid US cell + plumbing → call created with consent TwiML first, `demo_calls`
@@ -2507,18 +2525,21 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Late status callbacks (real Postgres, fake Twilio and SMS sender; one case per terminal
     status): (a) the reaper has already reset and released the lease, then a `completed`
     callback arrives 10 minutes after `exp` (token still inside `sexp`) → 200, `demo_calls`
-    ends `completed` (found by `lease_id`) with one `demo_handoff_outbox` row and one job, and
-    once the handler runs the signup SMS has gone exactly once and `sent_at` is set; `no-answer`,
-    `busy` and `failed` finalize the row and insert no outbox row.
+    ends `completed` (found by `lease_id`) with one `demo_handoff_outbox` row, one
+    `signup_handoffs` row and one job, and once the handler runs the signup SMS has gone
+    exactly once and `sent_at` is set; `no-answer`, `busy` and `failed` finalize the row and
+    insert no outbox or handoff row.
     (b) Replay inserts nothing twice: the same callback delivered again, and two copies
-    delivered concurrently on two connections (looped) → still one outbox row and one job, the
-    `demo_calls` row unchanged, one SMS; the on-time path (lease `active`) writes the same row,
-    so an on-time callback followed by a late replay inserts and sends once. A fault injected
-    after the outbox insert and before the commit rolls back the status, the outbox row and the
-    job together, and Twilio's retry then finalizes normally.
+    delivered concurrently on two connections (looped) → still one outbox row, one handoff row
+    and one job, the `demo_calls` row unchanged, one SMS; the on-time path (lease `active`)
+    writes the same rows, so an on-time callback followed by a late replay inserts and sends
+    once. A fault injected after the outbox and handoff inserts and before the commit rolls
+    back the status, both rows and the job together (neither row survives without the other),
+    and Twilio's retry then finalizes normally.
     (b2) Crash between commit and send (the old `handoff_sent_at` failure): the handler is killed
     after the callback committed and before the provider is called → the outbox row is pending
-    (`sent_at` null, no SMS), a Twilio retry of the callback in the meantime inserts and sends
+    (`sent_at` null, no SMS) and its `signup_handoffs` row is already committed, a Twilio retry
+    of the callback in the meantime inserts and sends
     nothing, and the redelivered job sends exactly once and sets `sent_at`; with the job row
     deleted as well (a dead-lettered job), the reaper's sweep re-enqueues the row after five
     minutes under its own queue key and the SMS still goes exactly once. A send that fails outright
@@ -2530,14 +2551,36 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     exists, and `sent_at` ends set; a fake that does not collapse repeats shows the duplicate,
     which is the check that the key is really sent.
     (c) No tenant writes: a statement spy shows the late callback opens no tenant-scoped
-    transaction and writes nothing but `demo_calls`, its outbox row and the one platform-level
-    job (payload `{ demoCallId }`, no `tenantId`, so the generation guard drops nothing); the
+    transaction and writes nothing but `demo_calls`, its outbox row, its `signup_handoffs` row
+    and the one platform-level job (payload `{ demoCallId }`, no `tenantId`, so the generation
+    guard drops nothing); the
     lease row is unchanged (no claim, no reset spy call, no new generation); no demo-tenant queue
     message is enqueued; the tenant equals the
     fixture, including when the callback arrives while the tenant is leased to a new call,
     whose lease, generation and rows are untouched. A late callback with a second CallSid is
     403 and audits `demo_callsid_mismatch`; the voice URL with the same token past `exp`
     still speaks the busy line.
+  - Signup handoff (the row exists before the link does; real Postgres, fake Twilio and SMS
+    sender): a `completed` callback commits exactly one `signup_handoffs` row (`lead_id` of the
+    call's lead, `tenant_id` NULL, `consumed_at` NULL, `expires_at` equal to the outbox row's
+    `handoff_expires_at`) in the same transaction as the outbox row, and that row is committed
+    before the handler runs; the token the handler sends (captured on the fake sender) hashes
+    to that row's `token_hash`, and a retried send carries the same token. A replay, two copies
+    delivered concurrently (looped) and a replay with the injected clock advanced (so a freshly
+    computed expiry would hash differently) create no second row; `no-answer`, `busy` and
+    `failed` create none.
+  - Signup handoff (SMS to signup to seeded draft, end to end; real Postgres, the real Clerk
+    signup webhook handler and `POST /draft`, in `demo-signup-handoff.test.ts`): the token the
+    handler sent → the Clerk signup webhook for a new tenant carrying it binds `tenant_id`
+    (one row updated) → `POST /draft` consumes it (`consumed_at` set) and seeds trade, name and
+    metro from the lead. A second signup with the same token binds nothing and is logged, and
+    its `POST /draft` seeds nothing from the lead; two signups racing on one token (two
+    connections, looped) → exactly one binds.
+  - Signup handoff (no usable row asks, never guesses): a well-formed token whose hash has no
+    row (never inserted, which is also what a forged or tampered token looks like), a token
+    past `expires_at` (injected clock) and a token already consumed → the webhook binds
+    nothing, `POST /draft` reads no lead, and the shell asks for the facts on U3's first
+    screen.
   - Callback binding (a second CallSid on one lease): after CA is bound, a validly signed
     callback carrying CB → 403, `call_sid` stays CA, nothing is written and
     `demo_callsid_mismatch` is audited; CA presented again is accepted (Twilio's retries and
@@ -2631,7 +2674,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   that arrives before the `Calls` response returns, including an early terminal one, still lands
   on its own lease, and a `completed` callback that arrives after the grace and the reaper's
   reset still updates its call and sends the signup text once, including when the sender dies
-  between the callback's commit and the provider call; founder decision recorded in `docs/decisions.md`.
+  between the callback's commit and the provider call; the link in that text carries a token
+  whose row committed with the callback, so a signup from it binds that row and the new
+  tenant's draft is seeded from the lead once, while a token with no row, an expired one or a
+  spent one makes the shell ask; founder decision recorded in `docs/decisions.md`.
 
 ## Risks & Dependencies
 
@@ -2693,7 +2739,7 @@ previous one; the previous slice is merged first.
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
 | S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status (`reset` while no member is executed or executing and no `approved` member is past its undo window, else `settings`, for a failed member beside a terminal one as for any other `stopped` set) so the shell never offers a refused button; reset is also the way out of the set retry refuses as `DRAFT_RETRY_UNSAFE`; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body, and checked between `DRAFT_NOT_APPROVED` and `DRAFT_RETRY_UNSAFE`), made required once every client sends it. | 6-7 days (reset adds one) |
 | S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read, and the link attach re-checks the mode under a per-tenant payment-mode lock, so a checkout that stalls across a switch stores none even when the switch is the tenant's first settings write), flag flipped, v2 deleted. | 11-14 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another) |
-| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost), reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a transactional handoff outbox written in the finalizing transaction and sent by a queue worker under a stable idempotency key, so a crash before the send is retried and never loses the handoff, no tenant writes). | 11-15 days (the token and bind add one, the budget another, the late-callback handoff a third, the outbox and its sender a fourth) |
+| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost), reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a transactional handoff outbox written in the finalizing transaction together with the signup-handoff row its token validates against, and sent by a queue worker under a stable idempotency key, so a crash before the send is retried and never loses the handoff, no tenant writes). | 11-15 days (the token and bind add one, the budget another, the late-callback handoff a third, the outbox and its sender a fourth) |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
 second engineer shortens S2 and S3 only where the API they depend on is already merged.
