@@ -411,6 +411,42 @@ export class ProviderFailoverWrapper implements LLMProvider {
 // ─── ProviderTenantQuotaWrapper ───────────────────────────────────────────────
 
 /**
+ * Tokens reserved per image part. Real image cost depends on model, size and
+ * detail (gpt-4o: 85 + 170 per 512px tile, ~1,105 for a high-detail photo);
+ * this is an admission estimate only — release() reconciles the provider's
+ * actual usage, and an underestimate is carried as bucket debt.
+ */
+export const IMAGE_PART_TOKEN_ALLOWANCE = 1_105;
+
+/**
+ * Upper-bound token estimate for admission (GATEWAY-05): message `content`,
+ * every text part, a fixed allowance per image part, plus `request.maxTokens`
+ * (the most output the call can bill — the gateway always sets it from the
+ * routing tier). Previously only `content` was counted, so images, text parts
+ * and the whole output were never reserved. Robust to malformed `parts`.
+ * Exported for unit testing.
+ */
+export function estimateRequestTokens(request: LLMRequest): number {
+  let input = 0;
+  for (const m of request.messages) {
+    input += estimateTokens(typeof m.content === 'string' ? m.content : '');
+    if (!Array.isArray(m.parts)) continue;
+    for (const part of m.parts) {
+      if (part == null) continue;
+      if (part.type === 'image') input += IMAGE_PART_TOKEN_ALLOWANCE;
+      else if (part.type === 'text' && typeof part.text === 'string') {
+        input += estimateTokens(part.text);
+      }
+    }
+  }
+  const output =
+    typeof request.maxTokens === 'number' && Number.isFinite(request.maxTokens) && request.maxTokens > 0
+      ? Math.ceil(request.maxTokens)
+      : 0;
+  return input + output;
+}
+
+/**
  * Wraps an LLMProvider with per-tenant concurrency + token-bucket enforcement.
  *
  * Acquires a lease before forwarding to the inner provider and releases it
@@ -438,11 +474,9 @@ export class ProviderTenantQuotaWrapper implements LLMProvider {
       ? `classifier_${tenantTier}`
       : tenantTier;
 
-    // Estimate tokens from message text
-    const estimatedTokens = request.messages.reduce(
-      (sum, m) => sum + estimateTokens(m.content),
-      0,
-    );
+    // GATEWAY-05: reserve what the call can spend — input (text + images)
+    // plus its output allowance — and refund the difference on release.
+    const estimatedTokens = estimateRequestTokens(request);
 
     const lease = await this.registry.acquire({
       tenantId: quotaTenantId,

@@ -22,7 +22,10 @@ export type TenantTier = 'free' | 'standard' | 'premium' | string;
 export interface TenantQuotaTierConfig {
   /** Max concurrent in-flight requests per tenant. */
   maxConcurrency: number;
-  /** Token bucket capacity (input+output tokens). */
+  /**
+   * Token bucket capacity (input+output tokens). Usage above a call's
+   * reservation is carried as debt down to -bucketCapacity.
+   */
   bucketCapacity: number;
   /** Token refill rate per second. */
   refillTokensPerSec: number;
@@ -335,8 +338,10 @@ export class TenantQuotaRegistry implements QuotaStore {
           const actual = actualInput + actualOutput;
           const delta = actual - estimatedTokens;
           if (delta > 0) {
-            // Underestimated — drain the additional usage from the bucket.
-            state.bucketTokens = Math.max(0, state.bucketTokens - delta);
+            // Underestimated — charge the additional usage. GATEWAY-05: carry
+            // it as debt (down to -bucketCapacity) rather than forgiving it
+            // at 0, so later calls wait for the refill to pay it back.
+            state.bucketTokens = Math.max(-cfg.bucketCapacity, state.bucketTokens - delta);
           } else if (delta < 0) {
             // Overestimated — refund the unused tokens (capped to capacity).
             state.bucketTokens = Math.min(

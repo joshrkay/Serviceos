@@ -101,7 +101,9 @@ return {1, 0, 0, inFlight + 1}`;
  *       5=estimatedTokens 6=actualTokens 7=hashIdleMs
  * Removes the lease (frees the concurrency slot + reservation) and reconciles the
  * bucket against actual usage. Refills to now first so the delta lands on a
- * current bucket value (the canonical token-bucket update).
+ * current bucket value (the canonical token-bucket update). An underestimate is
+ * carried as debt down to -bucketCapacity (GATEWAY-05), same as the in-memory
+ * registry; ACQUIRE_LUA's `est > tokens` check then waits it out.
  */
 const RELEASE_LUA = `
 redis.call('ZREM', KEYS[1], ARGV[1])
@@ -116,7 +118,7 @@ ${NOW_MS_LUA}
   local elapsed = (now - lastMs) / 1000
   if elapsed > 0 then tokens = math.min(cap, tokens + elapsed * refill) end
   local delta = tonumber(ARGV[6]) - tonumber(ARGV[5])
-  if delta > 0 then tokens = math.max(0, tokens - delta)
+  if delta > 0 then tokens = math.max(-cap, tokens - delta)
   elseif delta < 0 then tokens = math.min(cap, tokens - delta) end
   redis.call('HSET', KEYS[2], 'tokens', tokens, 'refillMs', now)
   redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[7]))
