@@ -7,6 +7,7 @@ import * as path from 'path';
 
 const repoRoot = path.resolve(__dirname, '../../../..');
 const workflowPath = path.join(repoRoot, '.github/workflows/agent-path-smoke.yml');
+const shimPath = path.join(repoRoot, '.github/workflows/agent-path-smoke-skip.yml');
 const apiPackageJsonPath = path.resolve(__dirname, '../../package.json');
 const prChecksPath = path.join(repoRoot, '.github/workflows/pr-checks.yml');
 
@@ -57,6 +58,51 @@ describe('agent-path-smoke.yml — real-LLM path smoke workflow', () => {
     const src = fs.readFileSync(workflowPath, 'utf-8');
     expect(src).toMatch(/actions\/upload-artifact/);
     expect(src).toMatch(/agent-path-smoke-report/);
+  });
+});
+
+/**
+ * The quoted entries of the YAML list under `key:` (e.g. `paths:` or
+ * `paths-ignore:`), read until the list dedents. Both workflows are written
+ * with one `- '...'` entry per line, so no YAML parser is needed.
+ */
+function yamlList(src: string, key: string): string[] {
+  const m = new RegExp(String.raw`^( *)${key}:\n((?:\1 +- '[^']*'\n)+)`, 'm').exec(src);
+  expect(m, `${key}: list not found`).not.toBeNull();
+  return [...m![2].matchAll(/- '([^']*)'/g)].map((x) => x[1]);
+}
+
+// OBS-3 — the real-model smoke is the only PR check that calls the
+// production model, and it is path-filtered. Branch protection can only
+// require a check that reports on EVERY PR, so a sibling workflow with the
+// same name and job id passes instantly on the PRs the filter skips
+// (GitHub's documented pattern for a required, path-filtered check).
+describe('agent-path-smoke-skip.yml — skip-pass shim for the required check', () => {
+  it('reports the same check context (workflow name + job id) as the real workflow', () => {
+    expect(fs.existsSync(shimPath)).toBe(true);
+    const real = fs.readFileSync(workflowPath, 'utf-8');
+    const shim = fs.readFileSync(shimPath, 'utf-8');
+    const name = /^name:\s*(.+)$/m.exec(real)![1];
+    expect(/^name:\s*(.+)$/m.exec(shim)![1]).toBe(name);
+    expect(shim).toMatch(/^  path-smoke:$/m);
+    // The job id is the check context; a `name:` on the job would rename it.
+    expect(shim).not.toMatch(/^    name:/m);
+    // The real job must not carry a display name either, or the two diverge.
+    expect(real).not.toMatch(/^    name:/m);
+  });
+
+  it('ignores exactly the paths the real workflow filters on, so the two can never both skip', () => {
+    const real = fs.readFileSync(workflowPath, 'utf-8');
+    const shim = fs.readFileSync(shimPath, 'utf-8');
+    expect(shim).toMatch(/^on:\n  pull_request:\n    paths-ignore:/m);
+    expect(yamlList(shim, 'paths-ignore')).toEqual(yamlList(real, 'paths'));
+  });
+
+  it('does nothing but pass: no model call, no secret, no install', () => {
+    const shim = fs.readFileSync(shimPath, 'utf-8');
+    expect(shim).not.toMatch(/secrets\./);
+    expect(shim).not.toMatch(/npm ci|agent:path-smoke|--live/);
+    expect(shim).toMatch(/permissions:\n  contents: read/);
   });
 });
 

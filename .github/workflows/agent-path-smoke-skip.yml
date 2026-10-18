@@ -1,0 +1,42 @@
+# Skip-pass shim for the Agent Path Smoke check (OBS-3).
+#
+# agent-path-smoke.yml is the one PR check that calls the production model,
+# and it is path-filtered to the files that define a prompt or route a model.
+# Branch protection can only REQUIRE a check that reports on every PR: a
+# required check that never starts leaves the PR "Expected — Waiting for
+# status to be reported" forever. This workflow is GitHub's documented answer
+# (docs: "Handling skipped but required checks"): the same workflow `name:`
+# and the same job id, triggered on exactly the complement of the real
+# workflow's `paths:` (its `paths-ignore:` below MUST stay identical to that
+# list — test/voice-quality/ci-workflow-path-smoke.test.ts pins the two
+# equal), with one step that succeeds. A PR that touches no prompt or routing
+# file gets an instant green `path-smoke`; a PR that touches one runs the real
+# smoke. When a PR touches both kinds of file, both workflows report; the real
+# one finishes last and is the result GitHub shows.
+#
+# Keep this job free of secrets, installs and model calls: it must pass on a
+# fork PR with no credentials, and it must never be mistaken for evidence
+# that the smoke ran.
+name: Agent Path Smoke
+
+on:
+  pull_request:
+    paths-ignore:
+      - 'packages/api/src/ai/**'
+      - 'packages/api/scripts/agent-path-smoke.ts'
+      - 'packages/api/scripts/agent-graph-coverage.ts'
+      - 'packages/api/src/ai/voice-quality/**'
+      - '.github/workflows/agent-path-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  path-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: No prompt or model-routing file changed
+        run: |
+          echo "No prompt-defining or model-routing file changed in this pull request."
+          echo "The real-model path smoke (agent-path-smoke.yml) was not needed; this is the skip-pass shim for the required check."
