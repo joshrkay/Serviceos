@@ -54,6 +54,10 @@ async function isAccessRevoked(res: Response): Promise<boolean> {
 const STATUS_CACHE_TTL_MS = 2000;
 let inflightStatus: Promise<OnboardingStatusResponse> | null = null;
 let lastStatus: { body: OnboardingStatusResponse; at: number } | null = null;
+// Bumped whenever the cache is dropped. A request that started under an older generation is stale: its
+// response must not become the cached status, and it must not clear the slot of the newer request that
+// replaced it (a late answer would otherwise put the pre-action status back for the next poll to replay).
+let generation = 0;
 
 function fetchStatusCoalesced(
   apiFetch: ReturnType<typeof useApiClient>,
@@ -62,6 +66,7 @@ function fetchStatusCoalesced(
     return Promise.resolve(lastStatus.body);
   }
   if (!inflightStatus) {
+    const startedIn = generation;
     inflightStatus = (async () => {
       try {
         const res = await apiFetch('/api/onboarding/status');
@@ -70,10 +75,10 @@ function fetchStatusCoalesced(
           throw new Error(`HTTP ${res.status}`);
         }
         const body = (await res.json()) as OnboardingStatusResponse;
-        lastStatus = { body, at: Date.now() };
+        if (startedIn === generation) lastStatus = { body, at: Date.now() };
         return body;
       } finally {
-        inflightStatus = null;
+        if (startedIn === generation) inflightStatus = null;
       }
     })();
   }
@@ -82,12 +87,12 @@ function fetchStatusCoalesced(
 
 /** Test-only: drop the module cache so test cases don't bleed into each other. */
 export function _resetOnboardingStatusCacheForTests(): void {
-  inflightStatus = null;
-  lastStatus = null;
+  invalidateOnboardingStatusCache();
 }
 
 /** Drop the cached onboarding status on auth transitions (sign-out / tenant switch). */
 export function invalidateOnboardingStatusCache(): void {
+  generation += 1;
   inflightStatus = null;
   lastStatus = null;
 }

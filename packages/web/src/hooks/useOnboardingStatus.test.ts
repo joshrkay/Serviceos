@@ -1,6 +1,10 @@
-import { renderHook, waitFor } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { useOnboardingStatus, _resetOnboardingStatusCacheForTests } from './useOnboardingStatus';
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  useOnboardingStatus,
+  invalidateOnboardingStatusCache,
+  _resetOnboardingStatusCacheForTests,
+} from './useOnboardingStatus';
 
 describe('useOnboardingStatus', () => {
   beforeEach(() => {
@@ -58,5 +62,71 @@ describe('useOnboardingStatus', () => {
     expect(result.current.isLoading).toBe(false);
     expect(result.current.data).toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  describe('after the cache is invalidated', () => {
+    afterEach(() => vi.useRealTimers());
+
+    const at = (currentStep: string) => ({ currentStep, isComplete: false, voiceAgentLive: false, steps: [] });
+
+    it('does not let a slow earlier response put the stale status back for the next poll to replay', async () => {
+      vi.useFakeTimers();
+      const pending: Array<(body: unknown) => void> = [];
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+        () =>
+          new Promise<Response>((resolve) => {
+            pending.push((body) => resolve({ ok: true, json: () => Promise.resolve(body) } as Response));
+          }),
+      );
+      const flush = () => act(async () => void (await vi.advanceTimersByTimeAsync(0)));
+
+      // A poll is on its way (mount) and has not been answered when the owner acts.
+      const { result } = renderHook(() => useOnboardingStatus(1000));
+      await flush();
+      expect(pending).toHaveLength(1);
+
+      // The action: drop the cache and ask for real. The fresh answer comes back first, then the slow stale one.
+      invalidateOnboardingStatusCache();
+      act(() => void result.current.refetch());
+      await flush();
+      expect(pending).toHaveLength(2);
+      pending[1](at('phone'));
+      await flush();
+      expect(result.current.data?.currentStep).toBe('phone');
+      pending[0](at('billing'));
+      await flush();
+
+      // The next tick is inside the cache window: it must replay the fresh answer, with no request at all.
+      await act(async () => void (await vi.advanceTimersByTimeAsync(1000)));
+      expect(result.current.data?.currentStep).toBe('phone');
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not let a stale completion clear the slot of the request that replaced it', async () => {
+      const pending: Array<(body: unknown) => void> = [];
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+        () =>
+          new Promise<Response>((resolve) => {
+            pending.push((body) => resolve({ ok: true, json: () => Promise.resolve(body) } as Response));
+          }),
+      );
+      const first = renderHook(() => useOnboardingStatus(0));
+      await waitFor(() => expect(pending).toHaveLength(1));
+      invalidateOnboardingStatusCache();
+      const second = renderHook(() => useOnboardingStatus(0));
+      await waitFor(() => expect(pending).toHaveLength(2));
+
+      // The stale request finishes while the new one is still out: a third consumer joins the new one.
+      pending[0](at('billing'));
+      await act(() => Promise.resolve());
+      const third = renderHook(() => useOnboardingStatus(0));
+      await act(() => Promise.resolve());
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+      pending[1](at('phone'));
+      await act(() => Promise.resolve());
+      await waitFor(() => expect(third.result.current.data?.currentStep).toBe('phone'));
+      expect(second.result.current.data?.currentStep).toBe('phone');
+    });
   });
 });
