@@ -669,7 +669,16 @@ flowchart LR
         `output_snapshot` text for the subject's normalized phone numbers, email and full name. The
         scan is bounded by the tenant's retention window, because U4's purge has already scrubbed
         anything older.
-      - The erase result reports how many rows each strategy scrubbed.
+      - **A content match is a candidate, not proof.** Names, phones and emails are not unique per
+        customer (`packages/api/src/db/schema.ts:325-328`): two customers can share a name, and a
+        household can share a phone. The scrub is irreversible, so it runs automatically only for a
+        corroborated row, which meets both of these:
+        - its text carries at least two of the subject's identifiers
+        - no other customer or contact in the tenant shares any identifier that matched
+      - Every other match goes onto a candidate list, returned with the erase result and shown to the
+        owner. Those rows are scrubbed only after the owner explicitly confirms them.
+      - The erase result reports how many rows each strategy scrubbed, and how many candidates are
+        still waiting.
   - **Anonymize** the customer link on invoices, payments and estimates, and keep the amounts for
     tax and legal retention.
   - **Keep** `consent_events` and DNC rows as suppression records, hashing the phone if counsel
@@ -678,6 +687,9 @@ flowchart LR
   erases them, and asserts:
   - each store is scrubbed, including a pre-linkage `ai_runs` row found only by content and a linked
     row found by `correlation_id`
+  - with two customers sharing a full name, the other customer's row is untouched
+  - a row that matches only a household-shared phone lands on the candidate list and is scrubbed only
+    after confirmation
   - financial amounts remain
   - suppression remains
   - an audit event is written
