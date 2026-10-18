@@ -3162,8 +3162,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     does not loosen it. The sample-job messages the demo shows are rendered in the page and the
     spoken turn only. The platform-level handoff SMS to the visitor is not a tenant
     notification and is unaffected: it carries no `tenantId` (its payload is `{ demoCallId }`),
-    as operator alerts do not, so the check has nothing to match. Push has no recipient, since
-    demo tenants have no `users` rows.
+    as operator alerts do not, so the check has nothing to match (tenant wrappers such as the
+    owner SMS sender omit it too; see Deferred review findings D5). Push has no recipient,
+    since demo tenants have no `users` rows.
   - *In-flight registry.* The drain does not infer that a handler has finished from the
     queue: `visible_at` lapses on its own clock, independent of the claimed handler, so a
     handler that outlives its window drops out of any predicate on it while it can still be
@@ -3816,7 +3817,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 ### Deferred review findings (resolve at slice start)
 
 U6 and U7 are unbuilt (S5, and S6 which is decision-gated) and have taken many review rounds,
-so these four confirmed findings are recorded here with the direction to take rather than
+so these five confirmed findings are recorded here with the direction to take rather than
 designed further. Each is exposed first by the Docker-gated, real-column test named below.
 
 - **D1. A platform tenant must exist (U7, S6; P1).** `phone_rate_limits.tenant_id` and
@@ -3863,6 +3864,22 @@ designed further. Each is exposed first by the Docker-gated, real-column test na
   `HearItAnswer` polls or streams from it. *First test:* a demo call ends and the tenant is
   reset, then the browser fetch by correlation id still returns the transcript and the job
   card, and a wrong id returns nothing.
+- **D5. A tenantless send slips past the demo-tenant guard (U7, S6; P2).** The guard in
+  `GatedMessageDelivery` runs only when `SmsMessage.tenantId` is present, but that field (and
+  `EmailMessage.tenantId`) is optional and tenant-originated wrappers such as
+  `notifications/owner-sms-sender.ts` build `{ to, body, recipientClass: 'owner', alertClass? }`
+  without it, so a demo voice handler's owner, one-tap or life-safety text looks like the
+  intentionally tenantless platform handoff and reaches the provider (the owner bypass then
+  sends it). *Direction:* invert the default at the provider boundary: a message with no
+  `tenantId` is refused unless it carries an explicit trusted platform marker (a distinct
+  `PlatformMessage` kind or flag that only the signup-handoff outbox sender and operator alerts
+  construct), and every tenant-originated wrapper (owner SMS sender, one-tap, life-safety,
+  customer messaging) must set `tenantId`, enforced by making the field required on the tenant
+  message type so a missing one fails the build; the gate then suppresses when `tenants.demo` is
+  true. *First test:* a demo voice handler's owner SMS, one-tap send and life-safety send each
+  reach the gate with a tenant id and are suppressed (the provider fake sees no call and
+  `demo_send_suppressed` is audited), a message with neither a tenant id nor the platform
+  marker is refused, and the handoff SMS carrying the marker still sends.
 
 ## Sizing and sequencing
 
