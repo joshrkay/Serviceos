@@ -194,9 +194,10 @@ tiers; import from a photo; pricing or plan changes.
 - **tenant_id + RLS:** `onboarding_drafts` carries `tenant_id` with RLS like
   `onboarding_session` (migration 195). `regional_price_tiers` and `demo_calls` are
   platform tables with no `tenant_id`, admin-write only, the same posture as `tenants`;
-  `demo_call_budget` (U7; one row per UTC day, no `tenant_id` at all), `demo_tenant_leases`
-  and `demo_inflight_jobs` (U7) are the same kind of platform table, and the last two's
-  `tenant_id` only names the demo tenant a call or a running job holds.
+  `demo_call_budget` (U7; one row per UTC day, no `tenant_id` at all), `demo_handoff_outbox`
+  (U7; no `tenant_id`), `demo_tenant_leases` and `demo_inflight_jobs` (U7) are the same kind of
+  platform table, and the last two's `tenant_id` only names the demo tenant a call or a running
+  job holds.
 - **LLM gateway:** the free-speech override calls the existing extractors through the gateway;
   the choice path makes no model call.
 - **Catalog resolver:** the trip fee and hourly rate land as catalog items via the pack
@@ -1691,8 +1692,12 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     carrier) equal, field by field, the payloads of the two proposals that executed. Never: a
     proposal payload that differs from the committed draft's resolved fields.
   - Race, writer vs writer (two connections, looped): an owner-phone `PUT` and a choice `PUT`
-    concurrently → both applied in lock order, `version` up by two, neither field lost (each
-    computes its change from the locked row, not a stale copy).
+    issued from the same rendered draft version v (both endpoints require it) → exactly one
+    wins and bumps the draft to v + 1; the other waited behind the lock and is 409
+    `VERSION_CONFLICT` naming v and v + 1, having changed nothing. The loser re-reads and
+    re-sends once with v + 1 and succeeds, `version` ends at v + 2 and both values are stored,
+    neither lost (each write computes its change from the locked row, not a stale copy). Never
+    both applying at v, and never the loser silently overwriting the winner's field.
   - Race, approve vs approve (two connections, both carrying the same `expectedVersion`,
     repeated in a loop so ordering luck cannot pass it): both return 200, the first with
     `approvedNow: true` and the one that waited behind the lock with `approvedNow: false` (it
@@ -1753,8 +1758,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     DO NOTHING` on a caller-supplied client, with the table bootstrap done first on the queue's
     own connection; the in-memory queue implements it as a plain send),
     `packages/api/src/settings/settings.ts` and `pg-settings.ts` (the `afterWrite` option: it
-    runs inside `update`'s transaction after the row write and before commit, with the prior
-    and new rows read under the row lock), `packages/api/src/invoices/invoice-payment-link.ts` (the
+    runs inside `update`'s transaction after the row write and before commit; when the patch
+    names `payment_collection_mode`, `update` first takes the payment-mode lock below, and the
+    prior and new rows are read under it, because a row lock alone does not exist for a tenant
+    with no settings row yet), `packages/api/src/invoices/invoice-payment-link.ts` (the
     `payment_mode_changed` and `payment_mode_changed_during_checkout` reasons on
     `deactivateInvoicePaymentLink`),
     `packages/api/src/payments/payment-link-provider.ts` and `stripe-payment-link.ts`
@@ -1800,7 +1807,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   a policy change, in four pieces so that no single failure leaves a live link behind.
   - *Atomic enqueue.* Both write sites run `onPaymentCollectionModeChanged` inside the
     settings write's own transaction (the `afterWrite` option on `SettingsRepository.update`),
-    not after it. It compares the prior and the new value, both read under the row lock; when
+    not after it. It compares the prior and the new value, both read under the payment-mode
+    lock (see Attach-time revalidation, below); when
     the stored value moved from `pay_link` or from unset to `collect_on_site` it inserts the
     `deactivate_payment_links` job row with `queue.sendOn(client, …)` on that same client:
     payload `{ tenantId, pass: 1 }`, idempotency key `deactivate-payment-links:<tenantId>:<settings
@@ -1832,8 +1840,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `pass: 2` job never enqueues anything, so there are exactly two passes and no job can
     reschedule itself forever. Enqueueing before the batch means a pass 1 that throws and is
     retried still leaves its follow-up, and the retry's identical key inserts nothing new. The
-    follow-up is a backstop for a link attached around the attach check below, such as a
-    tenant with no settings row yet, where there is nothing to lock.
+    follow-up is defence in depth behind the attach check below, which already serialises an
+    attach against the settings write for every tenant, with or without a settings row.
   - *Reconciliation.* A daily leader-gated sweep (`workers/payment-link-reconciliation-sweep.ts`,
     the P0-009 sweep pattern; it excludes `tenants.demo` like every other tenant lister, U7)
     lists the tenants whose `payment_collection_mode` is `collect_on_site` and, for each one
@@ -1846,12 +1854,28 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     attached after the switch would leave a chargeable link against the approved policy until
     the next sweep; `setPaymentLinkIfPayable` checks invoice state and balance, not the mode.
     So its own `UPDATE` also requires the mode: `COALESCE((SELECT payment_collection_mode FROM
-    tenant_settings WHERE tenant_id = $1 FOR SHARE), 'pay_link') = 'pay_link'` (no row or an
-    unset key is the default, D-039/D-040; the exact join or subselect is settled at
-    implementation and pinned by the two-connection test). The share lock orders it against the
-    settings write: a write that starts while an attach is past its check waits for the attach
-    to commit, so its pass 1 finds the stored link, and an attach that starts after the write
-    reads `collect_on_site`. The method returns the invoice or a refusal that names its reason
+    tenant_settings WHERE tenant_id = $1), 'pay_link') = 'pay_link'` (no row or an unset key is
+    the default, D-039/D-040; the exact join or subselect is settled at implementation and
+    pinned by the two-connection test). The read cannot be its own lock: `FOR SHARE` on the
+    settings row locks nothing when there is no row, and the first `collect_on_site` write is
+    the one that inserts it, so an attach could read the default while that insert and its
+    pass 1 commit, then store a link pass 1 never saw. The order comes from a per-tenant
+    advisory lock, `pg_advisory_xact_lock(hashtext($1))` on `payment_mode:<tenantId>`, the form
+    `jobs/pg-job.ts`, `reputation/pg-service-credit.ts` and `shared/rate-limit/phone-rate-limit.ts`
+    use for per-tenant rules. `SettingsRepository.update` takes it exclusively, as its first
+    statement, whenever the patch names `payment_collection_mode` (both write sites, and any
+    later one, get it there); `setPaymentLinkIfPayable` takes `pg_advisory_xact_lock_shared` on
+    the same key as a statement of its own before the guarded `UPDATE` (a lock taken in the
+    same statement as the read would leave the read on a READ COMMITTED snapshot from before the
+    grant). Shared on attach so
+    concurrent checkouts of one tenant do not queue on each other. A write that starts while an
+    attach is past its check waits for the attach to commit, so its pass 1 finds the stored
+    link, and an attach that starts after the write reads `collect_on_site`, whether or not a
+    settings row existed before. A key exists for every tenant, where a row may not. (Rejected:
+    `SELECT … FROM tenants WHERE id = $1` with `FOR SHARE` on attach and `FOR NO KEY UPDATE` on
+    the write, as `users/pg-user.ts` anchors owner removal on that row with `FOR UPDATE`. The
+    row always exists, but billing and plan writes to it would queue behind every checkout.)
+    The method returns the invoice or a refusal that names its reason
     (`not_payable` as today, `mode_not_pay_link`), and a throw from the attach, the settings
     read included, is treated as an unreadable mode and fails closed. On either mode refusal
     all three mint sites (`createInvoicePaymentLink` and the two paths in
@@ -1953,6 +1977,15 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     attach commits, the write commits and pass 1 deactivates the stored link; the write first →
     the attach reads `collect_on_site`, stores nothing and the fresh link is deactivated.
     Never: a stored live link after pass 1 has finished.
+  - Mode change (attach against the FIRST `collect_on_site` write, no settings row; real
+    Postgres, two real connections, both orders, looped, for both write sites): a tenant with no
+    `tenant_settings` row, so the write inserts it. The write holds the lock mid-insert while the
+    attach starts → the attach waits, reads `collect_on_site` once the write commits, stores
+    nothing and its fresh link is deactivated; the attach past its check while the write starts
+    → the write waits, the attach stores its link, the write commits and pass 1 deactivates it.
+    Asserted immediately after pass 1, before pass 2 can run: no stored active link. A statement
+    spy shows the attach's lock statement precedes its guarded `UPDATE`, and that two attaches
+    for one tenant do not block each other.
   - Mode change (unchanged mode attaches): `pay_link`, an unset key and a tenant with no
     settings row each attach the link as today, with no deactivation and the same response; a
     void or credit landing during the mint still loses through the existing status and balance
@@ -1974,15 +2007,17 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Goal:** A visitor enters a cell and trade on the landing page, receives a sixty-second
   call answered as their business that books a sample job, then a signup text.
 - **Requirements:** R1 (value before identity)
-- **Dependencies:** U2, U4; voice-parity U3 for the preset voice on the call
+- **Dependencies:** U2, U4; U8 for `queue.sendOn`; voice-parity U3 for the preset voice on the call
 - **Files:**
   - modify `packages/api/src/integrations/credentials.ts` (explicit `PLATFORM_TWILIO_*`)
-  - create `packages/api/src/demo/{routes,service,script,lease,lease-token,reset,job-guard,inflight,write-fence,call-budget}.ts`,
+  - create `packages/api/src/demo/{routes,service,script,lease,lease-token,reset,job-guard,inflight,write-fence,call-budget,handoff-outbox}.ts`,
     migration `316_demo_calls` (313 went to the owner-cell column in S1b and 314-315 are S5's;
-    phone hash, trade, name, lease_id, call_sid, status, lead_id, `handoff_sent_at` (the
-    single-send guard for the signup SMS), and the budget reservation
+    phone hash, trade, name, lease_id, call_sid, status, lead_id, and the budget reservation
     the call holds: `budget_day`, `reserved_cents`, `budget_released_at`; no `tenant_id`); the
-    same migration adds `demo_call_budget` (`day` DATE primary key, `calls_reserved`,
+    same migration adds `demo_handoff_outbox` (`id`, `demo_call_id` UNIQUE, `lead_id`,
+    `idempotency_key` UNIQUE, `handoff_expires_at`, `created_at`, `sent_at` NULL until the
+    provider accepts the message, `attempts`; no `tenant_id`; see Late status callbacks),
+    `demo_call_budget` (`day` DATE primary key, `calls_reserved`,
     `calls_cap`, `est_cost_cents`, `cost_cap_cents`, all integers, CHECKs added `NOT VALID`; see
     Daily budget), `demo_tenant_leases` and `demo_inflight_jobs` (see Approach), a unique index
     on `demo_tenant_leases.call_sid WHERE call_sid IS NOT NULL`, the sequence
@@ -1991,8 +2026,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     seed script `packages/api/scripts/seed-demo-tenants.ts` (idempotent; pool size
     `DEMO_POOL_PER_TRADE`, default 3)
   - create `packages/api/src/workers/demo-lease-reaper.ts` (a leader-gated P0-009 sweep that
-    reclaims expired leases, takes over resets whose heartbeat has gone stale and reaps
-    in-flight registry rows whose heartbeat has lapsed); extract the
+    reclaims expired leases, takes over resets whose heartbeat has gone stale, reaps
+    in-flight registry rows whose heartbeat has lapsed and re-enqueues handoff outbox rows
+    still pending after five minutes); create `packages/api/src/workers/send-demo-handoff.ts`
+    (the queue handler that sends the signup text from an outbox row); extract the
     `information_schema` table walk that `tenants/deprovision.ts` uses to purge a tenant into a
     shared helper that takes a keep-list, an optional batch size and a `beforeStep` fence hook
     (deprovision passes none of them and keeps its single transaction; `demo/reset.ts` passes
@@ -2022,7 +2059,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `components/public/HearItAnswer.tsx`; modify `packages/web/src/components/auth/SignupPage.tsx`
     (forward the handoff token) and the Clerk signup webhook handler in `packages/api/src/`
     (copy it onto the tenant)
-  - tests: `packages/api/test/demo/{service,routes,limits,lease,lease-token,reset,job-guard,inflight,write-fence,call-budget}.test.ts`,
+  - tests: `packages/api/test/demo/{service,routes,limits,lease,lease-token,reset,job-guard,inflight,write-fence,call-budget,handoff-outbox}.test.ts`,
+    `packages/api/test/workers/send-demo-handoff.test.ts`,
+    `packages/api/test/integration/demo-handoff-outbox.test.ts`,
     `packages/api/test/integration/demo-calls.test.ts`,
     `packages/api/test/integration/demo-call-budget.test.ts`,
     `packages/api/test/integration/demo-callback-binding.test.ts`,
@@ -2105,17 +2144,36 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   updated, the signup SMS never sent, the lead handed off nowhere after a good demo. A status
   callback whose token is valid until `sexp` therefore always finalizes the platform-level
   `demo_calls` row found by `lease_id`: it binds the CallSid as above (a second CallSid is
-  still 403 and `demo_callsid_mismatch`), sets the terminal status while the row holds none,
-  and, for `completed`, sends the signup SMS from the platform number behind a single-send
-  guard: `UPDATE demo_calls SET handoff_sent_at = now() WHERE lease_id = $1 AND
-  handoff_sent_at IS NULL RETURNING …` runs before the send and is cleared again only if the
-  send fails, so a replayed or concurrent callback sends nothing twice and Twilio's retry
-  after a failed send still can. The on-time path uses the same guard. Only while the lease is
-  still `active` does the callback also take `resetAndRelease`'s claim; once it is `resetting`
-  or `released` the callback finalizes the row and stops: no tenant transaction, no lease
-  context, no lease row write, no queue message, so a late callback (even one arriving during
-  the tenant's next lease, which names only its own old lease) cannot write tenant data. Voice
-  turns and every tenant write still require an `active`, unexpired lease.
+  still 403 and `demo_callsid_mismatch`) and, in ONE platform transaction, sets the terminal
+  status while the row holds none and, for `completed`, inserts the signup handoff into
+  `demo_handoff_outbox` (`ON CONFLICT (demo_call_id) DO NOTHING`; a stable `idempotency_key`
+  of `demo-handoff:<demo_call_id>` and a `handoff_expires_at` are fixed on the row) and
+  enqueues a `send_demo_handoff` job with `queue.sendOn` on that same client (queue key
+  `send-demo-handoff:<demo_call_id>`). The callback sends nothing itself. A flag set before
+  the send cannot be made safe: a process that dies after committing it and before calling
+  the provider consumes the guard with nothing sent, and every retried callback then sees it
+  consumed. With an outbox the row and the job commit together or not at all, a crash before
+  the send leaves the row pending for the queue to redeliver, and `sent_at` is written only
+  after the provider accepts the message. The handler (`workers/send-demo-handoff.ts`, the
+  P0-009 pattern) returns if `sent_at` is set; otherwise it sends from the platform number with
+  the row's `idempotency_key` as the provider's idempotency token, then runs `UPDATE … SET
+  sent_at = now() WHERE id = $1 AND sent_at IS NULL`. A failed or ambiguous send (a timeout, a
+  crash after the provider accepted it) leaves `sent_at` null, and the retry carries the same
+  key and the same body (the link's handoff token is an HMAC over `lead_id` and the row's fixed
+  expiry), so the provider can collapse it instead of texting the visitor twice. Confirm at
+  implementation that the platform SMS call accepts an idempotency token, and take it to the
+  founder if it cannot, since an ambiguous send is then only at-least-once. A job that
+  dead-letters leaves its row pending, and the reaper's sweep re-enqueues it after five
+  minutes under a queue key of its own (`…:sweep:<UTC date>`). The payload is
+  `{ demoCallId }` with no `tenantId`, so it is not a demo-tenant job and the generation guard
+  does not apply (the lease is usually released before it runs). A replayed or concurrent
+  callback, and the on-time path, insert nothing a second time. Only while the lease is still
+  `active` does the callback also take `resetAndRelease`'s claim; once it is `resetting` or
+  `released` the callback finalizes
+  the row and stops: no tenant transaction, no lease context, no lease row write, no
+  demo-tenant queue message, so a late callback (even one arriving during the tenant's next
+  lease, which names only its own old lease) cannot write tenant data. Voice turns and every
+  tenant write still require an `active`, unexpired lease.
 - **Release and reset.** The lease is the tenant's hold on the pool, so it is never touched
   until the tenant is clean. The call-status callback (completed, failed, busy, no-answer,
   canceled; it finds its lease by the signed token, so one that beats the `Calls` response
@@ -2449,15 +2507,33 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Late status callbacks (real Postgres, fake Twilio and SMS sender; one case per terminal
     status): (a) the reaper has already reset and released the lease, then a `completed`
     callback arrives 10 minutes after `exp` (token still inside `sexp`) → 200, `demo_calls`
-    ends `completed` (found by `lease_id`), the signup SMS goes exactly once and
-    `handoff_sent_at` is set; `no-answer`, `busy` and `failed` finalize the row and send no SMS.
-    (b) Replay: the same callback delivered again, and two copies delivered concurrently on two
-    connections (looped) → one SMS, one `handoff_sent_at`, the row unchanged; an SMS send that
-    fails clears the guard and Twilio's retry then sends it once; the on-time path (lease
-    `active`) shares the guard, so an on-time callback followed by a late replay sends once.
+    ends `completed` (found by `lease_id`) with one `demo_handoff_outbox` row and one job, and
+    once the handler runs the signup SMS has gone exactly once and `sent_at` is set; `no-answer`,
+    `busy` and `failed` finalize the row and insert no outbox row.
+    (b) Replay inserts nothing twice: the same callback delivered again, and two copies
+    delivered concurrently on two connections (looped) → still one outbox row and one job, the
+    `demo_calls` row unchanged, one SMS; the on-time path (lease `active`) writes the same row,
+    so an on-time callback followed by a late replay inserts and sends once. A fault injected
+    after the outbox insert and before the commit rolls back the status, the outbox row and the
+    job together, and Twilio's retry then finalizes normally.
+    (b2) Crash between commit and send (the old `handoff_sent_at` failure): the handler is killed
+    after the callback committed and before the provider is called → the outbox row is pending
+    (`sent_at` null, no SMS), a Twilio retry of the callback in the meantime inserts and sends
+    nothing, and the redelivered job sends exactly once and sets `sent_at`; with the job row
+    deleted as well (a dead-lettered job), the reaper's sweep re-enqueues the row after five
+    minutes under its own queue key and the SMS still goes exactly once. A send that fails outright
+    leaves `sent_at` null and retries. A row already `sent` is never re-enqueued by the sweep.
+    (b3) Ambiguous send, then retry: a fake provider that accepts the message and then drops
+    the connection (and, separately, times out) before the handler records `sent_at` → the job
+    retries, the second provider call carries the same idempotency key and the identical body
+    as the first (asserted on the fake, which collapses repeats of a key), exactly one message
+    exists, and `sent_at` ends set; a fake that does not collapse repeats shows the duplicate,
+    which is the check that the key is really sent.
     (c) No tenant writes: a statement spy shows the late callback opens no tenant-scoped
-    transaction and writes nothing but `demo_calls`; the lease row is unchanged (no claim, no
-    reset spy call, no new generation); no queue message is enqueued; the tenant equals the
+    transaction and writes nothing but `demo_calls`, its outbox row and the one platform-level
+    job (payload `{ demoCallId }`, no `tenantId`, so the generation guard drops nothing); the
+    lease row is unchanged (no claim, no reset spy call, no new generation); no demo-tenant queue
+    message is enqueued; the tenant equals the
     fixture, including when the callback arrives while the tenant is leased to a new call,
     whose lease, generation and rows are untouched. A late callback with a second CallSid is
     403 and audits `demo_callsid_mismatch`; the voice URL with the same token past `exp`
@@ -2554,7 +2630,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   tenant after each, and no job from one call running or writing against the next; a callback
   that arrives before the `Calls` response returns, including an early terminal one, still lands
   on its own lease, and a `completed` callback that arrives after the grace and the reaper's
-  reset still updates its call and sends the signup text once; founder decision recorded in `docs/decisions.md`.
+  reset still updates its call and sends the signup text once, including when the sender dies
+  between the callback's commit and the provider call; founder decision recorded in `docs/decisions.md`.
 
 ## Risks & Dependencies
 
@@ -2615,8 +2692,8 @@ previous one; the previous slice is merged first.
 | S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover, even beside a failed one, and takes precedence over `failed`) and `POST /draft/retry` (guards in order: `DRAFT_NOT_APPROVED`, then `DRAFT_RETRY_UNSAFE` for a set holding such a proposal, failed member or not (`approved + undone` is unsafe, not nothing-failed), then `DRAFT_RETRY_NOTHING_FAILED` for the benign rest; the refusal changes nothing, because re-approving only the failed member would leave its sibling behind and the set would end `executed + undone`; that set's way out is S4's reset, so until S4 the only way out is Settings and the shell offers no Start over). Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
 | S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status (`reset` while no member is executed or executing and no `approved` member is past its undo window, else `settings`, for a failed member beside a terminal one as for any other `stopped` set) so the shell never offers a refused button; reset is also the way out of the set retry refuses as `DRAFT_RETRY_UNSAFE`; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body, and checked between `DRAFT_NOT_APPROVED` and `DRAFT_RETRY_UNSAFE`), made required once every client sends it. | 6-7 days (reset adds one) |
-| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read, and the link attach re-checks the mode so a checkout that stalls across a switch stores none), flag flipped, v2 deleted. | 11-14 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another) |
-| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost), reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a `handoff_sent_at` guard, no tenant writes). | 10-14 days (the token and bind add one, the budget another, the late-callback handoff a third) |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read, and the link attach re-checks the mode under a per-tenant payment-mode lock, so a checkout that stalls across a switch stores none even when the switch is the tenant's first settings write), flag flipped, v2 deleted. | 11-14 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another) |
+| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost), reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a transactional handoff outbox written in the finalizing transaction and sent by a queue worker under a stable idempotency key, so a crash before the send is retried and never loses the handoff, no tenant writes). | 11-15 days (the token and bind add one, the budget another, the late-callback handoff a third, the outbox and its sender a fourth) |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
 second engineer shortens S2 and S3 only where the API they depend on is already merged.
