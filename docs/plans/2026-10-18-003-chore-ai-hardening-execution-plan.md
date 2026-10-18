@@ -37,6 +37,11 @@ be alive and may push batch A or B at any time, so every batch start has to re-c
 | PR CI | `pr-checks.yml` `test` job runs `npm test`, `npm run test:integration` (all 376 integration files, RLS runtime role on) and coverage. `e2e.yml` (playwright) and `onboarding-database.yml` run too. `agent-path-smoke.yml` fires on `packages/api/src/ai/**`, so U2, U3, U4, U6 will trigger the live-model smoke; it needs the `OPENAI_API_KEY` secret and is capped at $1. |
 | Disk / CPU | 29 GB free, 4 CPUs. `node_modules` is 604 MB at the root plus `packages/{api,shared,web}/node_modules`. |
 
+## Decisions recorded
+
+- 2026-10-18, Josh: owner decisions 1 (PRIV-5 erasure scope) and 2 (money cap on AI spend) are
+  settled on the hardening plan's recommended defaults. U7 and U8 may start once U4 and U3 merge.
+
 ## Requirements
 
 - R1. Every batch U1–U6 ends as a draft PR on its named branch, test-first, with an independent
