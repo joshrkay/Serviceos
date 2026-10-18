@@ -649,6 +649,17 @@ flowchart LR
         legs still missing, so the voicemail still reaches transcription. It never re-fetches from
         Twilio.
       - alerts through `alertOperator` on any recording it cannot ingest
+    - **Fix a live lead-loss bug the sweep depends on.** Today `voicemail-status-route.ts:315-388`
+      records the `twilio_voicemail_lead` receipt and only then calls `createLead`. A `createLead`
+      failure is only logged as a warning and processing carries on, so every later delivery or
+      sweep replay sees the receipt and skips the lead. One transient failure therefore loses that
+      voicemail's lead permanently. Fix it in either of two ways:
+      - make the receipt a resumable claim (`pending` → `completed`) that is completed only after the
+        lead and its audit event commit, and have the sweep resume `pending` claims
+      - or write the lead, its audit event and the receipt in one transaction, keyed idempotently on
+        RecordingSid
+
+      Either way, a lead failure must leave the leg retryable, not silently done.
     - Twilio connection-override retry parameters on the callback URL are optional. Use them only
       after confirming against Twilio's documentation that they apply to recording status callbacks.
   - **LCR-05**
@@ -676,6 +687,8 @@ flowchart LR
     ingests that recording exactly once.
   - The DB is down before `/voicemail-status` runs → after recovery, the sweep creates exactly one
     lead and one voicemail recording, and replaying the sweep creates neither again.
+  - The lead receipt is recorded, then `createLead` throws. The lead leg stays retryable, and the next
+    delivery or sweep creates exactly one lead.
   - The upload and insert succeed, then the hand-off fails before the success receipt. The sweep resumes
     from the stored S3 object and hands the voicemail to transcription exactly once, with no Twilio
     re-fetch.
@@ -819,6 +832,20 @@ flowchart LR
       bare link column therefore can't silently escape the erase.
     - Free-text stores that can hold a customer's details without a foreign key (notes, messages,
       transcripts, `ai_runs`) are listed in the manifest explicitly, with how each is matched.
+  - **Fence writers that are still in flight, or the erase can be undone.** An erase can overlap an
+    asynchronous writer. For example, the gateway creates a pending `ai_runs` row before it
+    dispatches, and only writes `outputSnapshot` after completion (`gateway.ts:632-662`); the trace
+    export, transcript append and session summary work the same way. A completion that lands after
+    the scrub would put the data back.
+    - The erase first writes a durable, tenant-scoped erasure tombstone. It is keyed by the
+      customer id and the collected session, call and correlation ids.
+    - Every asynchronous content writer checks the tombstone before it writes content, and drops
+      that content when the tombstone matches. That covers the `ai_runs` completion, the trace
+      export, the transcript append, the summary, and the knowledge-chunk ingest.
+    - The erase reports success only after a bounded drain past the maximum gateway deadline,
+      followed by a re-scan that comes back clean.
+    - Test: a gateway call is in flight when the erase starts. It completes afterwards, and its
+      output is never persisted or exported.
   - **Scrub:**
     - the `customers` row and `customer_contacts`
     - `customer_custom_field_values`: the arbitrary `value` column (`schema.ts:4733-4741`) can hold
