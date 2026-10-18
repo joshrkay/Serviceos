@@ -332,6 +332,10 @@ describe('OptionPairTurn', () => {
         expect(tripField()).toBeValid();
         expect(rateField()).toBeInvalid();
         expect(rateField()).toHaveAccessibleDescription('Use dollars, like 120 or 89.50.');
+        // The wrong field shows red; the right one keeps its normal border.
+        expect(rateField().className).toMatch(/border-destructive/);
+        expect(rateField().className).not.toMatch(/border-foreground\/20/);
+        expect(tripField().className).toMatch(/border-foreground\/20/);
         expect(onTypeInstead).not.toHaveBeenCalled();
       });
 

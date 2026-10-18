@@ -1,6 +1,7 @@
 import { useId } from 'react';
 import type { AssembledOnboardingChoice } from '@ai-service-os/shared';
 import { Input } from '../../ui';
+import { cn } from '../../ui/utils';
 import { GREETING_MAX, type TypedErrors, type TypedField, type TypedKind, type TypedValues } from './typed-answer';
 import { dollars } from './summarize';
 
@@ -87,7 +88,8 @@ function TypedInput({ label, value, placeholder, maxLength, inputMode, error, au
         invalid={error !== undefined}
         aria-describedby={error ? errorId : undefined}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded-2xl border-[1.5px] border-foreground/20 px-4 py-3.5 text-lg"
+        // Keep the field's own red border when it is invalid.
+        className={cn('rounded-2xl border-[1.5px] px-4 py-3.5 text-lg', error === undefined && 'border-foreground/20')}
       />
       {error ? (
         <p id={errorId} role="alert" className="text-sm text-destructive">
