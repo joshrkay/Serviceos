@@ -81,6 +81,22 @@ const CONFIG_WRITING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * PI-3 — line-item document types whose operator edits become correction
+ * lessons on execution (learning/corrections/record-on-execution.ts). A
+ * lesson cascades into the tenant price book, labor rate and brand voice —
+ * settings:update authority, exercised by whoever APPROVED the edited card.
+ * The sweep runs detached from the approval and would otherwise attribute
+ * the work to the drafter, so the approver's id and role are stamped here;
+ * the recorder cascades only when that role holds settings:update.
+ */
+const APPROVER_ATTRIBUTED_LINE_ITEM_TYPES: ReadonlySet<string> = new Set([
+  'draft_estimate',
+  'update_estimate',
+  'draft_invoice',
+  'update_invoice',
+]);
+
+/**
  * N-009 / P2-038 — optional correction-loop reversal wired into `undoProposal`.
  * When supplied, undoing a proposal reverses every structured lesson that
  * proposal recorded (and the config each cascaded). Failure-soft: a throw is
@@ -367,10 +383,13 @@ export async function approveProposal(
     // reason and one more: the sweep runs detached from this request, so if
     // the approver's role isn't stamped here it cannot be recovered later, and
     // the audit falls back to asserting 'owner' regardless of who acted.
+    // Line-item types join for the correction lessons their edits cascade
+    // (PI-3, APPROVER_ATTRIBUTED_LINE_ITEM_TYPES).
     ...(proposal.proposalType === 'adopt_entity_alias'
       ? { executedBy: actorId }
       : {}),
-    ...(CONFIG_WRITING_PROPOSAL_TYPES.has(proposal.proposalType)
+    ...(CONFIG_WRITING_PROPOSAL_TYPES.has(proposal.proposalType) ||
+    APPROVER_ATTRIBUTED_LINE_ITEM_TYPES.has(proposal.proposalType)
       ? { executedBy: actorId, executedByRole: actorRole }
       : {}),
   });

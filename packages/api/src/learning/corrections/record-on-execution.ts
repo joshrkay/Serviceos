@@ -10,8 +10,9 @@
  *   2. runs the conservative structured extractor over the typed deltas,
  *   3. records + forward-applies any lessons (recordCorrectionLessons).
  *
- * Lessons are only recorded for EXECUTED (i.e. already human-approved)
- * proposals, so the config cascade stays behind the approval gate. The whole
+ * Lessons are only recorded for EXECUTED proposals approved by a human who
+ * holds settings:update (PI-3), so the config cascade stays behind the same
+ * authority the catalog and settings routes demand. The whole
  * thing is failure-soft at the call site — a lesson-record error must never
  * break execution.
  *
@@ -40,6 +41,7 @@ import { recordCorrectionLessons } from './apply-undo';
 import { localDateFor, type CorrectionLesson, type CorrectionLessonRepository } from './correction-lesson';
 import { detectCorrectionRepetition } from './correction-repetition';
 import type { ConfigPorts } from './lesson-applicator';
+import { hasPermission, isValidRole } from '../../auth/rbac';
 
 const DEFAULT_TIMEZONE = 'America/New_York';
 
@@ -109,6 +111,27 @@ export async function recordCorrectionLessonsOnExecution(
 
   const proposal = await deps.proposalRepo.findById(tenantId, proposalId);
   if (!proposal) return [];
+
+  // PI-3 — a lesson rewrites tenant config (catalog price, labor rate, brand
+  // voice banned phrases) the moment it is recorded; the catalog routes and
+  // the lesson undo both require settings:update. The authority is the
+  // APPROVER's, stamped at approval (approveProposal,
+  // APPROVER_ATTRIBUTED_LINE_ITEM_TYPES). A dispatcher's approval, or an
+  // unstamped one (an auto-approved draft has no approver), records and
+  // cascades nothing. Recording without cascading is deliberately NOT done:
+  // a lesson row means "applied", and undoing one reverts config to its
+  // `before` value — which would clobber a later real change. The edited
+  // document itself still executes at the approved price.
+  const approverRole = proposal.executedByRole;
+  const approverId = proposal.executedBy;
+  if (
+    !approverId ||
+    !approverRole ||
+    !isValidRole(approverRole) ||
+    !hasPermission(approverRole, 'settings:update')
+  ) {
+    return [];
+  }
 
   const execution = await deps.proposalExecutionRepo.findLatestByProposal(tenantId, proposalId);
   if (!execution || execution.status !== 'succeeded') return [];
@@ -184,11 +207,17 @@ export async function recordCorrectionLessonsOnExecution(
     {
       tenantId,
       sourceProposalId: proposalId,
-      ownerId: execution.executedBy,
+      ownerId: approverId,
       localDate,
       drafts,
     },
-    { repository: deps.lessonRepo, ports: deps.ports, auditRepo: deps.auditRepo },
+    {
+      repository: deps.lessonRepo,
+      ports: deps.ports,
+      auditRepo: deps.auditRepo,
+      // PI-3 — the audit names the real approver role, never a default.
+      actorRole: approverRole,
+    },
   );
 
   // WS20 — after persisting the fresh lessons, check whether the owner has now

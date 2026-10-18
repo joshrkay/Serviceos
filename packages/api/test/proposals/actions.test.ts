@@ -208,6 +208,29 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     expect(approved.executedByRole).toBe('owner');
   });
 
+  // PI-3 — a line-item draft's correction lessons cascade into tenant config
+  // under the APPROVER's authority, so the approver (not the drafter) and
+  // their role are stamped for the recorder to check and audit.
+  it.each([
+    ['draft_estimate', { customerId: '7c9e6679-7425-40de-944b-e07fc1f90ae7', lineItems: [{ description: 'Labor', quantity: 1, unitPrice: 11500 }] }],
+    ['update_estimate', { estimateId: '7c9e6679-7425-40de-944b-e07fc1f90ae7', editActions: [{ type: 'remove_line_item', index: 0 }] }],
+    ['draft_invoice', { customerId: '7c9e6679-7425-40de-944b-e07fc1f90ae7', lineItems: [{ description: 'Labor', quantity: 1, unitPriceCents: 11500 }] }],
+    ['update_invoice', { invoiceId: '7c9e6679-7425-40de-944b-e07fc1f90ae7', editActions: [{ type: 'remove_line_item', index: 0 }] }],
+  ])('line-item type %s stamps the approver and their role', async (type, payload) => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, {
+      proposalType: type as never,
+      payload: payload as Record<string, unknown>,
+      createdBy: 'technician-7',
+    });
+
+    const approved = await approveProposal(repo, tenantId, proposal.id, 'dispatcher-2', 'dispatcher');
+
+    expect(approved.createdBy).toBe('technician-7');
+    expect(approved.executedBy).toBe('dispatcher-2');
+    expect(approved.executedByRole).toBe('dispatcher');
+  });
+
   it('leaves the drafter as the executor for a non-config type', async () => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo, { createdBy: 'technician-7' });
