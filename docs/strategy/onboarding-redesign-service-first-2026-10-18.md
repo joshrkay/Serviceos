@@ -213,7 +213,83 @@ brief is partly a request to build what was designed.
 
 ## Competitors
 
-<!-- COMPETITOR SECTION: filled from docs/research/competitive-onboarding-narrative-2026-10-18.md -->
+Full evidence with sources: `docs/research/competitive-onboarding-narrative-2026-10-18.md`.
+Hero copy there comes from indexed snapshots, so re-capture before quoting it externally.
+
+### How the category frames and onboards
+
+| Competitor | Hero framing | Path to live | Guided setup | Setup by talking | Price public | Tone |
+|---|---|---|---|---|---|---|
+| Jobber | Owner identity ("Run a stronger service business") | 4 signup questions, then a tailored checklist; Receptionist in 6 steps with a "Play preview" that calls your phone | Tailored guide, CSV import, free coaching | No (voice preview only) | Yes, from $29 | Real-customer photography, warm |
+| Housecall Pro | Category and proof ("1 in 4 American homes") | 6-step wizard; CSR AI onboarding arrives as a text an hour later, plus a "Test CSR AI" button | Trade price book and trade packages; migration team on top tier only | No | Yes, from $59; AI add-on unpriced | Screenshot-led |
+| ServiceTitan | Category and scale | 3 stages, 12 to 16 weeks; "prepare your pricebook, data and accounting before kickoff" | Paid consultants and data analysts | No | No | Enterprise |
+| Workiz | Tech metaphor ("AI growth engine") | Logo, service areas, roles first; days to weeks | Videos, specialists | No | No | Screenshot |
+| FieldPulse / Service Fusion | Emotional outcome / feature + service promise | Demo, then phased rollout with homework | Implementation manager | No | No / partial | Mid-market |
+| Avoca | Category ("The AI front office for service businesses") | Demo, staged implementation tracker, go-live call | Implementation team and CSM | No | No | Trade photo, enterprise proof |
+| Bland | Tech and ROI | Developer build | No | No | Usage-based | Developer |
+| Goodcall | Setup ease is the hero ("Describe your business… Gabi writes the greeting") | Describe, Gabi drafts, practice calls on the hard cases, publish | Agent-guided | **Yes, text or speech, with a publish gate** | Yes, from $79 | Small-business persona |
+| Smith.ai | Pure jobs chain ("Answer every call, book the consult, sign more clients") | Plan, then human onboarding on Pro | Humans on Pro | No | Yes, per call | Staffing agency |
+| Rosie / Sameday / Broccoli | One metric or price in the hero ("Starting at $49", "15 minutes", "2 days onboarding"); named agents | Self-serve to demo-gated | Mixed | No | Mixed | Persona-led |
+
+### What this means for us
+
+Three readings matter for this brief.
+
+1. **Nobody sets up the business by talking.** Goodcall is the only product that configures
+   by conversation, and only the phone agent: describe, draft, practice the hard calls,
+   publish. That owners accept it, and that "nothing changes for callers until you publish"
+   is how Goodcall earns trust, is direct evidence for Acts 1 and 2 and for the inline
+   read-back approval. Nobody lets an owner say *"I charge $89 to come out and $150 an hour
+   after, I take cards, Monday to Saturday seven to five, I don't do gas"* and get a price
+   book, hours, payment rails and booking rules drafted for approval. That sentence is the
+   product.
+2. **"You don't need to know what an invoice is" is unclaimed.** Every flow in the set,
+   including the AI entrants, assumes the owner already understands estimate, invoice,
+   deposit and price book. ServiceTitan asks you to prepare them before kickoff. The 2025-26
+   AI wave (Avoca, Probook, Broccoli, Sameday, Rosie, Goodcall) is intake only; the single
+   entrant saying "back office" is WorkHero, HVAC-only at seed. Calls *and* money handled by
+   one thing, explained in trade words, has no owner in the market. That is the day-one
+   owner's job J2 and J6, and it is why the vocabulary table above is strategy, not polish.
+3. **The service feel is gated behind price everywhere else.** Human onboarding sits behind
+   MAX, Pro or enterprise tiers; self-serve gets screenshots and settings checklists. The
+   products that *feel* like staff (Smith.ai's "fully staffed, 24/7", the named agents Amy,
+   Hailey, Jessica, Gabi) do not pair it with a flat SMB price. Rivet can: the conversation is
+   the concierge, at $99.
+
+### Patterns adopted into the flow
+
+- **Goodcall:** describe, draft, practice the hard cases, publish. This is Act 1 and Act 2,
+  with our proposal gate as the publish step. Their 2.5-star billing reviews are also the
+  warning against per-caller pricing surprises.
+- **Jobber:** four human questions before anything else, then tailor; and "Play preview"
+  rings the owner's own phone so they hear the receptionist before a customer does. This
+  is the precedent for "Hear it answer" and for the day-one owner question in Act 1.
+- **Housecall Pro:** ship the trade's defaults with "homeowner-friendly descriptions", and
+  deliver the forwarding walkthrough as a text message. This is the pack read-back and the
+  forwarding-by-text in Act 3.
+- **Rosie, Sameday, Broccoli:** one concrete promise in the hero. Ours should be the time
+  to a working front desk and the flat price, in the same sentence.
+- **Avoca:** a per-capability Not Started / In Progress / Live tracker. Spoken by Rivet in
+  Act 4 ("your line is live, estimates are ready, payments need your bank") this becomes a
+  progress narrative instead of a settings page.
+
+### Anti-patterns we avoid
+
+- **Demo-gated, price-hidden entry.** A solo owner evaluates at 9pm on a phone. Sameday
+  promises "15 minutes" and then says "schedule a demo". We never do that.
+- **Add-on sprawl and gated help.** Unpriced AI add-ons, 30-conversation caps, modules at
+  $200-300 a month. Our flat price is a narrative asset and the trial screen should say so.
+- **Software-first wizards that make the owner do office work to get software that promises
+  to do office work.** Logo, service areas and roles before any value; "prepare your
+  pricebook before kickoff". That is the current identity step. The first five minutes should
+  end with a heard call or a booked test job, not a configured account.
+
+### One idea from the research not in the flow above
+
+**Import from a photo.** No vendor turns a paper price list, an invoice pad or a competitor
+export into a working account, and the gateway already runs vision. For Mike and Jenna this
+is the migration story ("take a picture of your price sheet"); for the day-one owner it is
+irrelevant. Candidate for Phase 3, flagged, not committed.
 
 ## What exists, what is new
 
