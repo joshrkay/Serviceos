@@ -201,6 +201,8 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
     );
   }
 
+  const savedAs = (execution: 'failed' | 'stopped') =>
+    statusAt('identity', {}, { draft: { status: 'approved', choicesAnswered: 7, version: 2, execution } });
   const claiming = statusAt('phone', { phone: { status: 'current', metadata: { lineState: 'claiming', pendingNumber: '+12165550199' } } });
   const asking = statusAt('phone', { phone: { status: 'current', metadata: { lineState: 'awaiting_pick' } } });
   const holding = statusAt('phone', { phone: { status: 'current', metadata: { phoneNumber: NUMBER } } });
@@ -212,6 +214,8 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
     ['Saving your choices', statusAt('identity'), { saving: true }],
     ['Getting your shop ready', statusAt('identity'), {}],
     ['Before the first status arrives', null, {}],
+    ['Save failed: Try again', savedAs('failed'), {}],
+    ['Save stopped: step by step', savedAs('stopped'), {}],
     ['Trial: the plans', statusAt('billing'), { ready: () => screen.findByRole('radiogroup') }],
     ['Trial: the plans cannot be shown', statusAt('billing'), { ready: () => screen.findByRole('alert') }],
     ['Number: getting it', claiming, {}],
@@ -235,6 +239,18 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
       expect(container.querySelector('main')?.className).toContain('max-w-[480px]');
     });
   }
+
+  it('Save failed: a failed retry adds one line under the buttons, not a wider page, and both buttons wrap at 320px', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(json(409, { error: 'CONFLICT', message: 'DRAFT_RETRY_UNSAFE' }))));
+    const { container } = render(after(savedAs('failed')));
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await screen.findByRole('alert');
+    expectAllTapTargets(container, 'save failed after a failed retry');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+    for (const name of ['Try again', 'Go through setup step by step']) {
+      expect(screen.getByRole('button', { name }).className, name).toMatch(/whitespace-normal/);
+    }
+  });
 
   it('Test call: "I\'ll test later" is a 44px target in the header, and a failed skip adds one line, not a wider page', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(json(500, { error: 'INTERNAL', message: 'boom' }))));

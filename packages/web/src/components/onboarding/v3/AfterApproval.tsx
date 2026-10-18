@@ -5,11 +5,13 @@ import { invalidateOnboardingStatusCache, type OnboardingStatusResult } from '..
 import { track, trackFunnel, type AnalyticsEvent } from '../../../lib/analytics';
 import { ONBOARDING_RERUN_PATH } from '../../../utils/onboarding-rerun';
 import { Button } from '../../ui';
+import { OnboardingDraftApiError, retryDraft } from '../../../lib/onboardingDraftApi';
 import { afterScreen, afterStage, phoneNumberOf, stepOf, type AfterScreen } from './after-screen';
 import { CONNECTION_ERROR, requestErrorCopy } from './connection-copy';
 import { GettingReadyTurn } from './GettingReadyTurn';
 import { NumberTurn } from './NumberTurn';
 import { AFTER_PACING, highestSeen, type AfterStage } from './pacing';
+import { SaveFailedScreen, SaveStoppedScreen } from './SaveProblem';
 import { TestCallTurn, type Closing } from './TestCallTurn';
 import { useTestCallArrival } from './test-call-arrival';
 import { TrialTurn } from './TrialTurn';
@@ -32,6 +34,12 @@ const SCREEN_VIEWED: Partial<Record<AfterScreen, AnalyticsEvent>> = {
   trial: 'v3_trial_viewed',
   number: 'v3_number_viewed',
   test_call: 'v3_test_call_viewed',
+};
+
+/** The header label where a saved change did not go live, instead of "Saving". */
+const SAVE_PROBLEM_LABEL: Partial<Record<AfterScreen, string>> = {
+  save_failed: 'Not saved',
+  save_stopped: 'Not finished',
 };
 
 const STATUS_LABEL: Record<AfterStage, string> = {
@@ -72,7 +80,10 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
   const [skipped, setSkipped] = useState(false);
   const [testLater, setTestLater] = useState<string | null>(null);
   const [skipping, setSkipping] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
   const testingLater = useRef(false);
+  const retryingSave = useRef(false);
   const highestProgress = useRef(0);
   const lowestMinutes = useRef(Infinity);
 
@@ -166,6 +177,26 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
     });
   };
 
+  // Try again on a failed save. Whatever comes back, ask the status again for real: a 409 means it moved on
+  // (nothing is failed any more, or the change was undone), and the screen follows the status, not the error.
+  const retrySave = () => {
+    if (retryingSave.current) return;
+    retryingSave.current = true;
+    setRetrying(true);
+    setRetryError(null);
+    void (async () => {
+      try {
+        await retryDraft(apiFetch);
+      } catch (err) {
+        setRetryError(err instanceof OnboardingDraftApiError ? requestErrorCopy(err.status) : CONNECTION_ERROR);
+      }
+      await refetch();
+    })().finally(() => {
+      retryingSave.current = false;
+      setRetrying(false);
+    });
+  };
+
   if (handOff) return null;
 
   const stage = afterStage(screen, saving, closing !== null);
@@ -180,9 +211,18 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
       : undefined;
 
   return (
-    <TurnFrame minutesLeft={lowestMinutes.current} progress={highestProgress.current} statusLabel={STATUS_LABEL[stage]} escape={escape}>
+    <TurnFrame minutesLeft={lowestMinutes.current} progress={highestProgress.current} statusLabel={SAVE_PROBLEM_LABEL[screen] ?? STATUS_LABEL[stage]} escape={escape}>
       {saving ? (
         <SavingLine count={changeCount} />
+      ) : screen === 'save_failed' ? (
+        <SaveFailedScreen
+          onRetry={retrySave}
+          retrying={retrying}
+          error={retryError}
+          onStepByStep={() => void navigate(ONBOARDING_RERUN_PATH)}
+        />
+      ) : screen === 'save_stopped' ? (
+        <SaveStoppedScreen onStepByStep={() => void navigate(ONBOARDING_RERUN_PATH)} />
       ) : screen === 'wait' ? (
         <WaitScreen
           heading="Getting your shop ready."

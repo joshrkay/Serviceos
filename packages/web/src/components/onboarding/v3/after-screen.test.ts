@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { OnboardingStatusResponse, OnboardingStep, OnboardingStepId } from '../../../types/onboarding';
+import type { OnboardingDraftExecution, OnboardingStatusResponse, OnboardingStep, OnboardingStepId } from '../../../types/onboarding';
 import { afterScreen, afterStage, phoneNumberOf, stepOf } from './after-screen';
 
 function status(currentStep: OnboardingStepId | null, steps: OnboardingStep[] = []): OnboardingStatusResponse {
@@ -23,6 +23,30 @@ describe('afterScreen', () => {
 
   it('has nothing to show for a finished setup, which the shell hands off', () => {
     expect(afterScreen(status(null))).toBe('wait');
+  });
+
+  describe('when a saved change did not go live', () => {
+    const withExecution = (currentStep: OnboardingStepId | null, execution: OnboardingDraftExecution | null | undefined): OnboardingStatusResponse => ({
+      ...status(currentStep),
+      draft: { status: 'approved', choicesAnswered: 7, version: 2, ...(execution === undefined ? {} : { execution }) },
+    });
+
+    it('says so instead of waiting when the save failed, and when it can never finish', () => {
+      expect(afterScreen(withExecution('identity', 'failed'))).toBe('save_failed');
+      expect(afterScreen(withExecution('pack', 'stopped'))).toBe('save_stopped');
+    });
+
+    it('keeps waiting while the changes are queued or running, or the status says nothing about them', () => {
+      for (const execution of ['pending', 'executing', 'executed', null, undefined] as const) {
+        expect(afterScreen(withExecution('identity', execution)), String(execution)).toBe('wait');
+      }
+      expect(afterScreen({ ...status('identity') })).toBe('wait');
+    });
+
+    it('only replaces the wait: once the setup has moved past the saved choices, its own screen wins', () => {
+      expect(afterScreen(withExecution('billing', 'failed'))).toBe('trial');
+      expect(afterScreen(withExecution('phone', 'stopped'))).toBe('number');
+    });
   });
 });
 
@@ -56,6 +80,8 @@ describe('afterStage', () => {
 
   it('gives each screen its place in the header, with the voice getting ready counted as the test call', () => {
     expect(afterStage('wait', false, false)).toBe('wait');
+    expect(afterStage('save_failed', false, false)).toBe('wait');
+    expect(afterStage('save_stopped', false, false)).toBe('wait');
     expect(afterStage('trial', false, false)).toBe('trial');
     expect(afterStage('number', false, false)).toBe('number');
     expect(afterStage('getting_ready', false, false)).toBe('test_call');

@@ -90,6 +90,11 @@ button, once per visit; the success is the step being seen to flip to `done`, ne
 by a visit that finds it already done), so the series stays comparable across both shells.
 `v3_number_viewed` to `v3_number_ready` is how long the owner waited for a number;
 `v3_trial_viewed` with no `v3_trial_started` is a trial the owner did not want to start.
+Between `v3_approved` and `v3_trial_viewed` the owner may see "Something didn't save." (a saved
+change failed; Try again re-queues it) or "One of your changes was undone." (it can only be
+finished step by step). Both are screens, not events: a `v3_approved` that never reaches
+`v3_trial_viewed` is the drop-off to read them from, and the step-by-step way out shows up in
+the sidebar shell's `onboarding_step_viewed` series.
 
 ### Generic per-step events (drive abandonment)
 

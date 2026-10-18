@@ -8,9 +8,11 @@ import type { AfterStage } from './pacing';
  * check, then the test call), so the screen can never run ahead of the facts.
  *
  * `getting_ready` is the pre-state of the test call: the voice check has no
- * screen of its own.
+ * screen of its own. `save_failed` and `save_stopped` stand in for the wait when
+ * the status says a saved change will not go live by waiting: it failed (a retry
+ * can fix it), or it was undone or rejected (nothing here can finish it).
  */
-export type AfterScreen = 'wait' | 'trial' | 'number' | 'getting_ready' | 'test_call';
+export type AfterScreen = 'wait' | 'save_failed' | 'save_stopped' | 'trial' | 'number' | 'getting_ready' | 'test_call';
 
 export function afterScreen(status: OnboardingStatusResponse | null): AfterScreen {
   switch (status?.currentStep) {
@@ -24,6 +26,8 @@ export function afterScreen(status: OnboardingStatusResponse | null): AfterScree
       return 'test_call';
     // signup, identity and pack are the saved choices going live; null is a finished setup (handed off).
     default:
+      if (status?.draft?.execution === 'failed') return 'save_failed';
+      if (status?.draft?.execution === 'stopped') return 'save_stopped';
       return 'wait';
   }
 }
@@ -33,6 +37,8 @@ export function afterStage(screen: AfterScreen, saving: boolean, heard: boolean)
   if (saving) return 'saving';
   switch (screen) {
     case 'wait':
+    case 'save_failed':
+    case 'save_stopped':
       return 'wait';
     case 'trial':
       return 'trial';

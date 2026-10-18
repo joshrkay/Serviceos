@@ -200,6 +200,148 @@ describe('ConversationShell after "That\'s right"', () => {
     });
   });
 
+  describe('when a saved change did not go live', () => {
+    const savedAs = (execution: 'pending' | 'failed' | 'stopped') =>
+      statusAt('identity', {}, { draft: { status: 'approved', choicesAnswered: 7, version: 2, execution } });
+    const retries = () => requests.filter((r) => r === 'POST /api/onboarding/draft/retry');
+    const statusReads = () => requests.filter((r) => r === 'GET /api/onboarding/status').length;
+
+    it('tells the owner it did not save, offers Try again at once (not after the slow wait), and a retry puts the wait back', async () => {
+      let release: (res: Response) => void = () => undefined;
+      stub(savedAs('failed'), {
+        'POST /api/onboarding/draft/retry': () => {
+          world.status = savedAs('pending');
+          return new Promise<Response>((resolve) => {
+            release = resolve;
+          });
+        },
+      });
+      const { container } = renderShell();
+      await settle();
+
+      expect(heading()).toHaveTextContent("Something didn't save.");
+      expect(screen.getByText(/safe to try again/)).toBeInTheDocument();
+      expect(screen.queryByText('Getting your shop ready.')).not.toBeInTheDocument();
+      expect(screen.queryByText('Still with you.')).not.toBeInTheDocument();
+      expectFrame(3, 65, 'Not saved');
+      expectAllTapTargets(container, 'the failed save');
+      const tryAgain = screen.getByRole('button', { name: 'Try again' });
+      expect(tryAgain.className).toMatch(/min-h-11|h-14/);
+
+      fireEvent.click(tryAgain);
+      await settle();
+      // A second tap while the first is in flight sends nothing.
+      const busy = screen.getByRole('button', { name: /Try again/ });
+      fireEvent.click(busy);
+      await settle();
+      expect(retries()).toHaveLength(1);
+      expect(busy).toHaveAttribute('aria-busy', 'true');
+      expect(busy).toBeDisabled();
+
+      const before = statusReads();
+      release(json(200, { draft: approved, retriedProposalIds: [approved.proposalIds[1]] }));
+      await settle();
+      expect(retries()).toHaveLength(1);
+      // The status the shell shares was out of date the moment the retry went through: it asks again for real.
+      expect(statusReads()).toBeGreaterThan(before);
+      expect(heading()).toHaveTextContent('Getting your shop ready.');
+      expect(screen.queryByText("Something didn't save.")).not.toBeInTheDocument();
+    });
+
+    it('keeps the 20 second slow note for a save that is only pending, and says nothing of a failure there', async () => {
+      stub(savedAs('pending'));
+      renderShell();
+      await settle();
+      expect(heading()).toHaveTextContent('Getting your shop ready.');
+      await tick(20_000);
+      expect(screen.getByText(/Some of your choices may not have saved/)).toBeInTheDocument();
+      expect(screen.queryByText("Something didn't save.")).not.toBeInTheDocument();
+    });
+
+    it('on a 409 from the retry re-reads the status: it moved on (the change was undone), so the owner gets the way out, not a dead button', async () => {
+      stub(savedAs('failed'), {
+        'POST /api/onboarding/draft/retry': () => {
+          world.status = savedAs('stopped');
+          return json(409, { error: 'CONFLICT', message: 'DRAFT_RETRY_NOTHING_FAILED: no proposal is in execution_failed' });
+        },
+      });
+      renderShell();
+      await settle();
+      const before = statusReads();
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      await settle();
+
+      expect(retries()).toHaveLength(1);
+      expect(statusReads()).toBeGreaterThan(before);
+      expect(heading()).toHaveTextContent('One of your changes was undone.');
+      expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+    });
+
+    it('on a 409 where the status still says failed, or any other error, shows one plain line and lets the owner tap again', async () => {
+      stub(savedAs('failed'), {
+        'POST /api/onboarding/draft/retry': () => json(409, { error: 'CONFLICT', message: 'DRAFT_RETRY_UNSAFE: not safe to retry' }),
+      });
+      renderShell();
+      await settle();
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      await settle();
+      expect(screen.getByRole('alert')).toHaveTextContent("That didn't go through. Try again.");
+      expect(heading()).toHaveTextContent("Something didn't save.");
+
+      routes['POST /api/onboarding/draft/retry'] = () => {
+        throw new TypeError('network down');
+      };
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      await settle();
+      expect(screen.getByRole('alert')).toHaveTextContent("I couldn't reach the server");
+      expect(screen.getByRole('button', { name: 'Try again' })).not.toHaveAttribute('aria-busy');
+      expect(retries()).toHaveLength(2);
+    });
+
+    it('lets the owner go through setup step by step instead, when trying again does not help', async () => {
+      stub(savedAs('failed'));
+      renderShell();
+      await settle();
+      fireEvent.click(screen.getByRole('button', { name: 'Go through setup step by step' }));
+      await settle();
+      expect(where()).toBe('/onboarding?rerun=1');
+      expect(retries()).toHaveLength(0);
+    });
+
+    it('says one change was undone and offers the step-by-step setup as the only action, never a retry', async () => {
+      stub(savedAs('stopped'));
+      const { container } = renderShell();
+      await settle();
+
+      expect(heading()).toHaveTextContent('One of your changes was undone.');
+      expect(screen.getByText(/can't finish setup from here/)).toBeInTheDocument();
+      expectFrame(3, 65, 'Not finished');
+      expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Check again' })).not.toBeInTheDocument();
+      expect(screen.getAllByRole('button')).toHaveLength(1);
+      expectAllTapTargets(container, 'the stopped save');
+      // Even long after, the action is there from the start and no retry ever appears.
+      await tick(25_000);
+      expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Go through setup step by step' }));
+      await settle();
+      expect(where()).toBe('/onboarding?rerun=1');
+      expect(screen.getByText('v2 shell')).toBeInTheDocument();
+      expect(requests.filter((r) => r.includes('/retry') && r.includes('draft'))).toEqual([]);
+    });
+
+    it('does nothing different against an API that has no execution state: the wait stays the wait', async () => {
+      stub(statusAt('identity', {}, { draft: { status: 'approved', choicesAnswered: 7, version: 2 } }));
+      renderShell();
+      await settle();
+      expect(heading()).toHaveTextContent('Getting your shop ready.');
+      await tick(25_000);
+      expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+      expect(requests.some((r) => r.includes('/draft/retry'))).toBe(false);
+    });
+  });
+
   it('walks the trial, the number, the voice and the test call as the status moves on, and hands off when the owner opens for business', async () => {
     stub(statusAt('billing'));
     const { container } = renderShell();
