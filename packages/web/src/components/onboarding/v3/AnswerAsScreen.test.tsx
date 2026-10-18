@@ -45,4 +45,33 @@ describe('AnswerAsScreen', () => {
     expect(screen.getByRole('button', { name: 'Show me my shop' })).toBeDisabled();
     expect(screen.getByText('Include the area code, 10 digits.')).toBeInTheDocument();
   });
+
+  it('holds back a cell with no digits in it, rather than reading it as skipped', async () => {
+    const onSubmit = vi.fn();
+    render(<AnswerAsScreen onSubmit={onSubmit} />);
+    await userEvent.type(screen.getByLabelText('Business name'), 'Walsh');
+    await userEvent.click(screen.getByRole('button', { name: 'HVAC' }));
+    await userEvent.type(screen.getByLabelText('Your cell'), 'call me later');
+    expect(screen.getByRole('button', { name: 'Show me my shop' })).toBeDisabled();
+    expect(screen.getByText('Include the area code, 10 digits.')).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText('Your cell'), '{Enter}');
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('treats an empty or blank cell as skipped, and a 10-digit cell as given', async () => {
+    const onSubmit = vi.fn();
+    render(<AnswerAsScreen onSubmit={onSubmit} />);
+    await userEvent.type(screen.getByLabelText('Business name'), 'Walsh');
+    await userEvent.click(screen.getByRole('button', { name: 'HVAC' }));
+    const go = screen.getByRole('button', { name: 'Show me my shop' });
+    expect(go).toBeEnabled();
+    await userEvent.type(screen.getByLabelText('Your cell'), '   ');
+    expect(go).toBeEnabled();
+    expect(screen.getByText('So I can match prices to your area. You can skip this.')).toBeInTheDocument();
+    await userEvent.clear(screen.getByLabelText('Your cell'));
+    await userEvent.type(screen.getByLabelText('Your cell'), '2165550142');
+    expect(go).toBeEnabled();
+    await userEvent.click(go);
+    expect(onSubmit).toHaveBeenLastCalledWith({ packId: 'hvac', businessName: 'Walsh', phone: '2165550142' });
+  });
 });

@@ -30,7 +30,8 @@ export function AnswerAsScreen({ onSubmit }: AnswerAsScreenProps) {
 
   const name = businessName.trim();
   const cellDigits = cell.replace(/\D/g, '').length;
-  const cellOk = cellDigits === 0 || cellDigits >= 10;
+  // Skipped only when truly empty: letters or punctuation with no digits would pass as "skipped" and silently get national prices.
+  const cellOk = cell.trim() === '' || cellDigits >= 10;
   const canSubmit = name.length > 0 && packId !== null && cellOk;
 
   const submit = (e: FormEvent) => {
