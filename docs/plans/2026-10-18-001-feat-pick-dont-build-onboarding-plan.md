@@ -86,7 +86,10 @@ unowned position.
   is derived from the rows at the moment of the re-run and never stored a second time: a
   headline item moves while its price still equals the baseline the seeder wrote, and a
   template line moves only when its own price still equals its own baseline AND the catalog
-  item it was seeded from moved in the same statement. A template line stores no catalog item
+  item it was seeded from moved in the same statement. An owner price save of any kind clears
+  the item's baseline in the same statement as the price, even when the amount is unchanged, so
+  typing the seeded number again is still the owner's choice and the equality test only says
+  that nothing has written the row since. A template line stores no catalog item
   id today, so U6's migration adds the link (a `seededCatalogItemId` key the seeder writes on
   the line) beside the baselines; a line whose link cannot be established is the owner's. An
   owner who edits a headline item therefore keeps the item and every line seeded from it at
@@ -811,7 +814,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     (`unit_price_cents` and `seeded_unit_price_cents` on an item, `defaultUnitPriceCents` and
     `seededUnitPriceCents` on a line); it returns what it moved and what it left, each with
     its reason, for the read-back. The seeder writes the keys, baselines and link from now on,
-    and rows seeded before 314 keep none and stay the owner's;
+    and rows seeded before 314 keep none and stay the owner's; the seeder and `repriceSeeded`
+    are the only writers that set or move a baseline, and every other write of a headline
+    item's price clears it (rule 2 of the seeded-price baseline below);
     `hasRepriceableSeed(tenantId)` is the re-run gate; tests
     `packages/api/test/packs/reprice-seeded.test.ts`,
     `packages/api/test/integration/reprice-seeded.test.ts`
@@ -825,6 +830,14 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     through `PUT /api/templates/:id` out of repricing, pinned in `reprice-seeded.test.ts`);
     test: extend `packages/api/test/integration/migration-replay-populated-db.test.ts` (rows
     in the pre-314 shape keep null baselines through the migration and a replay)
+  - modify `packages/api/src/catalog/pg-catalog-item.ts` (the one price branch of `update`,
+    `if (updates.unitPriceCents !== undefined)`, adds `seeded_unit_price_cents = NULL` to the
+    same `SET` list, so an owner or learned price write ends repricing in the same statement as
+    the price, even at an unchanged amount) and `packages/api/src/catalog/catalog-item.ts` (the
+    in-memory repository mirrors it for the unit double); no route, handler or port changes,
+    because `PUT /api/catalog/items/:id`, the approved `update_catalog_item` proposal and the
+    learned-price port all reach it through `catalogRepo.update`; test:
+    `packages/api/test/integration/reprice-seeded.test.ts`
   - modify `packages/api/src/proposals/execution/onboarding-handlers.ts`
     (`OnboardingTenantSettingsExecutionHandler`: when a pack is already active, call
     `repriceSeeded` for that pack with the payload's prices instead of the first-run `activatePackWithSeed`,
@@ -1112,27 +1125,47 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   and baseline both at the old pick on both sides. The newly selected price is the row's new
   seed: moving only the price would leave the baseline at the first seed price, so the next
   re-run would see price <> baseline, classify an untouched row as the owner's and leave it
-  ("I left it") while the card promised an update. What that decides when the owner has edited
-  something:
+  ("I left it") while the card promised an update.
+
+  The owner's side is a write, not an inference from equality: any write of a headline item's
+  price other than `repriceSeeded` sets `seeded_unit_price_cents` to NULL in the same `UPDATE`
+  as the price, even when the amount is unchanged. `PgCatalogItemRepository.update` has one
+  price branch, and every price write reaches it through `catalogRepo.update`: `PUT
+  /api/catalog/items/:id`, the approved `update_catalog_item` proposal (`updateCatalogItem`)
+  and the learned-price correction port `setSkuPriceCents` (wired in `app.ts` and in
+  `learning/corrections/pg-config-ports.ts`). The learned write ends repricing too: it is a
+  price distilled from the owner's own corrections, and a re-run must not overwrite it. A NULL
+  baseline is the owner's for good, because the seeder (once, in the statement that creates
+  the row) and `repriceSeeded` are the only writers that set or move a baseline. `seed_key`
+  stays, so the item is still found by its role and the read-back can name it. The equality
+  test in `repriceSeeded` survives only as the check that nothing has written the row since
+  the seeder or the last re-run wrote it, and a same-value save can no longer fool it. A patch
+  without `unitPriceCents` (a `PUT` with only `name`) leaves the baseline alone; the Settings
+  Price Book form resends the price with every save (`PriceBookPage.tsx`), so a save from it
+  always ends repricing, which errs toward the owner. What that decides when the owner has
+  edited something:
   - *The owner edits a headline item* (`PUT /api/catalog/items/:id`, which writes only
-    `catalog_items` and stamps its `updated_at`). Its price no longer equals its baseline, so
-    it is not in `moved`, and every line seeded from it stays at its price even though the
-    line's own price still equals the line's own baseline. Judged by its own baseline alone,
-    that line would have moved by itself and future estimates would quote a different price
-    than the owner's catalog.
+    `catalog_items`, stamps its `updated_at` and, with a price in the body, nulls the
+    baseline). Its baseline is gone, so it is not in `moved`, and every line seeded from it
+    stays at its price even though the line's own price still equals the line's own baseline.
+    Judged by its own baseline alone, that line would have moved by itself and future
+    estimates would quote a different price than the owner's catalog.
   - *The owner edits a template* (`PUT /api/templates/:id`). A `PUT` that carries
     `lineItemTemplates` rewrites them through `lineItemTemplateSchema`, a Zod object that drops
     unknown keys, so the lines come back without the seed keys and every line of that template
     is the owner's (a `PUT` that changes only the name or message leaves the lines and their
     keys alone, and they still follow their item). The catalog item may still move, and so do
     the lines of other templates seeded from it; the saved template keeps its price and the
-    read-back names the difference.
+    read-back names the difference. This is the template analogue of the cleared baseline and
+    needs no extra marker: a `PUT` that resends the lines unchanged strips the keys all the same.
   - *No link, or the item unavailable.* A line the seeder could not link, a line seeded before
     314, and a line whose item is archived, has no `seed_key` or is not in `moved`, stays: with
     no link the line is the owner's.
-  - *Set back to the seeded number.* An owner who edits an item and then types the seeded price
-    again leaves a row that holds its baseline; it is treated as untouched, since the price is
-    the seeded one.
+  - *Saved at the seeded number.* An owner who saves a seeded item at the amount it already
+    holds, or who edits it and later types the seeded amount again, has made a price save: the
+    baseline is NULL from that write, the item is not in `moved`, its lines stay, and the
+    read-back names it as theirs (`price_edited`: a `seed_key` row with a NULL baseline).
+    Equality with the seeded amount is no longer read as "untouched".
   - *Read-back.* `repriceSeeded` returns what it moved and what it left, each with a reason
     (`price_edited`, `job_type_edited`, `no_link`, `item_unavailable`) and, for a line that
     stayed while its item moved, both numbers. The read-back says it in the owner's words and
@@ -1169,8 +1202,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   its prices are its own (rule 3). Only rows the seeder writes after 314 carry
   `seeded_unit_price_cents` and `seed_key`, and their template lines `seededUnitPriceCents`
   and `seededCatalogItemId`, all written in the same statement as the row: positive per-row
-  provenance by construction. An owner edit after that moves the price off its baseline and
-  ends the re-price (rule 2). The migration adds columns and no step populates them for
+  provenance by construction. An owner price save after that clears the baseline and ends the
+  re-price (rule 2). The migration adds columns and no step populates them for
   existing rows, so the runner's replay of the corpus on every deploy has nothing to repeat.
 - **Patterns to follow:** `notifications/owner-sms-sender.ts` (`recipientClass: 'owner'`
   skips consent), `components/home/ActivationCelebrationBanner.tsx` (first-run state),
@@ -1290,13 +1323,14 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     after the migration carries `seed_key` and its baseline, and its template lines carry
     `seededUnitPriceCents` and `seededCatalogItemId`; a re-run with new prices moves the item
     and those lines while they are untouched. (d) A post-migration owner edit stops the
-    re-price: the owner edits that item (or saves a template) through the real route, and the
-    next re-run leaves the edited item, the lines seeded from it and the saved template at
-    the owner's prices, and the read-back names them as theirs.
-  - Edge (no baseline): a tenant whose headline items all lack a baseline, or all differ from
-    it → `POST /draft/reopen` reports `repricing.available = false`, the price turn says "Your
-    prices are your own" and shows no price card, and approval carries no prices; a tenant
-    with at least one headline item still at its baseline sees the repricing choice.
+    re-price: the owner edits that item (at a new price or the seeded one) or saves a template
+    through the real route, and the next re-run leaves the edited item, the lines seeded from
+    it and the saved template at the owner's prices, and the read-back names them as theirs.
+  - Edge (no baseline): a tenant whose headline items all lack a baseline (including each one
+    the owner saved a price on), or, defensively, all differ from it → `POST /draft/reopen`
+    reports `repricing.available = false`, the price turn says "Your prices are your own" and
+    shows no price card, and approval carries no prices; a tenant with at least one headline
+    item still at its baseline sees the repricing choice.
   - Edge (owner cell on re-run): the first run stored cell A on the draft and in
     `tenant_settings.owner_phone`; the owner then changes it to B in Settings and taps Re-run
     setup → `POST /draft/reopen` leaves the draft's `owner_phone` = B (not A), the read-back
@@ -1353,11 +1387,23 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     thinking they would be kept. (c) A line with no `seededCatalogItemId` (hand-added, or a
     line seeded before 314), and one whose item is archived or has no
     `seed_key`, is left alone even though its price equals its baseline, while its linked
-    siblings move. (d) The owner edits the item and then types the seeded number again → the
-    item is untouched and moves with its lines. (e) A headline item the owner only renamed
-    is still found by `seed_key` and moves. (f) A multi-pack tenant
+    siblings move. (d) The owner saves a seeded item at the price it already holds, through the
+    real `PUT` → `seeded_unit_price_cents` is NULL straight after the save (read from the row,
+    not inferred), a re-run with a new pick leaves that item and every line seeded from it, and
+    the read-back names it as theirs; the owner who edits to 11,500 and then saves 11,000 back,
+    the seeded amount, ends the same way, and `repricing.available` counts neither item. (e) A
+    headline item the owner only renamed, by a `PUT` whose body carries only `name` (the route
+    takes a partial body), keeps its baseline, is still found by `seed_key` and moves; the same
+    rename sent with `unitPriceCents`, as the Price Book form sends it, clears the baseline and
+    the item stays. (f) A multi-pack tenant
     (HVAC and plumbing): a pick for one pack moves that pack's items and lines only. (g) Each
-    pack, `other` included, has exactly one catalog seed per headline role (unit).
+    pack, `other` included, has exactly one catalog seed per headline role (unit). (h) The
+    approved `update_catalog_item` proposal and the learned-price port (`setSkuPriceCents`)
+    each write the price through `catalogRepo.update` and clear the baseline like the route,
+    so the next re-run leaves that item. (i) `repriceSeeded`'s own write still moves price and
+    baseline together: after re-run 1 both hold the new pick and re-run 2 moves them again (the
+    two-successive-re-runs case above), so the clear lives in the repository's `update` and
+    never in the CTE.
   - Error: SMS provider failure → the carrier code is shown inline with copy button as the
     fallback and an event is recorded; a non-E.164 source number → 400 naming the field; a
     carrier outside `verizon | att | tmobile | other` → 400.
@@ -1394,8 +1440,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `migration-replay-populated-db.test.ts`).
 - **Verification:** `grep -r "onboarding/v2" packages/web/src` returns nothing; e2e passes for
   both branches; the forbidden-vocabulary test extends to `components/home`; on a seeded
-  staging tenant seeded after migration 314, a re-run after the owner edits a headline price in
-  Settings leaves that item and the job types seeded from it at the owner's price and says so,
+  staging tenant seeded after migration 314, a re-run after the owner saves a headline price in
+  Settings, at a new amount or the seeded one, leaves that item and the job types seeded from it
+  at the owner's price and says so,
   and a re-run on a tenant seeded before it shows no price card; a re-run after the owner
   changes the business name and timezone in Settings leaves both as the owner set them.
 
@@ -2791,7 +2838,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `StatusCallbackEvent` `ringing answered completed` (Twilio's default is `completed` alone).
   The provider's queue is bounded by the pre-live window and by nothing else: a call still
   queued at `expires_at` is the unconfirmed case below (the lease is released by the reaper's
-  next sweep, so at most 70 s plus one 30 s sweep), and a first live callback that would
+  next sweep, so at most 70 s plus one 30 s sweep; cancelling that queued call at Twilio
+  before the release is recorded for slice start, see Deferred review findings D6), and a
+  first live callback that would
   arrive after `sexp` renews nothing, since a status callback past `sexp` answers 200 and
   does nothing. Twilio's Call resource reports `queue_time`; the staging check under
   Verification logs it as an observation and no lease logic reads it. A fixed 150 s from
@@ -3766,8 +3815,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **A re-run moving a price the owner set.** A price moves only while the owner has not touched
   it, judged on both sides: a template line follows its catalog item and never moves alone, a
   template the owner saved is theirs, and only rows the seeder writes after migration 314 carry
-  a baseline (U6). Rows seeded earlier have no per-row proof of who set their price, so they
-  stay the owner's and a tenant with only those sees no price card.
+  a baseline (U6). An owner price save of any kind, even at the seeded amount, clears the
+  baseline in the same statement as the price. Rows seeded earlier have no per-row proof of who
+  set their price, so they stay the owner's and a tenant with only those sees no price card.
 - **A re-run restoring a stale business name or timezone.** The draft keeps the first run's
   values and approval writes them back, so a Settings edit made in between would be undone.
   Reopen copies the live name and timezone onto the draft inside its locked write and rebuilds
@@ -3817,7 +3867,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 ### Deferred review findings (resolve at slice start)
 
 U6 and U7 are unbuilt (S5, and S6 which is decision-gated) and have taken many review rounds,
-so these five confirmed findings are recorded here with the direction to take rather than
+so these six confirmed findings are recorded here with the direction to take rather than
 designed further. Each is exposed first by the Docker-gated, real-column test named below.
 
 - **D1. A platform tenant must exist (U7, S6; P1).** `phone_rate_limits.tenant_id` and
@@ -3880,6 +3930,23 @@ designed further. Each is exposed first by the Docker-gated, real-column test na
   reach the gate with a tenant id and are suppressed (the provider fake sees no call and
   `demo_send_suppressed` is audited), a message with neither a tenant id nor the platform
   marker is refused, and the handoff SMS carrying the marker still sends.
+- **D6. A still-queued call outlives its released lease (U7, S6; P2).** When a calls-per-second
+  backlog keeps a bound `CallSid` queued past the 70 s pre-live window, the reaper releases and
+  resets only the local lease and nothing cancels the call at Twilio, so the visitor can get a
+  delayed call that rings after the release, hears the busy line and never sees the promised
+  demo (the planned late-`ringing` case documents that outcome and does not prevent it).
+  *Direction:* when the pre-live window expires with a bound `CallSid` whose status
+  is still `queued`, the reaper first asks Twilio to cancel that call (update the Call's status
+  to `canceled`, which Twilio allows only while the call is queued or ringing) and releases the
+  lease only after the cancel is acknowledged, or after Twilio reports the call already
+  `in-progress` or `completed`, in which case the lease is renewed or finalized as for a live
+  callback. A cancel that fails ambiguously (a timeout, a 5xx, an unlisted error) keeps today's
+  busy-line fallback. The race between the cancel and the release is resolved by the same
+  guarded state transition the late-callback binding uses (`state='active'` and the
+  generation): whichever commits first wins. *First test:* with a bound sid still `queued` at
+  the 70 s expiry, the fake Twilio sees the cancel request before the lease is released, and a
+  call that went live between the status check and the cancel is not killed (the lease is
+  renewed, not released).
 
 ## Sizing and sequencing
 
