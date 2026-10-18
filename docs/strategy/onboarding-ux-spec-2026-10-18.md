@@ -163,11 +163,11 @@ Rivet: *"You've been hearing me in this voice. Want a different one?"* Three voi
 play buttons; the current one is marked "The one you've heard so far". Then: *"And here's your
 number."* A local number is already held: "(216) 555-0180. Yours the moment you tap 'That
 works'." Secondary: "Different area code", "I have a number already". The last opens the
-forwarding path for established shops: Rivet texts a tap-to-dial link that dials the carrier
-code, and the owner can say "later", which leaves a visible "calls still ring your cell" badge
-on the first-day screen rather than a warning. Writes: voice preset, `voice_preview_at`,
-provisioned number. Trial and card: one sentence on this screen's footnote or the next,
-consistent with the landing page (decision pending in the brief).
+forwarding path for an owner who already has a business number: Rivet texts a tap-to-dial
+link that dials the carrier code, and the owner can say "later", which leaves a visible
+"calls still ring your cell" badge on the first-day screen rather than a warning. Writes: voice
+preset, `voice_preview_at`, provisioned number. Trial and card: one sentence on this screen's
+footnote or the next, consistent with the landing page (decision pending in the brief).
 
 ### 8. Now you call me
 
@@ -219,11 +219,18 @@ sit between the demo call and the read-back.
    or "second". The mic stays live; "Neither, I'll say it" is the free-speech override, and
    "Keep the rest as is" jumps to the read-back at any point.
 3. **The seven:** how I answer the phone · what you charge to come out · book it or hold it ·
-   how you get paid · when I can book (hours) · who I ring in an emergency · after hours.
-   Established shops get an eighth: "Do you already have a business number?" which opens the
-   forwarding path. Each writes the same typed settings as before.
-4. **Read-back, then scenarios.** Unchanged. The read-back now shows seven rows the owner has
-   already seen, so it takes ten seconds.
+   how you get paid · when I can book (hours) · who I ring in an emergency · after hours. Each
+   writes the same typed settings as before. Then every owner gets an eighth, last turn: "Do
+   you already have a business number?" (yes / no). Nothing asked before it says whether a shop
+   is established, so no owner is sorted in advance; the answer is what picks the branch. "No"
+   (a day-one owner clears it in one tap) removes forwarding entirely and makes the Rivet
+   number the business number. "Yes" asks for that number and the carrier on the same screen,
+   then opens the forwarding path. It is a yes or no, not a this-or-this pair, so it carries no
+   "Most shops" mark and has no default: "Keep the rest as is" leaves it unanswered, which
+   picks neither branch, and the read-back shows "Not set".
+4. **Read-back, then scenarios.** Unchanged. The read-back now shows eight rows the owner has
+   already seen, the seven choices and the business-number answer (tappable, and reading "Not
+   set", if the owner skipped it), so it still takes about ten seconds.
 
 ### Why this is better than open questions
 
@@ -233,8 +240,9 @@ sit between the demo call and the read-back.
   day-one owner can make with confidence. Naming a trip fee from nothing is not.
 - The consequence is visible before the choice. Every card says what Rivet will say to a
   caller, so there is no gap between a setting and its effect.
-- It shortens the conversation. Seven taps or seven spoken words, under three minutes, versus
-  five minutes of free speech plus extraction plus correction.
+- It shortens the conversation. Seven taps or seven spoken words, plus a yes or no on the
+  number, under three minutes, versus five minutes of free speech plus extraction plus
+  correction.
 - Free speech still exists where it earns its place: the override on each card, the scenario
   interview's "anything else I should know about calls like this", and the first-day home.
 
@@ -254,12 +262,13 @@ sit between the demo call and the read-back.
 
 | Screen | Rivet says | Options (A is "most shops") | Writes |
 |---|---|---|---|
-| Ready | "Walsh Plumbing is already set up. I built it the way most Cleveland plumbing shops run. Seven quick choices make it yours." | "Make it mine, 7 choices" / "Looks right as is, skip the choices" | nothing yet |
+| Ready | "Walsh Plumbing is already set up. I built it the way most Cleveland plumbing shops run. Seven quick choices and one question make it yours." | "Make it mine, 8 questions" / "Looks right as is, skip the choices" | nothing yet |
 | Greeting | "How should I answer your phone?" | "Walsh Plumbing, how can I help?" / "Thanks for calling Walsh Plumbing. What's going on today?" (both playable) | greeting text |
 | Price | "What do you charge to come out?" | $89 then $150/hr / $129 then $185/hr, each with the sentence Rivet would say | trip fee, hourly rate; pack prices follow |
 | Booking | "When someone wants a repair, do I book it or hold it for you?" | Book it on the call / Hold it for me | `autonomous_booking_enabled` |
 | Paid | "When a job's done, how do you want to get paid?" | Text them a pay link / Collect on the spot | payment method; bank connection asked at first bill |
 | Hours, Emergency, After hours | same pattern | | hours, `transfer_targets.emergency`, `after_hours_voice_mode` |
+| Business number (every owner, last) | "Do you already have a business number?" | Yes (then the number and carrier) / No (the Rivet number is your business number). Neither is "most shops"; no default | forwarding line on the draft, written on "That's right"; "No" clears any old line |
 
 ## 4. Copy rules
 
