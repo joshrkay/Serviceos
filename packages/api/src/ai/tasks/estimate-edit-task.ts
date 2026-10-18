@@ -11,6 +11,7 @@ import { UNCATALOGUED_CONFIDENCE_CAP } from '../resolution/catalog-resolver';
 import { groundEditActionPricing } from '../resolution/edit-action-grounding';
 import { mapEstimatesToCandidates } from '../resolution/reference-candidates';
 import type { EntityCandidate } from '../resolution/entity-resolver';
+import { ACCEPTANCE_VOID_MARKER } from '../../proposals/acceptance-void';
 
 // Mirrors InvoiceEditTaskHandler's check (invoice-edit-task.ts) / the
 // execution-side isUuid checks (proposals/execution/voice-extended-handlers.ts,
@@ -149,11 +150,12 @@ function buildPayload(parsed: Record<string, unknown> | null): Record<string, un
  * without a human first reviewing the low-confidence proposal.
  */
 
-/** RV-042 — review-time marker for edits that void a customer's acceptance. */
-export const ACCEPTANCE_VOID_MARKER = {
-  path: '_acceptance',
-  reason: "approving voids the customer's prior acceptance",
-} as const;
+/**
+ * RV-042 — review-time marker for edits that void a customer's acceptance.
+ * Defined in proposals/acceptance-void.ts so the executor, digest and SMS
+ * layers read the same constant; re-exported here for the drafting side.
+ */
+export { ACCEPTANCE_VOID_MARKER };
 
 export class EstimateEditTaskHandler implements TaskHandler {
   readonly taskType = 'update_estimate' as const;
@@ -338,7 +340,15 @@ export class EstimateEditTaskHandler implements TaskHandler {
       // Estimate edits target existing entities but only in editable
       // statuses (draft / ready_for_review). Sent estimates are locked
       // at execute time. Classified as `capture`, same as draft_estimate.
-      sourceTrustTier: 'autonomous',
+      //
+      // OVAS-01 — EXCEPT an edit to an ACCEPTED estimate: executing it voids
+      // the customer's signed acceptance (signature data deleted, estimate
+      // back to 'sent', reminder budget reset). The RV-042 marker only warns;
+      // auto-approval never reads markers, and a price-less remove action
+      // stays 'high' confidence. So no trust tier → decideInitialStatus
+      // returns 'draft' and a human reads the warning before it can run
+      // (same idiom as create-appointment-task's reviewGatedFallback).
+      ...(accepted ? {} : { sourceTrustTier: 'autonomous' as const }),
       ...(missingFields.length > 0 ? { missingFields } : {}),
       // PR B — propagate tenant override from context.
       ...(context.tenantThresholdOverride

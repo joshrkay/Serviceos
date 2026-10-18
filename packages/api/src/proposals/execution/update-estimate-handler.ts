@@ -10,6 +10,7 @@ import { DocumentRevisionRepository } from '../../ai/document-revision';
 import { EditDeltaRepository } from '../../estimates/edit-delta';
 import { JobRepository } from '../../jobs/job';
 import { ValidationError, ConflictError } from '../../shared/errors';
+import { voidsCustomerAcceptance } from '../acceptance-void';
 
 /**
  * Executes `update_estimate` proposals by applying the edit actions in
@@ -95,21 +96,30 @@ export class UpdateEstimateExecutionHandler implements ExecutionHandler {
       depositPaidCents = job?.depositPaidCents ?? 0;
     }
 
+    // OVAS-01 — voiding a customer's signed acceptance is allowed ONLY for a
+    // proposal whose reviewer was shown the RV-042 warning, i.e. one whose
+    // payload carries the `_acceptance` marker (stamped at drafting, which
+    // also keeps it from auto-approving). Without the marker the editor's
+    // accepted-estimate lock stays on, so an estimate the customer accepted
+    // AFTER the draft was made fails closed below instead of losing its
+    // signature to an edit nobody approved with that knowledge.
+    const acceptanceVoidReviewed = voidsCustomerAcceptance(payload);
+
     try {
       // Compute the post-edit line items, then persist through
       // updateEstimate so version/revision/audit stay consistent with the
       // authenticated PUT/PATCH path (which is the source of truth for the
       // optimistic-lock + stale-accept guards).
       //
-      // RV-042: an update_estimate against an ACCEPTED estimate invalidates
-      // the acceptance instead of refusing — updateEstimate clears the
-      // acceptance fields, returns the estimate to 'sent' (re-sendable),
-      // and records the prior acceptance in an
+      // RV-042: a MARKED update_estimate against an ACCEPTED estimate
+      // invalidates the acceptance instead of refusing — updateEstimate
+      // clears the acceptance fields, returns the estimate to 'sent'
+      // (re-sendable), and records the prior acceptance in an
       // `estimate.acceptance_invalidated` audit event.
       const { updatedEstimate } = applyEstimateEdits(
         estimate,
         editActions as EstimateEditAction[],
-        { allowAccepted: true },
+        { allowAccepted: acceptanceVoidReviewed },
       );
       const persisted = await updateEstimate(
         proposal.tenantId,
@@ -122,7 +132,7 @@ export class UpdateEstimateExecutionHandler implements ExecutionHandler {
           editDeltaRepo: this.editDeltaRepo,
           actorId: context.executedBy,
           actorRole: 'system',
-          invalidateAcceptance: true,
+          invalidateAcceptance: acceptanceVoidReviewed,
           depositPaidCents,
         },
       );

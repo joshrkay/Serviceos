@@ -4,6 +4,7 @@ import {
   CreateProposalInput,
   Proposal,
 } from '../../src/proposals/proposal';
+import { ACCEPTANCE_VOID_MARKER } from '../../src/proposals/acceptance-void';
 import {
   approveProposal,
   approveChainSet,
@@ -1167,6 +1168,37 @@ describe('Track E — chain-set approval', () => {
     expect(result.approved.map((p) => p.id)).toEqual([customer.id]);
     expect(result.skipped).toEqual([
       { id: job.id, reason: 'low_confidence' },
+      { id: sendEstimate.id, reason: 'non_capture' },
+    ]);
+    expect((await repo.findById(tenantId, job.id))?.status).toBe('draft');
+  });
+
+  // OVAS-01 — a sibling that voids a customer's signed acceptance never rides
+  // a set approval: it needs its own deliberate approval with the warning shown.
+  it('excludes an acceptance-voiding capture sibling while approving the rest', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const { customer, job, sendEstimate } = await seedChain(repo);
+    await repo.update(tenantId, job.id, {
+      payload: {
+        ...job.payload,
+        _meta: { overallConfidence: 'high', markers: [ACCEPTANCE_VOID_MARKER] },
+      },
+    });
+
+    const result = await approveChainSet(
+      repo,
+      tenantId,
+      customer.id,
+      actorId,
+      'owner',
+      auditRepo,
+      'sms',
+    );
+
+    expect(result.approved.map((p) => p.id)).toEqual([customer.id]);
+    expect(result.skipped).toEqual([
+      { id: job.id, reason: 'voids_acceptance' },
       { id: sendEstimate.id, reason: 'non_capture' },
     ]);
     expect((await repo.findById(tenantId, job.id))?.status).toBe('draft');

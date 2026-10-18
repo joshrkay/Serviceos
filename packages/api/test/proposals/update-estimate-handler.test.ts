@@ -17,6 +17,7 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { Proposal } from '../../src/proposals/proposal';
 import { buildLineItem, calculateDocumentTotals, LineItem } from '../../src/shared/billing-engine';
 import type { Job, JobRepository } from '../../src/jobs/job';
+import { ACCEPTANCE_VOID_MARKER } from '../../src/proposals/acceptance-void';
 
 /** Minimal job repo: resolves job-1 with the given paid deposit. */
 function makeJobRepo(depositPaidCents = 0): Pick<JobRepository, 'findById'> {
@@ -70,6 +71,14 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
     updatedAt: new Date(),
     ...overrides,
   };
+}
+
+/** The proposal as the RV-042 drafter emits it for an ACCEPTED target. */
+function markedProposal(): Proposal {
+  const base = makeProposal();
+  return makeProposal({
+    payload: { ...base.payload, _meta: { overallConfidence: 'high', markers: [ACCEPTANCE_VOID_MARKER] } },
+  });
 }
 
 describe('UpdateEstimateExecutionHandler', () => {
@@ -246,7 +255,7 @@ describe('UpdateEstimateExecutionHandler', () => {
         makeJobRepo(50_000),
       );
 
-      const result = await h.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
+      const result = await h.execute(markedProposal(), { tenantId: 't-1', executedBy: 'u-1' });
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/deposit has already been paid/i);
 
@@ -266,7 +275,7 @@ describe('UpdateEstimateExecutionHandler', () => {
         makeJobRepo(0),
       );
 
-      const result = await h.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
+      const result = await h.execute(markedProposal(), { tenantId: 't-1', executedBy: 'u-1' });
       expect(result.success).toBe(true);
 
       const after = await estimateRepo.findById('t-1', 'est-1');
@@ -295,9 +304,57 @@ describe('UpdateEstimateExecutionHandler', () => {
         jobRepo: makeJobRepo(25_000) as unknown as JobRepository,
       });
       const h = registry.get('update_estimate')!;
-      const result = await h.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
+      const result = await h.execute(markedProposal(), { tenantId: 't-1', executedBy: 'u-1' });
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/deposit has already been paid/i);
+    });
+  });
+
+  // OVAS-01 defence in depth — voiding a signed acceptance is only allowed for
+  // a proposal whose reviewer was SHOWN the RV-042 warning, i.e. one whose
+  // payload carries the `_acceptance` marker. An unmarked payload (drafted
+  // before the customer accepted, or a marker stripped by an edit) fails
+  // closed: the estimate, its signature and its status are untouched.
+  describe('OVAS-01 — acceptance invalidation requires the _acceptance marker', () => {
+    const SIGNED: Partial<Estimate> = {
+      status: 'accepted',
+      version: 3,
+      acceptedAt: new Date('2026-06-05T12:00:00Z'),
+      acceptedByName: 'Jane Henderson',
+      acceptedSignatureData: 'data:image/png;base64,c2lnbmF0dXJl',
+    };
+
+    it('refuses an UNMARKED edit of an accepted estimate and never writes', async () => {
+      await estimateRepo.update('t-1', 'est-1', SIGNED);
+      const updateSpy = vi.spyOn(estimateRepo, 'update');
+
+      const result = await handler.execute(makeProposal(), { tenantId: 't-1', executedBy: 'u-1' });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/accepted/i);
+      expect(updateSpy).not.toHaveBeenCalled();
+      const unchanged = await estimateRepo.findById('t-1', 'est-1');
+      expect(unchanged!.status).toBe('accepted');
+      expect(unchanged!.acceptedSignatureData).toBe('data:image/png;base64,c2lnbmF0dXJl');
+      expect(unchanged!.version).toBe(3);
+      expect(unchanged!.lineItems).toHaveLength(2);
+    });
+
+    it('a marker on a NON-accepted estimate changes nothing about a normal edit', async () => {
+      const result = await handler.execute(markedProposal(), { tenantId: 't-1', executedBy: 'u-1' });
+      expect(result.success).toBe(true);
+      const updated = await estimateRepo.findById('t-1', 'est-1');
+      expect(updated!.status).toBe('draft');
+      expect(updated!.lineItems).toHaveLength(3);
+    });
+
+    it('a MARKED edit of an accepted estimate invalidates the acceptance (RV-042 path kept)', async () => {
+      await estimateRepo.update('t-1', 'est-1', SIGNED);
+      const result = await handler.execute(markedProposal(), { tenantId: 't-1', executedBy: 'u-1' });
+      expect(result.success).toBe(true);
+      const after = await estimateRepo.findById('t-1', 'est-1');
+      expect(after!.status).toBe('sent');
+      expect(after!.acceptedSignatureData == null).toBe(true);
     });
   });
 });

@@ -281,6 +281,7 @@ import { createAuditEvent } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
 import type { OutboundAnchorKind } from './sms/sms-event';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
+import { voidsCustomerAcceptance } from './acceptance-void';
 
 /** Hard ceiling on one-tap link lifetime (risk note: TTL ≤ 30 minutes). */
 export const ONE_TAP_APPROVE_MAX_TTL_MS = 30 * 60 * 1000;
@@ -576,11 +577,13 @@ export interface RouteUnsupervisedProposalInput {
    * SMS anchors as `review_required_rendered` — exactly the same path the
    * low/very_low-confidence flip uses.
    *
-   * The two conditions are OR'd; the audit metadata records which one(s)
-   * fired via `suppressReason`:
+   * The conditions are OR'd; the audit metadata records which one(s)
+   * fired via `suppressReason` ('+'-joined when several fire):
    *   'low_confidence'            — payload _meta guard only
    *   'action_class'              — caller-asserted suppressApproveLink only
-   *   'low_confidence+action_class' — both fired simultaneously
+   *   'acceptance_void'           — OVAS-01: the payload carries the RV-042
+   *                                 acceptance-void marker
+   *   'low_confidence+action_class' — both of the first two fired
    */
   suppressApproveLink?: boolean;
   /**
@@ -616,10 +619,10 @@ export async function routeUnsupervisedProposal(
   // an SMS that still went out (low/very_low payload, or a caller-asserted
   // non-Y-approvable target like a money/comms chain head).
   let approveLinkSuppressed = false;
-  // Both conditions can fire simultaneously (e.g. a money/comms chain head
-  // that also carries low/very_low confidence). When both apply, record the
-  // combined reason so audit readers see the full picture.
-  let suppressReason: 'low_confidence' | 'action_class' | 'low_confidence+action_class' | undefined;
+  // Conditions can fire simultaneously (e.g. a money/comms chain head that
+  // also carries low/very_low confidence). When several apply, record the
+  // '+'-joined reasons so audit readers see the full picture.
+  let suppressReason: string | undefined;
 
   if (requested === 'escalate_to_oncall' && (input.channel !== 'voice_inbound' || !deps.escalateToOnCall)) {
     // Non-call channels (or no escalation seam wired) fall back to queue_only.
@@ -649,7 +652,12 @@ export async function routeUnsupervisedProposal(
       // chain head). Both conditions share one code path: no token, review
       // form, `review_required_rendered` anchor.
       const isLowConfidence = confidenceMetaBlocksAutoApprove(input.payload);
-      const reviewRequired = isLowConfidence || input.suppressApproveLink === true;
+      // OVAS-01 — approving an acceptance-voiding edit deletes a customer's
+      // signed acceptance; a single tap must never do that. No token; the
+      // renderer prints the warning on the review form.
+      const voidsAcceptance = voidsCustomerAcceptance(input.payload);
+      const reviewRequired =
+        isLowConfidence || input.suppressApproveLink === true || voidsAcceptance;
 
       let body: string;
       let expiresAt: Date | undefined;
@@ -682,12 +690,11 @@ export async function routeUnsupervisedProposal(
           ? input.renderSmsBody('')
           : `${summary}. Review in app.`;
         approveLinkSuppressed = true;
-        suppressReason =
-          isLowConfidence && input.suppressApproveLink === true
-            ? 'low_confidence+action_class'
-            : isLowConfidence
-            ? 'low_confidence'
-            : 'action_class';
+        suppressReason = [
+          ...(isLowConfidence ? ['low_confidence'] : []),
+          ...(input.suppressApproveLink === true ? ['action_class'] : []),
+          ...(voidsAcceptance ? ['acceptance_void'] : []),
+        ].join('+');
       } else {
         // No secret and not low confidence: preserve original behavior —
         // no token to mint, so no SMS goes out.

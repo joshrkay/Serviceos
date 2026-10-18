@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { ACCEPTANCE_VOID_MARKER } from '../../src/proposals/acceptance-void';
 import {
   resolveAutoApproveThreshold,
   shouldAutoApprove,
@@ -1107,6 +1108,39 @@ describe('RV-074 — routeUnsupervisedProposal: low/very_low confidence suppress
     });
     // No one-tap link in the body.
     expect(sms[0].body).not.toContain('https://app.test/p/approve');
+  });
+
+  // OVAS-01 — an edit that voids a customer's signed acceptance never gets a
+  // single-tap approve link: the owner reviews it (and its warning) first.
+  it('an acceptance-voiding payload gets no one-tap link: suppressReason is "acceptance_void"', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+
+    const result = await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => sms.push({ to, body }),
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+      },
+      {
+        ...baseInput,
+        payload: {
+          _meta: { overallConfidence: 'high', markers: [ACCEPTANCE_VOID_MARKER] },
+        },
+        renderSmsBody: (approveUrl: string) =>
+          approveUrl ? `Approve: ${approveUrl}` : 'Review in app.',
+      },
+    );
+
+    expect(result.smsSent).toBe(true);
+    expect(result.approveLinkExpiresAt).toBeUndefined();
+    expect(sms[0].body).not.toContain('https://app.test/p/approve');
+    const events = await audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+    expect(events[0].metadata).toMatchObject({
+      approveLinkSuppressed: true,
+      suppressReason: 'acceptance_void',
+    });
   });
 
   it('only suppressApproveLink (no low confidence): suppressReason is "action_class"', async () => {

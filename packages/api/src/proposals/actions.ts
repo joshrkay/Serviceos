@@ -8,6 +8,7 @@ import { AppointmentRepository, updateAppointment } from '../appointments/appoin
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { logProposalEvent } from './audit';
 import { confidenceMetaBlocksAutoApprove } from './auto-approve';
+import { voidsCustomerAcceptance } from './acceptance-void';
 import { chainMetaFor } from './chain';
 import { resolveChainReferences } from './execution/chain-resolution';
 import { undoCorrectionLesson } from '../learning/corrections/apply-undo';
@@ -114,6 +115,7 @@ export interface ApproveChainSetResult {
       | 'low_confidence'
       | 'pending_edit'
       | 'missing_fields'
+      | 'voids_acceptance'
       | 'error';
   }[];
 }
@@ -541,6 +543,12 @@ export async function approveChainSet(
     }
     if (confidenceMetaBlocksAutoApprove(proposal.payload)) {
       skipped.push({ id: proposal.id, reason: 'low_confidence' });
+      continue;
+    }
+    // OVAS-01 — voiding a customer's signed acceptance needs its own
+    // deliberate approval with the warning in front of the approver.
+    if (voidsCustomerAcceptance(proposal.payload)) {
+      skipped.push({ id: proposal.id, reason: 'voids_acceptance' });
       continue;
     }
     if (hasPendingEdit && (await hasPendingEdit(tenantId, proposal.id))) {
