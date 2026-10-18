@@ -3148,7 +3148,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   statement requires `sent_at IS NULL`). The sent stamp keeps its own guard and is written
   whatever `retired_at` says, because the provider did accept the message, so the one row that
   can carry both (a send that began outside the margin and a sweep that crossed it a moment
-  later) counts as sent. The sweep enqueues only a row that is neither sent nor retired and
+  later) counts as sent (not yet fenced, see Deferred review findings D10). The sweep enqueues only a row that is neither sent nor retired and
   still outside the margin and retires the rest in place, so a provider that stays down cannot
   leave a row pending forever. The payload is
   `{ demoCallId }` with no `tenantId`, so it is not a demo-tenant job and the generation guard
@@ -3962,7 +3962,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 ### Deferred review findings (resolve at slice start)
 
 U6 and U7 are unbuilt (S5, and S6 which is decision-gated) and have taken many review rounds,
-so these nine confirmed findings are recorded here with the direction to take rather than
+so these ten confirmed findings are recorded here with the direction to take rather than
 designed further. Each is exposed first by the Docker-gated, real-column test named below.
 
 - **D1. A platform tenant must exist (U7, S6; P1).** `phone_rate_limits.tenant_id` and
@@ -4094,6 +4094,25 @@ designed further. Each is exposed first by the Docker-gated, real-column test na
   session, then approve a re-run that edited only a policy choice: after execution the tenant
   name is the Settings value and the policy is the re-run's; and an edit to the same field the
   re-run also changed is skipped and reported.
+- **D10. A handoff send can race the retire sweep (U7, S6; P2).** The handler's expiry check
+  and its provider call are separate steps, so a handler that passes the check with just over
+  `HANDOFF_SEND_MARGIN_SECONDS` left can be mid-send when the sweep crosses the margin and
+  sets `retired_at`, and because the sent stamp is written whatever `retired_at` says the row
+  ends both retired and sent, with the recipient holding a link that has seconds left or has
+  expired, against the contract that a retired row is never sent. *Direction:* the sender
+  claims the row durably before calling the provider, with one guarded `UPDATE
+  demo_handoff_outbox SET send_claimed_at = now() WHERE id = $1 AND sent_at IS NULL AND
+  retired_at IS NULL AND handoff_expires_at > now() + <margin + provider timeout> RETURNING
+  id` (the margin must cover the bounded provider call, not just 60 s, so a link is never
+  dispatched with less time left than the call can take); the retire sweep and the handler's
+  own expiry check skip rows whose claim is younger than the provider timeout, and a stale
+  claim (a crashed sender) becomes reclaimable after that timeout. `sent_at` is only ever set
+  by the claimant and guards `retired_at IS NULL`, so a retired row can never be marked sent,
+  and a lost race is a no-op that the provider's idempotency key makes safe. *First test:* a
+  sender holding a claim with just over the margin remaining while the sweep runs: the sweep
+  leaves the row, the SMS goes out with at least the required remaining life, and `sent_at`
+  is set once; a sender that loses the claim to the sweep sends nothing; and a crashed
+  claimant's row is reclaimed after the provider timeout and then retired or sent once.
 
 ## Sizing and sequencing
 
