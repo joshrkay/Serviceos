@@ -26,7 +26,7 @@ import {
 import { createRedisCacheStore } from './redis-cache-store';
 import { findProviderModelMismatch } from './provider-model-compat';
 import { findUnpricedModels } from './model-pricing';
-import { DEFAULT_AI_ROUTING_CONFIG } from '../../config/ai-routing';
+import { DEFAULT_AI_ROUTING_CONFIG, isVisionCapableModel } from '../../config/ai-routing';
 import {
   FallbackModelMapProvider,
   resolveFallbackTierModelsFromEnv,
@@ -484,6 +484,15 @@ export function buildFallbackProvidersFromEnv(
 
   const tiers = resolveFallbackTierModelsFromEnv(env);
   warnOnUnpricedModels([tiers.lightweight, tiers.standard, tiers.complex], 'fallback', logger);
+  if (!isVisionCapableModel(tiers.complex)) {
+    // GATEWAY-06: mms_estimate (photo-to-quote) is complex-tier. With a
+    // text-only complex fallback, failover for it can never succeed.
+    const message =
+      'AI_FALLBACK_COMPLEX_MODEL is not vision-capable — photo-to-quote (mms_estimate) ' +
+      'cannot fail over to this provider';
+    logger?.info(message, { level: 'warn', complexModel: tiers.complex });
+    process.stderr.write(`[WARN] ${message}: ${tiers.complex}\n`);
+  }
   logger?.info('AI fallback provider wired', {
     host: parsedHost,
     lightweightModel: tiers.lightweight,
