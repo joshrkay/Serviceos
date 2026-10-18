@@ -90,9 +90,9 @@ describe('TrialTurn', () => {
     const rows = within(group).getAllByRole('radio');
     expect(rows).toHaveLength(2);
     expect(rows[0]).toHaveAccessibleName('Starter, $79 a month');
-    expect(rows[0]).toHaveAccessibleDescription('Includes 2 users and 20 minutes of answered calls.');
+    expect(rows[0]).toHaveAccessibleDescription('Includes 2 users and 20 minutes of answered calls, then $1.25 a minute.');
     expect(rows[1]).toHaveAccessibleName('Growth, $199 a month');
-    expect(rows[1]).toHaveAccessibleDescription('Includes 5 users and 60 minutes of answered calls.');
+    expect(rows[1]).toHaveAccessibleDescription('Includes 5 users and 60 minutes of answered calls, then $1.25 a minute.');
     expect(screen.queryByText('Most shops like yours')).not.toBeInTheDocument();
     for (const row of rows) expect(row).toHaveAttribute('aria-checked', 'false');
     // Choosing a plan is the owner's: nothing is picked for them.

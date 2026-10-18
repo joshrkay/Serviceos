@@ -19,16 +19,18 @@ const INTERVAL_PHRASE: Record<string, string> = { month: 'a month', year: 'a yea
 const count = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'}`;
 
 /**
- * A plan as a row the owner can pick. The price is formatted from integer cents
- * at the last moment. No "most shops" mark: the API does not say which plan is
+ * A plan as a row the owner can pick. The price and the per-minute rate past the
+ * included minutes are formatted from integer cents at the last moment. No "most shops" mark: the API does not say which plan is
  * the typical one.
  */
 export function planOption(plan: BillingPlan): OptionCardOption {
   const period = INTERVAL_PHRASE[plan.interval] ?? `per ${plan.interval}`;
+  // What the owner pays past the included minutes is part of what they commit to with a card.
+  const overage = plan.overageCentsPerAiMinute > 0 ? `, then ${dollars(plan.overageCentsPerAiMinute)} a minute` : '';
   return {
     key: plan.id,
     label: `${plan.name}, ${dollars(plan.amountCents)} ${period}`,
-    detail: `Includes ${count(plan.includedUsers, 'user')} and ${count(plan.includedAiMinutes, 'minute')} of answered calls.`,
+    detail: `Includes ${count(plan.includedUsers, 'user')} and ${count(plan.includedAiMinutes, 'minute')} of answered calls${overage}.`,
   };
 }
 
