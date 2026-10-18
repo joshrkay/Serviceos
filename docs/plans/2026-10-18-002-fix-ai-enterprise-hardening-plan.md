@@ -466,6 +466,20 @@ flowchart LR
       - user-role text in `LLMGateway.complete`, before dispatch and before the snapshot
       - `redactTextForExport`
       - `scrubPii`, whose residual detector also flags grouped digits
+    - **Scrub at the persistence boundary, not only at the known producers.** Review keeps finding
+      one more producer that writes caller speech without passing a listed chokepoint. The latest is
+      the Whisper path in `workers/transcription.ts:455-510`: it writes `voice_recordings.transcript`
+      and `transcriptMetadata.raw_transcript_retention` for voicemail and in-app recordings without
+      going through `callerTranscriptText` or Deepgram. So:
+      - Every repository write to a designated caller-text column runs the scrubber and the PCI
+        detection. The designated columns are `voice_recordings.transcript` and its
+        `raw_transcript_retention`, `call_transcript_turns`, `voice_sessions.transcript`,
+        `knowledge_chunks.content` and `content_scrubbed`, and the `ai_runs` snapshots. A new
+        speech source therefore can't bypass it.
+      - A test pins the list. It checks every repository method that writes one of those columns,
+        and a column added to the list without a scrubbing write path fails.
+      - The transcription worker additionally scrubs and detects as soon as the provider returns,
+        before the optional correction call, before persistence and before hand-off.
     - Add `redact=pci` to Deepgram.
     - Treat Deepgram's own redaction as a positive detection. With `redact=pci`, Deepgram masks the
       digits before our scrubber sees them, so the Luhn check alone would never flag a media-streams
@@ -514,8 +528,12 @@ flowchart LR
       - Add a bounded, resumable, one-time job that runs per tenant, in batches, under the tenant
         transaction.
       - It runs the same scrubber over the text stores still in that window: `call_transcript_turns`,
-        `voice_sessions.transcript`, `voice_recordings.transcript`, `knowledge_chunks.content` and
-        `ai_runs` input/output snapshots.
+        `voice_sessions.transcript`, `voice_recordings.transcript` with its
+        `raw_transcript_retention`, `knowledge_chunks.content` and `content_scrubbed`, and the
+        `ai_runs` input/output snapshots. Every designated column is covered; the context builder
+        sends `content_scrubbed` back to the model (`context-builder.ts:189`).
+      - It deletes or regenerates the embedding of every knowledge chunk it changes, so a vector
+        built from the card number can't keep matching.
       - It sets every recording still in the window to `pci_scan = 'pending'`, so the audio pass
         covers recordings made before the deploy too.
       - It writes one audit event per tenant, with the redaction counts.
@@ -534,6 +552,11 @@ flowchart LR
     - Non-Luhn digit runs and phone numbers are untouched.
     - An unspaced PAN no longer leaks its first five digits through the exporter.
   - **Unit:** the deleter treats 404 as done and keeps the token out of logs.
+  - **Unit:** a Whisper voicemail transcript containing a PAN is persisted scrubbed, in both
+    `transcript` and `raw_transcript_retention`, and its recording is flagged. The correction call
+    never receives the digits.
+  - **Unit:** a column added to the designated list without a scrubbing write path fails the
+    coverage test.
   - **Unit:** each greeting branch contains the disclosure.
   - **Unit:** the config guard rejects and accepts the right combinations.
   - **Integration (PRIV-1),** RLS on:
@@ -557,8 +580,9 @@ flowchart LR
       scrubbed to `[card number]`) is persisted. The scan marks the recording `pci_detected`; it
       never clears it.
   - **Integration (backfill):**
-    - A transcript turn, `ai_runs` row and knowledge chunk that held a PAN before the migration are
-      scrubbed by the backfill.
+    - A transcript turn, an `ai_runs` row, a recording's `raw_transcript_retention`, and both columns
+      of a knowledge chunk that held a PAN before the migration are scrubbed by the backfill. The
+      chunk's embedding is regenerated or removed.
     - A recording made before the deploy is set to `pending` and goes through the audio pass.
     - A second run changes nothing.
 - **Verification:** a PAN read aloud never reaches `ai_runs`, `call_transcript_turns` or the provider
