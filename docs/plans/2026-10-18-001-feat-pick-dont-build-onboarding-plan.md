@@ -182,7 +182,8 @@ tiers; import from a photo; pricing or plan changes.
   `onboarding.draft_retry` (both S1b), plus the existing proposal lifecycle events (S1b adds
   `proposal.retried`). S4 adds `onboarding.draft_undone` and `onboarding.draft_reset` (U9).
   U8 adds `invoice.payment_mode_unavailable` and reuses
-  `invoice.payment_link_deactivated` with the reason `payment_mode_changed`. U7 adds
+  `invoice.payment_link_deactivated` with the reasons `payment_mode_changed` and
+  `payment_mode_changed_during_checkout`. U7 adds
   `demo_job_dropped` (a queued job refused by the lease-generation check),
   `demo_write_rejected` (a write refused by the same check inside its own transaction),
   `demo_inflight_reaped` (a stale in-flight registry row removed), `demo_callsid_mismatch`
@@ -1158,7 +1159,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `{ expectedVersion }`, and S4 gives retry the same field); create
     `packages/api/src/onboarding/draft/retry.ts`
     (`retryFailedDraftProposals`, S1b, including its `DRAFT_RETRY_UNSAFE` refusal of a set that
-    holds a terminal not-applied member; S4 adds its `expectedVersion` comparison); modify `packages/api/src/onboarding/draft/approve.ts`
+    holds a terminal not-applied member, checked before `DRAFT_RETRY_NOTHING_FAILED`; S4 adds
+    its `expectedVersion` comparison, between `DRAFT_NOT_APPROVED` and the unsafe check); modify `packages/api/src/onboarding/draft/approve.ts`
     (the undo and reset helpers, S4, over one shared locked read of the draft and its
     proposals) and `packages/api/src/onboarding/draft/repository.ts` (undo and reset are draft
     writers under U11's invariant: each goes through the locked-write helper, declaring the
@@ -1181,7 +1183,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     the raw statuses never leave the server); S4 adds an
     optional, derived `recovery: 'reset' | 'settings'` beside it in the same block
     (`derive-status.ts` and `contracts.ts`, present only while `execution` is `failed` or
-    `stopped`), and rewrites the `deriveDraftExecution` and `retry.ts` doc comments, which
+    `stopped`; derived from the statuses and, for `approved` members, their `approved_at`,
+    which `load-facts.ts` selects beside the status, with the clock injected so
+    `derive-status.ts` stays pure), and rewrites the `deriveDraftExecution` and `retry.ts` doc comments, which
     today name the whole-draft undo as the way out of `stopped`
   - modify `packages/web/src/components/onboarding/v3/ConversationShell.tsx` (undo button during
     the window, which posts the `version` from the approve response; the wait screen holds while
@@ -1193,7 +1197,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `recovery: 'reset'` copy that says part of the setup was undone and a "Start over" button
     that calls `POST /draft/reset` with the draft's `version` and then re-renders the
     read-back with the owner's answers intact, and with `recovery: 'settings'` copy that says
-    part of it is already live and a link to the Settings page, no button; the same screen
+    part of it is already live or saving on its own and a link to the Settings page, no button; the same screen
     answers a `DRAFT_RESET_REFUSED` the server reaches on a race the same way, and a Retry tap
     from a stale `failed` screen that the server answers `DRAFT_RETRY_UNSAFE` (the owner undid
     the sibling from the inbox since the screen rendered) re-reads the status and renders the
@@ -1292,29 +1296,54 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   offering the same button again. Reset succeeds when the owner is quick, when the sibling
   failed, or when every member is already out of the way. To keep the shell from offering a
   button the server will refuse, the status draft block carries `recovery`, derived from the
-  same statuses: `'settings'` when any listed proposal is `executing` or `executed`, else
-  `'reset'`; the server stays the authority for the race and the window. The rule is the same
+  rules reset applies: `'settings'` when any listed proposal is `executing` or `executed`, or
+  when any `approved` one is no longer inside its undo window (`isInUndoWindow`, the endpoint's
+  own predicate, evaluated one second ahead of the status read's clock so the hint never
+  promises more than the endpoint grants); else `'reset'`. The window term is needed because
+  reset refuses an `approved` member past its window with `UNDO_WINDOW_CLOSED`: for an `undone`
+  + `approved` pair just past five seconds, or while the execution worker is delayed, a rule
+  over statuses alone keeps `stopped` with `recovery: 'reset'`, the shell keeps offering "Start
+  over", and every tap is refused with nothing changed. The hint therefore expires with the
+  window, and the sibling then lands on its own, which is what the Settings copy says. We
+  keep reset refusing past the window rather than letting it cancel an unclaimed `approved`
+  row: that would be race-safe under the draft lock and the row locks (a claim ahead of reset
+  shows `executing`, one behind it matches nothing), but it would make reset undo past a
+  window that the inbox undo and the whole-draft undo both enforce, and whether a tap
+  succeeds would depend on worker lag. The server stays the authority for the race and the
+  window. The rule is the same
   whichever of `stopped` and `failed` the set reads as, so a failed member beside a terminal
   one (which is `stopped`, below) gets `'reset'` whenever the reset can run, that is while
-  nothing is executed or executing, and `'settings'` once part of it is live. Reopen keeps its own
+  nothing is executed or executing and no `approved` member is past its window, and
+  `'settings'` otherwise (for `failed` it only hides Start over; Retry stays). Reopen keeps its own
   precondition (`approved` and every proposal `executed`): it edits a live setup, so a failed,
   stopped or part-undone set is retried or reset here first and never reopened on top of rows
   that did not run.
 
-  `POST /draft/retry` locks the draft row and reads the set before it writes anything. A draft
-  that is not approved is 409 `DRAFT_NOT_APPROVED`; a set with nothing in `execution_failed`
-  is 409 `DRAFT_RETRY_NOTHING_FAILED` (a second retry racing the first sees the first's
-  outcome under the draft lock); and a set that holds a failed member AND a terminal
-  not-applied one is 409 `DRAFT_RETRY_UNSAFE`, naming the statuses, with nothing changed (no
-  row reset, no `proposal.retried`, no `onboarding.draft_retry`). A terminal not-applied member
+  `POST /draft/retry` locks the draft row and reads the set before it writes anything, and
+  answers the first of four guards that applies, in this order: (1) a draft that is not
+  approved is 409 `DRAFT_NOT_APPROVED`; (2) from S4, a stale `expectedVersion` is 409
+  `VERSION_CONFLICT` (below); (3) a set that holds a terminal not-applied member is 409
+  `DRAFT_RETRY_UNSAFE`, naming the statuses, with nothing changed (no row reset, no
+  `proposal.retried`, no `onboarding.draft_retry`), whether or not another member failed;
+  (4) a set with nothing in `execution_failed` is 409 `DRAFT_RETRY_NOTHING_FAILED`. Unsafe
+  comes before nothing-failed because a set holding a member retry cannot recover is never
+  merely "nothing to do": `approved + undone` answers `DRAFT_RETRY_UNSAFE`, matching the
+  status, which reads `stopped` for exactly those sets, and `DRAFT_RETRY_NOTHING_FAILED` is
+  left for benign sets (every member `approved`, `executing` or `executed`), such as the loser
+  of two concurrent retries, which sees the first's outcome under the draft lock. A terminal
+  not-applied member
   is one retry cannot bring back: `undone`, `rejected` or `expired` (terminal in
   `lifecycle.ts`), a stuck pre-approval `draft` or `ready_for_review`, or a listed proposal
-  that no longer exists. The refusal exists because retry re-approves only the failed member:
+  that no longer exists. With a failed member beside it the refusal also keeps retry from
+  re-approving only the failed member:
   with an `undone` sibling left behind, the failed one would execute alone after its fresh
   window and the set would end `executed + undone`, half the configuration live, which reset
   refuses as `applied` and reopen refuses too. The way out of such a set is `POST /draft/reset`,
   which accepts it while nothing is executed or executing (the failed member is already not
-  applied) and reverts whatever is still approved inside its window. Only when every member is
+  applied) and reverts whatever is still approved inside its window. Reset is S4: the message
+  #1694 ships ("Reset the whole setup, or finish it from Settings") names a control that does
+  not exist yet, so until S4 lands the only way out is Settings (and the step-by-step setup
+  path), and the shell must not offer Start over before then. Only when every member is
   `approved`, `executing`, `executed` or `execution_failed` does retry move each
   `execution_failed` proposal along the only path `proposals/lifecycle.ts` allows
   (`execution_failed → draft` through `resetFailedForRetry`, then approved again through the
@@ -1329,7 +1358,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   pre-approval status) or no longer exists, even when another member is `execution_failed`,
   because retry cannot recover it (`undone` is terminal in `lifecycle.ts`), so the shell
   neither waits forever nor offers Retry, and its recovery is `POST /draft/reset`, or the
-  Settings page once part of the set is live (`recovery`); `failed` when none is but one is
+  Settings page once part of the set is live or about to be (`recovery`); `failed` when none is but one is
   `execution_failed` (the rest `approved`, `executing`, `executed` or failed too), the one
   state Retry is offered for; `executed` when all are; `executing` when work is in flight;
   `pending` when all are approved and none is picked up; and `null` while the draft is still
@@ -1337,7 +1366,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 
   Retry carries the version for the same reason as undo. `POST /draft/retry` also takes
   `{ expectedVersion }`, the approved draft's `version` as the failed screen rendered it; under
-  the draft lock, after the `approved` check and before the set is read, any other value is 409
+  the draft lock, after the `approved` check and before the set is read or the unsafe check runs, any other value is 409
   `VERSION_CONFLICT` naming both versions, nothing is reset and no `proposal.retried` row is
   written. Without it, a tab
   still showing the failure of approval 1 could re-queue the failed proposals of a newer pair
@@ -1396,7 +1425,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     not change the draft's `version`.
   - Error (stopped): a proposal undone from the inbox, one rejected, one expired and one
     missing (one case each, the other member `approved`) → fact `stopped`, `POST /draft/retry`
-    answers 409 `DRAFT_RETRY_NOTHING_FAILED`, and the shell offers no Retry and does not wait.
+    answers 409 `DRAFT_RETRY_UNSAFE` (never `DRAFT_RETRY_NOTHING_FAILED`: the unsafe guard comes
+    first), and the shell offers no Retry and does not wait. `DRAFT_RETRY_NOTHING_FAILED` is
+    pinned on a benign set (`approved` + `executed`, and the loser of two concurrent retries).
   - Retry refuses a failed member beside a terminal one (the finding's case; table-driven, real
     Postgres): `execution_failed` + `undone` (and, one case each, + `rejected`, + `expired`, +
     a stuck `draft`, + a listed id with no row) → fact `stopped`, never `failed`, with
@@ -1423,7 +1454,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     that passed its check on a stale read of the sibling.
   - Reset, the finding's case (an inbox-split pair): approve → both `approved` in the window,
     the owner undoes ONE of them from the inbox → fact `stopped` with `recovery: 'reset'`,
-    retry 409 `DRAFT_RETRY_NOTHING_FAILED`, undo 409 `DRAFT_UNDO_REFUSED`; `POST /draft/reset`
+    retry 409 `DRAFT_RETRY_UNSAFE`, undo 409 `DRAFT_UNDO_REFUSED`; `POST /draft/reset`
     with the draft's `version` → 200: the other proposal is `undone` (one audit row), the draft
     is `'draft'` at `version + 1` with `proposal_ids = []` and its choices intact,
     `tenant_settings` untouched, exactly one `onboarding.draft_reset` naming the reverted id
@@ -1446,9 +1477,22 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     forward and nothing loops. `executing` + `undone` → 409 `DRAFT_RESET_REFUSED`, reason
     `executing`, and once that proposal finishes the next attempt is `applied` (executed) or
     accepted (`execution_failed`). `approved` past its window + `undone` → 409
-    `UNDO_WINDOW_CLOSED`. A second reset, or a reset after undo, on an already editable draft →
+    `UNDO_WINDOW_CLOSED`, and the status read then says `recovery: 'settings'` (next case). A
+    second reset, or a reset after undo, on an already editable draft →
     409 `DRAFT_NOT_APPROVED`; a stale `expectedVersion` after a reset and a fresh approval →
     409 `VERSION_CONFLICT`, and the new pair is untouched.
+  - Reset, the hint never outruns the window (the `undone` + `approved` finding; fixed clock,
+    real Postgres): approve, the owner undoes one member from the inbox, the other stays
+    `approved`. Read at 3 s the status is `stopped` with `recovery: 'reset'` and a reset at 3 s
+    is 200. On a fresh pair, read at 4.5 s (inside the window, past the one-second margin) and
+    at 5.2 s it is `stopped` with `recovery: 'settings'`, and a reset sent at 5.2 s is 409
+    `UNDO_WINDOW_CLOSED` with nothing changed. Delayed worker: the sibling stays `approved`
+    unclaimed (worker paused) 30 s past its window → `stopped`, `recovery: 'settings'`, the
+    shell shows the Settings copy and no Start over, reset is 409 `UNDO_WINDOW_CLOSED`; when the
+    worker resumes the sibling executes and the hint stays `settings`. `execution_failed` +
+    `approved` past its window → `failed`, `recovery: 'settings'`: Retry offered, Start over
+    not. Sweep, table-driven across offsets from 0 to 8 s in 250 ms steps: whenever the status
+    says `recovery: 'reset'`, a reset at the same instant is not refused for the window.
   - Reset, races (two real connections, looped so ordering luck cannot pass): (a) the worker's
     `claimForExecution` on the `approved` sibling arrives after reset has locked the set → the
     claim blocks, reset commits, the claim returns null, no handler runs, the draft is
@@ -1462,7 +1506,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `rejected`, `expired`, a stuck `draft` or a missing row → `stopped`, in either member order;
     `execution_failed` beside `approved`, `executing`, `executed` or `execution_failed` →
     `failed`; a lone terminal member beside `approved` → `stopped`. `recovery` is `'settings'` for any `stopped` or `failed`
-    set holding an `executing` or `executed` proposal and `'reset'` for every other
+    set holding an `executing` or `executed` proposal, or an `approved` one past its undo
+    window (boundary on a fixed clock: 3.9 s after approval `'reset'`, 4.0 s `'settings'`;
+    an `approved` row with no `approved_at` counts as past it, as `isInUndoWindow` has it), and `'reset'` for every other
     `stopped` or `failed` set, and is absent for `pending`, `executing`, `executed` and a
     draft still being edited.
   - Shell: `stopped` with `recovery: 'reset'` → Start over calls reset with the draft's
@@ -1470,7 +1516,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     member beside an undone one lands on); `recovery: 'settings'` → the
     Settings link and no reset call; `failed` → Retry always, and Start over only with
     `recovery: 'reset'`; a `DRAFT_RESET_REFUSED` reason `applied` from a stale screen swaps in
-    the Settings copy, and reason `executing` or `UNDO_WINDOW_CLOSED` keeps the wait screen; a
+    the Settings copy, reason `executing` keeps the wait screen, and `UNDO_WINDOW_CLOSED`
+    re-reads the status (now `recovery: 'settings'`) and swaps in the Settings copy, never a second Start over; a
     Retry tap from a stale `failed` screen answered `DRAFT_RETRY_UNSAFE` re-reads the status
     and renders the `stopped` copy with Start over, and does not repeat the call.
   - Shell (version): the undo button posts the `version` from the approve response and Retry
@@ -1707,12 +1754,15 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     own connection; the in-memory queue implements it as a plain send),
     `packages/api/src/settings/settings.ts` and `pg-settings.ts` (the `afterWrite` option: it
     runs inside `update`'s transaction after the row write and before commit, with the prior
-    and new rows read under the row lock), `packages/api/src/invoices/invoice-payment-link.ts` (a
-    `payment_mode_changed` reason on `deactivateInvoicePaymentLink`),
+    and new rows read under the row lock), `packages/api/src/invoices/invoice-payment-link.ts` (the
+    `payment_mode_changed` and `payment_mode_changed_during_checkout` reasons on
+    `deactivateInvoicePaymentLink`),
     `packages/api/src/payments/payment-link-provider.ts` and `stripe-payment-link.ts`
     (`deactivateLink` accepts an optional customer-facing inactive message), and
     `packages/api/src/invoices/invoice.ts` with `pg-invoice.ts` (`InvoiceRepository` gains
-    `findOpenWithPaymentLink(tenantId, afterId, limit)`)
+    `findOpenWithPaymentLink(tenantId, afterId, limit)`, and `setPaymentLinkIfPayable` gains
+    the mode check under Attach-time revalidation, its in-memory twin taking an injected mode
+    lookup)
   - modify the voice answer for payment questions and the emergency hand-off in
     `packages/api/src/voice/` (exact modules named at implementation; patterns:
     `voice/triage/context-preface.ts`, `voice/call-me-back/call-me-back.ts`)
@@ -1747,7 +1797,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   switching the mode, does not disable it. The invoice lifecycle already deactivates such links
   when an invoice leaves the payable world (`deactivateInvoicePaymentLink` in
   `invoices/invoice-payment-link.ts`: voided, canceled, settled, repriced); U8 adds the same for
-  a policy change, in three pieces so that no single failure leaves a live link behind.
+  a policy change, in four pieces so that no single failure leaves a live link behind.
   - *Atomic enqueue.* Both write sites run `onPaymentCollectionModeChanged` inside the
     settings write's own transaction (the `afterWrite` option on `SettingsRepository.update`),
     not after it. It compares the prior and the new value, both read under the row lock; when
@@ -1782,15 +1832,37 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `pass: 2` job never enqueues anything, so there are exactly two passes and no job can
     reschedule itself forever. Enqueueing before the batch means a pass 1 that throws and is
     retried still leaves its follow-up, and the retry's identical key inserts nothing new. The
-    follow-up catches a link whose mint read `pay_link` just before the switch committed.
+    follow-up is a backstop for a link attached around the attach check below, such as a
+    tenant with no settings row yet, where there is nothing to lock.
   - *Reconciliation.* A daily leader-gated sweep (`workers/payment-link-reconciliation-sweep.ts`,
     the P0-009 sweep pattern; it excludes `tenants.demo` like every other tenant lister, U7)
     lists the tenants whose `payment_collection_mode` is `collect_on_site` and, for each one
     that `findOpenWithPaymentLink` says still holds a live link, enqueues a `pass: 1` job under
-    `deactivate-payment-links:<tenantId>:sweep:<UTC date>`. It catches what the enqueue path
-    cannot see: a job that was lost or dead-lettered, a link minted after both passes by a path
-    that read a stale mode, and links that predate the policy. A tenant with no live link costs
-    one query and no job.
+    `deactivate-payment-links:<tenantId>:sweep:<UTC date>`. It is the backstop for what the
+    enqueue path and the attach check below cannot see: a job that was lost or dead-lettered
+    and links that predate the policy. A tenant with no live link costs one query and no job.
+  - *Attach-time revalidation.* The passes and the sweep clean up after the fact, so on their
+    own a checkout that read `pay_link`, stalled in the Stripe call for more than 120 s and
+    attached after the switch would leave a chargeable link against the approved policy until
+    the next sweep; `setPaymentLinkIfPayable` checks invoice state and balance, not the mode.
+    So its own `UPDATE` also requires the mode: `COALESCE((SELECT payment_collection_mode FROM
+    tenant_settings WHERE tenant_id = $1 FOR SHARE), 'pay_link') = 'pay_link'` (no row or an
+    unset key is the default, D-039/D-040; the exact join or subselect is settled at
+    implementation and pinned by the two-connection test). The share lock orders it against the
+    settings write: a write that starts while an attach is past its check waits for the attach
+    to commit, so its pass 1 finds the stored link, and an attach that starts after the write
+    reads `collect_on_site`. The method returns the invoice or a refusal that names its reason
+    (`not_payable` as today, `mode_not_pay_link`), and a throw from the attach, the settings
+    read included, is treated as an unreadable mode and fails closed. On either mode refusal
+    all three mint sites (`createInvoicePaymentLink` and the two paths in
+    `PublicInvoiceService`) deactivate the freshly minted link at once through
+    `deactivateInvoicePaymentLink` with the reason `payment_mode_changed_during_checkout`
+    (given the invoice with the unpersisted link id, so its scope fallback and audit apply and
+    its CAS clear also covers an attach whose acknowledgement was lost), then answer 409
+    `COLLECT_ON_SITE`, or 503 `PAYMENT_MODE_UNAVAILABLE` with `invoice.payment_mode_unavailable`
+    when the mode was unreadable. They do not treat it as a lost mint race: no "invoice changed"
+    error and no serving of a competing mint's link. A deactivation that fails is audited with
+    the link id, as on the mint-guard path.
 
   Switching back to `pay_link` needs nothing: the pay-now flows mint a fresh link on demand once
   the columns are empty.
@@ -1863,17 +1935,40 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     before it runs it does nothing; the cap is read from the payload's `pass`, not inferred
     from the key.
   - Mode change (reconciliation sweep): a `collect_on_site` tenant holding a live link whose
-    job row was deleted, and another holding a link minted after both passes → the sweep
+    job row was deleted, and another holding a link that predates the policy → the sweep
     enqueues one `pass: 1` job each and running it deactivates the link; a second sweep the
     same day enqueues nothing new (same key); a `collect_on_site` tenant with no live link, a
     `pay_link` tenant and a `tenants.demo` tenant → no job.
+  - Mode change (a checkout that stalls across the switch; real Postgres, the provider fake
+    held at a latch, one case per mint site): the checkout reads `pay_link` and blocks in
+    `generateLink`; the settings write to `collect_on_site` commits and both passes run (the
+    second after the fake 120 s) and find nothing; the latch releases → the attach is refused:
+    the invoice's link columns are never set (a statement spy sees no write of them), the
+    provider fake received `deactivateLink` for that link id under the minting scope,
+    `invoice.payment_link_deactivated` is audited with reason `payment_mode_changed_during_checkout`,
+    the response is 409 `COLLECT_ON_SITE` (not "invoice changed"), and the sweep has nothing to
+    find. A failing Stripe deactivation is audited with the link id.
+  - Mode change (attach against the settings write, two real connections, both orders,
+    looped): an attach past its check while the settings write starts → the write waits, the
+    attach commits, the write commits and pass 1 deactivates the stored link; the write first →
+    the attach reads `collect_on_site`, stores nothing and the fresh link is deactivated.
+    Never: a stored live link after pass 1 has finished.
+  - Mode change (unchanged mode attaches): `pay_link`, an unset key and a tenant with no
+    settings row each attach the link as today, with no deactivation and the same response; a
+    void or credit landing during the mint still loses through the existing status and balance
+    guards, reported as before.
+  - Mode change (settings read failure at attach fails closed): the mode read inside the attach
+    throws → nothing is stored, the freshly minted link is deactivated with the same reason, the
+    response is 503 `PAYMENT_MODE_UNAVAILABLE`, `invoice.payment_mode_unavailable` is audited
+    with surface `checkout`, and the error is never read as `pay_link`.
   - Integration: a tenant with `collect_on_site` issues an invoice against real Postgres and the
     stored message carries no link; `findOpenWithPaymentLink` returns only `open` and
     `partially_paid` rows that hold a link, tenant-scoped under RLS and paged.
 - **Verification:** picking a card changes what the customer receives and what Rivet says, with
   a behaviour test per key, before the card copy is allowed to promise it; a pay link texted
   before a switch to collect-on-site no longer charges once the job has run (or, if the job
-  was lost, once the daily sweep has); and a failed mode read never produces a link.
+  was lost, once the daily sweep has); a checkout that stalled across the switch never stores
+  its link; and a failed mode read never produces a link.
 
 ### U7. Pre-signup "hear it answer" demo call (decision-gated)
 - **Goal:** A visitor enters a cell and trade on the landing page, receives a sixty-second
@@ -1884,7 +1979,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - modify `packages/api/src/integrations/credentials.ts` (explicit `PLATFORM_TWILIO_*`)
   - create `packages/api/src/demo/{routes,service,script,lease,lease-token,reset,job-guard,inflight,write-fence,call-budget}.ts`,
     migration `316_demo_calls` (313 went to the owner-cell column in S1b and 314-315 are S5's;
-    phone hash, trade, name, lease_id, call_sid, status, lead_id, and the budget reservation
+    phone hash, trade, name, lease_id, call_sid, status, lead_id, `handoff_sent_at` (the
+    single-send guard for the signup SMS), and the budget reservation
     the call holds: `budget_day`, `reserved_cents`, `budget_released_at`; no `tenant_id`); the
     same migration adds `demo_call_budget` (`day` DATE primary key, `calls_reserved`,
     `calls_cap`, `est_cost_cents`, `cost_cap_cents`, all integers, CHECKs added `NOT VALID`; see
@@ -1967,8 +2063,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   callback would match nothing and skip its cleanup, leaving the tenant held until the reaper's
   `expires_at` sweep. So the lease is named by something we mint before Twilio can call us, in
   this order. (1) The lease insert commits, `call_sid` still null. (2) `demo/lease-token.ts`
-  mints a token over the lease id, the tenant id and an expiry equal to the lease's
-  `expires_at`: `base64url(payload).HMAC-SHA256(payload)` with a required discriminator
+  mints a token over the lease id, the tenant id and two expiries: `exp`, equal to the
+  lease's `expires_at`, which gates voice turns and every tenant write, and `sexp`, the mint
+  time plus `DEMO_STATUS_TOKEN_TTL_HOURS` (default 24), which gates only the status callback
+  (see Late status callbacks): `base64url(payload).HMAC-SHA256(payload)` with a required discriminator
   `a: 'demo_lease'`, verified with `timingSafeEqual`, the construction of
   `proposals/one-tap-undo.ts` (the discriminator is why a one-tap approve or undo token cannot
   verify as this one), keyed by a platform secret `DEMO_LEASE_TOKEN_SECRET` read the way
@@ -1995,11 +2093,29 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   yet. Later hops of the same call (the turn processor's Gather actions and its stream)
   resolve the tenant by the bound `call_sid` under `state = 'active' AND expires_at > now()`,
   which is safe because the first callback committed the bind before it returned TwiML. A
-  forged, tampered, other-secret or wrong-purpose token is 403 and writes nothing. An expired
-  token is treated like a reclaimed lease: the voice callback speaks the busy line and hangs up,
-  a status callback answers 200 and does nothing, and the reaper owns the cleanup. An early
+  forged, tampered, other-secret or wrong-purpose token is 403 and writes nothing. A token past
+  `exp` is treated like a reclaimed lease on a voice callback: it speaks the busy line and hangs
+  up, and the reaper owns the cleanup. A status callback is judged against `sexp` instead (next
+  paragraph), and past `sexp` it answers 200 and does nothing. An early
   terminal callback binds the CallSid and then takes `resetAndRelease`'s claim exactly as a late
   one does.
+- **Late status callbacks finalize the call, not the tenant.** Twilio can deliver or retry a
+  terminal status callback after the 30 s grace, so tying the status path to `exp` would let the
+  reaper clean the tenant and then drop the sole `completed` callback: `demo_calls` never
+  updated, the signup SMS never sent, the lead handed off nowhere after a good demo. A status
+  callback whose token is valid until `sexp` therefore always finalizes the platform-level
+  `demo_calls` row found by `lease_id`: it binds the CallSid as above (a second CallSid is
+  still 403 and `demo_callsid_mismatch`), sets the terminal status while the row holds none,
+  and, for `completed`, sends the signup SMS from the platform number behind a single-send
+  guard: `UPDATE demo_calls SET handoff_sent_at = now() WHERE lease_id = $1 AND
+  handoff_sent_at IS NULL RETURNING …` runs before the send and is cleared again only if the
+  send fails, so a replayed or concurrent callback sends nothing twice and Twilio's retry
+  after a failed send still can. The on-time path uses the same guard. Only while the lease is
+  still `active` does the callback also take `resetAndRelease`'s claim; once it is `resetting`
+  or `released` the callback finalizes the row and stops: no tenant transaction, no lease
+  context, no lease row write, no queue message, so a late callback (even one arriving during
+  the tenant's next lease, which names only its own old lease) cannot write tenant data. Voice
+  turns and every tenant write still require an `active`, unexpired lease.
 - **Release and reset.** The lease is the tenant's hold on the pool, so it is never touched
   until the tenant is clean. The call-status callback (completed, failed, busy, no-answer,
   canceled; it finds its lease by the signed token, so one that beats the `Calls` response
@@ -2316,7 +2432,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     releases once, the tenant equals the fixture, `demo_calls` ends in that status (found by
     `lease_id`) and the signup SMS goes once after `completed` only; the `Calls` response then
     arriving binds nothing new and does not revive the lease; a callback after the release
-    answers 200 and does nothing.
+    answers 200 and changes nothing further (late callbacks: see Late status callbacks).
   - Callback binding (both URLs signed): the request the fake Twilio receives carries
     `lease=<token>` on both `Url` and `StatusCallback`, the token verifies for the lease minted
     for this call, and the lease row was already committed (call_sid null) when the request
@@ -2324,10 +2440,28 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Callback binding (forged or expired token): a payload edited to name another lease or
     tenant, a flipped signature byte, a token signed under another secret, a one-tap approve or
     undo token (wrong discriminator), and a missing or malformed token → 403 on both callbacks,
-    no lease row touched, nothing written; an expired token (injected clock) → the voice callback
-    speaks the busy line and hangs up, the status callback answers 200 and does nothing, the
-    lease is unchanged and the reaper reclaims it. Unit (`lease-token.test.ts`): round trip,
-    tamper, wrong secret, expiry on an injected clock, wrong discriminator, malformed input.
+    no lease row touched, nothing written; a token past `exp` (injected clock) → the voice
+    callback speaks the busy line and hangs up and the reaper reclaims the lease; a token past
+    `sexp` → the status callback answers 200 and does nothing. Unit (`lease-token.test.ts`):
+    round trip, tamper, wrong secret, `exp` and `sexp` expiring independently on an injected
+    clock (a token past `exp` still verifies for status, one past `sexp` does not), wrong
+    discriminator, malformed input.
+  - Late status callbacks (real Postgres, fake Twilio and SMS sender; one case per terminal
+    status): (a) the reaper has already reset and released the lease, then a `completed`
+    callback arrives 10 minutes after `exp` (token still inside `sexp`) → 200, `demo_calls`
+    ends `completed` (found by `lease_id`), the signup SMS goes exactly once and
+    `handoff_sent_at` is set; `no-answer`, `busy` and `failed` finalize the row and send no SMS.
+    (b) Replay: the same callback delivered again, and two copies delivered concurrently on two
+    connections (looped) → one SMS, one `handoff_sent_at`, the row unchanged; an SMS send that
+    fails clears the guard and Twilio's retry then sends it once; the on-time path (lease
+    `active`) shares the guard, so an on-time callback followed by a late replay sends once.
+    (c) No tenant writes: a statement spy shows the late callback opens no tenant-scoped
+    transaction and writes nothing but `demo_calls`; the lease row is unchanged (no claim, no
+    reset spy call, no new generation); no queue message is enqueued; the tenant equals the
+    fixture, including when the callback arrives while the tenant is leased to a new call,
+    whose lease, generation and rows are untouched. A late callback with a second CallSid is
+    403 and audits `demo_callsid_mismatch`; the voice URL with the same token past `exp`
+    still speaks the busy line.
   - Callback binding (a second CallSid on one lease): after CA is bound, a validly signed
     callback carrying CB → 403, `call_sid` stays CA, nothing is written and
     `demo_callsid_mismatch` is audited; CA presented again is accepted (Twilio's retries and
@@ -2419,7 +2553,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   and a staging run past the daily cap is refused with no Twilio request; a staging run of concurrent demo calls on one trade shows distinct tenants, a clean
   tenant after each, and no job from one call running or writing against the next; a callback
   that arrives before the `Calls` response returns, including an early terminal one, still lands
-  on its own lease; founder decision recorded in `docs/decisions.md`.
+  on its own lease, and a `completed` callback that arrives after the grace and the reaper's
+  reset still updates its call and sends the signup text once; founder decision recorded in `docs/decisions.md`.
 
 ## Risks & Dependencies
 
@@ -2451,8 +2586,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Stale pay links after a policy switch, and a failed mode read.** A texted Stripe Payment
   Link stays chargeable until deactivated, so switching to collect-on-site queues deactivation
   of every live link on open invoices (the job row is written in the settings transaction, with
-  a follow-up pass and a daily reconciliation sweep behind it); a failed read of the mode never
-  defaults to `pay_link` (U8).
+  a follow-up pass and a daily reconciliation sweep behind it, and the link attach re-checks
+  the mode so a checkout that stalls across the switch stores nothing); a failed read of the
+  mode never defaults to `pay_link` (U8).
 - **Voice-parity coupling.** Scenario turns (U9), voice preview persistence (U3) and verified
   test booking (U6) are rendered from existing facts until those units land; nothing in U1-U6
   blocks on them.
@@ -2476,11 +2612,11 @@ previous one; the previous slice is merged first.
 |---|---|---|---|
 | S1 | U1 + U2 | Choice registry, typical-shop assembly, regional tiers, draft/choices/approve API, `onboarding_voice_policy` proposal. Live API, integration-tested, no UI yet. | 7-10 days |
 | S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
-| S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover, even beside a failed one, and takes precedence over `failed`) and `POST /draft/retry` (it refuses a set holding such a proposal with 409 `DRAFT_RETRY_UNSAFE` and changes nothing, because re-approving only the failed member would leave its sibling behind and the set would end `executed + undone`; that set's way out is S4's reset). Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
+| S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover, even beside a failed one, and takes precedence over `failed`) and `POST /draft/retry` (guards in order: `DRAFT_NOT_APPROVED`, then `DRAFT_RETRY_UNSAFE` for a set holding such a proposal, failed member or not (`approved + undone` is unsafe, not nothing-failed), then `DRAFT_RETRY_NOTHING_FAILED` for the benign rest; the refusal changes nothing, because re-approving only the failed member would leave its sibling behind and the set would end `executed + undone`; that set's way out is S4's reset, so until S4 the only way out is Settings and the shell offers no Start over). Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
-| S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status (`reset` while no member is executed or executing, else `settings`, for a failed member beside a terminal one as for any other `stopped` set) so the shell never offers a refused button; reset is also the way out of the set retry refuses as `DRAFT_RETRY_UNSAFE`; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body), made required once every client sends it. | 6-7 days (reset adds one) |
-| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read), flag flipped, v2 deleted. | 10-13 days (the forwarding-details gate and its read-back prompt add one) |
-| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost), reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure. | 9-13 days (the token and bind add one, the budget another) |
+| S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status (`reset` while no member is executed or executing and no `approved` member is past its undo window, else `settings`, for a failed member beside a terminal one as for any other `stopped` set) so the shell never offers a refused button; reset is also the way out of the set retry refuses as `DRAFT_RETRY_UNSAFE`; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body, and checked between `DRAFT_NOT_APPROVED` and `DRAFT_RETRY_UNSAFE`), made required once every client sends it. | 6-7 days (reset adds one) |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read, and the link attach re-checks the mode so a checkout that stalls across a switch stores none), flag flipped, v2 deleted. | 11-14 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another) |
+| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost), reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a `handoff_sent_at` guard, no tenant writes). | 10-14 days (the token and bind add one, the budget another, the late-callback handoff a third) |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
 second engineer shortens S2 and S3 only where the API they depend on is already merged.
