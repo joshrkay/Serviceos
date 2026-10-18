@@ -555,8 +555,25 @@ flowchart LR
   - **LCR-04**
     - Provision `VoiceFallbackUrl` (POST) at purchase. Point it at a static, DB-free voicemail TwiML
       route.
+    - **That route must work on a cold process with the DB down, so it can't sit behind DB-backed
+      signature verification.** The router puts `requireTwilioSignature` on every route
+      (`routes/telephony.ts:425-430`), and the credential resolver fails closed when its DB lookup
+      throws (`telephony/twilio-webhook-credential.ts:196-208`). A cache of credentials that was
+      never filled can't help a cold process.
+      - Mount the fallback route outside that middleware, as a documented exemption.
+      - Make it side-effect-free. It serves fixed, tenant-neutral voicemail TwiML: no DB read, no
+        write, no tenant data, and so no business name. A forged request learns nothing and changes
+        nothing.
+      - The recording status callback it names stays on the verified router. A recording whose
+        callback fails is recovered by the reconciliation sweep.
+      - A test pins the route against all of these: no DB access, no mutation, no signature
+        dependency.
+      - Optional, for an outage of the whole API rather than only the DB: point `VoiceFallbackUrl`
+        at a Twilio-hosted target instead (a Serverless Function provisioned per subaccount). That
+        is an owner choice, because it adds a Twilio deployment surface.
     - Keep an in-memory TTL cache of verified webhook credentials, used only when the DB lookup
-      throws.
+      throws. It helps a warm process ride out a short brownout on `/voice` and `/gather`. It is not
+      the outage path; the exempt fallback route is.
     - The 503 and "try again later" `<Hangup/>` catch-alls on `/voice` and `/gather` become 200 plus
       `buildVoicemailTwiml`.
     - Write an idempotent backfill script for existing numbers that defaults to a dry run. Running it
@@ -597,7 +614,8 @@ flowchart LR
   - Shutdown → live calls redirected.
   - Unknown session → a fresh disclosed session.
   - The config guard.
-  - The fallback route returns static TwiML with no DB.
+  - The fallback route returns static TwiML with no DB and no warm credential cache. It answers on a
+    cold process with the DB down.
   - A recording callback that fails while the DB is down → after recovery, the reconciliation sweep
     ingests that recording exactly once.
   - The DB is down before `/voicemail-status` runs → after recovery, the sweep creates exactly one
@@ -732,6 +750,16 @@ flowchart LR
 - **Approach:**
   - A nullable `tenant_settings` monthly ceiling in integer cents (new idempotent migration). Null
     means no cap, so nothing changes until one is set.
+  - **Keep the ledger in micro-cents.** `computeCostMicroCents` returns micro-cents (1 cent =
+    1,000,000; `packages/api/src/ai/gateway/model-pricing.ts`), so the arithmetic must stay in that
+    unit.
+    - The ledger's `spent` and `reserved` are `BIGINT` micro-cents.
+    - The owner-set ceiling stays in whole cents. Convert it once (× 1,000,000) before the atomic
+      comparison.
+    - Never round an individual call to cents: sub-cent calls would count as zero and the
+      aggregate could pass the cap.
+    - A unit test pins the conversion: a cap of 100 cents admits exactly 100,000,000 micro-cents of
+      reservations.
   - **Reserve before dispatch, atomically, then reconcile.** A plain check before dispatch followed by
     a charge on completion lets concurrent requests near the ceiling all pass and overshoot it.
     - Before dispatch, reserve the call's worst-case cost: estimated input tokens plus `maxTokens`,
