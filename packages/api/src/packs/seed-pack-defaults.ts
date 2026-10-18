@@ -37,6 +37,7 @@ import {
 import {
   PLUMBING_LINE_ITEM_DEFAULTS,
 } from '../verticals/packs/plumbing';
+import { scaleCentsBps } from '../shared/scale-cents-bps';
 
 export interface SeedPackDefaultsDeps {
   catalogRepo: CatalogItemRepository;
@@ -59,6 +60,24 @@ export interface SeedPackDefaultsInput {
   tradeLabel?: string;
   /** Audit / provenance — defaults to a synthetic system actor. */
   actorId?: string;
+  /**
+   * "Pick, don't build" onboarding: the trip fee and hourly rate the owner
+   * chose. The pack's headline visit and labor items land at exactly these
+   * cents; every other seeded price is scaled by the hourly-rate ratio with
+   * the one shared rounding rule (scaleCentsBps). Omitted → pack defaults.
+   */
+  pricing?: ChosenPricing;
+}
+
+export interface ChosenPricing {
+  tripFeeCents: number;
+  hourlyRateCents: number;
+}
+
+/** The two prices a pack is quoted by on the phone: the visit (diagnostic) fee and the hourly labor rate. */
+export interface HeadlinePrices {
+  visitCents: number;
+  laborCents: number;
 }
 
 export interface SeedPackDefaultsResult {
@@ -479,6 +498,7 @@ function tradePackConfig(spec: TradePackSpec): PackSeedConfig {
     verticalType: spec.verticalType,
     catalogSeeds: () => tradeCatalogSeeds(spec),
     templateSeeds: () => tradeTemplateSeeds(spec),
+    headline: { visitCents: spec.prices.visit, laborCents: spec.prices.labor },
   };
 }
 
@@ -659,11 +679,23 @@ interface PackSeedConfig {
   verticalType: VerticalType;
   catalogSeeds: () => CatalogSeed[];
   templateSeeds: () => EstimateTemplateSeed[];
+  /** Identifies the headline items by price so chosen pricing can replace them exactly. */
+  headline: HeadlinePrices;
 }
 
 const PACK_SEEDS: Record<string, PackSeedConfig> = {
-  hvac: { verticalType: 'hvac', catalogSeeds: hvacCatalogSeeds, templateSeeds: hvacTemplateSeeds },
-  plumbing: { verticalType: 'plumbing', catalogSeeds: plumbingCatalogSeeds, templateSeeds: plumbingTemplateSeeds },
+  hvac: {
+    verticalType: 'hvac',
+    catalogSeeds: hvacCatalogSeeds,
+    templateSeeds: hvacTemplateSeeds,
+    headline: { visitCents: HVAC_LINE_ITEM_DEFAULTS.diagnosticFeeCents, laborCents: HVAC_LINE_ITEM_DEFAULTS.laborRatePerHourCents },
+  },
+  plumbing: {
+    verticalType: 'plumbing',
+    catalogSeeds: plumbingCatalogSeeds,
+    templateSeeds: plumbingTemplateSeeds,
+    headline: { visitCents: PLUMBING_LINE_ITEM_DEFAULTS.diagnosticFeeCents, laborCents: PLUMBING_LINE_ITEM_DEFAULTS.laborRatePerHourCents },
+  },
   electrical: tradePackConfig(ELECTRICAL_PACK),
   painting: tradePackConfig(PAINTING_PACK),
   roofing: tradePackConfig(ROOFING_PACK),
@@ -685,6 +717,32 @@ export function isSeedablePackId(packId: string): boolean {
   return packSeedConfig(packId, '') !== undefined;
 }
 
+/** Every pack id the seeder knows, including the generic 'other'. */
+export const SEEDABLE_PACK_IDS: readonly string[] = [...Object.keys(PACK_SEEDS), 'other'];
+
+/** The headline visit and labor prices a pack ships with, or undefined for an unknown pack id. */
+export function packHeadlinePrices(packId: string): HeadlinePrices | undefined {
+  return packSeedConfig(packId, '')?.headline;
+}
+
+/**
+ * Price a seed given the owner's chosen pricing: headline items land exactly,
+ * everything else scales by the hourly-rate ratio under the shared rounding
+ * rule. Exported for the seeder's tests; not a public API.
+ */
+function priceSeed(cents: number, headline: HeadlinePrices, pricing: ChosenPricing | undefined, ratioBps: number): number {
+  if (!pricing) return cents;
+  if (cents === headline.visitCents) return pricing.tripFeeCents;
+  if (cents === headline.laborCents) return pricing.hourlyRateCents;
+  return scaleCentsBps(cents, ratioBps);
+}
+
+function assertChosenPricing(p: ChosenPricing): void {
+  for (const [k, v] of Object.entries(p)) {
+    if (!Number.isInteger(v) || v < 0) throw new Error(`seedPackDefaults: pricing.${k} must be a non-negative integer, got ${v}`);
+  }
+}
+
 /**
  * Seed canonical catalog items + estimate templates for the given pack.
  *
@@ -702,10 +760,11 @@ export async function seedPackDefaults(
   input: SeedPackDefaultsInput,
   deps: SeedPackDefaultsDeps,
 ): Promise<SeedPackDefaultsResult> {
-  const { tenantId, packId } = input;
+  const { tenantId, packId, pricing } = input;
   const tradeLabel = input.tradeLabel ?? '';
   const actorId = input.actorId ?? 'system';
   const config = packSeedConfig(packId, tradeLabel);
+  if (pricing) assertChosenPricing(pricing);
 
   if (!config) {
     return {
@@ -743,6 +802,10 @@ export async function seedPackDefaults(
     existingCatalog.map((c) => c.name.toLowerCase()),
   );
 
+  // Ratio of the chosen hourly rate to the pack's default, in basis points,
+  // applied to every non-headline price so the whole book moves together.
+  const ratioBps = pricing ? Math.round((pricing.hourlyRateCents / config.headline.laborCents) * 10_000) : 10_000;
+
   const now = new Date().toISOString();
   let catalogItemsCreated = 0;
   for (const seed of config.catalogSeeds()) {
@@ -756,7 +819,7 @@ export async function seedPackDefaults(
       description: seed.description,
       category: seed.category,
       unit: seed.unit,
-      unitPriceCents: seed.unitPriceCents,
+      unitPriceCents: priceSeed(seed.unitPriceCents, config.headline, pricing, ratioBps),
       productServiceType: seed.category === 'Labor' ? 'service' : 'product',
       archivedAt: null,
       createdAt: now,
@@ -781,7 +844,10 @@ export async function seedPackDefaults(
       categoryId: seed.categoryId,
       name: seed.name,
       description: seed.description,
-      lineItemTemplates: seed.lineItems,
+      lineItemTemplates: seed.lineItems.map((l) => ({
+        ...l,
+        defaultUnitPriceCents: priceSeed(l.defaultUnitPriceCents, config.headline, pricing, ratioBps),
+      })),
       defaultDiscountCents: 0,
       defaultTaxRateBps: 0,
       defaultCustomerMessage: seed.customerMessage,

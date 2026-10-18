@@ -18,6 +18,7 @@ import {
   SeedPackDefaultsDeps,
   SeedPackDefaultsResult,
   seedPackDefaults,
+  type ChosenPricing,
 } from '../packs/seed-pack-defaults';
 
 export interface ActivatePackWithSeedDeps {
@@ -39,6 +40,8 @@ export interface ActivatePackWithSeedInput {
   /** Free-text trade label (the wizard's "Other" picker). Forwarded to the
    * seeder so generic seeds carry the operator's own trade name. */
   tradeLabel?: string;
+  /** Owner-chosen trip fee and hourly rate from "pick, don't build" onboarding; forwarded to the seeder. */
+  pricing?: ChosenPricing;
   actorId: string;
   /**
    * Ambient request-scoped tenant transaction client, when one exists —
@@ -87,7 +90,7 @@ export async function activatePackWithSeed(
   input: ActivatePackWithSeedInput,
   deps: ActivatePackWithSeedDeps,
 ): Promise<ActivatePackWithSeedResult> {
-  const { tenantId, packId, actorId, tradeLabel, lockClient, lockPool } = input;
+  const { tenantId, packId, actorId, tradeLabel, pricing, lockClient, lockPool } = input;
   const { settingsRepo, packActivationRepo, auditRepo, packSeedDeps } = deps;
 
   // #1083 — the guard is taken FIRST, before any write. It used to sit
@@ -168,7 +171,7 @@ export async function activatePackWithSeed(
     // Idempotent: each helper checks for the canonical names first.
     let seedResult: SeedPackDefaultsResult | null = null;
     if (packSeedDeps) {
-      seedResult = await seedPackDefaults({ tenantId, packId, tradeLabel, actorId }, packSeedDeps);
+      seedResult = await seedPackDefaults({ tenantId, packId, tradeLabel, actorId, pricing }, packSeedDeps);
     }
 
     await auditRepo.create(

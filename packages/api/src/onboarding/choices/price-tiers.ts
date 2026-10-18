@@ -12,8 +12,9 @@
  */
 import type { Pool } from 'pg';
 import { z } from 'zod';
-import { PLUMBING_LINE_ITEM_DEFAULTS } from '../../verticals/packs/plumbing';
-import { HVAC_LINE_ITEM_DEFAULTS } from '../../verticals/packs/hvac';
+import { packHeadlinePrices } from '../../packs/seed-pack-defaults';
+import { scaleCentsBps } from '../../shared/scale-cents-bps';
+export { scaleCentsBps };
 
 export const NATIONAL_METRO_CODE = 'US';
 
@@ -47,19 +48,8 @@ export interface ResolvedPriceTiers {
   showsCity: boolean;
 }
 
-/**
- * Scale integer cents by basis points, then round to the nearest whole dollar
- * (half up). The only place a derived price is rounded.
- */
-export function scaleCentsBps(cents: number, bps: number): number {
-  if (!Number.isInteger(cents) || cents < 0) throw new Error(`scaleCentsBps: cents must be a non-negative integer, got ${cents}`);
-  if (!Number.isInteger(bps) || bps < 0) throw new Error(`scaleCentsBps: bps must be a non-negative integer, got ${bps}`);
-  const scaled = Math.round((cents * bps) / 10_000);
-  return Math.round(scaled / 100) * 100;
-}
-
-/** Generic trades (electrical, painting, roofing, ..., other) share the seeder's generic visit/labor prices. */
-const GENERIC_STANDARD: PriceTier = { tripFeeCents: 8900, hourlyRateCents: 10000 };
+/** An unknown pack id (registry drift) falls back to the seeder's generic 'other' prices. */
+const FALLBACK_PACK_ID = 'other';
 
 function premiumFrom(standard: PriceTier): PriceTier {
   return {
@@ -68,25 +58,11 @@ function premiumFrom(standard: PriceTier): PriceTier {
   };
 }
 
-/** The tiers a trade gets when no regional row exists, from the pack defaults. */
+/** The tiers a trade gets when no regional row exists: the pack's own headline prices. */
 export function packDefaultTiers(packId: string): RegionalPriceTiers {
-  let standard: PriceTier;
-  switch (packId) {
-    case 'plumbing':
-      standard = {
-        tripFeeCents: PLUMBING_LINE_ITEM_DEFAULTS.diagnosticFeeCents,
-        hourlyRateCents: PLUMBING_LINE_ITEM_DEFAULTS.laborRatePerHourCents,
-      };
-      break;
-    case 'hvac':
-      standard = {
-        tripFeeCents: HVAC_LINE_ITEM_DEFAULTS.diagnosticFeeCents,
-        hourlyRateCents: HVAC_LINE_ITEM_DEFAULTS.laborRatePerHourCents,
-      };
-      break;
-    default:
-      standard = GENERIC_STANDARD;
-  }
+  const h = packHeadlinePrices(packId) ?? packHeadlinePrices(FALLBACK_PACK_ID);
+  if (!h) throw new Error('seed-pack-defaults has no generic pack; cannot derive default tiers');
+  const standard: PriceTier = { tripFeeCents: h.visitCents, hourlyRateCents: h.laborCents };
   return RegionalPriceTiersSchema.parse({ standard, premium: premiumFrom(standard) });
 }
 
