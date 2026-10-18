@@ -16,6 +16,10 @@ import { defineConfig, devices } from '@playwright/test';
  *
  * Optional: E2E_V3_DATABASE_URL (default postgres://postgres:postgres@localhost:5432/serviceos_e2e),
  * E2E_V3_API_PORT (3011), E2E_V3_WEB_PORT (5176).
+ *
+ * Billing is hermetic (synthetic Stripe keys, no plan prices): the trial turn is
+ * proven against the real routes' real answers, and a trial cannot be completed
+ * here, so the number and the test call are proven by component and shell tests.
  */
 const apiPort = process.env.E2E_V3_API_PORT ?? '3011';
 const webPort = process.env.E2E_V3_WEB_PORT ?? '5176';
@@ -25,6 +29,8 @@ const baseURL = `http://127.0.0.1:${webPort}`;
 
 // Tells the spec it is on the stack it needs; it skips itself under any other config.
 process.env.E2E_ONBOARDING_V3_STACK = '1';
+// Where the spec reaches the API directly (to pin what the billing routes really answer).
+process.env.E2E_V3_API_URL = apiURL;
 
 export default defineConfig({
   testDir: './',
@@ -63,6 +69,15 @@ export default defineConfig({
         LOG_LEVEL: 'warn',
         TELEPHONY_ENABLED: 'false',
         EMAIL_ENABLED: 'false',
+        // The same hermetic Stripe environment CI runs in (.github/workflows/onboarding-database.yml):
+        // synthetic keys, so billing exists but no request ever reaches Stripe. No plan prices are
+        // set (blanked, so a developer's own shell cannot change that), so the billing routes answer
+        // "not configured" and checkout cannot complete; the trial turn shows exactly that.
+        STRIPE_SECRET_KEY: 'sk_test_hermetic_release',
+        STRIPE_WEBHOOK_SECRET: 'whsec_hermetic_release',
+        STRIPE_STARTER_PRICE_ID: '',
+        STRIPE_GROWTH_PRICE_ID: '',
+        STRIPE_PRICE_ID: '',
         DATABASE_URL: databaseUrl,
         E2E_V3_DATABASE_URL: databaseUrl,
       },

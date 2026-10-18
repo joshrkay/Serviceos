@@ -1,10 +1,17 @@
 import { test, expect, type Page, type Response } from '@playwright/test';
+import { HERMETIC_CHECKOUT_400, HERMETIC_PLANS_503 } from '../packages/web/src/components/onboarding/v3/__fixtures__/after';
 
 /**
- * "Pick, don't build" onboarding (slices S2a and S2b), against the REAL stack:
- * the draft is created, staged choice by choice, read back and approved
- * through the API's own routes into a real Postgres (e2e/onboarding-v3.config.ts
+ * "Pick, don't build" onboarding (slices S2a, S2b and S2c), against the REAL
+ * stack: the draft is created, staged choice by choice, read back and approved
+ * through the API's own routes into a real Postgres, and the screens after
+ * "That's right" follow the status the real API derives (e2e/onboarding-v3.config.ts
  * boots both; nothing is mocked).
+ *
+ * Billing is hermetic here (synthetic Stripe keys, no plan prices), so the trial
+ * turn is proven against what the real billing routes really answer in that
+ * environment. A trial cannot complete, so the number and the test call are
+ * proven by component and shell tests (v3/ConversationShell.after.test.tsx).
  *
  * Each test at each viewport runs from a fresh tenant: the browser signs in as
  * a different dev owner per test (the API's DEV_AUTH_BYPASS turns an unsigned
@@ -24,12 +31,16 @@ function devOwnerToken(sub: string): string {
   return `${b64url({ alg: 'none', typ: 'JWT' })}.${b64url({ sub, sid: `session-${sub}`, role: 'owner' })}.x`;
 }
 
-async function signInAsFreshOwner(page: Page, label: string): Promise<void> {
+/** Signs the browser in as a new dev owner; returns the token, for a direct call to the real API as that owner. */
+async function signInAsFreshOwner(page: Page, label: string): Promise<string> {
   const token = devOwnerToken(`e2e_v3_${label}_${Date.now()}`);
   await page.route('**/api/**', (route) =>
     route.continue({ headers: { ...route.request().headers(), authorization: `Bearer ${token}` } }),
   );
+  return token;
 }
+
+const apiUrl = process.env.E2E_V3_API_URL ?? 'http://127.0.0.1:3011';
 
 async function horizontalOverflow(page: Page): Promise<number> {
   return page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -89,8 +100,8 @@ async function choose(page: Page, label: string, button: 'Next' | 'Save' = 'Next
 }
 
 /** The new owner's first screens: the one question Rivet cannot default, then the finished shop on Ready. */
-async function reachReady(page: Page, label: string): Promise<void> {
-  await signInAsFreshOwner(page, label);
+async function reachReady(page: Page, label: string): Promise<string> {
+  const token = await signInAsFreshOwner(page, label);
   await page.goto('/onboarding');
 
   // A new owner has no draft yet: Rivet asks the one thing it cannot default.
@@ -116,6 +127,21 @@ async function reachReady(page: Page, label: string): Promise<void> {
   await expect(page.getByRole('button', { name: 'Keep the rest as is' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Looks right as is, skip the choices' })).toBeVisible();
   await expectScreenFits(page);
+  return token;
+}
+
+const isPlans = (r: Response) => r.url().endsWith('/api/onboarding/billing/plans') && r.request().method() === 'GET';
+const isApprove = (r: Response) => r.url().endsWith('/api/onboarding/draft/approve') && r.request().method() === 'POST';
+const READBACK_HEADING = "Here's what I've got. Tap anything to change it.";
+const TRIAL_HEADING = 'Last thing before your number: start your free trial.';
+const PLANS_UNAVAILABLE = "I can't show the plans right now. Try again in a minute, or contact support.";
+
+/** The header's two lines and the progress line, read in one go (a screen that is about to change cannot half-match). */
+async function headerOf(page: Page): Promise<{ text: string; progress: string | null }> {
+  return page.evaluate(() => ({
+    text: (document.querySelector('header') as HTMLElement).innerText.replace(/\s+/g, ' ').trim(),
+    progress: document.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow') ?? null,
+  }));
 }
 
 for (const vp of viewports) {
@@ -227,6 +253,105 @@ for (const vp of viewports) {
 
       await expect(page.getByText('Saving 2 changes. They go live in a few seconds.')).toBeVisible();
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+    });
+
+    test('"That\'s right" saves, Rivet gets the shop ready, then the trial turn says what the real billing route says', async ({ page }) => {
+      test.setTimeout(120_000);
+      const token = await reachReady(page, `${vp.name}-after`);
+
+      await page.getByRole('button', { name: 'Looks right as is, skip the choices' }).click();
+      await expect(page.getByRole('heading', { level: 1, name: READBACK_HEADING })).toBeVisible();
+
+      // Listen before the tap: the trial turn asks the real route for its plans the moment it appears.
+      const firstPlans = page.waitForResponse(isPlans, { timeout: 40_000 });
+      firstPlans.catch(() => undefined);
+      const approved = page.waitForResponse(isApprove);
+      await page.getByRole('button', { name: "That's right" }).click();
+      expect((await approved).status()).toBe(200);
+
+      // 1. The undo window: the choices are being saved.
+      await expect(page.getByText('Saving 2 changes. They go live in a few seconds.')).toBeVisible();
+      expect(await headerOf(page)).toEqual({ text: 'About 3 minutes left Saving', progress: '60' });
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+
+      // 2. The window closes and the changes go live a moment later (the API's own timing, about a second):
+      //    Rivet says what it is doing. Read in one go, because the next poll moves the screen on.
+      await page.getByRole('heading', { level: 1, name: 'Getting your shop ready.' }).waitFor({ state: 'visible', timeout: 20_000 });
+      const waiting = await page.evaluate(() => ({
+        headings: Array.from(document.querySelectorAll('h1')).map((h) => h.textContent),
+        text: (document.querySelector('main') as HTMLElement).innerText,
+        controls: document.querySelectorAll('button:not(header button), input, a[href]').length,
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      }));
+      expect(waiting.headings).toEqual(['Getting your shop ready.']);
+      expect(waiting.text).toContain('This takes a few seconds.');
+      expect(waiting.text).not.toContain('taking longer than usual');
+      expect(waiting.controls).toBe(0);
+      expect(waiting.overflow).toBeLessThanOrEqual(0);
+
+      // 3. The real status reaches billing: the trial.
+      await expect(page.getByRole('heading', { level: 1, name: TRIAL_HEADING })).toBeVisible({ timeout: 20_000 });
+      expect(await headerOf(page)).toEqual({ text: 'About 3 minutes left Saved', progress: '70' });
+      await expect(page.getByText("It's free for 14 days, and you can cancel any time in Settings.")).toBeVisible();
+      await expect(page.getByText("You'll add a card on a secure page; nothing is charged for 14 days, and I never see the number.")).toBeVisible();
+      // No way out of the trial (a card is what pays for the number).
+      await expect(page.locator('header button')).toHaveCount(0);
+
+      // Hermetic billing has no plan prices, so the real route says so; the owner gets words, not the environment.
+      const plansResponse = await firstPlans;
+      expect(plansResponse.status()).toBe(503);
+      expect(await plansResponse.json()).toEqual(HERMETIC_PLANS_503);
+      await expect(page.getByRole('alert')).toHaveText(PLANS_UNAVAILABLE);
+      await expect(page.getByRole('radio')).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /Start my free trial/ })).toHaveCount(0);
+      expect(await page.locator('main').innerText()).not.toMatch(/stripe|twilio|\bAI\b|configured|STRIPE_|environment|tenant/i);
+      await expectScreenFits(page);
+
+      // Try again asks the real route again, and gets the same honest answer.
+      const secondPlans = page.waitForResponse(isPlans);
+      await page.getByRole('button', { name: 'Try again' }).click();
+      const second = await secondPlans;
+      expect(second.status()).toBe(503);
+      expect(await second.json()).toEqual(HERMETIC_PLANS_503);
+      await expect(page.getByRole('alert')).toHaveText(PLANS_UNAVAILABLE);
+
+      // The route the Start button calls answers the same way for this owner, so the words the turn has
+      // for it (component tests) are for what this API really sends.
+      const checkoutFor = async (planId: string) => {
+        const res = await page.request.post(`${apiUrl}/api/onboarding/billing/checkout-session`, {
+          headers: { authorization: `Bearer ${token}` },
+          data: { planId },
+        });
+        return { status: res.status(), body: await res.json() };
+      };
+      expect(await checkoutFor('starter')).toEqual({ status: 400, body: HERMETIC_CHECKOUT_400 });
+      expect(await checkoutFor('growth')).toEqual({
+        status: 400,
+        body: { error: 'VALIDATION_ERROR', message: 'Billing plan "growth" is not configured (STRIPE_GROWTH_PRICE_ID is not set). Contact support.' },
+      });
+
+      // Coming back from the payment page, in both directions, against the real cancel route.
+      const cancelled = page.waitForResponse((r) => r.url().endsWith('/api/onboarding/billing/cancel') && r.request().method() === 'POST');
+      await page.goto('/onboarding?billing=cancel');
+      expect((await cancelled).status()).toBe(200);
+      await expect(page.getByText("No problem. Your trial hasn't started. Start it whenever you're ready.")).toBeVisible();
+      await expect.poll(() => new URL(page.url()).search).toBe('');
+      await expect(page.getByRole('heading', { level: 1, name: TRIAL_HEADING })).toBeVisible();
+      await expect(page.getByText('Saving 2 changes')).toHaveCount(0);
+      await expectScreenFits(page);
+
+      await page.goto('/onboarding?billing=ok');
+      await expect(page.getByText("Thanks. I'm confirming your trial.")).toBeVisible();
+      await expect.poll(() => new URL(page.url()).search).toBe('');
+      // No payment page ran, so no trial started: the owner is still on the trial turn.
+      await expect(page.getByRole('heading', { level: 1, name: TRIAL_HEADING })).toBeVisible();
+      await expectScreenFits(page);
+
+      // A reload picks up on the same turn, with no saving window and no wait.
+      await page.reload();
+      await expect(page.getByRole('heading', { level: 1, name: TRIAL_HEADING })).toBeVisible();
+      await expect(page.getByText('Saving 2 changes')).toHaveCount(0);
+      await expect(page.getByRole('heading', { level: 1, name: 'Getting your shop ready.' })).toHaveCount(0);
     });
 
     test('Answer two, keep the rest as is, reload: the two choices are still staged and the owner picks up where they left off', async ({ page }) => {
