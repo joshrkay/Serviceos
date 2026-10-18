@@ -93,15 +93,17 @@ unowned position.
   their price, an owner who saves a template keeps that template, and a row that moves takes
   the new pick as its baseline in the same statement that writes its price, so a second
   re-run still sees an untouched seed. Anything left alone is named by the read-back
-  ("Your labor rate is yours; I left it"). A null baseline means "the owner's", so a tenant
-  seeded before the baseline existed would read as all owner-owned and the price card would
-  promise an update it could not make. The migration therefore backfills a baseline, but only
-  where the schema shows the row was made by the seeder and has not been written since
-  (`updated_at = created_at`, with the seeder's own audit record); a current price that merely
-  equals a seed price is not evidence, because an owner can type one by hand. Everything else
-  stays null and owner-owned, and the re-run flow offers repricing only while a headline item
-  still holds its baseline. A tenant with none is told its prices are its own and sees no
-  price card (U6).
+  ("Your labor rate is yours; I left it"). A null baseline means "the owner's". Only rows the
+  seeder writes after migration 314 carry a baseline, written in the same statement as the
+  row, so provenance is positive and per row by construction; a row seeded before 314 has none
+  and is the owner's, always. Nothing infers a baseline for it, because the seeder kept no
+  per-row record then and every trace it left is the absence of something (rule 4 of the
+  seeded-price baseline, U6). The re-run flow offers repricing only while a headline item
+  still holds its baseline, and a tenant with none, which includes every tenant seeded before
+  314, is told its prices are its own and sees no price card (U6). The re-run price card
+  targets owners onboarding through the new flow; existing tenants already have real prices,
+  and the cost of not offering them a re-price is far smaller than the cost of ever
+  overwriting an owner's price.
 - **Metro from area code is a static NPA→metro map in code**, extending
   `packages/api/src/compliance/us-geography.ts` which today maps area code to state only. One
   spoken confirmation when an NPA spans metros, and the inferred city is always visible and
@@ -790,35 +792,31 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     only; on each estimate template line seeded from one of them, two keys inside the
     `line_item_templates` JSONB, `seededUnitPriceCents` and `seededCatalogItemId` (the headline
     item's id), present together or not at all, because a template line stores no catalog item
-    id today and the link must exist before ownership can be derived from it;
-    `tenant_settings.seeded_baseline_backfilled_at`, the per-tenant one-shot stamp for the
-    backfill below. Create `packages/api/src/packs/reprice-seeded.ts`: the re-run update path,
-    `repriceSeeded(tenantId, packId, pricing)`, which runs ONE statement per tenant in the
+    id today and the link must exist before ownership can be derived from it, and no backfill
+    populates them for rows seeded earlier. Create `packages/api/src/packs/reprice-seeded.ts`:
+    the re-run update path, `repriceSeeded(tenantId, packId, pricing)`, which runs ONE
+    statement per tenant in the
     handler's transaction (a data-modifying CTE, see Approach in this unit): a headline item
     whose price equals its baseline moves to the new pick, and a template line moves only when
     its own price equals its own baseline AND its `seededCatalogItemId` is among the items that
     statement just moved; a moved row's baseline moves with it in the same write
     (`unit_price_cents` and `seeded_unit_price_cents` on an item, `defaultUnitPriceCents` and
     `seededUnitPriceCents` on a line); it returns what it moved and what it left, each with
-    its reason, for the read-back. The seeder writes the keys, baselines and link from now on;
-    `backfillSeededBaselines(tenantId)` covers tenants seeded before 314, from evidence only;
+    its reason, for the read-back. The seeder writes the keys, baselines and link from now on,
+    and rows seeded before 314 keep none and stay the owner's;
     `hasRepriceableSeed(tenantId)` is the re-run gate; tests
     `packages/api/test/packs/reprice-seeded.test.ts`,
     `packages/api/test/integration/reprice-seeded.test.ts`
   - modify `packages/api/src/packs/seed-pack-defaults.ts` (write `seed_key`, the baseline, the
     line baseline and the link on the headline rows and lines only, from one role rule shared
     with `priceSeed`: a seed priced at the pack's visit or labor headline price is that role,
-    and a pack unit test pins that every pack has exactly one catalog seed per role; export
-    the seed definitions the backfill reads, the headline catalog seed names and the seed
-    template lines per role, so it never re-derives a price),
+    and a pack unit test pins that every pack has exactly one catalog seed per role),
     `packages/api/src/templates/estimate-template.ts` (`LineItemTemplate` gains the two
     optional keys; `lineItemTemplateSchema` in `shared/contracts.ts` is deliberately left
     alone, because it drops unknown keys and that is what takes a template the owner saves
-    through `PUT /api/templates/:id` out of repricing, pinned in `reprice-seeded.test.ts`)
-    and `packages/api/src/db/migrate.ts` (after the SQL corpus, still under the migration
-    advisory lock, run `backfillSeededBaselines` for each tenant whose
-    `seeded_baseline_backfilled_at` is null); test: extend
-    `packages/api/test/integration/migration-replay-populated-db.test.ts`
+    through `PUT /api/templates/:id` out of repricing, pinned in `reprice-seeded.test.ts`);
+    test: extend `packages/api/test/integration/migration-replay-populated-db.test.ts` (rows
+    in the pre-314 shape keep null baselines through the migration and a replay)
   - modify `packages/api/src/proposals/execution/onboarding-handlers.ts`
     (`OnboardingTenantSettingsExecutionHandler`: when a pack is already active, call
     `repriceSeeded` for that pack with the payload's prices instead of the first-run `activatePackWithSeed`,
@@ -1048,11 +1046,12 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   (`POST /phone/retry`, on the owner's tap) and never re-search or offer a replacement number
   on their own.
 - **Seeded-price baseline, derived ownership and the re-run gate:** A null baseline means "the
-  owner's", so a tenant seeded before migration 314 would have every price skipped by
-  `repriceSeeded` while the re-run card implied an update. Four rules close that and keep it
-  true across re-runs and across the two places a price lives.
-  (1) What carries a baseline. Only what `repriceSeeded` can move: the pack's two headline
-  catalog items (`seed_key`, `seeded_unit_price_cents`) and the template lines seeded from
+  owner's", and a pack seeded before migration 314 has only null baselines, so for that pack
+  `repriceSeeded` is never called and the re-run card is not shown (rule 4). Four rules keep
+  this true across re-runs and across the two places a price lives.
+  (1) What carries a baseline. Only what `repriceSeeded` can move, and only when the seeder
+  writes it after migration 314: the pack's two headline catalog items (`seed_key`,
+  `seeded_unit_price_cents`) and the template lines seeded from
   them (`seededUnitPriceCents` and `seededCatalogItemId` inside `line_item_templates`). Nothing
   else is stamped, so no other baseline exists to go stale. The real model has no durable link
   between the two: a template line stores a description, quantity and price and no catalog item
@@ -1091,9 +1090,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     keys alone, and they still follow their item). The catalog item may still move, and so do
     the lines of other templates seeded from it; the saved template keeps its price and the
     read-back names the difference.
-  - *No link, or the item unavailable.* A line the seeder or the backfill could not link, and a
-    line whose item is archived, has no `seed_key` or is not in `moved`, stays: with no link
-    the line is the owner's.
+  - *No link, or the item unavailable.* A line the seeder could not link, a line seeded before
+    314, and a line whose item is archived, has no `seed_key` or is not in `moved`, stays: with
+    no link the line is the owner's.
   - *Set back to the seeded number.* An owner who edits an item and then types the seeded price
     again leaves a row that holds its baseline; it is treated as untouched, since the price is
     the seeded one.
@@ -1117,58 +1116,25 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `repriceSeeded` is not called. When it is true the owner picks as before, and rows the owner
   edited are still reported as theirs.
 
-  (4) Backfill, from evidence of an untouched seed and never from a matching price.
-  `backfillSeededBaselines(tenantId)` stamps a legacy row only when the schema shows both that
-  the seeder made it and that nothing has written it since. A current price that equals a seed
-  price shows neither: an owner can type a seed price by hand, or edit a row to the value the
-  resolved tier happens to use, and a baseline stamped on that row would let a later re-run
-  overwrite an owner-controlled price. A row that fails any condition below keeps a null
-  baseline and is the owner's. The schema keeps no per-row seed record (the seeder writes
-  through the repositories, and its only audit trace is the aggregate `tenant.pack_activated`
-  event), so the evidence is what the repositories do guarantee:
-  - *Not written since it was seeded.* `PgCatalogItemRepository` creates a row with
-    `created_at` and `updated_at` from one timestamp and stamps `updated_at` on every `update`
-    and `archive`; no trigger exists and nothing else writes `catalog_items`. Audit rows would
-    not do here, because the learned-price correction ports call `catalogRepo.update` with no
-    `catalog_item.updated` row. An item qualifies only if `updated_at = created_at AND
-    archived_at IS NULL`. For a template the same test is on the row,
-    `estimate_templates.updated_at = created_at`, and it is all the evidence there is: the
-    lines sit in one JSONB value with no per-line history, so a legacy template is stamped
-    whole or not at all, and an edited template stays null. `incrementUsage` also stamps
-    `updated_at`, so a template instantiated into an estimate even once reads as written and
-    stays the owner's. That cost is accepted: fewer legacy rows reprice, none reprice wrongly.
-  - *Made by the seeder, not by the owner.* An item must carry the name of a headline seed of a
-    pack the tenant has a `pack_activations` row for (the seeder's own idempotency key; the
-    generic pack's names carry the trade label that its `tenant.pack_activated` row records as
-    `metadata.tradeLabel`, and no recorded label is no match), and exactly one of the tenant's
-    rows may qualify per role, else none is stamped. The tenant must also have an `audit_events`
-    row with `event_type = 'tenant.pack_activated'`, `entity_id` that pack id and
-    `(metadata->>'catalogItemsCreated')::int >= 1`, written at or after the item's
-    `created_at` (the seeder's record that it created catalog rows for the pack, written just
-    after them), and no `audit_events` row with `event_type = 'catalog_item.created'` and
-    `entity_id` equal to the item's id (the Catalog route and the voice add-item handler each
-    write one for every row they create; the seeder writes none). A template likewise: its
-    `(vertical_type, category_id, lower(name))` must match a seed template of an activated pack
-    (the seeder's idempotency key), the pack's `tenant.pack_activated` row must show
-    `templatesCreated >= 1` at or after the template's `created_at`, and no
-    `estimate_template.created` row may exist for its id (the three `createTemplate` call sites
-    each pass the audit repository).
-  - *What is stamped.* The row is shown unwritten since the seeder wrote it, so its current
-    price is the price the seeder wrote, whatever tier or free-speech pair that was. The
-    baseline is therefore that price and the backfill needs no tier lookup. A qualifying item
-    gets `seed_key` and `seeded_unit_price_cents`. On a qualifying template, each line the seed
-    definition marks as a headline line (matched by `sortOrder` and `description` in the
-    definition, never by the tenant's price) gets `seededUnitPriceCents` and a
-    `seededCatalogItemId` naming the stamped item of that pack and role; a line whose item was
-    not stamped gets neither.
-
-  The one write this evidence cannot see is a price changed by hand-run SQL that leaves
-  `updated_at` alone; no application path does that, since the two repositories are the only
-  writers of either table. The runner has no ledger and replays the corpus every deploy, so the
-  step writes only where the row has no `seed_key` (or, on a line, no baseline), runs once per
-  tenant in that tenant's own transaction, and stamps
-  `tenant_settings.seeded_baseline_backfilled_at`; a tenant that fails is retried on the next
-  deploy and a stamped one is never revisited (the one-shot lesson of `194_thank_you_sms`).
+  (4) No backfill: a row seeded before 314 is the owner's. The seeder wrote no per-row
+  record of what it made, so a legacy row has no positive proof of provenance; the only
+  traces are negative: no creation audit row for the item, an `updated_at` that never moved
+  after creation, and an aggregate pack-activation event on the tenant. Absence of an audit
+  row proves nothing, because an audit failure after a create is swallowed on purpose
+  (`add-catalog-item-handler.ts` catches a failed `catalog_item.created` emit after the row
+  exists), so an untouched owner-created item with a seed name, on a tenant whose pack later
+  created a sibling item, would pass every such test, and a setup re-run could overwrite that
+  owner's price. Two review rounds each found a hole in inferring provenance this way, and the
+  cost of a hole is an overwritten owner price, so no migration or startup step stamps a
+  baseline for existing rows. Rows seeded before 314 keep a null `seed_key` and null
+  baselines whatever their price (including one equal to a tier price) and however untouched,
+  are never re-priced by a setup re-run, and a legacy tenant sees no price card and is told
+  its prices are its own (rule 3). Only rows the seeder writes after 314 carry
+  `seeded_unit_price_cents` and `seed_key`, and their template lines `seededUnitPriceCents`
+  and `seededCatalogItemId`, all written in the same statement as the row: positive per-row
+  provenance by construction. An owner edit after that moves the price off its baseline and
+  ends the re-price (rule 2). The migration adds columns and no step populates them for
+  existing rows, so the runner's replay of the corpus on every deploy has nothing to repeat.
 - **Patterns to follow:** `notifications/owner-sms-sender.ts` (`recipientClass: 'owner'`
   skips consent), `components/home/ActivationCelebrationBanner.tsx` (first-run state),
   `docs/solutions/architecture-patterns/derive-shared-status-rule-across-frontends.md`.
@@ -1273,29 +1239,23 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     the payload schema): `forwarding` absent, `null` and a value all parse and stay distinct;
     `{ sourceNumber }` alone, a non-E.164 number, a carrier outside the four and an extra key
     are rejected.
-  - Edge (legacy seeded tenants; the backfill stamps evidence, never a matching price; unit
-    in `reprice-seeded.test.ts` with a repository double, and Docker-gated in
-    `migration-replay-populated-db.test.ts` and `integration/reprice-seeded.test.ts` against
-    real `catalog_items`, `estimate_templates` and `audit_events` rows, the edits made through
-    the real `PUT /api/catalog/items/:id` and `PUT /api/templates/:id` routes). (a) A legacy
-    tenant (the real seeder, then the 314 columns and keys cleared, which is what a pre-314 row
-    looks like) never edited: each headline item (priced at
-    the pack defaults, and separately at the tenant's `standard` tier, its `premium` tier or a
-    free-speech pair) gets `seed_key` and a baseline equal to its price, each headline template
-    line in a template with `updated_at = created_at` gets its baseline and a
-    `seededCatalogItemId` naming that item, and a new price pick reprices them. (b) The same
-    tenant with the owner having edited a headline item to a value that EQUALS the resolved
-    tier's seed price (the false positive of inferring provenance from equality) → the item's
-    `updated_at` moved, so it keeps a null `seed_key` and baseline, the re-run leaves it and
-    the lines linked to it, and the read-back says it is theirs; the same edit made to a
-    template line through `PUT /api/templates/:id` → that template's lines keep null
-    baselines and links. (c) A template whose `updated_at` moved for any reason, including an
-    `incrementUsage` after the owner used it once → all of its lines stay null even though
-    their prices match the seed. (d) An owner-made item that carries a seed name and the seed
-    price (it has a `catalog_item.created` row), a tenant with no `tenant.pack_activated` row
-    for the pack (or one with `catalogItemsCreated = 0`), and two qualifying rows for one role
-    → no row is stamped. (e) A second deploy replays the backfill → no baseline overwritten
-    and a stamped tenant is not revisited; a tenant whose backfill failed is retried.
+  - Edge (legacy rows are owner-controlled; real Postgres: the migration and its replay in
+    `migration-replay-populated-db.test.ts`, the re-run and the edits in
+    `integration/reprice-seeded.test.ts` through the real `PUT /api/catalog/items/:id` and
+    `PUT /api/templates/:id` routes; unit in `reprice-seeded.test.ts` with a repository
+    double). (a) Legacy rows, written in the pre-314 shape (no `seed_key`, no baseline,
+    template lines without the two keys) at any price, including a headline item priced
+    exactly at the tenant's tier price, have NULL `seed_key` and baselines and keyless lines
+    after the corpus applies over them, and still after a second deploy replays it. (b) A
+    re-run on that legacy tenant: `POST /draft/reopen` reports `repricing.available = false`,
+    the price turn shows no price card, approval carries no prices, `repriceSeeded` is not
+    called, and no catalog item or template line price changes. (c) A row the seeder writes
+    after the migration carries `seed_key` and its baseline, and its template lines carry
+    `seededUnitPriceCents` and `seededCatalogItemId`; a re-run with new prices moves the item
+    and those lines while they are untouched. (d) A post-migration owner edit stops the
+    re-price: the owner edits that item (or saves a template) through the real route, and the
+    next re-run leaves the edited item, the lines seeded from it and the saved template at
+    the owner's prices, and the read-back names them as theirs.
   - Edge (no baseline): a tenant whose headline items all lack a baseline, or all differ from
     it → `POST /draft/reopen` reports `repricing.available = false`, the price turn says "Your
     prices are your own" and shows no price card, and approval carries no prices; a tenant
@@ -1334,7 +1294,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     templates seeded from it move with it; the read-back names that job type. A unit pin shows
     the schema drops `seededUnitPriceCents` and `seededCatalogItemId`, so nobody adds them
     thinking they would be kept. (c) A line with no `seededCatalogItemId` (hand-added, or a
-    legacy line the backfill could not link), and one whose item is archived or has no
+    line seeded before 314), and one whose item is archived or has no
     `seed_key`, is left alone even though its price equals its baseline, while its linked
     siblings move. (d) The owner edits the item and then types the seeded number again → the
     item is untouched and moves with its lines. (e) A headline item the owner only renamed
@@ -1368,17 +1328,18 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     new candidate, a second `area_code_unavailable` re-searches again.
   - Integration: route test proves the SMS body contains the right code for each carrier; real
     Postgres pins the new columns (`tenant_settings.forwarding_source_number`,
-    `forwarding_carrier` with its CHECK, `seeded_baseline_backfilled_at`;
+    `forwarding_carrier` with its CHECK;
     `catalog_items.seed_key` with its partial unique index and `seeded_unit_price_cents`; the
     `onboarding_drafts` forwarding columns) and
     the handler's write to them under RLS (a value, an explicit `null` that clears the four
-    forwarding columns, and an absent key that leaves them alone); the backfill runs against
-    seeded, hand-edited and used rows in a populated database, with real `updated_at` values
-    and `audit_events` rows (extending `migration-replay-populated-db.test.ts`).
+    forwarding columns, and an absent key that leaves them alone); rows in the pre-314 shape in
+    a populated database keep null baselines through the migration and a replay (extending
+    `migration-replay-populated-db.test.ts`).
 - **Verification:** `grep -r "onboarding/v2" packages/web/src` returns nothing; e2e passes for
   both branches; the forbidden-vocabulary test extends to `components/home`; on a seeded
-  staging tenant, a re-run after the owner edits a headline price in Settings leaves that item
-  and the job types seeded from it at the owner's price and says so.
+  staging tenant seeded after migration 314, a re-run after the owner edits a headline price in
+  Settings leaves that item and the job types seeded from it at the owner's price and says so,
+  and a re-run on a tenant seeded before it shows no price card.
 
 ### U10. The owner's cell: on the draft, on the settings proposal, required when a choice rings it
 - **Goal:** The owner's cell, optional on the first screen and used today only to place the
@@ -3745,9 +3706,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   land only through approval and remain editable catalog items.
 - **A re-run moving a price the owner set.** A price moves only while the owner has not touched
   it, judged on both sides: a template line follows its catalog item and never moves alone, a
-  template the owner saved is theirs, and a legacy row gets a baseline only when it was never
-  written since the seeder made it (U6). Where the schema cannot show that, the row stays the
-  owner's and the read-back says so.
+  template the owner saved is theirs, and only rows the seeder writes after migration 314 carry
+  a baseline (U6). Rows seeded earlier have no per-row proof of who set their price, so they
+  stay the owner's and a tenant with only those sees no price card.
 - **Status contract drift.** Additive facts only; `.length(7)` preserved; pinned by extending
   `packages/api/test/onboarding/derive-status.test.ts` and the integration status test.
 - **Demo call cost, abuse, TCPA, cross-visitor leakage.** Phased last, consent first, two-layer
@@ -3854,7 +3815,7 @@ previous one; the previous slice is merged first.
 | S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`, until a retry bumps `version`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so, an approve sent from before a retry included); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover, even beside a failed one, and takes precedence over `failed`) and `POST /draft/retry` (guards in order: `DRAFT_NOT_APPROVED`, then `DRAFT_RETRY_UNSAFE` for a set holding such a proposal, failed member or not (`approved + undone` is unsafe, not nothing-failed), then `DRAFT_RETRY_NOTHING_FAILED` for the benign rest; the refusal changes nothing, because re-approving only the failed member would leave its sibling behind and the set would end `executed + undone`; a retry that passes the guards bumps the draft `version` by one in the same locked transaction as the re-queue, so one version names one approval attempt and a screen from before the retry cannot undo, reset or re-approve it (409 `VERSION_CONFLICT`), and `onboarding.draft_retry` records the version before and after; that set's way out is S4's reset, so until S4 the only way out is Settings and the shell offers no Start over). Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
 | S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`, refused with `DRAFT_METRO_LOCKED` once a choice is staged and rebuilding the assembled shop for the new metro in the same write, so the city and prices change together); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper, and a derived, optional `undoable` on the status draft block and on the retry response (S1b's retry response is unchanged), so the saving screen shows Undo only while the whole set is still inside its windows and a partial retry, which refreshes only the failed member, shows none; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, expires any still-`draft` or `ready_for_review` ones as `superseded_by_reset` (one `proposal.expired` row each, so none stays in the inbox or approvable; `approveProposal`'s write becomes conditional so an approve racing the reset cannot revive one), returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status (`reset` while no member is executed or executing and no `approved` member is past its undo window, else `settings`, for a failed member beside a terminal one as for any other `stopped` set) so the shell never offers a refused button; reset is also the way out of the set retry refuses as `DRAFT_RETRY_UNSAFE`; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body, and checked between `DRAFT_NOT_APPROVED` and `DRAFT_RETRY_UNSAFE`), made required once every client sends it. | 6-7 days (reset adds one) |
-| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps and bumps a forwarding generation that both stamps compare against, so a late probe or a stale tab's confirm for the old line is refused; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep, each deactivation claimed under the payment-mode lock so a switch back stops the cleanup; no link minted and none deactivated on a failed mode read, and the link attach re-checks the mode under a per-tenant payment-mode lock, so a checkout that stalls across a switch stores none even when the switch is the tenant's first settings write), flag flipped, v2 deleted. | 12-15 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another, the per-link claim step a third) |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps and bumps a forwarding generation that both stamps compare against, so a late probe or a stale tab's confirm for the old line is refused; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline (rows seeded after 314 only) and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep, each deactivation claimed under the payment-mode lock so a switch back stops the cleanup; no link minted and none deactivated on a failed mode read, and the link attach re-checks the mode under a per-tenant payment-mode lock, so a checkout that stalls across a switch stores none even when the switch is the tenant's first settings write), flag flipped, v2 deleted. | 12-15 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another, the per-link claim step a third) |
 | S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost) and renewing the lease's short pre-live expiry once, from the first `ringing` or `in-progress` callback, in that same statement (the `Calls` response binds and never renews, so a call Twilio is still queueing cannot start the clock), with the `Calls` request bounded at 10 s, reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces, with every text and email for a demo tenant refused at the delivery boundary; a daily call-and-cents budget is reserved atomically before every `Calls` request, in the one transaction that also spends the visitor's one-call-a-day allowance and takes the lease, so a refused visitor keeps the allowance, and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a transactional handoff outbox written in the finalizing transaction together with the signup-handoff row its token validates against, and sent by a queue worker under a stable idempotency key, so a crash before the send is retried and never loses the handoff, and retired unsent once its link is within a minute of expiring, no tenant writes). | 12-16 days (the token and bind add one, the budget another, the late-callback handoff a third, the outbox and its sender a fourth, the lease renewal, the demo-tenant send suppression and the transactional allowance a fifth) |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
