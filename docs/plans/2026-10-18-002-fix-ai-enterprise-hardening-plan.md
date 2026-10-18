@@ -461,6 +461,22 @@ flowchart LR
   - **PRIV-3**
     - One Luhn-validated scrubber: 13–19 digits, optional space or dash groups, replaced with
       `[card number]`.
+    - **The scrubber also catches card numbers spoken as words.** Whisper can return a card number
+      read aloud as words ("four one one one …"), not digits. `workers/transcription.ts` sends that
+      text to the optional correction model and then stores it. The Deepgram audio pass can flag and
+      purge the recording, but it doesn't redact a transcript already stored or exported. So:
+      - Before the Luhn check, the scrubber normalizes runs of spoken digit words into digits, in
+        English and Spanish: zero/oh to nine, cero to nueve, and "double" / "doble" repeats. Filler
+        and separators between them ("and", "dash", "y") are allowed.
+      - It Luhn-checks the normalized 13–19-digit sequences, and replaces the original word span
+        with `[card number]`.
+      - It runs before the correction model and before persistence, at the same boundary as the
+        digit form.
+      - Tests:
+        - a Whisper-shaped word-form PAN, in English and in Spanish, is redacted before the correction
+          call and before the write
+        - a word-form run that fails Luhn, such as a read-back phone number, is left alone
+      - Batch D started before this was added, so it lands as a batch D follow-up commit.
     - Apply it at:
       - `callerTranscriptText`
       - user-role text in `LLMGateway.complete`, before dispatch and before the snapshot
@@ -1133,6 +1149,15 @@ flowchart LR
         `output_snapshot` text for the subject's normalized phone numbers, email and full name. The
         scan is bounded by the tenant's retention window, because U4's purge has already scrubbed
         anything older.
+      - **The scan also matches the subject's ids.** A drafting prompt can carry only the resolved
+        customer id and non-identifying job details. For example, `estimate-task.ts` serializes
+        `context.existingEntities`, including the verified `customerId`, into the user message, and
+        `gateway.ts` stores that message verbatim under a random correlation id. A phone, email and
+        name scan finds nothing in such a row. So:
+        - The historical scan also matches the customer UUID, and the UUIDs of the subject's jobs,
+          estimates, invoices and appointments.
+        - A UUID is unique to the subject, so a UUID match counts as corroborated on its own, and
+          that row is scrubbed automatically.
       - **A content match is a candidate, not proof.** Names, phones and emails are not unique per
         customer (`packages/api/src/db/schema.ts:325-328`): two customers can share a name, and a
         household can share a phone. The scrub is irreversible, so it runs automatically only for a
@@ -1280,8 +1305,10 @@ flowchart LR
       - Its RLS matches every tenant table.
       - A per-tenant monthly `ai_spend_ledger` row holds `spent` and `reserved`.
       - **Reserve** is one transaction. A conditional
-        `UPDATE ai_spend_ledger SET reserved = reserved + $cost WHERE spent + reserved + $cost <= cap
-        RETURNING …` runs first. When it returns a row, the reservation row is inserted.
+        `UPDATE ai_spend_ledger SET reserved = reserved + $cost WHERE spent + pre_ledger_spent +
+        reserved + $cost <= cap RETURNING …` runs first. `pre_ledger_spent` is in the same atomic
+        predicate, so concurrent reservations can't pass the real monthly total. When it returns a
+        row, the reservation row is inserted.
       - **Every later step is a guarded transition on that one row**, in the same transaction as
         the ledger adjustment:
         `UPDATE ai_spend_reservations SET state = $next WHERE attempt_id = $1 AND state = 'reserved'
