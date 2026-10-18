@@ -128,6 +128,7 @@ import {
   OnboardingEstimateTemplateExecutionHandler,
   OnboardingTeamMemberExecutionHandler,
   OnboardingScheduleExecutionHandler,
+  OnboardingVoicePolicyExecutionHandler,
 } from './onboarding-handlers';
 import { PackActivationRepository } from '../../settings/pack-activation';
 import type { PendingInvitationRepository } from '../../users/pending-invitation';
@@ -1620,6 +1621,10 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.seatUsage,
     ),
     new OnboardingScheduleExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
+    // "Pick, don't build" onboarding — one proposal for the choices the five
+    // onboarding_* proposals above do not cover (greeting, book-or-hold,
+    // after-hours mode, emergency target, payment mode, booking hours).
+    new OnboardingVoicePolicyExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
     // B1.18 — update_brand_voice: writes through the SAME versioned
     // read→cool-down-check→merge→bump path the Brand-Voice Configurator
     // sheet uses (never re-implemented here — see brand-voice-handler.ts).

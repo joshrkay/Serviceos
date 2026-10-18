@@ -163,5 +163,13 @@ export const OnboardingStatusResponseSchema = z.object({
   /** ISO-8601 timestamp of tenants.created_at. Lets the client tell a brand-new
    * account (welcome tour) from an established user (what's-new changelog). */
   accountCreatedAt: z.string().datetime().optional(),
+  /** "Pick, don't build" — the pre-approval draft's progress, when one exists. Additive. */
+  draft: z
+    .object({
+      status: z.enum(['draft', 'approved']),
+      choicesAnswered: z.number().int().min(0),
+      version: z.number().int().positive(),
+    })
+    .optional(),
 });
 export type OnboardingStatusResponse = z.infer<typeof OnboardingStatusResponseSchema>;

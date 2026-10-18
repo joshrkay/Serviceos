@@ -26,7 +26,7 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
   // tenant transaction (e.g. tests, background contexts).
   const db = currentTenantContext()?.client ?? pool;
 
-  const [settings, integRes, tenantRes, callsRes, tsRes, packsRes] = await Promise.all([
+  const [settings, integRes, tenantRes, callsRes, tsRes, packsRes, draftRes] = await Promise.all([
     settingsRepo.findByTenant(tenantId),
     db.query<TwilioIntegrationRow>(
       `SELECT status, last_error, provider_data
@@ -72,7 +72,14 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
          WHERE tenant_id=$1 AND status='active'`,
       [tenantId]
     ),
+    // "Pick, don't build" (migration 311) — one draft per tenant, or none.
+    db.query<{ status: 'draft' | 'approved'; version: number; n: number }>(
+      `SELECT status, version, (SELECT COUNT(*)::int FROM jsonb_object_keys(choices)) AS n
+         FROM onboarding_drafts WHERE tenant_id=$1`,
+      [tenantId]
+    ),
   ]);
+  const draftRow = draftRes.rows[0];
 
   const tenant = tenantRes.rows[0];
   const ts = tsRes.rows[0];
@@ -98,6 +105,7 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
       timezone: ts?.timezone ?? null,
     },
     packActivated: activePackCount > 0 || settingsPacks > 0,
+    draft: draftRow ? { status: draftRow.status, choicesAnswered: draftRow.n, version: draftRow.version } : null,
     twilioStatus: integRes.rows[0]?.status ?? null,
     twilioPhoneNumber: twilioLine.phoneNumber,
     twilioLineState: integRes.rows[0] ? twilioLine.state : null,

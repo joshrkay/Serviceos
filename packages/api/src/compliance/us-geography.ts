@@ -254,3 +254,90 @@ function nanpAreaCode(phone: string): string | null {
   const national = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
   return national.length === 10 ? national.slice(0, 3) : null;
 }
+
+// ---------------------------------------------------------------------------
+// NANP area code → US metro. Used by "pick, don't build" onboarding to pick
+// the regional price tier from the owner's cell number before asking anything.
+// Metro codes are short slugs, not CBSA ids; they key `regional_price_tiers`.
+// A code listed under two metros is reported as ambiguous so the conversation
+// can ask one confirming question instead of guessing.
+// ---------------------------------------------------------------------------
+
+export interface MetroEntry {
+  name: string;
+  areaCodes: readonly string[];
+}
+
+export const NPA_METROS: Readonly<Record<string, MetroEntry>> = {
+  NYC: { name: 'New York', areaCodes: ['212', '332', '347', '646', '718', '917', '929'] },
+  LAX: { name: 'Los Angeles', areaCodes: ['213', '310', '323', '424', '562', '626', '747', '818'] },
+  CHI: { name: 'Chicago', areaCodes: ['312', '773', '872', '708', '847', '224', '630', '331'] },
+  DFW: { name: 'Dallas-Fort Worth', areaCodes: ['214', '469', '972', '945', '817', '682'] },
+  HOU: { name: 'Houston', areaCodes: ['713', '281', '832', '346'] },
+  DC: { name: 'Washington', areaCodes: ['202', '771', '703', '571', '301', '240'] },
+  MIA: { name: 'Miami', areaCodes: ['305', '786', '954', '754', '561'] },
+  PHL: { name: 'Philadelphia', areaCodes: ['215', '267', '445', '610', '484'] },
+  ATL: { name: 'Atlanta', areaCodes: ['404', '470', '678', '770'] },
+  PHX: { name: 'Phoenix', areaCodes: ['480', '602', '623'] },
+  BOS: { name: 'Boston', areaCodes: ['617', '857', '781', '339'] },
+  SFO: { name: 'San Francisco Bay Area', areaCodes: ['415', '628', '510', '341', '650', '408', '669'] },
+  RIV: { name: 'Inland Empire', areaCodes: ['909', '951'] },
+  DET: { name: 'Detroit', areaCodes: ['313', '248', '586', '734', '947'] },
+  SEA: { name: 'Seattle', areaCodes: ['206', '253', '425'] },
+  MSP: { name: 'Minneapolis-St. Paul', areaCodes: ['612', '651', '763', '952'] },
+  SAN: { name: 'San Diego', areaCodes: ['619', '858'] },
+  TPA: { name: 'Tampa Bay', areaCodes: ['813', '727'] },
+  DEN: { name: 'Denver', areaCodes: ['303', '720'] },
+  BAL: { name: 'Baltimore', areaCodes: ['410', '443', '667'] },
+  STL: { name: 'St. Louis', areaCodes: ['314', '636'] },
+  ORL: { name: 'Orlando', areaCodes: ['407', '321', '689'] },
+  CLT: { name: 'Charlotte', areaCodes: ['704', '980'] },
+  SAT: { name: 'San Antonio', areaCodes: ['210', '726'] },
+  PDX: { name: 'Portland', areaCodes: ['503', '971'] },
+  SAC: { name: 'Sacramento', areaCodes: ['916', '279'] },
+  PIT: { name: 'Pittsburgh', areaCodes: ['412', '724', '878'] },
+  LAS: { name: 'Las Vegas', areaCodes: ['702', '725'] },
+  AUS: { name: 'Austin', areaCodes: ['512', '737'] },
+  CIN: { name: 'Cincinnati', areaCodes: ['513'] },
+  KC: { name: 'Kansas City', areaCodes: ['816', '913'] },
+  CMH: { name: 'Columbus', areaCodes: ['614', '380'] },
+  IND: { name: 'Indianapolis', areaCodes: ['317', '463'] },
+  CLE: { name: 'Cleveland', areaCodes: ['216', '440'] },
+  BNA: { name: 'Nashville', areaCodes: ['615', '629'] },
+  SLC: { name: 'Salt Lake City', areaCodes: ['801', '385'] },
+  MKE: { name: 'Milwaukee', areaCodes: ['414'] },
+  JAX: { name: 'Jacksonville', areaCodes: ['904'] },
+  OKC: { name: 'Oklahoma City', areaCodes: ['405'] },
+  RDU: { name: 'Raleigh-Durham', areaCodes: ['919', '984'] },
+  MEM: { name: 'Memphis', areaCodes: ['901'] },
+  RIC: { name: 'Richmond', areaCodes: ['804'] },
+  SDF: { name: 'Louisville', areaCodes: ['502'] },
+  MSY: { name: 'New Orleans', areaCodes: ['504'] },
+  BUF: { name: 'Buffalo', areaCodes: ['716'] },
+};
+
+export type MetroLookup =
+  | { kind: 'metro'; metroCode: string; name: string }
+  | { kind: 'ambiguous'; metros: Array<{ metroCode: string; name: string }> }
+  | { kind: 'unknown' };
+
+/** The metro for a three-digit NANP area code, or unknown. Table injectable for tests. */
+export function metroForAreaCode(
+  areaCode: string,
+  table: Readonly<Record<string, MetroEntry>> = NPA_METROS,
+): MetroLookup {
+  if (!/^\d{3}$/.test(areaCode)) return { kind: 'unknown' };
+  const hits: Array<{ metroCode: string; name: string }> = [];
+  for (const [metroCode, entry] of Object.entries(table)) {
+    if (entry.areaCodes.includes(areaCode)) hits.push({ metroCode, name: entry.name });
+  }
+  if (hits.length === 0) return { kind: 'unknown' };
+  if (hits.length === 1) return { kind: 'metro', ...hits[0] };
+  return { kind: 'ambiguous', metros: hits };
+}
+
+/** The metro for a phone number in E.164 or US national format, or unknown. */
+export function metroForPhone(phone: string): MetroLookup {
+  const areaCode = nanpAreaCode(phone);
+  return areaCode ? metroForAreaCode(areaCode) : { kind: 'unknown' };
+}

@@ -326,3 +326,15 @@ describe('deriveOnboardingStatus', () => {
     expect(r.isComplete).toBe(true);
   });
 });
+
+describe('deriveOnboardingStatus — pick-don\'t-build draft facts', () => {
+  it('surfaces the draft additively and keeps exactly seven steps', () => {
+    const r = deriveOnboardingStatus(facts({ draft: { status: 'draft', choicesAnswered: 3, version: 4 } }));
+    expect(r.steps).toHaveLength(7);
+    expect(r.draft).toEqual({ status: 'draft', choicesAnswered: 3, version: 4 });
+  });
+  it('omits draft when the tenant has none', () => {
+    expect(deriveOnboardingStatus(facts({ draft: null }))).not.toHaveProperty('draft');
+    expect(deriveOnboardingStatus(facts())).not.toHaveProperty('draft');
+  });
+});

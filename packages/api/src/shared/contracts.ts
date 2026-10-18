@@ -3,6 +3,7 @@ import { z } from 'zod';
 import './zod-messages';
 import { accountTypeSchema, catalogUnitSchema } from '@ai-service-os/shared';
 import { CUSTOMER_SOURCES } from '../customers/customer';
+import { AFTER_HOURS_VOICE_MODES, EMERGENCY_TARGETS, PAYMENT_COLLECTION_MODES } from '../settings/settings';
 
 export const tenantIdHeader = 'x-tenant-id';
 export const correlationIdHeader = 'x-correlation-id';
@@ -607,7 +608,10 @@ export const updateSettingsSchema = z.object({
       trigger_keyword_frustration: z.boolean(),
       trigger_llm_sentiment: z.boolean(),
       llm_sentiment_threshold: z.number().min(0).max(1),
-      after_hours_voice_mode: z.enum(['voicemail', 'ai_answering']),
+      after_hours_voice_mode: z.enum(AFTER_HOURS_VOICE_MODES),
+      // "Pick, don't build" onboarding — without this key the strip-mode object
+      // would drop the chosen target on the next Call Routing save.
+      emergency_target: z.enum(EMERGENCY_TARGETS),
       // The money-approval PIN is NOT writable here. `PUT
       // /api/settings/voice-approval-pin` is its only writer: it hashes the PIN,
       // rejects weak ones and stamps the change time. None of
@@ -645,6 +649,8 @@ export const updateSettingsSchema = z.object({
   // UB-D / D-015 — autonomous booking lane (migration 231). Threshold bounds
   // mirror the DB CHECK (NUMERIC(3,2) in [0.90, 0.99]).
   autonomousBookingEnabled: z.boolean().optional(),
+  // Migration 312 — "pick, don't build" payment preference; null clears.
+  paymentCollectionMode: z.enum(PAYMENT_COLLECTION_MODES).nullable().optional(),
   autonomousBookingThreshold: z.number().min(0.9).max(0.99).optional(),
   // #1011 (wayfinder map #995) — five keys that `PgSettingsRepository`'s write
   // column map already carries (pg-settings.ts:372,374,431,438,439) but that

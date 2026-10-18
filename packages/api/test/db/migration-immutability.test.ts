@@ -607,6 +607,9 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['308_oauth_states_google_business_provider', '79915b29a7a0fe83f95f798f21646cccf3ea6c50ce323b5bdb4106a0b36eb3a1'],
   // New owners default field-capable at INSERT now that 066's backfill is one-shot.
   ['309_users_owner_can_field_serve_default', 'e84f9ebc0b7ca4f2bd596006e3c4a2d9394be92fc18732cc405c95a4f6372a33'],
+  ['310_regional_price_tiers', 'cc7cc980e77d57f58c5a3b595c5db8ce9a94764363f44ef38add18d114659795'],
+  ['311_onboarding_drafts', '355ea643b690822e5416a147d3836a7d768fb069e2b5aa238b045498a4715e39'],
+  ['312_tenant_settings_payment_collection_mode', '81ef124ca22d0db44e0744a24c2c41680cd644e7b5bffd57ddaaabb85c8bbc9e'],
 ];
 
 function hashMigration(value: string): string {

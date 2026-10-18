@@ -135,6 +135,9 @@ import { maybeAutoGoLiveOnInboundEnd } from './voice/go-live';
 import { maybeFireFirstRealCallActivation } from './voice/activation';
 import { createOnboardingRouter } from './routes/onboarding';
 import { createOnboardingConversationRouter } from './routes/onboarding-conversation';
+import { createOnboardingDraftRouter } from './routes/onboarding-draft';
+import { PgOnboardingDraftRepository } from './onboarding/draft/repository';
+import { PgRegionalPriceTierRepository } from './onboarding/choices/price-tiers';
 import { OnboardingConversationOrchestrator } from './ai/orchestration/onboarding-conversation';
 import { createAssistantRouter } from './routes/assistant';
 import { createProposalsRouter } from './routes/proposals';
@@ -6104,6 +6107,21 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       }),
     }),
   );
+  // "Pick, don't build" onboarding (docs/plans/2026-10-18-001, slice S1) — the
+  // draft the owner assembles by choosing, approved into onboarding_*
+  // proposals on "That's right". Needs the DB: no hermetic-boot variant.
+  if (pool) {
+    app.use(
+      '/api/onboarding/draft',
+      createOnboardingDraftRouter({
+        draftRepo: new PgOnboardingDraftRepository(pool),
+        tierRepo: new PgRegionalPriceTierRepository(pool),
+        proposalRepo,
+        auditRepo,
+        approvalReferenceChecks,
+      }),
+    );
+  }
   app.use(
     '/api/technician-location',
     createTechnicianLocationRouter({

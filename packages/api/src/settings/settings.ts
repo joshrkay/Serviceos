@@ -32,6 +32,21 @@ export function normalizeReminderOffsets(input: unknown): number[] {
 }
 
 /**
+ * Canonical enums for the "pick, don't build" onboarding settings. Declared
+ * once here; the settings PUT contract, the onboarding_voice_policy proposal
+ * and the choice registry all build their Zod enums from these arrays.
+ * (SQL migration literals stay as written — they cannot import.)
+ */
+/** How the owner wants to be paid when a job is marked done. */
+export const PAYMENT_COLLECTION_MODES = ['pay_link', 'collect_on_site'] as const;
+export type PaymentCollectionMode = (typeof PAYMENT_COLLECTION_MODES)[number];
+/** Who the agent reaches first on an emergency call. */
+export const EMERGENCY_TARGETS = ['owner_cell', 'owner_cell_then_text'] as const;
+export type EmergencyTarget = (typeof EMERGENCY_TARGETS)[number];
+/** Inbound behavior outside business hours. */
+export const AFTER_HOURS_VOICE_MODES = ['voicemail', 'ai_answering'] as const;
+
+/**
  * F8 — per-tenant escalation channel + trigger flags.
  *
  * Stored as a JSON column on tenant_settings (migration deferred to the
@@ -60,7 +75,14 @@ export interface EscalationSettings {
    * tenant never saved the Call Routing sheet, so only an owner's own choice
    * survives as a stored value.
    */
-  after_hours_voice_mode?: 'voicemail' | 'ai_answering';
+  after_hours_voice_mode?: (typeof AFTER_HOURS_VOICE_MODES)[number];
+  /**
+   * "Pick, don't build" onboarding — who the agent reaches first on an
+   * emergency call: the owner's cell, or the owner's cell with an SMS page
+   * if unanswered. Chosen on the emergency card; consumed by the hand-off
+   * path. Absent means owner_cell.
+   */
+  emergency_target?: EmergencyTarget;
   /**
    * RV-071 — spoken challenge (e.g. a PIN like "4271") required before a
    * money-class or irreversible-class proposal can be APPROVED BY VOICE on
@@ -601,6 +623,8 @@ export interface TenantSettings {
    * rows / legacy fixtures read as "off" via `?? false`.
    */
   autonomousBookingEnabled?: boolean;
+  /** Migration 312 — how the owner collects payment at job completion; null/undefined = not chosen yet. */
+  paymentCollectionMode?: PaymentCollectionMode | null;
   /**
    * UB-D / D-015 — the lane's dedicated confidence threshold. NUMERIC(3,2)
    * with DB CHECK 0.90–0.99 (default 0.95); the evaluator
@@ -771,6 +795,8 @@ export interface UpdateSettingsInput {
   weeklyFeedbackEnabled?: boolean;
   /** UB-D / D-015 — opt into the autonomous booking lane (column default false). */
   autonomousBookingEnabled?: boolean;
+  /** Migration 312 — how the owner collects payment at job completion; null/undefined = not chosen yet. */
+  paymentCollectionMode?: PaymentCollectionMode | null;
   /** UB-D / D-015 — lane confidence threshold, 0.90–0.99 (column default 0.95). */
   autonomousBookingThreshold?: number;
   /** D-018 — opt into the autonomous close lane (column default false). */
