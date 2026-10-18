@@ -80,7 +80,11 @@ unowned position.
   re-seed. It updates the pack's two headline items (visit fee, labor rate) and the estimate
   template line items that carry those same seeded amounts, in each case only while the row
   still holds the price the seeder set; anything the owner has edited is left alone, and the
-  read-back says which happened ("Your labor rate is yours; I left it").
+  read-back says which happened ("Your labor rate is yours; I left it"). Knowing which rows
+  still hold the seeded price needs the baseline: U6's migration adds a nullable
+  `seeded_unit_price_cents` to `catalog_items` and to the estimate template line items, set by
+  the seeder from then on; a row whose baseline is null or differs from its current price is
+  the owner's and is left alone.
 - **Metro from area code is a static NPA→metro map in code**, extending
   `packages/api/src/compliance/us-geography.ts` which today maps area code to state only. One
   spoken confirmation when an NPA spans metros, and the inferred city is always visible and
@@ -147,7 +151,8 @@ tiers; import from a photo; pricing or plan changes.
   with a Zod contract in `packages/api/src/proposals/contracts/onboarding.ts` and a handler in
   `proposals/execution/onboarding-handlers.ts`. The draft row is pre-approval state only.
   Execution remains async after the 5 s undo window (`proposals/lifecycle.ts:53`); the
-  read-back shows "Saving, tap to undo" for that window.
+  read-back shows "Saving, tap to undo" for that window (the one tap is `POST /draft/undo`, U9;
+  until it lands the screen says "Saving" with no button, as S2a shipped).
 - **Audit events:** `onboarding.draft_created`, `onboarding.choice_staged`,
   `onboarding.draft_approved`, plus the existing proposal lifecycle events.
 - **Integer cents:** tier prices, trip fee and hourly rate are cents end to end; the price
@@ -273,8 +278,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   transaction rolls every proposal row back (integration test: a failing proposal leaves no
   rows and the draft still `'draft'`). Only then set `status='approved'` and emit
   `onboarding.draft_approved`. Execution stays with `workers/execution-worker.ts` after the undo
-  window. `onboarding_tenant_settings` needs timezone, so `GET /draft` records
-  `clientTimezone` from the first request.
+  window; the one-tap undo of the whole approval, and holding onboarding until every generated
+  proposal has executed, are U9. `onboarding_tenant_settings` needs timezone, so `POST /draft`
+  records `clientTimezone` from the first request.
 - **Patterns to follow:** `db/onboarding-session-repository.ts` and migration 195 (RLS
   table), `routes/onboarding-conversation.ts` (owner-only route shape), `routes/proposals.ts`
   batch approve, `docs/solutions/logic-errors/whole-object-refine-mints-approve-to-fail-voice-proposals.md`
@@ -318,9 +324,12 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   waits) and `useOnboardingDraft`, and derives the turn list client-side: ready → unanswered
   choices in registry order → read-back → billing (existing `/billing/checkout-session`) →
   number (`/phone/available` candidate shown earlier, bought on "That works"; the candidate is
-  read-only and not reserved, so when `/phone/claim` fails after a long checkout because another
-  buyer took it, the number turn re-searches and offers the next candidate, "That one just went.
-  Here's another.", with a claim-failure test) → test call
+  read-only and not reserved, and `/phone/claim` only validates and enqueues `provision-twilio`,
+  so a number another buyer took during a long checkout surfaces later as the phone step's
+  `error` (`area_code_unavailable`) on the status poll; the number turn reacts to that
+  transition by re-searching and offering the next candidate, "That one just went. Here's
+  another.", with a test that drives the status from provisioning to error to a new candidate)
+  → test call
   (existing `TestCallStep` behaviour, re-skinned) → first-day home. Header: minutes left,
   escape hatch ("Keep the rest as is" → read-back). Every turn: heading is Rivet's line,
   option cards, mic (U4), "Type instead", "Neither, I'll say it" (U5). Copy follows the
@@ -444,6 +453,12 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Dependencies:** U3
 - **Files:**
   - modify `packages/web/src/components/onboarding/v3/NumberCard.tsx`, `ConversationShell.tsx`
+  - create migration `314_seeded_price_baseline` (`catalog_items.seeded_unit_price_cents`,
+    estimate template line items `seeded_unit_price_cents`, nullable) and
+    `packages/api/src/packs/reprice-seeded.ts` (the re-run update path: headline items and
+    template lines whose current price equals their baseline move to the new pick; the seeder
+    writes the baseline from now on); tests `packages/api/test/packs/reprice-seeded.test.ts`,
+    `packages/api/test/integration/reprice-seeded.test.ts`
   - create `packages/api/src/onboarding/forwarding-text.ts` (owner SMS with tap-to-dial carrier
     code via `notifications/owner-sms-sender.ts`), route `POST /api/onboarding/phone/forwarding-text`
   - modify `packages/web/src/components/home/HomeConversationPanel.tsx`, `HomePage.tsx`
@@ -481,6 +496,43 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Integration: route test proves the SMS body contains the right code for each carrier.
 - **Verification:** `grep -r "onboarding/v2" packages/web/src` returns nothing; e2e passes for
   both branches; the forbidden-vocabulary test extends to `components/home`.
+
+### U9. Whole-draft undo, execution tracking and retry
+- **Goal:** "Saving, tap to undo" is one tap that undoes the whole approval, and onboarding does
+  not move past the saving screen until every generated proposal has executed.
+- **Requirements:** R3
+- **Dependencies:** U2
+- **Files:**
+  - modify `packages/api/src/onboarding/draft/routes.ts` (`POST /draft/undo`, `POST /draft/retry`),
+    `packages/api/src/onboarding/draft/approve.ts` (undo and retry helpers),
+    `packages/api/src/onboarding/load-facts.ts` and `derive-status.ts` (the `draft` fact gains
+    `execution: 'pending' | 'executing' | 'executed' | 'failed'`, derived from the generated
+    proposals' statuses)
+  - modify `packages/web/src/components/onboarding/v3/ConversationShell.tsx` (undo button during
+    the window; the wait screen holds while `execution !== 'executed'`; on `failed`, "Something
+    didn't save. Try again." → retry)
+  - tests: `packages/api/test/onboarding/draft/undo.test.ts`,
+    `packages/api/test/onboarding/derive-status.test.ts` (extend),
+    `packages/api/test/integration/onboarding-draft-undo.test.ts`, the v3 shell tests
+- **Approach:** `POST /draft/undo` runs in one tenant transaction: every proposal in
+  `proposal_ids` that is still `approved` and unexecuted is reverted with the same logic
+  `POST /api/proposals/:id/undo` uses, the draft returns to `'draft'` with `proposal_ids = []`,
+  and `onboarding.draft_undone` is emitted. If any proposal has already executed, undo is
+  refused with 409 and the shell says so; the inbox's per-proposal undo remains for that case.
+  `POST /draft/retry` re-queues only the set's `execution_failed` proposals for the execution
+  worker and emits `onboarding.draft_retry`. The execution state is derived, never stored.
+- **Patterns to follow:** `routes/proposals.ts` undo handler and `proposals/lifecycle.ts`,
+  `workers/execution-worker.ts` retry semantics, D-039/D-040.
+- **Test scenarios:**
+  - Happy path: approve → undo inside the window → every proposal reverted, settings untouched,
+    draft `'draft'` and editable again, one audit row.
+  - Edge: one proposal already executed → 409, nothing changed; approve → all executed → fact
+    `executed` and the shell moves to billing.
+  - Error: one proposal `execution_failed` → fact `failed`, the shell holds and offers retry;
+    retry re-queues that one only; after it executes the fact is `executed`.
+  - Integration: real Postgres rows for the undo and for the mixed-status set.
+- **Verification:** no owner reaches the trial turn with a generated proposal unexecuted, and
+  one tap inside the window undoes the whole approval.
 
 ### U8. Runtime consumers for the policy keys the cards write
 - **Goal:** Every card's promise is behaviour, not a stored value. `payment_collection_mode`
@@ -604,7 +656,7 @@ previous one; the previous slice is merged first.
 | S1 | U1 + U2 | Choice registry, typical-shop assembly, regional tiers, draft/choices/approve API, `onboarding_voice_policy` proposal. Live API, integration-tested, no UI yet. | 7-10 days |
 | S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
-| S4 | U5 | Free-speech override, setting-key routing for the read-back mic, metro change (`PUT /draft/metro`). | 2-3 days |
+| S4 | U5 + U9 | Free-speech override, setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); whole-draft undo, execution tracking and retry. | 3-4 days |
 | S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search, forwarding text, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target`, flag flipped, v2 deleted. | 6-8 days |
 | S6 | U7 | Pre-signup demo call (founder decision first). | 6-9 days |
 
