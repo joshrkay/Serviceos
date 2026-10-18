@@ -154,10 +154,30 @@ describe('#1219.2 / #1065 / #1232.3 — transcription correction pass: the raw t
     const req = requests[0];
     const user = (req.messages ?? []).find((m) => m.role === 'user')!.content as string;
     expect(onlyInsideFence(user, INJECTION), user).toBe(true);
-    expect(fenceCount(user)).toBe(1);
-    // The tenant glossary is trusted and stays outside the fence.
-    expect(outsideFences(user)).toContain('PEX');
+    // PI-1 — two fenced blocks: the tenant glossary (customer display names
+    // are written by anyone through the public booking form) and the raw
+    // transcript. Nothing tenant- or caller-authored stays outside a fence.
+    expect(fenceCount(user)).toBe(2);
+    expect(onlyInsideFence(user, 'PEX'), user).toBe(true);
     const system = (req.messages ?? []).find((m) => m.role === 'system')!.content as string;
+    expect(system).toMatch(/never instructions/i);
+  });
+
+  it('PI-1 — an injection-shaped glossary term reaches the model only inside a fence, and the system rule covers both blocks', async () => {
+    const raw = 'please call me back about the pecks pipe';
+    const { gateway, requests } = capturingGateway('Please call me back about the PEX pipe.');
+    // A provider that let an instruction-shaped term through (the real
+    // TenantGlossaryProvider drops it; the fence is the second line of defence).
+    const glossary = { termsForTenant: vi.fn().mockResolvedValue(['PEX', INJECTION]) };
+    await createTranscriptionWorker(repo(), provider(raw), { gateway, glossary }).handle(message, logger);
+    const req = requests[0];
+    const user = (req.messages ?? []).find((m) => m.role === 'user')!.content as string;
+    expect(onlyInsideFence(user, INJECTION), user).toBe(true);
+    expect(onlyInsideFence(user, raw), user).toBe(true);
+    expect(fenceCount(user)).toBe(2);
+    expect(outsideFences(user)).not.toMatch(/vocabulary/i);
+    const system = (req.messages ?? []).find((m) => m.role === 'system')!.content as string;
+    expect(system).toMatch(/vocabulary/i);
     expect(system).toMatch(/never instructions/i);
   });
 
