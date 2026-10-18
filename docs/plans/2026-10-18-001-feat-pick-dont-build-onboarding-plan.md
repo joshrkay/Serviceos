@@ -20,9 +20,12 @@ A day-one plumber or HVAC owner-operator who has never sent an invoice cannot ge
 today's setup without doing office work: an eleven-field identity form, a 21-control hours
 grid, carrier forwarding codes, "Verify your AI". The conversational path that matches the
 product's promise exists (`packages/api/src/ai/orchestration/onboarding-conversation.ts`) but
-is a sidebar toggle on two of seven steps and ends in an inbox chore. Competitors offer no
-conversational business setup at all (Goodcall configures only the phone agent), so this is
-also the unowned position in the market.
+is a sidebar toggle on two of seven steps and ends in an inbox chore. Among competitors only
+Goodcall sets up conversationally (its Gabi drafts the greeting, questions and steps from a
+spoken or typed description and runs practice calls; see the competitive research), and it
+configures the phone agent alone. No competitor sets up the back office that way: prices,
+booking posture, hours, how the owner gets paid, emergency routing. That broader setup is the
+unowned position.
 
 ## Requirements
 
@@ -238,13 +241,21 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `packages/api/test/onboarding/derive-status.test.ts` (extend),
     `packages/api/test/integration/onboarding-draft.test.ts`,
     `packages/api/test/integration/onboarding-voice-policy-handler.test.ts`
-- **Approach:** `GET /draft` creates the draft on first call (trade and metro from the signup
-  payload or the demo-call lead), returning the assembled shop and staged choices.
+- **Approach:** `POST /draft` creates the draft (idempotent per tenant; `GET /draft` reads it,
+  404 before). The trade, business name and optional cell it needs come from the demo-call
+  lead when there is one (U7) and otherwise from the v3 shell's first screen, "What should I
+  answer as?" (U3), which asks exactly those three before the draft exists; the signup form is
+  unchanged and the direct "Start free" path never reaches the shell without them. The response
+  is the assembled shop and the staged choices.
   `PUT /draft/choices/:settingKey` validates against the registry, stores `'a'|'b'|{override}`
   with a `version` compare-and-swap, emits `onboarding.choice_staged`. `POST /draft/approve`
   runs in one tenant transaction: build proposals from draft (existing five types plus
   `onboarding_voice_policy`), create them with surface `'onboarding_readback'`, call the same
-  batch-approve function `routes/proposals.ts:322` uses, set `status='approved'`, emit
+  batch-approve function `routes/proposals.ts:322` uses, and gate on its result: that helper
+  reports per-item failures in `failed` and keeps the earlier approvals, so the route throws a
+  `ConflictError` when `failed.length > 0` before the draft is touched, and the one tenant
+  transaction rolls every proposal row back (integration test: a failing proposal leaves no
+  rows and the draft still `'draft'`). Only then set `status='approved'` and emit
   `onboarding.draft_approved`. Execution stays with `workers/execution-worker.ts` after the undo
   window. `onboarding_tenant_settings` needs timezone, so `GET /draft` records
   `clientTimezone` from the first request.
@@ -276,8 +287,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - create `packages/web/src/components/onboarding/v3/ConversationShell.tsx`,
     `ReadyScreen.tsx`, `OptionPairTurn.tsx`, `ReadbackCard.tsx`, `TranscriptCard.tsx`,
     `NumberCard.tsx`, `TrialScreen.tsx`, `TestCallTurn.tsx`, `useOnboardingDraft.ts`
-  - create `packages/web/src/components/ui/option-card.tsx` (two-option radiogroup, 56 px rows,
-    `aria-pressed`, selected state)
+  - create `packages/web/src/components/ui/option-card.tsx` (two-option `role="radiogroup"` of
+    `role="radio"` rows with `aria-checked`, roving tabindex and arrow-key movement, 56 px rows,
+    one selected state)
   - modify `packages/web/src/routes.ts:67` (flag-gated lazy import),
     `packages/web/src/lib/analytics.ts` (new events), `FUNNEL.md`
   - tests: `packages/web/src/components/onboarding/v3/ConversationShell.test.tsx`,
@@ -288,7 +300,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   no fixture server. The shell reads `useOnboardingStatus` (existing, polls for phone and billing
   waits) and `useOnboardingDraft`, and derives the turn list client-side: ready → unanswered
   choices in registry order → read-back → billing (existing `/billing/checkout-session`) →
-  number (`/phone/available` candidate shown earlier, bought on "That works") → test call
+  number (`/phone/available` candidate shown earlier, bought on "That works"; the candidate is
+  read-only and not reserved, so when `/phone/claim` fails after a long checkout because another
+  buyer took it, the number turn re-searches and offers the next candidate, "That one just went.
+  Here's another.", with a claim-failure test) → test call
   (existing `TestCallStep` behaviour, re-skinned) → first-day home. Header: minutes left,
   escape hatch ("Keep the rest as is" → read-back). Every turn: heading is Rivet's line,
   option cards, mic (U4), "Type instead", "Neither, I'll say it" (U5). Copy follows the
@@ -357,13 +372,19 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Requirements:** R2, R3
 - **Dependencies:** U2
 - **Files:**
-  - create `packages/api/src/onboarding/choices/override.ts` (single-setting extraction via
-    `PricingExtractor`, `ScheduleExtractor`, `BusinessProfileExtractor` in
-    `packages/api/src/ai/tasks/onboarding/`; one clarification on low confidence)
+  - create `packages/api/src/onboarding/choices/override.ts` (single-setting extraction, one
+    path per key: `PricingExtractor` for `trip_fee_and_rate`, `ScheduleExtractor` for
+    `booking_hours`, and a new `packages/api/src/ai/tasks/onboarding/choice-override-extractor.ts`
+    with one Zod schema per remaining key: `greeting` as length-capped free text, and the enum
+    keys `booking_posture`, `payment_collection_mode`, `emergency_target`, `after_hours_mode`
+    each classified to one of that key's allowed values from `ALLOWED_WRITES_BY_KEY` or a
+    clarification; `BusinessProfileExtractor` is not involved. One clarification on low
+    confidence)
   - modify `packages/api/src/onboarding/draft/routes.ts` (`POST /draft/override/:settingKey`)
   - modify `packages/web/src/components/onboarding/v3/OptionPairTurn.tsx`, `ReadbackCard.tsx`
     (override turn UI reusing `TranscriptCard`)
-  - tests: `packages/api/test/onboarding/choices/override.test.ts` (mocked gateway),
+  - tests: `packages/api/test/onboarding/choices/override.test.ts` (mocked gateway; one case
+    per key, all seven, plus a clarification case per enum key),
     `packages/api/test/onboarding/draft/routes.test.ts` (extend),
     `packages/web/src/components/onboarding/v3/OverrideTurn.test.tsx`
 - **Approach:** The override endpoint picks the extractor by `settingKey`, calls it through
@@ -375,7 +396,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `ai/orchestration/onboarding-conversation.ts` extractor invocation.
 - **Test scenarios:**
   - Happy path: "I charge one twenty to come out and one seventy-five an hour" → trip fee
-    12000, rate 17500 cents, line rendered with those numbers.
+    12000, rate 17500 cents, line rendered with those numbers; "just hold them for me, I'll call
+    back" on `booking_posture` → `autonomousBookingEnabled: false`; "say Walsh, go ahead" on
+    `greeting` → `voiceGreeting` set verbatim.
   - Edge: "weekdays and Saturday mornings" → schedule with Saturday 7-12; two numbers with no
     units → clarification question returned, nothing staged.
   - Error: gateway timeout → 503 with the card unchanged; override on a key not in the
