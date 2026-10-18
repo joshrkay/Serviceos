@@ -30,6 +30,9 @@ import { Logger } from '../logging/logger';
 import type { FileRepository, StorageProvider } from '../files/file-service';
 import type { JobRepository } from '../jobs/job';
 import type { TtsProvider } from '../ai/tts/tts-provider';
+import { hashOf, type TtsClipCache } from '../ai/tts/clip-cache';
+import { resolveTtsVoice, TTS_VOICE_PRESET_SCHEMA } from '../ai/tts/resolve-voice';
+import type { SettingsRepository } from '../settings/settings';
 import { routeParam } from '../shared/route-params';
 
 interface CreateVoiceRecordingBody {
@@ -58,8 +61,15 @@ const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
 const JOB_ID_SCHEMA = z.guid();
 /** H2 review — files.id is uuid: a malformed fileId is a 400, not a Postgres 22P02 → 500. */
 const FILE_ID_SCHEMA = z.guid();
-/** #1603 — one spoken clip's text; same ceiling as a voice-session turn. */
-const TTS_BODY_SCHEMA = z.object({ text: z.string().trim().min(1).max(2000) });
+/**
+ * #1603 — one spoken clip's text; same ceiling as a voice-session turn.
+ * S3-1 — `voice` names a tenant voice preset to speak in instead of the
+ * tenant's stored choice; vendor voice ids are never accepted.
+ */
+const TTS_BODY_SCHEMA = z.object({
+  text: z.string().trim().min(1).max(2000),
+  voice: TTS_VOICE_PRESET_SCHEMA.optional(),
+});
 
 const ALLOWED_MIME_TYPES = new Set([
   'audio/webm', 'audio/ogg', 'audio/wav', 'audio/mpeg',
@@ -92,6 +102,18 @@ export interface VoiceRouterOpts {
    * device keeps the answer on screen only.
    */
   tts?: TtsProvider;
+  /**
+   * S3-1 — the tenant's chosen voice (`tenant_settings.voice_id`, a preset
+   * key) for POST /tts. Optional: absent → every clip is spoken in the
+   * default preset.
+   */
+  settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
+  /**
+   * S3-1 — clips keyed by (provider voice id, sha256(text)); the onboarding
+   * lines are static per trade and voice, so the second owner on a voice
+   * pays nothing. Optional: absent → every request synthesizes.
+   */
+  clipCache?: TtsClipCache;
 }
 
 export function createVoiceRouter(
@@ -276,6 +298,12 @@ export function createVoiceRouter(
    * everyone else who reaches the Assistant. Nothing is persisted; the clip
    * is billable, so every success is audited to the actor (chars, provider).
    * Absent provider → 501 (mirrors /transcribe).
+   *
+   * S3-1 — the clip is spoken in the tenant's chosen voice (or the preset
+   * the body names) and cached by (voice, sha256(text)): a hit answers with
+   * the stored bytes, no provider call and no audit, since nothing was
+   * billed. The response gains `clipHash` and `cached`; `{ audio,
+   * contentType }` is unchanged for the mobile consumer.
    */
   router.post(
     '/tts',
@@ -286,23 +314,57 @@ export function createVoiceRouter(
     asyncRoute(async (req: Request, res: Response) => {
       // Validate first: a client bug is a 400 even in a keyless environment,
       // not a misleading "not configured".
-      const { text } = TTS_BODY_SCHEMA.parse(req.body ?? {});
+      const { text, voice: requestedPresetId } = TTS_BODY_SCHEMA.parse(req.body ?? {});
       const tts = opts?.tts;
       if (!tts) {
         res.status(501).json({ error: 'NOT_CONFIGURED', message: 'Speech synthesis is not configured' });
         return;
       }
       const authReq = req as AuthenticatedRequest;
+      const tenantId = authReq.auth!.tenantId;
+      const voice = await resolveTtsVoice({
+        tenantId,
+        requestedPresetId,
+        settingsRepo: opts?.settingsRepo,
+        provider: tts,
+      });
+      const clipHash = hashOf(text);
+      const cached = opts?.clipCache?.get(voice.providerVoiceId, clipHash);
+      if (cached) {
+        res.json({
+          audio: cached.audio.toString('base64'),
+          contentType: cached.contentType,
+          clipHash,
+          cached: true,
+        });
+        return;
+      }
       try {
-        const result = await tts.synthesize({ text, tenantId: authReq.auth!.tenantId });
-        res.json({ audio: result.audio.toString('base64'), contentType: result.contentType });
+        const result = await tts.synthesize({
+          text,
+          tenantId,
+          // A provider with no catalogue for the presets speaks its own
+          // default; passing the cache-key placeholder would name no voice.
+          ...(tts.voiceForPreset ? { voice: voice.providerVoiceId } : {}),
+        });
+        opts?.clipCache?.set(voice.providerVoiceId, clipHash, {
+          audio: result.audio,
+          contentType: result.contentType,
+        });
+        res.json({
+          audio: result.audio.toString('base64'),
+          contentType: result.contentType,
+          clipHash,
+          cached: false,
+        });
         // Cost attribution: who had how many characters spoken by which
-        // provider. Failure-soft like /transcribe's audit — never blocks the
-        // clip, but a broken sink is logged rather than swallowed.
+        // provider, in which preset (never the vendor voice id). Failure-soft
+        // like /transcribe's audit — never blocks the clip, but a broken sink
+        // is logged rather than swallowed.
         if (auditRepo) {
           try {
             await auditRepo.create(createAuditEvent({
-              tenantId: authReq.auth!.tenantId,
+              tenantId,
               actorId: authReq.auth!.userId,
               actorRole: 'user',
               eventType: 'voice.tts.synthesized',
@@ -311,6 +373,7 @@ export function createVoiceRouter(
               metadata: {
                 chars: text.length,
                 provider: result.provider,
+                voice: voice.presetId,
                 ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
               },
             }));

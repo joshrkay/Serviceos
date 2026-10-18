@@ -435,6 +435,7 @@ import { createEvaluationRouter } from './routes/evaluation';
 import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
 import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
 import { createTtsProvider, assertTtsProviderSupportsMediaStreams } from './ai/tts/tts-provider';
+import { TtsClipCache, ttsClipCacheBytesFromEnv } from './ai/tts/clip-cache';
 import { createTtsHealthCheck } from './ai/tts/tts-health';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
@@ -6010,6 +6011,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
     AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
   });
+  // S3-1 — one per-process clip cache for POST /tts (bounded by
+  // VOICE_TTS_CLIP_CACHE_BYTES): the onboarding lines are static per trade
+  // and voice, so the second owner on a voice pays nothing.
+  const ttsClipCache = new TtsClipCache({ maxBytes: ttsClipCacheBytesFromEnv(process.env) });
   app.use(
     '/api/voice',
     createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, {
@@ -6020,6 +6025,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       storage: storageProvider,
       jobRepo,
       ...(inAppTtsProvider ? { tts: inAppTtsProvider } : {}),
+      // S3-1 — the tenant's chosen voice and the clip cache behind POST /tts.
+      settingsRepo,
+      clipCache: ttsClipCache,
     }),
   );
 
