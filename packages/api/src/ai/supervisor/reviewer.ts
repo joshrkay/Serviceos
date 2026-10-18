@@ -9,13 +9,13 @@
  *   - critical (harm)      → enforce: hold + escalation alert; shadow: log only
  *   - timeout / error      → fail-open, dispatch, verdict logged
  *
- * Each LLM-bearing review logs one ai_runs row (taskType 'supervisor_review').
+ * Each LLM-bearing review logs one ai_runs row (taskType 'supervisor_review'),
+ * written by the gateway itself — it carries the tokens, cost and served
+ * model, and the review row links it via `response.aiRunId` (OBS-5).
  * PII discipline: the prompt carries derived features + the operator-facing
  * summary, never the raw transcript.
  */
 import type { LLMRequest, LLMResponse } from '../gateway/gateway';
-import type { AiRunRepository } from '../ai-run';
-import { createAiRun, startAiRun } from '../ai-run';
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import { actionClassForProposalType } from '../../proposals/proposal';
 import { payloadHeadlineCents } from '../../proposals/payload-money';
@@ -63,8 +63,8 @@ export interface PricingBaseline {
 }
 
 export interface SupervisorReviewerDeps {
+  /** Must be the gateway wired with the ai_runs repository — it writes the run row. */
   gateway: ReviewerGateway;
-  aiRunRepo: AiRunRepository;
   reviewsRepo: SupervisorReviewRepository;
   proposalRepo: Pick<ProposalRepository, 'update' | 'updateStatus'>;
   /** Rollout flag per tenant. Absent resolver / error ⇒ default shadow. */
@@ -75,7 +75,7 @@ export interface SupervisorReviewerDeps {
   resolveAccountType?: (proposal: Proposal) => Promise<AccountType | null>;
   /** Tenant locked banned-phrase list. */
   resolveBannedPhrases?: (tenantId: string) => Promise<string[]>;
-  /** Resolved lightweight-tier model id (logged on ai_runs + supervisor_reviews). */
+  /** Resolved lightweight-tier model id (logged on supervisor_reviews). */
   supervisorModel: string;
   logger: ReviewerLogger;
   now?: () => Date;
@@ -113,28 +113,11 @@ async function runLlmCheck(
   proposal: Proposal,
 ): Promise<{ signals: ReturnType<typeof parseSupervisorLlmResponse>; aiRunId: string | null }> {
   const input = buildLlmInput(proposal);
-  let run = createAiRun({
-    tenantId: proposal.tenantId,
-    taskType: SUPERVISOR_REVIEW_TASK_TYPE,
-    model: deps.supervisorModel,
-    inputSnapshot: input,
-    createdBy: 'system',
-  });
-  run = startAiRun(run);
-  // Persist the run row FIRST so supervisor_reviews.ai_run_id references a real
-  // row (never a fabricated id — see check-fk-path-coverage.sh).
-  try {
-    await deps.aiRunRepo.create(run);
-  } catch (err) {
-    deps.logger.warn('supervisor-review: ai_run create failed, continuing without run row', {
-      tenantId: proposal.tenantId,
-      proposalId: proposal.id,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    // Deterministic-only fallback: no LLM signals, no ai_run_id.
-    return { signals: null, aiRunId: null };
-  }
-
+  // OBS-5: the gateway writes the ONE ai_runs row for this call (tokens, cost,
+  // served model). The reviewer used to write a second, usage-less row of its
+  // own and link that one, so every review produced two rows and the linked
+  // row had no usage. correlationId = proposal id makes the gateway's row
+  // findable from the proposal, including when the call fails.
   try {
     const response = await deps.gateway.complete({
       taskType: SUPERVISOR_REVIEW_TASK_TYPE,
@@ -150,21 +133,22 @@ async function runLlmCheck(
             JSON.stringify(input),
         },
       ],
-      metadata: { proposalId: proposal.id },
+      metadata: { proposalId: proposal.id, correlationId: proposal.id },
     });
     const signals = parseSupervisorLlmResponse(response.content);
-    await deps.aiRunRepo.updateStatus(proposal.tenantId, run.id, 'completed', {
-      outputSnapshot: (signals ?? { unparseable: true }) as Record<string, unknown>,
-    });
-    return { signals, aiRunId: run.id };
+    // Link only a row the gateway actually persisted (its logging is
+    // best-effort) — supervisor_reviews.ai_run_id is an FK, never fabricated.
+    return { signals, aiRunId: response.aiRunId ?? null };
   } catch (err) {
-    await deps.aiRunRepo
-      .updateStatus(proposal.tenantId, run.id, 'failed', {
-        error: err instanceof Error ? err.message : String(err),
-      })
-      .catch(() => undefined);
-    // The LLM half failed; the deterministic checks still stand.
-    return { signals: null, aiRunId: run.id };
+    deps.logger.warn('supervisor-review: LLM check failed, deterministic checks only', {
+      tenantId: proposal.tenantId,
+      proposalId: proposal.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    // The LLM half failed; the deterministic checks still stand. The gateway's
+    // failed ai_runs row is not returned to callers, so nothing is linked; it
+    // is found by correlation_id = proposal id.
+    return { signals: null, aiRunId: null };
   }
 }
 

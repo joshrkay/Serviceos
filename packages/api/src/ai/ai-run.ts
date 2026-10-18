@@ -106,10 +106,6 @@ export function createAiRun(input: CreateAiRunInput): AiRun {
   };
 }
 
-export function startAiRun(run: AiRun): AiRun {
-  return { ...run, status: 'running', startedAt: new Date() };
-}
-
 export function completeAiRun(
   run: AiRun,
   output: Record<string, unknown>,

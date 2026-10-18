@@ -7,6 +7,10 @@
  * against real estimates.total_cents / invoices.total_cents columns (the
  * entity-resolver lesson: a mocked Pool once shipped nonexistent column names).
  *
+ * Also drives the real reviewer → LLMGateway → PgAiRunRepository path: one
+ * ai_runs row per review, and the review's ai_run_id resolves to the row that
+ * carries token usage and cost (OBS-5).
+ *
  * FK-PATH-COVERAGE: src/ai/supervisor/reviews-repo.ts
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -14,6 +18,10 @@ import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgSupervisorReviewRepository } from '../../src/ai/supervisor/reviews-repo';
 import { PgPricingBaselineResolver } from '../../src/ai/supervisor/pricing-baseline';
+import { createSupervisorReviewGate } from '../../src/ai/supervisor/reviewer';
+import { PgAiRunRepository } from '../../src/ai/pg-ai-run';
+import { LLMGateway } from '../../src/ai/gateway/gateway';
+import type { LLMProvider } from '../../src/ai/gateway/gateway';
 
 async function seedProposal(pool: Pool, tenantId: string, createdBy: string): Promise<string> {
   const id = crypto.randomUUID();
@@ -125,6 +133,74 @@ describe('Postgres integration — supervisor_reviews (migration 242)', () => {
       shadow: true,
     });
     expect(created.aiRunId).toBeNull();
+  });
+
+  it('a review through the real gateway links the ONE ai_runs row that carries usage (OBS-5)', async () => {
+    const t = await createTestTenant(pool);
+    const proposalId = await seedProposal(pool, t.tenantId, t.userId);
+    const aiRunRepo = new PgAiRunRepository(pool);
+    const provider: LLMProvider = {
+      name: 'stub',
+      isAvailable: async () => true,
+      complete: async () => ({
+        content: JSON.stringify({
+          missedUrgency: false,
+          medicalMentionUnescalated: false,
+          registerDrift: false,
+          rationale: 'routine',
+        }),
+        model: 'claude-haiku-4-5-20251001',
+        provider: 'stub',
+        tokenUsage: { input: 150, output: 25, total: 175 },
+        latencyMs: 4,
+      }),
+    };
+    const gateway = new LLMGateway(
+      { defaultProvider: 'stub' },
+      new Map([['stub', provider]]),
+      undefined,
+      aiRunRepo,
+    );
+    const gate = createSupervisorReviewGate({
+      gateway,
+      reviewsRepo: repo,
+      proposalRepo: { update: async () => null, updateStatus: async () => null },
+      supervisorModel: 'claude-haiku-4-5-20251001',
+      resolveMode: async () => 'shadow',
+      logger: { info() {}, warn() {}, error() {} },
+    });
+    const now = new Date();
+    await gate.review({
+      proposal: {
+        id: proposalId,
+        tenantId: t.tenantId,
+        proposalType: 'draft_estimate',
+        status: 'ready_for_review',
+        payload: { lineItems: [] },
+        summary: 'Estimate for a water heater',
+        createdBy: t.userId,
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+
+    const runs = await pool.query(
+      `SELECT id, token_usage, cost_micro_cents, correlation_id
+         FROM ai_runs WHERE tenant_id = $1 AND task_type = 'supervisor_review'`,
+      [t.tenantId],
+    );
+    expect(runs.rows).toHaveLength(1);
+    const joined = await pool.query(
+      `SELECT r.ai_run_id, a.token_usage, a.cost_micro_cents
+         FROM supervisor_reviews r JOIN ai_runs a ON a.id = r.ai_run_id
+        WHERE r.tenant_id = $1 AND r.proposal_id = $2`,
+      [t.tenantId, proposalId],
+    );
+    expect(joined.rows).toHaveLength(1);
+    expect(joined.rows[0].ai_run_id).toBe(runs.rows[0].id);
+    expect(joined.rows[0].token_usage).toMatchObject({ input: 150, output: 25, total: 175 });
+    expect(Number(joined.rows[0].cost_micro_cents)).toBe(150 * 100 + 25 * 500);
+    expect(runs.rows[0].correlation_id).toBe(proposalId);
   });
 
   it('RLS isolates supervisor_reviews across tenants', async () => {
