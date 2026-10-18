@@ -617,6 +617,15 @@ flowchart LR
         nothing.
       - The recording status callback it names stays on the verified router. A recording whose
         callback fails is recovered by the reconciliation sweep.
+      - The callback URL must carry the call's `From` and `To`. Twilio's `recordingStatusCallback`
+        POST includes neither, and on a cold process there is no in-memory session to supply them.
+        Without them `voicemail-status-route.ts:227-299` can't resolve the tenant and returns 200
+        with no lead and no recording. So the fallback route copies the incoming request's `From`
+        and `To` into the callback query, the way `buildVoicemailTwiml` already does with
+        `callerPhone` / `dialedNumber`. The route still reads no DB.
+
+        This is safe even though the route is unsigned. Only Twilio's own fallback request leads
+        to a callback, and that callback is signature-verified, including its query.
       - A test pins the route against all of these: no DB access, no mutation, no signature
         dependency.
       - Optional, for an outage of the whole API rather than only the DB: point `VoiceFallbackUrl`
@@ -633,7 +642,15 @@ flowchart LR
       "let its handler 5xx and be retried later". During an outage the fallback `<Record>` still
       captures the audio, and Twilio holds it until it is ingested; PRIV-2 deletes Twilio's copy only
       after ingestion succeeds. Add a reconciliation sweep that does three things:
-      - lists each subaccount's recent recordings through the Twilio Recordings API
+      - lists each subaccount's recordings through the Twilio Recordings API from a durable
+        watermark, not an unspecified "recent" window. A window would let recordings age out
+        unseen whenever the sweep is stopped, rate-limited or failing to authenticate for longer
+        than the window. So:
+        - Keep a per-subaccount watermark in the DB, and re-read a fixed overlap behind it, so
+          late-arriving recordings are still picked up.
+        - Page through every result.
+        - Advance the watermark only after every page has been processed successfully.
+        - Alert when the watermark lags beyond a threshold.
       - for any recording whose URL has no `voice_recordings` row (`recording_url` is the idempotency
         key), fetches the parent call's From/To through the Calls API and replays every leg the
         missed callback would have run, through the same handler code rather than a second
@@ -689,6 +706,10 @@ flowchart LR
     lead and one voicemail recording, and replaying the sweep creates neither again.
   - The lead receipt is recorded, then `createLead` throws. The lead leg stays retryable, and the next
     delivery or sweep creates exactly one lead.
+  - The sweep is down for longer than any rolling window. On restart it resumes from the watermark,
+    misses no recording, and creates no duplicates in the overlap.
+  - A fallback voicemail whose callback arrives after the DB recovers creates its lead and recording
+    straight from the callback, using the `From`/`To` in its query, without waiting for the sweep.
   - The upload and insert succeed, then the hand-off fails before the success receipt. The sweep resumes
     from the stored S3 object and hands the voicemail to transcription exactly once, with no Twilio
     re-fetch.
@@ -808,6 +829,15 @@ flowchart LR
     - **External sinks are erased too, or the erase says it is incomplete.**
       - With content capture on, the erase deletes the subject's Langfuse traces through the
         Langfuse API, keyed by the collected correlation and session ids.
+      - The Langfuse SDK queues events synchronously and sends them later. A trace queued before
+        the tombstone was written can therefore still go out after the external delete and recreate
+        the trace (`trace-exporter.ts` exposes `flush()` only for shutdown). So the erase does four
+        things:
+        - flushes the exporter queue before the external delete
+        - applies the tombstone at the exporter's send boundary too, so queued events for the
+          subject are dropped before transport
+        - deletes again after the drain window
+        - reports success only once that second delete and its re-check come back clean
       - If any external delete fails, the erase result reports that store as incomplete, the owner
         sees it, and `alertOperator` fires.
       - It never claims success it hasn't confirmed.
@@ -899,6 +929,8 @@ flowchart LR
   - with content capture on, the subject's Langfuse traces are deleted through the API (a mocked
     Langfuse endpoint). When the delete fails, the erase result marks that store incomplete and
     alerts.
+  - a trace queued before the erase whose transport is delayed until after it is never recreated: it
+    is dropped at the send boundary, or deleted again on the second pass
   - with two customers sharing a full name, the other customer's row is untouched
   - a row that matches only a household-shared phone lands on the candidate list and is scrubbed only
     after confirmation
