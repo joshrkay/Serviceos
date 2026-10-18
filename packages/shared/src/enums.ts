@@ -207,6 +207,10 @@ export enum ProposalType {
   ONBOARDING_ESTIMATE_TEMPLATE = 'onboarding_estimate_template',
   ONBOARDING_TEAM_MEMBER = 'onboarding_team_member',
   ONBOARDING_SCHEDULE = 'onboarding_schedule',
+  // "Pick, don't build" onboarding — greeting, book-or-hold, after-hours mode,
+  // emergency target, payment mode and booking-hours preset in one capture-class
+  // proposal minted from the owner's draft on "That's right".
+  ONBOARDING_VOICE_POLICY = 'onboarding_voice_policy',
   REVIEW_RESPONSE_PROPOSAL = 'review_response_proposal',
   SEND_PAYMENT_REMINDER = 'send_payment_reminder',
   APPLY_LATE_FEE = 'apply_late_fee',

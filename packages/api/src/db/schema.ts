@@ -7660,6 +7660,65 @@ export const MIGRATIONS = {
 
     ALTER TABLE users ALTER COLUMN can_field_serve DROP DEFAULT;
   `,
+
+  // "Pick, don't build" onboarding (docs/plans/2026-10-18-001). Platform-owned,
+  // founder-curated typical prices per (trade, metro) that the price choice
+  // shows the owner; metro_code 'US' is the national fallback. No tenant_id
+  // and no RLS on purpose: this is reference data like `tenants`, written by
+  // admins and seeds only, read by every tenant's onboarding.
+  '310_regional_price_tiers': `
+    CREATE TABLE IF NOT EXISTS regional_price_tiers (
+      trade TEXT NOT NULL,
+      metro_code TEXT NOT NULL,
+      tier JSONB NOT NULL,
+      source TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (trade, metro_code)
+    );
+  `,
+
+  // The owner's pre-approval onboarding draft: the assembled typical shop plus
+  // the choices they have staged. One row per tenant. Nothing here reaches
+  // tenant_settings until POST /api/onboarding/draft/approve turns it into
+  // onboarding_* proposals and approves them; `version` is the compare-and-swap
+  // guard against two tabs staging at once. RLS like onboarding_session (195).
+  '311_onboarding_drafts': `
+    CREATE TABLE IF NOT EXISTS onboarding_drafts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      pack_id TEXT NOT NULL,
+      trade TEXT NOT NULL,
+      metro_code TEXT,
+      metro_name TEXT,
+      business_name TEXT NOT NULL,
+      owner_first_name TEXT,
+      client_timezone TEXT,
+      assembled JSONB NOT NULL,
+      choices JSONB NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved')),
+      version INTEGER NOT NULL DEFAULT 1,
+      proposal_ids JSONB NOT NULL DEFAULT '[]',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      approved_at TIMESTAMPTZ
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_onboarding_drafts_tenant
+      ON onboarding_drafts (tenant_id);
+    ALTER TABLE onboarding_drafts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE onboarding_drafts FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_onboarding_drafts ON onboarding_drafts;
+    CREATE POLICY tenant_isolation_onboarding_drafts ON onboarding_drafts
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // "Pick, don't build" onboarding — how the owner collects payment when a
+  // job is marked done. Nullable: unset until the owner chooses. Written by
+  // the onboarding_voice_policy proposal handler and the settings PUT.
+  '312_tenant_settings_payment_collection_mode': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS payment_collection_mode TEXT
+        CHECK (payment_collection_mode IS NULL OR payment_collection_mode IN ('pay_link', 'collect_on_site'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

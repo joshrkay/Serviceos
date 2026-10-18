@@ -10,6 +10,7 @@ import {
   VOICE_APPROVAL_PIN_CREDENTIAL_KEYS,
   type SettingsUpdateOptions,
   type E1Reviewer,
+  type PaymentCollectionMode,
 } from './settings';
 
 /**
@@ -233,6 +234,8 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // table) — convert explicitly instead of the bare int-column casts
     // used elsewhere in this mapper.
     autonomousBookingEnabled: (row.autonomous_booking_enabled as boolean | null) ?? false,
+    // Migration 312 — nullable; undefined when the owner has not chosen.
+    paymentCollectionMode: (row.payment_collection_mode as PaymentCollectionMode | null) ?? undefined,
     autonomousBookingThreshold:
       row.autonomous_booking_threshold != null
         ? Number(row.autonomous_booking_threshold)
@@ -487,6 +490,7 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         // route validation (Zod + validateCommonSettingsFields) never passes
         // null through, so the generic `value ?? null` handler is safe.
         autonomousBookingEnabled: 'autonomous_booking_enabled',
+        paymentCollectionMode: 'payment_collection_mode',
         autonomousBookingThreshold: 'autonomous_booking_threshold',
         // D-018 (WS18) — migration 247.
         autonomousCloseEnabled: 'autonomous_close_enabled',

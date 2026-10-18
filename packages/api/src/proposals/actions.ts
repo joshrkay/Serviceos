@@ -67,6 +67,7 @@ const CONFIG_WRITING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
   'onboarding_estimate_template',
   'onboarding_team_member',
   'onboarding_schedule',
+  'onboarding_voice_policy',
   'update_brand_voice',
   'update_catalog_item',
   'add_catalog_item',

@@ -59,6 +59,13 @@ export interface OnboardingFacts {
   /** When the tenant skipped the AI check (escape hatch — completes the step,
    * verification stays retryable from Settings). */
   aiVerificationSkippedAt: Date | null;
+  /**
+   * "Pick, don't build" onboarding — the tenant's pre-approval draft, when one
+   * exists. Additive: the seven steps are unchanged (the status contract pins
+   * `.length(7)` and mobile consumes it); the v3 shell derives its turns from
+   * this plus the draft itself.
+   */
+  draft?: { status: 'draft' | 'approved'; choicesAnswered: number; version: number } | null;
 }
 
 /**
@@ -168,5 +175,6 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
       : {}),
     ...(f.activatedAt ? { activatedAt: f.activatedAt.toISOString() } : {}),
     ...(f.tenantCreatedAt ? { accountCreatedAt: f.tenantCreatedAt.toISOString() } : {}),
+    ...(f.draft ? { draft: f.draft } : {}),
   };
 }

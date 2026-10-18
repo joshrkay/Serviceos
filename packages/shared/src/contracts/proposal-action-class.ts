@@ -42,6 +42,7 @@ export const CAPTURE_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   ProposalType.ONBOARDING_ESTIMATE_TEMPLATE,
   ProposalType.ONBOARDING_TEAM_MEMBER,
   ProposalType.ONBOARDING_SCHEDULE,
+  ProposalType.ONBOARDING_VOICE_POLICY,
   ProposalType.LOG_EXPENSE,
   ProposalType.CONVERT_LEAD,
   ProposalType.CONFIRM_APPOINTMENT,
