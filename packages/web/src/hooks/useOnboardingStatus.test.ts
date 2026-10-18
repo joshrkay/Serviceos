@@ -36,6 +36,33 @@ describe('useOnboardingStatus', () => {
     expect(result.current.data?.isComplete).toBe(false);
   });
 
+  it('carries the draft fact through with its execution state, and without it from an API that predates it', async () => {
+    const body = { steps: [], currentStep: 'identity', isComplete: false, voiceAgentLive: false, tenantId: 't', subscriptionStatus: null };
+    const respond = (draft?: unknown) =>
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ...body, ...(draft ? { draft } : {}) }),
+      } as Response);
+
+    respond({ status: 'approved', choicesAnswered: 7, version: 2, execution: 'failed' });
+    const failed = renderHook(() => useOnboardingStatus(0));
+    await waitFor(() => expect(failed.result.current.isLoading).toBe(false));
+    expect(failed.result.current.data?.draft?.execution).toBe('failed');
+
+    _resetOnboardingStatusCacheForTests();
+    respond({ status: 'approved', choicesAnswered: 7, version: 2 });
+    const older = renderHook(() => useOnboardingStatus(0));
+    await waitFor(() => expect(older.result.current.isLoading).toBe(false));
+    expect(older.result.current.data?.draft).toEqual({ status: 'approved', choicesAnswered: 7, version: 2 });
+    expect(older.result.current.data?.draft?.execution).toBeUndefined();
+
+    _resetOnboardingStatusCacheForTests();
+    respond();
+    const none = renderHook(() => useOnboardingStatus(0));
+    await waitFor(() => expect(none.result.current.isLoading).toBe(false));
+    expect(none.result.current.data?.draft).toBeUndefined();
+  });
+
   it('surfaces HTTP errors', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: false,
