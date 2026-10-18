@@ -42,6 +42,15 @@ export const GREETING_MAX = 120;
 
 const DOLLARS_HINT = 'Use dollars, like 120 or 89.50.';
 
+/**
+ * The most a typed price may be: $1,000, the same ceiling the hourly rate has
+ * everywhere else it is set. A slip like a phone number's tail would otherwise
+ * be read back as a plausible price, approved, and then scale every service in
+ * the price book past what it can hold.
+ */
+export const MAX_TYPED_PRICE_CENTS = 100_000;
+const TOO_MUCH = `Keep it to ${dollars(MAX_TYPED_PRICE_CENTS)} or less.`;
+
 export function typedAnswer(kind: TypedKind, values: TypedValues): TypedResult {
   if (kind === 'greeting') {
     const text = values.greeting.trim();
@@ -56,8 +65,10 @@ export function typedAnswer(kind: TypedKind, values: TypedValues): TypedResult {
   // A free trip is a real answer; a free hour is not.
   if (values.trip.trim() === '') errors.trip = 'Enter what you charge to come out.';
   else if (tripFeeCents === null) errors.trip = DOLLARS_HINT;
+  else if (tripFeeCents > MAX_TYPED_PRICE_CENTS) errors.trip = TOO_MUCH;
   if (values.rate.trim() === '' || hourlyRateCents === 0) errors.rate = 'Enter your hourly rate.';
   else if (hourlyRateCents === null) errors.rate = DOLLARS_HINT;
+  else if (hourlyRateCents > MAX_TYPED_PRICE_CENTS) errors.rate = TOO_MUCH;
   if (errors.trip || errors.rate || tripFeeCents === null || hourlyRateCents === null) return { errors };
   return {
     override: {

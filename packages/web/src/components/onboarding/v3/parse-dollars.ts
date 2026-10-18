@@ -6,8 +6,9 @@
  * Accepts "120", "$120", "$ 120", "89.50", "89.5", "1,234" and "$1,234.56".
  * Everything else is null: negatives, more than two decimals (rounding would
  * quietly change a price), a half-typed "120." or ".50", commas that are not
- * thousands separators, and more than seven digits of dollars (so the result
- * is always a safe integer).
+ * thousands separators, and more than seven digits of dollars (a parse limit
+ * only, so the text stays a sane length; what a price may be worth is the
+ * caller's rule, e.g. MAX_TYPED_PRICE_CENTS in typed-answer.ts).
  */
 const AMOUNT = /^(?<whole>\d{1,7}|\d{1,3}(?:,\d{3})+)(?:\.(?<cents>\d{1,2}))?$/;
 

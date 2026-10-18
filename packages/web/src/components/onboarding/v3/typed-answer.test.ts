@@ -36,10 +36,10 @@ describe('typedAnswer: price', () => {
     expect(typedAnswer('price', { ...blank, trip: '$120', rate: '175' })).toEqual({
       override: { label: '$120 to come out, then $175 an hour', writes: {}, prices: { tripFeeCents: 12000, hourlyRateCents: 17500 } },
     });
-    expect(typedAnswer('price', { ...blank, trip: '89.50', rate: '$1,234.05' }).override).toEqual({
-      label: '$89.50 to come out, then $1,234.05 an hour',
+    expect(typedAnswer('price', { ...blank, trip: '89.50', rate: '$234.05' }).override).toEqual({
+      label: '$89.50 to come out, then $234.05 an hour',
       writes: {},
-      prices: { tripFeeCents: 8950, hourlyRateCents: 123405 },
+      prices: { tripFeeCents: 8950, hourlyRateCents: 23405 },
     });
   });
 
@@ -63,6 +63,19 @@ describe('typedAnswer: price', () => {
       trip: 'Use dollars, like 120 or 89.50.',
       rate: 'Use dollars, like 120 or 89.50.',
     });
+  });
+
+  it('accepts up to $1,000 and says so inline above it, for either amount', () => {
+    expect(typedAnswer('price', { ...blank, trip: '1,000', rate: '$1,000.00' }).override?.prices).toEqual({
+      tripFeeCents: 100000,
+      hourlyRateCents: 100000,
+    });
+    expect(typedAnswer('price', { ...blank, trip: '120', rate: '1,000.01' }).errors).toEqual({ rate: 'Keep it to $1,000 or less.' });
+    expect(typedAnswer('price', { ...blank, trip: '1001', rate: '150' }).errors).toEqual({ trip: 'Keep it to $1,000 or less.' });
+    // A 7-digit slip (the tail of a phone number) is not read back as a price.
+    const slip = typedAnswer('price', { ...blank, trip: '89', rate: '5550142' });
+    expect(slip.override).toBeUndefined();
+    expect(slip.errors).toEqual({ rate: 'Keep it to $1,000 or less.' });
   });
 
   it('never returns an override and errors together', () => {
@@ -89,7 +102,7 @@ describe('initialTypedValues', () => {
   });
 
   it('round-trips: what reopens parses back to the same override', () => {
-    const staged = { override: { label: '$89.50 to come out, then $1,200 an hour', writes: {}, prices: { tripFeeCents: 8950, hourlyRateCents: 120000 } } };
+    const staged = { override: { label: '$89.50 to come out, then $950 an hour', writes: {}, prices: { tripFeeCents: 8950, hourlyRateCents: 95000 } } };
     expect(typedAnswer('price', initialTypedValues(staged)).override).toEqual(staged.override);
   });
 });
