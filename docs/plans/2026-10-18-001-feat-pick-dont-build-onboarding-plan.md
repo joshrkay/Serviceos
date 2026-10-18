@@ -134,7 +134,7 @@ unowned position.
   rejected: the integration cost lands later and larger.)
 - **The demo call is last and decision-gated.** It needs platform Twilio credentials, a
   tenant-less public route, a leased pool of demo tenants per trade (one live call per
-  tenant), consent and rate limits. Screen 7's
+  tenant), consent, rate limits and a reserved daily budget. Screen 7's
   in-app "hear it" delivers most of the value without telephony.
 
 ## Scope Boundaries
@@ -185,16 +185,17 @@ tiers; import from a photo; pricing or plan changes.
   `invoice.payment_link_deactivated` with the reason `payment_mode_changed`. U7 adds
   `demo_job_dropped` (a queued job refused by the lease-generation check),
   `demo_write_rejected` (a write refused by the same check inside its own transaction),
-  `demo_inflight_reaped` (a stale in-flight registry row removed) and `demo_callsid_mismatch`
+  `demo_inflight_reaped` (a stale in-flight registry row removed), `demo_callsid_mismatch`
   (a validly signed callback, or the `Calls` response, presenting a second CallSid for a
-  lease).
+  lease) and `demo_budget_alert` (the daily call budget reaching 80% of a cap, or filling one).
 - **Integer cents:** tier prices, trip fee and hourly rate are cents end to end; the price
   multiplier is applied in integer arithmetic with explicit rounding in one function.
 - **tenant_id + RLS:** `onboarding_drafts` carries `tenant_id` with RLS like
   `onboarding_session` (migration 195). `regional_price_tiers` and `demo_calls` are
   platform tables with no `tenant_id`, admin-write only, the same posture as `tenants`;
-  `demo_tenant_leases` and `demo_inflight_jobs` (U7) are the same kind of platform table, and
-  their `tenant_id` only names the demo tenant a call or a running job holds.
+  `demo_call_budget` (U7; one row per UTC day, no `tenant_id` at all), `demo_tenant_leases`
+  and `demo_inflight_jobs` (U7) are the same kind of platform table, and the last two's
+  `tenant_id` only names the demo tenant a call or a running job holds.
 - **LLM gateway:** the free-speech override calls the existing extractors through the gateway;
   the choice path makes no model call.
 - **Catalog resolver:** the trip fee and hourly rate land as catalog items via the pack
@@ -330,7 +331,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   both): build exactly two proposals from the draft
   (`buildDraftProposals`: `onboarding_tenant_settings` carrying name, city, pack, chosen prices
   and timezone, and `onboarding_voice_policy` carrying the other staged settings; the
-  draft-only `existing_number` answer is never written), create them with surface
+  draft-only `existing_number` answer is never written as itself; U6 turns it into the
+  settings payload's `forwarding` field), create them with surface
   `'onboarding_readback'`, call the same
   batch-approve function `routes/proposals.ts:322` uses, and gate on its result: that helper
   reports per-item failures in `failed` and keeps the earlier approvals, so the route throws a
@@ -371,7 +373,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     per PUT and one `onboarding.draft_approved`; `tenant_settings` is untouched until the
     worker runs (pinned by `test/integration/onboarding-draft-approve.test.ts`). Unit:
     `buildDraftProposals` returns only those two inputs and both payloads parse under their
-    Zod schemas; an answered `existing_number` never appears in either payload.
+    Zod schemas; an answered `existing_number` never appears in either payload as a key (its
+    effect, the settings payload's `forwarding` field, is U6's).
   - Edge: approve with choices unanswered → each takes its `mostShops` default (option A
     today), no gated proposal minted; no recorded timezone → 400 `TIMEZONE_REQUIRED`, zero
     proposal rows, draft still `'draft'`; stale `version` on PUT → 409; approve twice → second
@@ -692,22 +695,34 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     (315) adds nullable `onboarding_drafts.forwarding_source_number` and
     `forwarding_carrier`; modify `packages/api/src/onboarding/draft/contracts.ts` and
     `repository.ts` (both fields on the draft: E.164 through the existing phone normaliser, and
-    the carrier enum above), `packages/api/src/routes/onboarding-draft.ts` (`PUT
+    the carrier enum above; staging the `existing_number` answer "no" nulls both draft columns
+    in that same locked write, so the draft never holds a number beside a "no"),
+    `packages/api/src/routes/onboarding-draft.ts` (`PUT
     /draft/forwarding` stages them, refused unless `existing_number` resolves to "yes", and
     written through U11's locked-write helper so it takes the row lock, is refused once the
     draft is approved and bumps `version`),
-    `packages/api/src/onboarding/draft/approve.ts` (carry `forwardingSourceNumber` and
-    `forwardingCarrier` on the `onboarding_tenant_settings` payload),
-    `packages/api/src/proposals/contracts/onboarding.ts` (both optional on that payload's Zod
-    schema), `proposals/execution/onboarding-handlers.ts` (`OnboardingTenantSettingsExecutionHandler`
-    writes both columns through `SettingsRepository` and, in that same write, nulls
-    `forwarding_confirmed_at` and `forwarding_verified_at` whenever the payload's source number
-    or carrier differs from the stored one, so a re-run that moves the forwarding line cannot
-    inherit the old line's "I dialed it" or probe stamp), and `packages/api/src/settings/settings.ts`
-    and `pg-settings.ts` (the two keys; not added to `updateSettingsSchema`); tests
+    `packages/api/src/onboarding/draft/approve.ts` (carry ONE `forwarding` field on the
+    `onboarding_tenant_settings` payload, three-valued on purpose: `{ sourceNumber, carrier }`
+    when `existing_number` is "yes" and both are staged, the literal `null` when it is "no"
+    ("clear the line"), and no `forwarding` key at all when the question was never answered or
+    "yes" has no pair yet, which means "untouched"),
+    `packages/api/src/proposals/contracts/onboarding.ts` (`forwarding` optional on that
+    payload's Zod schema as a union of a strict `{ sourceNumber: E.164, carrier: enum }` and
+    `z.null()`, so absent and `null` stay different through validation and through the
+    proposal's stored JSON), `proposals/execution/onboarding-handlers.ts`
+    (`OnboardingTenantSettingsExecutionHandler`, one `SettingsRepository` write per case: a
+    value writes `forwarding_source_number` and `forwarding_carrier` and, in that same write,
+    nulls `forwarding_confirmed_at` and `forwarding_verified_at` whenever the source number or
+    carrier differs from the stored one, so a re-run that moves the forwarding line cannot
+    inherit the old line's "I dialed it" or probe stamp; `null` nulls all four columns
+    (`forwarding_source_number`, `forwarding_carrier`, `forwarding_confirmed_at`,
+    `forwarding_verified_at`) together; absent touches none of them), and
+    `packages/api/src/settings/settings.ts` and `pg-settings.ts` (the four keys, each accepting
+    an explicit `null` to clear, as the deposit keys already do, with `undefined` meaning
+    untouched; not added to `updateSettingsSchema`); tests
     `packages/api/test/onboarding/draft/forwarding.test.ts`,
     `packages/api/test/integration/onboarding-draft-forwarding.test.ts` (the stamp-clearing
-    cases below run here, against real Postgres)
+    and clear-on-"no" cases below run here, against real Postgres)
   - create `packages/api/src/onboarding/forwarding-text.ts` (owner SMS with tap-to-dial carrier
     code via `notifications/owner-sms-sender.ts`), route `POST /api/onboarding/phone/forwarding-text`
   - modify `packages/web/src/components/home/HomeConversationPanel.tsx`, `HomePage.tsx`
@@ -740,8 +755,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   things on the same turn, "What's that number?" (E.164) and the carrier (chips from the table
   in `steps/PhoneStep.tsx:28-35`), because a yes/no cannot be forwarded and the owner's cell
   is not the business line. Both answers are staged on the draft (`PUT /draft/forwarding`),
-  ride the `onboarding_tenant_settings` payload as `forwardingSourceNumber` and
-  `forwardingCarrier`, and are written to `tenant_settings.forwarding_source_number` and
+  ride the `onboarding_tenant_settings` payload as the one `forwarding` field
+  (`{ sourceNumber, carrier }`), and are written to `tenant_settings.forwarding_source_number` and
   `forwarding_carrier` by that proposal's handler when it executes, so the write is approved,
   audited and undoable like the rest. Nothing else writes them: they are not in
   `updateSettingsSchema`, and the staging endpoint writes the draft only. The shell holds until
@@ -765,6 +780,26 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   First-day home replaces empty KPI cards with
   Rivet's spoken opener and three chips; the existing cards stay hidden until they have data.
   Delete v2 with a re-grep for every import (CLAUDE.md dead-code rule).
+- **A "no" to the existing-number question clears the line.** `existing_number` is a
+  draft-only answer, so on its own it writes nothing, and a payload that merely left the
+  forwarding fields out would leave an earlier run's `forwarding_source_number`,
+  `forwarding_carrier` and both stamps in place (the handler cannot tell "not asked" from
+  "answered no"); status, the probe and reopen would then keep treating an abandoned line as
+  configured. So the payload's `forwarding` field has three states, and the draft is what tells
+  them apart. A "yes" with its pair staged approves as `{ sourceNumber, carrier }`. A "no"
+  approves as the literal `null`, and the handler clears `forwarding_source_number`,
+  `forwarding_carrier`, `forwarding_confirmed_at` and `forwarding_verified_at` in one write, so
+  there is no moment with the number gone and a stamp left, or the reverse. No key means
+  untouched: `existing_number` was never answered (a first run that skipped the turn, or a
+  draft approved before the eighth turn shipped; the question has no default) or "yes" has no
+  pair staged yet, and nothing stored changes. On a re-run, reopen pre-fills the answer from the
+  live columns: "yes" with the stored number and carrier when `forwarding_source_number` is set
+  (re-approved as it stands, the value equals the stored one and leaves both stamps alone),
+  unanswered otherwise; an established shop that flips that answer to "no" is the case the
+  `null` exists for. The text, the probe and the badge key on `forwarding_source_number` being
+  set, so after a clear none of them has a line to act on: both routes answer 409
+  `FORWARDING_NOT_CONFIGURED` and place nothing, and the first-day state shows no forwarding
+  badge.
 - **Number-availability failures reach the shell as a code.** The shell can tell the
   recoverable "someone took that number" from a failure no new number fixes only if the status
   says which one it was, and today it cannot: `load-facts.ts` selects the twilio row's
@@ -849,7 +884,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     first-day home with zero jobs → opener, three chips, two muted cards, no stat tiles.
   - Edge (forwarding answers): staged on the draft but not approved → `tenant_settings`
     forwarding columns still null; `existing_number` "no" → `PUT /draft/forwarding` refused and
-    neither key on the payload; approved and executed → both columns hold the staged values;
+    the payload carries `forwarding: null` (not omission: `buildDraftProposals` output has the
+    key with the value `null`, and so does the proposal row's stored JSON after a round trip);
+    approved and executed → both columns hold the staged values;
     `PUT /draft/forwarding` after approval → 409 `DRAFT_APPROVED`, and its race with approve is
     the forwarding row of U11's writer-vs-approve test.
   - Edge (forwarding re-run clears the old line's stamps): a tenant with source number A,
@@ -861,6 +898,25 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     (confirmed but never probed, and the reverse) → both end null on a change. The columns and
     the stamps change in one `SettingsRepository` write (a write that fails leaves the old
     numbers beside the old stamps, never new numbers beside old stamps).
+  - Edge (a re-run that answers "no" clears the old line; the explicit-null contract, real
+    Postgres): an established tenant with source number A, carrier `verizon` and both stamps
+    set re-runs setup (reopen pre-fills `existing_number` "yes" with A and `verizon`) and
+    flips the answer to "no" → the draft's two forwarding columns are null, the approved
+    payload has `forwarding: null`, and after execution all four `tenant_settings` columns
+    (`forwarding_source_number`, `forwarding_carrier`, `forwarding_confirmed_at`,
+    `forwarding_verified_at`) are null, written by one `SettingsRepository` write (a fault
+    injected into it leaves all four at their old values, never some cleared); the text and
+    probe routes answer 409 `FORWARDING_NOT_CONFIGURED` with no SMS sent and no call placed, and
+    the first-day state shows no forwarding badge. "No" then "yes" on a tenant with nothing
+    stored → both columns hold the staged pair and both stamps stay null (the badge shows until
+    the owner confirms or a probe lands). A payload with no `forwarding` key (`existing_number`
+    never answered, or "yes" with no pair staged) → all four columns exactly as they were,
+    stamps included, whatever their values. "Yes" re-approved with the stored number and
+    carrier → columns and stamps untouched. Reopen on a tenant with no
+    `forwarding_source_number` leaves `existing_number` unanswered. Unit (`forwarding.test.ts`,
+    the payload schema): `forwarding` absent, `null` and a value all parse and stay distinct;
+    `{ sourceNumber }` alone, a non-E.164 number, a carrier outside the four and an extra key
+    are rejected.
   - Edge (legacy seeded tenants): rows seeded at the pack defaults, and separately rows seeded
     at the tenant's `standard` tier, its `premium` tier or a free-speech pair (scaled rows
     included), with a null baseline and an exactly matching price → after the backfill each has
@@ -922,7 +978,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     Postgres pins the new columns (`tenant_settings.forwarding_source_number`,
     `forwarding_carrier` with its CHECK, `seeded_baseline_backfilled_at`;
     `catalog_items.seeded_unit_price_cents`; the `onboarding_drafts` forwarding columns) and
-    the handler's write to them under RLS; the backfill runs against seeded and hand-edited
+    the handler's write to them under RLS (a value, an explicit `null` that clears the four
+    forwarding columns, and an absent key that leaves them alone); the backfill runs against seeded and hand-edited
     rows in a populated database (extending `migration-replay-populated-db.test.ts`).
 - **Verification:** `grep -r "onboarding/v2" packages/web/src` returns nothing; e2e passes for
   both branches; the forbidden-vocabulary test extends to `components/home`.
@@ -1021,10 +1078,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Requirements:** R3
 - **Dependencies:** U2
 - **Files:**
-  - modify `packages/api/src/routes/onboarding-draft.ts` (`POST /draft/retry` in S1b,
-    `POST /draft/undo` and `POST /draft/reset` in S4); create
+  - modify `packages/api/src/routes/onboarding-draft.ts` (`POST /draft/retry` in S1b, which
+    takes no body; `POST /draft/undo` and `POST /draft/reset` in S4, each with a required
+    `{ expectedVersion }`, and S4 gives retry the same field); create
     `packages/api/src/onboarding/draft/retry.ts`
-    (`retryFailedDraftProposals`, S1b); modify `packages/api/src/onboarding/draft/approve.ts`
+    (`retryFailedDraftProposals`, S1b; S4 adds its `expectedVersion` comparison); modify `packages/api/src/onboarding/draft/approve.ts`
     (the undo and reset helpers, S4, over one shared locked read of the draft and its
     proposals) and `packages/api/src/onboarding/draft/repository.ts` (undo and reset are draft
     writers under U11's invariant: each goes through the locked-write helper, declaring the
@@ -1046,27 +1104,42 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `stopped`), and rewrites the `deriveDraftExecution` and `retry.ts` doc comments, which
     today name the whole-draft undo as the way out of `stopped`
   - modify `packages/web/src/components/onboarding/v3/ConversationShell.tsx` (undo button during
-    the window; the wait screen holds while `execution` is `pending` or `executing`; on
-    `failed`, "Something didn't save. Try again." → retry, plus "Start over" (reset) beneath it
+    the window, which posts the `version` from the approve response; the wait screen holds while
+    `execution` is `pending` or `executing`; on
+    `failed`, "Something didn't save. Try again." → retry (posting the draft's `version`), plus "Start over" (reset) beneath it
     when `recovery` is `reset`; on `stopped`, never Retry, since it cannot recover: with
     `recovery: 'reset'` copy that says part of the setup was undone and a "Start over" button
     that calls `POST /draft/reset` with the draft's `version` and then re-renders the
     read-back with the owner's answers intact, and with `recovery: 'settings'` copy that says
     part of it is already live and a link to the Settings page, no button; the same screen
     answers a `DRAFT_RESET_REFUSED` the server reaches on a race the same way)
-  - modify `packages/shared/src/contracts/onboarding-draft.ts` (S4: the reset body
-    `{ expectedVersion }` and its typed refusals, kept equal to the API's Zod by
-    `wire-contract.test.ts`)
+  - modify `packages/shared/src/contracts/onboarding-draft.ts` (S4: the undo and reset bodies
+    `{ expectedVersion }`, retry's optional `expectedVersion`, and their typed refusals, kept
+    equal to the API's Zod by `wire-contract.test.ts`)
   - tests: `packages/api/test/onboarding/draft/undo.test.ts`, `reset.test.ts`,
     `packages/api/test/onboarding/derive-status.test.ts` (extend),
     `packages/api/test/integration/onboarding-draft-undo.test.ts`,
     `packages/api/test/integration/onboarding-draft-reset.test.ts`, the v3 shell tests; shipped
-    in S1b: `packages/api/test/onboarding/draft/retry.test.ts`,
+    in S1b: `packages/api/test/onboarding/draft/retry.test.ts` (extended in S4 for
+    `expectedVersion`),
     `packages/api/test/proposals/lifecycle-retry.test.ts`,
     `packages/api/test/integration/onboarding-draft-execution.test.ts`
 - **Approach:** The derived `execution` fact and `POST /draft/retry` ship in the S1 follow-ups
-  PR (#1694); undo and reset ship in S4. `POST /draft/undo` runs in one tenant transaction that
-  locks, then decides, then writes. It takes `SELECT … FOR UPDATE` on the draft row and then on the proposals in
+  PR (#1694); undo and reset ship in S4. `POST /draft/undo` takes a required body
+  `{ expectedVersion }`: the draft's `version` as the saving screen rendered it, which is the
+  version after the approval the screen is showing (`draft.version` in the approve response, or
+  the status draft block's `version` when the screen is rebuilt after a reload). It runs in one
+  tenant transaction that locks, then decides, then writes. It locks the draft row through
+  `updateLocked`, requiring `approved`: a draft already back in `draft` (a double tap, or
+  another tab got there first) is 409 `DRAFT_NOT_APPROVED`, and an `expectedVersion` other than
+  the row's `version` is 409 `VERSION_CONFLICT` naming the version sent and the version found,
+  with nothing changed and the proposals not yet read. The version is what binds the tap to the
+  approval its screen showed. Without it, tab A's saving screen for approval 1 can outlive tab
+  B's undo (or reset), edit and approval of a new pair inside the window, and A's versionless
+  undo would lock the *current* `proposal_ids` and undo B's approval. An approved draft is
+  frozen and its `version` moves only when undo, reset or reopen take it out of `approved`
+  (retry does not write the row), and every approval bumps it again, so one version names one
+  approval. Then it takes `SELECT … FOR UPDATE` on the proposals in
   `proposal_ids` (ordered by id, so two undos cannot deadlock), and requires EVERY locked row
   to still be `approved` and inside the undo window (`isInUndoWindow`, read from the locked
   row). If any row is `executing`, `executed`, `execution_failed` or `undone`, if any window
@@ -1155,25 +1228,65 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   live (`recovery`); `executed` when all are; `executing` when work is in flight; `pending` when all are
   approved and none is picked up; and `null` while the draft is still being edited or lists
   nothing, so a vacuous "executed" never opens billing.
+
+  Retry carries the version for the same reason as undo. `POST /draft/retry` also takes
+  `{ expectedVersion }`, the approved draft's `version` as the failed screen rendered it; under
+  the draft lock, after the `approved` check, any other value is 409 `VERSION_CONFLICT` naming
+  both versions, nothing is reset and no `proposal.retried` row is written. Without it, a tab
+  still showing the failure of approval 1 could re-queue the failed proposals of a newer pair
+  another tab approved after a reset. This is a change to the retry that #1694 ships, not part
+  of it: that route reads no body (its handler calls `retryFailedDraftProposals` without
+  parsing `req.body`), so a version sent today is ignored. It is a follow-up in S4, with undo
+  and reset: the strict `{ expectedVersion }` schema (a positive integer), the comparison in
+  `retryFailedDraftProposals`, and the shared wire schema. The field is optional until
+  approve's becomes required, in the same step (U11), so a client that posts nothing keeps
+  working until then; S2's web can send it from the start. A retry still does not write the
+  draft row, so it leaves `version` unchanged, and two tabs retrying one failed set at one
+  version race to the existing `DRAFT_RETRY_NOTHING_FAILED`.
 - **Patterns to follow:** `routes/proposals.ts` undo handler and `proposals/lifecycle.ts`,
   `workers/execution-worker.ts` retry semantics, D-039/D-040.
 - **Test scenarios:**
-  - Happy path: approve → undo inside the window → every proposal reverted, settings untouched,
+  - Happy path: approve → undo inside the window, sending the approve response's
+    `draft.version` → every proposal reverted, settings untouched,
     draft `'draft'` and editable again, one audit row.
   - Edge: any one proposal `executing`, `executed`, `execution_failed` or `undone` (one case
     each; the `undone` one is an inbox-split pair, whose way out is the reset below) →
     409 `DRAFT_UNDO_REFUSED`, no row changed, draft still `approved`; the window closed on one
     row → 409 `UNDO_WINDOW_CLOSED`, nothing changed; approve → all executed → fact `executed`
     and the shell moves to billing.
+  - Undo, version (the stale-tab finding): tab A renders the saving screen for approval 1 at
+    version v (from its approve response); inside the window tab B undoes (the draft is back in
+    `draft`), stages a change and approves a new pair (`approved` at v + 3); tab A's `POST
+    /draft/undo { expectedVersion: v }` → 409 `VERSION_CONFLICT` naming v and v + 3, tab B's two
+    proposals still `approved`, the draft still `approved` at v + 3 with its `proposal_ids`
+    untouched, no `onboarding.draft_undone` row, settings untouched; B's own undo with v + 3
+    then succeeds. The same when B reached the new pair through `POST /draft/reset` instead of
+    undo, and when A's version is ahead of the row's. A tab whose version matches (the approve
+    response's, or the status block's after a reload) undoes as in the happy path. A missing
+    body, `{}`, a non-integer, zero, negative or extra key → 400 naming `expectedVersion`,
+    nothing locked or written. The same tap sent twice (the second after the first undid) → 409
+    `DRAFT_NOT_APPROVED`, nothing written. Ordering: a stale `expectedVersion` with a closed
+    window → `VERSION_CONFLICT`, not `UNDO_WINDOW_CLOSED`, because the proposals are never read.
   - Race (the five-second boundary, two real connections): (a) the worker's
     `claimForExecution` arrives after undo has locked the set → the claim blocks, undo commits,
     the claim returns null, no handler runs and the draft is `'draft'`; (b) the claim commits
     first → undo reads `executing`, refuses with 409, the draft stays `approved` and the
     executing proposal finishes untouched. Never: draft `'draft'` while any generated proposal
     is `executing` or `executed`.
+  - Race (a stale undo against the other tab, two real connections, both orders, looped): tab
+    B's reset (or undo) and tab A's undo carrying the same version → exactly one succeeds; the
+    loser waited behind the lock, found the draft in `draft` and is 409 `DRAFT_NOT_APPROVED`;
+    the draft ends in `draft` once with one audit row, and no proposal of a later approval is
+    touched.
   - Error: one proposal `execution_failed` → fact `failed`, the shell holds and offers retry;
     retry moves that one only through `draft → approved` with a new `approvedAt` (the others
     untouched), it executes after the fresh window, and the fact is `executed`.
+  - Retry, version (S4): `POST /draft/retry { expectedVersion: v }` with v the failed screen's
+    version re-queues as above; tab A holding v after tab B reset and re-approved (`approved` at
+    v + 3) with one of B's proposals `execution_failed` → 409 `VERSION_CONFLICT`, B's failed
+    proposal still `execution_failed`, no `proposal.retried` row; a non-integer or extra key →
+    400; no body → the behaviour #1694 shipped, until S4 makes the field required. A retry does
+    not change the draft's `version`.
   - Error (stopped): a proposal undone from the inbox, one rejected, one expired and one
     missing (one case each) → fact `stopped`, `POST /draft/retry` answers 409
     `DRAFT_RETRY_NOTHING_FAILED`, and the shell offers no Retry and does not wait; a set with
@@ -1224,12 +1337,18 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     Settings link and no reset call; `failed` → Retry always, and Start over only with
     `recovery: 'reset'`; a `DRAFT_RESET_REFUSED` reason `applied` from a stale screen swaps in
     the Settings copy, and reason `executing` or `UNDO_WINDOW_CLOSED` keeps the wait screen.
-  - Integration: real Postgres rows for the undo, for the mixed-status set and for every
-    reset row above, under RLS.
+  - Shell (version): the undo button posts the `version` from the approve response and Retry
+    posts the status block's `version`; a 409 `VERSION_CONFLICT` or `DRAFT_NOT_APPROVED` from
+    either re-reads the status and renders whatever is current (another tab's saving screen, or
+    the editable read-back) with the one-line "This changed in another window" notice, and
+    neither repeats the call by itself.
+  - Integration: real Postgres rows for the undo, for the mixed-status set, for every
+    reset row above and for the version cases (stale undo, stale retry), under RLS.
 - **Verification:** no owner reaches the trial turn with a generated proposal unexecuted, one
   tap inside the window undoes the whole approval, a tap that loses the race to the worker
   changes nothing, and an approval the owner split from the inbox ends in an editable draft or
-  a pointer to Settings, never in a button the server refuses.
+  a pointer to Settings, never in a button the server refuses; and a tap made from a screen
+  that no longer shows the current approval is refused with a 409 that changes nothing.
 
 ### U11. Draft write lock and approval compare-and-swap
 - **Goal:** "That's right" approves exactly the choices the owner was looking at, exactly once.
@@ -1246,7 +1365,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   unless the row is in the status that writer requires: `draft` for every field write (a
   write to an `approved` draft is `DraftAlreadyApprovedError`, 409 `DRAFT_APPROVED`) and
   `approved` for undo, reset (U9) and reopen (U6); (3) compare `version` with the caller's
-  `expectedVersion` when it sent one (`DraftVersionConflictError`, 409 `VERSION_CONFLICT`);
+  `expectedVersion` when it sent one (`DraftVersionConflictError`, 409 `VERSION_CONFLICT`;
+  undo and reset always send one, approve and retry may omit it until S4 requires it);
   (4) compute the change from the locked row, never from an earlier read, write it and bump
   `version`. The repository exposes this as one shared helper,
   `updateLocked(tenantId, { requireStatus, expectedVersion? }, compute)`, and it is the only
@@ -1624,10 +1744,13 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Dependencies:** U2, U4; voice-parity U3 for the preset voice on the call
 - **Files:**
   - modify `packages/api/src/integrations/credentials.ts` (explicit `PLATFORM_TWILIO_*`)
-  - create `packages/api/src/demo/{routes,service,script,lease,lease-token,reset,job-guard,inflight,write-fence}.ts`,
+  - create `packages/api/src/demo/{routes,service,script,lease,lease-token,reset,job-guard,inflight,write-fence,call-budget}.ts`,
     migration `316_demo_calls` (313 went to the owner-cell column in S1b and 314-315 are S5's;
-    phone hash, trade, name, lease_id, call_sid, status, lead_id; no `tenant_id`); the same
-    migration adds `demo_tenant_leases` and `demo_inflight_jobs` (see Approach), a unique index
+    phone hash, trade, name, lease_id, call_sid, status, lead_id, and the budget reservation
+    the call holds: `budget_day`, `reserved_cents`, `budget_released_at`; no `tenant_id`); the
+    same migration adds `demo_call_budget` (`day` DATE primary key, `calls_reserved`,
+    `calls_cap`, `est_cost_cents`, `cost_cap_cents`, all integers, CHECKs added `NOT VALID`; see
+    Daily budget), `demo_tenant_leases` and `demo_inflight_jobs` (see Approach), a unique index
     on `demo_tenant_leases.call_sid WHERE call_sid IS NOT NULL`, the sequence
     `demo_lease_generation_seq` and `tenants.demo BOOLEAN NOT NULL DEFAULT false`
   - create the demo tenant pool per trade, each tenant cloned from that trade's fixture, via a
@@ -1665,8 +1788,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `components/public/HearItAnswer.tsx`; modify `packages/web/src/components/auth/SignupPage.tsx`
     (forward the handoff token) and the Clerk signup webhook handler in `packages/api/src/`
     (copy it onto the tenant)
-  - tests: `packages/api/test/demo/{service,routes,limits,lease,lease-token,reset,job-guard,inflight,write-fence}.test.ts`,
+  - tests: `packages/api/test/demo/{service,routes,limits,lease,lease-token,reset,job-guard,inflight,write-fence,call-budget}.test.ts`,
     `packages/api/test/integration/demo-calls.test.ts`,
+    `packages/api/test/integration/demo-call-budget.test.ts`,
     `packages/api/test/integration/demo-callback-binding.test.ts`,
     `packages/api/test/integration/demo-tenant-leases.test.ts`,
     `packages/api/test/integration/demo-reset-fencing.test.ts`,
@@ -1695,7 +1819,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `Timeout` of 30 s and a `TimeLimit` of 90 s, and the lease adds 30 s of grace, 150 s in all,
   so a lease cannot lapse under a live call. The inbound turn processor gets its tenant from the
   `active` lease its callback names (next paragraph), never from a trade-level lookup. A Twilio
-  failure on the `Calls` request releases the lease at once.
+  failure on the `Calls` request releases the lease at once, and a definitive one also returns
+  the day's budget reservation (Daily budget, below).
 - **Callbacks find the lease by a signed token, not by `call_sid`.** Twilio can answer the
   visitor and fetch the voice URL, or send a terminal status callback (`failed`, `busy`,
   `no-answer`, `completed`), before the outbound `Calls` request has returned to us and before
@@ -1895,15 +2020,77 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   is written (no lease, no `demo_calls` or lead row, no call, and the visitor's one-call-a-day
   allowance is not spent). A call that is answered after its lease was reclaimed speaks the
   same line and hangs up, again writing nothing. Pool size is the concurrency ceiling; the kill
-  switch and the daily spend cap still apply.
+  switch and the daily budget still apply.
 - **Never visible to owners.** Demo tenants have no `users` rows, no Clerk organisation, no
   Stripe customer or subscription and no Twilio subaccount, so no owner, dispatcher or billing
   surface can reach one. Every sweep, report and analytics query that lists tenants excludes
   `tenants.demo`, funnel and product analytics drop events from demo tenants, and the
   platform-admin tenant list hides them behind an explicit filter.
-- **Consent, limits, handoff.** Consent line first; two-layer rate limits; daily spend cap;
-  a lead row in a platform marketing tenant. The signup SMS link carries a signed, single-use
-  handoff token (HMAC over `lead_id` and an expiry). Migration 316 also adds a platform table
+- **Daily budget: an aggregate bound, reserved before the call.** The IP limiter, the
+  one-call-per-number limiter and the pool size each bound one axis (a source, a number,
+  concurrency) and none bounds the total: a visitor who rotates IPs and numbers is slowed by
+  neither limiter, and every call also consumes a demo tenant and a reset-and-release cycle. So
+  the platform needs a ceiling on calls placed and cents committed per UTC day, and it has to be
+  taken before the call exists: a counter bumped once the call is up is a log, not a cap. A
+  search of `packages/api` found nothing to extend. `PhoneRateLimiter` is a tenant-scoped event
+  counter per key (it is the one-call-per-number limiter; it counts events, not cost, and
+  returns nothing). `tenant_budget_counters` is tenant-scoped with RLS and adds executed spend
+  after the fact, with no cap predicate and no reservation. `session-cost-tracker` caps one
+  session's LLM cost, and the gateway's tenant quota meters LLM tokens per tenant. None of them
+  gates outbound telephony spend across the platform. What is reused is the pattern of
+  `tenant_budget_counters`: UTC-day windows (`utcDayWindowStart`) and `INSERT … ON CONFLICT …
+  DO UPDATE`, so concurrent writers on any instance never lose an update.
+  - *The table.* `demo_call_budget(day DATE PRIMARY KEY, calls_reserved INTEGER, calls_cap
+    INTEGER, est_cost_cents INTEGER, cost_cap_cents INTEGER)`: a platform table (no
+    `tenant_id`, no RLS, admin-write), one row per UTC day, integer cents only.
+    `est_cost_cents` is the sum of the per-call estimates reserved so far, not a measured bill.
+  - *Reserve, atomically, before the Twilio request.* `demo/call-budget.ts` runs one statement:
+    `INSERT INTO demo_call_budget (day, calls_reserved, calls_cap, est_cost_cents,
+    cost_cap_cents) SELECT $day, 1, $cap, $unit, $costCap WHERE $cap >= 1 AND $unit <= $costCap
+    ON CONFLICT (day) DO UPDATE SET calls_reserved = demo_call_budget.calls_reserved + 1,
+    est_cost_cents = demo_call_budget.est_cost_cents + $unit WHERE
+    demo_call_budget.calls_reserved < demo_call_budget.calls_cap AND
+    demo_call_budget.est_cost_cents + $unit <= demo_call_budget.cost_cap_cents RETURNING
+    calls_reserved, calls_cap, est_cost_cents, cost_cap_cents`. One row means the call is inside
+    both caps and its slot and cents are taken; zero rows means a cap is reached. The conflict
+    branch's `WHERE` is evaluated under the row lock that `DO UPDATE` takes, so concurrent
+    reservations serialise on the day's row and cannot all pass a check that only some fit; the
+    insert branch has its own `WHERE`, so the first reservation of a day cannot slip past a zero
+    or sub-unit cap. The statement runs inside the lease transaction, right after the lease
+    insert and with the `demo_calls` row (which records `budget_day` and `reserved_cents`), and
+    that transaction commits before the `Calls` request is built: no call can exist without a
+    committed reservation. Zero rows rolls the transaction back and answers exactly like an
+    exhausted pool: 503 `DEMO_BUSY` and "Every line is busy. Try again in a minute.", with no
+    lease, no `demo_calls` or lead row, no Twilio request, and the visitor's one-call-a-day
+    allowance unspent. An exhausted pool refuses before the statement runs, so it reserves
+    nothing. The day is the UTC date of an injected clock, so 00:00 UTC starts a new row and a
+    full yesterday blocks nothing.
+  - *Release.* The reservation is returned (`calls_reserved - 1` and `est_cost_cents -
+    reserved_cents` on the row of `budget_day`, not today's) only when the `Calls` request
+    fails definitively before any CallSid is bound: a Twilio response that created no call, or a
+    failure before the request was sent. It runs once, in the transaction that sets
+    `demo_calls.budget_released_at` (`WHERE budget_released_at IS NULL`, and only while the
+    lease's `call_sid` is still null), so a retried failure handler cannot decrement twice and a
+    callback that already bound a CallSid pins the reservation. An ambiguous outcome (a timeout after
+    the request left) keeps the reservation, because a call may exist and be billed; so does a
+    bound CallSid, answered or not, and a crash after the commit. The count therefore errs
+    toward the cap and never past it.
+  - *Configuration and alerts.* `DEMO_CALLS_DAILY_CAP` (default 50), `DEMO_COST_DAILY_CAP_CENTS`
+    (default 2500) and `DEMO_CALL_EST_COST_CENTS` (default 50: a per-call figure for the 90 s
+    `TimeLimit`, which the staging measurement under Verification replaces) are integers read at
+    boot. A missing value uses its default; one that is malformed, zero or negative, or a unit
+    estimate above the cost cap, fails the demo module closed (every request refused, logged)
+    rather than guessing. The caps are written onto the day's row when it is created, so a
+    changed env applies from the next UTC day; the kill switch is the immediate lever. The
+    reservation that takes either count to 80% of its cap (integer arithmetic,
+    `calls_reserved * 5 >= calls_cap * 4` and `est_cost_cents * 5 >= cost_cap_cents * 4`,
+    checked on the returned row and on the same counts less this reservation, so only the
+    reservation that makes the upward crossing alerts) logs, alerts and writes a `demo_budget_alert` audit
+    row; the one that fills a cap does the same once more; refusals after that increment a
+    metric and do not page again.
+- **Consent, limits, handoff.** Consent line first; two-layer rate limits; the daily budget
+  above, the only aggregate bound; a lead row in a platform marketing tenant. The signup SMS
+  link carries a signed, single-use handoff token (HMAC over `lead_id` and an expiry). Migration 316 also adds a platform table
   `signup_handoffs(token_hash PK, lead_id, tenant_id NULL, expires_at, consumed_at)`:
   `SignupPage` forwards the token into Clerk unsafe metadata, the Clerk signup webhook binds
   it exclusively (`UPDATE … SET tenant_id = $2 WHERE token_hash = $1 AND tenant_id IS NULL
@@ -1919,7 +2106,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     row, lead row, signup SMS after hang-up.
   - Edge: same number twice in a day → 429 with a friendly message; premium or non-NANP
     number → 400; kill switch on → 503 and the landing CTA hides.
-  - Error: Twilio 5xx → row `status='failed'`, lease released, no SMS, no lead; handoff token reused or
+  - Error: Twilio 5xx → row `status='failed'`, lease released, the day's budget reservation
+    returned, no SMS, no lead; handoff token reused or
     expired → ignored, the shell asks for name and trade.
   - Isolation (two concurrent callers get distinct tenants): two real connections leasing for
     the same trade, repeated in a loop → distinct demo tenants, and rows one call wrote are not
@@ -1929,6 +2117,37 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     503 `DEMO_BUSY` with the busy copy, and no lease, `demo_calls`, lead or SMS row, no call
     placed, the visitor's daily allowance unspent; a call answered after its lease was
     reclaimed speaks the busy line, hangs up and writes nothing.
+  - Daily budget (concurrent reservations never exceed the cap; real Postgres, three or more
+    connections, repeated in a loop so ordering luck cannot pass): with `calls_cap` N and N + 5
+    simultaneous requests, exactly N reservations succeed and 5 are refused; the row ends at
+    `calls_reserved = N` and `est_cost_cents = N × unit`, never above either cap, and the
+    refused requests left no lease, `demo_calls` or lead row. With the cost cap binding first
+    (`cost_cap_cents` 175, unit 50, `calls_cap` large) exactly 3 succeed. The first reservation
+    of a new day is checked too: a `calls_cap` of 0, or a unit above the cost cap, refuses even
+    when no row exists yet.
+  - Daily budget (UTC rollover, injected clock): a reservation at 23:59:59 UTC and one at
+    00:00:00 UTC the next day land on two rows; the new day starts at `calls_reserved = 1` and
+    one unit of cents, a full previous day does not refuse the new one, and the release of the
+    23:59 reservation after midnight decrements the old day's row (`budget_day`), not the new
+    one's.
+  - Daily budget (a failed `Calls` request returns the reservation): a definitive Twilio 4xx or
+    5xx with no CallSid → `calls_reserved` and `est_cost_cents` back to their prior values,
+    `budget_released_at` set, lease released; the failure handler run twice decrements once; a
+    timeout after the request left (a fake Twilio that accepted the call and never answered)
+    keeps the reservation; a bound CallSid keeps it through `no-answer`, `busy` and `failed`
+    callbacks; a process killed between the commit and the request leaves it spent.
+  - Daily budget (cap reached refuses without calling Twilio): with the day's row at its cap,
+    requests from twenty distinct IPs and twenty distinct numbers (so neither limiter can be
+    what refuses) each answer 503 `DEMO_BUSY` with the busy copy; the fake Twilio receives zero
+    `Calls` requests; no lease, `demo_calls`, lead or SMS row is written; no number's
+    one-call-a-day allowance is spent and the pool is untouched. A pool with no free tenant and
+    a budget with room → 503 and the counters unchanged.
+  - Daily budget (alerts and config): the reservation that takes either count to 80% of its cap
+    raises exactly one alert and one `demo_budget_alert` row for that cap (a cap of 50 → the
+    40th reservation; a cap of 7 → the 6th), filling a cap raises one more, and later refusals
+    page nobody; missing env values use the defaults; a malformed, zero or negative value, or a
+    unit above the cost cap, fails the demo module closed with every request refused; a cap
+    changed mid-day does not alter that day's row.
   - Isolation (reset on release): after a call that created a session, messages, a booking, a
     proposal and a customer, release → every `tenant_id` table is back to a freshly cloned
     tenant's row counts (audit and `demo_tenant_leases` excepted) and settings, catalog and
@@ -2040,7 +2259,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Isolation (expired lease reclaimed): a lease past `expires_at` with no status callback →
     the reaper resets, releases and the tenant is leasable again; an unexpired lease is never
     reclaimed.
-  - Integration: `demo_calls` has no `tenant_id` and is not subject to RLS; rate limiter keyed
+  - Integration: `demo_calls` and `demo_call_budget` have no `tenant_id` and are not subject
+    to RLS (the reservation is pinned on real Postgres by running the statement in
+    `demo/call-budget.ts`, never a copy of it); rate limiter keyed
     to the sentinel tenant persists across restarts; `demo_tenant_leases` rejects a second
     unreleased lease (`active` or `resetting`) on one tenant (and on one visitor hash) at the
     partial unique index; a demo
@@ -2056,7 +2277,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     pinned the same way (two connections binding different sids to one lease: exactly one wins,
     in a loop).
 - **Verification:** cost per completed demo call measured in staging before the landing CTA
-  ships; a staging run of concurrent demo calls on one trade shows distinct tenants, a clean
+  ships (the figure replaces the default `DEMO_CALL_EST_COST_CENTS` and sizes the first caps),
+  and a staging run past the daily cap is refused with no Twilio request; a staging run of concurrent demo calls on one trade shows distinct tenants, a clean
   tenant after each, and no job from one call running or writing against the next; a callback
   that arrives before the `Calls` response returns, including an early terminal one, still lands
   on its own lease; founder decision recorded in `docs/decisions.md`.
@@ -2069,7 +2291,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   takes the same lock, refuses once the draft is approved and bumps `version` (U11's
   invariant: inline in the three writers that exist, one shared helper from S4), so no late write can ride behind the approval's snapshot,
   and the `version` CAS rejects stale tabs on choice writes and on approve (a stale tab's
-  approve is a 409 even when another tab has already approved).
+  approve is a 409 even when another tab has already approved); undo, reset and retry carry
+  the version of the approval their screen showed, so a tap from a screen that is no longer
+  current is a 409 that changes nothing.
 - **Browser voice on real devices.** Tap is first-class everywhere, `answer_mode` is measured
   per turn, U4 spikes WebKit before U3 depends on it.
 - **Regional prices wrong or read as advice.** Founder-curated rows, "typical" copy, prices
@@ -2077,7 +2301,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Status contract drift.** Additive facts only; `.length(7)` preserved; pinned by extending
   `packages/api/test/onboarding/derive-status.test.ts` and the integration status test.
 - **Demo call cost, abuse, TCPA, cross-visitor leakage.** Phased last, consent first, two-layer
-  limits, kill switch, spend cap; every live call holds its own demo tenant by lease, named in
+  limits, kill switch, a daily call-and-cents budget reserved atomically before the Twilio
+  request (so rotating IPs and numbers cannot raise the total); every live call holds its own demo tenant by lease, named in
   both Twilio callback URLs by a signed token so a fast answer or an early terminal callback
   cannot miss it, and the tenant is reset before anyone else can lease it (U7): the reset is
   heartbeat-renewed and
@@ -2115,9 +2340,9 @@ previous one; the previous slice is merged first.
 | S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
 | S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover) and `POST /draft/retry`. Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
-| S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing) on that helper; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status so the shell never offers a refused button; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; `expectedVersion` made required once every client sends it. | 6-7 days (reset adds one) |
-| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft (through the locked-write helper) and the settings proposal (a changed line clears the old confirm and probe stamps), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read), flag flipped, v2 deleted. | 10-12 days |
-| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost), reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces. | 8-12 days (the token and bind add one) |
+| S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status so the shell never offers a refused button; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body), made required once every client sends it. | 6-7 days (reset adds one) |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft (through the locked-write helper) and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read), flag flipped, v2 deleted. | 10-12 days |
+| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost), reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure. | 9-13 days (the token and bind add one, the budget another) |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
 second engineer shortens S2 and S3 only where the API they depend on is already merged.
