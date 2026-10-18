@@ -4,6 +4,7 @@ import {
   AiRun,
   AiRunStatus,
   AiRunRepository,
+  isUuid,
 } from './ai-run';
 
 /**
@@ -68,7 +69,9 @@ export class PgAiRunRepository extends PgBaseRepository implements AiRunReposito
           run.tenantId,
           run.taskType,
           run.model,
-          run.promptVersionId ?? null,
+          // prompt_version_id is a UUID column: a string ref ('brand_voice_v1')
+          // would make Postgres reject the whole INSERT (OBS-1).
+          isUuid(run.promptVersionId) ? run.promptVersionId : null,
           JSON.stringify(run.inputSnapshot),
           run.outputSnapshot ? JSON.stringify(run.outputSnapshot) : null,
           run.status,

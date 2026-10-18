@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import type { LLMRequest, LLMResponse, LLMGateway } from './gateway';
-import { redactMessagesForSnapshot, messagesContainImage } from './gateway';
+import { redactMessagesForSnapshot, messagesContainImage, promptRefFields } from './gateway';
 import type { AiRunRepository } from '../ai-run';
 import { createAiRun } from '../ai-run';
 import type { LLMTraceExporter } from './trace-exporter';
@@ -179,18 +179,20 @@ export class CachingGatewayWrapper {
       const tenantId = request.tenantId ?? this.tenantId;
       const correlationId =
         (request.metadata?.correlationId as string | undefined) ?? uuidv4();
-      const promptVersionId = request.metadata?.promptVersionId as string | undefined;
+      // OBS-1: a non-UUID prompt ref is filed as input_snapshot.promptRef.
+      const promptRef = promptRefFields(request.metadata?.promptVersionId);
       const now = new Date();
 
       const pendingRun = createAiRun({
         tenantId,
         taskType: request.taskType,
         model: cachedResponse.model,
-        promptVersionId,
+        promptVersionId: promptRef.promptVersionId,
         inputSnapshot: {
           messages: redactMessagesForSnapshot(request.messages),
           temperature: request.temperature,
           maxTokens: request.maxTokens,
+          ...promptRef.snapshot,
         },
         createdBy: 'gateway-cache',
         correlationId,

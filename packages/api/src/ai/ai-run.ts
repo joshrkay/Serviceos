@@ -66,6 +66,19 @@ export interface AiRunRepository {
   ): Promise<AiRun | null>;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * True for a canonical UUID string. `ai_runs.prompt_version_id` is a UUID
+ * column, but callers tag prompts with string refs too (the brand-voice
+ * composer sends 'brand_voice_v1'); binding one of those made Postgres reject
+ * the whole INSERT (OBS-1). Repositories store promptVersionId only when this
+ * holds; the gateway files any other ref under input_snapshot.promptRef.
+ */
+export function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
+
 export function validateAiRunInput(input: CreateAiRunInput): string[] {
   const errors: string[] = [];
   if (!input.tenantId) errors.push('tenantId is required');
@@ -130,8 +143,13 @@ export class InMemoryAiRunRepository implements AiRunRepository {
   private runs: Map<string, AiRun> = new Map();
 
   async create(run: AiRun): Promise<AiRun> {
-    this.runs.set(run.id, { ...run });
-    return run;
+    // Mirror PgAiRunRepository: the UUID column never holds a non-UUID ref.
+    const stored: AiRun = {
+      ...run,
+      promptVersionId: isUuid(run.promptVersionId) ? run.promptVersionId : undefined,
+    };
+    this.runs.set(run.id, stored);
+    return { ...stored };
   }
 
   async findById(tenantId: string, id: string): Promise<AiRun | null> {
