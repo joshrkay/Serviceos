@@ -982,9 +982,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `UPDATE tenant_settings SET forwarding_verified_at = COALESCE(forwarding_verified_at, now())
   WHERE tenant_id = $1 AND forwarding_probe_generation = forwarding_generation AND
   forwarding_probe_at > now() - interval '20 seconds'`; zero rows is a silent no-op and the
-  call is handled as any other inbound call. This is also what holds the 20 s window. A newer
-  probe overwrites the pending pair. The two stamps are different columns, so racing on one
-  generation they cannot conflict, a repeat of either keeps the first time, and each is exact
+  call is handled as any other inbound call. This is also what holds the 20 s window. (Known
+  gap: this predicate does not yet tie the inbound leg to the probe; see Deferred review
+  findings D3.) A newer probe overwrites the pending pair. The two stamps are different
+  columns, so racing on one generation they cannot conflict, a repeat of either keeps the first time, and each is exact
   on the generation it was issued under.
   First-day home replaces empty KPI cards with
   Rivet's spoken opener and three chips; the existing cards stay hidden until they have data.
@@ -3224,8 +3225,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     row; the one that fills a cap does the same once more; refusals after that increment a
     metric and do not page again.
 - **Consent, limits, handoff.** Consent line first; two-layer rate limits; the daily budget
-  above, the only aggregate bound; a lead row in a platform marketing tenant. The signup SMS
-  link carries a signed, single-use handoff token (HMAC over `lead_id` and an expiry). Migration 316 also adds a platform table
+  above, the only aggregate bound; a lead row in a platform marketing tenant (nothing yet
+  provisions that tenant or the sentinel tenant; see Deferred review findings D1). The signup
+  SMS link carries a signed, single-use handoff token (HMAC over `lead_id` and an expiry). Migration 316 also adds a platform table
   `signup_handoffs(token_hash PK, lead_id, tenant_id NULL, expires_at, consumed_at)`, whose
   row is inserted by the `completed` status callback's platform transaction with the outbox
   row, so it is committed before the handler can send the token (Late status callbacks, above):
@@ -3234,7 +3236,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   AND expires_at > now()`; a second signup with the same token binds nothing and is logged),
   and `POST /draft` consumes it atomically
   (`UPDATE … SET consumed_at = now() WHERE tenant_id = $1 AND consumed_at IS NULL AND
-  expires_at > now() RETURNING lead_id`) to read the lead's trade, name and metro. No row (a
+  expires_at > now() RETURNING lead_id`) to read the lead's trade, name and metro (the source of
+  those facts is revised at slice start; see Deferred review findings D2). No row (a
   forged or mistyped token), a consumed row or an expired one means the shell asks (U3's first
   screen); the SMS itself never carries the seed facts and the token is stored only as a hash.
 - **Patterns to follow:** D-037 (buy nothing for a tire-kicker), `docs/solutions/logic-errors/click-to-call-gate-requires-global-twilio-sid.md`.
@@ -3720,6 +3723,45 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 3. Deepgram `keyterms` support on the current plan tier for option-label boosting.
 4. Where the trial sentence and card decision sit (founder decision in the brief).
 5. Whether to keep `useTTS` after U4 or delete it (depends on fallback usage measured).
+
+### Deferred review findings (resolve at slice start)
+
+U6 and U7 are unbuilt (S5, and S6 which is decision-gated) and have taken many review rounds,
+so these three confirmed findings are recorded here with the direction to take rather than
+designed further. Each is exposed first by the Docker-gated, real-column test named below.
+
+- **D1. A platform tenant must exist (U7, S6; P1).** `phone_rate_limits.tenant_id` and
+  `leads.tenant_id` are both `NOT NULL REFERENCES tenants(id)` (`schema.ts`,
+  `111_phone_rate_limits` ~2871 and `057_create_leads` ~1399), but migration 316 and the seed
+  script create only demo-pool tenants and nothing creates the sentinel or marketing tenant,
+  so on a clean deployment the visitor allowance and the lead insert fail their foreign key;
+  a pool tenant cannot stand in because reset purges its rows. *Direction:* migration 316
+  inserts one durable hidden platform tenant at a fixed uuid, flagged so owner surfaces,
+  tenant-listing sweeps, the reaper and pool selection never touch it, and it owns the demo
+  `phone_rate_limits` and `leads` rows. Platform-scoped tables are the rejected alternative
+  (more new surface). *First test:* an integration test on an empty database after
+  migrations, where `tryConsumeOn` and the lead insert for a demo request succeed, plus the
+  existing tenant-listing guard test covering the platform tenant.
+- **D2. Seed facts come from a per-call snapshot (U7, S6; P2).** `captureLead` attaches a
+  repeat phone to the existing unconverted lead and fills blank fields only
+  (`attachSubmissionToLead`, `lead-service.ts`), and `Lead` has no typed trade or metro field,
+  so a second permitted demo from the same phone with a corrected name, trade or metro lets
+  the next signup inherit the first demo's facts through `lead_id`. *Direction:* `demo_calls`
+  carries an immutable snapshot of business name, trade and metro captured at call time (it
+  stores trade and name already; the metro is the addition), the signup handoff is keyed to
+  `demo_call_id` (as `demo_handoff_outbox` already is), and `POST /draft` seeds from that
+  snapshot, not from the deduplicated lead, which stays a marketing record only. *First
+  test:* an integration test with two demo calls from one phone on different days and
+  different facts, where each handoff seeds its own call's name, trade and metro.
+- **D3. Correlate the inbound leg before stamping verification (U6, S5; P2).** The stamp
+  predicate checks only the probe generation and the 20 s window and the forwarded leg
+  carries no identity, so any ordinary inbound call to the Rivet number inside the window
+  stamps `forwarding_verified_at` and can clear the badge though the business line never
+  forwarded. *Direction:* the probe dials from a dedicated platform caller ID and the inbound
+  handler also requires `From` to equal it (staging confirms the carrier preserves it); if
+  the telephony layer exposes a provider correlation value on forwarded legs, use that
+  instead. *First test:* with a probe pending, an ordinary inbound call from another number
+  inside 20 s updates zero rows and the badge stays, while the probe's own leg stamps.
 
 ## Sizing and sequencing
 
