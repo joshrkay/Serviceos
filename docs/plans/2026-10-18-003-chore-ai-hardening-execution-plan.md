@@ -42,6 +42,38 @@ be alive and may push batch A or B at any time, so every batch start has to re-c
 - 2026-10-18, Josh: owner decisions 1 (PRIV-5 erasure scope) and 2 (money cap on AI spend) are
   settled on the hardening plan's recommended defaults. U7 and U8 may start once U4 and U3 merge.
 
+## Assurance program (rebuilt 2026-10-18 after owner review)
+
+Josh's bar is enterprise production-ready: a large customer's security, reliability and privacy
+reviewer signs off, every AI feature works end to end, and no workflow leaves bad state behind.
+Landing the 34 audited fixes is necessary, not sufficient. The program therefore has four layers,
+each orchestrated as a Workflow with adversarial verification, and the batch protocol in E3 is the
+innermost layer only:
+
+1. **Completeness: gap audit of `main`** (runs alongside wave 1). Twelve independent lenses re-audit
+   the AI surface: the seven audit dimensions, three enterprise lenses the audit lacked (authn and
+   authz on AI surfaces, operability of AI paths, data lifecycle and compliance evidence), and two
+   functional lenses (features that do not work end to end on the real app with only the model
+   mocked; multi-step workflows that create inconsistent, duplicated or orphaned state). Rounds
+   repeat until two consecutive rounds surface nothing new. Every fresh finding faces three
+   skeptics (does the path exist, is it real in production configuration, is it already covered by
+   the 34 or their planned fixes) and survives only if none refutes it. Survivors are assigned to
+   the existing batches or to a new batch G (functional and workflow fixes).
+2. **Per-finding implementation and verification**, not per-batch. Each finding gets its own
+   implementer working from the wave work package, then three refuters: production-path bypass,
+   test validity by reverting the fix and watching the new tests fail, and regression, invariants
+   and security. Blocking items go to a fixer, then the finding is re-verified; up to three rounds.
+   Wave 1's whole-batch implementers feed the same gauntlet before anything is pushed.
+3. **Enterprise panel per PR** before push: a privacy and SOC 2 reviewer, an SRE reviewer and an
+   application security reviewer judge the whole diff; blockers loop through the fixer.
+4. **Evidence pack per PR** at `docs/quality/ai-hardening-evidence/batch-<K>-U<u>.md`: per finding,
+   the production-path trace, commits, tests with proof they fail without the fix, refuter verdicts
+   per round, panel verdicts, and the gate output verbatim. The PR body links it.
+
+Definition of done for a batch: every finding PASSes all three refuters, the panel has no open
+blocker, the gate is green with counts in the evidence pack, CI and bot reviews are green, and the
+evidence pack is on the branch.
+
 ## Requirements
 
 - R1. Every batch U1–U6 ends as a draft PR on its named branch, test-first, with an independent
