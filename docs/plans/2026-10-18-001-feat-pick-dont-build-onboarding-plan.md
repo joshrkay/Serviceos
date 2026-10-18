@@ -209,8 +209,9 @@ tiers; import from a photo; pricing or plan changes.
   reason), `demo_call_unconfirmed_expired` (the reservation of such a call returned after
   the callback window closed with no CallSid ever bound), `demo_lease_renewed` (a lease's
   expiry moved once, at the first `ringing` or `in-progress` callback, with the old and new
-  value) and `demo_send_suppressed` (a text or email for a demo tenant refused at the delivery
-  boundary, with the channel and recipient class).
+  value), `demo_handoff_expired` (a signup handoff retired unsent because its link was within
+  60 s of expiring) and `demo_send_suppressed` (a text or email for a demo tenant refused at
+  the delivery boundary, with the channel and recipient class).
 - **Integer cents:** tier prices, trip fee and hourly rate are cents end to end; the price
   multiplier is applied in integer arithmetic with explicit rounding in one function.
 - **tenant_id + RLS:** `onboarding_drafts` carries `tenant_id` with RLS like
@@ -823,11 +824,16 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     which skips existing names; integration test in `reprice-seeded.test.ts` runs the handler
     against a seeded tenant and asserts the moved and untouched rows)
   - create `packages/api/src/onboarding/forwarding-probe.ts` and route
-    `POST /api/onboarding/phone/forwarding-probe`; migration 314 also adds
+    `POST /api/onboarding/phone/forwarding-probe` and the owner's confirm route
+    `POST /api/onboarding/phone/forwarding-confirm` (the "I dialed it" tap, in the same file);
+    migration 314 also adds
     `tenant_settings.forwarding_confirmed_at`, `forwarding_verified_at`,
     `forwarding_source_number` (nullable text, E.164) and `forwarding_carrier` (nullable text,
     CHECK in `verizon | att | tmobile | other`, added `NOT VALID` per
-    `docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md`); tests
+    `docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md`), and
+    the three columns that bind a stamp to its line: `forwarding_generation` (integer NOT NULL
+    DEFAULT 0) and the pending probe's `forwarding_probe_generation` (nullable integer) and
+    `forwarding_probe_at` (nullable timestamptz), see Approach; tests
     `packages/api/test/onboarding/forwarding-probe.test.ts`
   - the forwarding answers travel the same road as the owner's cell (U10): a second migration
     (315) adds nullable `onboarding_drafts.forwarding_source_number` and
@@ -862,16 +868,19 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     value writes `forwarding_source_number` and `forwarding_carrier` and, in that same write,
     nulls `forwarding_confirmed_at` and `forwarding_verified_at` whenever the source number or
     carrier differs from the stored one, so a re-run that moves the forwarding line cannot
-    inherit the old line's "I dialed it" or probe stamp; `null` nulls all four columns
+    inherit the old line's "I dialed it" or probe stamp, and bumps `forwarding_generation` by
+    one in that same statement, which is what lets a late stamp for the old line be refused;
+    `null` nulls all four columns
     (`forwarding_source_number`, `forwarding_carrier`, `forwarding_confirmed_at`,
-    `forwarding_verified_at`) together; absent touches none of them), and
+    `forwarding_verified_at`) together and bumps the generation if a line was stored; absent
+    touches none of them, the generation included), and
     `packages/api/src/settings/settings.ts` and `pg-settings.ts` (the four keys, each accepting
     an explicit `null` to clear, as the deposit keys already do, with `undefined` meaning
     untouched; not added to `updateSettingsSchema`); tests
     `packages/api/test/onboarding/draft/forwarding.test.ts`, `approve.test.ts` (extend),
     `packages/api/test/integration/onboarding-draft-forwarding.test.ts` (the stamp-clearing,
-    clear-on-"no", atomic-staging and refused-approval cases below run here, against real
-    Postgres)
+    generation, clear-on-"no", atomic-staging and refused-approval cases below run here,
+    against real Postgres)
   - modify `packages/web/src/components/onboarding/v3/ReadbackCard.tsx` and
     `ConversationShell.tsx` (the `existing_number` row reads "Not set" while the question is
     unanswered, and tapping it re-asks it; a 400 `FORWARDING_DETAILS_REQUIRED` turns the
@@ -885,7 +894,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     code via `notifications/owner-sms-sender.ts`), route `POST /api/onboarding/phone/forwarding-text`
   - modify `packages/web/src/components/home/HomeConversationPanel.tsx`, `HomePage.tsx`
     (first-day state: Rivet speaks first, three chips, collapsed cards with value-stating empty
-    states; the bank chip links to `POST /api/billing/connect/onboarding`)
+    states; the bank chip links to `POST /api/billing/connect/onboarding`; the forwarding
+    chip's "I dialed it" sends the `forwardingGeneration` the status it rendered from carried,
+    and a 409 `FORWARDING_CHANGED` makes it re-read the status)
   - modify `packages/web/src/routes.ts` (flip flag), delete `components/onboarding/v2/**` and
     its tests, `utils/onboarding-rerun.ts` callers updated to v3
   - modify `packages/web/src/components/settings/SettingsPage.tsx:1131` ("Re-run setup" → v3,
@@ -945,6 +956,36 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   until the owner dials and confirms or a probe lands for the new line; an unchanged number
   and carrier leave both stamps alone. Without the clear, either old timestamp would hide the
   badge for a line the owner never dialed or probed.
+  The clear is not enough on its own, because a stamp can land after it: a probe for line A
+  still in flight, or an old tab still showing A's "I dialed it", completes after a re-run
+  moved the line to B and would set an unqualified timestamp against a line nobody dialed or
+  probed. So the line has a generation, `tenant_settings.forwarding_generation` (migration 314,
+  starting at 0), and every stamp is a compare-and-set against it. The write that changes the
+  line bumps it by one in the same statement that sets the new values and nulls the stamps
+  (all three are `SET` expressions over the row being updated, with the comparison made in SQL
+  against that row and not against an earlier read, so two re-runs cannot both bump from one
+  read or skip), for any change of the stored source number or carrier (an undo that restores
+  the earlier line included, and a clear of a stored line), and for nothing else: a re-run that approves the same number and carrier
+  does not bump, so an ordinary re-save keeps a valid verification. (1) The first-day state
+  reads the generation in the same query as the stamps, the chip's "I dialed it" sends it back
+  as `forwardingGeneration` to `POST /api/onboarding/phone/forwarding-confirm`, and the route
+  runs `UPDATE tenant_settings SET forwarding_confirmed_at = COALESCE(forwarding_confirmed_at,
+  now()) WHERE tenant_id = $1 AND forwarding_generation = $2 AND forwarding_source_number IS
+  NOT NULL`. Zero rows stamps nothing and answers 409 `FORWARDING_CHANGED` (409
+  `FORWARDING_NOT_CONFIGURED` instead when the line was cleared), and the shell re-reads the
+  status, which shows the new line and its badge. (2) The probe route records what the probe
+  is for in the statement that finds the number to dial: `UPDATE tenant_settings SET
+  forwarding_probe_generation = forwarding_generation, forwarding_probe_at = now() WHERE
+  tenant_id = $1 AND forwarding_source_number IS NOT NULL RETURNING forwarding_source_number`.
+  The forwarded call reaches the Rivet number as an ordinary inbound call and carries nothing
+  of ours, so that pending pair is the probe's identity, and the inbound handler stamps with
+  `UPDATE tenant_settings SET forwarding_verified_at = COALESCE(forwarding_verified_at, now())
+  WHERE tenant_id = $1 AND forwarding_probe_generation = forwarding_generation AND
+  forwarding_probe_at > now() - interval '20 seconds'`; zero rows is a silent no-op and the
+  call is handled as any other inbound call. This is also what holds the 20 s window. A newer
+  probe overwrites the pending pair. The two stamps are different columns, so racing on one
+  generation they cannot conflict, a repeat of either keeps the first time, and each is exact
+  on the generation it was issued under.
   First-day home replaces empty KPI cards with
   Rivet's spoken opener and three chips; the existing cards stay hidden until they have data.
   Delete v2 with a re-grep for every import (CLAUDE.md dead-code rule).
@@ -957,8 +998,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   them apart. A "yes" approves as `{ sourceNumber, carrier }` (it cannot be staged without its
   pair, above). A "no" approves as the literal `null`, and the handler clears
   `forwarding_source_number`, `forwarding_carrier`, `forwarding_confirmed_at` and
-  `forwarding_verified_at` in one write, so there is no moment with the number gone and a stamp
-  left, or the reverse. No key means untouched: `existing_number` was never answered (a first
+  `forwarding_verified_at` in one write (bumping `forwarding_generation` when a line was
+  stored), so there is no moment with the number gone and a stamp left, or the reverse. No
+  key means untouched: `existing_number` was never answered (a first
   run that skipped the turn or took "Keep the rest as is", or a draft approved before the
   eighth turn shipped; the question has no default), and nothing stored changes. A "yes"
   without a complete pair is not a fourth state: approval refuses it
@@ -968,7 +1010,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   the promised forwarding setup is silently skipped. On a re-run, reopen pre-fills the answer
   from the live columns: "yes" with the stored number and carrier when both
   `forwarding_source_number` and `forwarding_carrier` are set
-  (re-approved as it stands, the value equals the stored one and leaves both stamps alone),
+  (re-approved as it stands, the value equals the stored one and leaves both stamps and the
+  generation alone),
   unanswered otherwise; an established shop that flips that answer to "no" is the case the
   `null` exists for. The text, the probe and the badge key on `forwarding_source_number` being
   set, so after a clear none of them has a line to act on: both routes answer 409
@@ -1189,6 +1232,26 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     (confirmed but never probed, and the reverse) → both end null on a change. The columns and
     the stamps change in one `SettingsRepository` write (a write that fails leaves the old
     numbers beside the old stamps, never new numbers beside old stamps).
+  - Edge (a stamp lands after the line moved; real Postgres, two connections, looped; the
+    first-day state, the confirm and probe routes and the inbound handler): a tenant on line A
+    at generation 3. (a) A probe is placed for A (pending pair `3`), a re-run is approved and
+    executed with line B (generation 4, both stamps null), then A's forwarded call arrives at
+    the Rivet number → zero rows, `forwarding_verified_at` stays null, the badge stays, and
+    the call is handled as any inbound call. (b) A stale tab still showing A's chip sends
+    `forwardingGeneration: 3` to the confirm route after B → 409 `FORWARDING_CHANGED`,
+    `forwarding_confirmed_at` stays null, and the shell's re-read shows B's code and badge. (c)
+    A tap carrying `4` after B, and a probe placed after B whose call arrives inside 20 s, stamp
+    their own columns; a probe whose `forwarding_probe_at` is 21 s old stamps nothing. (d) A re-run that approves
+    A and its carrier again leaves the generation at 3 and both stamps in place, and a probe
+    placed before it still stamps. (e) A carrier-only change, a number-only change and a "no"
+    that clears a stored line each bump the generation by exactly one, and a "no" on a tenant
+    with no stored line bumps nothing; two re-runs to different lines executed at once on two
+    connections end two above where they started, never one short. (f) The tap and the
+    probe's arrival racing on one generation, and the same tap sent twice, all succeed: each
+    stamps only its own column, and the second tap leaves the first time in place. (g) The
+    confirm route against a cleared line answers 409 `FORWARDING_NOT_CONFIGURED`. Shell test: a
+    409 `FORWARDING_CHANGED` re-reads the status and renders the new line's chip, with no
+    stamp shown for the old one.
   - Edge (a re-run that answers "no" clears the old line; the explicit-null contract, real
     Postgres): an established tenant with source number A, carrier `verizon` and both stamps
     set re-runs setup (reopen pre-fills `existing_number` "yes" with A and `verizon`) and
@@ -2531,7 +2594,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     call holds: `budget_day`, `reserved_cents`, `budget_released_at`; no `tenant_id`); the
     same migration adds `demo_handoff_outbox` (`id`, `demo_call_id` UNIQUE, `lead_id`,
     `idempotency_key` UNIQUE, `handoff_expires_at`, `created_at`, `sent_at` NULL until the
-    provider accepts the message, `attempts`; no `tenant_id`; see Late status callbacks),
+    provider accepts the message, `retired_at` NULL until a row that can no longer be sent
+    usefully is retired unsent, `attempts`; no `tenant_id`; see Late status callbacks),
     `signup_handoffs` (`token_hash` PK, `lead_id`, `tenant_id` NULL until a signup binds it,
     `expires_at`, `consumed_at` NULL; inserted with the outbox row, see Late status callbacks
     and Consent, limits, handoff), `demo_call_budget` (`day` DATE primary key, `calls_reserved`,
@@ -2545,9 +2609,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - create `packages/api/src/workers/demo-lease-reaper.ts` (a leader-gated P0-009 sweep that
     reclaims expired leases, takes over resets whose heartbeat has gone stale, reaps
     in-flight registry rows whose heartbeat has lapsed, re-enqueues handoff outbox rows
-    still pending after five minutes and returns the reservation of an unconfirmed call whose
+    still pending after five minutes (or retires one inside its expiry margin instead) and
+    returns the reservation of an unconfirmed call whose
     callback window has closed); create `packages/api/src/workers/send-demo-handoff.ts`
-    (the queue handler that sends the signup text from an outbox row); extract the
+    (the queue handler that sends the signup text from an outbox row, or retires the row
+    unsent when its link is about to expire); extract the
     `information_schema` table walk that `tenants/deprovision.ts` uses to purge a tenant into a
     shared helper that takes a keep-list, an optional batch size and a `beforeStep` fence hook
     (deprovision passes none of them and keeps its single transaction; `demo/reset.ts` passes
@@ -2572,7 +2638,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `packages/api/src/workers/execution-worker.ts` (a demo tenant's proposals are claimed only
     under an `active`, unexpired lease, and run with that lease's generation in context),
     `packages/api/src/shared/rate-limit/phone-rate-limit.ts` (platform sentinel tenant, one
-    call per number per day), `packages/api/src/flags/voice-flags.ts` (kill switch)
+    call per number per day; gains `tryConsumeOn(client, …)`, the same limiter on a caller's
+    transaction client, which `tryConsume` is refactored to call, see Daily budget),
+    `packages/api/src/flags/voice-flags.ts` (kill switch)
   - reuse `telephony/outbound-call-service.ts:266` REST pattern minus the customer bridge (and
     plus a `signal`: the original passes none, see the 10 s request bound under Approach),
     `ai/skills/disclose-recording.ts` copy pattern for the consent line,
@@ -2588,7 +2656,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `packages/api/test/integration/demo-send-suppression.test.ts`,
     `packages/api/test/integration/demo-handoff-outbox.test.ts`,
     `packages/api/test/integration/demo-calls.test.ts`,
-    `packages/api/test/integration/demo-call-budget.test.ts`,
+    `packages/api/test/integration/demo-call-budget.test.ts` (it also runs the allowance cases),
+    `packages/api/test/integration/phone-rate-limit.test.ts` (extend: `tryConsumeOn`),
     `packages/api/test/integration/demo-callback-binding.test.ts`,
     `packages/api/test/integration/demo-signup-handoff.test.ts`,
     `packages/api/test/integration/demo-tenant-leases.test.ts`,
@@ -2605,7 +2674,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   other's details and land jobs on a shared account, and the per-number rate limit does nothing
   about that. Isolation is a lease, not a limit. Per trade there is a small pool of demo
   tenants (`tenants.demo = true`, each cloned from the trade's fixture). Every call takes
-  exactly one, as the first write of the request, by inserting a `demo_tenant_leases` row
+  exactly one, as the first write of the request after the visitor's allowance (the first
+  statement of the same transaction, see Daily budget), by inserting a `demo_tenant_leases` row
   (`id`, `tenant_id`, `visitor_phone_hash`, `call_sid`, `leased_at`, `expires_at`, `state`
   (`active | resetting | released`, CHECK added `NOT VALID`), `reset_started_at`,
   `reset_heartbeat_at`, `reset_token` (the fencing token), `generation`, `released_at`,
@@ -2820,8 +2890,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   commit or roll back together. A replay inserts neither: a fresh expiry computed on a replay
   would hash to a different token, so the insert follows the outbox row and does not rely on
   the conflict alone. The token itself is never stored, only its hash. The handler
-  (`workers/send-demo-handoff.ts`, the P0-009 pattern) returns if `sent_at` is set; otherwise
-  it sends from the platform number with the row's `idempotency_key` as the provider's
+  (`workers/send-demo-handoff.ts`, the P0-009 pattern) returns if `sent_at` or `retired_at`
+  is set; otherwise, unless the expiry check below retires the row first, it sends from the
+  platform number with the row's `idempotency_key` as the provider's
   idempotency token, then runs `UPDATE … SET sent_at = now() WHERE id = $1 AND sent_at IS
   NULL`. A failed or ambiguous send (a timeout, a crash after the provider accepted it) leaves
   `sent_at` null, and the retry carries the same key and the same body (the link's handoff
@@ -2831,7 +2902,30 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   twice. Confirm at implementation that the platform SMS call accepts an idempotency token,
   and take it to the founder if it cannot, since an ambiguous send is then only
   at-least-once. A job that dead-letters leaves its row pending, and the reaper's sweep re-enqueues it after five
-  minutes under a queue key of its own (`…:sweep:<UTC date>`). The payload is
+  minutes under a queue key of its own (`…:sweep:<UTC date>`) unless the row is retired (next).
+  The link must also still be usable when it lands, because the webhook rejects a token whose
+  `signup_handoffs` row is past `expires_at`, the same `handoff_expires_at`; a provider or queue
+  that stays down past it would otherwise get an unusable link sent and `sent_at` set. So
+  the handler's first statement, and the sweep's for each pending row, is one guarded
+  `UPDATE demo_handoff_outbox SET retired_at = now() WHERE demo_call_id = $1 AND sent_at IS
+  NULL AND retired_at IS NULL AND handoff_expires_at <= now() + interval '60 seconds' RETURNING
+  id`: it takes the row lock and reads the database clock in the one statement, so no instance's
+  clock decides it. A returned row means the handoff is retired unsent; the handler returns
+  without calling the provider and audits `demo_handoff_expired` (the `RETURNING` is what keeps a
+  replay from auditing twice). The 60 s margin is `HANDOFF_SEND_MARGIN_SECONDS` in
+  `demo/handoff-outbox.ts`, beside the token, so a link is never sent with less than a minute
+  left: a row with exactly 60 s left is retired and one with more is sent. No fresh token is
+  minted, because a text that arrives after the first one's expiry is not worth a second
+  credential; the unused `signup_handoffs` row is left to expire on its own, and the lead row
+  is kept, so the visitor who still signs up lands on U3's first screen, which asks for the
+  trade and name (the path of any missing or expired handoff row). A retired row is never
+  sent later (the handler returns on `retired_at`), and a sent row is never retired (the
+  statement requires `sent_at IS NULL`). The sent stamp keeps its own guard and is written
+  whatever `retired_at` says, because the provider did accept the message, so the one row that
+  can carry both (a send that began outside the margin and a sweep that crossed it a moment
+  later) counts as sent. The sweep enqueues only a row that is neither sent nor retired and
+  still outside the margin and retires the rest in place, so a provider that stays down cannot
+  leave a row pending forever. The payload is
   `{ demoCallId }` with no `tenantId`, so it is not a demo-tenant job and the generation guard
   does not apply (the lease is usually released before it runs). A replayed or concurrent
   callback, and the on-time path, insert no second outbox row, handoff row or job. Only while
@@ -3027,7 +3121,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Pool exhausted.** When no demo tenant of the trade is free, the request is refused up front
   with 503 `DEMO_BUSY` and the page says "Every line is busy. Try again in a minute."; nothing
   is written (no lease, no `demo_calls` or lead row, no call, and the visitor's one-call-a-day
-  allowance is not spent). A call that is answered after its lease was reclaimed speaks the
+  allowance is not spent: it is consumed inside the transaction this refusal rolls back, see
+  Daily budget). A call that is answered after its lease was reclaimed speaks the
   same line and hangs up, again writing nothing. Pool size is the concurrency ceiling; the kill
   switch and the daily budget still apply.
 - **Never visible to owners.** Demo tenants have no `users` rows, no Clerk organisation, no
@@ -3074,6 +3169,33 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     allowance unspent. An exhausted pool refuses before the statement runs, so it reserves
     nothing. The day is the UTC date of an injected clock, so 00:00 UTC starts a new row and a
     full yesterday blocks nothing.
+  - *The visitor's allowance is spent inside that same transaction.* `PhoneRateLimiter.tryConsume`
+    opens and commits its own `withTenantTransaction`, so calling it before the lease
+    transaction would burn the day's attempt of a visitor the pool or the budget then refuses,
+    and checking first and consuming afterwards would let two requests for one number both
+    take a tenant and a budget unit before one loses the limiter race. Neither order is
+    allowed. `phone-rate-limit.ts` gains `tryConsumeOn(client, tenantId, scope, key, limit,
+    windowMs)`, which runs on the caller's client and opens, commits and rolls back nothing: the
+    same `pg_advisory_xact_lock(hashtext('<tenantId>:<scope>:<key>'))`, then the same count,
+    insert and reap statements in the same order, with the tenant id passed as a parameter
+    where `tryConsume` reads it from the `app.current_tenant_id` GUC (the platform
+    transaction sets none, as for `demo_calls`, and runs as the connection principal).
+    `tryConsume` is refactored to run `tryConsumeOn` inside its existing
+    `withTenantTransaction`, so its lock key, statements and results are unchanged, the RLS
+    policy still checks the GUC against the same id, and its other callers and tests are
+    untouched. The request's one platform transaction then runs in this order: (1) `tryConsumeOn`
+    for the visitor's number hash under the sentinel tenant, with the existing one-per-day
+    limit; a `false` rolls back and answers 429 having touched no tenant and no budget row;
+    (2) the lease insert; (3) the reservation above and the `demo_calls` row that records it.
+    The allowance goes first because its advisory lock serialises concurrent requests for one
+    number before any of them holds a tenant row or the day's budget row: the second waits, and when the first
+    commits it counts the first's row and is refused (the count runs after the lock, so it sees
+    the committed insert), and when the first rolls back, whether on a full pool, a refused
+    budget or a crash, it finds the allowance unspent and carries on. A pool or budget
+    refusal, and any failure before the commit, roll the allowance back with the lease and the
+    reservation; the commit spends all three together. The key lock is the first lock the
+    transaction takes and no other path takes it while holding a tenant row or the budget row,
+    so the allowance adds no wait cycle.
   - *Release.* The reservation is returned (`calls_reserved - 1` and `est_cost_cents -
     reserved_cents` on the row of `budget_day`, not today's) in exactly two cases. (1) The
     `Calls` request provably created no call (the not-created outcome above: a failure before
@@ -3188,6 +3310,25 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `Calls` requests; no lease, `demo_calls`, lead or SMS row is written; no number's
     one-call-a-day allowance is spent and the pool is untouched. A pool with no free tenant and
     a budget with room → 503 and the counters unchanged.
+  - Allowance (spent with the lease and the reservation, never apart; real Postgres, two
+    connections, each case looped and in both arrival orders): (a) two simultaneous requests
+    for one number, a free pool and budget room → exactly one lease, one `demo_calls` row, one
+    budget unit and one allowance row; the other answers 429 having taken no tenant and no
+    budget unit, and the allowance count is 1, not 2 (the loser added nothing). (b) Pool
+    exhausted → 503 `DEMO_BUSY` and the allowance count for the number is 0; once a tenant frees
+    the same number's retry the same day succeeds and the count is 1. (c) Budget refused (the
+    day's row at its cap) → the same: 503, count 0, no lease row survives, and a retry after
+    room opens succeeds. (d) A fault injected after the allowance row is written and before the
+    commit (and, separately, a killed process) → count 0, no lease or `demo_calls` row, and a
+    fresh request for the number succeeds; with a second request for that number waiting on the
+    key lock at the time, it is not refused, it consumes once and completes. (e) After a
+    committed call the next request for the number answers 429 before the pool or the budget
+    row is read (a statement spy shows neither). (f) Unit and integration for the limiter
+    (`phone-rate-limit.test.ts`, extended): `tryConsume` and `tryConsumeOn` over one key share a
+    counter (consume on one, denied on the other); both take the lock on the same
+    `<tenantId>:<scope>:<key>` string; `tryConsumeOn` on a client that then rolls back leaves
+    the count unchanged; 10 parallel callers at limit 3 allow exactly 3 through either; and the
+    existing `PhoneRateLimiter` tests and `recovery-rate-limiter.test.ts` pass unchanged.
   - Daily budget (alerts and config): the reservation that takes either count to 80% of its cap
     raises exactly one alert and one `demo_budget_alert` row for that cap (a cap of 50 → the
     40th reservation; a cap of 7 → the 6th), filling a cap raises one more, and later refusals
@@ -3331,6 +3472,21 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     as the first (asserted on the fake, which collapses repeats of a key), exactly one message
     exists, and `sent_at` ends set; a fake that does not collapse repeats shows the duplicate,
     which is the check that the key is really sent.
+    (b4) Expired before it could be sent (real Postgres, a fake provider that records calls;
+    the row's `handoff_expires_at` is set relative to the database's `now()`, since the
+    statement reads that clock): a provider that fails every attempt until the row is inside
+    the margin, then the sweep runs → the row is retired in place (`retired_at` set, `sent_at`
+    null), the fake saw no further call, no job is enqueued for it, one `demo_handoff_expired`
+    audit row exists, the `signup_handoffs` row is untouched (unconsumed, and the webhook
+    rejects its token once expired), the lead row stays and the shell asks for trade and name.
+    A handler attempt with 30 s left → retired, no provider call; with 61 s left → sends and
+    sets `sent_at`; with exactly 60 s left → retired (the boundary: the expiry is set to
+    `now() + interval '60 seconds'` and the statement run in one transaction, so `now()` does
+    not move); with 5 minutes left → sends and sets `sent_at`. A retired row
+    replayed (the job redelivered, the sweep run twice, two handlers at once) → no provider
+    call and still one audit row. A sent row is never retired: the handler and the sweep run
+    after `handoff_expires_at` has passed leave `sent_at` as it was, `retired_at` null and no
+    audit row. A pending row outside the margin is re-enqueued by the sweep as before.
     (c) No tenant writes: a statement spy shows the late callback opens no tenant-scoped
     transaction and writes nothing but `demo_calls`, its outbox row, its `signup_handoffs` row
     and the one platform-level job (payload `{ demoCallId }`, no `tenantId`, so the generation
@@ -3578,8 +3734,8 @@ previous one; the previous slice is merged first.
 | S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`, until a retry bumps `version`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so, an approve sent from before a retry included); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover, even beside a failed one, and takes precedence over `failed`) and `POST /draft/retry` (guards in order: `DRAFT_NOT_APPROVED`, then `DRAFT_RETRY_UNSAFE` for a set holding such a proposal, failed member or not (`approved + undone` is unsafe, not nothing-failed), then `DRAFT_RETRY_NOTHING_FAILED` for the benign rest; the refusal changes nothing, because re-approving only the failed member would leave its sibling behind and the set would end `executed + undone`; a retry that passes the guards bumps the draft `version` by one in the same locked transaction as the re-queue, so one version names one approval attempt and a screen from before the retry cannot undo, reset or re-approve it (409 `VERSION_CONFLICT`), and `onboarding.draft_retry` records the version before and after; that set's way out is S4's reset, so until S4 the only way out is Settings and the shell offers no Start over). Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
 | S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`, refused with `DRAFT_METRO_LOCKED` once a choice is staged and rebuilding the assembled shop for the new metro in the same write, so the city and prices change together); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper, and a derived, optional `undoable` on the status draft block and on the retry response (S1b's retry response is unchanged), so the saving screen shows Undo only while the whole set is still inside its windows and a partial retry, which refreshes only the failed member, shows none; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status (`reset` while no member is executed or executing and no `approved` member is past its undo window, else `settings`, for a failed member beside a terminal one as for any other `stopped` set) so the shell never offers a refused button; reset is also the way out of the set retry refuses as `DRAFT_RETRY_UNSAFE`; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body, and checked between `DRAFT_NOT_APPROVED` and `DRAFT_RETRY_UNSAFE`), made required once every client sends it. | 6-7 days (reset adds one) |
-| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep, each deactivation claimed under the payment-mode lock so a switch back stops the cleanup; no link minted and none deactivated on a failed mode read, and the link attach re-checks the mode under a per-tenant payment-mode lock, so a checkout that stalls across a switch stores none even when the switch is the tenant's first settings write), flag flipped, v2 deleted. | 12-15 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another, the per-link claim step a third) |
-| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost) and renewing the lease's short pre-live expiry once, from the first `ringing` or `in-progress` callback, in that same statement (the `Calls` response binds and never renews, so a call Twilio is still queueing cannot start the clock), with the `Calls` request bounded at 10 s, reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces, with every text and email for a demo tenant refused at the delivery boundary; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a transactional handoff outbox written in the finalizing transaction together with the signup-handoff row its token validates against, and sent by a queue worker under a stable idempotency key, so a crash before the send is retried and never loses the handoff, no tenant writes). | 11-15 days (the token and bind add one, the budget another, the late-callback handoff a third, the outbox and its sender a fourth) |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps and bumps a forwarding generation that both stamps compare against, so a late probe or a stale tab's confirm for the old line is refused; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep, each deactivation claimed under the payment-mode lock so a switch back stops the cleanup; no link minted and none deactivated on a failed mode read, and the link attach re-checks the mode under a per-tenant payment-mode lock, so a checkout that stalls across a switch stores none even when the switch is the tenant's first settings write), flag flipped, v2 deleted. | 12-15 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another, the per-link claim step a third) |
+| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost) and renewing the lease's short pre-live expiry once, from the first `ringing` or `in-progress` callback, in that same statement (the `Calls` response binds and never renews, so a call Twilio is still queueing cannot start the clock), with the `Calls` request bounded at 10 s, reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces, with every text and email for a demo tenant refused at the delivery boundary; a daily call-and-cents budget is reserved atomically before every `Calls` request, in the one transaction that also spends the visitor's one-call-a-day allowance and takes the lease, so a refused visitor keeps the allowance, and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a transactional handoff outbox written in the finalizing transaction together with the signup-handoff row its token validates against, and sent by a queue worker under a stable idempotency key, so a crash before the send is retried and never loses the handoff, and retired unsent once its link is within a minute of expiring, no tenant writes). | 12-16 days (the token and bind add one, the budget another, the late-callback handoff a third, the outbox and its sender a fourth, the lease renewal, the demo-tenant send suppression and the transactional allowance a fifth) |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
 second engineer shortens S2 and S3 only where the API they depend on is already merged.
