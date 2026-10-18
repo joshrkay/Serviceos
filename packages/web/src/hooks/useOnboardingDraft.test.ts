@@ -30,7 +30,7 @@ function stubFetch(queue: Array<Response | Error>): void {
   responses = [...queue];
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const headers = (init?.headers ?? {}) as Record<string, string>;
       calls.push({
         method: init?.method ?? 'GET',
@@ -40,8 +40,7 @@ function stubFetch(queue: Array<Response | Error>): void {
       });
       const next = responses.shift();
       if (!next) throw new Error(`unexpected fetch ${String(input)}`);
-      if (next instanceof Error) throw next;
-      return next;
+      return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
     }),
   );
 }

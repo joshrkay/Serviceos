@@ -145,7 +145,14 @@ function Conversation() {
         />
       )}
       {screen === 'saving' && draft && <SavingLine count={draft.proposalIds.length} />}
-      {screen === 'after' && (step === 'billing' ? <BillingStep /> : <SavingLine count={draft?.proposalIds.length ?? 0} settling />)}
+      {screen === 'after' &&
+        (step === 'billing' ? (
+          <div className="mt-7">
+            <BillingStep />
+          </div>
+        ) : (
+          <SavingLine count={draft?.proposalIds.length ?? 0} settling />
+        ))}
     </TurnFrame>
   );
 }
