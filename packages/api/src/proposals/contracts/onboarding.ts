@@ -1,8 +1,17 @@
 import { z } from 'zod';
 import { isRuntimeTimezone } from '../../shared/timezone';
+import { isSeedablePackId } from '../../packs/seed-pack-defaults';
 
 // Electrical and painting are accepted as basic second-class verticals; rich defaults are added separately.
 const verticalTypeSchema = z.enum(['hvac', 'plumbing', 'electrical', 'painting']);
+
+/**
+ * A pack the seeder knows: the four rich verticals plus the generic trades the
+ * form wizard already activates (roofing, gc_remodel, landscaping, concrete,
+ * other). "Pick, don't build" onboarding mints onboarding_tenant_settings for
+ * every trade, so the pack list must accept what POST /api/onboarding/pack does.
+ */
+const seedablePackIdSchema = z.string().min(1).refine(isSeedablePackId, { message: 'unknown pack id' });
 
 const lineItemCategorySchema = z.enum(['labor', 'material', 'equipment', 'other']);
 
@@ -10,7 +19,7 @@ export const onboardingTenantSettingsPayloadSchema = z.object({
   businessName: z.string().min(1),
   city: z.string().optional(),
   state: z.string().optional(),
-  verticalPacks: z.array(verticalTypeSchema).min(1),
+  verticalPacks: z.array(seedablePackIdSchema).min(1),
   // B1.20 — the owner's hourly rate, when the pricing capture state
   // extracted one (price_type: 'hourly_rate'). Integer cents, per the
   // repo's money invariant. Optional/absent when no hourly rate was

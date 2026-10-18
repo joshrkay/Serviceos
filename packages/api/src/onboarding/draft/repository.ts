@@ -206,3 +206,54 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
     });
   }
 }
+
+// ─── In-memory implementation (route tests, hermetic boot) ───────────────────
+
+export class InMemoryOnboardingDraftRepository implements OnboardingDraftRepository {
+  private readonly byTenant = new Map<string, OnboardingDraft>();
+
+  async getForTenant(tenantId: string): Promise<OnboardingDraft | null> {
+    return this.byTenant.get(tenantId) ?? null;
+  }
+
+  async create(tenantId: string, input: CreateDraftRecord): Promise<OnboardingDraft> {
+    const existing = this.byTenant.get(tenantId);
+    if (existing) return existing;
+    const now = new Date();
+    const draft: OnboardingDraft = {
+      id: crypto.randomUUID(),
+      tenantId,
+      ...input,
+      choices: {},
+      status: 'draft',
+      version: 1,
+      proposalIds: [],
+      createdAt: now,
+      updatedAt: now,
+      approvedAt: null,
+    };
+    this.byTenant.set(tenantId, draft);
+    return draft;
+  }
+
+  async stageChoice(tenantId: string, settingKey: AnyChoiceKey, choice: StagedChoice, expectedVersion: number): Promise<OnboardingDraft> {
+    const key = ChoiceKeySchema.parse(settingKey);
+    const staged = StagedChoiceSchema.parse(choice);
+    const d = this.byTenant.get(tenantId);
+    if (!d) throw new DraftNotFoundError(tenantId);
+    if (d.status === 'approved') throw new DraftAlreadyApprovedError();
+    if (d.version !== expectedVersion) throw new DraftVersionConflictError(expectedVersion, d.version);
+    const next: OnboardingDraft = { ...d, choices: { ...d.choices, [key]: staged }, version: d.version + 1, updatedAt: new Date() };
+    this.byTenant.set(tenantId, next);
+    return next;
+  }
+
+  async markApproved(tenantId: string, proposalIds: string[]): Promise<OnboardingDraft> {
+    const d = this.byTenant.get(tenantId);
+    if (!d) throw new DraftNotFoundError(tenantId);
+    if (d.status === 'approved') return d;
+    const next: OnboardingDraft = { ...d, status: 'approved', proposalIds: [...proposalIds], version: d.version + 1, approvedAt: new Date(), updatedAt: new Date() };
+    this.byTenant.set(tenantId, next);
+    return next;
+  }
+}

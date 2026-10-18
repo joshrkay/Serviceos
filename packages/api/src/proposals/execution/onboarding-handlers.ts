@@ -31,7 +31,7 @@ import {
   activatePackWithSeed,
   ActivatePackWithSeedDeps,
 } from '../../onboarding/activate-pack-with-seed';
-import { SeedPackDefaultsDeps, type ChosenPricing } from '../../packs/seed-pack-defaults';
+import { SeedPackDefaultsDeps, isSeedablePackId, type ChosenPricing } from '../../packs/seed-pack-defaults';
 import {
   EstimateTemplateRepository,
   LineItemTemplate,
@@ -134,7 +134,7 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
       return { success: false, error: 'Payload must include a non-empty businessName' };
     }
     const verticalPacks = payload.verticalPacks;
-    if (!Array.isArray(verticalPacks) || verticalPacks.length === 0 || !verticalPacks.every(isVerticalType)) {
+    if (!Array.isArray(verticalPacks) || verticalPacks.length === 0 || !verticalPacks.every((v) => typeof v === 'string' && isSeedablePackId(v))) {
       return { success: false, error: 'Payload must include at least one valid verticalPacks entry' };
     }
     const city = typeof payload.city === 'string' ? payload.city.trim() : '';
@@ -231,7 +231,7 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
         auditRepo: this.auditRepo,
         packSeedDeps: this.packSeedDeps,
       };
-      for (const packId of verticalPacks as VerticalType[]) {
+      for (const packId of verticalPacks as string[]) {
         // No lockClient — the executor doesn't run inside an HTTP request's
         // tenant transaction, so an xact lock can't be used here. lockPool
         // (review finding #3) is the session-level fallback that actually

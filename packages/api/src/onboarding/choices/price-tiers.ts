@@ -70,6 +70,20 @@ export interface RegionalPriceTierRepository {
   find(trade: string, metroCode: string): Promise<RegionalPriceTiers | null>;
 }
 
+/** Test and hermetic-boot implementation; same contract as the Pg repository. */
+export class InMemoryRegionalPriceTierRepository implements RegionalPriceTierRepository {
+  private readonly rows = new Map<string, RegionalPriceTiers>();
+  constructor(seed: Record<string, RegionalPriceTiers> = {}) {
+    for (const [k, v] of Object.entries(seed)) this.rows.set(k, RegionalPriceTiersSchema.parse(v));
+  }
+  async find(trade: string, metroCode: string): Promise<RegionalPriceTiers | null> {
+    return this.rows.get(`${trade}|${metroCode}`) ?? null;
+  }
+  async upsert(trade: string, metroCode: string, tiers: RegionalPriceTiers): Promise<void> {
+    this.rows.set(`${trade}|${metroCode}`, RegionalPriceTiersSchema.parse(tiers));
+  }
+}
+
 export class PgRegionalPriceTierRepository implements RegionalPriceTierRepository {
   constructor(private readonly pool: Pool) {}
 
