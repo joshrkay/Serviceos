@@ -38,6 +38,10 @@ export function normalizeReminderOffsets(input: unknown): number[] {
  * full F8 data-plane PR). Until then, the field is purely in-memory and
  * resolved at runtime via `resolveEscalationSettings`.
  */
+/** How the owner wants to be paid when a job is marked done ("pick, don't build" onboarding). */
+export type PaymentCollectionMode = 'pay_link' | 'collect_on_site';
+export type EmergencyTarget = 'owner_cell' | 'owner_cell_then_text';
+
 export interface EscalationSettings {
   channel_sms: boolean;
   channel_in_app: boolean;
@@ -61,6 +65,13 @@ export interface EscalationSettings {
    * survives as a stored value.
    */
   after_hours_voice_mode?: 'voicemail' | 'ai_answering';
+  /**
+   * "Pick, don't build" onboarding — who the agent reaches first on an
+   * emergency call: the owner's cell, or the owner's cell with an SMS page
+   * if unanswered. Chosen on the emergency card; consumed by the hand-off
+   * path. Absent means owner_cell.
+   */
+  emergency_target?: EmergencyTarget;
   /**
    * RV-071 — spoken challenge (e.g. a PIN like "4271") required before a
    * money-class or irreversible-class proposal can be APPROVED BY VOICE on
@@ -601,6 +612,8 @@ export interface TenantSettings {
    * rows / legacy fixtures read as "off" via `?? false`.
    */
   autonomousBookingEnabled?: boolean;
+  /** Migration 312 — how the owner collects payment at job completion; null/undefined = not chosen yet. */
+  paymentCollectionMode?: PaymentCollectionMode | null;
   /**
    * UB-D / D-015 — the lane's dedicated confidence threshold. NUMERIC(3,2)
    * with DB CHECK 0.90–0.99 (default 0.95); the evaluator
@@ -771,6 +784,8 @@ export interface UpdateSettingsInput {
   weeklyFeedbackEnabled?: boolean;
   /** UB-D / D-015 — opt into the autonomous booking lane (column default false). */
   autonomousBookingEnabled?: boolean;
+  /** Migration 312 — how the owner collects payment at job completion; null/undefined = not chosen yet. */
+  paymentCollectionMode?: PaymentCollectionMode | null;
   /** UB-D / D-015 — lane confidence threshold, 0.90–0.99 (column default 0.95). */
   autonomousBookingThreshold?: number;
   /** D-018 — opt into the autonomous close lane (column default false). */

@@ -7710,6 +7710,15 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_onboarding_drafts ON onboarding_drafts
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // "Pick, don't build" onboarding — how the owner collects payment when a
+  // job is marked done. Nullable: unset until the owner chooses. Written by
+  // the onboarding_voice_policy proposal handler and the settings PUT.
+  '312_tenant_settings_payment_collection_mode': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS payment_collection_mode TEXT
+        CHECK (payment_collection_mode IS NULL OR payment_collection_mode IN ('pay_link', 'collect_on_site'));
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

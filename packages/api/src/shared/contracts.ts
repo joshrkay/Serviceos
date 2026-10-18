@@ -645,6 +645,8 @@ export const updateSettingsSchema = z.object({
   // UB-D / D-015 — autonomous booking lane (migration 231). Threshold bounds
   // mirror the DB CHECK (NUMERIC(3,2) in [0.90, 0.99]).
   autonomousBookingEnabled: z.boolean().optional(),
+  // Migration 312 — "pick, don't build" payment preference; null clears.
+  paymentCollectionMode: z.enum(['pay_link', 'collect_on_site']).nullable().optional(),
   autonomousBookingThreshold: z.number().min(0.9).max(0.99).optional(),
   // #1011 (wayfinder map #995) — five keys that `PgSettingsRepository`'s write
   // column map already carries (pg-settings.ts:372,374,431,438,439) but that
