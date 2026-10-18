@@ -207,8 +207,10 @@ tiers; import from a photo; pricing or plan changes.
   lease), `demo_budget_alert` (the daily call budget reaching 80% of a cap, or filling one),
   `demo_call_unconfirmed` (a `Calls` request whose outcome may have created a call, with its
   reason), `demo_call_unconfirmed_expired` (the reservation of such a call returned after
-  the callback window closed with no CallSid ever bound) and `demo_lease_renewed` (a lease's
-  expiry moved once, at the CallSid bind, with the old and new value).
+  the callback window closed with no CallSid ever bound), `demo_lease_renewed` (a lease's
+  expiry moved once, at the first `ringing` or `in-progress` callback, with the old and new
+  value) and `demo_send_suppressed` (a text or email for a demo tenant refused at the delivery
+  boundary, with the channel and recipient class).
 - **Integer cents:** tier prices, trip fee and hourly rate are cents end to end; the price
   multiplier is applied in integer arithmetic with explicit rounding in one function.
 - **tenant_id + RLS:** `onboarding_drafts` carries `tenant_id` with RLS like
@@ -2560,6 +2562,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     and `metrics/`; at least `workers/setup-reminder-sweep.ts`, `trial-reminder-sweep.ts`,
     `dunning-sweep.ts`, `money-reconciliation.ts`, `overage-settlement-reconciliation.ts` and
     `billing/call-usage-billing.ts`), and the platform-admin tenant list
+  - modify `packages/api/src/notifications/gated-message-delivery.ts` (the one provider
+    boundary: `sendSms` and `sendEmail` refuse a message whose `tenantId` is a demo tenant, see
+    No external sends) and wire its demo-flag read in `app.ts` where `messageDelivery` is built
   - modify `packages/api/src/app.ts` (public route with the `/public` IP limiter at :839;
     `handleQueueMessage` runs `demo/job-guard.ts` before any handler, which checks the
     generation, registers the job in `demo_inflight_jobs` and heartbeats it, and the queue is
@@ -2579,6 +2584,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     consumes it to seed the draft)
   - tests: `packages/api/test/demo/{service,routes,limits,lease,lease-token,twilio-outcome,reset,job-guard,inflight,write-fence,call-budget,handoff-outbox}.test.ts`,
     `packages/api/test/workers/send-demo-handoff.test.ts`,
+    `packages/api/test/notifications/demo-send-suppression.test.ts`,
+    `packages/api/test/integration/demo-send-suppression.test.ts`,
     `packages/api/test/integration/demo-handoff-outbox.test.ts`,
     `packages/api/test/integration/demo-calls.test.ts`,
     `packages/api/test/integration/demo-call-budget.test.ts`,
@@ -2601,27 +2608,45 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   exactly one, as the first write of the request, by inserting a `demo_tenant_leases` row
   (`id`, `tenant_id`, `visitor_phone_hash`, `call_sid`, `leased_at`, `expires_at`, `state`
   (`active | resetting | released`, CHECK added `NOT VALID`), `reset_started_at`,
-  `reset_heartbeat_at`, `reset_token` (the fencing token), `generation`, `released_at`) in one
-  transaction: the tenant is picked `FOR UPDATE SKIP LOCKED` among the
+  `reset_heartbeat_at`, `reset_token` (the fencing token), `generation`, `released_at`,
+  `renewed_at` (null until the one renewal below; it is what makes the renewal once-only)) in
+  one transaction: the tenant is picked `FOR UPDATE SKIP LOCKED` among the
   trade's demo tenants with no unreleased lease, and a partial unique index on `tenant_id WHERE
   released_at IS NULL` is the backstop (it covers `active` and `resetting` alike), so two
   callers can never hold one tenant (a second, on `visitor_phone_hash` under the same
   predicate, stops one visitor holding two). `expires_at` is set twice, because the lease is
-  taken before anything proves the call exists. The call is created with a Twilio ring
-  `Timeout` of 30 s and a `TimeLimit` of 90 s, so once it exists it can run 120 s, and the lease
-  adds 30 s of grace: 150 s from the moment the call is confirmed, not from the lease. At insert
-  the expiry is only the pre-creation window, the `Calls` request's own bound (10 s, below)
-  plus the 30 s ring `Timeout` plus 30 s of grace, 70 s from `leased_at`: long enough for the
-  first callback of a call created at the end of the request, short enough that a request that
-  never produced a call frees the tenant in 70 s and not 150. When the CallSid binds (the first
-  callback or the `Calls` response, whichever commits first), the bind statement renews
-  `expires_at` once to the bind time plus 150 s, clamped to `sexp` (see the callbacks paragraph
-  for the statement and its guards). A fixed 150 s from `leased_at` assumes the call is created
-  promptly, and nothing guarantees that: the reused request has no bound of its own, and even
-  a bounded one that is aborted can still be created by Twilio afterwards, so a call created
-  late would outlive the lease, its voice turns would start failing the active check, and the
-  reaper could reset the tenant mid-call. The constants (10 s, 30 s, 90 s, 30 s, 150 s) live
-  in `lease.ts` and nowhere else. The inbound turn processor gets its tenant from the
+  taken before anything proves the call is live. The call is created with a Twilio ring
+  `Timeout` of 30 s and a `TimeLimit` of 90 s, so once it is ringing it can run 120 s, and the
+  lease adds 30 s of grace: 150 s from the first callback that proves the call is live, not
+  from the lease and not from the `Calls` response. At insert the expiry is only the pre-live
+  window, the `Calls` request's own bound (10 s, below) plus the 30 s ring `Timeout` plus 30 s
+  of grace, 70 s from `leased_at`: long enough for a call that is placed promptly to report
+  `ringing`, short enough that a request that never produced a call, or a call Twilio is still
+  holding in its queue, frees the tenant in 70 s and not 150. The `Calls` response does not
+  renew. A 2xx with a `sid` says Twilio accepted the request, not that the call is being
+  placed: an account over its calls-per-second limit has its calls queued, and a queued call
+  returns a `CallSid` while it waits, so a renewal at the response could start the 150 s clock
+  well before dialing and let the reaper reset the tenant under a call that is still ringing or
+  running its demo. The response binds the `CallSid` (callback matching and the reservation
+  need it) and renews nothing. The lease renews once, from the first status callback whose
+  `CallStatus` is `ringing` or `in-progress` (whichever Twilio sends first; the voice `Url`
+  fetch that follows an answer carries `in-progress` too), to that callback's time plus 150 s,
+  clamped to `sexp` (see the callbacks paragraph for the statement and its guards). `queued`
+  and `initiated` do not count, because neither proves the call has left Twilio's queue, and a
+  terminal status ends the lease and never extends it. The `Calls` request therefore asks for
+  `StatusCallbackEvent` `ringing answered completed` (Twilio's default is `completed` alone).
+  The provider's queue is bounded by the pre-live window and by nothing else: a call still
+  queued at `expires_at` is the unconfirmed case below (the lease is released by the reaper's
+  next sweep, so at most 70 s plus one 30 s sweep), and a first live callback that would
+  arrive after `sexp` renews nothing, since a status callback past `sexp` answers 200 and
+  does nothing. Twilio's Call resource reports `queue_time`; the staging check under
+  Verification logs it as an observation and no lease logic reads it. A fixed 150 s from
+  `leased_at` assumes the call is live promptly, and nothing guarantees that: the reused
+  request has no bound of its own, a bounded one that is aborted can still be created by
+  Twilio afterwards, and Twilio can queue a created call, so a call that goes live late would
+  outlive the lease, its voice turns would start failing the active check, and the reaper could
+  reset the tenant mid-call. The constants (10 s, 30 s, 90 s, 30 s, 150 s) live in `lease.ts`
+  and nowhere else. The inbound turn processor gets its tenant from the
   `active` lease its callback names (next paragraph), never from a trade-level lookup. What the
   `Calls` request did is classified before anything is released (next paragraph): only a
   request that provably created no call releases the lease and returns the day's budget
@@ -2639,10 +2664,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   timing open for as long. U7's request carries `AbortSignal.timeout(CALLS_REQUEST_TIMEOUT_MS)`,
   10 s, built in `demo/service.ts` (the shared bridge-call service is left as it is). The abort
   is the timeout case of the *Unconfirmed* class below, with no new outcome, and it bounds the
-  time from the lease to the call's creation, which the 70 s pre-creation window relies on.
+  time from the lease to the call's creation, which the 70 s pre-live window relies on.
   - *Created.* A 2xx whose body parses and carries a `sid`. The sid is bound by the same
-    statement a callback uses, which pins the reservation and, if no callback bound it first,
-    renews the lease to the bind time plus 150 s, and the lease runs its course.
+    statement a callback uses, which pins the reservation and renews nothing (the call may
+    still be queued); the lease keeps its pre-live expiry until a `ringing` or `in-progress`
+    callback renews it, and then runs its course.
   - *Not created*, the only outcome that releases at once. (a) The request failed before any
     of it was written: a local failure (missing credentials, a number that fails the NANP and
     premium checks, a token that cannot be minted; no request is made) or a connection error
@@ -2670,25 +2696,29 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   lead row stays so a late `completed` can still hand off, and
   the visitor is answered as for a success ("calling you now") with the one-call-a-day
   allowance spent. Then one of three things happens. (1) A callback carrying the lease token
-  arrives: it binds the CallSid and the call proceeds exactly like a created one, so the bind
-  renews the lease to that moment plus 150 s, the voice URL answers as the leased tenant, a
-  terminal status takes `resetAndRelease`'s claim, and the bound CallSid pins the reservation.
-  (2) No callback arrives by `expires_at`, which for an unconfirmed call is still the 70 s
-  pre-creation expiry: the reaper reclaims the lease through `resetAndRelease` as for any
-  unanswered call, and the reservation stays counted. (3) No callback arrives by
+  arrives: it binds the CallSid and the call proceeds exactly like a created one, so a
+  `ringing` or `in-progress` callback renews the lease to that moment plus 150 s, the voice URL
+  answers as the leased tenant, a terminal status takes `resetAndRelease`'s claim, and the
+  bound CallSid pins the reservation. (2) No live callback arrives by `expires_at`, which for
+  an unconfirmed call, and for a created one still held in Twilio's queue, is the 70 s pre-live
+  expiry: the reaper reclaims the lease through `resetAndRelease` as for any unanswered call,
+  and the reservation stays counted. (3) No callback arrives by
   `callback_deadline_at`, the first moment no callback can bind any more (a status callback
   past `sexp` answers 200 and does nothing): the reaper's
   sweep, run a fixed ten minutes later to outlast clock skew between instances, sets the row
   `failed`, returns the reservation once and audits `demo_call_unconfirmed_expired`. A callback
   between `expires_at` and the deadline always binds the CallSid, finalizes the row through the
   late-status path and pins the reservation, so a call that did exist is never missing from
-  the cap. Whether it also renews the lease is decided by commit order and nothing else: the
-  lease is renewed if the callback's bind commits while the lease is still `active` and still
-  at the generation the token names, which can be after `expires_at` and before the reaper's
-  next sweep (it runs every 30 s), because the reaper's claim repeats the expiry test in its
-  own statement (Release and reset) and a renewal that commits first leaves it zero rows. If
-  the reaper's claim commits first, the callback binds and finalizes and renews nothing, and
-  the voice URL speaks the busy line. The two rules are one rule: an unconfirmed call's late
+  the cap. Whether it also renews the lease is decided by what it is and by commit order, and
+  nothing else: only a `ringing` or `in-progress` callback can renew, and it does if its
+  statement commits while the lease is still `active`, unrenewed and at the generation the
+  token names, which can be after `expires_at` and before the reaper's next sweep (it runs
+  every 30 s), because the reaper's claim repeats the expiry test in its own statement
+  (Release and reset) and a renewal that commits first leaves it zero rows. If the reaper's
+  claim commits first, the callback binds and finalizes and renews nothing, and the voice URL
+  speaks the busy line and hangs up. This is the rule for a queued call too: one whose
+  `ringing` arrives after the lease was released binds, finalizes and renews nothing, and the
+  answer it then gets from the voice URL is the busy line. The rules are one rule: a late
   callback gets the lease only if the lease is still there to renew, and the tenant is never
   handed back to a call after its reset has started.
 - **Callbacks find the lease by a signed token, not by `call_sid`.** Twilio can answer the
@@ -2704,8 +2734,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   lease transaction's time plus `DEMO_STATUS_TOKEN_TTL_HOURS`, default 24, read from that
   column so the token and the sweep below can never disagree), which gates only the status
   callback (see Late status callbacks). The token carries no lease expiry of its own: the
-  lease's `expires_at` moves when the CallSid binds, so a copy minted before the `Calls`
-  request would be stale by then, and the row (`state = 'active' AND expires_at > now()`) is
+  lease's `expires_at` moves when the first live callback renews it, so a copy minted before
+  the `Calls` request would be stale by then, and the row (`state = 'active' AND expires_at > now()`) is
   what gates voice turns and every tenant write. The token is
   `base64url(payload).HMAC-SHA256(payload)` with a required discriminator `a: 'demo_lease'`,
   verified with `timingSafeEqual`, the construction of
@@ -2718,31 +2748,37 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   (`telephony/twilio-signature.ts`) validates the exact URL Twilio called, query string
   included, so the token also sits inside Twilio's own signature check; the two layers are
   independent. (4) Each callback verifies the token (signature, discriminator, `sexp`), loads
-  the lease by the id inside it and binds the CallSid it carries, renewing the lease on the
-  first bind, in one statement: `UPDATE demo_tenant_leases SET call_sid = $sid, expires_at =
-  CASE WHEN call_sid IS NULL AND state = 'active' AND generation = $gen THEN LEAST(now() +
-  interval '150 seconds', $sexp) ELSE expires_at END WHERE id = $lease AND (call_sid IS NULL
-  OR call_sid = $sid)`, with `$gen` and `$sexp` from the token. One row means this is the
-  first sight of the CallSid, or the CallSid already bound (Twilio's retries and the later
-  status callbacks); zero rows means a different CallSid is bound, and the callback is
-  rejected with 403, writes nothing and audits `demo_callsid_mismatch`. The `CASE` is the
-  lease renewal, and it is the same statement as the bind so there is no window between them.
-  It fires only on the null-to-bound transition, so a lease is renewed once and Twilio's
-  retries and later status callbacks, which present the bound sid, renew nothing; only while
-  the lease is `active`; and only at the generation the token names, so a lease whose reset
-  has been claimed (the claim draws a fresh generation, and returning a claim to `active`
-  does not restore the old one) is never revived by a late callback. The new expiry is the
-  bind time plus 150 s, the longest a call that exists can still run, and never later than
-  `sexp`, so a lease cannot outlive its own status-callback deadline either. Nothing renews it
-  a second time, so a stuck call holds its tenant for at most 150 s past its bind and then the
-  reaper reclaims it, whatever the callbacks do. The caller loaded the row first and audits
-  `demo_lease_renewed` (the old and new `expires_at`) when the returned `expires_at` differs
-  from the one it loaded. The voice callback then answers as the demo tenant only
-  while the lease is `state = 'active' AND expires_at > now()`; otherwise it speaks the busy
-  line and hangs up. The `Calls` response runs the same statement with the sid it
-  returns, so whichever of the first callback and the response arrives first binds and the
-  other verifies; the response is no longer the only thing that can bind, and nothing depends on
-  its bookkeeping having committed. The unique index on `call_sid` stops one CallSid binding two
+  the lease by the id inside it and binds the CallSid it carries, renewing the lease when the
+  callback is the first live one, in one statement: `UPDATE demo_tenant_leases SET call_sid =
+  $sid, expires_at = CASE WHEN $live AND renewed_at IS NULL AND state = 'active' AND
+  generation = $gen THEN LEAST(now() + interval '150 seconds', $sexp) ELSE expires_at END,
+  renewed_at = CASE WHEN $live AND renewed_at IS NULL AND state = 'active' AND generation =
+  $gen THEN now() ELSE renewed_at END WHERE id = $lease AND (call_sid IS NULL OR call_sid =
+  $sid)`, with `$gen` and `$sexp` from the token and `$live` true only when the callback's
+  `CallStatus` is `ringing` or `in-progress` (false for the `Calls` response, `queued`,
+  `initiated` and every terminal status). Both `CASE`s read the row as it was before the
+  statement, so they agree. One row means this is the first sight of the CallSid, or the
+  CallSid already bound (Twilio's retries and the later status callbacks); zero rows means a
+  different CallSid is bound, and the callback is rejected with 403, writes nothing and audits
+  `demo_callsid_mismatch`. The `CASE`s are the lease renewal, and they are the same statement
+  as the bind so there is no window between them. `renewed_at IS NULL` is what makes the
+  renewal once: the first live callback to commit sets it, and Twilio's retries, the voice
+  fetch after a `ringing` and the later status callbacks find it set and renew nothing. The
+  renewal also needs the lease `active` and the generation the token names, so a lease whose
+  reset has been claimed (the claim draws a fresh generation, and returning a claim to
+  `active` does not restore the old one) is never revived by a late callback. The new expiry
+  is the callback's time plus 150 s, the longest a call that is live can still run, and never
+  later than `sexp`, so a lease cannot outlive its own status-callback deadline either.
+  Nothing renews it a second time, so a stuck call holds its tenant for at most 150 s past its
+  first live callback and a call that never goes live for at most its 70 s pre-live expiry,
+  and then the reaper reclaims it, whatever the callbacks do. The caller loaded the row first
+  and audits `demo_lease_renewed` (the old and new `expires_at`) when the returned `renewed_at`
+  is set and was null on the row it loaded. The voice callback then answers as the demo tenant
+  only while the lease is `state = 'active' AND expires_at > now()`; otherwise it speaks the
+  busy line and hangs up. The `Calls` response runs the same statement with the sid it
+  returns and `$live` false, so whichever of the first callback and the response arrives first
+  binds and the other verifies; the response is no longer the only thing that can bind, and
+  nothing depends on its bookkeeping having committed. The unique index on `call_sid` stops one CallSid binding two
   leases. `demo_calls` carries `lease_id` from the lease transaction, so its status and the
   signup SMS after `completed` key on the lease too, not on a `call_sid` that may not be written
   yet. Later hops of the same call (the turn processor's Gather actions and its stream)
@@ -2921,9 +2957,35 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     return, release), so the share locks queue behind nothing else. A write that is not a
     database write cannot join the transaction; for a demo tenant that is a stored-object
     upload, keyed under the lease generation, so a late upload lands under a key no read path
-    of the next lease reaches and the next reset's object sweep deletes. (Demo tenants have no
-    Twilio subaccount, Stripe customer or Clerk organisation, so no other external effect
-    exists to fence.)
+    of the next lease reaches and the next reset's object sweep deletes. The generation fence
+    does not cover a notification provider call, and it is not asked to: that is refused
+    outright, next. (Demo tenants have no Twilio subaccount, Stripe customer or Clerk
+    organisation, so the remaining external effect is a text or email.)
+  - *No external sends.* A handler that pauses after preparing a text, misses heartbeats for
+    60 s, and resumes after its registry row was reaped and the tenant released can still call
+    `delivery.sendSms` (as `notifications/customer-message-delivery.ts:139-153` does) without
+    opening another tenant transaction, so the write fence never sees it. A check keyed to the
+    lease would need the very lease the handler no longer holds, so demo tenants never send
+    externally, and the rule sits at the provider boundary. Every tenant text and email reaches
+    a provider through `GatedMessageDelivery` (`notifications/gated-message-delivery.ts`):
+    `app.ts` wraps the one `rawMessageDelivery` in it and every consumer, the customer-message
+    sender included, takes the wrapped object. Its `sendSms` and `sendEmail` get a first check,
+    ahead of the kill switch's alert exemption and the owner bypass: when the message carries a
+    `tenantId`, one primary-key read of `tenants.demo` (the flag migration 316 adds and the seed
+    script sets on every pool tenant) decides, at send time, inside the function the resumed
+    handler calls. A demo tenant's message is not sent. The gate logs it, counts it beside the
+    kill-switch counter, writes the gate's existing best-effort audit row as
+    `demo_send_suppressed` (outside any lease context, because the audit trail is append-only,
+    survives resets and is flagged by `tenants.demo`, so even a stale handler's suppression is
+    recorded) and throws `SmsSuppressedError('demo_tenant')` or
+    `EmailSuppressedError('demo_tenant')`, which every caller already handles as a suppression.
+    A failed flag read refuses the send; it never guesses. Nothing here depends on a lease, a
+    generation or a heartbeat, so a resurrected handler cannot get around it, and a live lease
+    does not loosen it. The sample-job messages the demo shows are rendered in the page and the
+    spoken turn only. The platform-level handoff SMS to the visitor is not a tenant
+    notification and is unaffected: it carries no `tenantId` (its payload is `{ demoCallId }`),
+    as operator alerts do not, so the check has nothing to match. Push has no recipient, since
+    demo tenants have no `users` rows.
   - *In-flight registry.* The drain does not infer that a handler has finished from the
     queue: `visible_at` lapses on its own clock, independent of the claimed handler, so a
     handler that outlives its window drops out of any predicate on it while it can still be
@@ -2940,7 +3002,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     by message and attempt), because it is also running. A row whose heartbeat is 60 s stale
     belongs to a dead process: the reaper, and the drain for its own tenant, delete it and
     audit `demo_inflight_reaped`. Reaping never makes a resurrected process safe by itself;
-    the write fence does that. The execution worker claims a proposal by table, not by queue
+    the write fence does that for database writes and stored objects, and the delivery
+    boundary does it for texts and emails (No external sends). The execution worker claims a proposal by table, not by queue
     message, so it registers nothing: it sets the same lease context, its handler's writes
     pass the same fence, and the drain still lists the tenant's `executing` proposals.
   - *Reset.* Between the claim and the row walk, each step fenced: (i) the claim has already
@@ -3176,44 +3239,70 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     tamper, wrong secret, `sexp` expiring on an injected clock (a token past it does not
     verify for status), a missing or non-integer `gen`, wrong discriminator, malformed input.
   - Lease lifetime (the stalled `Calls` request finding; real Postgres, injected clock, fake
-    Twilio held at a latch; the 10 s request bound, the 70 s pre-creation expiry and the
-    150 s renewal are the constants of `lease.ts`, asserted by value): (a) the lease row
-    is inserted with `expires_at = leased_at + 70 s`, and the injected fetch receives a `signal`
-    that aborts at 10 s (none passed fails the test). (b) The request stalls 8 s and then
-    answers 201: the bind renews `expires_at` to the response time plus 150 s (158 s after the
-    lease, past the old fixed 150 s), `demo_lease_renewed` records both values, a voice turn at
-    155 s passes the
-    active check and writes under the lease's generation, the reaper's sweep at 155 s resets
-    nothing, and the sweep after 158 s reclaims it. (c) The request stalls past the bound and
-    the fake creates the call late (it accepts the request, creates the call at 40 s and the
-    visitor answers at 65 s): the request aborts at 10 s and is classified `unconfirmed`
-    (`timeout`), the visitor is answered as for a success, the lease keeps `expires_at =
-    leased_at + 70 s`, and the voice callback with the lease token at 65 s binds and renews to
-    65 s plus 150 s. A voice turn at 152 s, past the old fixed 150 s lease and while the call
-    is still live, passes the active check and writes under the lease's generation; the
-    reaper's sweeps at 152 s and 180 s reset nothing; the sweep after 215 s reclaims the lease
-    if no terminal callback came. The aborted request's late answer is never read. (d) No
-    callback: the same unconfirmed request, no callback, the reaper's sweep after 70 s resets
-    and releases (not at 150 s), the reservation stays counted. (e) A callback after the
-    pre-creation expiry and before the reaper's sweep (at 75 s, the lease still `active`):
-    it binds and renews to 75 s plus 150 s; with the reaper's claim committing first (two real
-    connections, both orders, looped) exactly one wins, and the other matches zero rows:
-    renewal first, the claim (which repeats `expires_at <= now()`) matches nothing and no reset
-    runs; claim first, the callback still binds and finalizes `demo_calls`, renews nothing
-    (the lease is `resetting`, then `released`, and `expires_at` is unchanged), and the voice
-    URL speaks the busy line. (f) The clamp: a bind at `sexp` minus 10 s (injected clock, the
-    reaper paused so the lease is still `active`) renews to `sexp` and not to 150 s past the
-    bind; a status callback past `sexp` still answers 200 and does nothing. (g) Renewal is
-    once: a second callback, a Twilio retry and a
-    `completed` callback presenting the bound sid change `expires_at` by nothing and write no
-    second `demo_lease_renewed`; a `Calls` response arriving after a callback bound the sid
-    renews nothing. (h) Renewal is refused for another generation: a claim that draws a fresh
-    generation and is then returned to `active` (a failed reset, `expires_at = now()`), and
-    then a first callback with the original token (call_sid still null) → it binds the
-    CallSid, `expires_at` stays `now()`, no `demo_lease_renewed`, the voice URL speaks the busy
-    line, and the reaper's retry resets the tenant; a token minted for an earlier lease of the
-    same tenant renews nothing on the tenant's current lease (it names its own lease id, which
-    is `released`).
+    Twilio held at a latch; the 10 s request bound, the 70 s pre-live expiry and the 150 s
+    renewal are the constants of `lease.ts`, asserted by value): (a) the lease row is inserted
+    with `expires_at = leased_at + 70 s` and `renewed_at` null, and the injected fetch receives
+    a `signal` that aborts at 10 s (none passed fails the test) and `StatusCallbackEvent`
+    `ringing answered completed`. (b) The request stalls 8 s and then answers 201: the response
+    binds the sid and renews nothing (`expires_at` still `leased_at + 70 s`, `renewed_at` null,
+    no `demo_lease_renewed`); the `ringing` callback at 9 s renews `expires_at` to 9 s plus
+    150 s (159 s after the lease, past the old fixed 150 s), `demo_lease_renewed` records both
+    values, a voice turn at 155 s passes the active check and writes under the lease's
+    generation, the reaper's sweep at 155 s resets nothing, and the sweep after 159 s reclaims
+    it. (c) The request stalls past the bound and the fake creates the call late (it accepts
+    the request, creates the call at 40 s, sends `ringing` at 40 s and the visitor answers at
+    65 s): the request aborts at 10 s and is classified `unconfirmed` (`timeout`), the visitor
+    is answered as for a success, the lease keeps `expires_at = leased_at + 70 s` until the
+    `ringing` callback with the lease token at 40 s binds and renews to 40 s plus 150 s; the
+    `in-progress` voice callback at 65 s renews nothing. A voice turn at 152 s, past the old
+    fixed 150 s lease and while the call is still live, passes the active check and writes under
+    the lease's generation; the reaper's sweeps at 152 s and 180 s reset nothing; the sweep
+    after 190 s reclaims the lease if no terminal callback came. The aborted request's late
+    answer is never read. (d) No callback: the same unconfirmed request, no callback, the
+    reaper's sweep after 70 s resets and releases (not at 150 s), the reservation stays
+    counted. (e) A live callback after the pre-live expiry and before the reaper's sweep (a
+    `ringing` at 75 s, the lease still `active`): it binds and renews to 75 s plus 150 s; with
+    the reaper's claim committing first (two real connections, both orders, looped) exactly one
+    wins, and the other matches zero rows: renewal first, the claim (which repeats
+    `expires_at <= now()`) matches nothing and no reset runs; claim first, the callback still
+    binds and finalizes `demo_calls`, renews nothing (the lease is `resetting`, then
+    `released`, and `expires_at` is unchanged), and the voice URL speaks the busy line. (f) The
+    clamp: a `ringing` at `sexp` minus 10 s (injected clock, the reaper paused so the lease is
+    still `active`) renews to `sexp` and not to 150 s past the callback; a status callback past
+    `sexp` still answers 200 and does nothing. (g) Renewal is once: after a `ringing` renewed
+    the lease, a second `ringing`, the `in-progress` voice fetch, a Twilio retry of the first
+    `ringing` and a `completed` callback presenting the bound sid change `expires_at` and
+    `renewed_at` by nothing and write no second `demo_lease_renewed`; a `Calls` response
+    arriving after a callback bound the sid renews nothing, and a response that bound the sid
+    first (at 5 s) leaves `renewed_at` null, so the later `ringing` still renews, once. (h)
+    Renewal is refused for another generation: a claim that draws a fresh generation and is
+    then returned to `active` (a failed reset, `expires_at = now()`), and then a first
+    `ringing` callback with the original token (call_sid still null) → it binds the CallSid,
+    `expires_at` stays `now()`, `renewed_at` stays null, no `demo_lease_renewed`, the voice URL
+    speaks the busy line, and the reaper's retry resets the tenant; a token minted for an
+    earlier lease of the same tenant renews nothing on the tenant's current lease (it names its
+    own lease id, which is `released`).
+  - Lease lifetime (a call Twilio holds in its queue; the fake keeps the call `queued` for a
+    chosen time, as an account over its calls-per-second limit would; real Postgres, injected
+    clock): (a) the response binds the sid at 5 s and `initiated` arrives at 20 s (and, in a
+    second case, `queued`) → neither renews: `expires_at` stays `leased_at + 70 s`,
+    `renewed_at` is null, no `demo_lease_renewed`, and with no live callback the reaper's first
+    sweep after 70 s resets and releases the lease (within one 30 s sweep of the expiry) while
+    the bound sid keeps the reservation counted. (b) `ringing` arrives at 60 s, the lease still
+    `active` → it renews to 210 s (`LEAST(60 s + 150 s, sexp)`; `sexp` is 24 h away, so the
+    clamp does not bind), sets `renewed_at`, writes one `demo_lease_renewed`, a voice turn at
+    200 s passes the active check, and the sweeps before 210 s reset nothing. (c) `ringing`
+    arrives at 90 s, after the 70 s expiry and the reaper's release and before `sexp` → it
+    binds (or matches the sid the response bound) and renews nothing: the lease stays
+    `released`, `expires_at` and `renewed_at` are
+    unchanged, no `demo_lease_renewed`, no claim and no reset (reset spy); the `in-progress`
+    voice fetch at 95 s speaks the busy line, hangs up and writes nothing; the reservation
+    stays counted; the later terminal status finalizes `demo_calls` through the late-status
+    path. (d) Renewal stays once-only and generation-guarded after a queue: cases (g) and (h)
+    above, run with the response bound at 5 s and the first `ringing` at 60 s. Unit
+    (`lease.test.ts`, a table): `$live` is true for `ringing` and `in-progress` and false for
+    `queued`, `initiated`, `completed`, `busy`, `no-answer`, `failed`, `canceled`, the `Calls`
+    response and an unknown value.
   - Late status callbacks (real Postgres, fake Twilio and SMS sender; one case per terminal
     status): (a) the reaper has already reset and released the lease, then a `completed`
     callback arrives 10 minutes after `expires_at` (token still inside `sexp`) → 200, `demo_calls`
@@ -3339,6 +3428,31 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     rejected by the fence; a job delivered while the reset claims (two real connections, both
     orders, repeated in a loop) either registers before the claim and is drained or fails the
     check and is dropped with `demo_job_dropped`, never neither.
+  - Isolation (no external sends; `demo-send-suppression.test.ts` with a mocked provider and
+    the real `GatedMessageDelivery`, then `integration/demo-send-suppression.test.ts` on real
+    Postgres): (a) a handler paused past 60 s, its registry row reaped and its lease reset and
+    released, resumes and calls `sendCustomerMessage` (SMS, then email) → the provider spy is
+    never called, `SmsSuppressedError('demo_tenant')` / `EmailSuppressedError('demo_tenant')`
+    is thrown and handled as a suppression (no dispatch row marked sent, the caller's mutation
+    not blocked), one `demo_send_suppressed` audit row is written, and it is written even
+    though the handler's own lease generation is stale (the audit write carries no lease
+    context). (b) A normal tenant's customer text and email still reach the provider spy
+    unchanged (a statement spy shows one primary-key read of `tenants.demo` per send). (c) A demo tenant's sample
+    estimate send, with a live `active` lease at the current generation, is suppressed the same
+    way: a live lease does not loosen the rule, and an owner-class text, a customer-class text
+    and a life-safety page naming the demo tenant are all refused. (d) A message with no
+    `tenantId` (the platform handoff SMS, an operator alert) is not matched and reaches the
+    provider; the handoff handler's send is unaffected. (e) The flag read throws → the send is
+    refused and nothing reaches the provider, for a normal tenant as well, and a later send
+    after the read recovers goes out. (f) Real columns: the read runs against the real
+    `tenants.demo` column on a seeded pool tenant and a normal tenant, so the predicate is
+    pinned on real Postgres and not on a mocked pool. (g) Guard test (grep-style, like the
+    tenant-listing guard): it fails when any file under `packages/api/src` other than the
+    provider implementations and their factory (`notifications/*-delivery-provider.ts`,
+    `delivery-provider-factory.ts`) references a provider endpoint (`Messages.json`, the
+    SendGrid or Twilio email hosts) or constructs a delivery provider, and when `app.ts` hands
+    any consumer the raw provider and not `messageDelivery`, so a new direct `sendSms` path
+    fails CI instead of bypassing the boundary.
   - Isolation (expired lease reclaimed): a lease past `expires_at` with no status callback →
     the reaper resets, releases and the tenant is leasable again; an unexpired lease is never
     reclaimed.
@@ -3358,6 +3472,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     claim `UPDATE` is pinned on real Postgres with two connections, because a mocked pool
     cannot show a lock conflict; the CallSid bind `UPDATE` and the `call_sid` unique index are
     pinned the same way (two connections binding different sids to one lease: exactly one wins,
+    in a loop), and so is the once-only renewal (two connections presenting a first `ringing`
+    and a first `in-progress` at once: exactly one sets `renewed_at` and moves `expires_at`,
     in a loop).
 - **Verification:** cost per completed demo call measured in staging before the landing CTA
   ships (the figure replaces the default `DEMO_CALL_EST_COST_CENTS` and sizes the first caps),
@@ -3368,8 +3484,15 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   proxy) shows the call still landing on its own lease and counted against the cap, and one
   with the request held past the 10 s bound (a proxy that holds it 25 s and forwards it even
   after the client has aborted) shows it classified unconfirmed and the call, answered after the abort, still served by its
-  own lease to its end (the lease renewed at the bind, the tenant not reset mid-call); a staging
-  run of concurrent demo calls on one trade shows distinct tenants, a clean
+  own lease to its end (the lease renewed at its first `ringing` or `in-progress` callback, the
+  tenant not reset mid-call); a staging run with the platform account's calls-per-second limit
+  forced low, so the demo call is queued behind other calls, shows no renewal from the `Calls`
+  response or an `initiated` callback, the lease released at the pre-live expiry when
+  `ringing` has not come, a `ringing` that arrives in time renewing it once, and a call that
+  rings after its release hearing the busy line and hanging up, with Twilio's `queue_time`
+  logged as an observation and read by nothing; a staging demo whose sample estimate is sent
+  reaches no phone or inbox and leaves a `demo_send_suppressed` row, while a normal staging
+  tenant's send is delivered; a staging run of concurrent demo calls on one trade shows distinct tenants, a clean
   tenant after each, and no job from one call running or writing against the next; a callback
   that arrives before the `Calls` response returns, including an early terminal one, still lands
   on its own lease, and a `completed` callback that arrives after the grace and the reaper's
@@ -3409,15 +3532,18 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   or the callback window closes, and returned at once only when the request provably created
   none; every live call holds its own demo tenant by lease, named in
   both Twilio callback URLs by a signed token so a fast answer or an early terminal callback
-  cannot miss it, the lease short (70 s) until the call is confirmed and renewed once to 150 s
-  from the CallSid bind, behind a 10 s bound on the `Calls` request, so a stalled or late-created
-  call cannot outlast its lease and an unconfirmed one does not hold a tenant for long, and the
+  cannot miss it, the lease short (70 s) until a `ringing` or `in-progress` callback proves the
+  call is live and renewed once to 150 s from that callback (the `Calls` response binds the
+  CallSid and never renews, so a call Twilio is queueing cannot start the clock early), behind
+  a 10 s bound on the `Calls` request, so a stalled, queued or late-created call cannot outlast
+  its lease and an unconfirmed one does not hold a tenant for long, and the
   tenant is reset before anyone else can lease it (U7): the reset is
   heartbeat-renewed and
   token-fenced, so a takeover leaves exactly one resetter writing, and queued work carries a
   lease generation that every demo write re-checks inside its own transaction, with release
   waiting on an in-flight registry rather than on queue visibility, so no job from one call
-  runs or writes against the next.
+  runs or writes against the next, and no demo tenant sends a text or email at all (refused
+  at the one delivery boundary, so a handler that outlives its lease cannot message anyone).
 - **Stale pay links after a policy switch, and a failed mode read.** A texted Stripe Payment
   Link stays chargeable until deactivated, so switching to collect-on-site queues deactivation
   of every live link on open invoices (the job row is written in the settings transaction, with
@@ -3453,7 +3579,7 @@ previous one; the previous slice is merged first.
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
 | S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`, refused with `DRAFT_METRO_LOCKED` once a choice is staged and rebuilding the assembled shop for the new metro in the same write, so the city and prices change together); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper, and a derived, optional `undoable` on the status draft block and on the retry response (S1b's retry response is unchanged), so the saving screen shows Undo only while the whole set is still inside its windows and a partial retry, which refreshes only the failed member, shows none; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status (`reset` while no member is executed or executing and no `approved` member is past its undo window, else `settings`, for a failed member beside a terminal one as for any other `stopped` set) so the shell never offers a refused button; reset is also the way out of the set retry refuses as `DRAFT_RETRY_UNSAFE`; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body, and checked between `DRAFT_NOT_APPROVED` and `DRAFT_RETRY_UNSAFE`), made required once every client sends it. | 6-7 days (reset adds one) |
 | S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep, each deactivation claimed under the payment-mode lock so a switch back stops the cleanup; no link minted and none deactivated on a failed mode read, and the link attach re-checks the mode under a per-tenant payment-mode lock, so a checkout that stalls across a switch stores none even when the switch is the tenant's first settings write), flag flipped, v2 deleted. | 12-15 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another, the per-link claim step a third) |
-| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost) and renewing the lease's short pre-creation expiry in that same statement, with the `Calls` request bounded at 10 s, reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a transactional handoff outbox written in the finalizing transaction together with the signup-handoff row its token validates against, and sent by a queue worker under a stable idempotency key, so a crash before the send is retried and never loses the handoff, no tenant writes). | 11-15 days (the token and bind add one, the budget another, the late-callback handoff a third, the outbox and its sender a fourth) |
+| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost) and renewing the lease's short pre-live expiry once, from the first `ringing` or `in-progress` callback, in that same statement (the `Calls` response binds and never renews, so a call Twilio is still queueing cannot start the clock), with the `Calls` request bounded at 10 s, reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces, with every text and email for a demo tenant refused at the delivery boundary; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a transactional handoff outbox written in the finalizing transaction together with the signup-handoff row its token validates against, and sent by a queue worker under a stable idempotency key, so a crash before the send is retried and never loses the handoff, no tenant writes). | 11-15 days (the token and bind add one, the budget another, the late-callback handoff a third, the outbox and its sender a fourth) |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
 second engineer shortens S2 and S3 only where the API they depend on is already merged.
