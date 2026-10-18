@@ -73,13 +73,29 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
       [tenantId]
     ),
     // "Pick, don't build" (migration 311) — one draft per tenant, or none.
-    db.query<{ status: 'draft' | 'approved'; version: number; n: number }>(
-      `SELECT status, version, (SELECT COUNT(*)::int FROM jsonb_object_keys(choices)) AS n
+    db.query<{ status: 'draft' | 'approved'; version: number; n: number; expected: number }>(
+      `SELECT status, version, (SELECT COUNT(*)::int FROM jsonb_object_keys(choices)) AS n,
+              jsonb_array_length(proposal_ids)::int AS expected
          FROM onboarding_drafts WHERE tenant_id=$1`,
       [tenantId]
     ),
   ]);
   const draftRow = draftRes.rows[0];
+
+  // Execution state of an approved draft: the status of each proposal it lists.
+  // One extra query, and only once the draft is approved, so the polled status
+  // endpoint stays cheap for every tenant that is still choosing (or has no draft).
+  let draftProposals: { expected: number; statuses: string[] } | undefined;
+  if (draftRow?.status === 'approved' && draftRow.expected > 0) {
+    const proposalsRes = await db.query<{ status: string }>(
+      `SELECT p.status FROM proposals p
+         WHERE p.tenant_id=$1
+           AND p.id IN (SELECT jsonb_array_elements_text(d.proposal_ids)::uuid
+                          FROM onboarding_drafts d WHERE d.tenant_id=$1)`,
+      [tenantId]
+    );
+    draftProposals = { expected: draftRow.expected, statuses: proposalsRes.rows.map((r) => r.status) };
+  }
 
   const tenant = tenantRes.rows[0];
   const ts = tsRes.rows[0];
@@ -105,7 +121,14 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
       timezone: ts?.timezone ?? null,
     },
     packActivated: activePackCount > 0 || settingsPacks > 0,
-    draft: draftRow ? { status: draftRow.status, choicesAnswered: draftRow.n, version: draftRow.version } : null,
+    draft: draftRow
+      ? {
+          status: draftRow.status,
+          choicesAnswered: draftRow.n,
+          version: draftRow.version,
+          ...(draftProposals ? { proposals: draftProposals } : {}),
+        }
+      : null,
     twilioStatus: integRes.rows[0]?.status ?? null,
     twilioPhoneNumber: twilioLine.phoneNumber,
     twilioLineState: integRes.rows[0] ? twilioLine.state : null,

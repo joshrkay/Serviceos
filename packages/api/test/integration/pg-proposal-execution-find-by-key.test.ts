@@ -103,6 +103,59 @@ describe('PgProposalExecutionRepository.findByIdempotencyKey (§11 H1)', () => {
 });
 
 /**
+ * A retried proposal (onboarding POST /draft/retry: execution_failed -> draft ->
+ * approved) re-runs under the SAME idempotency key as its failed attempt. The
+ * upsert must let the new outcome replace a prior failure, and must keep
+ * preserving a succeeded row.
+ */
+describe('PgProposalExecutionRepository.recordExecution — retry after a failed attempt', () => {
+  let pool: Pool;
+  let repo: PgProposalExecutionRepository;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    repo = new PgProposalExecutionRepository(pool);
+  });
+
+  const input = (t: { tenantId: string; userId: string }, proposalId: string, key: string, extra: Record<string, unknown>) =>
+    ({ tenantId: t.tenantId, proposalId, executedPayload: {}, executedBy: t.userId, idempotencyKey: key, ...extra }) as Parameters<
+      PgProposalExecutionRepository['recordExecution']
+    >[0];
+
+  it('promotes the failed row to succeeded: one row, no error, and the idempotency marker now exists', async () => {
+    const t = await createTestTenant(pool);
+    const proposalId = await createProposal(pool, t.tenantId, 'prop-retry-1');
+    const failed = await repo.recordExecution(input(t, proposalId, 'k-retry-1', { status: 'failed', errorMessage: 'PACK_ACTIVATION_IN_PROGRESS', executedPayload: { v: 1 } }));
+    expect(await repo.findByIdempotencyKey(t.tenantId, 'k-retry-1')).toBeNull();
+
+    const ok = await repo.recordExecution(input(t, proposalId, 'k-retry-1', { status: 'succeeded', executedPayload: { v: 2 } }));
+    expect(ok.id).toBe(failed.id);
+    expect(ok).toMatchObject({ status: 'succeeded', errorMessage: undefined, executedPayload: { v: 2 } });
+    expect(await repo.listByProposal(t.tenantId, proposalId)).toHaveLength(1);
+    expect((await repo.findLatestByProposal(t.tenantId, proposalId))?.status).toBe('succeeded');
+    expect((await repo.findByIdempotencyKey(t.tenantId, 'k-retry-1'))?.id).toBe(failed.id);
+  });
+
+  it('a second failure refreshes the recorded error instead of keeping the first one', async () => {
+    const t = await createTestTenant(pool);
+    const proposalId = await createProposal(pool, t.tenantId, 'prop-retry-2');
+    await repo.recordExecution(input(t, proposalId, 'k-retry-2', { status: 'failed', errorMessage: 'first' }));
+    const again = await repo.recordExecution(input(t, proposalId, 'k-retry-2', { status: 'failed', errorMessage: 'second' }));
+    expect(again).toMatchObject({ status: 'failed', errorMessage: 'second' });
+    expect(await repo.listByProposal(t.tenantId, proposalId)).toHaveLength(1);
+  });
+
+  it('never overwrites a succeeded row (the original execution is preserved)', async () => {
+    const t = await createTestTenant(pool);
+    const proposalId = await createProposal(pool, t.tenantId, 'prop-retry-3');
+    const first = await repo.recordExecution(input(t, proposalId, 'k-retry-3', { status: 'succeeded', executedPayload: { v: 1 } }));
+    const replay = await repo.recordExecution(input(t, proposalId, 'k-retry-3', { status: 'failed', errorMessage: 'late', executedPayload: { v: 2 } }));
+    expect(replay).toMatchObject({ id: first.id, status: 'succeeded', executedPayload: { v: 1 } });
+    expect(replay.errorMessage).toBeUndefined();
+  });
+});
+
+/**
  * Insert a parent proposals row. proposals.idempotency_key is NOT NULL
  * with its own UNIQUE INDEX on (tenant_id, idempotency_key), so each
  * call needs a unique key per tenant. Mirrors the helper in

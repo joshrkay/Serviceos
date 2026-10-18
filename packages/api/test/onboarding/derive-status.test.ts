@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { deriveOnboardingStatus, type OnboardingFacts } from '../../src/onboarding/derive-status';
+import { deriveDraftExecution, deriveOnboardingStatus, type OnboardingFacts } from '../../src/onboarding/derive-status';
 
 function facts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
   return {
@@ -331,10 +331,95 @@ describe('deriveOnboardingStatus — pick-don\'t-build draft facts', () => {
   it('surfaces the draft additively and keeps exactly seven steps', () => {
     const r = deriveOnboardingStatus(facts({ draft: { status: 'draft', choicesAnswered: 3, version: 4 } }));
     expect(r.steps).toHaveLength(7);
-    expect(r.draft).toEqual({ status: 'draft', choicesAnswered: 3, version: 4 });
+    expect(r.draft).toEqual({ status: 'draft', choicesAnswered: 3, version: 4, execution: null });
   });
   it('omits draft when the tenant has none', () => {
     expect(deriveOnboardingStatus(facts({ draft: null }))).not.toHaveProperty('draft');
     expect(deriveOnboardingStatus(facts())).not.toHaveProperty('draft');
+  });
+});
+
+describe('deriveDraftExecution', () => {
+  const tracked = (statuses: string[], expected = 2) => ({ expected, statuses });
+
+  it.each([
+    [['approved', 'approved'], 'pending'],
+    [['approved', 'executing'], 'executing'],
+    [['executing', 'executing'], 'executing'],
+    // One half finished, the other still waiting for the worker: work is in flight.
+    [['executed', 'approved'], 'executing'],
+    [['executed', 'executing'], 'executing'],
+    [['executed', 'executed'], 'executed'],
+    // `failed` only while retry can complete the pair: every OTHER member is
+    // still approved/executing/executed, so re-queueing the failed one finishes it.
+    [['execution_failed', 'approved'], 'failed'],
+    [['execution_failed', 'executing'], 'failed'],
+    [['execution_failed', 'executed'], 'failed'],
+    [['approved', 'execution_failed'], 'failed'],
+    [['execution_failed', 'execution_failed'], 'failed'],
+    // States the owner can land in through the inbox. Retry cannot leave them
+    // (POST /draft/retry only re-queues execution_failed), so they are `stopped`,
+    // never `failed`: the shell must neither wait forever nor offer a dead Retry.
+    [['undone', 'approved'], 'stopped'],
+    [['expired', 'executed'], 'stopped'],
+    [['rejected', 'approved'], 'stopped'],
+    [['draft', 'approved'], 'stopped'],
+    [['ready_for_review', 'executed'], 'stopped'],
+    [['undone', 'undone'], 'stopped'],
+    // A failure next to a member retry cannot recover is `stopped`, NOT `failed`:
+    // re-queueing only the failed half would execute it while the other stays
+    // undone/rejected/expired, leaving half the approved configuration live.
+    [['execution_failed', 'undone'], 'stopped'],
+    [['undone', 'execution_failed'], 'stopped'],
+    [['execution_failed', 'rejected'], 'stopped'],
+    [['rejected', 'execution_failed'], 'stopped'],
+    [['execution_failed', 'expired'], 'stopped'],
+    [['expired', 'execution_failed'], 'stopped'],
+    [['execution_failed', 'draft'], 'stopped'],
+    [['execution_failed', 'ready_for_review'], 'stopped'],
+  ])('approved draft with proposals %j is %s', (statuses, expected) => {
+    expect(deriveDraftExecution('approved', tracked(statuses))).toBe(expected);
+  });
+
+  it('a listed proposal that no longer exists (fewer rows than ids) is stopped, not failed', () => {
+    expect(deriveDraftExecution('approved', tracked(['executed'], 2))).toBe('stopped');
+    expect(deriveDraftExecution('approved', tracked([], 2))).toBe('stopped');
+    // A failure among the rows that remain does not change that: the missing
+    // sibling cannot be re-queued, so retrying only the failed half would
+    // execute half the configuration. Stopped wins over failed.
+    expect(deriveDraftExecution('approved', tracked(['execution_failed'], 2))).toBe('stopped');
+    expect(deriveDraftExecution('approved', tracked(['execution_failed', 'approved'], 3))).toBe('stopped');
+    // The full set present and failed alongside a retryable sibling is still failed.
+    expect(deriveDraftExecution('approved', tracked(['execution_failed', 'executed'], 2))).toBe('failed');
+  });
+
+  it('an approved draft with nothing to track is null, never a vacuous executed', () => {
+    expect(deriveDraftExecution('approved', tracked([], 0))).toBeNull();
+    expect(deriveDraftExecution('approved', undefined)).toBeNull();
+  });
+
+  it('a draft still being edited has no execution state', () => {
+    expect(deriveDraftExecution('draft', tracked(['approved', 'approved']))).toBeNull();
+    expect(deriveDraftExecution('draft', undefined)).toBeNull();
+  });
+});
+
+describe('deriveOnboardingStatus — draft execution on the status', () => {
+  const approved = (statuses: string[]) =>
+    facts({ draft: { status: 'approved', choicesAnswered: 7, version: 3, proposals: { expected: 2, statuses } } });
+
+  it('carries execution in draft, keeps seven steps, and does not leak the raw statuses', () => {
+    const r = deriveOnboardingStatus(approved(['execution_failed', 'executed']));
+    expect(r.draft).toEqual({ status: 'approved', choicesAnswered: 7, version: 3, execution: 'failed' });
+    expect(r.draft).not.toHaveProperty('proposals');
+    expect(r.steps).toHaveLength(7);
+  });
+
+  it('does not change a single step id or status with or without the draft', () => {
+    const base = deriveOnboardingStatus(facts());
+    const withDraft = deriveOnboardingStatus(approved(['approved', 'approved']));
+    expect(withDraft.steps).toEqual(base.steps);
+    expect(withDraft.currentStep).toBe(base.currentStep);
+    expect(withDraft.draft?.execution).toBe('pending');
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { validateProposalPayload } from '../../src/proposals/contracts';
+import { onboardingTenantSettingsPayloadSchema } from '../../src/proposals/contracts/onboarding';
 
 describe('Onboarding proposal contract validation', () => {
   describe('onboarding_tenant_settings', () => {
@@ -19,6 +20,20 @@ describe('Onboarding proposal contract validation', () => {
         verticalPacks: ['hvac', 'plumbing'],
       });
       expect(result.valid).toBe(true);
+    });
+
+    describe('ownerPhone', () => {
+      const base = { businessName: 'Walsh Plumbing', verticalPacks: ['plumbing'], timezone: 'America/New_York' };
+
+      it('accepts a canonical E.164 cell, keeps it through the strip-mode parse, and stays optional', () => {
+        expect(validateProposalPayload('onboarding_tenant_settings', { ...base, ownerPhone: '+12165550142' }).valid).toBe(true);
+        expect(onboardingTenantSettingsPayloadSchema.parse({ ...base, ownerPhone: '+12165550142' }).ownerPhone).toBe('+12165550142');
+        expect(validateProposalPayload('onboarding_tenant_settings', base).valid).toBe(true);
+      });
+
+      it.each(['(216) 555-0142', '555', '+442079460958', ''])('rejects %j (canonical E.164 only)', (ownerPhone) => {
+        expect(validateProposalPayload('onboarding_tenant_settings', { ...base, ownerPhone }).valid).toBe(false);
+      });
     });
 
     it('rejects empty business name', () => {
