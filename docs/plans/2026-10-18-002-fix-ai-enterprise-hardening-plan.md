@@ -509,6 +509,17 @@ flowchart LR
         recording; that is the price of a fail-closed PCI control.
     - A `pci_detected` mark makes the retention worker purge that recording's audio promptly from S3
       and Twilio.
+    - **Backfill what is already stored.** Everything above guards writes from now on. Card numbers
+      captured before this ships would stay in every store still inside its retention window.
+      - Add a bounded, resumable, one-time job that runs per tenant, in batches, under the tenant
+        transaction.
+      - It runs the same scrubber over the text stores still in that window: `call_transcript_turns`,
+        `voice_sessions.transcript`, `voice_recordings.transcript`, `knowledge_chunks.content` and
+        `ai_runs` input/output snapshots.
+      - It sets every recording still in the window to `pci_scan = 'pending'`, so the audio pass
+        covers recordings made before the deploy too.
+      - It writes one audit event per tenant, with the redaction counts.
+      - It is idempotent: a re-run changes nothing further.
   - **PRIV-4**
     - Every telephony greeting branch, including custom tenant greetings, includes a plain disclosure
       such as "I'm a virtual assistant".
@@ -545,6 +556,11 @@ flowchart LR
     - Split failure: on the Gather path the detection write fails, but the transcript turn (already
       scrubbed to `[card number]`) is persisted. The scan marks the recording `pci_detected`; it
       never clears it.
+  - **Integration (backfill):**
+    - A transcript turn, `ai_runs` row and knowledge chunk that held a PAN before the migration are
+      scrubbed by the backfill.
+    - A recording made before the deploy is set to `pending` and goes through the audio pass.
+    - A second run changes nothing.
 - **Verification:** a PAN read aloud never reaches `ai_runs`, `call_transcript_turns` or the provider
   payload in tests.
 
@@ -761,16 +777,25 @@ flowchart LR
   - **Make the scope complete by construction, not by list.** Review keeps turning up one more
     table that holds customer data, so the list below is only a starting point, not the
     definition.
-    - Build an erase-coverage manifest in code. It names every table that references `customers`:
-      any `customer_id` foreign key, whether created in a table definition or added later by
-      `ALTER TABLE`.
+    - Build an erase-coverage manifest in code. It names every table that references `customers`.
+      Foreign keys alone miss many links, because a lot of customer links in this schema are bare
+      columns: `leads.converted_customer_id` (`schema.ts:1411`), `portal_sessions.customer_id`
+      (`:1760`), and the bare `customer_id` columns at `:1611`, `:2963`, `:4171` and `:4243`. So the
+      manifest covers three kinds of link:
+      - every foreign key to `customers`, whether in a table definition or added later by
+        `ALTER TABLE`
+      - every column whose name ends in `customer_id`, foreign key or not, including external ids
+        such as `stripe_customer_id` (classified `keep` or `anonymize` with a reason)
+      - stores linked only by the customer's identifiers, such as an unconverted lead that matches
+        the customer's phone or email. These are listed explicitly, with how each is matched.
     - Classify each table, with a reason, as exactly one of:
       - `scrub` (delete or blank its PII columns)
       - `anonymize` (keep the row, drop the link and the PII)
       - `keep` (a legal or financial retention reason)
-    - A schema test reads the live catalog (`information_schema` / `pg_constraint`) in the
-      Docker-gated suite. It fails when any customer-referencing table, or any newly added one, is
-      missing from the manifest. A future table therefore can't silently escape the erase.
+    - A schema test reads the live catalog (`pg_constraint` for foreign keys, and
+      `information_schema.columns` for every `%customer_id` column) in the Docker-gated suite. It
+      fails when any match, or any newly added one, is missing from the manifest. A future table or
+      bare link column therefore can't silently escape the erase.
     - Free-text stores that can hold a customer's details without a foreign key (notes, messages,
       transcripts, `ai_runs`) are listed in the manifest explicitly, with how each is matched.
   - **Scrub:**
@@ -817,7 +842,10 @@ flowchart LR
     coordinates and access notes
   - a seeded `customer_custom_field_values` value is gone
   - **schema coverage:** the manifest test fails when a test-only migration adds a new table with a
-    `customer_id` foreign key that the manifest doesn't list
+    `customer_id` foreign key that the manifest doesn't list, and also when it adds a bare
+    `…_customer_id` column with no foreign key
+  - a lead converted into the customer (linked only by `converted_customer_id`, with no foreign key)
+    has its name, phone, email, notes and service address scrubbed
   - with two customers sharing a full name, the other customer's row is untouched
   - a row that matches only a household-shared phone lands on the candidate list and is scrubbed only
     after confirmation
