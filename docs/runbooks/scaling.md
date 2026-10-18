@@ -85,6 +85,14 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   > middleware bypass tests and a route-level probe test asserting no pooled
   > client exists at gateway time. Adding another LLM-heavy route? add it to
   > `LLM_LONG_CALL_ROUTES` and keep its DB work repo-scoped.
+  >
+  > ✅ **Fixed (TI-02) — in-app voice and in-request AI drafts.** The same
+  > bypass now covers `POST /voice/sessions`, `POST /voice/sessions/:id/input`,
+  > `DELETE /voice/sessions/:id`, `POST /conversations/:id/suggest-reply`,
+  > `POST /estimates/suggest` and `POST /onboarding/conversation/turn` (each
+  > held the request connection across classify/draft/TTS, and the in-app
+  > resolver and onboarding lock took a second one inside it). Pinned by
+  > `test/routes/llm-long-call-routes.route.test.ts`.
 - Direct pool: `DB_DIRECT_MAX_CONNECTIONS` small (default 10) — only lock holders
   + the LISTEN client use it.
 - Postgres ceiling = PgBouncer `default_pool_size` (server side), independent of

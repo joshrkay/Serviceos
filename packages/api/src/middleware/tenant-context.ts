@@ -215,6 +215,27 @@ const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
   // 13 judge calls in-request, and the sampling pass is kicked off detached
   // (outside tenantContextStore) — neither may hold a request transaction.
   { method: 'POST', re: /\/voice\/quality\/grade$/ },
+  // TI-02 — anchored at both ends (the `/api` mount prefix optional, as it is
+  // stripped from req.path) so no other router can inherit the bypass by
+  // sharing a suffix.
+  //
+  // In-app voice: a turn holds classify, drafting, entity resolution and TTS
+  // synthesis (seconds each); start speaks a greeting; end kicks off the
+  // summary. The entity resolver also takes its OWN pooled connection, so
+  // inside a request transaction every turn held two — ~DB_MAX_CONNECTIONS
+  // overlapping turns deadlocked on checkout and 500'd every tenant's /api.
+  // Every write the adapter makes is a repo call with an explicit tenantId,
+  // the contract the telephony voice path already runs under.
+  { method: 'POST', re: /^(?:\/api)?\/voice\/sessions$/ },
+  { method: 'POST', re: /^(?:\/api)?\/voice\/sessions\/[^/]+\/input$/ },
+  { method: 'DELETE', re: /^(?:\/api)?\/voice\/sessions\/[^/]+$/ },
+  // AI drafts awaited in-request: a suggested reply (reads + one draft call,
+  // no writes), an estimate suggestion (one draft proposal row), and an
+  // onboarding conversation turn (extractor calls; its writes commit together
+  // in the orchestrator's own short transaction).
+  { method: 'POST', re: /^(?:\/api)?\/conversations\/[^/]+\/suggest-reply$/ },
+  { method: 'POST', re: /^(?:\/api)?\/estimates\/suggest$/ },
+  { method: 'POST', re: /^(?:\/api)?\/onboarding\/conversation\/turn$/ },
 ];
 
 function isLlmLongCallRoute(req: { method: string; path: string }): boolean {

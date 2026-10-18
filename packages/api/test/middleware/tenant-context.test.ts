@@ -553,6 +553,66 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
     expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(true);
   });
 
+  describe('TI-02 — in-request LLM routes bypass the request transaction (method + path anchored)', () => {
+    async function probe(method: 'get' | 'post' | 'put' | 'delete', path: string) {
+      const { pool, calls } = makeMockPool();
+      let storeAtHandler: unknown = 'unset';
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        (req as AuthenticatedRequest).auth = { userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner' };
+        next();
+      });
+      app.use('/api', withTenantTransaction(pool));
+      app.all('/api/*splat', (_req, res) => {
+        storeAtHandler = currentTenantContext();
+        res.json({ ok: true });
+      });
+      const response = await request(app)[method](path).send({});
+      expect(response.status).toBe(200);
+      return {
+        connects: (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls.length,
+        began: calls.some((c) => /^\s*BEGIN/i.test(c.sql)),
+        storeAtHandler,
+      };
+    }
+
+    it.each([
+      ['post', '/api/voice/sessions'],
+      ['post', '/api/voice/sessions/3f1c9a52-0000-4000-8000-000000000001/input'],
+      ['delete', '/api/voice/sessions/3f1c9a52-0000-4000-8000-000000000001'],
+      ['post', '/api/conversations/3f1c9a52-0000-4000-8000-000000000002/suggest-reply'],
+      ['post', '/api/estimates/suggest'],
+      ['post', '/api/onboarding/conversation/turn'],
+    ] as const)('%s %s holds no request transaction', async (method, path) => {
+      const seen = await probe(method, path);
+      expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
+    });
+
+    it.each([
+      // Same paths, other methods.
+      ['get', '/api/voice/sessions/3f1c9a52-0000-4000-8000-000000000001'],
+      ['put', '/api/voice/sessions/3f1c9a52-0000-4000-8000-000000000001/input'],
+      ['get', '/api/onboarding/conversation/turn'],
+      ['delete', '/api/conversations/3f1c9a52-0000-4000-8000-000000000002/suggest-reply'],
+      // Mutating siblings that must keep multi-write atomicity.
+      ['post', '/api/voice/sessions/3f1c9a52-0000-4000-8000-000000000001/other'],
+      ['delete', '/api/voice/sessions/3f1c9a52-0000-4000-8000-000000000001/input'],
+      ['post', '/api/conversations/3f1c9a52-0000-4000-8000-000000000002/reply'],
+      ['post', '/api/estimates'],
+      ['post', '/api/estimates/3f1c9a52-0000-4000-8000-000000000003/send'],
+      ['post', '/api/estimates/suggest/extra'],
+      ['post', '/api/onboarding/pack'],
+      // A nested router sharing the suffix does not inherit the bypass.
+      ['post', '/api/admin/voice/sessions'],
+      ['post', '/api/leads/estimates/suggest'],
+    ] as const)('%s %s still opens the transaction', async (method, path) => {
+      const seen = await probe(method, path);
+      expect(seen.connects).toBe(1);
+      expect(seen.began).toBe(true);
+    });
+  });
+
   it('rollback on response close before finish', async () => {
     // Simulate a client disconnect: emit `close` without `finish`.
     const { pool, calls } = makeMockPool();
