@@ -367,6 +367,9 @@ next to this file.
 - **Impact:** Twilio's default webhook policy retries only connection timeouts, not 5xx responses. No VoiceFallbackUrl is set on any purchased number, so a 5xx or timeout on /voice plays Twilio's generic "an application error has occurred" and drops the call.
 - **Verifier's narrowing:** The dropped call is real, but in a database brownout the Twilio-signature credential lookup fails first, with a 500 before the route runs. So the primary fix is a database-free VoiceFallbackUrl plus a credential cache. Fixing the route catch-alls comes second.
 - **Fix:** (1) The primary fix is to provision VoiceFallbackUrl (POST) at purchase and backfill existing numbers. Point it at a target that needs neither the API's DB nor its signature resolver: either a Twilio-hosted TwiML Bin/Function, or a static API route serving fixed voicemail TwiML (<Say> + <Record recordingStatusCallback=.../api/telephony/recording?callerPhone&dialedNumber>). Rely on the existing /recording To/From fallback, and let its handler 5xx and be retried later, so ingestion happens once the DB is back.
+- **Correction (review of this report):** Twilio does not retry a 5xx by default, so the recording
+  callback must not depend on a retry. The plan (U5, LCR-04) replaces that step with a reconciliation
+  sweep. The sweep ingests any recording Twilio holds that has no `voice_recordings` row.
 
 #### LCR-05 — Voice session state is process-local: every voice deploy hangs up calls still live after the 25 s drain, and the documented scale-out (NUM_REPLICAS>1 + REDIS_URL) sends /gather turns and stream upgrades to replicas without the session
 

@@ -535,6 +535,16 @@ flowchart LR
       `buildVoicemailTwiml`.
     - Write an idempotent backfill script for existing numbers that defaults to a dry run. Running it
       is an owner action.
+    - **Never rely on Twilio retrying a 5xx; by default it does not.** This overrides the verifier's
+      "let its handler 5xx and be retried later". During an outage the fallback `<Record>` still
+      captures the audio, and Twilio holds it until it is ingested; PRIV-2 deletes Twilio's copy only
+      after ingestion succeeds. Add a reconciliation sweep that does three things:
+      - lists each subaccount's recent recordings through the Twilio Recordings API
+      - ingests any recording whose URL has no `voice_recordings` row (`recording_url` is the
+        idempotency key), so the voicemail and the lead survive once the DB is back
+      - alerts through `alertOperator` on any recording it cannot ingest
+    - Twilio connection-override retry parameters on the callback URL are optional. Use them only
+      after confirming against Twilio's documentation that they apply to recording status callbacks.
   - **LCR-05**
     - `runShutdown` first redirects live media-streams calls to `/voice/gather-fallback`.
     - An unknown-session `/gather` starts a fresh inbound session, logged as a deploy-induced restart.
@@ -555,6 +565,8 @@ flowchart LR
   - Unknown session → a fresh disclosed session.
   - The config guard.
   - The fallback route returns static TwiML with no DB.
+  - A recording callback that fails while the DB is down → the reconciliation sweep ingests that
+    recording exactly once after recovery.
 - **Verification:** no test path ends a call right after a "connect you" line.
 
 ### U6. Injection fences, alerting and eval gates — batch F, `fix/ai-hardening-injection-ops`
@@ -625,15 +637,24 @@ flowchart LR
     - `voice_sessions.transcript`, `voice_recordings.transcript`
     - stored audio (S3 and Twilio)
     - entity aliases and correction lessons that reference the customer
-    - `ai_runs` content for the subject's sessions; historical rows are covered by the U4 age-based
-      purge plus a documented manual step
+    - `ai_runs` content, found two ways:
+      - **Linked rows.** Rows whose `correlation_id` is one of the subject's conversation, session or
+        call ids. U2 (OBS-2) makes every drafting call carry that id; before U7 ships, check that the
+        classifier, summary and other voice-path gateway calls carry it too, and close any gap.
+      - **Historical rows.** Rows written before that linkage have random correlation ids, so match
+        them by content instead. Use a tenant-scoped, batched scan of `input_snapshot` /
+        `output_snapshot` text for the subject's normalized phone numbers, email and full name. The
+        scan is bounded by the tenant's retention window, because U4's purge has already scrubbed
+        anything older.
+      - The erase result reports how many rows each strategy scrubbed.
   - **Anonymize** the customer link on invoices, payments and estimates, and keep the amounts for
     tax and legal retention.
   - **Keep** `consent_events` and DNC rows as suppression records, hashing the phone if counsel
     requires it.
 - **Test scenarios:** one Docker-gated integration test that seeds a customer across every store,
   erases them, and asserts:
-  - each store is scrubbed
+  - each store is scrubbed, including a pre-linkage `ai_runs` row found only by content and a linked
+    row found by `correlation_id`
   - financial amounts remain
   - suppression remains
   - an audit event is written
@@ -647,13 +668,25 @@ flowchart LR
 - **Approach:**
   - A nullable `tenant_settings` monthly ceiling in integer cents (new idempotent migration). Null
     means no cap, so nothing changes until one is set.
-  - Check it before dispatch in the gateway, including on failover and streaming.
-  - Charge it from `computeCostMicroCents` on completion.
+  - **Reserve before dispatch, atomically, then reconcile.** A plain check before dispatch followed by
+    a charge on completion lets concurrent requests near the ceiling all pass and overshoot it.
+    - Before dispatch, reserve the call's worst-case cost: estimated input tokens plus `maxTokens`,
+      at that model's prices. Do it in one atomic step: either a single conditional
+      `UPDATE … SET reserved = reserved + $cost WHERE spent + reserved + $cost <= cap RETURNING …` on
+      a per-tenant monthly ledger row, or a Lua script in the same style as
+      `redis-tenant-quota.ts`.
+    - On completion or failure, release the reservation and charge the actual cost from
+      `computeCostMicroCents`, in one step.
+    - A failover hop reserves at the fallback model's price before it dispatches.
+    - A reservation carries a lease expiry, so a crashed process's hold is reclaimed.
   - Reject with a typed error that the voice path turns into its existing hold-line / Gather behaviour.
   - Alert at 80% through `alertOperator`.
 - **Test scenarios:**
   - **Unit:** a call is admitted under the cap and rejected over it.
   - **Unit:** failover is charged once.
+  - **Concurrency:** N requests start together just below the ceiling. Admitted reservations never
+    exceed the cap, and every rejection is typed.
+  - **Unit:** an expired lease returns its reservation.
   - **Integration:** the monthly window resets and the spend sum matches `ai_runs`.
 
 ## Owner decisions and actions (not code)
