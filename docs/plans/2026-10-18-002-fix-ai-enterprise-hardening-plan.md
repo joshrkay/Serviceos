@@ -943,15 +943,55 @@ flowchart LR
     dispatches, and only writes `outputSnapshot` after completion (`gateway.ts:632-662`); the trace
     export, transcript append and session summary work the same way. A completion that lands after
     the scrub would put the data back.
-    - The erase first writes a durable, tenant-scoped erasure tombstone. It is keyed by the
-      customer id and the collected session, call and correlation ids.
-    - Every asynchronous content writer checks the tombstone before it writes content, and drops
-      that content when the tombstone matches. That covers the `ai_runs` completion, the trace
-      export, the transcript append, the summary, and the knowledge-chunk ingest.
-    - The erase reports success only after a bounded drain past the maximum gateway deadline,
-      followed by a re-scan that comes back clean.
-    - Test: a gateway call is in flight when the erase starts. It completes afterwards, and its
-      output is never persisted or exported.
+    - The erase first writes a durable, tenant-scoped erasure tombstone. It is keyed by:
+      - the customer id, and the collected session, call and correlation ids
+      - the subject's normalized phone numbers and email addresses, stored as keyed hashes
+        (HMAC-SHA256 with a server-side key), so the tombstone keeps no raw identifier
+      A writer that knows only a recipient, with no customer id, still matches. The erased
+      customer row no longer holds the identifiers, so without this such a writer could never
+      match the tombstone.
+    - **One fence for every writer, enforced by a test, not by a list.** The writers named in this
+      plan are examples, and a list can always miss one. U7 adds a single primitive,
+      `withErasureFence(tenantId, subjectKeys, write)`:
+      - It takes the subject's erasure lock in shared mode, checks the tombstone, and records a
+        write-ahead claim, all in one transaction.
+      - It runs the write, or the provider call, only after a guarded claim flip (see below).
+      Every writer that can persist or export the subject's data goes through it. That includes:
+      - AI content: the `ai_runs` completion, the trace export, the transcript append, the summary
+        and the knowledge-chunk ingest
+      - outbound messages, email and calls
+      - business-integration creates: QuickBooks `ensureCustomerExternalId`
+        (`integrations/accounting/sync-service.ts:280-310`) and Stripe saved-card customer
+        creation (`payments/stripe-saved-card.ts:84-124`)
+      A structural test lists every call site of each external provider client's write methods
+      (Twilio Messages and Calls, both email providers, QuickBooks, Stripe, Langfuse). It fails
+      when a call site is not wrapped in the fence, so a new writer can't skip it.
+    - **A recipient match refuses only work that predates the erase.** A recipient-only match
+      refuses any send whose source record (the queued reminder, the lead, the callback task) was
+      created before the tombstone. A send sourced from a record created after the erase is a new
+      contact, and the normal consent and do-not-contact rules govern it.
+    - **Each writer drains for its own worst case.** The erase waits out each fenced writer's own
+      worst-case duration, not just the gateway deadline:
+      - the gateway: the maximum gateway deadline
+      - the QuickBooks client: its retrying 20-second requests, times its retry count
+      - messaging and email: the provider client timeout
+      Then it re-scans until the result comes back clean.
+    - **An ambiguous business-integration create is reconciled, not assumed absent.** The
+      QuickBooks create already carries a stable request id (`customer-<id>`, `sync-service.ts:288`).
+      When a create's outcome is unknown, the erase looks that customer up in QuickBooks and
+      anonymizes it if it exists. Stripe works the same way, through the customer's metadata. Until
+      that lookup succeeds, the store is `incomplete`.
+    - Tests:
+      - A gateway call is in flight when the erase starts. It completes afterwards, and its output
+        is never persisted or exported.
+      - **First sync versus erase.** The accounting sweep has loaded the customer and is paused
+        inside its first QuickBooks create when the erase starts. Either the erase sees the claim,
+        waits, then finds and anonymizes the QuickBooks customer, or the create is refused. It is
+        never left holding the old name, email and phone.
+      - A recipient-only send that begins after phase 1 has fully committed, and is sourced from a
+        reminder created before the erase, is refused.
+      - A recipient-only send sourced from a lead created after the erase goes through.
+      - The structural test fails on a fixture provider call site that isn't wrapped.
   - **Fence outbound provider writes too, including ambiguous ones.** An outbound SMS can pass its
     tombstone check and then complete at Twilio after the provider cleanup has run.
     `notifications/send-service.ts:750-816` calls Twilio first and writes the `message_dispatches`
