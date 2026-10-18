@@ -180,11 +180,14 @@ tiers; import from a photo; pricing or plan changes.
 - **Audit events:** `onboarding.draft_created`, `onboarding.choice_staged`,
   `onboarding.draft_approved`, `onboarding.owner_phone_set` (number masked) and
   `onboarding.draft_retry` (both S1b), plus the existing proposal lifecycle events (S1b adds
-  `proposal.retried`). U8 adds `invoice.payment_mode_unavailable` and reuses
+  `proposal.retried`). S4 adds `onboarding.draft_undone` and `onboarding.draft_reset` (U9).
+  U8 adds `invoice.payment_mode_unavailable` and reuses
   `invoice.payment_link_deactivated` with the reason `payment_mode_changed`. U7 adds
   `demo_job_dropped` (a queued job refused by the lease-generation check),
-  `demo_write_rejected` (a write refused by the same check inside its own transaction) and
-  `demo_inflight_reaped` (a stale in-flight registry row removed).
+  `demo_write_rejected` (a write refused by the same check inside its own transaction),
+  `demo_inflight_reaped` (a stale in-flight registry row removed) and `demo_callsid_mismatch`
+  (a validly signed callback, or the `Calls` response, presenting a second CallSid for a
+  lease).
 - **Integer cents:** tier prices, trip fee and hourly rate are cents end to end; the price
   multiplier is applied in integer arithmetic with explicit rounding in one function.
 - **tenant_id + RLS:** `onboarding_drafts` carries `tenant_id` with RLS like
@@ -303,7 +306,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Approach:** `POST /draft` creates the draft (idempotent per tenant; `GET /draft` reads it,
   404 before). One row per tenant, so a re-run reopens that row rather than creating another:
   `POST /draft/reopen` (U6) is allowed only when the draft is `approved` and every generated
-  proposal has executed; it re-assembles for the current trade and metro, pre-fills `choices`
+  proposal has executed (a set that failed, stopped or was part-undone from the inbox goes
+  through U9's retry or `POST /draft/reset` first, never a reopen); it re-assembles for the
+  current trade and metro, pre-fills `choices`
   from the live settings (greeting → override label; the enum keys → the option whose writes
   match; prices → the current headline items, repriced only while the tenant still has a
   seeded baseline, U6; the owner's cell → the live `tenant_settings.owner_phone`, copied onto
@@ -718,8 +723,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `tenant_settings.owner_phone` (null included) onto the draft's `owner_phone`, written
     through U11's locked-write helper with the `approved` status it requires; refused with
     409 unless every
-    generated proposal has `executed`, so a `failed` set is retried through U9 first and a
-    second set is never minted beside failed rows; the response carries
+    generated proposal has `executed`, so a `failed` set is retried and a `stopped` or
+    part-undone one is reset through U9 first (or, once part of it is live, edited in
+    Settings), and a second set is never minted beside rows that did not run; the response carries
     `repricing: { available }`, and a reopened draft's approval leaves the prices off the
     settings payload when it is false); tests
     `packages/api/test/onboarding/draft/reopen.test.ts`,
@@ -1006,17 +1012,22 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   S4: no tenant can approve an owner-ringing emergency choice without a number on file, and
   the number the owner typed is the one the hand-off rings.
 
-### U9. Whole-draft undo, execution tracking and retry
-- **Goal:** "Saving, tap to undo" is one tap that undoes the whole approval, and onboarding does
-  not move past the saving screen until every generated proposal has executed.
+### U9. Whole-draft undo, reset, execution tracking and retry
+- **Goal:** "Saving, tap to undo" is one tap that undoes the whole approval, onboarding does
+  not move past the saving screen until every generated proposal has executed, and an approval
+  that cannot finish (one proposal failed, or the owner undid one of the pair from the inbox)
+  has a way out that works: retry, a reset back to an editable draft, or a pointer to Settings
+  when part of it is already live.
 - **Requirements:** R3
 - **Dependencies:** U2
 - **Files:**
   - modify `packages/api/src/routes/onboarding-draft.ts` (`POST /draft/retry` in S1b,
-    `POST /draft/undo` in S4); create `packages/api/src/onboarding/draft/retry.ts`
+    `POST /draft/undo` and `POST /draft/reset` in S4); create
+    `packages/api/src/onboarding/draft/retry.ts`
     (`retryFailedDraftProposals`, S1b); modify `packages/api/src/onboarding/draft/approve.ts`
-    (the undo helper, S4) and `packages/api/src/onboarding/draft/repository.ts` (undo is a draft
-    writer under U11's invariant: it goes through the locked-write helper, declaring the
+    (the undo and reset helpers, S4, over one shared locked read of the draft and its
+    proposals) and `packages/api/src/onboarding/draft/repository.ts` (undo and reset are draft
+    writers under U11's invariant: each goes through the locked-write helper, declaring the
     `approved` status it requires, not a second locking path),
     `packages/api/src/proposals/proposal.ts` and `pg-proposal.ts` (S1b:
     `ProposalRepository.resetFailedForRetry`, one conditional `UPDATE … WHERE status =
@@ -1029,35 +1040,104 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `packages/api/src/onboarding/load-facts.ts` and `derive-status.ts` (S1b: the `draft` fact
     gains `execution: 'pending' | 'executing' | 'executed' | 'failed' | 'stopped'`, `null`
     while the draft is still being edited, derived by `deriveDraftExecution` from the
-    generated proposals' statuses; the raw statuses never leave the server)
+    generated proposals' statuses; the raw statuses never leave the server); S4 adds an
+    optional, derived `recovery: 'reset' | 'settings'` beside it in the same block
+    (`derive-status.ts` and `contracts.ts`, present only while `execution` is `failed` or
+    `stopped`), and rewrites the `deriveDraftExecution` and `retry.ts` doc comments, which
+    today name the whole-draft undo as the way out of `stopped`
   - modify `packages/web/src/components/onboarding/v3/ConversationShell.tsx` (undo button during
     the window; the wait screen holds while `execution` is `pending` or `executing`; on
-    `failed`, "Something didn't save. Try again." → retry; on `stopped`, no retry, since it
-    cannot recover, and copy that says the setup was stopped, with the whole-draft undo as the
-    way out from S4)
-  - tests: `packages/api/test/onboarding/draft/undo.test.ts`,
+    `failed`, "Something didn't save. Try again." → retry, plus "Start over" (reset) beneath it
+    when `recovery` is `reset`; on `stopped`, never Retry, since it cannot recover: with
+    `recovery: 'reset'` copy that says part of the setup was undone and a "Start over" button
+    that calls `POST /draft/reset` with the draft's `version` and then re-renders the
+    read-back with the owner's answers intact, and with `recovery: 'settings'` copy that says
+    part of it is already live and a link to the Settings page, no button; the same screen
+    answers a `DRAFT_RESET_REFUSED` the server reaches on a race the same way)
+  - modify `packages/shared/src/contracts/onboarding-draft.ts` (S4: the reset body
+    `{ expectedVersion }` and its typed refusals, kept equal to the API's Zod by
+    `wire-contract.test.ts`)
+  - tests: `packages/api/test/onboarding/draft/undo.test.ts`, `reset.test.ts`,
     `packages/api/test/onboarding/derive-status.test.ts` (extend),
-    `packages/api/test/integration/onboarding-draft-undo.test.ts`, the v3 shell tests; shipped
+    `packages/api/test/integration/onboarding-draft-undo.test.ts`,
+    `packages/api/test/integration/onboarding-draft-reset.test.ts`, the v3 shell tests; shipped
     in S1b: `packages/api/test/onboarding/draft/retry.test.ts`,
     `packages/api/test/proposals/lifecycle-retry.test.ts`,
     `packages/api/test/integration/onboarding-draft-execution.test.ts`
 - **Approach:** The derived `execution` fact and `POST /draft/retry` ship in the S1 follow-ups
-  PR (#1694); undo ships in S4. `POST /draft/undo` runs in one tenant transaction that locks, then decides,
-  then writes. It takes `SELECT … FOR UPDATE` on the draft row and then on the proposals in
+  PR (#1694); undo and reset ship in S4. `POST /draft/undo` runs in one tenant transaction that
+  locks, then decides, then writes. It takes `SELECT … FOR UPDATE` on the draft row and then on the proposals in
   `proposal_ids` (ordered by id, so two undos cannot deadlock), and requires EVERY locked row
   to still be `approved` and inside the undo window (`isInUndoWindow`, read from the locked
   row). If any row is `executing`, `executed`, `execution_failed` or `undone`, if any window
   has closed, or if a listed proposal is missing, it refuses with 409 and a typed reason
   (`DRAFT_UNDO_REFUSED` naming the offending statuses, or `UNDO_WINDOW_CLOSED`), changes
-  nothing, and the shell says so; the inbox's per-proposal undo remains for the executed case.
-  Only then does it revert the whole set with the transition `POST /api/proposals/:id/undo`
-  makes (`approved → undone`), return the draft to `'draft'` with `proposal_ids = []`, and
+  nothing, and the shell says so; the inbox's per-proposal undo remains for the executed case,
+  and a set the inbox has already split (one `undone`, `rejected` or `expired`) is the reset's,
+  below, not a looser undo. Only then does it revert the whole set with the transition
+  `POST /api/proposals/:id/undo` makes (`approved → undone`), return the draft to `'draft'` with `proposal_ids = []`, and
   emit `onboarding.draft_undone`. The lock is what closes the race at the five-second
   boundary: the worker claims a row with `UPDATE … WHERE id = $1 AND status = 'approved'`
   (`claimForExecution`), so a claim that arrives while undo holds the locks waits and then
   matches nothing because the rows are `undone`, and a claim that committed first shows as
   `executing` to the locked read and refuses the undo. The draft cannot reopen while a
   generated proposal is applying or has applied.
+
+  **Reset: the way out of a set that can no longer finish as one unit.** The inbox can undo
+  ONE member of the approved pair (`approved → undone` inside the window). Every other escape
+  then rejects the set: undo wants every row `approved`, retry wants `execution_failed`, and
+  reopen (U6) wants every row `executed`; the fact reads `stopped`, and an owner who is sent
+  to a whole-draft undo that refuses is stuck before billing. `POST /draft/reset` is the
+  locked reconciliation for that case, and it is its own endpoint rather than a looser
+  `/draft/undo` on purpose. Undo is the one-tap, all-or-nothing reversal inside the saving
+  window: its refusal on a set that is not wholly `approved` is how the owner learns the inbox
+  already acted, and the saving screen's button should keep meaning only that. Reset is
+  reached from `stopped` (and `failed`), tolerates terminal members, and emits a different
+  event, so the audit trail tells an owner's undo from a clean-up after a partial stop. It
+  accepts a superset of what undo accepts and shares its locked read.
+
+  The body is `{ expectedVersion }`, the `version` the shell rendered the state from (the
+  status draft block carries it). One tenant transaction, lock then decide then write:
+  (1) lock the draft row through `updateLocked`, requiring `approved`: a draft already back in
+  `draft` (a double tap, or another tab got there first) is 409 `DRAFT_NOT_APPROVED`, and a
+  stale `expectedVersion` (a tab that rendered an earlier approval, since replaced by a reset
+  and a new approval) is 409 `VERSION_CONFLICT`, so a reset can never revert an approval its
+  caller never saw; (2) `SELECT … FOR UPDATE` the proposals in `proposal_ids`, ordered by id,
+  the same locking read as undo; (3) decide from the locked rows only. The set is accepted
+  when every listed proposal is either `approved` and inside the undo window
+  (`isInUndoWindow`, read from the locked row) or *not applied*: any status outside
+  `approved | executing | executed` (`undone`, `rejected`, `expired`, `execution_failed`, and
+  the pre-approval `draft` or `ready_for_review` that an inbox reopen of a rejection leaves
+  behind), or a listed id with no row. It refuses with 409 `DRAFT_RESET_REFUSED`, naming the
+  offending statuses and a `reason`, when ANY proposal is `executed` (`applied`: that work is
+  live, and only the inbox's undo of executed work or the Settings page reverses it) or
+  `executing` (`executing`: it is landing now, and the next poll shows `executed` or
+  `failed`); with `UNDO_WINDOW_CLOSED` when an `approved` row's window has closed (the worker
+  is about to claim it); and a refusal changes nothing. (4) Write: every `approved` row goes to
+  `undone` by the transition `POST /api/proposals/:id/undo` makes, with its audit row; rows
+  that were already not applied are left exactly as they are (reset mints, moves and
+  re-approves nothing, and clearing `proposal_ids` is what detaches them from the draft); the
+  draft returns to `'draft'` with its staged choices intact, `proposal_ids = []` and
+  `version + 1`, through the locked-write helper; and `onboarding.draft_reset` is emitted with
+  the reverted ids and the `{ id, status }` of every other member. The next approval mints a
+  fresh pair. The row locks close the same boundary race as undo: a worker claim
+  (`UPDATE … WHERE id = $1 AND status = 'approved'`) that arrives while reset holds the set
+  waits and then matches nothing because the row is `undone`, and a claim that committed
+  first shows as `executing` to the locked read and refuses the reset.
+
+  The window is five seconds, and the surviving sibling of a split pair executes by itself
+  once its own window closes, so the common landing for a split approval is the Settings
+  pointer: `executed` + `undone` is refused as `applied` (reopen refuses it too, since not
+  every row executed), and the shell's copy sends the owner to the Settings page instead of
+  offering the same button again. Reset succeeds when the owner is quick, when the sibling
+  failed, or when every member is already out of the way. To keep the shell from offering a
+  button the server will refuse, the status draft block carries `recovery`, derived from the
+  same statuses: `'settings'` when any listed proposal is `executing` or `executed`, else
+  `'reset'`; the server stays the authority for the race and the window. Reopen keeps its own
+  precondition (`approved` and every proposal `executed`): it edits a live setup, so a failed,
+  stopped or part-undone set is retried or reset here first and never reopened on top of rows
+  that did not run.
+
   `POST /draft/retry` locks the draft row, then moves each of the set's `execution_failed`
   proposals along the only path `proposals/lifecycle.ts` allows (`execution_failed → draft`
   through `resetFailedForRetry`, then approved again through the batch-approve helper with a
@@ -1071,7 +1151,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   state); `stopped` when none is but one is outside `approved | executing | executed` (undone
   or rejected from the inbox, expired) or no longer exists, which retry cannot recover
   (`undone` is terminal in `lifecycle.ts`), so the shell neither waits forever nor offers
-  Retry; `executed` when all are; `executing` when work is in flight; `pending` when all are
+  Retry, and its recovery is `POST /draft/reset`, or the Settings page once part of the set is
+  live (`recovery`); `executed` when all are; `executing` when work is in flight; `pending` when all are
   approved and none is picked up; and `null` while the draft is still being edited or lists
   nothing, so a vacuous "executed" never opens billing.
 - **Patterns to follow:** `routes/proposals.ts` undo handler and `proposals/lifecycle.ts`,
@@ -1079,7 +1160,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Test scenarios:**
   - Happy path: approve → undo inside the window → every proposal reverted, settings untouched,
     draft `'draft'` and editable again, one audit row.
-  - Edge: any one proposal `executing`, `executed` or `execution_failed` (one case each) →
+  - Edge: any one proposal `executing`, `executed`, `execution_failed` or `undone` (one case
+    each; the `undone` one is an inbox-split pair, whose way out is the reset below) →
     409 `DRAFT_UNDO_REFUSED`, no row changed, draft still `approved`; the window closed on one
     row → 409 `UNDO_WINDOW_CLOSED`, nothing changed; approve → all executed → fact `executed`
     and the shell moves to billing.
@@ -1097,10 +1179,57 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `DRAFT_RETRY_NOTHING_FAILED`, and the shell offers no Retry and does not wait; a set with
     one `execution_failed` and one `undone` → `failed`, and retry re-queues only the failed
     one.
-  - Integration: real Postgres rows for the undo and for the mixed-status set.
+  - Reset, the finding's case (an inbox-split pair): approve → both `approved` in the window,
+    the owner undoes ONE of them from the inbox → fact `stopped` with `recovery: 'reset'`,
+    retry 409 `DRAFT_RETRY_NOTHING_FAILED`, undo 409 `DRAFT_UNDO_REFUSED`; `POST /draft/reset`
+    with the draft's `version` → 200: the other proposal is `undone` (one audit row), the draft
+    is `'draft'` at `version + 1` with `proposal_ids = []` and its choices intact,
+    `tenant_settings` untouched, exactly one `onboarding.draft_reset` naming the reverted id
+    and the other member's status; a choice `PUT` carrying the new version succeeds, and the
+    next approve mints exactly two new proposals beside the two old ones, which are not
+    touched again.
+  - Reset, other accepted sets (table-driven, one case per row, each ending editable with one
+    `onboarding.draft_reset`): `undone` + `undone` (nothing left to revert), `rejected` +
+    `approved` in the window, `expired` + `approved` in the window, `execution_failed` +
+    `undone`, `execution_failed` + `execution_failed`, a stray `draft` or `ready_for_review`
+    member + `undone`, and a listed id with no row + `approved` in the window; all `approved`
+    in the window also resets (a superset of undo).
+  - Reset, refused (nothing written in any case: draft still `approved`, `version` and every
+    proposal unchanged, no audit row): `executed` + `undone` (the sibling executed before the
+    inbox undo) → 409 `DRAFT_RESET_REFUSED`, reason `applied`; the status reads `stopped` with
+    `recovery: 'settings'`, so the shell shows the Settings link and no Start over button, and
+    the same screen results when the 409 is the answer to a tap made before the poll caught
+    up; `POST /draft/reopen` on that set is refused too, so the pointer is the one way
+    forward and nothing loops. `executing` + `undone` → 409 `DRAFT_RESET_REFUSED`, reason
+    `executing`, and once that proposal finishes the next attempt is `applied` (executed) or
+    accepted (`execution_failed`). `approved` past its window + `undone` → 409
+    `UNDO_WINDOW_CLOSED`. A second reset, or a reset after undo, on an already editable draft →
+    409 `DRAFT_NOT_APPROVED`; a stale `expectedVersion` after a reset and a fresh approval →
+    409 `VERSION_CONFLICT`, and the new pair is untouched.
+  - Reset, races (two real connections, looped so ordering luck cannot pass): (a) the worker's
+    `claimForExecution` on the `approved` sibling arrives after reset has locked the set → the
+    claim blocks, reset commits, the claim returns null, no handler runs, the draft is
+    `'draft'`; (b) the claim commits first → reset reads `executing`, refuses with 409, the
+    draft stays `approved` and the proposal finishes untouched. Never: draft `'draft'` while any
+    generated proposal is `executing` or `executed`. (c) The inbox undo of the surviving
+    sibling racing the reset, both orders → both proposals end `undone`, the draft ends
+    `'draft'`, and whichever lost the lock gets its own typed 409 or a no-op, never a
+    half-written set.
+  - Status (`derive-status.test.ts`): `recovery` is `'settings'` for any `stopped` or `failed`
+    set holding an `executing` or `executed` proposal and `'reset'` for every other
+    `stopped` or `failed` set, and is absent for `pending`, `executing`, `executed` and a
+    draft still being edited.
+  - Shell: `stopped` with `recovery: 'reset'` → Start over calls reset with the draft's
+    `version` and re-renders the read-back with the answers intact; `recovery: 'settings'` → the
+    Settings link and no reset call; `failed` → Retry always, and Start over only with
+    `recovery: 'reset'`; a `DRAFT_RESET_REFUSED` reason `applied` from a stale screen swaps in
+    the Settings copy, and reason `executing` or `UNDO_WINDOW_CLOSED` keeps the wait screen.
+  - Integration: real Postgres rows for the undo, for the mixed-status set and for every
+    reset row above, under RLS.
 - **Verification:** no owner reaches the trial turn with a generated proposal unexecuted, one
-  tap inside the window undoes the whole approval, and a tap that loses the race to the worker
-  changes nothing.
+  tap inside the window undoes the whole approval, a tap that loses the race to the worker
+  changes nothing, and an approval the owner split from the inbox ends in an editable draft or
+  a pointer to Settings, never in a button the server refuses.
 
 ### U11. Draft write lock and approval compare-and-swap
 - **Goal:** "That's right" approves exactly the choices the owner was looking at, exactly once.
@@ -1111,12 +1240,12 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Dependencies:** U2 (S1, merged). The approve half ships early, in the "S1 follow-ups" PR
   (#1694) together with U10's API half and U9's execution fact and `POST /draft/retry` (see
   the slice table); the shared `updateLocked` helper, its guard test and the table-driven
-  writer race ship in S4, where U9's undo and U5's `setMetro` reuse it.
+  writer race ship in S4, where U9's undo and reset and U5's `setMetro` reuse it.
 - **Invariant.** Every writer of `onboarding_drafts` does the same four things in one tenant
   transaction, in this order: (1) `SELECT … FOR UPDATE` the tenant's draft row; (2) refuse
   unless the row is in the status that writer requires: `draft` for every field write (a
   write to an `approved` draft is `DraftAlreadyApprovedError`, 409 `DRAFT_APPROVED`) and
-  `approved` for undo (U9) and reopen (U6); (3) compare `version` with the caller's
+  `approved` for undo, reset (U9) and reopen (U6); (3) compare `version` with the caller's
   `expectedVersion` when it sent one (`DraftVersionConflictError`, 409 `VERSION_CONFLICT`);
   (4) compute the change from the locked row, never from an earlier read, write it and bump
   `version`. The repository exposes this as one shared helper,
@@ -1124,7 +1253,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   code in the repository that issues `UPDATE onboarding_drafts` (`… WHERE id = $1 AND version =
   $found`; zero rows throws). Every writer is a thin caller of it: `stageChoice` (which
   requires `expectedVersion`), `setClientTimezone`, `setOwnerPhone` (U10), `setMetro` (U5),
-  `setForwarding` (U6), `markApproved`, undo (U9) and reopen (U6); `POST /draft` (the INSERT)
+  `setForwarding` (U6), `markApproved`, undo and reset (U9) and reopen (U6); `POST /draft` (the INSERT)
   is the only other statement that touches the table. The in-memory repository implements the
   same helper. A writer that skipped any step could land between proposal construction and
   `markApproved`, or after it, and the executed proposals would no longer match the draft the
@@ -1140,7 +1269,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   inline, and `onboarding-draft-approve-concurrency.test.ts` covers approve against a choice
   `PUT` and against approve, the owner-phone `PUT` against a choice `PUT`, and the timezone
   write against a choice `PUT`, on real Postgres and over HTTP. S4 extracts the helper with
-  the first writers that follow (`setMetro`, undo), re-expresses the existing writers over it
+  the first writers that follow (`setMetro`, undo, reset), re-expresses the existing writers over it
   with behaviour unchanged, and adds the guard and the `DRAFT_WRITERS` table that then replaces
   the scripted cases. The `packages/shared` wire schema and the web half (send the version,
   show `failed` and `stopped`) are not in #1694; they follow with the S2 consumers.
@@ -1191,7 +1320,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   so an approval carrying the pre-write version gets `VERSION_CONFLICT` (and one carrying no
   version builds from the row exactly as the write left it). Under the lock, in this order:
   no row → 404; `status = 'approved'` → a repeat, and `expectedVersion` tells a retry from a
-  stale tab. An approved draft is frozen (every field writer refuses it, and undo and reopen
+  stale tab. An approved draft is frozen (every field writer refuses it, and undo, reset and reopen
   move it out of `approved`) and `markApproved` bumps `version` once, so the version an
   approval was made from is always the approved row's `version - 1`. No `expectedVersion`
   (older clients post `{}`) or `expectedVersion = version - 1` → 200 `{ approvedNow: false }`
@@ -1495,10 +1624,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Dependencies:** U2, U4; voice-parity U3 for the preset voice on the call
 - **Files:**
   - modify `packages/api/src/integrations/credentials.ts` (explicit `PLATFORM_TWILIO_*`)
-  - create `packages/api/src/demo/{routes,service,script,lease,reset,job-guard,inflight,write-fence}.ts`,
+  - create `packages/api/src/demo/{routes,service,script,lease,lease-token,reset,job-guard,inflight,write-fence}.ts`,
     migration `316_demo_calls` (313 went to the owner-cell column in S1b and 314-315 are S5's;
-    phone hash, trade, name, call_sid, status, lead_id; no `tenant_id`); the same migration
-    adds `demo_tenant_leases` and `demo_inflight_jobs` (see Approach), the sequence
+    phone hash, trade, name, lease_id, call_sid, status, lead_id; no `tenant_id`); the same
+    migration adds `demo_tenant_leases` and `demo_inflight_jobs` (see Approach), a unique index
+    on `demo_tenant_leases.call_sid WHERE call_sid IS NOT NULL`, the sequence
     `demo_lease_generation_seq` and `tenants.demo BOOLEAN NOT NULL DEFAULT false`
   - create the demo tenant pool per trade, each tenant cloned from that trade's fixture, via a
     seed script `packages/api/scripts/seed-demo-tenants.ts` (idempotent; pool size
@@ -1535,8 +1665,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `components/public/HearItAnswer.tsx`; modify `packages/web/src/components/auth/SignupPage.tsx`
     (forward the handoff token) and the Clerk signup webhook handler in `packages/api/src/`
     (copy it onto the tenant)
-  - tests: `packages/api/test/demo/{service,routes,limits,lease,reset,job-guard,inflight,write-fence}.test.ts`,
+  - tests: `packages/api/test/demo/{service,routes,limits,lease,lease-token,reset,job-guard,inflight,write-fence}.test.ts`,
     `packages/api/test/integration/demo-calls.test.ts`,
+    `packages/api/test/integration/demo-callback-binding.test.ts`,
     `packages/api/test/integration/demo-tenant-leases.test.ts`,
     `packages/api/test/integration/demo-reset-fencing.test.ts`,
     `packages/api/test/integration/demo-job-generation.test.ts`,
@@ -1563,11 +1694,53 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   is the call start plus the longest a demo can run: the call is created with a Twilio ring
   `Timeout` of 30 s and a `TimeLimit` of 90 s, and the lease adds 30 s of grace, 150 s in all,
   so a lease cannot lapse under a live call. The inbound turn processor gets its tenant from the
-  `active` lease found by the call's `call_sid`, never from a trade-level lookup. `call_sid` is filled
-  in once Twilio creates the call; a Twilio failure releases the lease at once.
+  `active` lease its callback names (next paragraph), never from a trade-level lookup. A Twilio
+  failure on the `Calls` request releases the lease at once.
+- **Callbacks find the lease by a signed token, not by `call_sid`.** Twilio can answer the
+  visitor and fetch the voice URL, or send a terminal status callback (`failed`, `busy`,
+  `no-answer`, `completed`), before the outbound `Calls` request has returned to us and before
+  any post-create write has committed. A lookup by `call_sid` finds no lease in that window: a
+  fast answer would hear the busy line and the demo call would be lost, and an early terminal
+  callback would match nothing and skip its cleanup, leaving the tenant held until the reaper's
+  `expires_at` sweep. So the lease is named by something we mint before Twilio can call us, in
+  this order. (1) The lease insert commits, `call_sid` still null. (2) `demo/lease-token.ts`
+  mints a token over the lease id, the tenant id and an expiry equal to the lease's
+  `expires_at`: `base64url(payload).HMAC-SHA256(payload)` with a required discriminator
+  `a: 'demo_lease'`, verified with `timingSafeEqual`, the construction of
+  `proposals/one-tap-undo.ts` (the discriminator is why a one-tap approve or undo token cannot
+  verify as this one), keyed by a platform secret `DEMO_LEASE_TOKEN_SECRET` read the way
+  `ONE_TAP_APPROVE_SECRET` is in `app.ts` (explicit in prod and staging, a fixed dev fallback
+  elsewhere). It is not single-use, because one call produces several status callbacks, so it
+  consumes no nonce. (3) The `Calls` request carries it in BOTH callback URLs, the voice `Url`
+  and the `StatusCallback`, as `?lease=<token>`. `requireTwilioSignature`
+  (`telephony/twilio-signature.ts`) validates the exact URL Twilio called, query string
+  included, so the token also sits inside Twilio's own signature check; the two layers are
+  independent. (4) Each callback verifies the token (signature, discriminator, expiry), loads the
+  lease by the id inside it and binds the CallSid it carries in one statement: `UPDATE
+  demo_tenant_leases SET call_sid = $sid WHERE id = $lease AND (call_sid IS NULL OR call_sid =
+  $sid)`. One row means this is the first sight of the CallSid, or the CallSid already bound
+  (Twilio's retries and the later status callbacks); zero rows means a different CallSid is
+  bound, and the callback is rejected with 403, writes nothing and audits
+  `demo_callsid_mismatch`. The voice callback then answers as the demo tenant only while the
+  lease is `state = 'active' AND expires_at > now()`; otherwise it speaks the busy line and
+  hangs up. The `Calls` response runs the same statement with the sid it
+  returns, so whichever of the first callback and the response arrives first binds and the
+  other verifies; the response is no longer the only thing that can bind, and nothing depends on
+  its bookkeeping having committed. The unique index on `call_sid` stops one CallSid binding two
+  leases. `demo_calls` carries `lease_id` from the lease transaction, so its status and the
+  signup SMS after `completed` key on the lease too, not on a `call_sid` that may not be written
+  yet. Later hops of the same call (the turn processor's Gather actions and its stream)
+  resolve the tenant by the bound `call_sid` under `state = 'active' AND expires_at > now()`,
+  which is safe because the first callback committed the bind before it returned TwiML. A
+  forged, tampered, other-secret or wrong-purpose token is 403 and writes nothing. An expired
+  token is treated like a reclaimed lease: the voice callback speaks the busy line and hangs up,
+  a status callback answers 200 and does nothing, and the reaper owns the cleanup. An early
+  terminal callback binds the CallSid and then takes `resetAndRelease`'s claim exactly as a late
+  one does.
 - **Release and reset.** The lease is the tenant's hold on the pool, so it is never touched
   until the tenant is clean. The call-status callback (completed, failed, busy, no-answer,
-  canceled) and the reaper (every 30 s, for `active` leases past `expires_at`) can both fire
+  canceled; it finds its lease by the signed token, so one that beats the `Calls` response
+  counts) and the reaper (every 30 s, for `active` leases past `expires_at`) can both fire
   for one lease, and a reset can outlive the process that began it, so they end the lease
   through one function, `resetAndRelease`, built on a claim, a heartbeat and a fencing token.
   (1) Claim: `UPDATE demo_tenant_leases SET state = 'resetting', reset_started_at = now(),
@@ -1639,7 +1812,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     reset's claim, so no two leases of a tenant, and no lease and its own reset, share a
     value. Every job enqueued for a demo tenant carries `leaseGeneration` in its payload. The
     generation travels in an async context (`demo/job-guard.ts`) set by whoever owns the
-    lease: the turn processor, from the `active`, unexpired lease found by `call_sid`, and
+    lease: the turn processor, from the `active`, unexpired lease its callback's token names (the bound
+    `call_sid` on later hops), and
     the queue guard, from the incoming payload before it calls a handler. The wrapper around
     `queue.send` and `queue.sendOn` stamps from that context and refuses an enqueue for a
     demo tenant (`tenants.demo`) made outside one. It never reads the lease table, so a
@@ -1672,7 +1846,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     reset token's does: the reset claim (the `UPDATE` that replaces the generation) waits for
     every write transaction already past its check to commit, and any later transaction fails
     the check, so no write lands under a generation the claim has replaced. The lease row is
-    otherwise written only by the lease lifecycle (`call_sid` fill-in, claim, heartbeat,
+    otherwise written only by the lease lifecycle (`call_sid` bind, claim, heartbeat,
     return, release), so the share locks queue behind nothing else. A write that is not a
     database write cannot join the transaction; for a demo tenant that is a stored-object
     upload, keyed under the lease generation, so a late upload lands under a key no read path
@@ -1771,6 +1945,37 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     one of them wins the `active → resetting` claim and the other matches zero rows and does
     nothing; the reset runs once (counted on a reset spy), the lease is released once, the
     callback still answers 200, and a callback that arrives after the release matches nothing.
+  - Callback binding (the callback beats the `Calls` response; two real connections, a fake
+    Twilio held at a latch): the voice callback arrives with the lease token while the `Calls`
+    request is still unanswered and the lease's `call_sid` is null → the lease is found, the
+    CallSid binds, and the turn processor answers as the leased demo tenant (not the busy line)
+    with writes under that lease's generation; when the response is released its bind matches
+    the same sid, changes nothing and raises nothing; a statement spy shows the callback never
+    looked the lease up by `call_sid` before binding. Variant: the response wins the race → the
+    callback's bind matches the sid already there and proceeds.
+  - Callback binding (an early terminal callback still cleans up): for each of `completed`,
+    `failed`, `busy` and `no-answer`, the status callback arrives with the token before the
+    response → the CallSid binds, the claim wins, the reset runs once (reset spy) and the lease
+    releases once, the tenant equals the fixture, `demo_calls` ends in that status (found by
+    `lease_id`) and the signup SMS goes once after `completed` only; the `Calls` response then
+    arriving binds nothing new and does not revive the lease; a callback after the release
+    answers 200 and does nothing.
+  - Callback binding (both URLs signed): the request the fake Twilio receives carries
+    `lease=<token>` on both `Url` and `StatusCallback`, the token verifies for the lease minted
+    for this call, and the lease row was already committed (call_sid null) when the request
+    was sent.
+  - Callback binding (forged or expired token): a payload edited to name another lease or
+    tenant, a flipped signature byte, a token signed under another secret, a one-tap approve or
+    undo token (wrong discriminator), and a missing or malformed token → 403 on both callbacks,
+    no lease row touched, nothing written; an expired token (injected clock) → the voice callback
+    speaks the busy line and hangs up, the status callback answers 200 and does nothing, the
+    lease is unchanged and the reaper reclaims it. Unit (`lease-token.test.ts`): round trip,
+    tamper, wrong secret, expiry on an injected clock, wrong discriminator, malformed input.
+  - Callback binding (a second CallSid on one lease): after CA is bound, a validly signed
+    callback carrying CB → 403, `call_sid` stays CA, nothing is written and
+    `demo_callsid_mismatch` is audited; CA presented again is accepted (Twilio's retries and
+    the later status callbacks); a `Calls` response returning CB after a callback bound CA is
+    rejected the same way; CA presented for a different lease is refused by the unique index.
   - Isolation (heartbeat): a resetter that is slow but alive is never taken over: with a purge
     slowed past 60 s and its heartbeat renewing every 10 s (fake clock), the reaper's takeover
     `UPDATE` matches zero rows on every sweep. A resetter whose heartbeat stops is taken over
@@ -1847,10 +2052,14 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     JSON-path predicate is pinned on real columns and not on a mocked pool; the drain runs
     against the real `demo_inflight_jobs` table, and the write fence's `FOR SHARE` against the
     claim `UPDATE` is pinned on real Postgres with two connections, because a mocked pool
-    cannot show a lock conflict.
+    cannot show a lock conflict; the CallSid bind `UPDATE` and the `call_sid` unique index are
+    pinned the same way (two connections binding different sids to one lease: exactly one wins,
+    in a loop).
 - **Verification:** cost per completed demo call measured in staging before the landing CTA
   ships; a staging run of concurrent demo calls on one trade shows distinct tenants, a clean
-  tenant after each, and no job from one call running or writing against the next; founder decision recorded in `docs/decisions.md`.
+  tenant after each, and no job from one call running or writing against the next; a callback
+  that arrives before the `Calls` response returns, including an early terminal one, still lands
+  on its own lease; founder decision recorded in `docs/decisions.md`.
 
 ## Risks & Dependencies
 
@@ -1868,8 +2077,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Status contract drift.** Additive facts only; `.length(7)` preserved; pinned by extending
   `packages/api/test/onboarding/derive-status.test.ts` and the integration status test.
 - **Demo call cost, abuse, TCPA, cross-visitor leakage.** Phased last, consent first, two-layer
-  limits, kill switch, spend cap; every live call holds its own demo tenant by lease and the
-  tenant is reset before anyone else can lease it (U7): the reset is heartbeat-renewed and
+  limits, kill switch, spend cap; every live call holds its own demo tenant by lease, named in
+  both Twilio callback URLs by a signed token so a fast answer or an early terminal callback
+  cannot miss it, and the tenant is reset before anyone else can lease it (U7): the reset is
+  heartbeat-renewed and
   token-fenced, so a takeover leaves exactly one resetter writing, and queued work carries a
   lease generation that every demo write re-checks inside its own transaction, with release
   waiting on an in-flight registry rather than on queue visibility, so no job from one call
@@ -1904,9 +2115,9 @@ previous one; the previous slice is merged first.
 | S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
 | S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover) and `POST /draft/retry`. Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
-| S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing) on that helper; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; `expectedVersion` made required once every client sends it. | 5-6 days |
+| S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing) on that helper; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status so the shell never offers a refused button; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; `expectedVersion` made required once every client sends it. | 6-7 days (reset adds one) |
 | S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft (through the locked-write helper) and the settings proposal (a changed line clears the old confirm and probe stamps), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read), flag flipped, v2 deleted. | 10-12 days |
-| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces. | 8-11 days |
+| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost), reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces. | 8-12 days (the token and bind add one) |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
 second engineer shortens S2 and S3 only where the API they depend on is already merged.
