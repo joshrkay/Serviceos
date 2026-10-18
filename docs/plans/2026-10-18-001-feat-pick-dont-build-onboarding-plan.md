@@ -77,8 +77,9 @@ unowned position.
   owner's price choice becomes a multiplier passed into `seed-pack-defaults.ts`, not a second
   seed set. That holds for a first run only: the seeder skips any catalog item or template
   whose canonical name already exists, so on U6's "Re-run setup" the price card does not
-  re-seed. It updates the pack's two headline items (visit fee, labor rate) only while they
-  still carry the price the seeder set, leaves anything the owner has edited alone, and the
+  re-seed. It updates the pack's two headline items (visit fee, labor rate) and the estimate
+  template line items that carry those same seeded amounts, in each case only while the row
+  still holds the price the seeder set; anything the owner has edited is left alone, and the
   read-back says which happened ("Your labor rate is yours; I left it").
 - **Metro from area code is a static NPA→metro map in code**, extending
   `packages/api/src/compliance/us-geography.ts` which today maps area code to state only. One
@@ -467,8 +468,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   skips consent), `components/home/ActivationCelebrationBanner.tsx` (first-run state),
   `docs/solutions/architecture-patterns/derive-shared-status-rule-across-frontends.md`.
 - **Test scenarios:**
-  - Happy path: re-run with a new price pick → the two headline catalog items update when
-    unedited since seeding, an owner-edited labor rate is untouched and the read-back says so;
+  - Happy path: re-run with a new price pick → the two headline catalog items and the template
+    lines that still carry the seeded amounts update, an owner-edited labor rate (and the
+    template line the owner changed) are untouched and the read-back says so;
     day-one owner → no forwarding turn, number card says "put it on the truck";
     established shop → forwarding text sent once, badge shown until `twilioStatus` reports
     forwarding verified.
@@ -545,8 +547,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   a lead row in a platform marketing tenant. The signup SMS link carries a signed, single-use
   handoff token (HMAC over `lead_id` and an expiry). Migration 313 also adds a platform table
   `signup_handoffs(token_hash PK, lead_id, tenant_id NULL, expires_at, consumed_at)`:
-  `SignupPage` forwards the token into Clerk unsafe metadata, the Clerk signup webhook sets
-  `tenant_id` on the matching unexpired row, and `POST /draft` consumes it atomically
+  `SignupPage` forwards the token into Clerk unsafe metadata, the Clerk signup webhook binds
+  it exclusively (`UPDATE … SET tenant_id = $2 WHERE token_hash = $1 AND tenant_id IS NULL
+  AND expires_at > now()`; a second signup with the same token binds nothing and is logged),
+  and `POST /draft` consumes it atomically
   (`UPDATE … SET consumed_at = now() WHERE tenant_id = $1 AND consumed_at IS NULL AND
   expires_at > now() RETURNING lead_id`) to read the lead's trade, name and metro. No row, a
   consumed row or an expired one means the shell asks (U3's first screen); the SMS itself never
