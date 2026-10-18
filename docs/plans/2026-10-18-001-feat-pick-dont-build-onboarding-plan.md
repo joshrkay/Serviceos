@@ -369,7 +369,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `assembleTypicalShop`, so a default line that embeds the name (the greeting) is regenerated;
   the rebuild changes rendered text only and never edits `choices`. A field with no live value
   keeps the draft's. A re-run's proposals therefore only restate what Settings holds, and
-  never restore a stale name or zone over a Settings edit (U6). The
+  never restore a stale name or zone over a Settings edit (U6). An edit saved after reopen
+  commits is not yet fenced, see Deferred review findings D9. The
   read-back then shows what is
   live today and "That's right" mints proposals exactly as a first run does. The trade, business name and optional cell it needs come from the demo-call
   lead when there is one (U7) and otherwise from the v3 shell's first screen, "What should I
@@ -1199,10 +1200,11 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `hourlyRateCents` only for `repriceable` items (the first-run path, which requires both, is
   unchanged), so what is approved is what was rendered. An item that turns `owner` between the
   render and the approval is still left by the statement's own predicate and named in the
-  read-back (rule 2). Wire compatibility is additive: `available` stays for one release as
-  "either item is `repriceable`" so a boolean-era client still parses the response, while the
-  server's per-item payload build means such a client cannot make an approval move an owner's
-  price.
+  read-back (rule 2); an item that changes after the card rendered is not yet surfaced as a
+  conflict before "That's right", see Deferred review findings D8. Wire compatibility is
+  additive: `available` stays for one release as "either item is `repriceable`" so a
+  boolean-era client still parses the response, while the server's per-item payload build
+  means such a client cannot make an approval move an owner's price.
 
   (4) No backfill: a row seeded before 314 is the owner's. The seeder wrote no per-row
   record of what it made, so a legacy row has no positive proof of provenance; the only
@@ -3960,7 +3962,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 ### Deferred review findings (resolve at slice start)
 
 U6 and U7 are unbuilt (S5, and S6 which is decision-gated) and have taken many review rounds,
-so these seven confirmed findings are recorded here with the direction to take rather than
+so these nine confirmed findings are recorded here with the direction to take rather than
 designed further. Each is exposed first by the Docker-gated, real-column test named below.
 
 - **D1. A platform tenant must exist (U7, S6; P1).** `phone_rate_limits.tenant_id` and
@@ -4060,6 +4062,38 @@ designed further. Each is exposed first by the Docker-gated, real-column test na
   empties, then the generation moves and the tenant is released; and with the handler stalled
   past the heartbeat timeout the reset terminalizes the row itself and still releases the
   tenant (no stranded `executing`).
+- **D8. The owner can confirm a repricing the approval no longer applies (U6, S5; P2).** The
+  price card is rendered from per-item states, but approval re-derives them and carries only
+  the items still `repriceable`, so when another tab saves one headline price between the
+  render and "That's right", the payload silently omits that item while the card the owner
+  confirmed still promised it would move (the statement-level predicate in `repriceSeeded`
+  protects the price, and the read-back names the miss only after the fact). *Direction:* the
+  reopen response and the read-back carry a repricing revision, a hash or counter over the
+  per-item states and current prices the card was rendered from; the approve request sends it
+  back, and if the states re-derived at approval differ it answers a typed 409 (for example
+  `REPRICING_CHANGED`) with nothing minted, and the shell refreshes the read-back instead of
+  accepting. The statement-level predicate stays as the last guard. *First test:* render the
+  combined card, change one headline price through the real catalog route from a second
+  session, then approve with the old revision: 409, nothing minted, and the refreshed card
+  shows the single-item pair.
+- **D9. A re-run can write the reopen snapshot back over later Settings edits (U2, U6, S5;
+  P1).** Reopen copies the live business name, timezone, owner cell and pre-filled policy onto
+  the draft once, and a re-run's approval restates all of them, which
+  `OnboardingTenantSettingsExecutionHandler` writes as payload values through
+  `upsertIdentityFields`, so a Settings edit saved from another tab after `POST /draft/reopen`
+  commits and before the proposals execute is silently overwritten by the older snapshot (the
+  draft `version` fences only `onboarding_drafts`, not `tenant_settings`). *Direction:* the
+  re-run's `onboarding_tenant_settings` proposal carries ONLY the fields the owner changed
+  relative to the reopen snapshot (a diff against what reopen copied, never the whole
+  snapshot; the pre-filled policy the voice-policy proposal restates follows the same rule),
+  so an unedited field can never be written back; for the fields it does carry, the handler
+  applies each as a compare-and-set against the snapshot value stored with the proposal, and
+  skips, and reports in the execution result, any field whose live value has moved. The
+  finding's other option, a settings revision that rejects the whole execution, is the
+  fallback. *First test:* reopen, then change the business name in Settings from a second
+  session, then approve a re-run that edited only a policy choice: after execution the tenant
+  name is the Settings value and the policy is the re-run's; and an edit to the same field the
+  re-run also changed is skipped and reported.
 
 ## Sizing and sequencing
 
