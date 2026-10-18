@@ -39,6 +39,11 @@ const WEB_FUNNEL_EVENTS: AnalyticsEvent[] = [
   'v3_readback_viewed',
   'v3_readback_edit',
   'v3_approved',
+  'v3_trial_viewed',
+  'v3_trial_started',
+  'v3_number_viewed',
+  'v3_number_ready',
+  'v3_test_call_viewed',
 ];
 
 const REQUIRED_FIELDS = ['tenant_id', 'user_id', 'timestamp', 'source'] as const;

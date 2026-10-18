@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { READBACK_PROGRESS, READY_PROGRESS, highestSeen, minutesLeft, turnProgress } from './pacing';
+import { AFTER_PACING, READBACK_PROGRESS, READY_PROGRESS, highestSeen, minutesLeft, turnProgress, type AfterStage } from './pacing';
 
 describe('pacing', () => {
   it('estimates minutes from the work still ahead, never below one', () => {
@@ -37,5 +37,34 @@ describe('pacing', () => {
     expect(highestSeen(0.5, 0.3)).toBe(0.5);
     expect(highestSeen(0.3, 0.5)).toBe(0.5);
     expect(highestSeen(0, 0.15)).toBe(0.15);
+  });
+
+  describe('after "That\'s right"', () => {
+    const ORDER: AfterStage[] = ['saving', 'wait', 'trial', 'number', 'test_call', 'open'];
+
+    it('reads the numbers the brief names for the trial, the number, the test call and open', () => {
+      expect(AFTER_PACING.trial).toEqual({ minutesLeft: 3, progress: 0.7 });
+      expect(AFTER_PACING.number).toEqual({ minutesLeft: 2, progress: 0.8 });
+      expect(AFTER_PACING.test_call).toEqual({ minutesLeft: 1, progress: 0.9 });
+      expect(AFTER_PACING.open.progress).toBe(1);
+    });
+
+    it('continues the read-back without a step back: minutes never rise, the line never falls', () => {
+      let minutes = minutesLeft(0);
+      let line = READBACK_PROGRESS;
+      for (const stage of ORDER) {
+        expect(AFTER_PACING[stage].minutesLeft, `${stage} minutes`).toBeLessThanOrEqual(minutes);
+        expect(AFTER_PACING[stage].progress, `${stage} progress`).toBeGreaterThanOrEqual(line);
+        minutes = AFTER_PACING[stage].minutesLeft;
+        line = AFTER_PACING[stage].progress;
+      }
+    });
+
+    it('never leaves less than a minute, and never goes past a full line', () => {
+      for (const stage of ORDER) {
+        expect(AFTER_PACING[stage].minutesLeft).toBeGreaterThanOrEqual(1);
+        expect(AFTER_PACING[stage].progress).toBeLessThanOrEqual(1);
+      }
+    });
   });
 });

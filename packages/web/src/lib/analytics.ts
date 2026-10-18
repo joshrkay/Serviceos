@@ -61,6 +61,11 @@ export type AnalyticsEvent =
   | 'v3_readback_viewed'
   | 'v3_readback_edit'
   | 'v3_approved'
+  | 'v3_trial_viewed'
+  | 'v3_trial_started'
+  | 'v3_number_viewed'
+  | 'v3_number_ready'
+  | 'v3_test_call_viewed'
   // In-app intent/view events (U6). Things the server-side audit stream can't
   // see because there's no row mutation — gestures, not state changes. IDs /
   // enums / counts / bools only, never message or query text.
