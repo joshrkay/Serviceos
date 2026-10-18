@@ -13,7 +13,7 @@ import {
 } from '@ai-service-os/shared';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { hasPermission, isValidRole, type Permission, type Role } from '../auth/rbac';
+import { holdIfCallerCannotApprove } from '../proposals/caller-approval-gate';
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { Proposal, ProposalRepository, ProposalType, missingFieldsFor } from '../proposals/proposal';
@@ -2968,51 +2968,6 @@ async function answerUnpaidInvoicesQuery(
 }
 
 /**
- * Permission a proposal type needs before it may EXECUTE without a human
- * approval tap.
- *
- * Most drafting handlers pass no `sourceTrustTier`, so their proposals always
- * land in 'draft' → 'ready_for_review' and a permission holder approves them.
- * `create_appointment` is the exception: it carries
- * `sourceTrustTier: 'autonomous'` and is capture-class, so for a supervised,
- * high-confidence tenant `decideInitialStatus` returns 'approved' and the
- * worker executes it — and the execution layer performs NO permission check of
- * its own (verified: no `hasPermission` anywhere under proposals/execution/).
- *
- * Granting technicians `ai:run` therefore has to not become a back door around
- * `appointments:create`, which they deliberately lack (the day-view reschedule
- * flow routes through the proposal path precisely so `proposals:create` stays
- * the low-privilege action). A caller who lacks the direct permission still
- * gets their draft — it just waits for the approval tap instead of
- * self-executing. Fails closed: an unknown/invalid role gets the downgrade.
- */
-const DIRECT_EXECUTION_PERMISSION: Partial<Record<ProposalType, Permission>> = {
-  create_appointment: 'appointments:create',
-  create_booking: 'appointments:create',
-};
-
-/**
- * Downgrade an auto-approved proposal to 'ready_for_review' when the caller
- * lacks the permission the equivalent direct route would demand. Returns true
- * when a downgrade was applied. No-op for every proposal that was not
- * auto-approved, so existing owner/dispatcher behavior is byte-identical.
- */
-function downgradeIfCallerLacksDirectPermission(
-  proposal: { proposalType: ProposalType; status: string; approvedAt?: Date | undefined },
-  callerRole: string | undefined,
-): boolean {
-  if (proposal.status !== 'approved') return false;
-  const required = DIRECT_EXECUTION_PERMISSION[proposal.proposalType];
-  if (!required) return false;
-  const permitted =
-    !!callerRole && isValidRole(callerRole) && hasPermission(callerRole as Role, required);
-  if (permitted) return false;
-  proposal.status = 'ready_for_review';
-  proposal.approvedAt = undefined;
-  return true;
-}
-
-/**
  * Task 15 (2026-08-07 tradesperson plan) — quality-review fix. Single source
  * of truth for which classifier intents this route can dispatch to a
  * drafting handler, mapping the intent (classifier output) to the PROPOSAL
@@ -3257,10 +3212,10 @@ async function generateAssistantReply(
   // to resolve against yet, so that ordering is never a gap.
   conversationId?: string,
   // The caller's DB-authoritative role (middleware/auth overwrites
-  // req.auth.role with the membership row's role on every request). Used only
-  // by downgradeIfCallerLacksDirectPermission to keep an auto-approving
-  // proposal from executing for a caller who lacks the direct permission.
-  // Undefined → treated as "lacks it" (fails closed).
+  // req.auth.role with the membership row's role on every request). Used by
+  // holdIfCallerCannotApprove (OVAS-02) to keep an auto-approving proposal
+  // from executing for a caller who lacks the direct permission, and by the
+  // lookup gate below. Undefined → treated as "lacks it" (fails closed).
   callerRole?: string,
   // P12-001/P12-004 wiring gap (commit 1) — `req.auth.mode` has been
   // populated by `requireTenant` on every authenticated request since
@@ -4111,9 +4066,9 @@ async function generateAssistantReply(
           // (the normal case). Already resolved (memoized) by the dispatch
           // call above, so this await is free.
           Object.assign(proposal, holdIfUnsupervised(proposal, await getSupervisorPresent()));
-          // A caller without the direct permission never gets a self-executing
-          // proposal — their draft waits for the approval tap instead.
-          downgradeIfCallerLacksDirectPermission(proposal, callerRole);
+          // OVAS-02 — a caller without the type's direct permission never gets
+          // a self-executing proposal; their draft waits for the approval tap.
+          Object.assign(proposal, holdIfCallerCannotApprove(proposal, callerRole));
           // #1480 — the same executability check a tap runs.
           Object.assign(
             proposal,
@@ -4384,9 +4339,9 @@ async function generateAssistantReply(
         // comment on the chain-segment path above. Already resolved
         // (memoized) by the dispatch call above.
         Object.assign(proposal, holdIfUnsupervised(proposal, await getSupervisorPresent()));
-        // A caller without the direct permission never gets a self-executing
-        // proposal — their draft waits for the approval tap instead.
-        downgradeIfCallerLacksDirectPermission(proposal, callerRole);
+        // OVAS-02 — a caller without the type's direct permission never gets
+        // a self-executing proposal; their draft waits for the approval tap.
+        Object.assign(proposal, holdIfCallerCannotApprove(proposal, callerRole));
         // #1480 — the ONE executability check a human tap runs
         // (approveProposal), run here too, so a card that cannot execute is
         // never "approved automatically" and the reply asks for what is missing.

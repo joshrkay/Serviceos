@@ -3014,6 +3014,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // execute their skill instead of skipping. `voiceRepo` doubles as the
     // memo-creator resolver for the owner-grade authorization gate.
     voiceRepo,
+    // OVAS-02 — the memo creator's DB role gates auto-approval (same loader).
+    resolveMemberRole: resolveVoiceMemberRole,
     // Same object the assistant-chat router gets — see `lookupAnswerDeps`.
     lookupAnswers: lookupAnswerDeps,
     // B5.5 — en_route ("on my way") voice leg: userRepo resolves the memo
