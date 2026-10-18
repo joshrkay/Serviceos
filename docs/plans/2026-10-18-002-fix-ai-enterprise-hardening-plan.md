@@ -966,6 +966,29 @@ flowchart LR
       A structural test lists every call site of each external provider client's write methods
       (Twilio Messages and Calls, both email providers, QuickBooks, Stripe, Langfuse). It fails
       when a call site is not wrapped in the fence, so a new writer can't skip it.
+    - **Local writes are fenced in the database, so no repository can skip the fence.** A test over
+      provider calls can't see a local write. For example, a transcription already waiting on its
+      provider still runs `voiceRepository.updateStatus(..., 'completed', { transcript, metadata })`
+      (`workers/transcription.ts:489-508`) after the scrub. That would put the transcript back, and
+      the encrypted raw copy in `metadata.raw_transcript_retention` with it. So:
+      - Every table that the erase-coverage manifest classifies `scrub` or `anonymize` gets a
+        `BEFORE INSERT OR UPDATE` trigger.
+      - The trigger takes the subject's erasure lock in shared mode, so it serializes with phase 1
+        like every other writer.
+      - It checks the row's subject keys against the tombstone. The manifest maps those keys for
+        each table: `customer_id`, session id, call SID or correlation id.
+      - On a match, it raises a dedicated SQLSTATE. A write that only blanks content columns, which
+        is what the erase itself does, passes, because it can't put data back.
+      - Writers treat that SQLSTATE as "erased, drop the content". It is never an error that
+        retries. The transcription worker ends that recording's job without writing.
+      - The manifest schema test reads `pg_trigger` in the Docker-gated suite. It fails when any
+        `scrub` or `anonymize` table lacks the trigger, so a new table or repository is covered by
+        construction.
+      - The tombstone lookup is an index probe on `(tenant_id, key)`, so the per-row cost on hot
+        tables such as `call_transcript_turns` stays small.
+      - Test: a transcription is held at its provider while the erase runs. Its completion write is
+        refused by the trigger, the recording's transcript and metadata stay blank, and the job
+        doesn't retry.
     - **A recipient match fences only the subject's own work, by provenance, not by time.** A
       household can share a phone or an email, so a recipient hash alone can't say whose send it
       is, and neither can creation time. So:
@@ -1167,7 +1190,19 @@ flowchart LR
 - **Dependencies:** U3, plus owner decision 2 below.
 - **Approach:**
   - A nullable `tenant_settings` monthly ceiling in integer cents (new idempotent migration). Null
-    means no cap, so nothing changes until one is set.
+    means no cap is enforced.
+  - **The ledger runs for every tenant, capped or not, so a cap set mid-month is a real monthly
+    cap.** If the ledger started when a cap was set, a tenant that had already spent $90 could
+    enable a $100 ceiling and spend another $100.
+    - Every attempt is reserved and settled in the ledger whether or not a ceiling is set. With a
+      null ceiling, the reserve step just skips the comparison.
+    - At deploy, an idempotent one-time seed sets the current month's `spent` for every tenant from
+      that month's `ai_runs.cost_micro_cents`. It only seeds a month that has no ledger row yet.
+    - Rows with a null cost (unpriced models) are counted into `unpriced_runs` on the ledger row.
+      The settings response shows that count, so the owner can see the seeded figure is a floor.
+    - Enabling a cap takes effect at once against the month's real spend. When `spent` is already
+      over the new ceiling, the settings response says so in plain words, and new AI work is
+      refused.
   - **Keep the ledger in micro-cents.** `computeCostMicroCents` returns micro-cents (1 cent =
     1,000,000; `packages/api/src/ai/gateway/model-pricing.ts`), so the arithmetic must stay in that
     unit.
@@ -1198,12 +1233,29 @@ flowchart LR
         `buildWireRequest()` it also uses itself.
       - The reservation is computed from that payload.
       - A test covers JSON-mode injection on byte-dense input.
-    - Do the reservation in one atomic step: either a single conditional
-      `UPDATE … SET reserved = reserved + $cost WHERE spent + reserved + $cost <= cap RETURNING …` on
-      a per-tenant monthly ledger row, or a Lua script in the same style as
-      `redis-tenant-quota.ts`.
-    - On completion, release the reservation and charge the actual cost from
-      `computeCostMicroCents`, in one step.
+    - **Give each physical attempt its own durable reservation, in Postgres.** An aggregate
+      `reserved` counter can't say which of two concurrent attempts expired, whether that attempt
+      was already reconciled, or whether a retried completion has already been counted. So:
+      - An `ai_spend_reservations` row is keyed by a unique `attempt_id`. It holds `tenant_id`, the
+        month, `amount_micro_cents`, `state` and `lease_expires_at`, plus the `ai_run_id` once known.
+        The states are `reserved`, `settled`, `released` and `expired_charged`.
+      - Its RLS matches every tenant table.
+      - A per-tenant monthly `ai_spend_ledger` row holds `spent` and `reserved`.
+      - **Reserve** is one transaction. A conditional
+        `UPDATE ai_spend_ledger SET reserved = reserved + $cost WHERE spent + reserved + $cost <= cap
+        RETURNING …` runs first. When it returns a row, the reservation row is inserted.
+      - **Every later step is a guarded transition on that one row**, in the same transaction as
+        the ledger adjustment:
+        `UPDATE ai_spend_reservations SET state = $next WHERE attempt_id = $1 AND state = 'reserved'
+        RETURNING amount_micro_cents`, and then the matching ledger update by exactly the returned
+        amount. That covers settle (charge the actual cost from `computeCostMicroCents`), release
+        and expire.
+      - A transition that matches no row is a no-op. A retried completion, a reaper that races a
+        late completion, and a double release therefore each count once.
+      - The lease reaper expires each attempt by its own id and amount. It never strands capacity,
+        double-charges, or releases a reservation that may have been billed.
+      - Postgres, not Redis, holds this, because a money ledger must be durable and auditable.
+        Each transition writes an audit event.
     - **Only a failure that definitively never reached the provider releases the reservation.**
       Examples: preflight rejection, quota rejection, a connection refused before send, a 4xx
       validation error. An ambiguous failure — a timeout or connection reset after send, a 5xx after
@@ -1243,6 +1295,13 @@ flowchart LR
   - **Unit:** a capped tenant's request to an unpriced model is rejected with a typed error.
   - **Unit:** enabling a cap is refused while any configured model is unpriced.
   - **Integration:** the monthly window resets and the spend sum matches `ai_runs`.
+  - **Integration (per-attempt reservations, real Postgres):**
+    - Two concurrent attempts reserve different amounts, and one process dies. The reaper charges
+      exactly that attempt's amount, and the other attempt settles normally.
+    - A completion delivered twice settles once.
+    - A reaper racing a late completion produces exactly one transition.
+  - **Integration (mid-month cap):** a tenant has $90 of `ai_runs` cost this month, all from before
+    deploy. After the seed, it enables a $100 cap, and a $15 worst-case call is refused.
 
 ## Owner decisions and actions (not code)
 
