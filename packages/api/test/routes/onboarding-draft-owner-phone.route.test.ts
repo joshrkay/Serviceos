@@ -131,13 +131,16 @@ describe('owner cell on the onboarding draft routes', () => {
       expect((await ctx.draftRepo.getForTenant(TENANT_ID))!.ownerPhone).toBe('+12165550142');
     });
 
-    it.each(['12345', 'abc'])('a value that does not normalise (%j) is a 400 naming ownerPhone', async (ownerPhone) => {
+    // '+47 912 34 567' has ten digits: it used to be stored as the US number +14791234567.
+    it.each(['12345', 'abc', '+47 912 34 567'])('a value that does not normalise (%j) is a 400 naming ownerPhone', async (ownerPhone) => {
       await request(ctx.app).post(BASE).send(CREATE_NO_PHONE);
       const res = await request(ctx.app).put(`${BASE}/owner-phone`).send({ ownerPhone, version: 1 });
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('VALIDATION_ERROR');
       expect(res.body.details.issues[0]).toEqual({ path: 'ownerPhone', message: OWNER_PHONE_INVALID_MESSAGE });
-      expect((await ctx.draftRepo.getForTenant(TENANT_ID))!.version).toBe(1);
+      const draft = (await ctx.draftRepo.getForTenant(TENANT_ID))!;
+      expect(draft.version).toBe(1);
+      expect(draft.ownerPhone).toBeNull();
     });
 
     it.each([

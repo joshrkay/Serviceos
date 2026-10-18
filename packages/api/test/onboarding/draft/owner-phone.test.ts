@@ -48,7 +48,7 @@ describe('parseOwnerPhone', () => {
     },
   );
 
-  it.each(['abc', '555-0142', '123-456-7890', '+44 20 7946 0958', '', '   '])('rejects %j with a VALIDATION_ERROR naming the field and never echoing the input', (raw) => {
+  it.each(['abc', '555-0142', '123-456-7890', '+44 20 7946 0958', '+47 912 34 567', '+4791234567', '', '   '])('rejects %j with a VALIDATION_ERROR naming the field and never echoing the input', (raw) => {
     for (const field of ['phone', 'ownerPhone'] as const) {
       let thrown: unknown;
       try {
@@ -72,6 +72,9 @@ describe('isCanonicalOwnerPhone', () => {
     expect(isCanonicalOwnerPhone('(216) 555-0142')).toBe(false);
     expect(isCanonicalOwnerPhone('2165550142')).toBe(false);
     expect(isCanonicalOwnerPhone('+442079460958')).toBe(false);
+    // Ten digits after a non-+1 country code: never mistaken for a US number.
+    expect(isCanonicalOwnerPhone('+47 912 34 567')).toBe(false);
+    expect(isCanonicalOwnerPhone('+4791234567')).toBe(false);
     expect(isCanonicalOwnerPhone('')).toBe(false);
   });
 });
