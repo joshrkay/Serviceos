@@ -55,8 +55,10 @@ export const SetOwnerPhoneBodySchema = z
  * looking at was rendered from. When omitted the row lock alone serialises
  * approve against PUT /choices and against another approve. Additive and
  * optional, so a client that posts `{}` keeps working. On an already-approved
- * draft it is compared with the version the draft was approved from: equal or
- * omitted is the idempotent 200, anything else is 409 VERSION_CONFLICT.
+ * draft it is compared with the version the current approval attempt started
+ * from (the approval itself, or the latest retry, each of which moves the
+ * version by one): equal or omitted is the idempotent 200, anything else is
+ * 409 VERSION_CONFLICT, so a tab that has not seen a retry is refused after it.
  */
 export const ApproveDraftBodySchema = z
   .object({

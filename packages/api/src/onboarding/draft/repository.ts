@@ -11,7 +11,9 @@
  * and re-reads. Approval takes the row lock first (`getForTenantForUpdate`), so
  * a PUT /choices and an approve, or two approves, serialise on the draft row;
  * `markApproved` is the second guard: a compare-and-swap on the version read
- * under that lock, which never returns a row it did not update.
+ * under that lock, which never returns a row it did not update. `markRetried`
+ * is the same compare-and-swap for a later approval attempt (a retry), so
+ * `version` names the attempt a tab rendered, not just the staged choices.
  */
 import type { Pool } from 'pg';
 import { PgBaseRepository } from '../../db/pg-base';
@@ -37,6 +39,12 @@ export class DraftAlreadyApprovedError extends Error {
   constructor() {
     super('onboarding draft is already approved');
     this.name = 'DraftAlreadyApprovedError';
+  }
+}
+export class DraftNotApprovedError extends Error {
+  constructor() {
+    super('onboarding draft is not approved');
+    this.name = 'DraftNotApprovedError';
   }
 }
 
@@ -111,6 +119,16 @@ export interface OnboardingDraftRepository {
    * and never returns a row it did not update.
    */
   markApproved(tenantId: string, proposalIds: string[], expectedVersion: number): Promise<OnboardingDraft>;
+  /**
+   * A successful retry opens a new approval attempt (fresh undo window), so the
+   * draft's `version` moves on: bumps `version` and `updated_at` of an APPROVED
+   * draft, only if it is still at `expectedVersion` (the version read under the
+   * lock). Nothing else about the row changes. A tab that rendered an earlier
+   * attempt then holds a stale version. Throws DraftNotFoundError /
+   * DraftNotApprovedError / DraftVersionConflictError and never returns a row it
+   * did not update.
+   */
+  markRetried(tenantId: string, expectedVersion: number): Promise<OnboardingDraft>;
 }
 
 interface DraftRow {
@@ -312,6 +330,28 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
       throw new DraftVersionConflictError(expectedVersion, existing.rows[0].version);
     });
   }
+
+  async markRetried(tenantId: string, expectedVersion: number): Promise<OnboardingDraft> {
+    return this.withTenant(tenantId, async (client) => {
+      const updated = await client.query<DraftRow>(
+        `UPDATE onboarding_drafts
+            SET version = version + 1,
+                updated_at = NOW()
+          WHERE tenant_id = $1 AND status = 'approved' AND version = $2
+          RETURNING *`,
+        [tenantId, expectedVersion],
+      );
+      if (updated.rows.length > 0) return mapRow(updated.rows[0]);
+      // Zero rows: say why, but never hand back a row this call did not update.
+      const existing = await client.query<Pick<DraftRow, 'status' | 'version'>>(
+        'SELECT status, version FROM onboarding_drafts WHERE tenant_id = $1',
+        [tenantId],
+      );
+      if (existing.rows.length === 0) throw new DraftNotFoundError(tenantId);
+      if (existing.rows[0].status !== 'approved') throw new DraftNotApprovedError();
+      throw new DraftVersionConflictError(expectedVersion, existing.rows[0].version);
+    });
+  }
 }
 
 // ─── In-memory implementation (route tests, hermetic boot) ───────────────────
@@ -388,6 +428,16 @@ export class InMemoryOnboardingDraftRepository implements OnboardingDraftReposit
     if (d.status === 'approved') throw new DraftAlreadyApprovedError();
     if (d.version !== expectedVersion) throw new DraftVersionConflictError(expectedVersion, d.version);
     const next: OnboardingDraft = { ...d, status: 'approved', proposalIds: [...proposalIds], version: d.version + 1, approvedAt: new Date(), updatedAt: new Date() };
+    this.byTenant.set(tenantId, next);
+    return next;
+  }
+
+  async markRetried(tenantId: string, expectedVersion: number): Promise<OnboardingDraft> {
+    const d = this.byTenant.get(tenantId);
+    if (!d) throw new DraftNotFoundError(tenantId);
+    if (d.status !== 'approved') throw new DraftNotApprovedError();
+    if (d.version !== expectedVersion) throw new DraftVersionConflictError(expectedVersion, d.version);
+    const next: OnboardingDraft = { ...d, version: d.version + 1, updatedAt: new Date() };
     this.byTenant.set(tenantId, next);
     return next;
   }

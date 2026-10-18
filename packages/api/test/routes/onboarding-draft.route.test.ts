@@ -328,10 +328,14 @@ describe('POST /retry', () => {
   it('re-queues the failed proposal and answers { draft, retriedProposalIds }', async () => {
     const [a, b] = await approved();
     await fail(a);
+    const approvedVersion = (await ctx.draftRepo.getForTenant(TENANT_ID))!.version;
     const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
     expect(res.status).toBe(200);
     expect(res.body.retriedProposalIds).toEqual([a]);
     expect(res.body.draft.status).toBe('approved');
+    // The response names the new attempt: one version past the approval, and it is what GET now returns.
+    expect(res.body.draft.version).toBe(approvedVersion + 1);
+    expect((await request(ctx.app).get('/api/onboarding/draft')).body.draft.version).toBe(approvedVersion + 1);
     expect((await ctx.proposalRepo.findById(TENANT_ID, a))?.status).toBe('approved');
     expect((await ctx.proposalRepo.findById(TENANT_ID, b))?.status).toBe('approved');
   });
@@ -347,22 +351,44 @@ describe('POST /retry', () => {
     expect(retried).toHaveLength(1);
   });
 
-  it('nothing failed is a 409 DRAFT_RETRY_NOTHING_FAILED', async () => {
+  it('nothing failed is a 409 DRAFT_RETRY_NOTHING_FAILED and the version does not move', async () => {
     await approved();
+    const before = (await ctx.draftRepo.getForTenant(TENANT_ID))!;
     const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
     expect(res.status).toBe(409);
     expect(errText(res)).toMatch(/DRAFT_RETRY_NOTHING_FAILED/);
+    expect(await ctx.draftRepo.getForTenant(TENANT_ID)).toEqual(before);
+  });
+
+  it('a tab that rendered the original approval is refused after a retry: approve with its expectedVersion is a 409 VERSION_CONFLICT', async () => {
+    const created = await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+    const v = created.body.draft.version;
+    const first = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: v });
+    const [a] = [...first.body.proposalIds].sort();
+    await fail(a);
+
+    expect((await request(ctx.app).post('/api/onboarding/draft/retry').send()).status).toBe(200);
+
+    const stale = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: v });
+    expect(stale.status).toBe(409);
+    expect(errText(stale)).toMatch(/VERSION_CONFLICT/);
+    const bare = await request(ctx.app).post('/api/onboarding/draft/approve').send({});
+    expect(bare.status).toBe(200);
+    expect(bare.body.approvedNow).toBe(false);
+    expect(await ctx.proposalRepo.findByTenant(TENANT_ID)).toHaveLength(2);
   });
 
   it('a failed proposal next to an undone one is a 409 DRAFT_RETRY_UNSAFE and nothing is re-queued', async () => {
     const [a, b] = await approved();
     await fail(a);
     await ctx.proposalRepo.update(TENANT_ID, b, { status: 'undone' });
+    const draftBefore = await ctx.draftRepo.getForTenant(TENANT_ID);
     const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
     expect(res.status).toBe(409);
     expect(errText(res)).toMatch(/DRAFT_RETRY_UNSAFE/);
     expect((await ctx.proposalRepo.findById(TENANT_ID, a))?.status).toBe('execution_failed');
     expect((await ctx.proposalRepo.findById(TENANT_ID, b))?.status).toBe('undone');
+    expect(await ctx.draftRepo.getForTenant(TENANT_ID)).toEqual(draftBefore);
     const retried = (await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 100 })).filter((e) => e.eventType === 'proposal.retried');
     expect(retried).toHaveLength(0);
   });

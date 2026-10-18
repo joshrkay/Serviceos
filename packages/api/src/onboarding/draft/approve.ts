@@ -23,9 +23,13 @@
  * lets a client that rendered version N refuse to approve a newer draft
  * (DraftVersionConflictError, before anything is minted); `markApproved`
  * re-checks the same version as the second guard. On an already-approved draft
- * the same field is compared with the version it was approved from
- * (`version - 1`): equal or absent is the idempotent 200, anything else is a
- * stale confirmation and answers the same conflict.
+ * the same field is compared with the version the CURRENT approval attempt
+ * started from (`version - 1`): equal or absent is the idempotent 200, anything
+ * else is a stale confirmation and answers the same conflict. The version names
+ * the attempt: approval moves it by one and so does every successful retry
+ * (retry.ts), because a retry opens a new undo window. A tab that rendered the
+ * original approval is therefore refused once a retry has run, which is
+ * intended; sending no expectedVersion stays the idempotent 200.
  */
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';
@@ -161,10 +165,13 @@ export async function approveDraft(
   if (draft.status === 'approved') {
     // Idempotent re-tap, a lost-response retry, or the loser of an approve race:
     // the winner's ids, nothing minted. Approval bumped the version by one, so
-    // `version - 1` is the version it was approved FROM: no expectedVersion or
-    // that one is the same client confirming again (200). Any other value is a
-    // stale tab (or one ahead of the row) confirming a read-back that is not
-    // what was approved: refuse it, reporting the approved-from version.
+    // with no retry since, `version - 1` is the version it was approved FROM: no
+    // expectedVersion or that one is the same client confirming again (200).
+    // Any other value is a stale tab (or one ahead of the row) confirming a
+    // read-back that is not what was approved: refuse it, reporting `version - 1`.
+    // A retry (retry.ts) bumps the version again, so after one `version - 1` is
+    // the version that retry started from and the original confirmation lands
+    // here too: the retry opened a new undo window that tab never rendered.
     const approvedFrom = draft.version - 1;
     if (opts.expectedVersion !== undefined && opts.expectedVersion !== approvedFrom) {
       throw new DraftVersionConflictError(opts.expectedVersion, approvedFrom);

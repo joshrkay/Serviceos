@@ -12,7 +12,9 @@
  *                                 reset each execution_failed one to draft and approve it again for a
  *                                 fresh undo window; 409 DRAFT_NOT_APPROVED, then 409 DRAFT_RETRY_UNSAFE
  *                                 when a listed proposal is undone/rejected/expired/missing (nothing is
- *                                 re-queued), then 409 DRAFT_RETRY_NOTHING_FAILED when none failed)
+ *                                 re-queued), then 409 DRAFT_RETRY_NOTHING_FAILED when none failed;
+ *                                 a successful retry is a new approval attempt and moves the draft
+ *                                 `version` by one, the response carries it, a refused one moves nothing)
  *
  * Owner-only, like POST /api/onboarding/pack and the conversation lane: every
  * write here ends in config-change proposals against the tenant's settings.

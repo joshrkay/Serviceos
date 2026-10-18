@@ -23,8 +23,15 @@
  * DRAFT_RETRY_NOTHING_FAILED. Any thrown error rolls the whole request back, so a
  * proposal is never left half-reset in `draft`.
  *
- * The draft row itself is not written: it is frozen once approved and `version`
- * is the choice-staging compare-and-swap token.
+ * A successful retry opens a NEW approval attempt: the re-approval stamps a
+ * fresh `approvedAt` and so a fresh undo window, and the draft `version` moves
+ * with it (`markRetried`, one compare-and-swap on the version read under the
+ * lock, after every guard has passed and the proposals are re-approved). The
+ * version therefore names one approval attempt. A tab that rendered the
+ * original approval keeps the old version, so anything it later sends with it
+ * (a re-tapped approve today, an undo or reset later) is refused as stale
+ * instead of acting on a retry it never rendered. Nothing else about the row is
+ * written, and a refused retry (any of the 409s) writes nothing at all.
  *
  * What retry refuses: it re-queues ONLY the failed proposal, so it is safe only
  * when the pair can still complete. If any listed proposal is outside
@@ -33,7 +40,7 @@
  * is gone, re-queueing just the failed one would, after its fresh undo window,
  * execute it ALONE: half the approved configuration live, the other half dead,
  * and Settings the only way back. That set answers 409 DRAFT_RETRY_UNSAFE and
- * nothing is changed (a whole-draft reset or Settings is the way out). The status
+ * nothing is changed (the owner finishes it from the inbox or Settings). The status
  * says the same: such a draft derives `execution: 'stopped'` even when a sibling
  * failed (derive-status.ts, same `retryBlockingStatuses` check), so the shell
  * never offers a Retry that cannot work. `failed + executed` and
@@ -62,6 +69,7 @@ export interface RetryDraftDeps {
 }
 
 export interface RetryDraftResult {
+  /** The draft at its new version: the approval attempt this retry opened. */
   draft: OnboardingDraft;
   /** The proposals that were re-queued (ascending id order). */
   retriedProposalIds: string[];
@@ -92,7 +100,7 @@ function retryUnsafe(blockers: string[], statuses: string[], expected: number): 
   const reasons = [...new Set(blockers.map((b) => BLOCKER_PHRASE[b] ?? 'is not in a state that can be retried'))];
   return new ConflictError(
     `DRAFT_RETRY_UNSAFE: Retrying could leave your setup half saved, because ${reasons.map((r) => `part of it ${r}`).join(' and ')}. ` +
-      'Reset the whole setup, or finish it from Settings.',
+      'Check your inbox, or finish it from Settings.',
     { statuses, expected },
   );
 }
@@ -119,7 +127,7 @@ export async function retryFailedDraftProposals(
 
   // Check order: not approved (above), then unsafe, then nothing failed. Unsafe
   // comes before nothing-failed because a set with a member retry cannot recover
-  // is never merely "nothing to do": the owner needs the way out (reset or
+  // is never merely "nothing to do": the owner needs the way out (the inbox or
   // Settings), and it matches the status, which says `stopped` for exactly these
   // sets whether or not anything failed. NOTHING_FAILED is left for the benign
   // sets (everything approved/executing/executed), e.g. the loser of a race
@@ -164,6 +172,11 @@ export async function retryFailedDraftProposals(
     throw new ConflictError(`DRAFT_RETRY_FAILED: ${reasons}`);
   }
 
+  // Every guard passed and the re-approval succeeded: this is a new attempt, so
+  // move the version. Under the row lock taken above, `draft.version` is current;
+  // the compare-and-swap is the second guard. A throw here rolls the request back.
+  const retried = await draftRepo.markRetried(tenantId, draft.version);
+
   for (const id of moved) {
     const requeued = await proposalRepo.findById(tenantId, id);
     if (!requeued) throw new NotFoundError('Proposal', id);
@@ -187,9 +200,9 @@ export async function retryFailedDraftProposals(
       eventType: 'onboarding.draft_retry',
       entityType: 'onboarding_draft',
       entityId: draft.id,
-      metadata: { proposalIds: moved, draftVersion: draft.version },
+      metadata: { proposalIds: moved, draftVersionBefore: draft.version, draftVersionAfter: retried.version },
     }),
   );
 
-  return { draft, retriedProposalIds: moved };
+  return { draft: retried, retriedProposalIds: moved };
 }

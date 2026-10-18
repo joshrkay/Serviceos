@@ -257,6 +257,7 @@ describe('onboarding draft execution state (real DB)', () => {
       return Object.fromEntries(r.rows.map((x) => [x.event_type, x.n]));
     }
     const retry = (a: express.Express = app) => request(a).post('/api/onboarding/draft/retry').send();
+    const approve = (body: object = {}) => request(app).post('/api/onboarding/draft/approve').send(body);
 
     it('re-queues only the failed proposal with a fresh undo window and returns the fact to its in-flight state', async () => {
       const [a, b] = await approvedDraft();
@@ -272,6 +273,8 @@ describe('onboarding draft execution state (real DB)', () => {
       expect(res.status).toBe(200);
       expect(res.body.retriedProposalIds).toEqual([a]);
       expect(res.body.draft.status).toBe('approved');
+      // A retry is a new approval attempt: the response carries the new version.
+      expect(res.body.draft.version).toBe(draftBefore.version + 1);
 
       const afterA = await row(a);
       expect(afterA.status).toBe('approved');
@@ -284,9 +287,13 @@ describe('onboarding draft execution state (real DB)', () => {
       expect(afterA.executed_by_role).toBe('owner');
       expect(isInUndoWindow((await proposalRepo.findById(tenant.tenantId, a))!)).toBe(true);
 
-      // The other proposal and the draft row are byte-identical.
+      // The other proposal is byte-identical. The draft row moved on by exactly one
+      // version (and updated_at); status and the proposal ids are untouched.
       expect(await row(b)).toEqual(beforeB);
-      expect(await draftRow()).toEqual(draftBefore);
+      const draftAfter = await draftRow();
+      expect(draftAfter.version).toBe(draftBefore.version + 1);
+      expect(draftAfter.updated_at.getTime()).toBeGreaterThan(draftBefore.updated_at.getTime());
+      expect(draftAfter).toEqual({ ...draftBefore, version: draftBefore.version + 1, updated_at: draftAfter.updated_at });
 
       // [approved, executed]: work is in flight (the worker has one left to run).
       expect((await status()).status.draft?.execution).toBe('executing');
@@ -308,7 +315,11 @@ describe('onboarding draft execution state (real DB)', () => {
       expect(retried).toMatchObject({ entity_id: a, actor_id: tenant.userId });
       expect(retried.metadata).toMatchObject({ draftId: (await pool.query(`SELECT id FROM onboarding_drafts WHERE tenant_id = $1`, [tenant.tenantId])).rows[0].id, previousExecutionError: 'handler exploded' });
       const drafted = audit.rows.find((r) => r.event_type === 'onboarding.draft_retry');
-      expect(drafted.metadata).toMatchObject({ proposalIds: [a], draftVersion: draftBefore.version });
+      expect(drafted.metadata).toMatchObject({
+        proposalIds: [a],
+        draftVersionBefore: draftBefore.version,
+        draftVersionAfter: draftBefore.version + 1,
+      });
       expect(drafted.entity_id).toBe((await pool.query(`SELECT id FROM onboarding_drafts WHERE tenant_id = $1`, [tenant.tenantId])).rows[0].id);
       // The second approval of A was audited by the approval helper; B has only its original one.
       const approvals = await pool.query(
@@ -322,11 +333,14 @@ describe('onboarding draft execution state (real DB)', () => {
       const ids = await approvedDraft();
       for (const id of ids) await failProposal(id);
       expect((await status()).status.draft?.execution).toBe('failed');
+      const versionBefore = (await draftRow()).version;
 
       const res = await retry();
       expect(res.status).toBe(200);
       expect([...res.body.retriedProposalIds].sort()).toEqual(ids);
       for (const id of ids) expect((await row(id)).status).toBe('approved');
+      // One retry is one attempt, however many proposals it re-queues.
+      expect((await draftRow()).version).toBe(versionBefore + 1);
       expect((await status()).status.draft?.execution).toBe('pending');
       expect((await auditCounts())['proposal.retried']).toBe(2);
     });
@@ -334,12 +348,14 @@ describe('onboarding draft execution state (real DB)', () => {
     it('nothing failed: 409 DRAFT_RETRY_NOTHING_FAILED and nothing changes', async () => {
       const ids = await approvedDraft();
       const before = await Promise.all(ids.map(row));
+      const draftBefore = await draftRow();
       const auditBefore = await auditCounts();
 
       const res = await retry();
       expect(res.status).toBe(409);
       expect(JSON.stringify(res.body)).toContain('DRAFT_RETRY_NOTHING_FAILED');
       expect(await Promise.all(ids.map(row))).toEqual(before);
+      expect(await draftRow()).toEqual(draftBefore);
       expect(await auditCounts()).toEqual(auditBefore);
     });
 
@@ -364,11 +380,16 @@ describe('onboarding draft execution state (real DB)', () => {
       // button (retry only leaves `execution_failed`).
       expect((await status()).status.draft?.execution).toBe('stopped');
       const before = await row(a);
+      const draftBefore = await draftRow();
       const auditBefore = await auditCounts();
       const res = await retry();
       expect(res.status).toBe(409);
       expect(JSON.stringify(res.body)).toContain('DRAFT_RETRY_UNSAFE');
+      // The refusal points only at what exists today: the inbox and Settings, never a reset.
+      expect(JSON.stringify(res.body)).toContain('Check your inbox, or finish it from Settings.');
+      expect(JSON.stringify(res.body)).not.toMatch(/reset/i);
       expect(await row(a)).toEqual(before);
+      expect(await draftRow()).toEqual(draftBefore);
       expect((await row(a)).status).toBe('undone');
       expect(await auditCounts()).toEqual(auditBefore);
     });
@@ -417,6 +438,7 @@ describe('onboarding draft execution state (real DB)', () => {
       );
       expect((await status()).status.draft?.execution).toBe('stopped');
       const before = await row(a);
+      const draftBefore = await draftRow();
       const auditBefore = await auditCounts();
 
       const res = await retry();
@@ -424,14 +446,57 @@ describe('onboarding draft execution state (real DB)', () => {
       expect(res.status).toBe(409);
       expect(JSON.stringify(res.body)).toContain('DRAFT_RETRY_UNSAFE');
       expect(await row(a)).toEqual(before);
+      expect(await draftRow()).toEqual(draftBefore);
       expect(await auditCounts()).toEqual(auditBefore);
     });
 
     it('a draft that was never approved is a 409 DRAFT_NOT_APPROVED', async () => {
       await request(app).post('/api/onboarding/draft').send(CREATE);
+      const draftBefore = await draftRow();
       const res = await retry();
       expect(res.status).toBe(409);
       expect(JSON.stringify(res.body)).toContain('DRAFT_NOT_APPROVED');
+      expect(await draftRow()).toEqual(draftBefore);
+    });
+
+    // The race this change closes (Codex P1): a retry opens a NEW undo window, so
+    // the draft version must name the attempt. Tab A rendered the original approval
+    // and still holds its version; after the retry lands it must not be able to
+    // confirm (and later undo or reset) a retry it never rendered.
+    it('tab A holds the original approval: once a retry has landed, approve with its expectedVersion is 409 VERSION_CONFLICT, and a bare approve is still the idempotent 200', async () => {
+      const created = await request(app).post('/api/onboarding/draft').send(CREATE);
+      const v: number = created.body.draft.version; // the version tab A rendered
+      const approved = await approve({ expectedVersion: v });
+      expect(approved.status).toBe(200);
+      const ids: string[] = [...approved.body.proposalIds].sort();
+      expect((await draftRow()).version).toBe(v + 1);
+
+      // Before any retry, tab A's re-tap is the idempotent 200 and moves nothing.
+      const retap = await approve({ expectedVersion: v });
+      expect(retap.status).toBe(200);
+      expect(retap.body.approvedNow).toBe(false);
+      expect((await draftRow()).version).toBe(v + 1);
+
+      await failProposal(ids[0]);
+      const retried = await retry();
+      expect(retried.status).toBe(200);
+      expect(retried.body.draft.version).toBe(v + 2);
+      expect((await draftRow()).version).toBe(v + 2);
+
+      const draftAfterRetry = await draftRow();
+      const stale = await approve({ expectedVersion: v });
+      expect(stale.status).toBe(409);
+      expect(JSON.stringify(stale.body)).toContain('VERSION_CONFLICT');
+      // Refused: no proposal minted, no version moved, no second approval audited.
+      expect(await draftRow()).toEqual(draftAfterRetry);
+      expect((await proposalRepo.findByTenant(tenant.tenantId)).length).toBe(2);
+      expect((await auditCounts())['onboarding.draft_approved']).toBe(1);
+
+      const bare = await approve();
+      expect(bare.status).toBe(200);
+      expect(bare.body.approvedNow).toBe(false);
+      expect([...bare.body.proposalIds].sort()).toEqual(ids);
+      expect((await draftRow()).version).toBe(v + 2);
     });
 
     it('a refused re-approval rolls the whole request back: the row is still execution_failed with its original state', async () => {
@@ -442,6 +507,7 @@ describe('onboarding draft execution state (real DB)', () => {
       const [a] = [...ids].sort();
       await failProposal(a);
       const before = await row(a);
+      const draftBefore = await draftRow();
       const auditBefore = await auditCounts();
       blocked.add(a);
 
@@ -449,8 +515,9 @@ describe('onboarding draft execution state (real DB)', () => {
       expect(res.status).toBe(409);
       expect(JSON.stringify(res.body)).toContain('DRAFT_RETRY_FAILED');
 
-      // The reset to draft was rolled back, not just the approval.
+      // The reset to draft was rolled back, not just the approval, and the draft version never moved.
       expect(await row(a)).toEqual(before);
+      expect(await draftRow()).toEqual(draftBefore);
       expect((await row(a)).status).toBe('execution_failed');
       expect(await auditCounts()).toEqual(auditBefore);
     });
@@ -460,6 +527,7 @@ describe('onboarding draft execution state (real DB)', () => {
         tenant = await createTestTenant(pool);
         const [a] = await approvedDraft();
         await failProposal(a);
+        const versionBefore = (await draftRow()).version;
 
         const [r1, r2] = await Promise.all([retry(), retry()]);
         const statuses = [r1.status, r2.status].sort();
@@ -467,6 +535,8 @@ describe('onboarding draft execution state (real DB)', () => {
         const loser = r1.status === 409 ? r1 : r2;
         expect(JSON.stringify(loser.body)).toContain('DRAFT_RETRY_NOTHING_FAILED');
         expect((await row(a)).status).toBe('approved');
+        // Exactly one attempt was opened: the loser bumped nothing.
+        expect((await draftRow()).version, `round ${i}`).toBe(versionBefore + 1);
         expect((await auditCounts())['proposal.retried']).toBe(1);
         expect((await auditCounts())['onboarding.draft_retry']).toBe(1);
       }

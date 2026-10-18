@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { approveDraft } from '../../../src/onboarding/draft/approve';
 import { retryFailedDraftProposals } from '../../../src/onboarding/draft/retry';
-import { InMemoryOnboardingDraftRepository } from '../../../src/onboarding/draft/repository';
+import {
+  DraftNotApprovedError,
+  DraftNotFoundError,
+  DraftVersionConflictError,
+  InMemoryOnboardingDraftRepository,
+} from '../../../src/onboarding/draft/repository';
 import { InMemoryProposalRepository, type Proposal, type ProposalStatus } from '../../../src/proposals/proposal';
 import { isInUndoWindow } from '../../../src/proposals/lifecycle';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
@@ -18,6 +23,8 @@ describe('retryFailedDraftProposals', () => {
   let proposalRepo: InMemoryProposalRepository;
   let auditRepo: InMemoryAuditRepository;
   let ids: string[];
+  /** The version the owner's read-back was rendered from, i.e. what the approving tab sends as expectedVersion. */
+  let preApprovalVersion: number;
 
   async function createDraft(): Promise<void> {
     const assembled = await assembleTypicalShop(new InMemoryRegionalPriceTierRepository({ 'plumbing|CLE': CLE }), {
@@ -64,6 +71,7 @@ describe('retryFailedDraftProposals', () => {
     proposalRepo = new InMemoryProposalRepository();
     auditRepo = new InMemoryAuditRepository();
     await createDraft();
+    preApprovalVersion = (await draftRepo.getForTenant(TENANT))!.version;
     const approved = await approveDraft(deps(), TENANT, OWNER);
     ids = [...approved.proposalIds].sort();
   });
@@ -89,9 +97,12 @@ describe('retryFailedDraftProposals', () => {
     expect(afterA.executedBy).toBe(OWNER.userId);
     expect(afterA.executedByRole).toBe('owner');
     expect(await proposalRepo.findById(TENANT, b)).toEqual(beforeB);
-    // The draft is frozen once approved: retry does not write it.
-    expect(result.draft).toEqual(draftBefore);
-    expect(await draftRepo.getForTenant(TENANT)).toEqual(draftBefore);
+    // A retry is a new approval attempt: the draft moves on exactly one version,
+    // the response carries it, and nothing else about the row changes.
+    expect(result.draft.version).toBe(draftBefore!.version + 1);
+    expect(result.draft.updatedAt.getTime()).toBeGreaterThanOrEqual(draftBefore!.updatedAt.getTime());
+    expect(result.draft).toEqual({ ...draftBefore!, version: draftBefore!.version + 1, updatedAt: result.draft.updatedAt });
+    expect(await draftRepo.getForTenant(TENANT)).toEqual(result.draft);
 
     const retried = await events('proposal.retried');
     expect(retried).toHaveLength(1);
@@ -100,7 +111,13 @@ describe('retryFailedDraftProposals', () => {
     const drafted = await events('onboarding.draft_retry');
     expect(drafted).toHaveLength(1);
     expect(drafted[0]).toMatchObject({ entityType: 'onboarding_draft', entityId: draftBefore!.id });
-    expect(drafted[0].metadata).toMatchObject({ proposalIds: [a], draftVersion: draftBefore!.version });
+    expect(drafted[0].metadata).toMatchObject({
+      proposalIds: [a],
+      draftVersionBefore: draftBefore!.version,
+      draftVersionAfter: draftBefore!.version + 1,
+    });
+    // One name per fact: the old single `draftVersion` was ambiguous once a retry moves it.
+    expect(drafted[0].metadata).not.toHaveProperty('draftVersion');
     // approveProposal wrote its own second approval for the retried proposal only.
     const approvals = (await events('proposal.approved')).filter((e) => e.entityId === a);
     expect(approvals).toHaveLength(2);
@@ -113,6 +130,23 @@ describe('retryFailedDraftProposals', () => {
     for (const id of ids) expect((await proposalRepo.findById(TENANT, id))?.status).toBe('approved');
     expect(await events('proposal.retried')).toHaveLength(2);
     expect(await events('onboarding.draft_retry')).toHaveLength(1);
+    // One retry is one attempt, however many proposals it re-queues.
+    expect((await draftRepo.getForTenant(TENANT))!.version).toBe(preApprovalVersion + 2);
+  });
+
+  it('every successful retry opens its own attempt: the version moves once per retry and the audit rows chain', async () => {
+    await force(ids[0], 'execution_failed');
+    const first = await retry();
+    await force(ids[0], 'execution_failed');
+    const second = await retry();
+
+    expect(first.draft.version).toBe(preApprovalVersion + 2);
+    expect(second.draft.version).toBe(preApprovalVersion + 3);
+    const chain = (await events('onboarding.draft_retry')).map((e) => e.metadata).sort((x, y) => (x!.draftVersionBefore as number) - (y!.draftVersionBefore as number));
+    expect(chain.map((m) => [m!.draftVersionBefore, m!.draftVersionAfter])).toEqual([
+      [preApprovalVersion + 1, preApprovalVersion + 2],
+      [preApprovalVersion + 2, preApprovalVersion + 3],
+    ]);
   });
 
   it('truncates a long previous error in the audit row', async () => {
@@ -149,6 +183,7 @@ describe('retryFailedDraftProposals', () => {
     await force(ids[0], statuses[0]);
     await force(ids[1], statuses[1]);
     const snapshot = await Promise.all(ids.map((id) => proposalRepo.findById(TENANT, id)));
+    const draftBefore = await draftRepo.getForTenant(TENANT);
     const auditBefore = (await auditRepo.findRecentByTenant(TENANT, { limit: 100 })).length;
 
     const err = await retry().catch((e: unknown) => e);
@@ -157,6 +192,8 @@ describe('retryFailedDraftProposals', () => {
     expect((err as ConflictError).message).toContain('DRAFT_RETRY_NOTHING_FAILED');
     expect((err as ConflictError).details).toMatchObject({ statuses: expect.arrayContaining([statuses[0], statuses[1]]) });
     expect(await Promise.all(ids.map((id) => proposalRepo.findById(TENANT, id)))).toEqual(snapshot);
+    // A refused retry opened no attempt: the draft is untouched.
+    expect(await draftRepo.getForTenant(TENANT)).toEqual(draftBefore);
     expect((await auditRepo.findRecentByTenant(TENANT, { limit: 100 })).length).toBe(auditBefore);
   });
 
@@ -171,8 +208,12 @@ describe('retryFailedDraftProposals', () => {
       expect(message).toContain('DRAFT_RETRY_UNSAFE');
       // Owner-safe wording: says what is wrong in plain words and the way out.
       expect(message).toContain(phrase);
-      expect(message).toMatch(/Reset the whole setup, or finish it from Settings/);
+      // Points only at what exists today (the inbox and Settings), never at a reset.
+      expect(message).toMatch(/Check your inbox, or finish it from Settings\./);
+      expect(message).not.toMatch(/reset/i);
+      // Owner vocabulary: no internal terms, no vendor names, no AI jargon.
       expect(message).not.toMatch(/proposal|lifecycle|execution_failed|ready_for_review/i);
+      expect(message).not.toMatch(/\b(ai|agents?|dashboard|verify|verification|provisioning|stripe|twilio)\b/i);
       // The raw statuses are in the details, not the sentence.
       expect(details).toMatchObject({ expected: 2, statuses: expect.any(Array) });
     }
@@ -188,14 +229,17 @@ describe('retryFailedDraftProposals', () => {
       await force(ids[0], statuses[0]);
       await force(ids[1], statuses[1]);
       const snapshot = await Promise.all(ids.map((id) => proposalRepo.findById(TENANT, id)));
+      const draftBefore = await draftRepo.getForTenant(TENANT);
       const auditBefore = (await auditRepo.findRecentByTenant(TENANT, { limit: 100 })).length;
 
       const err = await retry().catch((e: unknown) => e);
 
       expectUnsafe(err, phrase);
       expect((err as ConflictError).details).toMatchObject({ statuses: expect.arrayContaining([...statuses]) });
-      // Neither row was reset, re-approved or re-stamped; no audit row of any kind.
+      // Neither row was reset, re-approved or re-stamped; no audit row of any kind;
+      // the draft version did not move.
       expect(await Promise.all(ids.map((id) => proposalRepo.findById(TENANT, id)))).toEqual(snapshot);
+      expect(await draftRepo.getForTenant(TENANT)).toEqual(draftBefore);
       expect((await auditRepo.findRecentByTenant(TENANT, { limit: 100 })).length).toBe(auditBefore);
       expect(await events('proposal.retried')).toHaveLength(0);
       expect(await events('onboarding.draft_retry')).toHaveLength(0);
@@ -213,6 +257,7 @@ describe('retryFailedDraftProposals', () => {
       expectUnsafe(err, 'is missing');
       expect((err as ConflictError).details).toMatchObject({ statuses: ['execution_failed'] });
       expect(reset).not.toHaveBeenCalled();
+      expect((await draftRepo.getForTenant(TENANT))!.version).toBe(preApprovalVersion + 1);
       expect(await find(TENANT, ids[0])).toEqual(snapshot);
       expect(await events('proposal.retried')).toHaveLength(0);
     });
@@ -226,6 +271,7 @@ describe('retryFailedDraftProposals', () => {
       await force(ids[1], statuses[1]);
       const err = await retry().catch((e: unknown) => e);
       expectUnsafe(err, 'was undone');
+      expect((await draftRepo.getForTenant(TENANT))!.version).toBe(preApprovalVersion + 1);
     });
   });
 
@@ -233,9 +279,11 @@ describe('retryFailedDraftProposals', () => {
     const fresh = new InMemoryOnboardingDraftRepository();
     draftRepo = fresh;
     await createDraft();
+    const draftBefore = await draftRepo.getForTenant(TENANT);
     const err = await retry().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ConflictError);
     expect((err as ConflictError).message).toContain('DRAFT_NOT_APPROVED');
+    expect(await draftRepo.getForTenant(TENANT)).toEqual(draftBefore);
   });
 
   it('no draft at all is a NotFoundError', async () => {
@@ -254,6 +302,39 @@ describe('retryFailedDraftProposals', () => {
     expect((err as ConflictError).message).toContain('DRAFT_RETRY_FAILED');
     expect(await events('proposal.retried')).toHaveLength(0);
     expect(await events('onboarding.draft_retry')).toHaveLength(0);
+    // The version moves only once the re-approval has succeeded, so a refusal
+    // leaves it alone even where nothing rolls the request back (this repository).
+    expect((await draftRepo.getForTenant(TENANT))!.version).toBe(preApprovalVersion + 1);
+  });
+
+  it('losing the reset to another path (nothing moved) is NOTHING_FAILED and leaves the version alone', async () => {
+    await force(ids[0], 'execution_failed');
+    vi.spyOn(proposalRepo, 'resetFailedForRetry').mockResolvedValue(null);
+    const err = await retry().catch((e: unknown) => e);
+    expect((err as ConflictError).message).toContain('DRAFT_RETRY_NOTHING_FAILED');
+    expect((await draftRepo.getForTenant(TENANT))!.version).toBe(preApprovalVersion + 1);
+    expect(await events('onboarding.draft_retry')).toHaveLength(0);
+  });
+
+  // The defect this pins (Codex P1): a retry opens a NEW undo window, so the
+  // draft version has to name the attempt. A tab that rendered the original
+  // approval must not be able to act on the retry it never saw.
+  it('a tab holding the original approval is refused after a retry: its expectedVersion is a VERSION_CONFLICT, a bare approve is still the idempotent 200', async () => {
+    await force(ids[0], 'execution_failed');
+    // Before the retry the same confirmation is the idempotent re-tap.
+    const beforeRetry = await approveDraft(deps(), TENANT, OWNER, { expectedVersion: preApprovalVersion });
+    expect(beforeRetry.approvedNow).toBe(false);
+    expect([...beforeRetry.proposalIds].sort()).toEqual(ids);
+
+    const { draft } = await retry();
+
+    const stale = approveDraft(deps(), TENANT, OWNER, { expectedVersion: preApprovalVersion });
+    await expect(stale).rejects.toBeInstanceOf(DraftVersionConflictError);
+    await expect(stale).rejects.toMatchObject({ expected: preApprovalVersion, actual: draft.version - 1 });
+    const bare = await approveDraft(deps(), TENANT, OWNER);
+    expect(bare.approvedNow).toBe(false);
+    expect([...bare.proposalIds].sort()).toEqual(ids);
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(2);
   });
 
   it('locks the draft row before it reads any proposal', async () => {
@@ -272,5 +353,33 @@ describe('retryFailedDraftProposals', () => {
     expect(lock).toHaveBeenCalledTimes(1);
     expect(order[0]).toBe('lock');
     expect(order).toContain('proposal');
+  });
+});
+
+describe('InMemoryOnboardingDraftRepository.markRetried (compare-and-swap)', () => {
+  async function approvedRepo() {
+    const tiers = new InMemoryRegionalPriceTierRepository({ 'plumbing|CLE': CLE });
+    const assembled = await assembleTypicalShop(tiers, { packId: 'plumbing', businessName: 'Walsh Plumbing', metro: { kind: 'metro', metroCode: 'CLE', name: 'Cleveland' } });
+    const repo = new InMemoryOnboardingDraftRepository();
+    const draft = await repo.create(TENANT, { packId: 'plumbing', trade: 'plumbing', metroCode: 'CLE', metroName: 'Cleveland', businessName: 'Walsh Plumbing', ownerFirstName: null, clientTimezone: 'America/New_York', assembled });
+    return { repo, draft };
+  }
+
+  it('bumps only the version (and updatedAt) of an approved draft at the expected version', async () => {
+    const { repo, draft } = await approvedRepo();
+    const approved = await repo.markApproved(TENANT, ['p1', 'p2'], draft.version);
+    const retried = await repo.markRetried(TENANT, approved.version);
+    expect(retried).toEqual({ ...approved, version: approved.version + 1, updatedAt: retried.updatedAt });
+    expect(await repo.getForTenant(TENANT)).toEqual(retried);
+  });
+
+  it('refuses a stale version, a draft that was never approved, and no draft, and writes nothing', async () => {
+    const { repo, draft } = await approvedRepo();
+    await expect(repo.markRetried(TENANT, draft.version)).rejects.toBeInstanceOf(DraftNotApprovedError);
+    const approved = await repo.markApproved(TENANT, ['p1'], draft.version);
+    await expect(repo.markRetried(TENANT, approved.version - 1)).rejects.toMatchObject({ expected: approved.version - 1, actual: approved.version });
+    await expect(repo.markRetried(TENANT, approved.version + 1)).rejects.toBeInstanceOf(DraftVersionConflictError);
+    await expect(repo.markRetried('00000000-0000-0000-0000-00000000ffff', 1)).rejects.toBeInstanceOf(DraftNotFoundError);
+    expect(await repo.getForTenant(TENANT)).toEqual(approved);
   });
 });

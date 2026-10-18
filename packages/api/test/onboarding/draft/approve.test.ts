@@ -206,6 +206,7 @@ describe('approveDraft (lock, version check, idempotence)', () => {
       setClientTimezone: (t, z) => h.repo.setClientTimezone(t, z),
       setOwnerPhone: (t, p, v) => h.repo.setOwnerPhone(t, p, v),
       markApproved: (t, ids, v) => h.repo.markApproved(t, ids, v),
+      markRetried: (t, v) => h.repo.markRetried(t, v),
     };
     await approveDraft({ ...h.deps, draftRepo: double }, TENANT, ACTOR);
     expect(getForTenant).not.toHaveBeenCalled();
@@ -242,6 +243,24 @@ describe('approveDraft (lock, version check, idempotence)', () => {
     expect(await approvedAudits(h.auditRepo)).toHaveLength(1);
   });
 
+  // A retry opens a new approval attempt and moves the version (retry.ts), so the
+  // original confirmation is now a stale one. Intended: no counter column, the
+  // version itself names the attempt.
+  it('once a retry has moved the version on, the original expectedVersion is refused while a bare approve stays the idempotent 200', async () => {
+    const h = await approveHarness();
+    const first = await approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: h.draft.version });
+    const retried = await h.repo.markRetried(TENANT, first.draft.version);
+    expect(retried.version).toBe(h.draft.version + 2);
+
+    const stale = approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: h.draft.version });
+    await expect(stale).rejects.toBeInstanceOf(DraftVersionConflictError);
+    await expect(stale).rejects.toMatchObject({ expected: h.draft.version, actual: h.draft.version + 1 });
+    const bare = await approveDraft(h.deps, TENANT, ACTOR);
+    expect(bare).toMatchObject({ approvedNow: false, proposalIds: first.proposalIds });
+    expect(await h.proposalRepo.findByTenant(TENANT)).toHaveLength(2);
+    expect(await approvedAudits(h.auditRepo)).toHaveLength(1);
+  });
+
   it('no draft rejects with DraftNotFoundError', async () => {
     const h = await approveHarness();
     await expect(approveDraft(h.deps, '00000000-0000-0000-0000-00000000ffff', ACTOR)).rejects.toBeInstanceOf(DraftNotFoundError);
@@ -261,6 +280,7 @@ describe('approveDraft (lock, version check, idempotence)', () => {
       setClientTimezone: (t, z) => h.repo.setClientTimezone(t, z),
       setOwnerPhone: (t, p, v) => h.repo.setOwnerPhone(t, p, v),
       markApproved: (t, ids, v) => h.repo.markApproved(t, ids, v),
+      markRetried: (t, v) => h.repo.markRetried(t, v),
     };
     await expect(approveDraft({ ...h.deps, draftRepo: spy }, TENANT, ACTOR)).rejects.toThrow(/TIMEZONE_REQUIRED/);
     expect(order).toEqual(['lock']);

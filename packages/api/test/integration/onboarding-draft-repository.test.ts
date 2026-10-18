@@ -7,6 +7,7 @@ import {
   PgOnboardingDraftRepository,
   DraftVersionConflictError,
   DraftAlreadyApprovedError,
+  DraftNotApprovedError,
   DraftNotFoundError,
 } from '../../src/onboarding/draft/repository';
 import { assembleTypicalShop } from '../../src/onboarding/choices/assemble';
@@ -239,6 +240,57 @@ describe('onboarding_drafts repository', () => {
 
   it('markApproved for a tenant with no draft rejects with DraftNotFoundError', async () => {
     await expect(repo.markApproved(tenant.tenantId, [PID], 1)).rejects.toBeInstanceOf(DraftNotFoundError);
+  });
+
+  type RawRetryRow = RawDraft & { updated_at: Date };
+  const rawRetryRow = async (): Promise<RawRetryRow> =>
+    (await pool.query<RawRetryRow>('SELECT status, version, proposal_ids, approved_at, updated_at FROM onboarding_drafts WHERE tenant_id = $1', [tenant.tenantId])).rows[0];
+
+  it('markRetried bumps version and updated_at of an approved draft on the raw row and changes nothing else', async () => {
+    const d = await seedDraft();
+    const approved = await repo.markApproved(tenant.tenantId, [PID], d.version);
+    const before = await rawRetryRow();
+
+    const retried = await repo.markRetried(tenant.tenantId, approved.version);
+
+    const after = await rawRetryRow();
+    expect(retried.version).toBe(approved.version + 1);
+    expect(after.version).toBe(before.version + 1);
+    expect(after.updated_at.getTime()).toBeGreaterThan(before.updated_at.getTime());
+    expect(after).toEqual({ ...before, version: before.version + 1, updated_at: after.updated_at });
+    expect(retried).toEqual(await repo.getForTenant(tenant.tenantId));
+  });
+
+  it('markRetried with a stale version rejects with DraftVersionConflictError and leaves the row untouched', async () => {
+    const d = await seedDraft();
+    const approved = await repo.markApproved(tenant.tenantId, [PID], d.version);
+    const before = await rawRetryRow();
+    for (const stale of [approved.version - 1, approved.version + 1]) {
+      await expect(repo.markRetried(tenant.tenantId, stale)).rejects.toMatchObject({
+        name: 'DraftVersionConflictError',
+        expected: stale,
+        actual: approved.version,
+      });
+    }
+    expect(await rawRetryRow()).toEqual(before);
+  });
+
+  it('markRetried on a draft that was never approved rejects with DraftNotApprovedError and leaves the row untouched', async () => {
+    const d = await seedDraft();
+    const before = await rawRetryRow();
+    await expect(repo.markRetried(tenant.tenantId, d.version)).rejects.toBeInstanceOf(DraftNotApprovedError);
+    expect(await rawRetryRow()).toEqual(before);
+  });
+
+  it('markRetried for a tenant with no draft rejects with DraftNotFoundError, and never touches another tenant', async () => {
+    await expect(repo.markRetried(tenant.tenantId, 1)).rejects.toBeInstanceOf(DraftNotFoundError);
+    const other = await createTestTenant(pool);
+    const otherDraft = await repo.create(other.tenantId, {
+      packId: 'plumbing', trade: 'plumbing', metroCode: 'CLE', metroName: 'Cleveland', businessName: 'Other Co', ownerFirstName: null, clientTimezone: 'America/New_York', assembled: await freshAssembled(),
+    });
+    const approvedOther = await repo.markApproved(other.tenantId, [PID], otherDraft.version);
+    await expect(repo.markRetried(tenant.tenantId, approvedOther.version)).rejects.toBeInstanceOf(DraftNotFoundError);
+    expect(await repo.getForTenant(other.tenantId)).toEqual(approvedOther);
   });
 
   it('getForTenantForUpdate refuses to run outside the request transaction', async () => {
