@@ -69,7 +69,8 @@ describe('TestCallTurn', () => {
     it('says "Now you call me." with the scenario to say, the number as a link, and a copy button', () => {
       const { container } = renderTurn();
       expect(screen.getByRole('heading', { level: 1, name: 'Now you call me.' })).toBeInTheDocument();
-      expect(screen.getByText("Say you've got a slow drain and you're not sure what's wrong. Ask for next Tuesday.")).toBeInTheDocument();
+      // No pack given: the trade-neutral scenario. The per-trade lines are pinned in test-call-scenario.test.ts.
+      expect(screen.getByText("Say you've got a problem you'd like looked at. Ask for next Tuesday.")).toBeInTheDocument();
       const link = screen.getByRole('link', { name: '(216) 555-0180' });
       expect(link).toHaveAttribute('href', 'tel:+12165550180');
       expect(screen.getByRole('button', { name: 'Copy number' })).toBeInTheDocument();

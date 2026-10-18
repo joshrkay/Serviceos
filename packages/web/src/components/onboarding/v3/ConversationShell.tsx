@@ -180,7 +180,15 @@ function Conversation() {
 
   // Past "That's right": the trial, the number and the test call, in the same frame.
   if (screen === 'saved') {
-    return <AfterApproval status={status} saving={saving} changeCount={draft?.proposalIds.length ?? 0} userId={userId} />;
+    return (
+      <AfterApproval
+        status={status}
+        saving={saving}
+        changeCount={draft?.proposalIds.length ?? 0}
+        packId={draft?.packId ?? null}
+        userId={userId}
+      />
+    );
   }
   if (isComplete) return null;
 

@@ -21,6 +21,8 @@ export interface AfterApprovalProps {
   saving: boolean;
   /** How many changes are being saved, for the line shown during the undo window. */
   changeCount: number;
+  /** The owner's pack, for the test-call scenario. */
+  packId: string | null;
   userId: string | null | undefined;
 }
 
@@ -47,7 +49,7 @@ const STATUS_LABEL: Record<AfterStage, string> = {
  * stays on a screen after setup is complete: the owner has just heard their
  * test call and has not yet said "Open for business".
  */
-export function AfterApproval({ status, saving, changeCount, userId }: AfterApprovalProps) {
+export function AfterApproval({ status, saving, changeCount, packId, userId }: AfterApprovalProps) {
   const navigate = useNavigate();
   const apiFetch = useApiClient();
   const { data, refetch: refetchShared } = status;
@@ -162,6 +164,7 @@ export function AfterApproval({ status, saving, changeCount, userId }: AfterAppr
       ) : (
         <TestCallTurn
           phoneNumber={phoneNumber}
+          packId={packId}
           heard={heard}
           tenantId={tenantId}
           userId={userId}

@@ -196,7 +196,7 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
   function after(data: OnboardingStatusResponse | null, saving = false) {
     return (
       <MemoryRouter>
-        <AfterApproval status={result(data)} saving={saving} changeCount={2} userId="user-1" />
+        <AfterApproval status={result(data)} saving={saving} changeCount={2} packId="plumbing" userId="user-1" />
       </MemoryRouter>
     );
   }

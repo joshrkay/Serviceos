@@ -6,10 +6,13 @@ import { formatPhone } from '../../phone/NumberPicker';
 import { Button } from '../../ui';
 import { CONNECTION_ERROR } from './connection-copy';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
+import { testCallScenario } from './test-call-scenario';
 
 export interface TestCallTurnProps {
   /** The business number, from the phone step. */
   phoneNumber: string | null;
+  /** The owner's pack, which picks the scenario Rivet asks them to act out. */
+  packId?: string | null;
   /** The test call was heard during this visit: ask to open for business. */
   heard: boolean;
   tenantId: string | null;
@@ -26,15 +29,15 @@ const WAITED_LONG_MS = 60_000;
 const ACTION = 'h-14 whitespace-normal rounded-2xl text-[17px] font-semibold';
 
 /** "Now you call me." Then, once the call is heard, "Ready to open for business?" */
-export function TestCallTurn({ phoneNumber, heard, tenantId, userId, testLaterError, onOpened }: TestCallTurnProps) {
+export function TestCallTurn({ phoneNumber, packId, heard, tenantId, userId, testLaterError, onOpened }: TestCallTurnProps) {
   return heard ? (
     <OpenForBusiness onOpened={onOpened} />
   ) : (
-    <CallMe phoneNumber={phoneNumber} tenantId={tenantId} userId={userId} testLaterError={testLaterError} />
+    <CallMe phoneNumber={phoneNumber} packId={packId} tenantId={tenantId} userId={userId} testLaterError={testLaterError} />
   );
 }
 
-function CallMe({ phoneNumber, tenantId, userId, testLaterError }: Pick<TestCallTurnProps, 'phoneNumber' | 'tenantId' | 'userId' | 'testLaterError'>) {
+function CallMe({ phoneNumber, packId, tenantId, userId, testLaterError }: Pick<TestCallTurnProps, 'phoneNumber' | 'packId' | 'tenantId' | 'userId' | 'testLaterError'>) {
   const [copied, setCopied] = useState(false);
   const [waitedLong, setWaitedLong] = useState(false);
   const initiated = useRef(false);
@@ -72,9 +75,7 @@ function CallMe({ phoneNumber, tenantId, userId, testLaterError }: Pick<TestCall
     <>
       <SpeakerLine />
       <RivetHeading>Now you call me.</RivetHeading>
-      <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">
-        Say you&apos;ve got a slow drain and you&apos;re not sure what&apos;s wrong. Ask for next Tuesday.
-      </p>
+      <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">{testCallScenario(packId)}</p>
 
       {phoneNumber ? (
         <div className="mt-5 flex flex-col gap-2 rounded-2xl border border-border bg-card p-4">
