@@ -473,7 +473,16 @@ flowchart LR
       - Detect Deepgram's redaction placeholder or entity signal in the transcript.
       - Pin the exact format in a test, built from a recorded Deepgram response rather than a guess.
       - Either signal, or a Luhn hit (the only detector on the Gather path, which has no upstream
-        redaction), marks the recording `pci_detected`.
+        redaction), counts as a detection.
+    - **Persist the detection by call, not on the recording.** Detection happens mid-call, but the
+      `voice_recordings` row is created only by Twilio's post-hangup recording callback
+      (`voice/call-transcript-turn.ts`). An in-memory flag would be lost on exactly the restart and
+      outage paths this plan hardens.
+      - Write the detection at once to a tenant-scoped, RLS-protected record keyed by `call_sid`,
+        for example a small `pci_detections` table added in an idempotent migration.
+      - When the recording row is created, it inherits `pci_detected` from that record.
+      - The retention worker and the LCR-04 reconciliation sweep both consult it, so a recording
+        whose callback never arrives is still purged from Twilio.
     - A `pci_detected` mark makes the retention worker purge that recording's audio promptly from S3
       and Twilio.
   - **PRIV-4**
@@ -498,6 +507,9 @@ flowchart LR
     - newer rows are untouched
   - **Integration:** the recording flow inserts the row, then deletes the Twilio copy; a failed delete
     is retried by the sweep.
+  - **Integration (PCI before callback):** a PAN is detected mid-call, then the process restarts before
+    the recording callback. The `pci_detections` record survives, the recording row created later
+    inherits `pci_detected`, and its audio is purged from S3 and Twilio.
 - **Verification:** a PAN read aloud never reaches `ai_runs`, `call_transcript_turns` or the provider
   payload in tests.
 
@@ -554,8 +566,15 @@ flowchart LR
       captures the audio, and Twilio holds it until it is ingested; PRIV-2 deletes Twilio's copy only
       after ingestion succeeds. Add a reconciliation sweep that does three things:
       - lists each subaccount's recent recordings through the Twilio Recordings API
-      - ingests any recording whose URL has no `voice_recordings` row (`recording_url` is the
-        idempotency key), so the voicemail and the lead survive once the DB is back
+      - for any recording whose URL has no `voice_recordings` row (`recording_url` is the idempotency
+        key), fetches the parent call's From/To through the Calls API and replays every leg the
+        missed callback would have run, through the same handler code rather than a second
+        implementation:
+        - Twilio's recording `source` tells a voicemail `<Record>` (`RecordVerb`) from a call
+          recording.
+        - For a voicemail, that means the receipt-guarded lead leg (provider
+          `twilio_voicemail_lead`, keyed on RecordingSid) as well as the recording and hand-off legs.
+          A sweep that only inserts the recording would lose the lead.
       - alerts through `alertOperator` on any recording it cannot ingest
     - Twilio connection-override retry parameters on the callback URL are optional. Use them only
       after confirming against Twilio's documentation that they apply to recording status callbacks.
@@ -579,8 +598,10 @@ flowchart LR
   - Unknown session → a fresh disclosed session.
   - The config guard.
   - The fallback route returns static TwiML with no DB.
-  - A recording callback that fails while the DB is down → the reconciliation sweep ingests that
-    recording exactly once after recovery.
+  - A recording callback that fails while the DB is down → after recovery, the reconciliation sweep
+    ingests that recording exactly once.
+  - The DB is down before `/voicemail-status` runs → after recovery, the sweep creates exactly one
+    lead and one voicemail recording, and replaying the sweep creates neither again.
 - **Verification:** no test path ends a call right after a "connect you" line.
 
 ### U6. Injection fences, alerting and eval gates — batch F, `fix/ai-hardening-injection-ops`
@@ -615,7 +636,14 @@ flowchart LR
     - A per-tenant failure-rate rule (`GROUP BY tenant_id, task_type`), with its own floor and the
       cooldown key `ai_task_failure_rate:<task>:<tenant>`.
     - A platform spend rule on `SUM(cost_micro_cents)` against configured thresholds.
-    - Both go through `alertOperator`.
+    - **Unpriced runs must not hide spend.** The production default `gpt-4o-mini` is deliberately
+      unpriced, so its `cost_micro_cents` is null and `SUM` skips it; on its own the spend rule could
+      never page on a runaway loop using the default model. So add:
+      - a token-volume rule (summed prompt + completion tokens per window, for the platform and per
+        tenant), which pages whether or not prices are known
+      - an "unpriced model in production" alert, raised when completed runs with null cost exceed a
+        small floor, pointing at `AI_MODEL_PRICING_JSON`
+    - All of these go through `alertOperator`.
   - **OBS-3**
     - **Gate each prompt family with an eval that exercises it.** Widening a path filter only starts a
       job; a broken public-response, estimate-drafting or summary prompt passes an intent-only job.
@@ -635,7 +663,8 @@ flowchart LR
   - **Unit:** an injection-shaped customer name is dropped from the glossary or fenced.
   - **Unit:** an injection-shaped review is fenced, and the fence-sites test covers the three new
     sites.
-  - **Unit:** the per-tenant and spend evaluators.
+  - **Unit:** the per-tenant, spend, token-volume and unpriced-model evaluators. A null-cost runaway
+    loop still pages through the token-volume rule.
   - **Integration:** an aggregate test that seeds two tenants, one failing and one healthy, and expects
     only the failing tenant to alert.
   - **Workflow YAML:** it parses (actionlint if available), and the secret references match the
