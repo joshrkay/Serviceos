@@ -413,8 +413,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `packages/web/src/components/onboarding/v3/OverrideTurn.test.tsx`
 - **Approach:** From the read-back the correction turn opens from a tapped row, so the key is
   known (U3 made every row tappable). The generic "Tell me what to change" mic has no key, so it
-  first runs a setting-key classifier (one gateway call returning one of the eight keys or
-  `unclear`; `unclear` asks "Which one?" with the row labels as chips) and only then the keyed
+  first runs a setting-key classifier (one gateway call returning one of the seven read-back
+  keys or `unclear`; `existing_number` is a yes/no turn of its own, never an override target;
+  `unclear` asks "Which one?" with the seven row labels as chips) and only then the keyed
   extractor; `POST /draft/override` without a key is that classifier. The override endpoint
   picks the extractor by `settingKey`, calls it through
   the gateway with the spoken or typed text, and on confidence ≥ 0.7 stages `{override}` with
