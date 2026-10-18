@@ -7,6 +7,8 @@
  * packages/api/src/shared/contracts.ts for the API-side mirror).
  */
 
+import type { OnboardingDraftExecution } from '@ai-service-os/shared';
+
 export type OnboardingStepId =
   | 'signup'
   | 'identity'
@@ -36,7 +38,7 @@ export interface OnboardingStep {
  * `failed` can be fixed by a retry; `stopped` cannot (a change was undone,
  * rejected or expired), so the shell offers no retry for it.
  */
-export type OnboardingDraftExecution = 'pending' | 'executing' | 'executed' | 'failed' | 'stopped';
+export type { OnboardingDraftExecution };
 
 export type SubscriptionStatusValue =
   | 'trialing'
