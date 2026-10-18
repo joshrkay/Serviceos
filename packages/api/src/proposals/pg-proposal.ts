@@ -441,7 +441,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       if (updates?.executedByRole !== undefined)    { setClauses.push(`executed_by_role = $${p++}`); params.push(updates.executedByRole); }
       if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
       if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
-      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p++}`);        params.push(updates.undoneBy); }
+      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p}`);         params.push(updates.undoneBy); }
 
       const result = await client.query(
         `UPDATE proposals SET ${setClauses.join(', ')}
@@ -496,7 +496,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       if (updates?.executedBy !== undefined)        { setClauses.push(`executed_by = $${p++}`);      params.push(updates.executedBy); }
       if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
       if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
-      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p++}`);        params.push(updates.undoneBy); }
+      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p}`);         params.push(updates.undoneBy); }
 
       const result = await client.query(
         `UPDATE proposals SET ${setClauses.join(', ')}
