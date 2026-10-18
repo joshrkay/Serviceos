@@ -14,6 +14,7 @@
  *   {businessName} {tripFee} {hourlyRate} {city} {ownerFirstName}
  */
 import { z } from 'zod';
+import { AFTER_HOURS_VOICE_MODES, EMERGENCY_TARGETS, PAYMENT_COLLECTION_MODES } from '../../settings/settings';
 
 /** The seven core choices every owner answers, in the order Rivet asks them. */
 export const CHOICE_KEYS = [
@@ -29,7 +30,6 @@ export type ChoiceKey = (typeof CHOICE_KEYS)[number];
 
 /** Asked only of established shops (branch on "do you already have a business number?"). */
 export const OPTIONAL_CHOICE_KEYS = ['existing_number'] as const;
-export type OptionalChoiceKey = (typeof OPTIONAL_CHOICE_KEYS)[number];
 
 export const ALL_CHOICE_KEYS = [...CHOICE_KEYS, ...OPTIONAL_CHOICE_KEYS] as const;
 export type AnyChoiceKey = (typeof ALL_CHOICE_KEYS)[number];
@@ -40,7 +40,6 @@ export type OptionKey = z.infer<typeof OptionKeySchema>;
 
 /** Which regional price tier an option's prices come from (price choice only). */
 export const PriceTierNameSchema = z.enum(['standard', 'premium']);
-export type PriceTierName = z.infer<typeof PriceTierNameSchema>;
 
 /**
  * Values an option writes when approved. Finite and typed: these are the only
@@ -48,19 +47,70 @@ export type PriceTierName = z.infer<typeof PriceTierNameSchema>;
  * Prices are deliberately NOT here — tier-driven options carry `priceTier`
  * and assembly fills `tripFeeCents` / `hourlyRateCents` from the tier.
  */
+const BOOKING_HOURS_PRESETS = ['weekdays_7_5', 'mon_sat_7_5', 'any_time'] as const;
+
 export const ChoiceWritesSchema = z
   .object({
-    voiceGreeting: z.string().min(1).max(240).optional(),
+    voiceGreeting: z.string().trim().min(1).max(240).optional(),
     autonomousBookingEnabled: z.boolean().optional(),
-    paymentCollectionMode: z.enum(['pay_link', 'collect_on_site']).optional(),
-    bookingHoursPreset: z.enum(['weekdays_7_5', 'mon_sat_7_5', 'any_time']).optional(),
+    paymentCollectionMode: z.enum(PAYMENT_COLLECTION_MODES).optional(),
+    bookingHoursPreset: z.enum(BOOKING_HOURS_PRESETS).optional(),
     /** "Someone else first" is the free-speech override, not an option. */
-    emergencyTarget: z.enum(['owner_cell', 'owner_cell_then_text']).optional(),
-    afterHoursVoiceMode: z.enum(['ai_answering', 'voicemail']).optional(),
+    emergencyTarget: z.enum(EMERGENCY_TARGETS).optional(),
+    afterHoursVoiceMode: z.enum(AFTER_HOURS_VOICE_MODES).optional(),
     hasExistingBusinessNumber: z.boolean().optional(),
   })
   .strict();
 export type ChoiceWrites = z.infer<typeof ChoiceWritesSchema>;
+
+/**
+ * The only writes each choice may carry. Registry options satisfy this by
+ * construction (pinned in schema.test.ts); free-speech overrides come from the
+ * owner and are checked against it before they are staged, so a "greeting"
+ * override cannot smuggle `autonomousBookingEnabled` into the approved
+ * proposal. `trip_fee_and_rate` writes prices only (via `priceTier` / `prices`).
+ */
+export const ALLOWED_WRITES_BY_KEY: Readonly<Record<AnyChoiceKey, readonly (keyof ChoiceWrites)[]>> = {
+  greeting: ['voiceGreeting'],
+  trip_fee_and_rate: [],
+  booking_posture: ['autonomousBookingEnabled'],
+  payment_collection_mode: ['paymentCollectionMode'],
+  booking_hours: ['bookingHoursPreset'],
+  emergency_target: ['emergencyTarget'],
+  after_hours_mode: ['afterHoursVoiceMode'],
+  existing_number: ['hasExistingBusinessNumber'],
+};
+
+export class WritesNotAllowedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WritesNotAllowedError';
+  }
+}
+
+/** Throws WritesNotAllowedError naming the first write key the choice does not own. */
+export function assertWritesAllowedFor(key: AnyChoiceKey, writes: ChoiceWrites): void {
+  const allowed = ALLOWED_WRITES_BY_KEY[key];
+  for (const w of Object.keys(writes) as (keyof ChoiceWrites)[]) {
+    if (writes[w] !== undefined && !allowed.includes(w)) {
+      throw new WritesNotAllowedError(`choice "${key}" may not write "${w}"`);
+    }
+  }
+}
+
+/**
+ * Shape check for a free-speech override: writes belong to the choice, and
+ * `prices` is carried by the price choice (required) and by no other.
+ */
+export function assertOverrideAllowedFor(key: AnyChoiceKey, override: { writes: ChoiceWrites; prices?: unknown }): void {
+  assertWritesAllowedFor(key, override.writes);
+  if (key === 'trip_fee_and_rate' && !override.prices) {
+    throw new WritesNotAllowedError('choice "trip_fee_and_rate" override must carry prices');
+  }
+  if (key !== 'trip_fee_and_rate' && override.prices !== undefined) {
+    throw new WritesNotAllowedError(`choice "${key}" may not carry prices`);
+  }
+}
 
 export const ChoiceOptionSchema = z
   .object({

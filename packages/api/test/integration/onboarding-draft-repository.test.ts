@@ -9,6 +9,7 @@ import {
 } from '../../src/onboarding/draft/repository';
 import { assembleTypicalShop } from '../../src/onboarding/choices/assemble';
 import { PgRegionalPriceTierRepository } from '../../src/onboarding/choices/price-tiers';
+import { WritesNotAllowedError } from '../../src/onboarding/choices/schema';
 
 describe('onboarding_drafts repository', () => {
   let pool: Pool;
@@ -140,6 +141,45 @@ describe('onboarding_drafts repository', () => {
     expect(twice.proposalIds).toEqual(['11111111-1111-1111-1111-111111111111']);
     expect(twice.version).toBe(approved.version);
     void d;
+  });
+
+  it('setClientTimezone round-trips the column, bumps version, and is refused once approved', async () => {
+    await expect(repo.setClientTimezone(tenant.tenantId, 'America/Phoenix')).rejects.toBeInstanceOf(DraftNotFoundError);
+    const assembled = await freshAssembled();
+    const d = await repo.create(tenant.tenantId, { packId: 'plumbing', trade: 'plumbing', metroCode: 'CLE', metroName: 'Cleveland', businessName: 'Walsh Plumbing', ownerFirstName: null, clientTimezone: null, assembled });
+    expect(d.clientTimezone).toBeNull();
+
+    const updated = await repo.setClientTimezone(tenant.tenantId, 'America/Phoenix');
+    expect(updated.clientTimezone).toBe('America/Phoenix');
+    expect(updated.version).toBe(d.version + 1);
+    expect(updated.updatedAt.getTime()).toBeGreaterThanOrEqual(d.updatedAt.getTime());
+    const raw = await pool.query<{ client_timezone: string; version: number }>(
+      'SELECT client_timezone, version FROM onboarding_drafts WHERE tenant_id = $1',
+      [tenant.tenantId],
+    );
+    expect(raw.rows[0]).toEqual({ client_timezone: 'America/Phoenix', version: d.version + 1 });
+    expect((await repo.getForTenant(tenant.tenantId))!.clientTimezone).toBe('America/Phoenix');
+
+    await repo.markApproved(tenant.tenantId, ['11111111-1111-1111-1111-111111111111']);
+    await expect(repo.setClientTimezone(tenant.tenantId, 'America/Denver')).rejects.toBeInstanceOf(DraftAlreadyApprovedError);
+    expect((await repo.getForTenant(tenant.tenantId))!.clientTimezone).toBe('America/Phoenix');
+  });
+
+  it('rejects an override carrying writes the choice does not own, or misplaced prices, without touching the row', async () => {
+    const assembled = await freshAssembled();
+    const d = await repo.create(tenant.tenantId, { packId: 'plumbing', trade: 'plumbing', metroCode: 'CLE', metroName: 'Cleveland', businessName: 'Walsh Plumbing', ownerFirstName: null, clientTimezone: null, assembled });
+    await expect(
+      repo.stageChoice(tenant.tenantId, 'greeting', { override: { label: 'x', writes: { autonomousBookingEnabled: true } } }, d.version),
+    ).rejects.toBeInstanceOf(WritesNotAllowedError);
+    await expect(
+      repo.stageChoice(tenant.tenantId, 'trip_fee_and_rate', { override: { label: 'x', writes: {} } }, d.version),
+    ).rejects.toBeInstanceOf(WritesNotAllowedError);
+    await expect(
+      repo.stageChoice(tenant.tenantId, 'greeting', { override: { label: 'x', writes: {}, prices: { tripFeeCents: 1, hourlyRateCents: 2 } } }, d.version),
+    ).rejects.toBeInstanceOf(WritesNotAllowedError);
+    const after = (await repo.getForTenant(tenant.tenantId))!;
+    expect(after.version).toBe(d.version);
+    expect(after.choices).toEqual({});
   });
 
   it('does not leak drafts across tenants', async () => {

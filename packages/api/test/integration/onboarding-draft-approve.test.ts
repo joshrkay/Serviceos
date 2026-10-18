@@ -11,6 +11,7 @@ import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { createOnboardingDraftRouter } from '../../src/routes/onboarding-draft';
 import { PgOnboardingDraftRepository } from '../../src/onboarding/draft/repository';
+import { ONBOARDING_READBACK_SURFACE } from '../../src/onboarding/draft/approve';
 import { PgRegionalPriceTierRepository } from '../../src/onboarding/choices/price-tiers';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
@@ -93,7 +94,7 @@ describe('onboarding draft → approve (real DB)', () => {
       ['onboarding_tenant_settings', 'approved'],
       ['onboarding_voice_policy', 'approved'],
     ]);
-    for (const r of rows.rows) expect(r.source_context).toMatchObject({ surface: 'onboarding_readback' });
+    for (const r of rows.rows) expect(r.source_context).toMatchObject({ surface: ONBOARDING_READBACK_SURFACE });
 
     const draftRow = await pool.query(`SELECT status, proposal_ids FROM onboarding_drafts WHERE tenant_id = $1`, [tenant.tenantId]);
     expect(draftRow.rows[0].status).toBe('approved');

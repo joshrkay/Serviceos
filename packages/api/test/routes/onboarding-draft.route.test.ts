@@ -3,6 +3,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createOnboardingDraftRouter } from '../../src/routes/onboarding-draft';
 import { InMemoryOnboardingDraftRepository } from '../../src/onboarding/draft/repository';
+import { ONBOARDING_READBACK_SURFACE } from '../../src/onboarding/draft/approve';
 import { InMemoryRegionalPriceTierRepository } from '../../src/onboarding/choices/price-tiers';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -115,7 +116,7 @@ describe('onboarding draft routes', () => {
     expect(proposals).toHaveLength(2);
     for (const p of proposals) {
       expect(p.status).toBe('approved');
-      expect(p.sourceContext).toMatchObject({ surface: 'onboarding_readback' });
+      expect(p.sourceContext).toMatchObject({ surface: ONBOARDING_READBACK_SURFACE });
     }
     const settings = proposals.find((p) => p.proposalType === 'onboarding_tenant_settings')!;
     expect(settings.payload).toMatchObject({ businessName: 'Walsh Plumbing', city: 'Cleveland', verticalPacks: ['plumbing'], tripFeeCents: 12900, hourlyRateCents: 18500, timezone: 'America/New_York' });
@@ -141,6 +142,79 @@ describe('onboarding draft routes', () => {
     expect(res.status).toBe(400);
     expect(JSON.stringify(res.body)).toMatch(/TIMEZONE_REQUIRED/);
     expect(await ctx.proposalRepo.findByTenant(TENANT_ID)).toHaveLength(0);
+  });
+
+  it('a later POST records a timezone the first call lacked, so approve then succeeds', async () => {
+    const first = await request(ctx.app).post('/api/onboarding/draft').send({ ...CREATE, clientTimezone: undefined });
+    expect(first.status).toBe(201);
+    expect(first.body.draft.clientTimezone).toBeNull();
+    expect((await request(ctx.app).post('/api/onboarding/draft/approve').send({})).status).toBe(400);
+
+    const again = await request(ctx.app).post('/api/onboarding/draft').send({ ...CREATE, clientTimezone: 'America/Phoenix' });
+    expect(again.status).toBe(200);
+    expect(again.body.created).toBe(false);
+    expect(again.body.draft.id).toBe(first.body.draft.id);
+    expect(again.body.draft.clientTimezone).toBe('America/Phoenix');
+    expect(again.body.draft.version).toBe(first.body.draft.version + 1);
+
+    // Same zone again is a no-op: no version bump, no second audit event.
+    const same = await request(ctx.app).post('/api/onboarding/draft').send({ ...CREATE, clientTimezone: 'America/Phoenix' });
+    expect(same.body.draft.version).toBe(again.body.draft.version);
+
+    const approve = await request(ctx.app).post('/api/onboarding/draft/approve').send({});
+    expect(approve.status).toBe(200);
+    const audits = await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 50 });
+    expect(audits.filter((a) => a.eventType === 'onboarding.draft_timezone_set')).toHaveLength(1);
+    const settings = (await ctx.proposalRepo.findByTenant(TENANT_ID)).find((p) => p.proposalType === 'onboarding_tenant_settings')!;
+    expect(settings.payload).toMatchObject({ timezone: 'America/Phoenix' });
+  });
+
+  it('POST rejects an unrecognized timezone on create and on update', async () => {
+    const onCreate = await request(ctx.app).post('/api/onboarding/draft').send({ ...CREATE, clientTimezone: 'Mars/Olympus' });
+    expect(onCreate.status).toBe(400);
+    expect(await ctx.draftRepo.getForTenant(TENANT_ID)).toBeNull();
+
+    await request(ctx.app).post('/api/onboarding/draft').send({ ...CREATE, clientTimezone: undefined });
+    const onUpdate = await request(ctx.app).post('/api/onboarding/draft').send({ ...CREATE, clientTimezone: 'Mars/Olympus' });
+    expect(onUpdate.status).toBe(400);
+    expect((await ctx.draftRepo.getForTenant(TENANT_ID))!.clientTimezone).toBeNull();
+  });
+
+  it('a repeat POST with a different timezone leaves an approved draft untouched', async () => {
+    await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+    await request(ctx.app).post('/api/onboarding/draft/approve').send({});
+    const res = await request(ctx.app).post('/api/onboarding/draft').send({ ...CREATE, clientTimezone: 'America/Phoenix' });
+    expect(res.status).toBe(200);
+    expect(res.body.draft.clientTimezone).toBe('America/New_York');
+  });
+
+  it('PUT rejects an override whose writes belong to another choice, or whose prices are misplaced', async () => {
+    await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+    const smuggled = await request(ctx.app)
+      .put('/api/onboarding/draft/choices/greeting')
+      .send({ choice: { override: { label: 'Hi there', writes: { voiceGreeting: 'Hi', autonomousBookingEnabled: true } } }, version: 1 });
+    expect(smuggled.status).toBe(400);
+    expect(JSON.stringify(smuggled.body)).toMatch(/autonomousBookingEnabled/);
+
+    const noPrices = await request(ctx.app)
+      .put('/api/onboarding/draft/choices/trip_fee_and_rate')
+      .send({ choice: { override: { label: '$120 then $175', writes: {} } }, version: 1 });
+    expect(noPrices.status).toBe(400);
+
+    const strayPrices = await request(ctx.app)
+      .put('/api/onboarding/draft/choices/greeting')
+      .send({ choice: { override: { label: 'Hi there', writes: { voiceGreeting: 'Hi' }, prices: { tripFeeCents: 100, hourlyRateCents: 200 } } }, version: 1 });
+    expect(strayPrices.status).toBe(400);
+
+    // Nothing was staged or audited by the rejected calls.
+    expect((await ctx.draftRepo.getForTenant(TENANT_ID))!.version).toBe(1);
+    const audits = await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 50 });
+    expect(audits.filter((a) => a.eventType === 'onboarding.choice_staged')).toHaveLength(0);
+
+    const ok = await request(ctx.app)
+      .put('/api/onboarding/draft/choices/greeting')
+      .send({ choice: { override: { label: 'Hi there', writes: { voiceGreeting: 'Hi there' } } }, version: 1 });
+    expect(ok.status).toBe(200);
   });
 
   it('POST approve without a draft is 404', async () => {

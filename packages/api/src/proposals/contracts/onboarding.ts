@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { isRuntimeTimezone } from '../../shared/timezone';
 import { isSeedablePackId } from '../../packs/seed-pack-defaults';
+import { ChoiceWritesSchema, type ChoiceWrites } from '../../onboarding/choices/schema';
 
 // Electrical and painting are accepted as basic second-class verticals; rich defaults are added separately.
 const verticalTypeSchema = z.enum(['hvac', 'plumbing', 'electrical', 'painting']);
@@ -129,20 +130,19 @@ export const onboardingSchedulePayloadSchema = z.object({
 // the choices the five proposals above do not cover. Every key is optional and
 // at least one must be present; the handler writes exactly the keys carried.
 
-export const BOOKING_HOURS_PRESETS = ['weekdays_7_5', 'mon_sat_7_5', 'any_time'] as const;
-export type BookingHoursPreset = (typeof BOOKING_HOURS_PRESETS)[number];
+export type BookingHoursPreset = NonNullable<ChoiceWrites['bookingHoursPreset']>;
 
+/**
+ * Derived from the choice registry's writes so the two cannot drift: every
+ * key a choice can write is a key this proposal carries. `hasExistingBusinessNumber`
+ * is the one choice write that is NOT a tenant setting (the v3 shell reads it
+ * from the draft to pick the day-one branch), so it is omitted. Still
+ * strip-mode like every proposal schema (contracts.test.ts forbids `.strict()`):
+ * unknown keys are dropped at the boundary, never a reason to reject an
+ * owner's approval.
+ */
 export const onboardingVoicePolicyPayloadSchema = z
-  .object({
-    voiceGreeting: z.string().trim().min(1).max(240).optional(),
-    autonomousBookingEnabled: z.boolean().optional(),
-    afterHoursVoiceMode: z.enum(['ai_answering', 'voicemail']).optional(),
-    emergencyTarget: z.enum(['owner_cell', 'owner_cell_then_text']).optional(),
-    paymentCollectionMode: z.enum(['pay_link', 'collect_on_site']).optional(),
-    bookingHoursPreset: z.enum(BOOKING_HOURS_PRESETS).optional(),
-  })
-  // Strip-mode like every proposal schema (contracts.test.ts): unknown keys are
-  // dropped at the boundary, never a reason to reject an owner's approval.
+  .object(ChoiceWritesSchema.omit({ hasExistingBusinessNumber: true }).shape)
   .refine((p) => Object.values(p).some((v) => v !== undefined), {
     message: 'onboarding_voice_policy must carry at least one setting',
   });

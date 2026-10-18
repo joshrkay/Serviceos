@@ -35,7 +35,6 @@ export const StageChoiceBodySchema = z
     version: z.number().int().positive(),
   })
   .strict();
-export type StageChoiceBody = z.infer<typeof StageChoiceBodySchema>;
 
 /** Partial on purpose: an owner mid-way through has staged some keys, not all. */
 export const ChoicesRecordSchema = z.partialRecord(ChoiceKeySchema, StagedChoiceSchema);
@@ -55,4 +54,3 @@ export const CreateDraftInputSchema = z
     clientTimezone: z.string().min(1).max(64).optional(),
   })
   .strict();
-export type CreateDraftInput = z.infer<typeof CreateDraftInputSchema>;

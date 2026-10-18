@@ -4,10 +4,10 @@ import {
   RegionalPriceTiersSchema,
   packDefaultTiers,
   resolvePriceTiers,
-  scaleCentsBps,
   type RegionalPriceTierRepository,
   type RegionalPriceTiers,
 } from '../../../src/onboarding/choices/price-tiers';
+import { scaleCentsBps } from '../../../src/shared/scale-cents-bps';
 import { PLUMBING_LINE_ITEM_DEFAULTS } from '../../../src/verticals/packs/plumbing';
 import { HVAC_LINE_ITEM_DEFAULTS } from '../../../src/verticals/packs/hvac';
 

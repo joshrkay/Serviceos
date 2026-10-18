@@ -13,7 +13,7 @@
 import type { Pool } from 'pg';
 import { PgBaseRepository } from '../../db/pg-base';
 import type { AssembledShop } from '../choices/assemble';
-import { ChoiceKeySchema, type AnyChoiceKey } from '../choices/schema';
+import { ChoiceKeySchema, assertOverrideAllowedFor, type AnyChoiceKey } from '../choices/schema';
 import { ChoicesRecordSchema, DraftStatusSchema, StagedChoiceSchema, type ChoicesRecord, type DraftStatus, type StagedChoice } from './contracts';
 
 export class DraftNotFoundError extends Error {
@@ -70,7 +70,16 @@ export interface OnboardingDraftRepository {
   getForTenant(tenantId: string): Promise<OnboardingDraft | null>;
   /** Creates the tenant's draft, or returns the existing one unchanged. */
   create(tenantId: string, input: CreateDraftRecord): Promise<OnboardingDraft>;
+  /**
+   * Overrides must carry only writes the choice owns (and prices only on the
+   * price choice); a violation throws WritesNotAllowedError before any write.
+   */
   stageChoice(tenantId: string, settingKey: AnyChoiceKey, choice: StagedChoice, expectedVersion: number): Promise<OnboardingDraft>;
+  /**
+   * Records the browser timezone on an existing draft (the create call may
+   * have run before the client knew its zone). Bumps `version`; refused once approved.
+   */
+  setClientTimezone(tenantId: string, clientTimezone: string): Promise<OnboardingDraft>;
   /** Marks approved and records the proposal ids; a no-op returning the row when already approved. */
   markApproved(tenantId: string, proposalIds: string[]): Promise<OnboardingDraft>;
 }
@@ -158,6 +167,7 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
   async stageChoice(tenantId: string, settingKey: AnyChoiceKey, choice: StagedChoice, expectedVersion: number): Promise<OnboardingDraft> {
     const key = ChoiceKeySchema.parse(settingKey);
     const staged = StagedChoiceSchema.parse(choice);
+    if ('override' in staged) assertOverrideAllowedFor(key, staged.override);
     return this.withTenant(tenantId, async (client) => {
       const current = await client.query<Pick<DraftRow, 'status' | 'version'>>(
         'SELECT status, version FROM onboarding_drafts WHERE tenant_id = $1 FOR UPDATE',
@@ -182,6 +192,27 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
         // happen within one transaction, but fail closed rather than return stale state).
         throw new DraftVersionConflictError(expectedVersion, current.rows[0].version + 1);
       }
+      return mapRow(updated.rows[0]);
+    });
+  }
+
+  async setClientTimezone(tenantId: string, clientTimezone: string): Promise<OnboardingDraft> {
+    return this.withTenant(tenantId, async (client) => {
+      const current = await client.query<Pick<DraftRow, 'status'>>(
+        'SELECT status FROM onboarding_drafts WHERE tenant_id = $1 FOR UPDATE',
+        [tenantId],
+      );
+      if (current.rows.length === 0) throw new DraftNotFoundError(tenantId);
+      if (current.rows[0].status === 'approved') throw new DraftAlreadyApprovedError();
+      const updated = await client.query<DraftRow>(
+        `UPDATE onboarding_drafts
+            SET client_timezone = $2,
+                version = version + 1,
+                updated_at = NOW()
+          WHERE tenant_id = $1
+          RETURNING *`,
+        [tenantId, clientTimezone],
+      );
       return mapRow(updated.rows[0]);
     });
   }
@@ -239,11 +270,21 @@ export class InMemoryOnboardingDraftRepository implements OnboardingDraftReposit
   async stageChoice(tenantId: string, settingKey: AnyChoiceKey, choice: StagedChoice, expectedVersion: number): Promise<OnboardingDraft> {
     const key = ChoiceKeySchema.parse(settingKey);
     const staged = StagedChoiceSchema.parse(choice);
+    if ('override' in staged) assertOverrideAllowedFor(key, staged.override);
     const d = this.byTenant.get(tenantId);
     if (!d) throw new DraftNotFoundError(tenantId);
     if (d.status === 'approved') throw new DraftAlreadyApprovedError();
     if (d.version !== expectedVersion) throw new DraftVersionConflictError(expectedVersion, d.version);
     const next: OnboardingDraft = { ...d, choices: { ...d.choices, [key]: staged }, version: d.version + 1, updatedAt: new Date() };
+    this.byTenant.set(tenantId, next);
+    return next;
+  }
+
+  async setClientTimezone(tenantId: string, clientTimezone: string): Promise<OnboardingDraft> {
+    const d = this.byTenant.get(tenantId);
+    if (!d) throw new DraftNotFoundError(tenantId);
+    if (d.status === 'approved') throw new DraftAlreadyApprovedError();
+    const next: OnboardingDraft = { ...d, clientTimezone, version: d.version + 1, updatedAt: new Date() };
     this.byTenant.set(tenantId, next);
     return next;
   }

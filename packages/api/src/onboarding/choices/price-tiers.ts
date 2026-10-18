@@ -14,9 +14,8 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import { packHeadlinePrices } from '../../packs/seed-pack-defaults';
 import { scaleCentsBps } from '../../shared/scale-cents-bps';
-export { scaleCentsBps };
 
-export const NATIONAL_METRO_CODE = 'US';
+const NATIONAL_METRO_CODE = 'US';
 
 /** Premium tier = standard × 1.30, rounded to the nearest dollar. */
 export const PREMIUM_MULTIPLIER_BPS = 13000;

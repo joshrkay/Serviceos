@@ -96,14 +96,11 @@ export function buildDraftProposals(draft: OnboardingDraft, actorId: string): Dr
     createdBy: actorId,
   };
 
-  const voicePayload: OnboardingVoicePolicyPayload = {
-    ...(merged.voiceGreeting !== undefined ? { voiceGreeting: merged.voiceGreeting } : {}),
-    ...(merged.autonomousBookingEnabled !== undefined ? { autonomousBookingEnabled: merged.autonomousBookingEnabled } : {}),
-    ...(merged.afterHoursVoiceMode !== undefined ? { afterHoursVoiceMode: merged.afterHoursVoiceMode } : {}),
-    ...(merged.emergencyTarget !== undefined ? { emergencyTarget: merged.emergencyTarget } : {}),
-    ...(merged.paymentCollectionMode !== undefined ? { paymentCollectionMode: merged.paymentCollectionMode } : {}),
-    ...(merged.bookingHoursPreset !== undefined ? { bookingHoursPreset: merged.bookingHoursPreset } : {}),
-  };
+  // `hasExistingBusinessNumber` is a draft-only answer, not a tenant setting:
+  // the v3 shell reads it from draft.choices to pick the day-one branch, so it
+  // is dropped here on purpose and never reaches the voice-policy proposal.
+  const { hasExistingBusinessNumber: _draftOnly, ...settingWrites } = merged;
+  const voicePayload: OnboardingVoicePolicyPayload = settingWrites;
   const voicePolicy: CreateProposalInput = {
     tenantId: draft.tenantId,
     proposalType: 'onboarding_voice_policy',

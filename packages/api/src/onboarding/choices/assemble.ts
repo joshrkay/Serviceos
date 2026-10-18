@@ -66,7 +66,7 @@ export function renderTemplate(template: string, tokens: TemplateTokens): string
 }
 
 /** "$89" for whole dollars, "$89.50" otherwise. Spoken and shown the same way. */
-export function formatPrice(cents: number): string {
+function formatPrice(cents: number): string {
   const plain = formatUsdCentsPlain(cents); // "$89.00"
   return plain.endsWith('.00') ? plain.slice(0, -3) : plain;
 }

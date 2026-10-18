@@ -728,7 +728,7 @@ export function packHeadlinePrices(packId: string): HeadlinePrices | undefined {
 /**
  * Price a seed given the owner's chosen pricing: headline items land exactly,
  * everything else scales by the hourly-rate ratio under the shared rounding
- * rule. Exported for the seeder's tests; not a public API.
+ * rule. Module-private: covered through seedPackDefaults.
  */
 function priceSeed(cents: number, headline: HeadlinePrices, pricing: ChosenPricing | undefined, ratioBps: number): number {
   if (!pricing) return cents;
@@ -804,6 +804,9 @@ export async function seedPackDefaults(
 
   // Ratio of the chosen hourly rate to the pack's default, in basis points,
   // applied to every non-headline price so the whole book moves together.
+  if (pricing && config.headline.laborCents === 0) {
+    throw new Error(`seed pack "${packId}": cannot scale a price book from a zero headline labor rate`);
+  }
   const ratioBps = pricing ? Math.round((pricing.hourlyRateCents / config.headline.laborCents) * 10_000) : 10_000;
 
   const now = new Date().toISOString();

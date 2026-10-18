@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildDraftProposals, resolveChoices } from '../../../src/onboarding/draft/approve';
+import { ONBOARDING_READBACK_SURFACE, buildDraftProposals, resolveChoices } from '../../../src/onboarding/draft/approve';
 import { InMemoryOnboardingDraftRepository, type OnboardingDraft } from '../../../src/onboarding/draft/repository';
 import { assembleTypicalShop } from '../../../src/onboarding/choices/assemble';
 import { InMemoryRegionalPriceTierRepository } from '../../../src/onboarding/choices/price-tiers';
@@ -62,7 +62,7 @@ describe('buildDraftProposals', () => {
       tripFeeCents: 8900,
       timezone: 'America/New_York',
     });
-    expect(tenantSettings.sourceContext).toEqual({ surface: 'onboarding_readback', draftId: draft.id });
+    expect(tenantSettings.sourceContext).toEqual({ surface: ONBOARDING_READBACK_SURFACE, draftId: draft.id });
 
     expect(voicePolicy.proposalType).toBe('onboarding_voice_policy');
     expect(onboardingVoicePolicyPayloadSchema.safeParse(voicePolicy.payload).success).toBe(true);
@@ -85,6 +85,20 @@ describe('buildDraftProposals', () => {
     const { tenantSettings, voicePolicy } = buildDraftProposals(d, 'u');
     expect(tenantSettings.payload).toMatchObject({ hourlyRateCents: 18500, tripFeeCents: 12900 });
     expect(voicePolicy.payload).toMatchObject({ autonomousBookingEnabled: false, afterHoursVoiceMode: 'voicemail' });
+  });
+
+  it('never puts hasExistingBusinessNumber in the voice policy payload (draft-only answer)', async () => {
+    const { repo, draft } = await draftFor();
+    const d = await repo.stageChoice(TENANT, 'existing_number', { option: 'a' }, draft.version);
+    // The answer exists on the resolved choice (the v3 shell reads it from the draft)...
+    const resolved = resolveChoices(d).find((r) => r.settingKey === 'existing_number');
+    expect(resolved?.writes.hasExistingBusinessNumber).toBeDefined();
+    // ...but is not a tenant setting, so it never lands in the proposal.
+    const { voicePolicy } = buildDraftProposals(d, 'u');
+    expect(voicePolicy.payload).not.toHaveProperty('hasExistingBusinessNumber');
+    expect(Object.keys(voicePolicy.payload).sort()).toEqual(
+      ['afterHoursVoiceMode', 'autonomousBookingEnabled', 'bookingHoursPreset', 'emergencyTarget', 'paymentCollectionMode', 'voiceGreeting'],
+    );
   });
 
   it('refuses without a recorded, valid timezone rather than guessing one', async () => {

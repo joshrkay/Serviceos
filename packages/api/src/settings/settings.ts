@@ -32,16 +32,27 @@ export function normalizeReminderOffsets(input: unknown): number[] {
 }
 
 /**
+ * Canonical enums for the "pick, don't build" onboarding settings. Declared
+ * once here; the settings PUT contract, the onboarding_voice_policy proposal
+ * and the choice registry all build their Zod enums from these arrays.
+ * (SQL migration literals stay as written — they cannot import.)
+ */
+/** How the owner wants to be paid when a job is marked done. */
+export const PAYMENT_COLLECTION_MODES = ['pay_link', 'collect_on_site'] as const;
+export type PaymentCollectionMode = (typeof PAYMENT_COLLECTION_MODES)[number];
+/** Who the agent reaches first on an emergency call. */
+export const EMERGENCY_TARGETS = ['owner_cell', 'owner_cell_then_text'] as const;
+export type EmergencyTarget = (typeof EMERGENCY_TARGETS)[number];
+/** Inbound behavior outside business hours. */
+export const AFTER_HOURS_VOICE_MODES = ['voicemail', 'ai_answering'] as const;
+
+/**
  * F8 — per-tenant escalation channel + trigger flags.
  *
  * Stored as a JSON column on tenant_settings (migration deferred to the
  * full F8 data-plane PR). Until then, the field is purely in-memory and
  * resolved at runtime via `resolveEscalationSettings`.
  */
-/** How the owner wants to be paid when a job is marked done ("pick, don't build" onboarding). */
-export type PaymentCollectionMode = 'pay_link' | 'collect_on_site';
-export type EmergencyTarget = 'owner_cell' | 'owner_cell_then_text';
-
 export interface EscalationSettings {
   channel_sms: boolean;
   channel_in_app: boolean;
@@ -64,7 +75,7 @@ export interface EscalationSettings {
    * tenant never saved the Call Routing sheet, so only an owner's own choice
    * survives as a stored value.
    */
-  after_hours_voice_mode?: 'voicemail' | 'ai_answering';
+  after_hours_voice_mode?: (typeof AFTER_HOURS_VOICE_MODES)[number];
   /**
    * "Pick, don't build" onboarding — who the agent reaches first on an
    * emergency call: the owner's cell, or the owner's cell with an SMS page
