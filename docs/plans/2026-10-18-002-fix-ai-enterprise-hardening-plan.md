@@ -858,6 +858,11 @@ flowchart LR
       conversation ids. For example, `call_me_back_tasks` (`schema.ts:3887-3901`) is linked only
       through `session_id`, yet it holds `caller_phone`, `caller_name`, `callback_message` and
       `intent_summary`.
+    - **Polymorphic:** an `entity_type` / `entity_id` pair that names the customer, or one of the
+      customer's jobs, estimates or invoices. For example, `customer-mms/customer-mms-intake.ts:150-163`
+      uploads each customer MMS image to S3 and creates a `files` row with `entityType: 'customer'`.
+      The schema test also lists every `entity_type` / `entity_id` table, so each must be classified.
+      The erase deletes those file rows and their S3 objects.
     - **Identifier-linked:** matched only by the customer's phone, email or name.
     - **External sinks:** S3 objects, Twilio recordings, and Langfuse traces when
       `LANGFUSE_CAPTURE_CONTENT` is on. `trace-exporter.ts` exports gateway inputs and outputs,
@@ -878,9 +883,15 @@ flowchart LR
         - Clear the email and the phone.
       - **Twilio messages.** `notifications/twilio-delivery-provider.ts:238-268` posts the recipient
         and the body to Twilio's Messages resource, and we keep the returned message SIDs. The
-        erase redacts or deletes every SMS/MMS Message resource sent to or from the customer,
-        media included, through the Twilio API. It finds them by the SIDs we keep and, for inbound
-        messages, by the customer's number.
+        erase redacts or deletes the customer's SMS/MMS Message resources, media included, through
+        the Twilio API.
+        - It selects them only by the message SIDs we keep linked to the subject: outbound sends,
+          and inbound captures, which already store `messageSid` with `customerId`
+          (`sms/inbound-capture.ts:293-309`).
+        - It never selects them by phone number alone. A household can share a number and numbers
+          get reassigned, so a number-only match could irreversibly delete someone else's history.
+        - Unlinked inbound messages that match only on the number go onto the same owner-confirmed
+          candidate list as historical `ai_runs`.
       - Every enabled integration is a manifest entry with its delete, anonymize or legally-retain
         rule.
 
@@ -984,6 +995,8 @@ flowchart LR
   - the customer's `service_locations` rows keep their ids but lose street, city, postal code,
     coordinates and access notes
   - a seeded `customer_custom_field_values` value is gone
+  - a customer MMS photo (a `files` row with `entityType: 'customer'`) is deleted along with its S3
+    object
   - **schema coverage:** the manifest test fails when a test-only migration adds a new table with a
     `customer_id` foreign key that the manifest doesn't list, and also when it adds a bare
     `…_customer_id` column with no foreign key
@@ -999,7 +1012,9 @@ flowchart LR
   - against mocked Stripe, QuickBooks and Twilio Messages APIs:
     - the Stripe Customer is deleted
     - the QuickBooks customer's `DisplayName` is replaced and its email and phone are cleared
-    - the customer's Twilio Message resources and their media are redacted or deleted
+    - the customer's linked Twilio Message resources and their media are redacted or deleted
+    - a message from a shared household number that isn't linked to the subject is left alone and
+      listed as a candidate
     - a failure at any provider marks that store `incomplete` and alerts
   - after an erase, the exporter still sends unrelated traces, so the drain did not shut it down
   - a drain failure marks Langfuse `incomplete`
