@@ -145,6 +145,7 @@ import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory
 import {
   invoiceReferenceCheck,
   invoiceSendableReferenceCheck,
+  jobReferenceCheck,
   serviceLocationReferenceCheck,
   sendRecipientReferenceCheck,
   executionAnchorReferenceCheck,
@@ -1115,6 +1116,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     estimateReferenceCheck(estimateRepo),
     // #1480 item 4 — a send_invoice for a draft (unissued) or dead invoice.
     invoiceSendableReferenceCheck(invoiceRepo),
+    // OVAS-03 — a drafted jobId must be this tenant's job, of the card's customer.
+    jobReferenceCheck(jobRepo),
   ];
 
   const webhookSettingsRepo = settingsRepo;
