@@ -7660,6 +7660,22 @@ export const MIGRATIONS = {
 
     ALTER TABLE users ALTER COLUMN can_field_serve DROP DEFAULT;
   `,
+
+  // "Pick, don't build" onboarding (docs/plans/2026-10-18-001). Platform-owned,
+  // founder-curated typical prices per (trade, metro) that the price choice
+  // shows the owner; metro_code 'US' is the national fallback. No tenant_id
+  // and no RLS on purpose: this is reference data like `tenants`, written by
+  // admins and seeds only, read by every tenant's onboarding.
+  '310_regional_price_tiers': `
+    CREATE TABLE IF NOT EXISTS regional_price_tiers (
+      trade TEXT NOT NULL,
+      metro_code TEXT NOT NULL,
+      tier JSONB NOT NULL,
+      source TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (trade, metro_code)
+    );
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
