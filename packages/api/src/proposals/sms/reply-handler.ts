@@ -42,6 +42,7 @@ import type {
 } from '../../sms/inbound-dispatch';
 import type { Proposal, ProposalRepository } from '../proposal';
 import { actionClassForProposalType } from '../proposal';
+import type { ApprovalReferenceCheck } from '../approval-reference-checks';
 import {
   approveChainSet,
   approveProposalsBatch,
@@ -91,6 +92,15 @@ export interface ProposalSmsReplyDeps {
   sendSms?: (to: string, body: string) => Promise<void>;
   /** Lets a rejected create_booking release its held calendar slot. */
   appointmentRepo?: AppointmentRepository;
+  /**
+   * B4 — the approval-time reference checks the dashboard approve route runs
+   * (proposals/approval-reference-checks.ts): an id on the card must name a
+   * record this tenant owns, the job must be the card's customer's, and so
+   * on. A texted Y is not a side door — a card the checks hold gets the
+   * truthful "can't approve yet" reply instead of an "Approved" that then
+   * fails at execution.
+   */
+  approvalReferenceChecks?: ApprovalReferenceCheck[];
   /**
    * LLM seam: turn a free-text instruction into a payload delta for
    * `editProposal` (which Zod-validates the result — a bad delta can
@@ -296,6 +306,7 @@ async function handleApproveAll(
     'owner',
     deps.auditRepo,
     'sms',
+    { referenceChecks: deps.approvalReferenceChecks },
   );
 
   await audit(deps, ctx, 'proposal.sms_approved_all', '', {
@@ -396,6 +407,7 @@ async function handleApprove(
       deps.auditRepo,
       'sms', // RV-073 — inbound SMS reply approval
       (tenantId, proposalId) => deps.smsEventRepo.hasUnappliedEditRequest(tenantId, proposalId),
+      { referenceChecks: deps.approvalReferenceChecks },
     );
     summary = summarizeChainSetResult(result);
     approvedSummary = result.approved[0]?.summary ?? proposal.summary;

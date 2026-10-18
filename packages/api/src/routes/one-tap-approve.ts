@@ -36,6 +36,8 @@ import {
 } from '../digest/invoice-one-tap';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import type { Role } from '../auth/rbac';
+import type { ApprovalReferenceCheck } from '../proposals/approval-reference-checks';
+import { ValidationError } from '../shared/errors';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -65,6 +67,13 @@ export interface OneTapApproveRouterDeps {
    * needs the review queue. Optional so pre-P2-034 wiring keeps working.
    */
   smsEventRepo?: Pick<ProposalSmsEventRepository, 'hasUnappliedEditRequest'>;
+  /**
+   * B4 — the approval-time reference checks the dashboard approve route runs
+   * (proposals/approval-reference-checks.ts). A link is not a side door: a
+   * card the checks hold gets a plain "needs a closer look" page instead of
+   * an "Approved" that then fails at execution.
+   */
+  approvalReferenceChecks?: ApprovalReferenceCheck[];
   /**
    * RV-065 — deps for the digest "invoice it" token variant
    * (action: 'mint_draft_invoice'). When the tapped token carries that
@@ -386,6 +395,7 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
           ? (tenantId, proposalId) =>
               deps.smsEventRepo!.hasUnappliedEditRequest(tenantId, proposalId)
           : undefined,
+        { referenceChecks: deps.approvalReferenceChecks },
       );
       const approved = result.approved[0];
       const summary = summarizeChainSetResult(result);
@@ -430,6 +440,23 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
         proposalId: verified.proposalId,
         error: err instanceof Error ? err.message : String(err),
       });
+      // B4 — still waiting, but something on it has to be fixed first (an
+      // unfilled field, or a reference check: e.g. its job belongs to another
+      // customer — both carry `details.missingFields`). Say so plainly instead
+      // of "it may already be handled". Other refusals (an expired window)
+      // keep the page below.
+      if (err instanceof ValidationError && Array.isArray(err.details?.missingFields)) {
+        res
+          .status(409)
+          .type('html')
+          .send(
+            page(
+              'Needs a closer look',
+              'This can’t be approved from the link yet — something on it needs fixing first. It’s waiting in your review queue.',
+            ),
+          );
+        return;
+      }
       res
         .status(410)
         .type('html')

@@ -19,6 +19,8 @@ import {
   createProposal,
 } from '../../src/proposals/proposal';
 import { applyChainMetadata } from '../../src/proposals/chain';
+import { jobReferenceCheck } from '../../src/proposals/approval-reference-checks';
+import { InMemoryJobRepository, createJob } from '../../src/jobs/job';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import {
   InMemoryProposalSmsEventRepository,
@@ -528,5 +530,68 @@ describe('RV-073 — one-tap approvals tag channel one_tap', () => {
     const approvedEvent = events.find((e) => e.eventType === 'proposal.approved');
     expect(approvedEvent).toBeDefined();
     expect(approvedEvent!.metadata).toMatchObject({ channel: 'one_tap' });
+  });
+});
+
+// B4 — the one-tap link runs the SAME approval-time reference checks as the
+// dashboard approve route. A card the checks hold (its job belongs to a
+// different customer) gets a plain "needs a closer look" page, never an
+// "Approved" that then fails at execution.
+describe('B4 — one-tap approval runs the approval-time reference checks', () => {
+  it('holds a card the checks flag: 409 plain page, nothing approved', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const jobOfOther = (
+      await createJob(
+        {
+          tenantId: TENANT,
+          customerId: '7a1b2c3d-2222-4222-8222-222222222222',
+          locationId: 'loc-other',
+          summary: 'Their furnace',
+          createdBy: 'seed',
+        },
+        jobRepo,
+      )
+    ).id;
+    const proposal = await proposalRepo.create({
+      ...createProposal({
+        tenantId: TENANT,
+        proposalType: 'create_appointment',
+        payload: {
+          customerId: '7a1b2c3d-1111-4111-8111-111111111111',
+          jobId: jobOfOther,
+          scheduledStart: '2026-06-16T19:00:00Z',
+          scheduledEnd: '2026-06-16T20:00:00Z',
+        },
+        summary: 'Book Mrs Lee Tuesday 2pm',
+        confidenceScore: 0.97,
+        createdBy: 'voice',
+      }),
+      status: 'ready_for_review',
+    });
+    const app = express();
+    app.use(
+      '/public/proposals',
+      createOneTapApproveRouter({
+        proposalRepo,
+        auditRepo,
+        secret: SECRET,
+        consumeNonce: createInMemoryNonceStore(),
+        approvalReferenceChecks: [jobReferenceCheck(jobRepo)],
+      }),
+    );
+
+    const res = await request(app)
+      .get('/public/proposals/one-tap-approve')
+      .query({ token: mint(proposal.id).token });
+
+    expect(res.status).toBe(409);
+    expect(res.text).toContain('Needs a closer look');
+    expect(res.text).not.toContain('Approved');
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+    const types = (await auditRepo.findByEntity(TENANT, 'proposal', proposal.id)).map((e) => e.eventType);
+    expect(types).not.toContain('proposal.approved');
+    expect(types).not.toContain('proposal.one_tap_approved');
   });
 });

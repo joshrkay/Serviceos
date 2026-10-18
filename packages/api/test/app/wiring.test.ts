@@ -183,4 +183,16 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(src).toMatch(/fillerCache\.load\(\);\s*void startFillerSynthesis\(fillerCache, sharedTtsProvider\);/);
     expect(src).not.toMatch(/await\s+startFillerSynthesis/);
   });
+
+  it('B4 — the SMS reply transport and the one-tap link get the approval-time reference checks', () => {
+    // Both seams take the checks as an OPTIONAL dep (unit fixtures omit it),
+    // so a dropped line here would silently let a texted Y or a tapped link
+    // approve a card the dashboard approve route holds.
+    const depsOf = (call: string) => {
+      const from = src.slice(src.indexOf(call));
+      return from.slice(0, from.indexOf('});'));
+    };
+    expect(depsOf('registerProposalReplySms(')).toMatch(/\bapprovalReferenceChecks,/);
+    expect(depsOf('createOneTapApproveRouter({')).toMatch(/\bapprovalReferenceChecks,/);
+  });
 });

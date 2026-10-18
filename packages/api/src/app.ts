@@ -1201,7 +1201,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     voiceApprovalPinLockAlertRepo,
   } = { ...buildRepositories(pool, directPool, overrides), ...overrides };
   // QA 2026-09-16 (AST-04) — approval-time reference checks, applied on every
-  // approval channel (dashboard single + batch, voice): an id in a payload must
+  // approval channel (dashboard single + batch, voice, SMS reply, one-tap
+  // link — B4): an id in a payload must
   // name a record this tenant owns (proposals/approval-reference-checks.ts).
   const approvalReferenceChecks = [
     invoiceReferenceCheck(invoiceRepo),
@@ -2088,6 +2089,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       userRepo,
       auditRepo,
       appointmentRepo,
+      // B4 — a texted Y runs the same reference checks as the dashboard approve.
+      approvalReferenceChecks,
       ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
       interpretEdit: createLlmEditInterpreter(llmGateway),
     },
@@ -3580,6 +3583,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // P2-034 — a pending manual edit request blocks the link too, not
       // just SMS Y replies; both paths approve the same stale payload.
       smsEventRepo: proposalSmsEventRepo,
+      // B4 — the link runs the same reference checks as the dashboard approve.
+      approvalReferenceChecks,
       // RV-065 — digest "invoice it" tokens: mint a draft_invoice proposal
       // for the bound job (batch-invoice eligibility machinery), then
       // redirect into the standard approve flow.
