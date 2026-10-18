@@ -15,7 +15,7 @@ describe('useOnboardingStatus', () => {
   it('fetches status on mount', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
-      json: async () => ({
+      json: () => Promise.resolve({
         steps: [
           { id: 'signup', status: 'done' },
           { id: 'identity', status: 'current' },
@@ -54,7 +54,7 @@ describe('useOnboardingStatus', () => {
     await waitFor(() => expect(result.current.error).toBe('boom'));
   });
 
-  it('skips fetch when enabled is false', async () => {
+  it('skips fetch when enabled is false', () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
     const { result } = renderHook(() => useOnboardingStatus(30_000, false));
