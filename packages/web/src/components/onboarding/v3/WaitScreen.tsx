@@ -4,7 +4,7 @@ import { RivetHeading, SpeakerLine } from './TurnFrame';
 import { DEFAULT_WAIT, WAIT_LINE, waitStage, type WaitStage, type WaitThresholds } from './wait-copy';
 
 /** How long this screen has been up, as the stage Rivet speaks to. Restarts when the screen is replaced. */
-export function useWaitStage(thresholds: WaitThresholds = DEFAULT_WAIT): WaitStage {
+function useWaitStage(thresholds: WaitThresholds = DEFAULT_WAIT): WaitStage {
   const [elapsedMs, setElapsedMs] = useState(0);
   const { stillWithYouMs, takingLongerMs } = thresholds;
   useEffect(() => {
