@@ -94,12 +94,12 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **72** |
+| Owner-only routes in code | **76** |
 | `cadence: daily` | **2** |
-| `cadence: onboarding` | **7** |
+| `cadence: onboarding` | **11** |
 | `cadence: occasional` | **63** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
-| `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **7** |
+| `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **11** |
 
 A PR that raises `ownerRequiredDailyWebActions` has to edit the number in the
 contract test, which is the point: adding an owner-only, non-SMS-reachable
@@ -109,12 +109,12 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 72,
+  "ownerOnlyRoutes": 76,
   "daily": 2,
-  "onboarding": 7,
+  "onboarding": 11,
   "occasional": 63,
   "ownerRequiredDailyWebActions": 1,
-  "ownerRequiredOnboardingWebActions": 7
+  "ownerRequiredOnboardingWebActions": 11
 }
 ```
 
@@ -132,6 +132,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `POST /api/onboarding/pack` | onboarding | Step `pack`: seeds `catalog_items` and `estimate_templates`. Without a price book the AI cannot ground a quote. | false | none | Reviewed: one-time activation; a vertical pack pick is a list selection, not a spoken action. |
 | `POST /api/onboarding/phone/claim` | onboarding | Step `phone`: claims the DID customers call. The voice product does not exist without it. | false | none | Reviewed: one-time activation, and claiming a specific number commits recurring spend — a deliberate on-screen confirmation is wanted here. |
 | `POST /api/onboarding/billing/checkout-session` | onboarding | Step `billing`: mints the trial subscription checkout. `POST /api/voice/go-live` refuses with `BILLING_REQUIRED` until a subscription is active. | false | none | Reviewed: one-time activation, and the checkout itself is a hosted Stripe redirect that cannot happen over SMS. |
+| `POST /api/onboarding/draft/` | onboarding | "Pick, don't build" setup (docs/plans/2026-10-18-001): assembles the typical shop for the owner's trade and metro, or records the browser timezone on an existing draft. The read-back cannot be approved without it. | false | none | Reviewed: one-time activation. The draft is the pre-approval state of the owner's own setup choices; it exists only on the setup surface and is replaced by that surface's conversation, not by SMS. |
+| `GET /api/onboarding/draft/` | onboarding | Reads the owner's setup draft so the setup surface can resume where they left off. | false | none | Reviewed: one-time activation; a read of the owner's own unsaved choices, consumed by the setup surface only. |
+| `PUT /api/onboarding/draft/choices/:settingKey` | onboarding | Stages one this-or-this setup choice (tap or spoken "first"/"second") on the draft, compare-and-swap on version. | false | none | Reviewed: one-time activation. The choice is spoken or tapped on the setup surface; voice is the surface's own input, not the voice agent, and nothing is written to settings until the read-back is approved. |
+| `POST /api/onboarding/draft/approve` | onboarding | "That's right": mints onboarding_tenant_settings and onboarding_voice_policy from the draft and approves them in the request transaction. The owner's business is not configured until this runs. | false | none | Reviewed: one-time activation and the one approval that configures the whole business; a deliberate on-screen act after a spoken read-back, matching POST /api/voice/go-live. |
 | `POST /api/billing/connect/onboarding` | onboarding | Stripe Connect onboarding. Until it is done the tenant cannot take card payments, which is half of the time-to-cash metric. | false | none | Reviewed: one-time activation; Stripe's hosted onboarding is a browser flow by construction. |
 | `POST /api/voice/go-live` | onboarding | Flips the tenant's voice agent live. Until it is called the AI answers nothing, so it is the last forced step of activation. | false | none | Reviewed: one-time activation. Deliberately a considered on-screen act — the owner is handing their phone line to an AI. |
 | `PUT /api/settings/texting-registration/` | onboarding | US A2P 10DLC registration (#1564): the owner submits the business's legal name, EIN, address and authorized contact once; Rivet (as ISV) registers the Brand and campaign with the carriers. Until it is approved the tenant's texts are unregistered 10DLC traffic. | false | none | Reviewed: one-time activation. The carriers vet exact legal identity data (legal name must match the EIN record), so this is a deliberate form entry, not a spoken or SMS action; the long carrier review that follows needs no owner action (the worker polls it). |
