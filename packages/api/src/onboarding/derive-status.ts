@@ -1,5 +1,6 @@
 import type { PhoneLineState } from './phone-line';
 import type {
+  DraftExecution,
   OnboardingStatusResponse,
   OnboardingStepId,
   OnboardingStepStatus,
@@ -65,7 +66,52 @@ export interface OnboardingFacts {
    * `.length(7)` and mobile consumes it); the v3 shell derives its turns from
    * this plus the draft itself.
    */
-  draft?: { status: 'draft' | 'approved'; choicesAnswered: number; version: number } | null;
+  draft?: {
+    status: 'draft' | 'approved';
+    choicesAnswered: number;
+    version: number;
+    /** Present only for an approved draft: what the listed proposals look like right now. */
+    proposals?: DraftProposalsFact;
+  } | null;
+}
+
+/**
+ * The approved draft's proposals, as read: how many ids the draft lists and the
+ * status of each one that still exists (a missing row is `expected - statuses.length`).
+ */
+export interface DraftProposalsFact {
+  expected: number;
+  statuses: string[];
+}
+
+const IN_FLIGHT_OR_DONE = new Set(['approved', 'executing', 'executed']);
+
+/**
+ * Derived execution state of an approved draft's proposals.
+ *
+ * - `failed`: any proposal outside approved/executing/executed (execution_failed,
+ *   undone, expired, rejected, or a stuck pre-approval status) or a listed
+ *   proposal that no longer exists. The shell offers a retry instead of waiting
+ *   forever; wins over every other state.
+ * - `executed`: every listed proposal executed.
+ * - `executing`: any executing, or some executed while others still wait for
+ *   the worker (work is in flight, so the shell keeps saying "Saving").
+ * - `pending`: all approved, none picked up yet.
+ *
+ * `null` while the draft is still being edited, and when there is nothing to
+ * track: a vacuous "executed" must never open billing.
+ */
+export function deriveDraftExecution(
+  draftStatus: 'draft' | 'approved',
+  tracked?: DraftProposalsFact,
+): DraftExecution | null {
+  if (draftStatus !== 'approved') return null;
+  if (!tracked || tracked.expected <= 0) return null;
+  const { expected, statuses } = tracked;
+  if (statuses.length < expected || statuses.some((s) => !IN_FLIGHT_OR_DONE.has(s))) return 'failed';
+  if (statuses.every((s) => s === 'executed')) return 'executed';
+  if (statuses.some((s) => s === 'executing' || s === 'executed')) return 'executing';
+  return 'pending';
 }
 
 /**
@@ -175,6 +221,12 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
       : {}),
     ...(f.activatedAt ? { activatedAt: f.activatedAt.toISOString() } : {}),
     ...(f.tenantCreatedAt ? { accountCreatedAt: f.tenantCreatedAt.toISOString() } : {}),
-    ...(f.draft ? { draft: f.draft } : {}),
+    ...(f.draft ? { draft: toDraftStatus(f.draft) } : {}),
   };
+}
+
+/** The status response's draft block: the raw proposal statuses never leave the server. */
+function toDraftStatus(draft: NonNullable<OnboardingFacts['draft']>): NonNullable<OnboardingStatusResponse['draft']> {
+  const { proposals, ...rest } = draft;
+  return { ...rest, execution: deriveDraftExecution(draft.status, proposals) };
 }

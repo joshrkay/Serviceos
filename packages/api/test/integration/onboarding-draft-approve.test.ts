@@ -84,7 +84,7 @@ describe('onboarding draft → approve (real DB)', () => {
 
     const factsBefore = await loadOnboardingFacts({ pool, settingsRepo }, tenant.tenantId);
     expect(factsBefore.draft).toEqual({ status: 'draft', choicesAnswered: 3, version });
-    expect(deriveOnboardingStatus(factsBefore).draft).toEqual({ status: 'draft', choicesAnswered: 3, version });
+    expect(deriveOnboardingStatus(factsBefore).draft).toEqual({ status: 'draft', choicesAnswered: 3, version, execution: null });
 
     const approved = await request(app).post('/api/onboarding/draft/approve').send({});
     expect(approved.status).toBe(200);
@@ -119,6 +119,7 @@ describe('onboarding draft → approve (real DB)', () => {
     const factsAfter = await loadOnboardingFacts({ pool, settingsRepo }, tenant.tenantId);
     expect(factsAfter.draft?.status).toBe('approved');
     expect(deriveOnboardingStatus(factsAfter).steps).toHaveLength(7);
+    expect(deriveOnboardingStatus(factsAfter).draft?.execution).toBe('pending');
 
     const audit = await pool.query(
       `SELECT event_type FROM audit_events WHERE tenant_id = $1 AND event_type LIKE 'onboarding.%' ORDER BY event_type`,

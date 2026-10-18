@@ -190,3 +190,32 @@ describe('OnboardingStatusResponseSchema', () => {
     expect(OnboardingStatusResponseSchema.parse(value)).toEqual(value);
   });
 });
+
+describe('OnboardingStatusResponseSchema — draft.execution', () => {
+  const steps = ['signup', 'identity', 'pack', 'phone', 'billing', 'ai_check', 'test_call'].map((id) => ({
+    id: id as 'signup',
+    status: 'pending' as const,
+  }));
+  const base = {
+    steps,
+    currentStep: 'identity' as const,
+    isComplete: false,
+    voiceAgentLive: false,
+    tenantId: '00000000-0000-0000-0000-000000000001',
+    subscriptionStatus: null,
+  };
+  const draft = { status: 'approved' as const, choicesAnswered: 7, version: 3 };
+
+  it.each(['pending', 'executing', 'executed', 'failed', null] as const)('parses execution %s', (execution) => {
+    expect(OnboardingStatusResponseSchema.parse({ ...base, draft: { ...draft, execution } }).draft?.execution).toBe(execution);
+  });
+
+  it('parses a draft without execution (older clients and fixtures)', () => {
+    expect(OnboardingStatusResponseSchema.safeParse({ ...base, draft }).success).toBe(true);
+  });
+
+  it('rejects an unknown execution value and a steps array that is not seven long', () => {
+    expect(OnboardingStatusResponseSchema.safeParse({ ...base, draft: { ...draft, execution: 'weird' } }).success).toBe(false);
+    expect(OnboardingStatusResponseSchema.safeParse({ ...base, steps: steps.slice(0, 6) }).success).toBe(false);
+  });
+});

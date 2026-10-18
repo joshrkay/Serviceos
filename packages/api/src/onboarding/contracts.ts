@@ -146,6 +146,15 @@ export const SubscriptionStatusSchema = z
   .nullable();
 export type SubscriptionStatusValue = z.infer<typeof SubscriptionStatusSchema>;
 
+/**
+ * Where the approved draft's two proposals are on their way to execution
+ * (derived on read, never stored): `pending` all approved and waiting for the
+ * worker, `executing` work in flight, `executed` all done, `failed` something
+ * the owner can only retry. See `deriveDraftExecution` (derive-status.ts).
+ */
+export const DRAFT_EXECUTION_STATES = ['pending', 'executing', 'executed', 'failed'] as const;
+export type DraftExecution = (typeof DRAFT_EXECUTION_STATES)[number];
+
 export const OnboardingStatusResponseSchema = z.object({
   steps: z.array(OnboardingStepSchema).length(7),
   currentStep: OnboardingStepIdSchema.nullable(),
@@ -169,6 +178,8 @@ export const OnboardingStatusResponseSchema = z.object({
       status: z.enum(['draft', 'approved']),
       choicesAnswered: z.number().int().min(0),
       version: z.number().int().positive(),
+      /** Additive: null while the draft is still being edited (or has nothing to track). */
+      execution: z.enum(DRAFT_EXECUTION_STATES).nullable().optional(),
     })
     .optional(),
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { deriveOnboardingStatus, type OnboardingFacts } from '../../src/onboarding/derive-status';
+import { deriveDraftExecution, deriveOnboardingStatus, type OnboardingFacts } from '../../src/onboarding/derive-status';
 
 function facts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
   return {
@@ -331,10 +331,72 @@ describe('deriveOnboardingStatus — pick-don\'t-build draft facts', () => {
   it('surfaces the draft additively and keeps exactly seven steps', () => {
     const r = deriveOnboardingStatus(facts({ draft: { status: 'draft', choicesAnswered: 3, version: 4 } }));
     expect(r.steps).toHaveLength(7);
-    expect(r.draft).toEqual({ status: 'draft', choicesAnswered: 3, version: 4 });
+    expect(r.draft).toEqual({ status: 'draft', choicesAnswered: 3, version: 4, execution: null });
   });
   it('omits draft when the tenant has none', () => {
     expect(deriveOnboardingStatus(facts({ draft: null }))).not.toHaveProperty('draft');
     expect(deriveOnboardingStatus(facts())).not.toHaveProperty('draft');
+  });
+});
+
+describe('deriveDraftExecution', () => {
+  const tracked = (statuses: string[], expected = 2) => ({ expected, statuses });
+
+  it.each([
+    [['approved', 'approved'], 'pending'],
+    [['approved', 'executing'], 'executing'],
+    [['executing', 'executing'], 'executing'],
+    // One half finished, the other still waiting for the worker: work is in flight.
+    [['executed', 'approved'], 'executing'],
+    [['executed', 'executing'], 'executing'],
+    [['executed', 'executed'], 'executed'],
+    // Failed wins over everything else.
+    [['execution_failed', 'approved'], 'failed'],
+    [['execution_failed', 'executing'], 'failed'],
+    [['execution_failed', 'executed'], 'failed'],
+    [['execution_failed', 'execution_failed'], 'failed'],
+    // States the owner can land in through the inbox; the shell must never wait forever on them.
+    [['undone', 'approved'], 'failed'],
+    [['expired', 'executed'], 'failed'],
+    [['rejected', 'approved'], 'failed'],
+    [['draft', 'approved'], 'failed'],
+    [['ready_for_review', 'executed'], 'failed'],
+  ])('approved draft with proposals %j is %s', (statuses, expected) => {
+    expect(deriveDraftExecution('approved', tracked(statuses))).toBe(expected);
+  });
+
+  it('a listed proposal that no longer exists (fewer rows than ids) is failed', () => {
+    expect(deriveDraftExecution('approved', tracked(['executed'], 2))).toBe('failed');
+    expect(deriveDraftExecution('approved', tracked([], 2))).toBe('failed');
+  });
+
+  it('an approved draft with nothing to track is null, never a vacuous executed', () => {
+    expect(deriveDraftExecution('approved', tracked([], 0))).toBeNull();
+    expect(deriveDraftExecution('approved', undefined)).toBeNull();
+  });
+
+  it('a draft still being edited has no execution state', () => {
+    expect(deriveDraftExecution('draft', tracked(['approved', 'approved']))).toBeNull();
+    expect(deriveDraftExecution('draft', undefined)).toBeNull();
+  });
+});
+
+describe('deriveOnboardingStatus — draft execution on the status', () => {
+  const approved = (statuses: string[]) =>
+    facts({ draft: { status: 'approved', choicesAnswered: 7, version: 3, proposals: { expected: 2, statuses } } });
+
+  it('carries execution in draft, keeps seven steps, and does not leak the raw statuses', () => {
+    const r = deriveOnboardingStatus(approved(['execution_failed', 'executed']));
+    expect(r.draft).toEqual({ status: 'approved', choicesAnswered: 7, version: 3, execution: 'failed' });
+    expect(r.draft).not.toHaveProperty('proposals');
+    expect(r.steps).toHaveLength(7);
+  });
+
+  it('does not change a single step id or status with or without the draft', () => {
+    const base = deriveOnboardingStatus(facts());
+    const withDraft = deriveOnboardingStatus(approved(['approved', 'approved']));
+    expect(withDraft.steps).toEqual(base.steps);
+    expect(withDraft.currentStep).toBe(base.currentStep);
+    expect(withDraft.draft?.execution).toBe('pending');
   });
 });
