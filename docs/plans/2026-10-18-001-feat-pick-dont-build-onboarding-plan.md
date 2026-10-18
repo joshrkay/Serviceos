@@ -131,7 +131,8 @@ unowned position.
   test that pins real columns. (Alternative: a web lane on mocks in parallel with the API,
   rejected: the integration cost lands later and larger.)
 - **The demo call is last and decision-gated.** It needs platform Twilio credentials, a
-  tenant-less public route, fixture tenants per trade, consent and rate limits. Screen 7's
+  tenant-less public route, a leased pool of demo tenants per trade (one live call per
+  tenant), consent and rate limits. Screen 7's
   in-app "hear it" delivers most of the value without telephony.
 
 ## Scope Boundaries
@@ -169,12 +170,16 @@ tiers; import from a photo; pricing or plan changes.
   read-back shows "Saving, tap to undo" for that window (the one tap is `POST /draft/undo`, U9;
   until it lands the screen says "Saving" with no button, as S2a shipped).
 - **Audit events:** `onboarding.draft_created`, `onboarding.choice_staged`,
-  `onboarding.draft_approved`, plus the existing proposal lifecycle events.
+  `onboarding.draft_approved`, plus the existing proposal lifecycle events. U8 adds
+  `invoice.payment_mode_unavailable` and reuses `invoice.payment_link_deactivated` with the
+  reason `payment_mode_changed`.
 - **Integer cents:** tier prices, trip fee and hourly rate are cents end to end; the price
   multiplier is applied in integer arithmetic with explicit rounding in one function.
 - **tenant_id + RLS:** `onboarding_drafts` carries `tenant_id` with RLS like
   `onboarding_session` (migration 195). `regional_price_tiers` and `demo_calls` are
-  platform tables with no `tenant_id`, admin-write only, the same posture as `tenants`.
+  platform tables with no `tenant_id`, admin-write only, the same posture as `tenants`;
+  `demo_tenant_leases` (U7) is the same kind of platform table, and its `tenant_id` only names
+  the demo tenant a call holds.
 - **LLM gateway:** the free-speech override calls the existing extractors through the gateway;
   the choice path makes no model call.
 - **Catalog resolver:** the trip fee and hourly rate land as catalog items via the pack
@@ -298,7 +303,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   is the assembled shop and the staged choices.
   `PUT /draft/choices/:settingKey` validates against the registry, stores `'a'|'b'|{override}`
   with a `version` compare-and-swap, emits `onboarding.choice_staged`. `POST /draft/approve`
-  runs in one tenant transaction: build exactly two proposals from the draft
+  runs in one tenant transaction (S1 shipped it without a version check or row lock; U11 adds
+  both): build exactly two proposals from the draft
   (`buildDraftProposals`: `onboarding_tenant_settings` carrying name, city, pack, chosen prices
   and timezone, and `onboarding_voice_policy` carrying the other staged settings; the
   draft-only `existing_number` answer is never written), create them with surface
@@ -312,6 +318,20 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   window; the one-tap undo of the whole approval, and holding onboarding until every generated
   proposal has executed, are U9. `onboarding_tenant_settings` needs timezone, so `POST /draft`
   records `clientTimezone` from the first request.
+- **Shipped in S1 (merged to `main`), and the gap it left:** the draft, choices and approve
+  API landed as described above, without one guard. `POST /draft/approve` takes no expected
+  version (the web client posts `{}`); `approveDraft` reads the draft with a plain `SELECT`,
+  not `FOR UPDATE` (the route pre-reads it unlocked too); and `markApproved` updates
+  `WHERE tenant_id = $1 AND status = 'draft'` with no version predicate, returning the
+  existing row when it matches nothing instead of failing. Two races follow. A choice `PUT`
+  that commits between proposal construction and `markApproved` leaves proposals built from
+  choices the approved draft no longer holds. Two concurrent approvals each mint and approve
+  their own pair inside their own request transaction; the loser's `markApproved` matches
+  nothing and returns the winner's row, yet the loser's request still commits (answering with
+  its own proposal ids while the draft records the winner's), so a second approved pair
+  exists and the execution worker runs it. S1 shipped without the lock; U11 closes both
+  races, and with it the repeat-tap contract changes from S1's no-op 200 to 409
+  `DRAFT_APPROVED`.
 - **Patterns to follow:** `db/onboarding-session-repository.ts` and migration 195 (RLS
   table), `routes/onboarding-conversation.ts` (owner-only route shape), `routes/proposals.ts`
   batch approve, `docs/solutions/logic-errors/whole-object-refine-mints-approve-to-fail-voice-proposals.md`
@@ -329,7 +349,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - Edge: approve with choices unanswered → each takes its `mostShops` default (option A
     today), no gated proposal minted; no recorded timezone → 400 `TIMEZONE_REQUIRED`, zero
     proposal rows, draft still `'draft'`; stale `version` on PUT → 409; approve twice → second
-    is a no-op 200 returning the same two ids.
+    is a no-op 200 returning the same two ids (as S1 shipped; U11 replaces this with 409
+    `DRAFT_APPROVED`).
   - Error: unknown `settingKey` → 400 naming the key; option `'c'` → 400; tenant without a
     draft calling approve → 404; non-owner → 403.
   - Integration: handler for `onboarding_voice_policy` writes `voice_greeting`,
@@ -412,16 +433,46 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `packages/api/src/routes/voice.ts` (`POST /api/voice/tts/batch`, `GET /api/voice/tts/clip/:hash`)
   - tests: `packages/api/test/routes/voice-tts-voice-param.test.ts`,
     `packages/api/test/ai/tts/clip-cache.test.ts`,
+    `packages/api/test/routes/voice-tts-batch.route.test.ts`,
+    `packages/api/test/onboarding/choices/registry-tts-caps.test.ts`,
     `packages/web/src/lib/option-matcher.test.ts`, `packages/web/src/hooks/useRivetVoice.test.ts`,
     `e2e/onboarding-v3-voice-webkit.spec.ts` (WebKit autoplay and mic spike)
 - **Approach:** Option-pair lines are static per trade and voice, so the server caches clips
   and the client prefetches the next turn's clips while the current one plays. The budget
-  matters: `POST /api/voice/tts` is limited to 20 requests per user per minute
-  (`routes/voice.ts`), and seven headings plus fourteen option clips would hit it for a fast
-  owner. So the prefetch asks for a whole turn at once (`POST /api/voice/tts/batch`: question
-  plus two options, one request, counted once) and cached clips are served by content hash from
-  `GET /api/voice/tts/clip/:hash`, which never counts (a miss falls back to the limited POST).
-  A full pass is eight counted requests, with a test that counts them. Output
+  matters, and the batch must not be a way around it. `POST /api/voice/tts` is limited to 20
+  clips per user per minute (`ttsLimiter` in `routes/voice.ts`, added in #1603 so each billable
+  clip is capped and no account becomes a free-text TTS proxy), and a turn of three clips every
+  few seconds would meet that for a fast owner, so the prefetch asks for a whole turn in one
+  request. The batch is bounded and charged per clip, never per request:
+  - **Bounded.** `POST /api/voice/tts/batch` is exactly one turn: the question plus at most
+    two option lines, so one to three items. Zod enforces each item at 1-240 characters
+    (trimmed), at most three items, and at most 600 characters in total; anything else is a 400
+    before any charge, cache lookup or provider call. The caps are sized from the registry
+    (`onboarding/choices/registry/*.ts`): the longest question is 61 characters (the schema
+    allows 140), the longest `rivetLine` template is 104 (the schema allows 260), and with the
+    longest substitutions (`{businessName}` up to 120, `{ownerFirstName}` up to 60) the longest
+    rendered line is 163 and the heaviest turn, the eighth, is 362 characters in all. 240 and
+    600 leave about 1.5x and 1.7x headroom. The schema ceilings are looser than the batch caps,
+    so the guard is a registry test that renders every trade's turns at the maximum name
+    lengths and fails the content PR that outgrows either cap. Lines outside the seven turns
+    (the Ready opener, the read-back, the trial and number lines) go through the single-clip
+    `POST /api/voice/tts`.
+  - **Charged per clip.** The batch resolves cache hits first (key `(voiceId, sha256(text))`),
+    then charges the caller's budget one unit per miss, before any provider call. The budget is
+    the one `ttsLimiter` already keeps (same per-user key, same `VOICE_TTS_PER_MIN`), exposed as
+    a `chargeTtsClips(req, n)` helper that `POST /tts` also calls with 1, so the cap lives in
+    one place. If the misses exceed what is left, it answers 429 `RATE_LIMITED` and synthesizes
+    nothing; cache hits cost nothing; each synthesized clip is audited as
+    `voice.tts.synthesized` with its own character count, as the single route does.
+  - **Free hash reads.** Cached clips are served by content hash from
+    `GET /api/voice/tts/clip/:hash`, which never charges and never synthesizes (a miss is a
+    404, and the client falls back to the charged POST).
+
+  The prefetch looks one turn ahead and no further, so a fast owner (a turn every ten seconds,
+  three uncached clips a turn) draws about 18 clips a minute, inside the 20. The first pass for
+  a (trade, voice) is the expensive one: later owners hit the cache for every line that embeds
+  no name or price. A 429 degrades that turn to `speechSynthesis`, never to a blocked turn. A
+  full pass is counted in clips, at most three per turn, with a test that counts them. Output
   fallback order: ElevenLabs clip → `speechSynthesis` → silent heading with type-in. Input:
   voice → tap (always rendered) → "Type instead". Option labels are passed to Deepgram as
   `keyterms`. The first clip plays from the "Make it mine" tap gesture to satisfy iOS autoplay,
@@ -436,6 +487,15 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     timers); token expires mid-turn → refreshed without dropping the recorder.
   - Error: TTS 5xx → `speechSynthesis` fallback and `tts_fallback` event; mic permission
     denied → tap-only mode with no error banner, `answer_mode='tap'`.
+  - Batch limits (the provider-spend guard): an item over 240 characters → 400, nothing
+    charged, nothing synthesized; four items → 400; three items under 240 each but over 600 in
+    total → 400; an empty or whitespace-only item → 400; a three-item turn at the caps → 200.
+    Charging: three uncached items charge three units; the same turn again charges zero (every
+    clip a cache hit); one cached and two uncached items charge two; a turn whose misses exceed
+    the remaining budget → 429 with no provider call and no partial charge; the single
+    `POST /tts` and the batch draw from one per-user budget (twenty single clips leave a batch
+    with nothing). Registry: every trade's turns, rendered at the maximum name lengths, stay
+    within 240 per item and 600 per turn.
   - Integration: WebKit Playwright run proves autoplay after gesture and `audio/mp4` upload
     accepted by the Deepgram stream.
 - **Verification:** on iOS Safari and Android Chrome, Rivet speaks in the chosen voice,
@@ -699,7 +759,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Files:**
   - modify `packages/api/src/routes/onboarding-draft.ts` (`POST /draft/undo`, `POST /draft/retry`),
     `packages/api/src/onboarding/draft/approve.ts` (undo and retry helpers),
-    `packages/api/src/onboarding/draft/repository.ts` (read the draft `FOR UPDATE`),
+    `packages/api/src/onboarding/draft/repository.ts` (reuse the draft `FOR UPDATE` read U11 adds),
     `packages/api/src/proposals/proposal.ts` and `pg-proposal.ts` (`ProposalRepository` gains a
     locking read of a proposal set by id, ordered, `FOR UPDATE`; the in-memory repo implements
     it as a plain ordered read),
@@ -756,12 +816,102 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   tap inside the window undoes the whole approval, and a tap that loses the race to the worker
   changes nothing.
 
+### U11. Approval compare-and-swap and row lock
+- **Goal:** "That's right" approves exactly the choices the owner was looking at, exactly once.
+  A choice `PUT` racing an approval cannot change what is executed, and two concurrent
+  approvals cannot both mint a proposal pair. Closes the gap S1 shipped with (see U2).
+- **Requirements:** R3
+- **Dependencies:** U2 (S1, merged). Lands first in S4: U9's undo reuses the locked read.
+- **Files:**
+  - modify `packages/api/src/onboarding/draft/contracts.ts` (`ApproveDraftBodySchema`:
+    `{ expectedVersion }`, a positive integer, strict) and
+    `packages/shared/src/contracts/onboarding-draft.ts` (`ApproveOnboardingDraftBodySchema`),
+    kept equal by `packages/api/test/onboarding/draft/wire-contract.test.ts` (extend)
+  - modify `packages/api/src/onboarding/draft/repository.ts` (`getForUpdate(tenantId)`: the
+    draft `SELECT … FOR UPDATE`; `markApproved(tenantId, proposalIds, expectedVersion)` becomes
+    `UPDATE … WHERE id = $1 AND status = 'draft' AND version = $2` and throws
+    `DraftVersionConflictError` or `DraftAlreadyApprovedError` when it matches nothing instead
+    of returning the existing row; the in-memory repository mirrors both)
+  - modify `packages/api/src/onboarding/draft/approve.ts` (`approveDraft` takes
+    `expectedVersion`, locks first, and builds from the locked row)
+  - modify `packages/api/src/routes/onboarding-draft.ts` (`POST /draft/approve` validates the
+    body and drops its own unlocked pre-read; maps the typed errors to 409 `VERSION_CONFLICT`
+    and 409 `DRAFT_APPROVED`, the codes `PUT /draft/choices/:settingKey` already uses)
+  - modify `packages/web/src/lib/onboardingDraftApi.ts` and
+    `packages/web/src/hooks/useOnboardingDraft.ts` (`approve` sends the draft's `version`)
+  - tests: `packages/api/test/onboarding/draft/approve.test.ts` (extend),
+    `packages/api/test/routes/onboarding-draft.route.test.ts` (extend),
+    `packages/api/test/integration/onboarding-draft-approve-concurrency.test.ts`,
+    `packages/web/src/hooks/useOnboardingDraft.test.ts` (extend)
+- **Approach:** `POST /draft/approve` takes `{ expectedVersion }`, the `version` of the draft
+  the read-back was rendered from. The first statement of the approve transaction is
+  `getForUpdate`. `withTenant` reuses the request-scoped client, so the row lock is held until
+  the response commits or rolls back, and every other writer of the row waits behind it:
+  `stageChoice` and `setClientTimezone` already take `FOR UPDATE` first, so a `PUT` that
+  arrives during an approval blocks, then finds the draft approved and gets `DRAFT_APPROVED`;
+  a `PUT` that took the lock first has bumped `version`, so the approval gets
+  `VERSION_CONFLICT`. Under the lock, in this order: no row → 404; `status = 'approved'` →
+  409 `DRAFT_APPROVED` (whatever the version); `version <> expectedVersion` → 409
+  `VERSION_CONFLICT` naming expected and found. Both refusals happen before anything is
+  minted, so they leave no proposal rows. Only then does `buildDraftProposals` run, from the
+  locked row and never from an earlier read, followed by the mint, the batch approve and the
+  `failed.length` gate exactly as U2 describes. `markApproved` is the second guard, not the
+  first: `UPDATE … WHERE id = $1 AND status = 'draft' AND version = $2`, and zero rows throws,
+  so a response and a draft row can never name different proposal ids. Any throw is a ≥ 400,
+  and the request transaction rolls back the minted proposals and their approvals. Inside one
+  transaction the lock makes that branch unreachable; it stays so the guarantee does not rest
+  on every future caller remembering the lock, and the in-memory repository enforces the same
+  predicate. Web: `useOnboardingDraft.approve` reads the version from the draft at run time (the
+  hook's write queue already serialises it behind staged choices) and sends it. It already
+  re-reads on a 409; a `VERSION_CONFLICT` shows the existing one-line "your answers changed
+  somewhere else" notice and the owner re-taps on the refreshed read-back (U3 renders it), and
+  a `DRAFT_APPROVED` whose re-read shows `status = 'approved'` is success, not an error: the
+  shell moves on to "Saving" with the proposal ids the draft carries. That covers a double tap
+  and a retry after a lost response.
+- **Patterns to follow:** `stageChoice` in `onboarding/draft/repository.ts` (lock, then
+  compare, then write), U9's lock-then-decide-then-write undo, and
+  `test/integration/onboarding-draft-repository.test.ts` for real-connection setup.
+- **Test scenarios:**
+  - Happy path: stage choices, approve with the draft's current version → two proposals, draft
+    `approved`, `version` up by one, one `onboarding.draft_approved` row (U2's happy path, now
+    with the version sent).
+  - Edge (stale version): `expectedVersion` behind the row (a `PUT` landed after the read-back
+    rendered) → 409 `VERSION_CONFLICT`, zero proposal rows, draft still `'draft'` with its
+    choices as the `PUT` left them, no `draft_approved` audit row; `expectedVersion` ahead of
+    the row → the same; missing or non-integer `expectedVersion` → 400 naming the field.
+  - Edge (already approved): approve again with any version → 409 `DRAFT_APPROVED`, still
+    exactly two proposal rows for the tenant and no new audit row.
+  - Race, `PUT` vs approve (two real connections, both orders): (a) the `PUT` takes the lock
+    and commits first, then the approve that carries the pre-`PUT` version → `VERSION_CONFLICT`,
+    no proposals, the staged choice is on the draft; (b) the approve takes the lock first and
+    commits, and the `PUT` that was waiting → `DRAFT_APPROVED`, and the draft's resolved choices
+    equal, field by field, the payloads of the two proposals that executed. Never: a proposal
+    payload that differs from the committed draft's resolved choices.
+  - Race, approve vs approve (two connections, same `expectedVersion`, repeated in a loop so
+    ordering luck cannot pass it): exactly one returns 200 and the other 409 `DRAFT_APPROVED`;
+    afterwards exactly one pair of `onboarding_*` proposals exists for the draft (counted by
+    `source_context.draftId`), its ids equal the draft's `proposal_ids`, and the loser's
+    response carries no ids.
+  - Unit: `markApproved` with a stale version, or on a non-`draft` status, throws and writes
+    nothing, identically in the Pg and in-memory repositories; `approveDraft` builds from the
+    row `getForUpdate` returned (a repo double that changes the row after an earlier read proves
+    the earlier read is unused).
+  - Web: `approve` sends the hook's current version; a 409 `VERSION_CONFLICT` re-reads and sets
+    the notice; a 409 `DRAFT_APPROVED` whose re-read is `approved` resolves as success and
+    leaves no error; a double tap sends one request.
+  - Integration: all of the races above on real Postgres under RLS, in
+    `packages/api/test/integration/`, as CLAUDE.md requires for a DB-touching change.
+- **Verification:** no interleaving of choice writes, a timezone write and one or more
+  approvals yields proposals that differ from the approved draft's resolved choices, or more
+  than one proposal pair per draft.
+
 ### U8. Runtime consumers for the policy keys the cards write
 - **Goal:** Every card's promise is behaviour, not a stored value. `payment_collection_mode`
   decides whether an issued invoice goes out with a pay link ("Text them a pay link") or is
   marked collect-on-site with no link ("Collect on the spot"), and what Rivet answers when a
   caller asks how to pay; `emergency_target` decides the emergency hand-off (owner cell, or
-  owner cell then a text) in the voice hand-off path.
+  owner cell then a text) in the voice hand-off path. Switching to collect-on-site also retires
+  the pay links already minted or texted, so the policy holds for old URLs as well as new ones.
 - **Requirements:** R2
 - **Dependencies:** U2
 - **Files:**
@@ -773,30 +923,122 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     (`packages/api/src/routes/public-invoices.ts`, `invoices/public-invoice-service.ts`) and
     the portal's link generation in `packages/api/src/routes/public-portal.ts` (refuse with
     409 `COLLECT_ON_SITE`, and omit the pay button from the public invoice and portal pages)
+  - the mode-change path: create `packages/api/src/invoices/payment-mode-change.ts`
+    (`onPaymentCollectionModeChanged`, called after the write by both write sites of the key,
+    the `onboarding_voice_policy` handler in `proposals/execution/onboarding-handlers.ts` and
+    `PATCH /api/settings` in `routes/settings.ts`) and
+    `packages/api/src/workers/deactivate-payment-links.ts` (the queue handler, registered in
+    `app.ts`); modify `packages/api/src/invoices/invoice-payment-link.ts` (a
+    `payment_mode_changed` reason on `deactivateInvoicePaymentLink`),
+    `packages/api/src/payments/payment-link-provider.ts` and `stripe-payment-link.ts`
+    (`deactivateLink` accepts an optional customer-facing inactive message), and
+    `packages/api/src/invoices/invoice.ts` with `pg-invoice.ts` (`InvoiceRepository` gains
+    `findOpenWithPaymentLink(tenantId, afterId, limit)`)
   - modify the voice answer for payment questions and the emergency hand-off in
     `packages/api/src/voice/` (exact modules named at implementation; patterns:
     `voice/triage/context-preface.ts`, `voice/call-me-back/call-me-back.ts`)
   - tests: `packages/api/test/invoices/payment-collection-mode.test.ts`,
+    `packages/api/test/workers/deactivate-payment-links.test.ts`,
     `packages/api/test/voice/emergency-target.handler.test.ts` (mocked gateway/repos),
-    `packages/api/test/integration/payment-collection-mode.test.ts`
-- **Approach:** Read both keys through `SettingsRepository` at the point of behaviour, default
-  to today's behaviour when unset (pay link; owner cell), so tenants that never answered the
-  cards are unchanged. Audit the invoice send with the mode used.
+    `packages/api/test/integration/payment-collection-mode.test.ts`,
+    `packages/api/test/integration/payment-link-mode-switch.test.ts`
+- **Approach:** Read both keys through `SettingsRepository` at the point of behaviour. The
+  default (pay link; owner cell) applies only to a read that succeeds and finds the key unset
+  (D-039/D-040: an absent key means the default), so tenants that never answered the cards are
+  unchanged. A read that throws is not an unset key; see Read failures. Audit the invoice send
+  with the mode used.
+- **Read failures.** For `payment_collection_mode`, an error never becomes `pay_link`: a
+  failed read is no evidence of the approved policy, and defaulting would mint or send a
+  checkout link for an owner who chose "Collect on the spot". The consumer fails closed on the
+  link and open on delivery. An invoice that is otherwise due to go out still goes out, with no
+  link minted, none stored, none in the message, and no pay button on the public invoice or
+  portal page; `POST /public/invoices/:token/checkout` answers 503 `PAYMENT_MODE_UNAVAILABLE`
+  (retryable, distinct from the policy refusal 409 `COLLECT_ON_SITE`). Each occurrence is logged
+  and audited as `invoice.payment_mode_unavailable` (reason `payment_mode_unavailable`) with the
+  invoice id and the surface (send, public page, portal, checkout). Nothing is cached across the
+  failure: the next send or page open reads again, and a link is minted, on demand by the
+  existing pay-now flows, only after a read that succeeds and says `pay_link`. For
+  `emergency_target` a failed read falls back to ringing the owner's cell, the one choice that
+  still reaches a person, and records the same kind of event.
+- **Mode change.** `payment_collection_mode` is mutable (U2), and a Stripe Payment Link is a
+  direct hosted URL: invoices persist it (`stripe_payment_link_url`), customers receive it by
+  text, and it stays chargeable until it is deactivated at Stripe. Hiding the button, or
+  switching the mode, does not disable it. The invoice lifecycle already deactivates such links
+  when an invoice leaves the payable world (`deactivateInvoicePaymentLink` in
+  `invoices/invoice-payment-link.ts`: voided, canceled, settled, repriced); U8 adds the same for
+  a policy change. After the write, both write sites call one function; when the stored value
+  moved from `pay_link` or unset to `collect_on_site` it enqueues a `deactivate_payment_links`
+  job (`{ tenantId }`, idempotency key `deactivate-payment-links:<tenantId>:<settings
+  updated_at>`) on the queue, the P0-009 async-worker pattern `provision-twilio` uses. No Stripe
+  call therefore runs inside a settings request or a proposal execution, and a Stripe outage
+  cannot fail a settings write. The handler re-reads the mode first and does nothing if it is
+  no longer `collect_on_site` (the owner switched back before the job ran). Otherwise it pages
+  through the tenant's `open` and `partially_paid` invoices that hold a link
+  (`findOpenWithPaymentLink`) and calls `deactivateInvoicePaymentLink` on each with the new
+  reason `payment_mode_changed`. That helper deactivates the link at Stripe under whichever
+  account scope minted it, clears the columns only while they still hold that link, and audits
+  each invoice (`invoice.payment_link_deactivated`, or `_deactivation_failed` with the columns
+  kept); one tenant-level event records the counts. If any invoice failed, the job throws after
+  the batch so the queue retries only what is left: a cleared invoice no longer qualifies,
+  which is also what makes a re-run safe. The job schedules one more pass of itself two minutes
+  later (`delaySeconds`) to catch a link whose mint read `pay_link` just before the switch
+  committed. Switching back to `pay_link` needs nothing: the pay-now flows mint a fresh link on
+  demand once the columns are empty.
+- **What an already-sent link shows.** The deactivation call also sets the link's customer-
+  facing inactive message at Stripe (the Payment Link `inactive_message` field, sent in the same
+  update as `active: false`): "{businessName} collects payment in person. Please settle up with
+  {ownerFirstName} when the work is done." A customer who opens a text from last week then reads
+  "pay on site", not a generic dead-link page. Confirm the field on the pinned Stripe API
+  version at implementation; if it is unavailable, the hosted page is Stripe's own inactive
+  page, and the invoice text and public invoice page (which U8 already switches to the
+  collect-on-site message) carry the explanation. PaymentIntents from a pay page that was
+  already open are outside this job: they are not standing URLs, and
+  `cancelInvoicePaymentIntents` exists if the founder wants them cancelled too.
 - **Patterns to follow:** D-039/D-040 (absent key = default), the existing invoice send
-  handlers in `proposals/execution/handlers.ts`.
+  handlers in `proposals/execution/handlers.ts`, `deactivateInvoicePaymentLink` in
+  `invoices/invoice-payment-link.ts` (best-effort, audited, CAS clear), and
+  `workers/provision-twilio.ts` (a queue handler with an idempotent enqueue).
 - **Test scenarios:**
   - Happy path: `collect_on_site` → issued invoice has no pay link and the customer message
     says the tech collects on site; the public invoice page and portal show no pay button and
     `POST /public/invoices/:token/checkout` answers 409; `pay_link` → unchanged behaviour.
     `owner_cell_then_text` → hand-off rings the owner, then texts on no answer.
-  - Edge: key unset → today's behaviour; mode changed between issue and send → the value at
-    send time wins, audited.
-  - Error: settings read fails → fall back to default and record an event, never block the
-    invoice.
+  - Edge: key unset (a successful read of an absent key) → `pay_link` and the owner cell, so
+    an unanswered tenant is unchanged; set to `collect_on_site` → no link minted, none stored,
+    none in the message; mode changed between issue and send → the value at send time wins,
+    audited.
+  - Error (read failure): the settings read throws → delivery continues where it would have,
+    but the Stripe provider fake is never called, no link is stored or put in the message, the
+    public invoice and portal pages render no pay button, `POST /public/invoices/:token/checkout`
+    answers 503 `PAYMENT_MODE_UNAVAILABLE`, and `invoice.payment_mode_unavailable` is audited
+    (assert the error is never read as `pay_link`); the next send after the read recovers mints
+    a link only when the mode says `pay_link`. `emergency_target` read error → the owner's cell
+    is rung and the event recorded.
+  - Mode change (links deactivated on switch): a tenant with an `open` and a `partially_paid`
+    invoice that each hold a link, plus a paid invoice with cleared columns; the
+    `onboarding_voice_policy` handler writes `collect_on_site` over `pay_link`, and separately
+    `PATCH /api/settings` does → one job enqueued per switch. Running it deactivates exactly the
+    two live links (the provider fake receives `deactivateLink` with the minting account scope
+    and the inactive message), clears their columns, and audits one
+    `invoice.payment_link_deactivated` per invoice with reason `payment_mode_changed`; the paid
+    invoice is untouched.
+  - Mode change (no-op when none): a tenant with no live links → the job succeeds, the provider
+    is not called, no per-invoice events; a switch back to `pay_link` before the job runs → the
+    job re-reads the mode and does nothing; a switch from unset, or `collect_on_site` written
+    over `collect_on_site`, enqueues nothing.
+  - Mode change (idempotent re-run): running the job twice, and enqueueing it twice under one
+    idempotency key, makes no second provider call and writes no second audit row for an
+    invoice already cleared; one invoice whose Stripe call fails keeps its columns and is
+    audited as failed, the others are still deactivated, the job throws, and the retry touches
+    only the failed one; a link minted by a racing request just after the first pass is
+    deactivated by the delayed second pass.
   - Integration: a tenant with `collect_on_site` issues an invoice against real Postgres and the
-    stored message carries no link.
+    stored message carries no link; `findOpenWithPaymentLink` returns only `open` and
+    `partially_paid` rows that hold a link, tenant-scoped under RLS and paged.
 - **Verification:** picking a card changes what the customer receives and what Rivet says, with
-  a behaviour test per key, before the card copy is allowed to promise it.
+  a behaviour test per key, before the card copy is allowed to promise it; a pay link texted
+  before a switch to collect-on-site no longer charges once the job has run; and a failed mode
+  read never produces a link.
 
 ### U7. Pre-signup "hear it answer" demo call (decision-gated)
 - **Goal:** A visitor enters a cell and trade on the landing page, receives a sixty-second
@@ -805,9 +1047,22 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Dependencies:** U2, U4; voice-parity U3 for the preset voice on the call
 - **Files:**
   - modify `packages/api/src/integrations/credentials.ts` (explicit `PLATFORM_TWILIO_*`)
-  - create `packages/api/src/demo/{routes,service,script}.ts`, migration `313_demo_calls`
-    (phone hash, trade, name, call_sid, status, lead_id; no `tenant_id`)
-  - create fixture tenants per trade via a seed script `packages/api/scripts/seed-demo-tenants.ts`
+  - create `packages/api/src/demo/{routes,service,script,lease,reset}.ts`, migration
+    `313_demo_calls` (phone hash, trade, name, call_sid, status, lead_id; no `tenant_id`); the
+    same migration adds `demo_tenant_leases` (see Approach) and
+    `tenants.demo BOOLEAN NOT NULL DEFAULT false`
+  - create the demo tenant pool per trade, each tenant cloned from that trade's fixture, via a
+    seed script `packages/api/scripts/seed-demo-tenants.ts` (idempotent; pool size
+    `DEMO_POOL_PER_TRADE`, default 3)
+  - create `packages/api/src/workers/demo-lease-reaper.ts` (a leader-gated P0-009 sweep that
+    reclaims expired leases and finishes interrupted resets); extract the `information_schema`
+    table walk that `tenants/deprovision.ts` uses to purge a tenant into a shared helper that
+    `demo/reset.ts` reuses
+  - modify every sweep and report that lists tenants so it excludes `tenants.demo` (found by
+    grepping `FROM tenants` and the tenant lister under `workers/`, `billing/`, `analytics/`
+    and `metrics/`; at least `workers/setup-reminder-sweep.ts`, `trial-reminder-sweep.ts`,
+    `dunning-sweep.ts`, `money-reconciliation.ts`, `overage-settlement-reconciliation.ts` and
+    `billing/call-usage-billing.ts`), and the platform-admin tenant list
   - modify `packages/api/src/app.ts` (public route with the `/public` IP limiter at :839),
     `packages/api/src/shared/rate-limit/phone-rate-limit.ts` (platform sentinel tenant, one
     call per number per day), `packages/api/src/flags/voice-flags.ts` (kill switch)
@@ -818,12 +1073,52 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `components/public/HearItAnswer.tsx`; modify `packages/web/src/components/auth/SignupPage.tsx`
     (forward the handoff token) and the Clerk signup webhook handler in `packages/api/src/`
     (copy it onto the tenant)
-  - tests: `packages/api/test/demo/{service,routes,limits}.test.ts`,
-    `packages/api/test/integration/demo-calls.test.ts`, `e2e/hear-it-answer.spec.ts`
+  - tests: `packages/api/test/demo/{service,routes,limits,lease,reset}.test.ts`,
+    `packages/api/test/integration/demo-calls.test.ts`,
+    `packages/api/test/integration/demo-tenant-leases.test.ts`,
+    `packages/api/test/integration/demo-tenants-excluded.test.ts`, `e2e/hear-it-answer.spec.ts`
 - **Approach:** The outbound leg dials the visitor from the platform number and connects it
-  to the real inbound turn processor running against a per-trade fixture tenant, so the
-  visitor hears exactly what customers will. A canned `<Say>/<Gather>` script is the fallback
-  if fixture tenants prove awkward. Consent line first; two-layer rate limits; daily spend cap;
+  to the real inbound turn processor running against a demo tenant leased to that one call, so
+  the visitor hears exactly what customers will, and no one else's details. A canned
+  `<Say>/<Gather>` script is the fallback if the demo tenant pool proves awkward.
+- **One live call per tenant.** The turn processor writes real rows (sessions, messages, a
+  booking, proposals, a customer), so two concurrent visitors on one tenant would hear each
+  other's details and land jobs on a shared account, and the per-number rate limit does nothing
+  about that. Isolation is a lease, not a limit. Per trade there is a small pool of demo
+  tenants (`tenants.demo = true`, each cloned from the trade's fixture). Every call takes
+  exactly one, as the first write of the request, by inserting a `demo_tenant_leases` row
+  (`id`, `tenant_id`, `visitor_phone_hash`, `call_sid`, `leased_at`, `expires_at`,
+  `released_at`) in one transaction: the tenant is picked `FOR UPDATE SKIP LOCKED` among the
+  trade's demo tenants with no active lease, and a partial unique index on `tenant_id WHERE
+  released_at IS NULL` is the backstop, so two callers can never hold one tenant (a second, on
+  `visitor_phone_hash` under the same predicate, stops one visitor holding two). `expires_at`
+  is the call start plus the longest a demo can run: the call is created with a Twilio ring
+  `Timeout` of 30 s and a `TimeLimit` of 90 s, and the lease adds 30 s of grace, 150 s in all,
+  so a lease cannot lapse under a live call. The inbound turn processor gets its tenant from the
+  lease found by the call's `call_sid`, never from a trade-level lookup. `call_sid` is filled
+  in once Twilio creates the call; a Twilio failure releases the lease at once.
+- **Release and reset.** The call-status callback (completed, failed, busy, no-answer,
+  canceled) and the reaper (every 30 s, for leases past `expires_at`) run the same reset and
+  only then set `released_at`, so the lease stays active, and the tenant unleasable, until the
+  tenant is clean. Reset deletes the tenant's rows from every table that carries a `tenant_id`
+  (the deprovision table walk, so a table added later is purged by default) except the tenant
+  row and an explicit keep-list, which holds the append-only audit trail (it stays, flagged by
+  `tenants.demo`), and deletes the tenant's stored objects the way a purge does; then it
+  re-seeds settings, catalog and templates from the fixture with the clone function the seed
+  script uses. A reset that fails leaves the lease active, alerts, and is retried by the
+  reaper: that tenant stays out of the pool and is never leased dirty.
+- **Pool exhausted.** When no demo tenant of the trade is free, the request is refused up front
+  with 503 `DEMO_BUSY` and the page says "Every line is busy. Try again in a minute."; nothing
+  is written (no lease, no `demo_calls` or lead row, no call, and the visitor's one-call-a-day
+  allowance is not spent). A call that is answered after its lease was reclaimed speaks the
+  same line and hangs up, again writing nothing. Pool size is the concurrency ceiling; the kill
+  switch and the daily spend cap still apply.
+- **Never visible to owners.** Demo tenants have no `users` rows, no Clerk organisation, no
+  Stripe customer or subscription and no Twilio subaccount, so no owner, dispatcher or billing
+  surface can reach one. Every sweep, report and analytics query that lists tenants excludes
+  `tenants.demo`, funnel and product analytics drop events from demo tenants, and the
+  platform-admin tenant list hides them behind an explicit filter.
+- **Consent, limits, handoff.** Consent line first; two-layer rate limits; daily spend cap;
   a lead row in a platform marketing tenant. The signup SMS link carries a signed, single-use
   handoff token (HMAC over `lead_id` and an expiry). Migration 313 also adds a platform table
   `signup_handoffs(token_hash PK, lead_id, tenant_id NULL, expires_at, consumed_at)`:
@@ -841,25 +1136,53 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     row, lead row, signup SMS after hang-up.
   - Edge: same number twice in a day → 429 with a friendly message; premium or non-NANP
     number → 400; kill switch on → 503 and the landing CTA hides.
-  - Error: Twilio 5xx → row `status='failed'`, no SMS, no lead; handoff token reused or
+  - Error: Twilio 5xx → row `status='failed'`, lease released, no SMS, no lead; handoff token reused or
     expired → ignored, the shell asks for name and trade.
+  - Isolation (two concurrent callers get distinct tenants): two real connections leasing for
+    the same trade, repeated in a loop → distinct demo tenants, and rows one call wrote are not
+    visible under the other's tenant; a pool of N with N+1 concurrent callers → exactly one is
+    refused.
+  - Isolation (exhausted pool refuses without writes): all of a trade's demo tenants leased →
+    503 `DEMO_BUSY` with the busy copy, and no lease, `demo_calls`, lead or SMS row, no call
+    placed, the visitor's daily allowance unspent; a call answered after its lease was
+    reclaimed speaks the busy line, hangs up and writes nothing.
+  - Isolation (reset on release): after a call that created a session, messages, a booking, a
+    proposal and a customer, release → every `tenant_id` table is back to a freshly cloned
+    tenant's row counts (audit excepted) and settings, catalog and templates equal the
+    fixture; the lease is released only after the reset; a failing reset keeps the lease active
+    and the tenant out of the pool until the reaper's retry succeeds.
+  - Isolation (expired lease reclaimed): a lease past `expires_at` with no status callback →
+    the reaper resets, releases and the tenant is leasable again; an unexpired lease is never
+    reclaimed.
   - Integration: `demo_calls` has no `tenant_id` and is not subject to RLS; rate limiter keyed
-    to the sentinel tenant persists across restarts.
+    to the sentinel tenant persists across restarts; `demo_tenant_leases` rejects a second
+    active lease on one tenant (and on one visitor hash) at the partial unique index; a demo
+    tenant with an open invoice, an expired trial and an unfinished setup is selected by no
+    tenant-listing sweep or report, and a guard test fails when a `FROM tenants` listing under
+    `workers/` or `billing/` neither filters `demo` nor is allow-listed.
 - **Verification:** cost per completed demo call measured in staging before the landing CTA
-  ships; founder decision recorded in `docs/decisions.md`.
+  ships; a staging run of concurrent demo calls on one trade shows distinct tenants and a clean
+  tenant after each; founder decision recorded in `docs/decisions.md`.
 
 ## Risks & Dependencies
 
 - **Two sources of truth (draft vs proposals).** The draft is the only pre-approval state;
-  mint and approve happen in one transaction; `version` CAS rejects stale tabs.
+  mint and approve happen in one transaction that locks the draft row and checks
+  `expectedVersion` (U11, closing the unlocked approve S1 shipped), and `version` CAS rejects
+  stale tabs on choice writes.
 - **Browser voice on real devices.** Tap is first-class everywhere, `answer_mode` is measured
   per turn, U4 spikes WebKit before U3 depends on it.
 - **Regional prices wrong or read as advice.** Founder-curated rows, "typical" copy, prices
   land only through approval and remain editable catalog items.
 - **Status contract drift.** Additive facts only; `.length(7)` preserved; pinned by extending
   `packages/api/test/onboarding/derive-status.test.ts` and the integration status test.
-- **Demo call cost, abuse, TCPA.** Phased last, consent first, two-layer limits, kill switch,
-  spend cap.
+- **Demo call cost, abuse, TCPA, cross-visitor leakage.** Phased last, consent first, two-layer
+  limits, kill switch, spend cap; every live call holds its own demo tenant by lease and the
+  tenant is reset before anyone else can lease it (U7).
+- **Stale pay links after a policy switch, and a failed mode read.** A texted Stripe Payment
+  Link stays chargeable until deactivated, so switching to collect-on-site queues deactivation
+  of every live link on open invoices; a failed read of the mode never defaults to `pay_link`
+  (U8).
 - **Voice-parity coupling.** Scenario turns (U9), voice preview persistence (U3) and verified
   test booking (U6) are rendered from existing facts until those units land; nothing in U1-U6
   blocks on them.
@@ -884,9 +1207,9 @@ previous one; the previous slice is merged first.
 | S1 | U1 + U2 | Choice registry, typical-shop assembly, regional tiers, draft/choices/approve API, `onboarding_voice_policy` proposal. Live API, integration-tested, no UI yet. | 7-10 days |
 | S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
-| S4 | U5 + U9 + U10 | Free-speech override, setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); whole-draft undo (row-locked, all-or-nothing), execution tracking and retry; the owner's cell on the draft and the settings proposal. | 5-6 days |
-| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search, forwarding text with owner confirmation and probe, forwarding answers on the draft and the settings proposal, seeded-price baseline with legacy backfill and the re-run repricing gate, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target`, flag flipped, v2 deleted. | 8-10 days |
-| S6 | U7 | Pre-signup demo call (founder decision first). | 6-9 days |
+| S4 | U5 + U9 + U10 + U11 | Approval compare-and-swap and row lock (`expectedVersion`, locked read, guarded `markApproved`; first in the slice, U9 reuses its locked read); free-speech override, setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); whole-draft undo (row-locked, all-or-nothing), execution tracking and retry; the owner's cell on the draft and the settings proposal. | 5.5-6.5 days |
+| S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search, forwarding text with owner confirmation and probe, forwarding answers on the draft and the settings proposal, seeded-price baseline with legacy backfill and the re-run repricing gate, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, no link on a failed mode read), flag flipped, v2 deleted. | 9-11 days |
+| S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, reset before reuse and excluded from owner, billing and analytics surfaces. | 7-10 days |
 
 Serial by construction: one engineer, nine to twelve weeks for S1-S5; S6 adds about two. A
 second engineer shortens S2 and S3 only where the API they depend on is already merged.
