@@ -30,6 +30,13 @@ import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import { withTenantTransaction } from '../../src/middleware/tenant-context';
 import type { ApprovalReferenceCheck } from '../../src/proposals/approval-reference-checks';
 import { UNDO_WINDOW_MS, isInUndoWindow } from '../../src/proposals/lifecycle';
+import { ProposalExecutor } from '../../src/proposals/execution/executor';
+import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
+import { PgIdempotencyLockProvider } from '../../src/proposals/execution/idempotency-lock';
+import { PgProposalExecutionRepository } from '../../src/proposals/pg-proposal-execution';
+import type { ExecutionHandler } from '../../src/proposals/execution/handlers';
+import { runExecutionSweep } from '../../src/workers/execution-worker';
+import type { Logger } from '../../src/logging/logger';
 
 const CREATE = {
   packId: 'plumbing',
@@ -393,6 +400,89 @@ describe('onboarding draft execution state (real DB)', () => {
       tenant = theirTenant;
       expect(await row(theirs[0])).toEqual(theirsBefore);
       expect(await auditCounts()).toEqual(theirAuditBefore);
+    });
+  });
+
+  describe('fail, retry, succeed through the real executor and sweep', () => {
+    const silentLogger: Logger = {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+      child: () => silentLogger,
+    };
+
+    /** Records every run; the tenant-settings handler fails (returns success:false) until told otherwise. */
+    function buildExecutor() {
+      const runs: string[] = [];
+      let settingsFails = true;
+      const handler = (proposalType: 'onboarding_tenant_settings' | 'onboarding_voice_policy'): ExecutionHandler => ({
+        proposalType,
+        async execute(p) {
+          runs.push(p.id);
+          if (proposalType === 'onboarding_tenant_settings' && settingsFails) return { success: false, error: 'PACK_ACTIVATION_IN_PROGRESS' };
+          return { success: true, resultEntityId: p.id };
+        },
+      });
+      const executionRepo = new PgProposalExecutionRepository(pool);
+      const guard = new IdempotencyGuard(executionRepo, proposalRepo, new PgIdempotencyLockProvider(pool));
+      const executor = new ProposalExecutor(
+        new Map<string, ExecutionHandler>([
+          ['onboarding_tenant_settings', handler('onboarding_tenant_settings')],
+          ['onboarding_voice_policy', handler('onboarding_voice_policy')],
+        ]) as ConstructorParameters<typeof ProposalExecutor>[0],
+        proposalRepo,
+        guard,
+        new PgAuditRepository(pool),
+        { executionRepo },
+      );
+      return { executor, executionRepo, runs, healSettings: () => { settingsFails = false; } };
+    }
+
+    const sweep = (executor: ProposalExecutor) =>
+      runExecutionSweep({ proposalRepo, executor, logger: silentLogger, auditRepo: new PgAuditRepository(pool) });
+    const pastWindow = (id: string) =>
+      pool.query(`UPDATE proposals SET approved_at = NOW() - interval '1 hour' WHERE tenant_id = $1 AND id = $2`, [tenant.tenantId, id]);
+    const stored = async (id: string) =>
+      (await pool.query<{ status: string }>(`SELECT status FROM proposals WHERE tenant_id = $1 AND id = $2`, [tenant.tenantId, id])).rows[0].status;
+
+    it('a retried proposal executes once more, ends executed, and its execution history says succeeded (not the stale failed row)', async () => {
+      const { executor, executionRepo, runs, healSettings } = buildExecutor();
+      const ids = await approvedDraft();
+      const settingsId = (await proposalRepo.findByTenant(tenant.tenantId)).find((p) => p.proposalType === 'onboarding_tenant_settings')!.id;
+      const voiceId = ids.find((id) => id !== settingsId)!;
+      for (const id of ids) await pastWindow(id);
+
+      await sweep(executor);
+      expect(await stored(settingsId)).toBe('execution_failed');
+      expect(await stored(voiceId)).toBe('executed');
+      expect((await status()).status.draft?.execution).toBe('failed');
+      expect((await executionRepo.findLatestByProposal(tenant.tenantId, settingsId))?.status).toBe('failed');
+
+      const retried = await request(app).post('/api/onboarding/draft/retry').send();
+      expect(retried.status).toBe(200);
+      expect(retried.body.retriedProposalIds).toEqual([settingsId]);
+      // Inside the fresh undo window the worker leaves it alone.
+      await sweep(executor);
+      expect(await stored(settingsId)).toBe('approved');
+      expect(runs.filter((id) => id === settingsId)).toHaveLength(1);
+
+      healSettings();
+      await pastWindow(settingsId);
+      await sweep(executor);
+
+      expect(await stored(settingsId)).toBe('executed');
+      expect((await status()).status.draft?.execution).toBe('executed');
+      // One handler run per attempt: two for the retried proposal, one for the other.
+      expect(runs.filter((id) => id === settingsId)).toHaveLength(2);
+      expect(runs.filter((id) => id === voiceId)).toHaveLength(1);
+
+      const history = await executionRepo.listByProposal(tenant.tenantId, settingsId);
+      expect(history).toHaveLength(1);
+      expect(history[0]).toMatchObject({ status: 'succeeded', errorMessage: undefined });
+      expect((await executionRepo.findLatestByProposal(tenant.tenantId, settingsId))?.status).toBe('succeeded');
+      // The idempotency marker exists, so a replay of the executed proposal short-circuits.
+      expect(await executionRepo.findByIdempotencyKey(tenant.tenantId, `proposal-run:${tenant.tenantId}:${settingsId}`)).not.toBeNull();
     });
   });
 });
