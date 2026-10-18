@@ -807,7 +807,13 @@ flowchart LR
   - The endpoint is `POST /api/customers/:id/erase`:
     - owner-only and audited
     - an explicit human action, never an AI proposal
-    - one `executeAudited` command transaction
+    - **Two phases, not one transaction.** The tombstone has to be visible to other processes
+      before the scrub starts. `executeAudited` opens `BEGIN` and commits only after its whole state
+      change and its audit insert, so a tombstone written inside the same transaction would stay
+      invisible while in-flight writers pass their checks. The erase therefore runs in two phases:
+      1. A short audited transaction commits the tombstone (and an `erase_started` audit event).
+      2. Separate audited transactions then run the scrub, the external cleanup, the drain and the
+         final re-scan, and record `erase_completed` or `erase_incomplete`.
   - **U7 starts with a data inventory, before any erase code.** Review keeps turning up one more
     store that holds customer data: service locations, custom-field values, converted leads, callback
     tasks, an external trace sink. That shows the scope has to be discovered systematically, not
@@ -833,7 +839,12 @@ flowchart LR
         the tombstone was written can therefore still go out after the external delete and recreate
         the trace (`trace-exporter.ts` exposes `flush()` only for shutdown). So the erase does four
         things:
-        - flushes the exporter queue before the external delete
+        - flushes the exporter queue before the external delete, through a new erasure-specific
+          drain. The existing `LangfuseTraceExporter.flush()` calls `shutdownAsync()` and swallows
+          errors. Using it here would either shut down the process-wide exporter for good or fail
+          silently. The new drain leaves the exporter running, waits for pending sends, and
+          propagates any failure. A failure marks the store `incomplete` instead of reporting
+          success.
         - applies the tombstone at the exporter's send boundary too, so queued events for the
           subject are dropped before transport
         - deletes again after the drain window
@@ -931,6 +942,10 @@ flowchart LR
     alerts.
   - a trace queued before the erase whose transport is delayed until after it is never recreated: it
     is dropped at the send boundary, or deleted again on the second pass
+  - after an erase, the exporter still sends unrelated traces, so the drain did not shut it down
+  - a drain failure marks Langfuse `incomplete`
+  - with phase 1 committed, an in-flight writer in another connection sees the tombstone and drops
+    its content while phase 2 is still running
   - with two customers sharing a full name, the other customer's row is untouched
   - a row that matches only a household-shared phone lands on the candidate list and is scrubbed only
     after confirmation
