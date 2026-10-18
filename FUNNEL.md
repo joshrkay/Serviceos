@@ -47,6 +47,22 @@ stamps the four fields uniformly. The server activation event passes them in
 | `overage_threshold` | `api/.../billing/usage-alerts.ts` (call end) | server | paid period first reaches 80% / 100% of included minutes or the overage cap (once/threshold/period) | `threshold`, `plan`, `used_minutes` |
 | `minute_overage_invoiced` | `api/.../billing/call-usage-billing.ts` (Stripe `invoice.created`) | server | settlement creates an AI-minute overage invoice item | `plan`, `overage_minutes`, `charge_cents` |
 
+### v3 (pick, don't build)
+
+The single-surface conversation shell (`web/.../onboarding/v3/ConversationShell.tsx`),
+behind the `onboarding_v3` flag. It sits alongside, not instead of, the v2 events
+above until v2 retires. All are client events through `trackFunnel`, so they carry the
+four required fields; `tenant_id` comes from the onboarding status (or the draft).
+
+| Event | Where it fires | Trigger | Extra props |
+|---|---|---|---|
+| `v3_ready_viewed` | `ConversationShell.tsx` | the owner first sees the finished shop ("<Business> is already set up"); once per mount | `trade`, `metro` |
+| `v3_readback_viewed` | `ConversationShell.tsx` | the owner first sees the read-back list; once per mount | `trade`, `metro` |
+| `v3_approved` | `ConversationShell.tsx` | "That's right" succeeded and this call saved the draft (a repeat tap on an already-saved draft does not fire) | `proposal_count` (2), `trade` |
+
+Drop-off reads as `v3_ready_viewed` with no `v3_readback_viewed`, or `v3_readback_viewed`
+with no `v3_approved`.
+
 ### Generic per-step events (drive abandonment)
 
 | Event | Where | Trigger | Extra |

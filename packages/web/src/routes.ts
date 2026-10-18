@@ -17,6 +17,7 @@ import {
   RequireSettingsView,
 } from './components/auth/RequirePermission';
 import { LoginPage } from './components/auth/LoginPage';
+import { isOnboardingV3Enabled } from './lib/onboardingV3Flag';
 
 // The param-wrapper routes (`:id` → typed props) are defined *inside* their
 // lazy loaders below, so each heavy page stays out of the eager graph while the
@@ -63,9 +64,18 @@ export const router = createBrowserRouter([
       // guard's existing behaviour) instead of rendering the shell, whose
       // status fetch then fails with "We couldn't load your setup" and no
       // way forward. OnboardingGuard already passes /onboarding through.
+      //
+      // "Pick, don't build" (v3): when the `onboarding_v3` flag is on
+      // (lib/onboardingV3Flag.ts) the same route loads the single-surface
+      // conversation shell instead. The flag is read when the route loads, so
+      // a per-browser opt-in takes effect on the next visit to /onboarding.
       {
         path: 'onboarding',
-        lazy: async () => ({ Component: (await import('./components/onboarding/v2/OnboardingShell')).OnboardingShell }),
+        lazy: async () => ({
+          Component: isOnboardingV3Enabled()
+            ? (await import('./components/onboarding/v3/ConversationShell')).ConversationShell
+            : (await import('./components/onboarding/v2/OnboardingShell')).OnboardingShell,
+        }),
         hydrateFallbackElement: routeFallback,
       },
       {
