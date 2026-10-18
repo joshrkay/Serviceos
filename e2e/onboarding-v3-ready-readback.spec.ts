@@ -46,6 +46,28 @@ async function horizontalOverflow(page: Page): Promise<number> {
   return page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 }
 
+/**
+ * Records every h1 text the page shows from the start of each document it loads
+ * (a MutationObserver installed before any page script runs), so a screen that
+ * only flashes on the way to another cannot go unseen by a check made at the end.
+ * Applies to every navigation after this call, a reload included.
+ */
+async function recordHeadings(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const seen: string[] = [];
+    (window as unknown as { __h1Seen: string[] }).__h1Seen = seen;
+    const note = () => {
+      const text = document.querySelector('h1')?.textContent?.trim();
+      if (text && seen[seen.length - 1] !== text) seen.push(text);
+    };
+    new MutationObserver(note).observe(document, { childList: true, subtree: true, characterData: true });
+    note();
+  });
+}
+
+const headingsSeen = (page: Page): Promise<string[]> =>
+  page.evaluate(() => [...((window as unknown as { __h1Seen?: string[] }).__h1Seen ?? [])]);
+
 /** Every visible button and field is at least 44px tall. */
 async function expectGloveTargets(page: Page): Promise<void> {
   const controls = page.locator('button:visible, input:visible');
@@ -331,6 +353,7 @@ for (const vp of viewports) {
       });
 
       // Coming back from the payment page, in both directions, against the real cancel route.
+      await recordHeadings(page);
       const cancelled = page.waitForResponse((r) => r.url().endsWith('/api/onboarding/billing/cancel') && r.request().method() === 'POST');
       await page.goto('/onboarding?billing=cancel');
       expect((await cancelled).status()).toBe(200);
@@ -338,6 +361,8 @@ for (const vp of viewports) {
       await expect.poll(() => new URL(page.url()).search).toBe('');
       await expect(page.getByRole('heading', { level: 1, name: TRIAL_HEADING })).toBeVisible();
       await expect(page.getByText('Saving 2 changes')).toHaveCount(0);
+      // Measure the settled layout (notice, the plans alert and Try again), not whichever of loading or unavailable is up.
+      await expect(page.getByRole('alert')).toHaveText(PLANS_UNAVAILABLE);
       await expectScreenFits(page);
 
       await page.goto('/onboarding?billing=ok');
@@ -345,13 +370,18 @@ for (const vp of viewports) {
       await expect.poll(() => new URL(page.url()).search).toBe('');
       // No payment page ran, so no trial started: the owner is still on the trial turn.
       await expect(page.getByRole('heading', { level: 1, name: TRIAL_HEADING })).toBeVisible();
+      await expect(page.getByRole('alert')).toHaveText(PLANS_UNAVAILABLE);
       await expectScreenFits(page);
 
-      // A reload picks up on the same turn, with no saving window and no wait.
+      // A reload picks up on the same turn, with no saving window and no wait. The headings are recorded
+      // from the start of the document, so a wait screen that only shows on the way to the trial is caught.
       await page.reload();
       await expect(page.getByRole('heading', { level: 1, name: TRIAL_HEADING })).toBeVisible();
       await expect(page.getByText('Saving 2 changes')).toHaveCount(0);
-      await expect(page.getByRole('heading', { level: 1, name: 'Getting your shop ready.' })).toHaveCount(0);
+      const seenOnReload = await headingsSeen(page);
+      expect(seenOnReload.length).toBeGreaterThan(0);
+      expect(seenOnReload[0]).toBe(TRIAL_HEADING);
+      expect(seenOnReload).not.toContain('Getting your shop ready.');
     });
 
     test('Answer two, keep the rest as is, reload: the two choices are still staged and the owner picks up where they left off', async ({ page }) => {
