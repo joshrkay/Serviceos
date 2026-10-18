@@ -3,6 +3,7 @@ import { useApiClient } from '../../../lib/apiClient';
 import { formatPhone } from '../../phone/NumberPicker';
 import { Button } from '../../ui';
 import type { OnboardingStep } from '../../../types/onboarding';
+import { CONNECTION_ERROR } from './connection-copy';
 import { numberView, phoneRetryErrorCopy } from './phone-copy';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
 import { NUMBER_WAIT } from './wait-copy';
@@ -43,7 +44,7 @@ export function NumberTurn({ step, onChanged }: NumberTurnProps) {
       }
       onChanged();
     } catch {
-      setAskError("I couldn't reach the server. Check your connection and try again.");
+      setAskError(CONNECTION_ERROR);
     } finally {
       setAsking(false);
     }
