@@ -103,7 +103,13 @@ unowned position.
   changeable: a cell can keep the area code of a former city, so a unique NPA is a guess, not a
   fact. The Ready screen names the city it priced for ("the way most Cleveland plumbing shops
   run") with a one-tap "Not Cleveland?" that takes a typed or spoken city and re-assembles
-  (`PUT /draft/metro`, allowed while no choice is staged; lands with U5's overrides). When the
+  (`PUT /draft/metro`, lands with U5's overrides). It is allowed only on an unapproved draft
+  with no choice staged, because a staged `'a'` or `'b'` names an option as the owner saw it
+  priced; and it rewrites `metro_code` and the whole `assembled` shop (the city, the tier
+  prices, option B's multiple and the rendered lines) in one write, so the city and the
+  prices an approval copies always belong to one metro. Once a choice is staged there is no
+  metro change (409 `DRAFT_METRO_LOCKED`) and the control is gone; after approval the city
+  and the prices are ordinary settings and catalog items the owner edits in Settings. When the
   owner skips, the national tier applies and the copy drops the city.
 - **Keep the seven step ids; add facts.** `contracts.ts:150` hard-codes `.length(7)` and
   mobile consumes it. `derive-status.ts` gains `draftStatus` and `choicesAnswered` facts; the
@@ -179,8 +185,10 @@ tiers; import from a photo; pricing or plan changes.
   until it lands the screen says "Saving" with no button, as S2a shipped).
 - **Audit events:** `onboarding.draft_created`, `onboarding.choice_staged`,
   `onboarding.draft_approved`, `onboarding.owner_phone_set` (number masked) and
-  `onboarding.draft_retry` (both S1b), plus the existing proposal lifecycle events (S1b adds
-  `proposal.retried`). S4 adds `onboarding.draft_undone` and `onboarding.draft_reset` (U9).
+  `onboarding.draft_retry` (both S1b; the retry row records the draft `version` before and
+  after), plus the existing proposal lifecycle events (S1b adds `proposal.retried`). S4 adds
+  `onboarding.draft_undone` and `onboarding.draft_reset` (U9) and `onboarding.metro_changed`
+  (U5, the old and new `metro_code`).
   U8 adds `invoice.payment_mode_unavailable` and reuses
   `invoice.payment_link_deactivated` with the reasons `payment_mode_changed` and
   `payment_mode_changed_during_checkout`. U7 adds
@@ -261,6 +269,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   A values resolved from the tier (or national default), `mostShops` marks, and the rendered
   `rivetLine` per option with `{businessName}` and `{tripFee}` substituted. The multiplier for
   option B is an integer-cents function with one rounding rule, unit-tested.
+  `assembleTypicalShop` is the one place the city and every metro-derived price are computed:
+  `POST /draft`, reopen and U5's `setMetro` all call it, so none of them can leave one
+  metro's city beside another metro's prices.
 - **Patterns to follow:** `packages/api/src/verticals/packs/plumbing.ts` (per-trade typed
   content), `verticals/registry.ts` (`VerticalPack`), migration style and NOT VALID CHECK
   constraints per `docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md`.
@@ -269,6 +280,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     on every entry, lines contain the business name.
   - Edge: metro with no tier row → `'US'` row; no `'US'` row → `PLUMBING_LINE_ITEM_DEFAULTS`
     and `showsCity: false`; area code spanning metros → `ambiguous: [metros]`.
+  - Two metros: the same trade assembled for `CLE` and for a second curated metro differs in
+    the city, the option A prices, the option B prices and the rendered lines (every one of
+    them, with no field shared between the two results), so a caller that stores one result
+    whole, as U5's `setMetro` does, cannot end up half-converted.
   - Error: registry file missing a key for a trade fails the load-time test; a tier row with a
     non-integer price is rejected by Zod.
   - Integration: tier row inserted through the repository is read back with cents intact and
@@ -330,7 +345,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   lead when there is one (U7) and otherwise from the v3 shell's first screen, "What should I
   answer as?" (U3), which asks exactly those three before the draft exists; the signup form is
   unchanged and the direct "Start free" path never reaches the shell without them. The response
-  is the assembled shop and the staged choices.
+  is the assembled shop and the staged choices. `metro_code` and `assembled` are one fact:
+  create, reopen's re-assembly and U5's `setMetro` each write both in one `UPDATE`, and
+  approval builds the settings proposal's city and prices from the locked row, so it can only
+  copy a city and prices that were assembled together.
   `PUT /draft/choices/:settingKey` validates against the registry, stores `'a'|'b'|{override}`
   with a `version` compare-and-swap, emits `onboarding.choice_staged`. `POST /draft/approve`
   runs in one tenant transaction (S1 shipped it without a version check or row lock; U11 adds
@@ -365,7 +383,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   no-op 200 `approvedNow: false` carrying the stored proposal ids, and U11 adds only the row
   lock and the optional `expectedVersion` check. On an already approved draft that check is
   what tells a retry of the same approval (200, as before) from a stale tab's approval (409
-  `VERSION_CONFLICT`); see U11.
+  `VERSION_CONFLICT`; after a `POST /draft/retry` has bumped the version, an approve from
+  before it counts as a stale tab's); see U11.
 - **Patterns to follow:** `db/onboarding-session-repository.ts` and migration 195 (RLS
   table), `routes/onboarding-conversation.ts` (owner-only route shape), `routes/proposals.ts`
   batch approve, `docs/solutions/logic-errors/whole-object-refine-mints-approve-to-fail-voice-proposals.md`
@@ -563,15 +582,23 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - modify `packages/api/src/routes/onboarding-draft.ts` (`POST /draft/override/:settingKey`,
     `POST /draft/override` with the setting-key classifier, `PUT /draft/metro`) and
     `packages/api/src/onboarding/draft/repository.ts` (`setMetro`, a thin caller of U11's
-    locked-write helper: lock, refuse once approved, compare version, bump; a metro change and
-    a staged choice serialise on the same row lock)
-  - modify `packages/web/src/components/onboarding/v3/OptionPairTurn.tsx`, `ReadbackCard.tsx`
+    locked-write helper that runs in one transaction: lock, refuse once approved
+    (`DRAFT_APPROVED`), refuse once any choice is staged (`DRAFT_METRO_LOCKED`), compare
+    version, then rebuild `assembled` for the new metro through U1's `assembleTypicalShop` and
+    write `metro_code`, `assembled` and the version bump in ONE `UPDATE`; a metro change and a
+    staged choice serialise on the same row lock)
+  - modify `packages/web/src/components/onboarding/v3/ReadyScreen.tsx` (the "Not Cleveland?"
+    control, rendered only while no choice is staged), `OptionPairTurn.tsx`, `ReadbackCard.tsx`
     (override turn UI reusing `TranscriptCard`)
   - tests: `packages/api/test/onboarding/choices/override.test.ts` (mocked gateway; one case
     per key, all seven, plus a clarification case per enum key),
     `packages/api/test/onboarding/choices/booking-hours-match.test.ts`,
     `packages/api/test/routes/onboarding-draft.route.test.ts` (extend),
     `packages/web/src/components/onboarding/v3/OverrideTurn.test.tsx`,
+    `packages/web/src/components/onboarding/v3/ReadyScreen.test.tsx`,
+    `packages/api/test/onboarding/draft/set-metro.test.ts` (Pg and in-memory repositories),
+    `packages/api/test/integration/onboarding-draft-metro.test.ts` (Docker-gated: the metro
+    change on real Postgres, and its race with a choice `PUT`),
     `packages/api/test/integration/onboarding-draft-writers-vs-approve.test.ts` (U11's table,
     created in S4: add the `PUT /draft/metro` row)
 - **Approach:** From the read-back the correction turn opens from a tapped row, so the key is
@@ -613,6 +640,39 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   the option pair. The confirmation is not a low-confidence clarification and does not use
   the one-question cap above. Custom per-day hours are deferred (Scope Boundaries) until a
   validated `customBusinessHours` payload and a settings consumer exist.
+
+  **Metro change: refuse once a choice is staged, rebuild the shop as one write.**
+  `PUT /draft/metro` takes `{ metro, version }` (the version of the draft the Ready screen
+  rendered, required like the other draft `PUT`s) and runs in one tenant transaction through
+  the locked-write helper (U11), in this order: (1) lock the draft row; (2) an `approved`
+  draft is 409 `DRAFT_APPROVED`, then a draft with ANY key in `choices` is 409
+  `DRAFT_METRO_LOCKED` (`DraftMetroLockedError`, the helper's `precondition` hook, checked
+  before the version because re-sending with a fresh version cannot make it succeed), both
+  with the draft unchanged; (3) a `version` other than the row's is 409 `VERSION_CONFLICT`
+  naming both; (4) compute from the locked row: `assembleTypicalShop(row.trade, metro)` (U1:
+  pure apart from one tier-table read, no model call) gives the shop for the new metro, and
+  ONE `UPDATE` writes `metro_code`, the whole `assembled` JSONB and `version + 1`. The city,
+  the tier prices, option B's multiplied prices and the rendered lines therefore change
+  together in one version bump, no reader or waiting approve can see the new city beside the
+  old metro's prices, and the settings proposal an approval builds from that row carries the
+  new city and prices. The response is the updated draft (new `metro_code`, `assembled` and
+  `version`) and one `onboarding.metro_changed` audit row records the old and new codes in the
+  same transaction.
+
+  The staged-choice refusal is what keeps a staged pick meaning what the owner saw when they
+  tapped it: a choice stores `'a'`, `'b'` or an override, and the cents behind `'a'` and `'b'`
+  live in `assembled`, so re-pricing under a staged pick would silently change the number the
+  owner agreed to. A metro change after staging is therefore not supported; the shell does not
+  offer one. "Not Cleveland?" lives on the Ready screen, which the shell renders only for a
+  draft with no staged choice (a resumed draft opens on its next unanswered turn, and a
+  reopened one arrives with its choices pre-filled), and the read-back names the city as plain
+  text with no change control; the city and prices stay editable in Settings once approved. A
+  tap from a stale Ready screen that the server answers `DRAFT_METRO_LOCKED` or
+  `VERSION_CONFLICT` re-reads the draft, renders whatever is current with the one-line "This
+  changed in another window" notice, and does not repeat the call. A `metro` that is not a
+  well-formed code in the vocabulary U1 settles (open question 1) is 400 naming the field and
+  writes nothing; a well-formed code with no tier row is not an error, it assembles on the
+  national tier with `showsCity: false` exactly as `POST /draft` does.
 - **Patterns to follow:** `ai/agents/onboarding/constants.ts` thresholds,
   `ai/orchestration/onboarding-conversation.ts` extractor invocation.
 - **Test scenarios:**
@@ -641,9 +701,48 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `difference`; a tie goes to the narrower preset.
   - Error: gateway timeout → 503 with the card unchanged; override on a key not in the
     registry → 400.
-  - Metro: `PUT /draft/metro` after approval → 409 `DRAFT_APPROVED` with the draft unchanged;
-    racing an approve in both orders is the metro row of U11's writer-vs-approve race test.
-  - Integration: none beyond U2's draft tests and that race row (no new tables).
+  - Metro, unit and route (`set-metro.test.ts`, `onboarding-draft.route.test.ts`; one
+    parametrised case over the Pg and in-memory repositories): `PUT /draft/metro` on an
+    `approved` draft → 409 `DRAFT_APPROVED`; with one choice staged (any key; `'a'`, `'b'` or
+    an override) → 409 `DRAFT_METRO_LOCKED`; in both, `metro_code`, `assembled`, `choices`
+    and `version` are unchanged, `assembleTypicalShop` is never called and no
+    `onboarding.metro_changed` row exists. Order: a staged choice with a stale `version` →
+    `DRAFT_METRO_LOCKED`, not `VERSION_CONFLICT`; an unstaged draft with a stale `version` →
+    409 `VERSION_CONFLICT` naming both and nothing written. A malformed `metro`, or a missing
+    `version`, → 400 naming the field with nothing locked or written; a well-formed metro with
+    no tier row → 200 on the national tier with `showsCity: false`. The success path builds
+    from the locked row and issues exactly one `UPDATE onboarding_drafts`, which sets
+    `metro_code`, `assembled` and `version` together (U11's guard test already forbids any
+    other statement).
+  - Metro, real Postgres (`onboarding-draft-metro.test.ts`, Docker-gated): a plumbing draft
+    assembled for `CLE` with no choice staged; `PUT /draft/metro { metro: <Columbus>,
+    version: v }` → 200 with `version` v + 1, and in that one bump the row's `metro_code`, the
+    assembled city (or `showsCity`), the option A tier prices, option B's multiplied prices
+    and the rendered lines all equal `assembleTypicalShop('plumbing', <Columbus>)` field by
+    field, with none of Cleveland's left over; `GET /draft` returns the same pair; one
+    `onboarding.metro_changed` row names `CLE` and the new code. An approve taken afterwards
+    mints `onboarding_tenant_settings` with the Columbus city and prices, equal to the row
+    field by field.
+  - Metro vs a choice `PUT` (two real connections, both orders, looped, both requests sent
+    from the same rendered version v): exactly one wins and the draft ends at v + 1. Metro
+    first → the choice `PUT`, which waited behind the lock, is 409 `VERSION_CONFLICT` naming v
+    and v + 1 and stages nothing; the draft holds the new metro, its assembled shop and no
+    choices; the loser re-reads and re-sends once with v + 1 and its pick is staged against
+    the Columbus shop. Choice first → the metro `PUT` is 409 `DRAFT_METRO_LOCKED`; the draft
+    holds the old metro, its assembled shop and the one staged choice. Never: a staged choice
+    beside an `assembled` shop other than the one it was staged against, or `metro_code` and
+    `assembled` naming different metros.
+  - Metro vs approve: racing an approve in both orders is the metro row of U11's
+    writer-vs-approve race test (metro first → an approve carrying the pre-write version is
+    409 `VERSION_CONFLICT`, one carrying none mints from the new metro; approve first → the
+    metro `PUT` is 409 `DRAFT_APPROVED`).
+  - Shell (`ReadyScreen.test.tsx`): "Not Cleveland?" is rendered only for a draft with no
+    staged choice and calls `PUT /draft/metro` with the draft's `version`; a draft with a
+    staged choice (a resumed session) opens on its next turn and its read-back shows the city
+    with no change control; a `DRAFT_METRO_LOCKED` or `VERSION_CONFLICT` answer from a stale
+    Ready screen re-reads, renders the current turn with the one-line notice and does not
+    repeat the call.
+  - Integration: beyond U2's draft tests, the two metro files above (no new tables).
 - **Verification:** an owner can override any of the seven settings by voice and see the
   change in the read-back before approving; hours the three presets cannot hold are either
   confirmed against the closest preset or not staged at all.
@@ -1161,12 +1260,14 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `{ expectedVersion }`, and S4 gives retry the same field); create
     `packages/api/src/onboarding/draft/retry.ts`
     (`retryFailedDraftProposals`, S1b, including its `DRAFT_RETRY_UNSAFE` refusal of a set that
-    holds a terminal not-applied member, checked before `DRAFT_RETRY_NOTHING_FAILED`; S4 adds
+    holds a terminal not-applied member, checked before `DRAFT_RETRY_NOTHING_FAILED`, and, once
+    the guards pass, the draft's `version + 1` written in the same locked transaction as the
+    re-queue, with the updated draft in the response; S4 adds
     its `expectedVersion` comparison, between `DRAFT_NOT_APPROVED` and the unsafe check); modify `packages/api/src/onboarding/draft/approve.ts`
     (the undo and reset helpers, S4, over one shared locked read of the draft and its
-    proposals) and `packages/api/src/onboarding/draft/repository.ts` (undo and reset are draft
-    writers under U11's invariant: each goes through the locked-write helper, declaring the
-    `approved` status it requires, not a second locking path),
+    proposals) and `packages/api/src/onboarding/draft/repository.ts` (undo, reset and retry's
+    version bump are draft writers under U11's invariant: each goes through the locked-write
+    helper, declaring the `approved` status it requires, not a second locking path),
     `packages/api/src/proposals/proposal.ts` and `pg-proposal.ts` (S1b:
     `ProposalRepository.resetFailedForRetry`, one conditional `UPDATE … WHERE status =
     'execution_failed'` that moves the row to `draft` and clears `approved_at`, the error, the
@@ -1190,7 +1291,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `derive-status.ts` stays pure), and rewrites the `deriveDraftExecution` and `retry.ts` doc comments, which
     today name the whole-draft undo as the way out of `stopped`
   - modify `packages/web/src/components/onboarding/v3/ConversationShell.tsx` (undo button during
-    the window, which posts the `version` from the approve response; the wait screen holds while
+    the window, which posts the `version` from the approve response (or, after a Retry, from the
+    retry response's `draft`); the wait screen holds while
     `execution` is `pending` or `executing`; on
     `failed`, "Something didn't save. Try again." → retry (posting the draft's `version`), plus "Start over" (reset) beneath it
     when `recovery` is `reset` (a `failed` set holds no terminal member, since that reads
@@ -1218,8 +1320,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Approach:** The derived `execution` fact and `POST /draft/retry` ship in the S1 follow-ups
   PR (#1694); undo and reset ship in S4. `POST /draft/undo` takes a required body
   `{ expectedVersion }`: the draft's `version` as the saving screen rendered it, which is the
-  version after the approval the screen is showing (`draft.version` in the approve response, or
-  the status draft block's `version` when the screen is rebuilt after a reload). It runs in one
+  version after the approval attempt the screen is showing (`draft.version` in the approve
+  response, in the retry response after a Retry, or the status draft block's `version` when
+  the screen is rebuilt after a reload). It runs in one
   tenant transaction that locks, then decides, then writes. It locks the draft row through
   `updateLocked`, requiring `approved`: a draft already back in `draft` (a double tap, or
   another tab got there first) is 409 `DRAFT_NOT_APPROVED`, and an `expectedVersion` other than
@@ -1228,9 +1331,13 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   approval its screen showed. Without it, tab A's saving screen for approval 1 can outlive tab
   B's undo (or reset), edit and approval of a new pair inside the window, and A's versionless
   undo would lock the *current* `proposal_ids` and undo B's approval. An approved draft is
-  frozen and its `version` moves only when undo, reset or reopen take it out of `approved`
-  (retry does not write the row), and every approval bumps it again, so one version names one
-  approval. Then it takes `SELECT … FOR UPDATE` on the proposals in
+  frozen and its `version` moves only when undo, reset or reopen take it out of `approved`,
+  or when a successful retry opens a new execution window on it (the retry bumps it by one in
+  the same locked transaction that re-queues the failed proposals), and every approval bumps
+  it again, so one version names one approval *attempt*: the first approval, or one retry of
+  it. Without the retry bump, tab A's saving screen for the original approval would still
+  match after tab B retried a set in which every member failed, and A's undo inside the
+  retry's new five-second window would revert a retry A never rendered. Then it takes `SELECT … FOR UPDATE` on the proposals in
   `proposal_ids` (ordered by id, so two undos cannot deadlock), and requires EVERY locked row
   to still be `approved` and inside the undo window (`isInUndoWindow`, read from the locked
   row). If any row is `executing`, `executed`, `execution_failed` or `undone`, if any window
@@ -1326,13 +1433,16 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   approved is 409 `DRAFT_NOT_APPROVED`; (2) from S4, a stale `expectedVersion` is 409
   `VERSION_CONFLICT` (below); (3) a set that holds a terminal not-applied member is 409
   `DRAFT_RETRY_UNSAFE`, naming the statuses, with nothing changed (no row reset, no
-  `proposal.retried`, no `onboarding.draft_retry`), whether or not another member failed;
+  `proposal.retried`, no `onboarding.draft_retry`, no version bump), whether or not another
+  member failed;
   (4) a set with nothing in `execution_failed` is 409 `DRAFT_RETRY_NOTHING_FAILED`. Unsafe
   comes before nothing-failed because a set holding a member retry cannot recover is never
   merely "nothing to do": `approved + undone` answers `DRAFT_RETRY_UNSAFE`, matching the
   status, which reads `stopped` for exactly those sets, and `DRAFT_RETRY_NOTHING_FAILED` is
   left for benign sets (every member `approved`, `executing` or `executed`), such as the loser
-  of two concurrent retries, which sees the first's outcome under the draft lock. A terminal
+  of two concurrent retries that send no version, which sees the first's outcome under the
+  draft lock (a loser that sends the pre-retry version is stopped one guard earlier, by
+  `VERSION_CONFLICT`, because the winner's bump moved it). A terminal
   not-applied member
   is one retry cannot bring back: `undone`, `rejected` or `expired` (terminal in
   `lifecycle.ts`), a stuck pre-approval `draft` or `ready_for_review`, or a listed proposal
@@ -1351,7 +1461,16 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   (`execution_failed → draft` through `resetFailedForRetry`, then approved again through the
   batch-approve helper with a fresh `approvedAt`), in one request transaction with a
   `proposal.retried` audit row each, so the worker's `approved` sweep picks them up after a
-  fresh undo window; it emits `onboarding.draft_retry`. Proposals that are not
+  fresh undo window. In that same transaction, after the guards pass and the re-queue is
+  computed, it bumps the draft's `version` by one (a write to the draft row through the
+  locked-write helper, requiring `approved`; S1b writes it inline with the same four steps),
+  returns the updated draft in its response, and emits `onboarding.draft_retry` recording the
+  version before and after. A retry that any guard refuses throws before it writes, so it
+  bumps nothing. The bump is there because a retry opens a new execution window on an
+  approved draft: one `version` names one approval attempt, so every screen rendered before
+  the retry now holds a stale `expectedVersion`, and its undo or reset is 409
+  `VERSION_CONFLICT`, while the retrying tab's response (`draft.version`) carries the version
+  the next undo or reset must send. Proposals that are not
   `execution_failed` are left alone. From S4 the safety check and the re-queue read the set
   through the same ordered `FOR UPDATE` as undo and reset, so an inbox undo of the sibling
   cannot land between the check and the re-queue. The execution state is derived, never
@@ -1378,9 +1497,13 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   and reset: the strict `{ expectedVersion }` schema (a positive integer), the comparison in
   `retryFailedDraftProposals`, and the shared wire schema. The field is optional until
   approve's becomes required, in the same step (U11), so a client that posts nothing keeps
-  working until then; S2's web can send it from the start. A retry still does not write the
-  draft row, so it leaves `version` unchanged, and two tabs retrying one failed set at one
-  version race to the existing `DRAFT_RETRY_NOTHING_FAILED`.
+  working until then; S2's web can send it from the start. A successful retry writes the
+  draft row (`version + 1`, above), so two tabs retrying one failed set at one version are
+  serialised by the draft lock: the loser, which sent the pre-retry version, is 409
+  `VERSION_CONFLICT` naming both versions (from S4, when the field is sent), and a loser that
+  sent none finds the set already re-queued and gets the existing
+  `DRAFT_RETRY_NOTHING_FAILED`. The same bump makes an approve tap from before the retry a 409
+  (U11).
 - **Patterns to follow:** `routes/proposals.ts` undo handler and `proposals/lifecycle.ts`,
   `workers/execution-worker.ts` retry semantics, D-039/D-040.
 - **Test scenarios:**
@@ -1423,13 +1546,47 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     version re-queues as above; tab A holding v after tab B reset and re-approved (`approved` at
     v + 3) with one of B's proposals `execution_failed` → 409 `VERSION_CONFLICT`, B's failed
     proposal still `execution_failed`, no `proposal.retried` row; a non-integer or extra key →
-    400; no body → the behaviour #1694 shipped, until S4 makes the field required. A retry does
-    not change the draft's `version`.
+    400; no body → the behaviour #1694 shipped, until S4 makes the field required. A retry
+    that succeeds moves the draft's `version` by one (next scenario); two retries sent at one
+    version → one 200, and the loser is 409 `VERSION_CONFLICT` naming v and v + 1 (a loser that
+    sent none is `DRAFT_RETRY_NOTHING_FAILED`).
+  - Retry bumps the version (the stale-undo finding; real Postgres): approve (the draft is
+    `approved` at version v, the approve response's `draft.version`), then every proposal
+    `execution_failed` (and, one case, one of the two); `POST /draft/retry` (with
+    `expectedVersion: v` from S4, and with no body as #1694 ships) → 200 and the response's
+    `draft.version` is v + 1, which is also the row's and the status draft block's; the
+    re-queued proposals are `approved` with new `approved_at` values; one
+    `onboarding.draft_retry` row records v before and v + 1 after; `status`, `proposal_ids` and
+    `choices` are unchanged. A second failure and a second retry take it to v + 2: by exactly
+    one per retry. An approve from before the retry is U11's stale-approve case (409
+    `VERSION_CONFLICT`).
+  - A refused retry bumps nothing (table-driven, real Postgres): `DRAFT_NOT_APPROVED` (the
+    draft is back in `draft`), `VERSION_CONFLICT` (S4: a stale `expectedVersion`),
+    `DRAFT_RETRY_UNSAFE` (`execution_failed` + `undone`) and `DRAFT_RETRY_NOTHING_FAILED`
+    (`approved` + `executed`), plus a set that trips two guards at once, which answers the
+    first in the order above; in every case the draft's `version`, `status`, `proposal_ids`
+    and `updated_at` are exactly as before, no `onboarding.draft_retry` or `proposal.retried`
+    row exists and every proposal is untouched.
+  - Retry vs a stale undo (the finding's race; real Postgres, two connections, both orders,
+    looped): tab A rendered the saving screen from the approve response at version v and
+    still shows it; the worker has run and every member is `execution_failed`. Tab B's `POST
+    /draft/retry` carrying v → 200, the draft is `approved` at v + 1 and both proposals are
+    `approved` in a new window. Tab A's `POST /draft/undo { expectedVersion: v }` inside that
+    window → 409 `VERSION_CONFLICT` naming v and v + 1; both proposals are still `approved`,
+    the draft is still `approved` at v + 1, no `onboarding.draft_undone` row exists and
+    settings are untouched; the same for A's `POST /draft/reset { expectedVersion: v }`.
+    After a re-read, an undo carrying v + 1 (from B, or from A) → 200: both proposals
+    `undone` and the draft back in `draft` at v + 2. Issued concurrently, A's undo before the
+    retry reads `execution_failed` members and is 409 `DRAFT_UNDO_REFUSED` (the retry then
+    succeeds and the draft ends at v + 1), and the retry before A's undo makes it the
+    `VERSION_CONFLICT` above. Never: an undo that reverts a retry whose version its sender
+    did not hold.
   - Error (stopped): a proposal undone from the inbox, one rejected, one expired and one
     missing (one case each, the other member `approved`) → fact `stopped`, `POST /draft/retry`
     answers 409 `DRAFT_RETRY_UNSAFE` (never `DRAFT_RETRY_NOTHING_FAILED`: the unsafe guard comes
     first), and the shell offers no Retry and does not wait. `DRAFT_RETRY_NOTHING_FAILED` is
-    pinned on a benign set (`approved` + `executed`, and the loser of two concurrent retries).
+    pinned on a benign set (`approved` + `executed`, and the loser of two concurrent retries
+    that send no version).
   - Retry refuses a failed member beside a terminal one (the finding's case; table-driven, real
     Postgres): `execution_failed` + `undone` (and, one case each, + `rejected`, + `expired`, +
     a stuck `draft`, + a listed id with no row) → fact `stopped`, never `failed`, with
@@ -1523,19 +1680,23 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     Retry tap from a stale `failed` screen answered `DRAFT_RETRY_UNSAFE` re-reads the status
     and renders the `stopped` copy with Start over, and does not repeat the call.
   - Shell (version): the undo button posts the `version` from the approve response and Retry
-    posts the status block's `version`; a 409 `VERSION_CONFLICT` or `DRAFT_NOT_APPROVED` from
+    posts the status block's `version`; after a successful Retry the undo and Start over taps
+    post the retry response's `draft.version` (v + 1), and a status poll after a retry from
+    another window replaces the version the screen holds; a 409 `VERSION_CONFLICT` or `DRAFT_NOT_APPROVED` from
     either re-reads the status and renders whatever is current (another tab's saving screen, or
     the editable read-back) with the one-line "This changed in another window" notice, and
     neither repeats the call by itself.
   - Integration: real Postgres rows for the undo, for the mixed-status set, for every
-    reset row above and for the version cases (stale undo, stale retry), under RLS.
+    reset row above and for the version cases (stale undo, stale retry, the retry bump and the
+    retry-vs-stale-undo race), under RLS.
 - **Verification:** no owner reaches the trial turn with a generated proposal unexecuted, one
   tap inside the window undoes the whole approval, a tap that loses the race to the worker
   changes nothing, and an approval the owner split from the inbox ends in an editable draft or
   a pointer to Settings, never in a button the server refuses; a failed proposal beside an
   undone, rejected, expired or missing one is reset, never retried into a half-live setup
   (`executed` + `undone`); and a tap made from a screen
-  that no longer shows the current approval is refused with a 409 that changes nothing.
+  that no longer shows the current approval attempt (a retry opens a new one) is refused with
+  a 409 that changes nothing.
 
 ### U11. Draft write lock and approval compare-and-swap
 - **Goal:** "That's right" approves exactly the choices the owner was looking at, exactly once.
@@ -1551,16 +1712,20 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   transaction, in this order: (1) `SELECT … FOR UPDATE` the tenant's draft row; (2) refuse
   unless the row is in the status that writer requires: `draft` for every field write (a
   write to an `approved` draft is `DraftAlreadyApprovedError`, 409 `DRAFT_APPROVED`) and
-  `approved` for undo, reset (U9) and reopen (U6); (3) compare `version` with the caller's
+  `approved` for undo, reset, retry (U9) and reopen (U6); a writer with a precondition on the
+  locked row declares it and it is checked here too, before the version (`setMetro`: no
+  choice staged, `DraftMetroLockedError`, 409 `DRAFT_METRO_LOCKED`, because a stale version
+  is not the reason it fails); (3) compare `version` with the caller's
   `expectedVersion` when it sent one (`DraftVersionConflictError`, 409 `VERSION_CONFLICT`;
   undo and reset always send one, approve and retry may omit it until S4 requires it);
   (4) compute the change from the locked row, never from an earlier read, write it and bump
   `version`. The repository exposes this as one shared helper,
-  `updateLocked(tenantId, { requireStatus, expectedVersion? }, compute)`, and it is the only
-  code in the repository that issues `UPDATE onboarding_drafts` (`… WHERE id = $1 AND version =
-  $found`; zero rows throws). Every writer is a thin caller of it: `stageChoice` (which
-  requires `expectedVersion`), `setClientTimezone`, `setOwnerPhone` (U10), `setMetro` (U5),
-  `setForwarding` (U6), `markApproved`, undo and reset (U9) and reopen (U6); `POST /draft` (the INSERT)
+  `updateLocked(tenantId, { requireStatus, expectedVersion?, precondition? }, compute)`, and it
+  is the only code in the repository that issues `UPDATE onboarding_drafts` (`… WHERE id = $1
+  AND version = $found`; zero rows throws). Every writer is a thin caller of it: `stageChoice`
+  (which requires `expectedVersion`), `setClientTimezone`, `setOwnerPhone` (U10), `setMetro`
+  (U5, the only caller with a `precondition`), `setForwarding` (U6), `markApproved`, undo,
+  reset and retry's version bump (U9) and reopen (U6); `POST /draft` (the INSERT)
   is the only other statement that touches the table. The in-memory repository implements the
   same helper. A writer that skipped any step could land between proposal construction and
   `markApproved`, or after it, and the executed proposals would no longer match the draft the
@@ -1571,7 +1736,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `WHERE … AND version = $` compare-and-swap that throws `DraftAlreadyApprovedError` or
   `DraftVersionConflictError` instead of returning a row it did not update, and `setOwnerPhone`
   taking the four steps inline (lock, refuse once approved, compare `version`, write and bump),
-  as `stageChoice` and `setClientTimezone` already did. It does not ship `updateLocked`, the
+  as `stageChoice` and `setClientTimezone` already did, and the retry's `version + 1` (U9:
+  `POST /draft/retry` writes the draft row on every retry that passes its guards) taking its
+  own inline, requiring `approved`. It does not ship `updateLocked`, the
   single-`UPDATE` guard test or the table-driven writer race: the writers carry the four steps
   inline, and `onboarding-draft-approve-concurrency.test.ts` covers approve against a choice
   `PUT` and against approve, the owner-phone `PUT` against a choice `PUT`, and the timezone
@@ -1593,18 +1760,20 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     (`UPDATE … WHERE tenant_id = $1 AND status = 'draft' AND version = $3`) that throws
     `DraftVersionConflictError` or `DraftAlreadyApprovedError` when it matches nothing instead
     of returning the existing row; `setOwnerPhone` takes the four steps inline; S4: `updateLocked`,
-    above, and `markApproved`, `stageChoice`, `setClientTimezone` and `setOwnerPhone` are
-    re-expressed over it with their behaviour unchanged; the in-memory repository mirrors all
-    of it)
+    above, and `markApproved`, `stageChoice`, `setClientTimezone`, `setOwnerPhone` and
+    retry's version bump are re-expressed over it with their behaviour unchanged; the
+    in-memory repository mirrors all of it)
   - modify `packages/api/src/onboarding/draft/approve.ts` (`approveDraft` takes
     `expectedVersion`, locks first, and builds from the locked row)
   - modify `packages/api/src/routes/onboarding-draft.ts` (`POST /draft/approve` validates the
     body and drops its own unlocked pre-read; one error mapper turns `DraftVersionConflictError`
     into 409 `VERSION_CONFLICT`, the code `PUT /draft/choices/:settingKey` already uses, and
-    `DraftAlreadyApprovedError` into 409 `DRAFT_APPROVED` for every draft `PUT`; an already
+    `DraftAlreadyApprovedError` into 409 `DRAFT_APPROVED` for every draft `PUT` (and, from S4,
+    `DraftMetroLockedError` into 409 `DRAFT_METRO_LOCKED` for `PUT /draft/metro`); an already
     approved draft on approve stays the idempotent 200 `approvedNow: false` with the stored ids
-    when the request carries no `expectedVersion` or the version the draft was approved from
-    (`version - 1`), and answers 409 `VERSION_CONFLICT` for any other)
+    when the request carries no `expectedVersion` or `version - 1` (the version the draft was
+    approved from, until a `POST /draft/retry` bumps `version`; after one, an approve sent
+    from before it is a stale tab's), and answers 409 `VERSION_CONFLICT` for any other)
   - modify `packages/web/src/lib/onboardingDraftApi.ts` and
     `packages/web/src/hooks/useOnboardingDraft.ts` (`approve` sends the draft's `version`)
   - tests: `packages/api/test/onboarding/draft/approve.test.ts` (extend),
@@ -1626,17 +1795,27 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   whichever endpoint it came through; a write that took the lock first has bumped `version`,
   so an approval carrying the pre-write version gets `VERSION_CONFLICT` (and one carrying no
   version builds from the row exactly as the write left it). Under the lock, in this order:
-  no row → 404; `status = 'approved'` → a repeat, and `expectedVersion` tells a retry from a
-  stale tab. An approved draft is frozen (every field writer refuses it, and undo, reset and reopen
-  move it out of `approved`) and `markApproved` bumps `version` once, so the version an
-  approval was made from is always the approved row's `version - 1`. No `expectedVersion`
-  (older clients post `{}`) or `expectedVersion = version - 1` → 200 `{ approvedNow: false }`
-  with the ids the row already carries: a double tap, or a retry after a lost response, is a
-  success, as S1 shipped. Any other `expectedVersion` → 409 `VERSION_CONFLICT` naming the
-  version sent and the version the draft was approved from: that tab's read-back was stale
-  (another tab edited and approved after it rendered), so the call must not be answered as
-  though it had approved what that tab showed; the web re-reads and lands on the approved
-  state. S1b implements exactly this rule, the 409 included. For a draft still in `draft`,
+  no row → 404; `status = 'approved'` → a repeat, and `expectedVersion` tells a repeat of the
+  same approval from a stale tab. An approved draft is frozen (every field writer refuses it,
+  and undo, reset and reopen move it out of `approved`) and `markApproved` bumps `version`
+  once, so straight after an approval the version it was made from is the approved row's
+  `version - 1`. The one writer that moves an approved draft without taking it out of
+  `approved` is `POST /draft/retry` (U9), which bumps `version` by one each time it re-queues
+  failed proposals, so one version names one approval attempt, and the rule below keeps
+  comparing with `version - 1` only. No `expectedVersion` (older clients post `{}`) or
+  `expectedVersion = version - 1` → 200 `{ approvedNow: false }` with the ids the row already
+  carries: a double tap, or a repeat after a lost response, is a success, as S1 shipped. Any
+  other `expectedVersion` → 409 `VERSION_CONFLICT` naming the version sent and `version - 1`
+  (the version the draft was approved from, until a retry moves it): that tab's read-back was
+  stale (another tab edited and approved after it rendered), so the call must not be answered
+  as though it had approved what that tab showed; the web re-reads and lands on the approved
+  state. The same 409 answers an approve sent from before an execution retry: after r retries
+  the version the draft was approved from is `version - 1 - r`, so a stale approve tab (or a
+  repeat that arrived after a retry) gets a 409 instead of the idempotent 200, which is
+  intended: its screen predates the retry's new window, so it re-reads and lands on the
+  saving, wait or result screen the status shows. No per-approval counter is kept to preserve
+  the 200 across a retry. S1b implements exactly this rule, the 409 and the retry bump included. For a
+  draft still in `draft`,
   `expectedVersion` present and `<>` the row's `version` → 409 `VERSION_CONFLICT` naming
   expected and found. None of these paths mints anything. A missing `expectedVersion` is
   accepted while older clients post `{}`: the
@@ -1656,8 +1835,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   read-back (U3 renders it). A `VERSION_CONFLICT` whose re-read shows the draft `approved` (a
   stale tab) lands the shell on the approved state, which shows what was approved rather than
   what the tab last rendered, with no re-tap. A repeat tap or a retry after a lost response
-  (same version) gets the idempotent 200 and the shell moves on to "Saving" with the ids it
-  carries.
+  (same version, with no execution retry in between) gets the idempotent 200 and the shell
+  moves on to "Saving" with the ids it carries; the same tap after an execution retry is the
+  stale-tab 409 above and lands on whatever the status then shows.
 - **Patterns to follow:** `stageChoice` in `onboarding/draft/repository.ts` (lock, then
   compare, then write), U9's lock-then-decide-then-write undo, and
   `test/integration/onboarding-draft-repository.test.ts` for real-connection setup.
@@ -1679,6 +1859,18 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     → 409 `VERSION_CONFLICT` naming 5 and 6, still exactly two proposal rows (B's), the draft
     and its `proposal_ids` untouched, no new audit row; an `expectedVersion` ahead of the row's
     → the same 409; after the re-read tab A sees `approved` and lands on the approved state.
+  - Edge (stale approve after an execution retry; real Postgres): approve from version a (the
+    draft is `approved` at a + 1), every proposal then `execution_failed`, one
+    `POST /draft/retry` (the row is at a + 2, the proposals `approved` in a new window). The
+    same approve again with `expectedVersion: a` (a stale tab, or a repeat that arrived after
+    the retry) → 409 `VERSION_CONFLICT` naming a and a + 1 (`version - 1`), still exactly the
+    two proposal rows, nothing re-minted, the retry's re-queued proposals and the draft row
+    (`version` a + 2, `proposal_ids`) untouched, no new `onboarding.draft_approved` row; the
+    same approve with no `expectedVersion` (older clients) → the idempotent 200
+    `approvedNow: false` with the stored ids; after the re-read the tab renders the saving
+    screen from the status (`execution` `pending`) and does not re-tap. Without a retry in
+    between, `expectedVersion: a` is still the idempotent 200 (the "already approved" case
+    above).
   - Race, every draft writer vs approve (two real connections, both orders; scripted per
     writer in S1b's `onboarding-draft-approve-concurrency.test.ts` for `PUT /draft/choices/:key`,
     the timezone write and `PUT /draft/owner-phone`, then table-driven from S4 over a
@@ -1686,8 +1878,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     three and gains `PUT /draft/metro` (S4, U5) and `PUT /draft/forwarding` (S5, U6), each row
     added by the PR that adds the endpoint): (a) the write takes the lock and commits first, then the approve that
     carries the pre-write version → `VERSION_CONFLICT`, no proposals, the new value is on the
-    draft, and an approve that carries no version mints from the row with the new value in its
-    payload; (b) the approve takes the lock first and commits, and the write that was waiting
+    draft (for the metro row, `metro_code` and the rebuilt `assembled` shop together), and an
+    approve that carries no version mints from the row with the new value in its payload; (b) the approve takes the lock first and commits, and the write that was waiting
     → 409 `DRAFT_APPROVED`, the draft row unchanged by it, and the draft's resolved choices
     and settings facts (owner phone, metro-derived city and prices, forwarding number and
     carrier) equal, field by field, the payloads of the two proposals that executed. Never: a
@@ -1698,7 +1890,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `VERSION_CONFLICT` naming v and v + 1, having changed nothing. The loser re-reads and
     re-sends once with v + 1 and succeeds, `version` ends at v + 2 and both values are stored,
     neither lost (each write computes its change from the locked row, not a stale copy). Never
-    both applying at v, and never the loser silently overwriting the winner's field.
+    both applying at v, and never the loser silently overwriting the winner's field. The
+    metro `PUT` against a choice `PUT` is U5's `onboarding-draft-metro.test.ts` instead,
+    because it is the one writer with a precondition: if the choice wins, the metro `PUT` is
+    `DRAFT_METRO_LOCKED`, not `VERSION_CONFLICT`.
   - Race, approve vs approve (two connections, both carrying the same `expectedVersion`,
     repeated in a loop so ordering luck cannot pass it): both return 200, the first with
     `approvedNow: true` and the one that waited behind the lock with `approvedNow: false` (it
@@ -1713,7 +1908,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     row `getForTenantForUpdate` returned (a repo double that changes the row after an earlier read proves
     the earlier read is unused); `approveDraft` on an `approved` row returns the stored ids for
     no `expectedVersion` or `version - 1` and throws `DraftVersionConflictError` for any other
-    (one parametrised case, Pg and in-memory); every field writer refuses an `approved` draft, compares a
+    (one parametrised case, Pg and in-memory, including a row a retry has bumped: the version
+    it was approved from is then `version - 1 - r`, which throws); every field writer refuses an `approved` draft, compares a
     supplied `expectedVersion` and bumps `version` (one parametrised case per writer); a guard
     test reads `onboarding/draft/repository.ts` and fails if `UPDATE onboarding_drafts` appears
     anywhere but the helper.
@@ -1727,7 +1923,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   more approvals yields proposals that differ from the approved draft's resolved choices, or more
   than one proposal pair per draft; and a stale tab's approval of an already approved draft is
   refused with 409 instead of being answered as an approval it never made, while a retry of the
-  same approval is still a 200.
+  same approval is still a 200 until an execution retry has bumped the version, after which an
+  approve from before it is a 409 too.
 
 ### U8. Runtime consumers for the policy keys the cards write
 - **Goal:** Every card's promise is behaviour, not a stored value. `payment_collection_mode`
@@ -2687,9 +2884,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   takes the same lock, refuses once the draft is approved and bumps `version` (U11's
   invariant: inline in the three writers that exist, one shared helper from S4), so no late write can ride behind the approval's snapshot,
   and the `version` CAS rejects stale tabs on choice writes and on approve (a stale tab's
-  approve is a 409 even when another tab has already approved); undo, reset and retry carry
-  the version of the approval their screen showed, so a tap from a screen that is no longer
-  current is a 409 that changes nothing.
+  approve is a 409 even when another tab has already approved, or a retry has since opened a
+  new window); undo, reset and retry carry the version of the approval attempt their screen
+  showed, and a successful retry bumps it, so a tap from a screen that is no longer current is
+  a 409 that changes nothing.
 - **Browser voice on real devices.** Tap is first-class everywhere, `answer_mode` is measured
   per turn, U4 spikes WebKit before U3 depends on it.
 - **Regional prices wrong or read as advice.** Founder-curated rows, "typical" copy, prices
@@ -2735,9 +2933,9 @@ previous one; the previous slice is merged first.
 |---|---|---|---|
 | S1 | U1 + U2 | Choice registry, typical-shop assembly, regional tiers, draft/choices/approve API, `onboarding_voice_policy` proposal. Live API, integration-tested, no UI yet. | 7-10 days |
 | S2 | U3 | v3 shell against the live S1 API: Ready, seven turns (tap and type), read-back, approve, trial, number, test call. Playwright on the real stack. | 6-9 days |
-| S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover, even beside a failed one, and takes precedence over `failed`) and `POST /draft/retry` (guards in order: `DRAFT_NOT_APPROVED`, then `DRAFT_RETRY_UNSAFE` for a set holding such a proposal, failed member or not (`approved + undone` is unsafe, not nothing-failed), then `DRAFT_RETRY_NOTHING_FAILED` for the benign rest; the refusal changes nothing, because re-approving only the failed member would leave its sibling behind and the set would end `executed + undone`; that set's way out is S4's reset, so until S4 the only way out is Settings and the shell offers no Start over). Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
+| S1b | U11 (approve half) + U10 (API half) + U9 (execution fact, retry) | "S1 follow-ups" PR against `main` (#1694, draft, branch `feat/pick-dont-build-s1-followups`): the approval row lock (`getForTenantForUpdate`) with optional `expectedVersion` and a `markApproved` compare-and-swap, with a repeat approve staying the idempotent 200 when it carries the version the draft was approved from (`version - 1`, until a retry bumps `version`) or none, and a different `expectedVersion` on an approved draft answering 409 `VERSION_CONFLICT` (the stale-tab rule, implemented exactly so, an approve sent from before a retry included); `owner_phone` on the draft (migration `313_onboarding_drafts_owner_phone`), stored on create, `PUT /draft/owner-phone` (body `{ ownerPhone, version }`, the same lock-then-compare as `stageChoice`), the owner cell on the settings payload and the handler's write to `tenant_settings.owner_phone`, with no `OWNER_PHONE_REQUIRED` gate (both emergency options ring the owner, so a gate would leave every draft without a cell unapprovable until the read-back can ask; it ships with the prompt in S4); `draft.execution` on the status (`pending \| executing \| executed \| failed \| stopped`, where `stopped` covers undone, rejected, expired or missing proposals that retry cannot recover, even beside a failed one, and takes precedence over `failed`) and `POST /draft/retry` (guards in order: `DRAFT_NOT_APPROVED`, then `DRAFT_RETRY_UNSAFE` for a set holding such a proposal, failed member or not (`approved + undone` is unsafe, not nothing-failed), then `DRAFT_RETRY_NOTHING_FAILED` for the benign rest; the refusal changes nothing, because re-approving only the failed member would leave its sibling behind and the set would end `executed + undone`; a retry that passes the guards bumps the draft `version` by one in the same locked transaction as the re-queue, so one version names one approval attempt and a screen from before the retry cannot undo, reset or re-approve it (409 `VERSION_CONFLICT`), and `onboarding.draft_retry` records the version before and after; that set's way out is S4's reset, so until S4 the only way out is Settings and the shell offers no Start over). Not in #1694: the shared `updateLocked` helper with its guard and table-driven race (S4, with the first writers that need it) and the `packages/shared` wire schemas and web consumers (S2: send the version, show `failed` and `stopped`). | 2 days |
 | S3 | U4 | Server-voice TTS with clip cache, first/second matcher, barge-in, WebKit coverage. | 4-5 days |
-| S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status (`reset` while no member is executed or executing and no `approved` member is past its undo window, else `settings`, for a failed member beside a terminal one as for any other `stopped` set) so the shell never offers a refused button; reset is also the way out of the set retry refuses as `DRAFT_RETRY_UNSAFE`; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body, and checked between `DRAFT_NOT_APPROVED` and `DRAFT_RETRY_UNSAFE`), made required once every client sends it. | 6-7 days (reset adds one) |
+| S4 | U5 + rest of U9 + rest of U10 + U11's shared helper | Free-speech override (booking hours mapped onto the three presets, or confirmed against the closest one and never coerced), setting-key routing for the read-back mic, metro change (`PUT /draft/metro`, refused with `DRAFT_METRO_LOCKED` once a choice is staged and rebuilding the assembled shop for the new metro in the same write, so the city and prices change together); `updateLocked` extracted from the inline draft writers with its single-`UPDATE` guard and the table-driven writer-vs-approve race; whole-draft undo (row-locked, all-or-nothing, with a required `expectedVersion` so a saving screen left open in a stale tab cannot undo a newer approval) on that helper; whole-draft reset (`POST /draft/reset`), the locked reconciliation for an approval the owner split from the inbox or that failed or lapsed: it accepts members that are `approved` inside the window or not applied (`undone`, `rejected`, `expired`, `execution_failed`), reverts the approved ones, returns the draft to editable at `version + 1` and emits `onboarding.draft_reset`, and refuses with a typed 409 when any member is `executing` or `executed`, sending the owner to Settings, with the derived `recovery` hint on the status (`reset` while no member is executed or executing and no `approved` member is past its undo window, else `settings`, for a failed member beside a terminal one as for any other `stopped` set) so the shell never offers a refused button; reset is also the way out of the set retry refuses as `DRAFT_RETRY_UNSAFE`; the read-back's owner-cell prompt together with the `OWNER_PHONE_REQUIRED` approve gate, in one PR so the gate always has a control that lifts it; approve's `expectedVersion`, and retry's (added in this slice, since #1694's retry reads no body, and checked between `DRAFT_NOT_APPROVED` and `DRAFT_RETRY_UNSAFE`), made required once every client sends it. | 6-7 days (reset adds one) |
 | S5 | U6 + U8 | Eighth turn (existing number) and day-one branch, number flow with claim re-search driven by a structured provisioning `failureCode` on the status (only `area_code_unavailable` re-searches; other codes show their own copy), forwarding text with owner confirmation and probe, forwarding answers on the draft through the locked-write helper, the `existing_number` answer staged in one `PUT /draft/forwarding` write with the number and carrier a "yes" needs (so a "yes" can never exist without its pair; "Keep the rest as is" leaves the question unanswered and the read-back shows "Not set"; approval refuses a corrupted "yes" without a pair with the recoverable 400 `FORWARDING_DETAILS_REQUIRED`, which the read-back turns into the question again, gate and prompt in one PR), and the settings proposal as one three-valued `forwarding` field (a changed line clears the old confirm and probe stamps; an explicit `null`, from a re-run that answers no, clears the line and both stamps; absent, only when the question was never answered, leaves them), seeded-price baseline with legacy backfill and the re-run repricing gate (a repriced row's baseline moves with its price), re-run reopen copying the live owner cell onto the draft, first-day home, runtime consumers for `payment_collection_mode` and `emergency_target` (pay links deactivated on a switch to collect-on-site, enqueued in the settings transaction with a follow-up pass and a daily sweep; no link on a failed mode read, and the link attach re-checks the mode under a per-tenant payment-mode lock, so a checkout that stalls across a switch stores none even when the switch is the tenant's first settings write), flag flipped, v2 deleted. | 11-14 days (the forwarding-details gate and its read-back prompt add one, the attach-time mode check another) |
 | S6 | U7 | Pre-signup demo call (founder decision first), with a leased pool of demo tenants per trade, each call's callbacks resolving the lease by a signed token minted before the `Calls` request and binding the CallSid atomically (so a fast answer or an early terminal callback is never lost), reset before reuse (heartbeat-renewed and token-fenced, with queued work fenced by a lease generation that every write re-checks, and release waiting on an in-flight job registry rather than on queue visibility) and excluded from owner, billing and analytics surfaces; a daily call-and-cents budget is reserved atomically before every `Calls` request and returned on a definitive failure; a terminal status callback delayed past the lease still finalizes its call row and sends the signup text once (a longer-lived status expiry on the token, a transactional handoff outbox written in the finalizing transaction together with the signup-handoff row its token validates against, and sent by a queue worker under a stable idempotency key, so a crash before the send is retried and never loses the handoff, no tenant writes). | 11-15 days (the token and bind add one, the budget another, the late-callback handoff a third, the outbox and its sender a fourth) |
 
