@@ -89,10 +89,15 @@ const IN_FLIGHT_OR_DONE = new Set(['approved', 'executing', 'executed']);
 /**
  * Derived execution state of an approved draft's proposals.
  *
- * - `failed`: any proposal outside approved/executing/executed (execution_failed,
- *   undone, expired, rejected, or a stuck pre-approval status) or a listed
- *   proposal that no longer exists. The shell offers a retry instead of waiting
- *   forever; wins over every other state.
+ * - `failed`: any proposal is `execution_failed`. POST /draft/retry re-queues
+ *   exactly those rows, so the shell offers a retry instead of waiting forever;
+ *   wins over every other state.
+ * - `stopped`: no proposal is `execution_failed`, but one is outside
+ *   approved/executing/executed (undone or rejected from the inbox, expired, a
+ *   stuck pre-approval status) or a listed proposal no longer exists. Retry
+ *   cannot leave any of these (`undone` is terminal in lifecycle.ts), so the
+ *   shell must not offer it; it also never waits forever. The whole-draft undo
+ *   (plan U9, S4) is the way out.
  * - `executed`: every listed proposal executed.
  * - `executing`: any executing, or some executed while others still wait for
  *   the worker (work is in flight, so the shell keeps saying "Saving").
@@ -108,7 +113,8 @@ export function deriveDraftExecution(
   if (draftStatus !== 'approved') return null;
   if (!tracked || tracked.expected <= 0) return null;
   const { expected, statuses } = tracked;
-  if (statuses.length < expected || statuses.some((s) => !IN_FLIGHT_OR_DONE.has(s))) return 'failed';
+  if (statuses.some((s) => s === 'execution_failed')) return 'failed';
+  if (statuses.length < expected || statuses.some((s) => !IN_FLIGHT_OR_DONE.has(s))) return 'stopped';
   if (statuses.every((s) => s === 'executed')) return 'executed';
   if (statuses.some((s) => s === 'executing' || s === 'executed')) return 'executing';
   return 'pending';

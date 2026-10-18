@@ -162,10 +162,10 @@ describe('onboarding draft execution state (real DB)', () => {
       expect(s.steps).toHaveLength(7);
     });
 
-    it('is failed when the owner undid one half, and when a listed proposal row is gone', async () => {
+    it('is stopped (not failed) when the owner undid one half, and when a listed proposal row is gone', async () => {
       const [a] = await approvedDraft();
       await setStatus(a, 'undone');
-      expect((await status()).status.draft?.execution).toBe('failed');
+      expect((await status()).status.draft?.execution).toBe('stopped');
 
       await setStatus(a, 'approved');
       expect((await status()).status.draft?.execution).toBe('pending');
@@ -174,7 +174,7 @@ describe('onboarding draft execution state (real DB)', () => {
         `UPDATE onboarding_drafts SET proposal_ids = proposal_ids || to_jsonb($2::text) WHERE tenant_id = $1`,
         [tenant.tenantId, crypto.randomUUID()],
       );
-      expect((await status()).status.draft?.execution).toBe('failed');
+      expect((await status()).status.draft?.execution).toBe('stopped');
     });
 
     it("never reads another tenant's proposals", async () => {
@@ -191,7 +191,7 @@ describe('onboarding draft execution state (real DB)', () => {
         a,
         foreign.rows[0].id,
       ]);
-      expect((await status()).status.draft?.execution).toBe('failed');
+      expect((await status()).status.draft?.execution).toBe('stopped');
     });
   });
 
@@ -314,6 +314,9 @@ describe('onboarding draft execution state (real DB)', () => {
     it('an undone proposal cannot be retried: 409, and it stays undone', async () => {
       const [a] = await approvedDraft();
       await setStatus(a, 'undone');
+      // The status says so too: `stopped`, which the shell renders without a Retry
+      // button (retry only leaves `execution_failed`).
+      expect((await status()).status.draft?.execution).toBe('stopped');
       const res = await retry();
       expect(res.status).toBe(409);
       expect(JSON.stringify(res.body)).toContain('DRAFT_RETRY_NOTHING_FAILED');

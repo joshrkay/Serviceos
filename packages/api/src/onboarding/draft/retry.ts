@@ -27,7 +27,9 @@
  * is the choice-staging compare-and-swap token.
  *
  * What retry cannot do: `undone` is terminal in lifecycle.ts, so a proposal the
- * owner undid from the inbox is not retryable and answers the same 409.
+ * owner undid from the inbox is not retryable and answers the same 409. The
+ * status says so: such a draft derives `execution: 'stopped'`, not `failed`
+ * (derive-status.ts), so the shell never offers a Retry that cannot work.
  */
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';

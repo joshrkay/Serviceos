@@ -355,19 +355,27 @@ describe('deriveDraftExecution', () => {
     [['execution_failed', 'executing'], 'failed'],
     [['execution_failed', 'executed'], 'failed'],
     [['execution_failed', 'execution_failed'], 'failed'],
-    // States the owner can land in through the inbox; the shell must never wait forever on them.
-    [['undone', 'approved'], 'failed'],
-    [['expired', 'executed'], 'failed'],
-    [['rejected', 'approved'], 'failed'],
-    [['draft', 'approved'], 'failed'],
-    [['ready_for_review', 'executed'], 'failed'],
+    // States the owner can land in through the inbox. Retry cannot leave them
+    // (POST /draft/retry only re-queues execution_failed), so they are `stopped`,
+    // never `failed`: the shell must neither wait forever nor offer a dead Retry.
+    [['undone', 'approved'], 'stopped'],
+    [['expired', 'executed'], 'stopped'],
+    [['rejected', 'approved'], 'stopped'],
+    [['draft', 'approved'], 'stopped'],
+    [['ready_for_review', 'executed'], 'stopped'],
+    [['undone', 'undone'], 'stopped'],
+    // A retryable failure alongside a stopped one stays `failed`: retry has work to do.
+    [['execution_failed', 'undone'], 'failed'],
+    [['undone', 'execution_failed'], 'failed'],
   ])('approved draft with proposals %j is %s', (statuses, expected) => {
     expect(deriveDraftExecution('approved', tracked(statuses))).toBe(expected);
   });
 
-  it('a listed proposal that no longer exists (fewer rows than ids) is failed', () => {
-    expect(deriveDraftExecution('approved', tracked(['executed'], 2))).toBe('failed');
-    expect(deriveDraftExecution('approved', tracked([], 2))).toBe('failed');
+  it('a listed proposal that no longer exists (fewer rows than ids) is stopped, not failed', () => {
+    expect(deriveDraftExecution('approved', tracked(['executed'], 2))).toBe('stopped');
+    expect(deriveDraftExecution('approved', tracked([], 2))).toBe('stopped');
+    // ...but a retryable failure among the rows that remain is still failed.
+    expect(deriveDraftExecution('approved', tracked(['execution_failed'], 2))).toBe('failed');
   });
 
   it('an approved draft with nothing to track is null, never a vacuous executed', () => {

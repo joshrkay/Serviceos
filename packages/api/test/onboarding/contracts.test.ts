@@ -206,7 +206,7 @@ describe('OnboardingStatusResponseSchema — draft.execution', () => {
   };
   const draft = { status: 'approved' as const, choicesAnswered: 7, version: 3 };
 
-  it.each(['pending', 'executing', 'executed', 'failed', null] as const)('parses execution %s', (execution) => {
+  it.each(['pending', 'executing', 'executed', 'failed', 'stopped', null] as const)('parses execution %s', (execution) => {
     expect(OnboardingStatusResponseSchema.parse({ ...base, draft: { ...draft, execution } }).draft?.execution).toBe(execution);
   });
 
