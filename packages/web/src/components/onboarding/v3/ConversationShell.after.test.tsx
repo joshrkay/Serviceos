@@ -154,7 +154,11 @@ describe('ConversationShell after "That\'s right"', () => {
       expect(screen.queryByText('Still with you.')).not.toBeInTheDocument();
       // Honest about it: the choices may not have saved, and there is a way out that is not another look at the same status.
       expect(screen.getByText(/Some of your choices may not have saved/)).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Go through setup step by step' })).toBeInTheDocument();
+      const stepByStep = screen.getByRole('button', { name: 'Go through setup step by step' });
+      // The label wraps instead of spilling past the button at 320px, like every other full-width v3 action.
+      expect(stepByStep.className).toMatch(/whitespace-normal/);
+      // The note speaks the button's language: it is a look at the status again.
+      expect(screen.getByText(/You can check again, or go through setup step by step/)).toBeInTheDocument();
       // It only looks at the status again, so it does not claim to retry anything.
       expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
       expectAllTapTargets(container, 'the slow wait');

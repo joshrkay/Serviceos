@@ -189,9 +189,9 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
           support="This takes a few seconds."
           onRetry={refetch}
           retryLabel="Check again"
-          slowNote="Some of your choices may not have saved. You can try again, or go through setup step by step."
+          slowNote="Some of your choices may not have saved. You can check again, or go through setup step by step."
           slowAction={
-            <Button fullWidth variant="outline" size="lg" className="h-14 rounded-2xl text-[17px] font-semibold" onClick={() => void navigate(ONBOARDING_RERUN_PATH)}>
+            <Button fullWidth variant="outline" size="lg" className="h-14 rounded-2xl text-[17px] font-semibold whitespace-normal" onClick={() => void navigate(ONBOARDING_RERUN_PATH)}>
               Go through setup step by step
             </Button>
           }
