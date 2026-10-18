@@ -774,9 +774,30 @@ flowchart LR
     - owner-only and audited
     - an explicit human action, never an AI proposal
     - one `executeAudited` command transaction
-  - **Make the scope complete by construction, not by list.** Review keeps turning up one more
-    table that holds customer data, so the list below is only a starting point, not the
-    definition.
+  - **U7 starts with a data inventory, before any erase code.** Review keeps turning up one more
+    store that holds customer data: service locations, custom-field values, converted leads, callback
+    tasks, an external trace sink. That shows the scope has to be discovered systematically, not
+    patched one store at a time. The first deliverable is a written inventory, reviewed on its own
+    PR, of every place a customer's data can live, reached through any of five kinds of link:
+    - **Direct:** a `customer_id` foreign key.
+    - **Bare column:** a `%customer_id` column with no foreign key.
+    - **Session- or call-linked:** keyed by the customer's `voice_sessions`, `call_sid` or
+      conversation ids. For example, `call_me_back_tasks` (`schema.ts:3887-3901`) is linked only
+      through `session_id`, yet it holds `caller_phone`, `caller_name`, `callback_message` and
+      `intent_summary`.
+    - **Identifier-linked:** matched only by the customer's phone, email or name.
+    - **External sinks:** S3 objects, Twilio recordings, and Langfuse traces when
+      `LANGFUSE_CAPTURE_CONTENT` is on. `trace-exporter.ts` exports gateway inputs and outputs,
+      including transcripts, under correlation and session ids.
+
+    The erase code and its tests are then written against that inventory. The list of stores below
+    is a starting point, not the definition.
+    - **External sinks are erased too, or the erase says it is incomplete.**
+      - With content capture on, the erase deletes the subject's Langfuse traces through the
+        Langfuse API, keyed by the collected correlation and session ids.
+      - If any external delete fails, the erase result reports that store as incomplete, the owner
+        sees it, and `alertOperator` fires.
+      - It never claims success it hasn't confirmed.
     - Build an erase-coverage manifest in code. It names every table that references `customers`.
       Foreign keys alone miss many links, because a lot of customer links in this schema are bare
       columns: `leads.converted_customer_id` (`schema.ts:1411`), `portal_sessions.customer_id`
@@ -846,6 +867,11 @@ flowchart LR
     `…_customer_id` column with no foreign key
   - a lead converted into the customer (linked only by `converted_customer_id`, with no foreign key)
     has its name, phone, email, notes and service address scrubbed
+  - a `call_me_back_tasks` row linked only through the customer's voice session has its caller phone,
+    name, message and intent summary scrubbed
+  - with content capture on, the subject's Langfuse traces are deleted through the API (a mocked
+    Langfuse endpoint). When the delete fails, the erase result marks that store incomplete and
+    alerts.
   - with two customers sharing a full name, the other customer's row is untouched
   - a row that matches only a household-shared phone lands on the candidate list and is scrubbed only
     after confirmation
