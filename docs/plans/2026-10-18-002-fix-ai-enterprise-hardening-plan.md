@@ -869,8 +869,18 @@ flowchart LR
         charge records under its legal obligations, outside our control, and the result says so.
       - **QuickBooks.** `integrations/accounting/sync-service.ts:271-315` pushes the customer's
         display name, email and phone. Accounting records fall under the same tax and legal
-        retention as local invoices (owner decision 1), so the default is to anonymize the
-        QuickBooks customer's contact fields and keep the financial records.
+        retention as local invoices (owner decision 1). The default is to keep the financial
+        records and anonymize the QuickBooks customer record:
+        - Replace the required `DisplayName` with a stable anonymized value, for example
+          `Erased customer <short id>`. `sync-service.ts:282-287` sends `customer.displayName`, and
+          `quickbooks-client.ts:93-103` stores it as `DisplayName`, so clearing email and phone
+          alone leaves the name.
+        - Clear the email and the phone.
+      - **Twilio messages.** `notifications/twilio-delivery-provider.ts:238-268` posts the recipient
+        and the body to Twilio's Messages resource, and we keep the returned message SIDs. The
+        erase redacts or deletes every SMS/MMS Message resource sent to or from the customer,
+        media included, through the Twilio API. It finds them by the SIDs we keep and, for inbound
+        messages, by the customer's number.
       - Every enabled integration is a manifest entry with its delete, anonymize or legally-retain
         rule.
 
@@ -986,9 +996,11 @@ flowchart LR
     alerts.
   - a trace queued before the erase whose transport is delayed until after it is never recreated: it
     is dropped at the send boundary, or deleted again on the second pass
-  - against mocked Stripe and QuickBooks APIs, the Stripe Customer is deleted and the QuickBooks
-    customer's contact fields are anonymized, and a failure at either provider marks that store
-    `incomplete` and alerts
+  - against mocked Stripe, QuickBooks and Twilio Messages APIs:
+    - the Stripe Customer is deleted
+    - the QuickBooks customer's `DisplayName` is replaced and its email and phone are cleared
+    - the customer's Twilio Message resources and their media are redacted or deleted
+    - a failure at any provider marks that store `incomplete` and alerts
   - after an erase, the exporter still sends unrelated traces, so the drain did not shut it down
   - a drain failure marks Langfuse `incomplete`
   - with phase 1 committed, an in-flight writer in another connection sees the tombstone and drops
