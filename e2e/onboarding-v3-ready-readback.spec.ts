@@ -180,7 +180,10 @@ for (const vp of viewports) {
       await expect(page.getByText('Tap one to hear it. Say "first" or "second" to pick.')).toBeVisible();
       await expect(page.getByRole('radio')).toHaveCount(2);
       await expect(page.getByText('Most shops like yours')).toHaveCount(1);
-      await expect(page.getByText('Rivet would say:').first()).toBeVisible();
+      // The greeting options already are what Rivet says, so the line is not repeated under them.
+      await expect(page.getByText('Rivet would say:')).toHaveCount(0);
+      // Focus lands on Rivet's question, so a keyboard or screen-reader owner starts on the new turn.
+      await expect(page.getByRole('heading', { level: 1, name: QUESTIONS.greeting })).toBeFocused();
       await expect(page.getByText('Nothing saved yet')).toBeVisible();
       await expect(page.getByText('About 6 minutes left')).toBeVisible();
       await expect(page.getByRole('button', { name: 'Next' })).toBeDisabled();
@@ -199,6 +202,11 @@ for (const vp of viewports) {
       await page.getByRole('button', { name: 'Next' }).click();
       await expect(page.getByRole('alert')).toHaveText('Use dollars, like 120 or 89.50.');
       await expectScreenFits(page);
+      // A slip that is still digits (a phone number's tail) is refused too, not read back as a price.
+      await page.getByLabel('Per hour').fill('5550142');
+      await page.getByRole('button', { name: 'Next' }).click();
+      await expect(page.getByRole('alert')).toHaveText(['Use dollars, like 120 or 89.50.', 'Keep it to $1,000 or less.']);
+      await page.getByLabel('Per hour').fill('175');
       await page.getByLabel('To come out').fill('$120');
       await expect(page.getByRole('alert')).toHaveCount(0);
       const priceSaved = page.waitForResponse(isStage);
@@ -208,6 +216,7 @@ for (const vp of viewports) {
       // 3. Booking: the second option again. 4. Paid, 5. Hours, 6. Emergency: what most shops pick.
       await expectTurn(page, QUESTIONS.posture);
       await expect(page.getByRole('button', { name: 'Type instead' })).toHaveCount(0);
+      await expect(page.getByText('Rivet would say:').first()).toBeVisible();
       await choose(page, 'Hold it for me');
       await expectTurn(page, QUESTIONS.paid);
       await choose(page, 'Text them a pay link');
