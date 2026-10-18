@@ -152,15 +152,26 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
         setNotice(null);
         setApproving(true);
         try {
-          const res = await approveDraft(apiFetch);
+          // The version is read here, after earlier writes in the queue have landed, so it is the one the
+          // read-back on screen was rendered from. A stale tab then gets a 409 instead of approving a read-back
+          // that changed, and a repeat tap is told apart from a stale one.
+          const res = await approveDraft(apiFetch, draftRef.current?.version);
           commit(res.draft);
           return res;
         } catch (err) {
-          // A 409 here is DRAFT_APPROVAL_FAILED (the transaction rolled back, the
-          // draft is still a draft) — not a version race, so no "refreshed" notice.
-          // Re-read so the shell shows the server's state, then ask for a re-tap.
-          if (err instanceof OnboardingDraftApiError && err.status === 409) await refresh();
-          setError(SAVE_ERROR);
+          if (err instanceof OnboardingDraftApiError && err.status === 409) {
+            // Re-read so the shell shows the server's state. If that says the draft is approved (the other tab
+            // got there first) the shell moves on by itself and there is nothing to ask. A VERSION_CONFLICT on a
+            // draft that is still a draft means the answers changed: say so. Any other 409 is
+            // DRAFT_APPROVAL_FAILED (the transaction rolled back): a plain re-tap.
+            const refreshed = await refresh();
+            if (refreshed && draftRef.current?.status !== 'approved') {
+              if (err.versionConflict) setNotice(CONFLICT_NOTICE);
+              else setError(SAVE_ERROR);
+            }
+          } else {
+            setError(SAVE_ERROR);
+          }
           return null;
         } finally {
           setApproving(false);

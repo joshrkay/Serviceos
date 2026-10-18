@@ -233,7 +233,8 @@ describe('useOnboardingDraft', () => {
       res = await result.current.approve();
     });
 
-    expect(calls[1]).toMatchObject({ method: 'POST', path: '/api/onboarding/draft/approve' });
+    // The version of the read-back the owner is looking at rides along, so a stale tab cannot approve it.
+    expect(calls[1]).toMatchObject({ method: 'POST', path: '/api/onboarding/draft/approve', body: { expectedVersion: 1 } });
     expect(res).toMatchObject({ proposalIds: ['p1', 'p2'], approvedNow: true });
     expect(result.current.draft?.status).toBe('approved');
     expect(result.current.approving).toBe(false);
@@ -256,6 +257,86 @@ describe('useOnboardingDraft', () => {
     expect(result.current.version).toBe(5);
     expect(result.current.error).toMatch(/\S/);
     expect(result.current.notice).toBeNull();
+  });
+
+  it('approves from the version a queued staging write returned, not the one the tap saw', async () => {
+    const staged = withDraft({ version: 2, choices: { greeting: { option: 'b' } } });
+    const approved = withDraft({ status: 'approved', version: 2, proposalIds: ['p1', 'p2'], approvedAt: '2026-10-18T10:05:00.000Z' });
+    stubFetch([
+      json(200, { draft: draftJson }),
+      json(200, { draft: staged }),
+      json(200, { draft: approved, proposalIds: ['p1', 'p2'], approvedNow: true }),
+    ]);
+    const { result } = renderHook(() => useOnboardingDraft(null));
+    await waitFor(() => expect(result.current.draft).not.toBeNull());
+
+    await act(async () => {
+      const staging = result.current.stage('greeting', { option: 'b' });
+      const approving = result.current.approve();
+      await Promise.all([staging, approving]);
+    });
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      'GET /api/onboarding/draft',
+      'PUT /api/onboarding/draft/choices/greeting',
+      'POST /api/onboarding/draft/approve',
+    ]);
+    expect(calls[2].body).toEqual({ expectedVersion: 2 });
+  });
+
+  it('on a 409 VERSION_CONFLICT from approve (a stale tab) re-reads the draft and shows the refresh notice, not an error', async () => {
+    stubFetch([
+      json(200, { draft: draftJson }),
+      json(409, { error: 'CONFLICT', message: 'VERSION_CONFLICT: expected 1, found 3; re-read the draft' }),
+      json(200, { draft: withDraft({ version: 3 }) }),
+    ]);
+    const { result } = renderHook(() => useOnboardingDraft(null));
+    await waitFor(() => expect(result.current.draft).not.toBeNull());
+
+    let res: Awaited<ReturnType<typeof result.current.approve>> = null;
+    await act(async () => {
+      res = await result.current.approve();
+    });
+    expect(res).toBeNull();
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      'GET /api/onboarding/draft',
+      'POST /api/onboarding/draft/approve',
+      'GET /api/onboarding/draft',
+    ]);
+    expect(result.current.version).toBe(3);
+    expect(result.current.notice).toMatch(/changed somewhere else/);
+    expect(result.current.error).toBeNull();
+    expect(result.current.approving).toBe(false);
+  });
+
+  it('on a VERSION_CONFLICT whose re-read says the draft is already approved, shows nothing and the draft is approved', async () => {
+    const approved = withDraft({ status: 'approved', version: 3, proposalIds: ['p1', 'p2'], approvedAt: '2026-10-18T10:05:00.000Z' });
+    stubFetch([
+      json(200, { draft: draftJson }),
+      json(409, { error: 'CONFLICT', message: 'VERSION_CONFLICT: expected 1, found 3; re-read the draft' }),
+      json(200, { draft: approved }),
+    ]);
+    const { result } = renderHook(() => useOnboardingDraft(null));
+    await waitFor(() => expect(result.current.draft).not.toBeNull());
+
+    await act(async () => {
+      await result.current.approve();
+    });
+    expect(result.current.draft?.status).toBe('approved');
+    expect(result.current.error).toBeNull();
+    expect(result.current.notice).toBeNull();
+  });
+
+  it('keeps a draft that has gained ownerPhone parseable, and one that predates the field', async () => {
+    stubFetch([json(200, { draft: withDraft({ ownerPhone: '+12165550142' }) })]);
+    const withPhone = renderHook(() => useOnboardingDraft(null));
+    await waitFor(() => expect(withPhone.result.current.draft).not.toBeNull());
+    expect(withPhone.result.current.error).toBeNull();
+    expect(withPhone.result.current.draft?.ownerPhone).toBe('+12165550142');
+
+    stubFetch([json(200, { draft: draftJson })]);
+    const without = renderHook(() => useOnboardingDraft(null));
+    await waitFor(() => expect(without.result.current.draft).not.toBeNull());
+    expect(without.result.current.draft?.ownerPhone).toBeUndefined();
   });
 
   it('reports a load failure and retries on reload', async () => {

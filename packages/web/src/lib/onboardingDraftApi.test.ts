@@ -6,6 +6,7 @@ import {
   approveDraft,
   createDraft,
   getDraft,
+  retryDraft,
   stageChoice,
 } from './onboardingDraftApi';
 
@@ -74,6 +75,36 @@ describe('onboardingDraftApi', () => {
     expect(res.proposalIds).toEqual(['p1', 'p2']);
     expect(res.approvedNow).toBe(true);
     expect(apiFetch).toHaveBeenCalledWith('/api/onboarding/draft/approve', { method: 'POST', body: '{}' });
+  });
+
+  it('approveDraft sends the version the read-back was rendered from, so a stale tab is told apart from a repeat', async () => {
+    const approved = { ...draftJson, status: 'approved', version: 4, proposalIds: ['p1', 'p2'], approvedAt: '2026-10-18T10:05:00.000Z' };
+    apiFetch.mockResolvedValueOnce(json(200, { draft: approved, proposalIds: ['p1', 'p2'], approvedNow: true }));
+    await approveDraft(apiFetch, 3);
+    expect(apiFetch).toHaveBeenCalledWith('/api/onboarding/draft/approve', { method: 'POST', body: JSON.stringify({ expectedVersion: 3 }) });
+  });
+
+  it('approveDraft flags a VERSION_CONFLICT from a stale expectedVersion', async () => {
+    apiFetch.mockResolvedValueOnce(json(409, { error: 'CONFLICT', message: 'VERSION_CONFLICT: expected 1, found 3; re-read the draft' }));
+    const err = await approveDraft(apiFetch, 1).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 409, versionConflict: true });
+  });
+
+  it('retryDraft POSTs /retry with no body and returns the re-queued ids', async () => {
+    const approved = { ...draftJson, status: 'approved', version: 2, proposalIds: ['p1', 'p2'], approvedAt: '2026-10-18T10:05:00.000Z' };
+    apiFetch.mockResolvedValueOnce(json(200, { draft: approved, retriedProposalIds: ['p2'] }));
+    const res = await retryDraft(apiFetch);
+    expect(res.retriedProposalIds).toEqual(['p2']);
+    expect(res.draft.status).toBe('approved');
+    expect(apiFetch).toHaveBeenCalledWith('/api/onboarding/draft/retry', { method: 'POST' });
+  });
+
+  it('retryDraft throws the API error for a 409 and for a body that does not match the contract', async () => {
+    apiFetch.mockResolvedValueOnce(json(409, { error: 'CONFLICT', message: 'DRAFT_RETRY_NOTHING_FAILED: no proposal is in execution_failed' }));
+    await expect(retryDraft(apiFetch)).rejects.toMatchObject({ status: 409, code: 'CONFLICT', versionConflict: false });
+
+    apiFetch.mockResolvedValueOnce(json(200, { draft: draftJson }));
+    await expect(retryDraft(apiFetch)).rejects.toMatchObject({ code: 'UNEXPECTED_RESPONSE' });
   });
 
   it('rejects a response that does not match the shared schema', async () => {

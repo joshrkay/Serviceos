@@ -10,11 +10,14 @@ import {
   ApproveOnboardingDraftResponseSchema,
   CreateOnboardingDraftResponseSchema,
   OnboardingDraftResponseSchema,
+  RetryOnboardingDraftResponseSchema,
+  type ApproveOnboardingDraftBody,
   type ApproveOnboardingDraftResponse,
   type CreateOnboardingDraftBody,
   type CreateOnboardingDraftResponse,
   type OnboardingChoiceKey,
   type OnboardingDraft,
+  type RetryOnboardingDraftResponse,
   type StagedOnboardingChoice,
 } from '@ai-service-os/shared';
 import type { ApiFetch } from './apiClient';
@@ -87,9 +90,25 @@ export async function stageChoice(
   return (await parse(res, OnboardingDraftResponseSchema)).draft;
 }
 
-/** "That's right": the API mints and approves two proposals; a repeat call is an idempotent read. */
-export async function approveDraft(apiFetch: ApiFetch): Promise<ApproveOnboardingDraftResponse> {
-  const res = await apiFetch(`${DRAFT_PATH}/approve`, { method: 'POST', body: '{}' });
+/**
+ * "That's right": the API mints and approves two proposals; a repeat call is an idempotent read.
+ * `expectedVersion` is the draft version the read-back on screen was rendered from: the API answers
+ * 409 VERSION_CONFLICT when the draft has changed since (a stale tab), and an API that predates the
+ * field ignores it.
+ */
+export async function approveDraft(apiFetch: ApiFetch, expectedVersion?: number): Promise<ApproveOnboardingDraftResponse> {
+  const body: ApproveOnboardingDraftBody = expectedVersion === undefined ? {} : { expectedVersion };
+  const res = await apiFetch(`${DRAFT_PATH}/approve`, { method: 'POST', body: JSON.stringify(body) });
   if (!res.ok) throw await failure(res);
   return parse(res, ApproveOnboardingDraftResponseSchema);
+}
+
+/**
+ * After a save failed: re-queue the changes that did not go through. Owner only, no body. Any 409
+ * (nothing failed any more, not approved, not safe to retry) means the status moved on: re-read it.
+ */
+export async function retryDraft(apiFetch: ApiFetch): Promise<RetryOnboardingDraftResponse> {
+  const res = await apiFetch(`${DRAFT_PATH}/retry`, { method: 'POST' });
+  if (!res.ok) throw await failure(res);
+  return parse(res, RetryOnboardingDraftResponseSchema);
 }
