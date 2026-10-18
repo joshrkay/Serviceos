@@ -91,6 +91,33 @@ describe('useOnboardingDraft', () => {
     expect(calls[1].body).toEqual({ ...CREATE, clientTimezone: BROWSER_TZ });
   });
 
+  it('backfills the timezone on an existing unapproved draft that has none, through the idempotent create route', async () => {
+    const zoneless = withDraft({ clientTimezone: null, ownerFirstName: 'Jenna' });
+    stubFetch([json(200, { draft: zoneless }), json(200, { draft: withDraft({ clientTimezone: BROWSER_TZ, version: 2 }), created: false })]);
+    const { result } = renderHook(() => useOnboardingDraft(null));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(['GET /api/onboarding/draft', 'POST /api/onboarding/draft']);
+    expect(calls[1].body).toEqual({ packId: 'plumbing', businessName: 'Walsh Plumbing', ownerFirstName: 'Jenna', clientTimezone: BROWSER_TZ });
+    expect(result.current.draft?.clientTimezone).toBe(BROWSER_TZ);
+    expect(result.current.version).toBe(2);
+    expect(result.current.error).toBeNull();
+  });
+
+  it('keeps showing a zoneless draft when the backfill call fails, and never backfills an approved one', async () => {
+    stubFetch([json(200, { draft: withDraft({ clientTimezone: null }) }), new Error('network down')]);
+    const { result } = renderHook(() => useOnboardingDraft(null));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(calls).toHaveLength(2);
+    expect(result.current.draft?.clientTimezone).toBeNull();
+    expect(result.current.error).toBeNull();
+
+    stubFetch([json(200, { draft: withDraft({ clientTimezone: null, status: 'approved', proposalIds: ['p1', 'p2'] }) })]);
+    const approved = renderHook(() => useOnboardingDraft(null));
+    await waitFor(() => expect(approved.result.current.loading).toBe(false));
+    expect(calls.map((c) => c.method)).toEqual(['GET']);
+  });
+
   it('does not create when a draft already exists, even with a create input', async () => {
     stubFetch([json(200, { draft: draftJson })]);
     const { result } = renderHook(() => useOnboardingDraft(CREATE));
@@ -168,6 +195,31 @@ describe('useOnboardingDraft', () => {
     expect(ok).toBe(false);
     expect(result.current.error).toMatch(/\S/);
     expect(result.current.draft?.version).toBe(1);
+  });
+
+  it('on a 409 DRAFT_APPROVED while staging, re-reads the draft so the shell can move on, with no error line', async () => {
+    const approved = withDraft({ status: 'approved', version: 3, proposalIds: ['p1', 'p2'], approvedAt: '2026-10-18T10:05:00.000Z' });
+    stubFetch([
+      json(200, { draft: draftJson }),
+      json(409, { error: 'CONFLICT', message: 'DRAFT_APPROVED: the draft is already approved' }),
+      json(200, { draft: approved }),
+    ]);
+    const { result } = renderHook(() => useOnboardingDraft(null));
+    await waitFor(() => expect(result.current.draft).not.toBeNull());
+
+    let staged = true;
+    await act(async () => {
+      staged = await result.current.stage('greeting', { option: 'b' });
+    });
+    expect(staged).toBe(false);
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      'GET /api/onboarding/draft',
+      'PUT /api/onboarding/draft/choices/greeting',
+      'GET /api/onboarding/draft',
+    ]);
+    expect(result.current.draft?.status).toBe('approved');
+    expect(result.current.error).toBeNull();
+    expect(result.current.notice).toBeNull();
   });
 
   it('approves with POST /approve and returns the two proposal ids', async () => {

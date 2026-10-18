@@ -77,6 +77,8 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
         let next = await getDraft(apiFetch);
         if (!next && input) {
           next = (await createDraft(apiFetch, { ...input, clientTimezone: input.clientTimezone ?? browserTimezoneOrUndefined() })).draft;
+        } else if (next) {
+          next = await backfillTimezone(apiFetch, next, input?.clientTimezone);
         }
         if (!isStale()) commit(next);
       } catch {
@@ -127,8 +129,13 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
           commit(await stageChoice(apiFetch, key, choice, current.version));
           return true;
         } catch (err) {
-          if (err instanceof OnboardingDraftApiError && err.versionConflict) {
-            if (await refresh()) setNotice(CONFLICT_NOTICE);
+          if (err instanceof OnboardingDraftApiError && err.status === 409) {
+            // Either another writer moved the version, or the draft was approved
+            // elsewhere (DRAFT_APPROVED). Re-read so the shell shows the server's
+            // state instead of a dead-end "try again" on a draft that is finished.
+            const refreshed = await refresh();
+            if (refreshed && err.versionConflict) setNotice(CONFLICT_NOTICE);
+            else if (refreshed && draftRef.current?.status !== 'approved') setError(SAVE_ERROR);
           } else {
             setError(SAVE_ERROR);
           }
@@ -163,4 +170,34 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
   );
 
   return { draft, version: draft?.version ?? null, loading, error, notice, approving, stage, approve, reload };
+}
+
+
+/**
+ * A draft saved without a zone can never be approved (the API refuses rather
+ * than guess one), so an owner who reloads keeps hitting the same wall. The
+ * create route is idempotent and records a zone on an existing unapproved
+ * draft, so re-post the draft's own facts with the zone we can detect now.
+ * Best effort: if that call fails, the draft is still shown and approval
+ * reports its own error.
+ */
+async function backfillTimezone(
+  apiFetch: Parameters<typeof getDraft>[0],
+  draft: OnboardingDraft,
+  preferredTimezone: string | undefined,
+): Promise<OnboardingDraft> {
+  if (draft.status !== 'draft' || draft.clientTimezone !== null) return draft;
+  const clientTimezone = preferredTimezone ?? browserTimezoneOrUndefined();
+  if (!clientTimezone) return draft;
+  try {
+    const res = await createDraft(apiFetch, {
+      packId: draft.packId,
+      businessName: draft.businessName,
+      ...(draft.ownerFirstName ? { ownerFirstName: draft.ownerFirstName } : {}),
+      clientTimezone,
+    });
+    return res.draft;
+  } catch {
+    return draft;
+  }
 }
