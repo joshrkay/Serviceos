@@ -134,7 +134,7 @@ function Conversation() {
   };
 
   const keepTheRest = () => {
-    if (!draft || staging) return;
+    if (!draft) return;
     trackFunnel('v3_keep_rest', funnelContext, { answered_count: answeredCount(draft) });
     goTo({ screen: 'readback' });
   };
@@ -196,7 +196,9 @@ function Conversation() {
   // Never backwards: going back to change an answer does not lower the line.
   highestProgress.current = highestSeen(highestProgress.current, frame.progress);
   const escape =
-    screen === 'turn' ? (editing ? { label: 'Back', onSelect: () => goTo({ screen: 'readback' }) } : { label: 'Keep the rest as is', onSelect: keepTheRest }) : undefined;
+    screen === 'turn'
+      ? { ...(editing ? { label: 'Back', onSelect: () => goTo({ screen: 'readback' }) } : { label: 'Keep the rest as is', onSelect: keepTheRest }), busy: staging }
+      : undefined;
 
   return (
     <TurnFrame minutesLeft={frame.minutesLeft} progress={highestProgress.current} statusLabel={frame.statusLabel} escape={escape}>

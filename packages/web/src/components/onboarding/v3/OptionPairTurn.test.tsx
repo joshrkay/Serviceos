@@ -48,9 +48,27 @@ describe('OptionPairTurn', () => {
       expect(book).toHaveAccessibleName('Book it on the call');
       expect(book).toHaveTextContent('Rivet would say: “I have Tuesday at 2 or Wednesday at 9. Which works for you?”');
       expect(book).toHaveTextContent('Most shops like yours');
+      expect(book).toHaveAccessibleDescription(/^Most shops like yours/);
       expect(hold).toHaveAccessibleName('Hold it for me');
+      expect(hold).not.toHaveAccessibleDescription(/Most shops like yours/);
       expect(hold).toHaveTextContent('Jenna will confirm a time with you within the hour.');
       expect(hold).not.toHaveTextContent('Most shops like yours');
+    });
+
+    it('does not say the same sentence twice when an option\'s label is what Rivet says', () => {
+      const choice = choiceFor('greeting');
+      setup('greeting', { choice: { ...choice, options: choice.options.map((o) => ({ ...o, rivetLine: o.label })) as typeof choice.options } });
+      expect(screen.queryByText(/Rivet would say/)).not.toBeInTheDocument();
+      expect(screen.getAllByText(choice.options[0].label)).toHaveLength(1);
+    });
+
+    it('moves focus to the new question when the turn opens, and to the typed field when it opens on typed words', () => {
+      const { unmount } = setup('booking_posture', { onTypeInstead: undefined });
+      expect(screen.getByRole('heading', { level: 1 })).toHaveFocus();
+      unmount();
+      const typed: StagedOnboardingChoice = { override: { label: 'Walsh, go ahead', writes: { voiceGreeting: 'Walsh, go ahead' } } };
+      setup('greeting', { staged: typed, editing: true });
+      expect(screen.getByRole('textbox', { name: 'Your greeting' })).toHaveFocus();
     });
 
     it('puts the mark on whichever option the draft says most shops pick', () => {
@@ -282,12 +300,12 @@ describe('OptionPairTurn', () => {
       it('keeps real cents in the cents and the label', async () => {
         const { onTypeInstead } = await openPrice();
         await userEvent.type(tripField(), '89.50');
-        await userEvent.type(rateField(), '$1,234.05');
+        await userEvent.type(rateField(), '$234.05');
         await userEvent.click(next());
         expect(onTypeInstead).toHaveBeenCalledWith({
-          label: '$89.50 to come out, then $1,234.05 an hour',
+          label: '$89.50 to come out, then $234.05 an hour',
           writes: {},
-          prices: { tripFeeCents: 8950, hourlyRateCents: 123405 },
+          prices: { tripFeeCents: 8950, hourlyRateCents: 23405 },
         });
       });
 

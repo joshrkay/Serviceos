@@ -55,6 +55,21 @@ describe('OptionCard', () => {
     expect(first).toHaveAccessibleDescription(/The caller leaves with a time\..*Rivet would say/);
   });
 
+  it('announces the Most-shops mark as the start of that option\'s description, and only for that option', () => {
+    setup();
+    expect(screen.getByRole('radio', { name: 'Book it on the call' })).toHaveAccessibleDescription(
+      /^Most shops like yours The caller leaves with a time\./,
+    );
+    expect(screen.getByRole('radio', { name: 'Hold it for me' })).not.toHaveAccessibleDescription(/Most shops like yours/);
+  });
+
+  it('reads the mark in the dark ink, not the low-contrast green', () => {
+    setup();
+    const mark = screen.getByText('Most shops like yours');
+    expect(mark.className).toMatch(/text-secondary-foreground/);
+    expect(mark.className).not.toMatch(/(^|\s)text-success/);
+  });
+
   it('leaves out the detail and the Rivet line when an option has none', () => {
     setup({ options: [{ key: 'a', label: 'Yes' }, { key: 'b', label: 'No' }] });
     const yes = screen.getByRole('radio', { name: 'Yes' });

@@ -70,4 +70,26 @@ describe('ReadbackCard', () => {
     expect(screen.getByRole('alert')).toHaveTextContent("That didn't go through. Try again.");
     expect(screen.getByText('I refreshed your answers.')).toHaveAttribute('role', 'status');
   });
+
+  it('does not open a row to edit while "That\'s right" is saving', async () => {
+    const { onEdit } = setup({ approving: true });
+    const rows = screen.getAllByRole('button').filter((b) => b.closest('li'));
+    expect(rows).toHaveLength(7);
+    for (const row of rows) expect(row).toBeDisabled();
+    await userEvent.click(rows[2]);
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it('puts focus on Rivet\'s heading when it appears', () => {
+    setup();
+    expect(screen.getByRole('heading', { level: 1 })).toHaveFocus();
+  });
+
+  it('gives every row a visible keyboard focus ring, like the option cards', () => {
+    setup();
+    for (const row of screen.getAllByRole('button').filter((b) => b.closest('li'))) {
+      expect(row.className).toMatch(/focus-visible:ring-2/);
+      expect(row.className).toMatch(/min-h-11/);
+    }
+  });
 });

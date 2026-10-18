@@ -62,7 +62,11 @@ export function OptionCard<K extends string = string>({
       {options.map((option, index) => {
         const selected = value === option.key;
         const id = `${baseId}-${option.key}`;
-        const describedBy = [option.detail ? `${id}-detail` : null, option.rivetLine ? `${id}-say` : null]
+        const describedBy = [
+          option.mostShops ? `${id}-most` : null,
+          option.detail ? `${id}-detail` : null,
+          option.rivetLine ? `${id}-say` : null,
+        ]
           .filter(Boolean)
           .join(' ');
         return (
@@ -94,7 +98,11 @@ export function OptionCard<K extends string = string>({
             </span>
             <span className="flex min-w-0 flex-1 flex-col gap-1.5">
               {option.mostShops ? (
-                <span className="self-start rounded-full bg-success/10 px-2.5 py-0.5 text-xs font-semibold text-success">
+                <span
+                  id={`${id}-most`}
+                  className="inline-flex items-center gap-1 self-start rounded-full bg-success/10 px-2.5 py-0.5 text-xs font-semibold text-secondary-foreground"
+                >
+                  <Check aria-hidden="true" size={12} strokeWidth={3} className="text-success" />
                   Most shops like yours
                 </span>
               ) : null}

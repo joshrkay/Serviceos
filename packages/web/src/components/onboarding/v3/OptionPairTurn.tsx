@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { AssembledOnboardingChoice, OnboardingOptionKey, StagedOnboardingChoice } from '@ai-service-os/shared';
 import { Button, OptionCard } from '../../ui';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
@@ -42,11 +42,20 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
   const [typed, setTyped] = useState(() => initialTypedValues(staged));
   const [typedErrors, setTypedErrors] = useState<TypedErrors>({});
 
+  // Each turn is a fresh mount, so put focus on Rivet's new question rather than let it fall to the page.
+  // A turn that opens on the owner's typed words already focuses its own field.
+  const heading = useRef<HTMLHeadingElement>(null);
+  const opensTyping = useRef(typing);
+  useEffect(() => {
+    if (!opensTyping.current) heading.current?.focus();
+  }, []);
+
   const options = choice.options.map((o) => ({
     key: o.key,
     label: o.label,
     detail: o.detail,
-    rivetLine: o.rivetLine,
+    // The greeting's options are what Rivet says, so the line would repeat the label under it.
+    rivetLine: o.rivetLine === o.label ? undefined : o.rivetLine,
     mostShops: o.key === choice.mostShops,
   }));
 
@@ -70,7 +79,7 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
   return (
     <form noValidate onSubmit={submit} className="flex flex-1 flex-col">
       <SpeakerLine />
-      <RivetHeading>{choice.question}</RivetHeading>
+      <RivetHeading ref={heading}>{choice.question}</RivetHeading>
       {choice.supportLine ? <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">{choice.supportLine}</p> : null}
 
       {typing && kind ? (

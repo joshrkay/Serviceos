@@ -43,6 +43,8 @@ interface Server {
   stageFaults?: StageFault[];
   /** Make "That's right" fail with a server error. */
   approveFails?: boolean;
+  /** Hold the next staged choice until this settles, so a test can act while a save is in flight. */
+  stageGate?: Promise<void>;
 }
 
 interface Request {
@@ -78,20 +80,25 @@ function stubNetwork(initial: Server) {
         return resolved(json(201, { draft: server.draft, created: true }));
       }
       if (path.startsWith('/api/onboarding/draft/choices/') && method === 'PUT') {
-        const key = path.slice(path.lastIndexOf('/') + 1);
-        const current = server.draft!;
-        const fault = server.stageFaults?.shift();
-        if (fault === 'error') return resolved(json(500, { error: 'INTERNAL', message: 'boom' }));
-        if (fault === 'conflict') {
-          // Another tab got there first: the draft moves on, and this write is stale.
-          server.draft = withChoices(current, { after_hours_mode: { option: 'b' } });
-          return resolved(json(409, { error: 'CONFLICT', message: `VERSION_CONFLICT: expected ${body?.version}, found ${server.draft.version}; re-read the draft` }));
-        }
-        if (body?.version !== current.version) {
-          return resolved(json(409, { error: 'CONFLICT', message: `VERSION_CONFLICT: expected ${body?.version}, found ${current.version}; re-read the draft` }));
-        }
-        server.draft = { ...withChoices(current, { [key]: body.choice as never }), version: current.version + 1 };
-        return resolved(json(200, { draft: server.draft }));
+        const gate = server.stageGate;
+        server.stageGate = undefined;
+        const respond = (): Response => {
+          const key = path.slice(path.lastIndexOf('/') + 1);
+          const current = server.draft!;
+          const fault = server.stageFaults?.shift();
+          if (fault === 'error') return json(500, { error: 'INTERNAL', message: 'boom' });
+          if (fault === 'conflict') {
+            // Another tab got there first: the draft moves on, and this write is stale.
+            server.draft = withChoices(current, { after_hours_mode: { option: 'b' } });
+            return json(409, { error: 'CONFLICT', message: `VERSION_CONFLICT: expected ${body?.version}, found ${server.draft.version}; re-read the draft` });
+          }
+          if (body?.version !== current.version) {
+            return json(409, { error: 'CONFLICT', message: `VERSION_CONFLICT: expected ${body?.version}, found ${current.version}; re-read the draft` });
+          }
+          server.draft = { ...withChoices(current, { [key]: body.choice as never }), version: current.version + 1 };
+          return json(200, { draft: server.draft });
+        };
+        return gate ? gate.then(respond) : resolved(respond());
       }
       if (path === '/api/onboarding/draft/approve' && method === 'POST') {
         if (server.approveFails) return resolved(json(500, { error: 'INTERNAL', message: 'boom' }));
@@ -388,6 +395,72 @@ describe('ConversationShell', () => {
       await userEvent.dblClick(next);
       await onTurn(1);
       expect(stagedCalls().filter((r) => r.path.endsWith('/greeting'))).toHaveLength(1);
+    });
+  });
+
+  describe('while an answer is being saved', () => {
+    function holdTheSave() {
+      let release: () => void = () => undefined;
+      server.stageGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return release;
+    }
+
+    it('turns "Keep the rest as is" into a disabled "One moment…" and ignores the tap, so the save carries on to the next turn', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody() });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      const release = holdTheSave();
+      await userEvent.click(screen.getByRole('radio', { name: turn(0).a }));
+      await userEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      const escape = await screen.findByRole('button', { name: 'One moment…' });
+      expect(escape).toBeDisabled();
+      await userEvent.click(escape);
+      expect(funnel('v3_keep_rest')).toEqual([]);
+
+      release();
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Keep the rest as is' })).toBeEnabled();
+    });
+
+    it('disables "Back" on an edit, so the owner is not moved or shown nothing when the save lands', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody() });
+      renderShell();
+      await userEvent.click(await screen.findByRole('button', { name: 'Looks right as is, skip the choices' }));
+      await userEvent.click(await screen.findByRole('button', { name: /Getting paid/ }));
+      await onTurn(3);
+      const release = holdTheSave();
+      await userEvent.click(screen.getByRole('radio', { name: turn(3).b }));
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+      expect(await screen.findByRole('button', { name: 'One moment…' })).toBeDisabled();
+      expect(screen.queryByRole('button', { name: 'Back' })).not.toBeInTheDocument();
+
+      release();
+      expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
+    });
+  });
+
+  describe('focus', () => {
+    it('lands on the new question after each answer, and on the read-back after Save', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody() });
+      renderShell();
+      await makeItMine();
+      expect(await onTurn(0)).toHaveFocus();
+      await choose(turn(0).a);
+      expect(await onTurn(1)).toHaveFocus();
+
+      await userEvent.click(screen.getByRole('button', { name: 'Keep the rest as is' }));
+      const readback = await screen.findByRole('heading', READBACK);
+      expect(readback).toHaveFocus();
+
+      await userEvent.click(screen.getByRole('button', { name: /Getting paid/ }));
+      expect(await onTurn(3)).toHaveFocus();
+      await choose(turn(3).b, 'Save');
+      expect(await screen.findByRole('heading', READBACK)).toHaveFocus();
     });
   });
 

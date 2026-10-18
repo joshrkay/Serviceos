@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { forwardRef, type ReactNode } from 'react';
 import { cn } from '../../ui/utils';
 
 export interface TurnFrameProps {
@@ -86,11 +86,25 @@ export function SpeakerLine() {
   );
 }
 
-/** What Rivet is saying. Under twenty words, first person. */
-export function RivetHeading({ children, className }: { children: ReactNode; className?: string }) {
+/**
+ * What Rivet is saying. Under twenty words, first person. It can take focus
+ * (not a tab stop) so a turn that replaces the one before it can move a
+ * keyboard or screen-reader owner onto the new question.
+ */
+export const RivetHeading = forwardRef<HTMLHeadingElement, { children: ReactNode; className?: string }>(function RivetHeading(
+  { children, className },
+  ref,
+) {
   return (
-    <h1 className={cn('mt-2.5 break-words font-display text-[30px] font-semibold leading-[1.1] tracking-[-0.02em]', className)}>
+    <h1
+      ref={ref}
+      tabIndex={-1}
+      className={cn(
+        'mt-2.5 break-words font-display text-[30px] font-semibold leading-[1.1] tracking-[-0.02em] outline-none',
+        className,
+      )}
+    >
       {children}
     </h1>
   );
-}
+});
