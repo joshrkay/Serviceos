@@ -66,8 +66,9 @@ function Conversation() {
   const { draft, loading, error, notice, approving, stage, approve, reload } = useOnboardingDraft(createInput);
   // The owner's own navigation; null until they move, then the draft decides where a returning owner opens.
   const [nav, setNav] = useState<Place | null>(null);
-  // The turn they last tried to answer: the hook's error and notice belong to that turn only.
-  const [tried, setTried] = useState<OnboardingCoreChoiceKey | null>(null);
+  // What the owner last tried to save: the turn they answered, or "That's right". The hook's one error and
+  // notice belong to that screen only, so a failed answer never shows up later on the read-back, or the reverse.
+  const [attempt, setAttempt] = useState<OnboardingCoreChoiceKey | 'approve' | null>(null);
   const [staging, setStaging] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -117,7 +118,7 @@ function Conversation() {
   const highestProgress = useRef(0);
 
   const goTo = (next: Place) => {
-    setTried(null);
+    setAttempt(null);
     setNav(next);
   };
 
@@ -145,7 +146,7 @@ function Conversation() {
   const answer = async (turn: CoreTurn, choice: StagedOnboardingChoice) => {
     if (!draft || staging) return;
     setStaging(true);
-    setTried(turn.settingKey);
+    setAttempt(turn.settingKey);
     const saved = await stage(turn.settingKey, choice).finally(() => setStaging(false));
     if (!saved) return;
     const tapped = 'option' in choice;
@@ -160,6 +161,7 @@ function Conversation() {
   };
 
   const approveReadback = async () => {
+    setAttempt('approve');
     const res = await approve();
     if (!res?.approvedNow) {
       // A repeat tap on an already-saved shop: nothing new to wait for.
@@ -212,8 +214,8 @@ function Conversation() {
           // Editing opens on what the read-back showed: the owner's answer, or the one most shops pick.
           staged={draft.choices[currentTurn.settingKey] ?? (editing ? { option: currentTurn.mostShops } : undefined)}
           busy={staging}
-          error={tried === currentTurn.settingKey ? error : null}
-          notice={tried === currentTurn.settingKey ? notice : null}
+          error={attempt === currentTurn.settingKey ? error : null}
+          notice={attempt === currentTurn.settingKey ? notice : null}
           editing={editing}
           onPick={(option) => void answer(currentTurn, { option })}
           onTypeInstead={typedKind(currentTurn.settingKey) ? (override) => void answer(currentTurn, { override }) : undefined}
@@ -223,8 +225,8 @@ function Conversation() {
         <ReadbackCard
           draft={draft}
           approving={approving}
-          error={error}
-          notice={notice}
+          error={attempt === 'approve' ? error : null}
+          notice={attempt === 'approve' ? notice : null}
           onApprove={() => void approveReadback()}
           onEdit={editFromReadback}
         />

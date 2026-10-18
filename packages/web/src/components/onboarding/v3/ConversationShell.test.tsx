@@ -346,6 +346,19 @@ describe('ConversationShell', () => {
       expect(funnel('v3_choice_made')).toHaveLength(1);
     });
 
+    it('does not carry a failed answer over to the read-back when the owner skips ahead', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), stageFaults: ['error'] });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      await choose(turn(0).b);
+      expect(await screen.findByRole('alert')).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Keep the rest as is' }));
+      expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
     it('stays on the turn, with a one-line notice, when the draft changed somewhere else', async () => {
       stubNetwork({ draft: draftJson, status: statusBody(), stageFaults: ['conflict'] });
       renderShell();
@@ -562,6 +575,9 @@ describe('ConversationShell', () => {
       expect(await screen.findByRole('alert')).toHaveTextContent("That didn't go through. Try again.");
       await userEvent.click(screen.getByRole('button', { name: /Booking/ }));
       await onTurn(2);
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Back' }));
+      await screen.findByRole('heading', READBACK);
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     });
   });
