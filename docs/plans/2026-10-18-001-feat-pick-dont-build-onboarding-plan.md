@@ -347,8 +347,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   `POST /draft/reopen` (U6) is allowed only when the draft is `approved` and every generated
   proposal has executed (a set that failed goes through U9's retry, and one that stopped or
   was part-undone from the inbox, a failed member beside an undone one included, through
-  `POST /draft/reset`, first, never a reopen); it re-assembles for the
-  current trade and metro, pre-fills `choices`
+  `POST /draft/reset`, first, never a reopen); it copies the live business name and timezone
+  onto the draft (identity rule below), re-assembles for the
+  current trade, metro and that name, pre-fills `choices`
   from the live settings (greeting → override label; the enum keys → the option whose writes
   match; prices → the current headline items, repriced only while a headline item still holds
   its seeded price, U6; the owner's cell → the live `tenant_settings.owner_phone`, copied onto
@@ -356,8 +357,15 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   changed or cleared in Settings replaces the one the draft captured at the first run and
   U10's `ownerPhone` payload field cannot write the old number back over the newer edit),
   resets `status='draft'`, `proposal_ids=[]`,
-  bumps `version`, and emits `onboarding.draft_reopened`. The pre-fill and the cell are read
-  from `tenant_settings` inside reopen's own locked write, before the read-back is shown. The
+  bumps `version`, and emits `onboarding.draft_reopened`. The pre-fill, the cell and the
+  identity are read from `tenant_settings` inside reopen's own locked write, before the
+  read-back is shown. Identity rule: reopen copies the live `business_name` and `timezone`
+  onto the draft's `businessName` and `clientTimezone` (and `ownerFirstName` when the draft
+  carries one and a live value exists), and rebuilds `assembled` with that name through U1's
+  `assembleTypicalShop`, so a default line that embeds the name (the greeting) is regenerated;
+  the rebuild changes rendered text only and never edits `choices`. A field with no live value
+  keeps the draft's. A re-run's proposals therefore only restate what Settings holds, and
+  never restore a stale name or zone over a Settings edit (U6). The
   read-back then shows what is
   live today and "That's right" mints proposals exactly as a first run does. The trade, business name and optional cell it needs come from the demo-call
   lead when there is one (U7) and otherwise from the v3 shell's first screen, "What should I
@@ -903,7 +911,9 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   - modify `packages/api/src/routes/onboarding-draft.ts`,
     `packages/api/src/onboarding/draft/repository.ts`, `approve.ts`
     (`POST /draft/reopen` and the settings → choices pre-fill, plus the live
-    `tenant_settings.owner_phone` (null included) onto the draft's `owner_phone`, written
+    `tenant_settings.owner_phone` (null included) onto the draft's `owner_phone`, and the live
+    `business_name` and `timezone` onto `businessName` and `clientTimezone` with `assembled`
+    rebuilt under that name, all written
     through U11's locked-write helper with the `approved` status it requires; refused with
     409 unless every
     generated proposal has `executed`, so a `failed` set is retried and a `stopped` or
@@ -1017,6 +1027,33 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   set, so after a clear none of them has a line to act on: both routes answer 409
   `FORWARDING_NOT_CONFIGURED` and place nothing, and the first-day state shows no forwarding
   badge.
+- **Reopen re-reads the live identity, so a re-run cannot restore a stale name or zone.**
+  `buildDraftProposals` always puts the draft's `businessName` and `clientTimezone` on the
+  `onboarding_tenant_settings` payload, and `OnboardingTenantSettingsExecutionHandler` writes
+  both through `upsertIdentityFields` (`business_name` and `timezone`, each overwritten because
+  the payload always carries one); both proposal summaries embed the name too. A draft that
+  kept the first run's values would approve a Settings edit away. Under the draft row lock and
+  after the `approved` check, in the same transaction that moves the draft back to `draft`,
+  reopen reads the identity in ONE `SELECT business_name, timezone FROM tenant_settings`
+  (RLS-scoped) and in its one `UPDATE` writes `businessName` and `clientTimezone` from it
+  (and `ownerFirstName` when the draft carries one and a live value exists; `tenant_settings`
+  has no first-name column today, so the draft's stands until one does), `assembled` rebuilt
+  through U1's `assembleTypicalShop` (it already runs here for the current trade and metro;
+  it now receives the live name, so the greeting default's `rivetLine` and `writes` are
+  regenerated), the pre-filled `choices`, `status`, `proposal_ids` and `version + 1`. The
+  rebuild changes rendered text only: a staged `'a'`/`'b'` or typed answer keeps pointing at
+  the option it did, because the settings → choices pre-fill decides that and the name does
+  not. A null or blank live column keeps the draft's value. `onboarding.draft_reopened`
+  carries `identity: { businessName, clientTimezone, ownerFirstName }`, each `{ before, after }`
+  (equal when nothing changed). Lock decision: the draft-row lock U11 already requires
+  (`updateLocked`, `requireStatus: 'approved'`) is the only lock, and no settings read lock is
+  taken. Reopen never writes `tenant_settings`, and one statement reads one snapshot of one
+  row, so a Settings save that sets the name and the zone in its one `UPDATE` is seen whole or
+  not at all, and the pair on the draft is always one state Settings committed. A `FOR SHARE`
+  on the settings row would only make a concurrent Settings save wait for reopen's commit and
+  leave the draft with the same pre-save values: no added correctness, and it would couple
+  Settings saves to an onboarding transaction. An edit committed after reopen's read is the
+  owner editing mid-run and sits outside this rule, the same boundary as the owner's cell.
 - **Number-availability failures reach the shell as a code.** The shell can tell the
   recoverable "someone took that number" from a failure no new number fixes only if the status
   says which one it was, and today it cannot: `load-facts.ts` selects the twilio row's
@@ -1271,6 +1308,26 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     rings the owner). Cell unchanged → draft and settings still agree. Integration
     (`onboarding-draft-reopen.test.ts`): real columns under RLS, the settings read and the
     draft write in one transaction.
+  - Edge (business name and timezone on re-run; unit in `reopen.test.ts` with a repo double,
+    real Postgres in `onboarding-draft-reopen.test.ts`, Docker-gated): the first run stored
+    "Acme Plumbing" and `America/New_York` on the draft and executed them, with payment mode
+    staged `'b'`; the owner then sets "Bright Plumbing" and `America/Chicago` in
+    Settings and taps Re-run setup → `POST /draft/reopen` leaves the draft's `businessName`
+    and `clientTimezone` at the live values, the greeting default's `rivetLine` and `writes`
+    in `assembled` carry the new name ("Acme Plumbing" appears nowhere in `assembled`), the payment-mode
+    choice is still `'b'` and the greeting choice still restates the live greeting text (the
+    owner's current setting, which this rule does not rewrite), and `onboarding.draft_reopened` holds `identity` with each
+    `{ before, after }`. "That's right" → the settings payload carries the new name and zone, both
+    summaries carry the new name, and after execution `tenant_settings.business_name` and `timezone` equal what
+    the owner set in Settings, exactly. Live values equal the draft's → reopen changes neither
+    field, the rendered lines equal what the draft held, and each audit `{ before, after }`
+    pair is equal. A null live `timezone` (never set) → the draft's `clientTimezone` stands (approval's
+    `TIMEZONE_REQUIRED` check reads it as before). Reopen racing a Settings save (two
+    real connections, both orders, looped; the save sets the name and the zone in its one
+    `UPDATE`): reopen takes the draft row lock and does not lock `tenant_settings`, and the
+    draft ends holding either the old pair or the new pair, never the old name beside the new
+    zone or the reverse, while `tenant_settings` is exactly what the save committed (reopen
+    never writes it).
   - Edge (two successive re-runs; unit and, against real Postgres, integration): seeded at
     labor 9,500 and trip 12,000 (each row's baseline equals its price); re-run 1 picks
     11,000 and 14,000 → both headline items and the template lines that carried those
@@ -1339,7 +1396,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   both branches; the forbidden-vocabulary test extends to `components/home`; on a seeded
   staging tenant seeded after migration 314, a re-run after the owner edits a headline price in
   Settings leaves that item and the job types seeded from it at the owner's price and says so,
-  and a re-run on a tenant seeded before it shows no price card.
+  and a re-run on a tenant seeded before it shows no price card; a re-run after the owner
+  changes the business name and timezone in Settings leaves both as the owner set them.
 
 ### U10. The owner's cell: on the draft, on the settings proposal, required when a choice rings it
 - **Goal:** The owner's cell, optional on the first screen and used today only to place the
@@ -3709,6 +3767,10 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
   template the owner saved is theirs, and only rows the seeder writes after migration 314 carry
   a baseline (U6). Rows seeded earlier have no per-row proof of who set their price, so they
   stay the owner's and a tenant with only those sees no price card.
+- **A re-run restoring a stale business name or timezone.** The draft keeps the first run's
+  values and approval writes them back, so a Settings edit made in between would be undone.
+  Reopen copies the live name and timezone onto the draft inside its locked write and rebuilds
+  the name-dependent assembled lines, so the re-run only restates what Settings holds (U6).
 - **Status contract drift.** Additive facts only; `.length(7)` preserved; pinned by extending
   `packages/api/test/onboarding/derive-status.test.ts` and the integration status test.
 - **Demo call cost, abuse, TCPA, cross-visitor leakage.** Phased last, consent first, two-layer
