@@ -861,7 +861,18 @@ flowchart LR
     - **Identifier-linked:** matched only by the customer's phone, email or name.
     - **External sinks:** S3 objects, Twilio recordings, and Langfuse traces when
       `LANGFUSE_CAPTURE_CONTENT` is on. `trace-exporter.ts` exports gateway inputs and outputs,
-      including transcripts, under correlation and session ids.
+      including transcripts, under correlation and session ids. Two business integrations hold
+      directly linked customer records too:
+      - **Stripe.** `payments/stripe-saved-card.ts:84-124` creates a Stripe Customer with the
+        customer's name, email and internal id, and attaches saved cards to it. The erase deletes
+        that Stripe Customer, which also detaches its saved payment methods. Stripe keeps its own
+        charge records under its legal obligations, outside our control, and the result says so.
+      - **QuickBooks.** `integrations/accounting/sync-service.ts:271-315` pushes the customer's
+        display name, email and phone. Accounting records fall under the same tax and legal
+        retention as local invoices (owner decision 1), so the default is to anonymize the
+        QuickBooks customer's contact fields and keep the financial records.
+      - Every enabled integration is a manifest entry with its delete, anonymize or legally-retain
+        rule.
 
     The erase code and its tests are then written against that inventory. The list of stores below
     is a starting point, not the definition.
@@ -975,6 +986,9 @@ flowchart LR
     alerts.
   - a trace queued before the erase whose transport is delayed until after it is never recreated: it
     is dropped at the send boundary, or deleted again on the second pass
+  - against mocked Stripe and QuickBooks APIs, the Stripe Customer is deleted and the QuickBooks
+    customer's contact fields are anonymized, and a failure at either provider marks that store
+    `incomplete` and alerts
   - after an erase, the exporter still sends unrelated traces, so the drain did not shut it down
   - a drain failure marks Langfuse `incomplete`
   - with phase 1 committed, an in-flight writer in another connection sees the tombstone and drops
