@@ -20,6 +20,14 @@ describe('ReadyScreen', () => {
     ).toBeInTheDocument();
   });
 
+  it('only promises what this screen can do: tap, not speech', () => {
+    // Voice in and out is a later slice. Until it is wired, the copy must not
+    // tell the owner to say "first" or "second", or that they can say "neither".
+    setup();
+    expect(screen.getByText(/Tap the one that sounds right\. Nothing is saved until you say so\./)).toBeInTheDocument();
+    expect(screen.queryByText(/say .?first|say .?second|say .?neither|tap to hear/i)).not.toBeInTheDocument();
+  });
+
   it('shows the finished shop from the assembled draft, with Most shops marks', () => {
     setup();
     const rows = screen.getAllByRole('listitem');

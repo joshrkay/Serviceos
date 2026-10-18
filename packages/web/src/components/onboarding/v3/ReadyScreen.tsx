@@ -40,7 +40,7 @@ export function ReadyScreen({ draft, onMakeItMine, onKeepAsIs }: ReadyScreenProp
       </ul>
 
       <p className="mt-3.5 text-sm leading-[1.45] text-muted-foreground">
-        Each choice is two options. Tap one, or say &ldquo;first&rdquo; or &ldquo;second&rdquo;. You can always say &ldquo;neither&rdquo; and tell me.
+        Each choice is two options. Tap the one that sounds right. Nothing is saved until you say so.
       </p>
 
       <div className="min-h-6 flex-1" />
