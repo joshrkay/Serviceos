@@ -36,6 +36,20 @@ export const StageChoiceBodySchema = z
   })
   .strict();
 
+/**
+ * Body of POST /api/onboarding/draft/approve. `expectedVersion` is an optional
+ * optimistic-concurrency token: the draft `version` the read-back the owner is
+ * looking at was rendered from. When omitted the row lock alone serialises
+ * approve against PUT /choices and against another approve. Additive and
+ * optional, so a client that posts `{}` keeps working.
+ */
+export const ApproveDraftBodySchema = z
+  .object({
+    expectedVersion: z.number().int().positive().optional(),
+  })
+  .strict();
+export type ApproveDraftBody = z.infer<typeof ApproveDraftBodySchema>;
+
 /** Partial on purpose: an owner mid-way through has staged some keys, not all. */
 export const ChoicesRecordSchema = z.partialRecord(ChoiceKeySchema, StagedChoiceSchema);
 export type ChoicesRecord = z.infer<typeof ChoicesRecordSchema>;

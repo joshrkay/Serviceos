@@ -5,7 +5,8 @@
  *                                 a repeat call may still record a changed clientTimezone)
  *   GET    /                      read it
  *   PUT    /choices/:settingKey   stage a choice (compare-and-swap on version)
- *   POST   /approve               "That's right": mint onboarding_* proposals and approve them
+ *   POST   /approve               "That's right": lock the draft row, mint onboarding_* proposals and
+ *                                 approve them (optional expectedVersion; repeat taps are idempotent)
  *
  * Owner-only, like POST /api/onboarding/pack and the conversation lane: every
  * write here ends in config-change proposals against the tenant's settings.
@@ -26,7 +27,7 @@ import { metroForPhone } from '../compliance/us-geography';
 import { assembleTypicalShop } from '../onboarding/choices/assemble';
 import type { RegionalPriceTierRepository } from '../onboarding/choices/price-tiers';
 import { ChoiceKeySchema, WritesNotAllowedError } from '../onboarding/choices/schema';
-import { CreateDraftInputSchema, StageChoiceBodySchema } from '../onboarding/draft/contracts';
+import { ApproveDraftBodySchema, CreateDraftInputSchema, StageChoiceBodySchema } from '../onboarding/draft/contracts';
 import {
   DraftAlreadyApprovedError,
   DraftNotFoundError,
@@ -41,6 +42,17 @@ export interface OnboardingDraftRouterDeps {
   proposalRepo: ProposalRepository;
   auditRepo: AuditRepository;
   approvalReferenceChecks?: ApprovalReferenceCheck[];
+}
+
+/** One mapping from repository errors to HTTP errors, shared by PUT /choices and POST /approve. */
+function rethrowDraftError(err: unknown, tenantId: string): never {
+  if (err instanceof WritesNotAllowedError) throw new ValidationError(err.message);
+  if (err instanceof DraftNotFoundError) throw new NotFoundError('OnboardingDraft', tenantId);
+  if (err instanceof DraftVersionConflictError) {
+    throw new ConflictError(`VERSION_CONFLICT: expected ${err.expected}, found ${err.actual}; re-read the draft`);
+  }
+  if (err instanceof DraftAlreadyApprovedError) throw new ConflictError('DRAFT_APPROVED: the draft is already approved');
+  throw err;
 }
 
 export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Router {
@@ -152,13 +164,7 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
       try {
         draft = await draftRepo.stageChoice(tenantId, keyParse.data, body.choice, body.version);
       } catch (err) {
-        if (err instanceof WritesNotAllowedError) throw new ValidationError(err.message);
-        if (err instanceof DraftNotFoundError) throw new NotFoundError('OnboardingDraft', tenantId);
-        if (err instanceof DraftVersionConflictError) {
-          throw new ConflictError(`VERSION_CONFLICT: expected ${err.expected}, found ${err.actual}; re-read the draft`);
-        }
-        if (err instanceof DraftAlreadyApprovedError) throw new ConflictError('DRAFT_APPROVED: the draft is already approved');
-        throw err;
+        rethrowDraftError(err, tenantId);
       }
 
       await auditRepo.create(
@@ -181,18 +187,24 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
     ...guards,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
-      const existing = await draftRepo.getForTenant(tenantId);
-      if (!existing) throw new NotFoundError('OnboardingDraft', tenantId);
-      const result = await approveDraft(
-        {
-          draftRepo,
-          proposalRepo,
-          auditRepo,
-          ...(approvalReferenceChecks ? { approvalOptions: { referenceChecks: approvalReferenceChecks } } : {}),
-        },
-        tenantId,
-        { userId: req.auth!.userId, role: req.auth!.role as Role },
-      );
+      // Express 5 leaves req.body undefined when no body was sent.
+      const body = validate(ApproveDraftBodySchema, req.body ?? {});
+      let result;
+      try {
+        result = await approveDraft(
+          {
+            draftRepo,
+            proposalRepo,
+            auditRepo,
+            ...(approvalReferenceChecks ? { approvalOptions: { referenceChecks: approvalReferenceChecks } } : {}),
+          },
+          tenantId,
+          { userId: req.auth!.userId, role: req.auth!.role as Role },
+          { expectedVersion: body.expectedVersion },
+        );
+      } catch (err) {
+        rethrowDraftError(err, tenantId);
+      }
       res.json(result);
     }),
   );

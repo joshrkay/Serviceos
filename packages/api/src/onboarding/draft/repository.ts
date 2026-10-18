@@ -8,10 +8,14 @@
  *
  * Concurrency: `stageChoice` is a compare-and-swap on `version`, so two tabs
  * cannot silently overwrite each other; the loser gets DraftVersionConflictError
- * and re-reads.
+ * and re-reads. Approval takes the row lock first (`getForTenantForUpdate`), so
+ * a PUT /choices and an approve, or two approves, serialise on the draft row;
+ * `markApproved` is the second guard: a compare-and-swap on the version read
+ * under that lock, which never returns a row it did not update.
  */
 import type { Pool } from 'pg';
 import { PgBaseRepository } from '../../db/pg-base';
+import { tenantContextStore } from '../../middleware/tenant-context';
 import type { AssembledShop } from '../choices/assemble';
 import { ChoiceKeySchema, assertOverrideAllowedFor, type AnyChoiceKey } from '../choices/schema';
 import { ChoicesRecordSchema, DraftStatusSchema, StagedChoiceSchema, type ChoicesRecord, type DraftStatus, type StagedChoice } from './contracts';
@@ -68,6 +72,14 @@ export interface CreateDraftRecord {
 
 export interface OnboardingDraftRepository {
   getForTenant(tenantId: string): Promise<OnboardingDraft | null>;
+  /**
+   * `SELECT ... FOR UPDATE`: reads the draft and locks its row until the
+   * surrounding transaction ends, so it is only meaningful inside the /api
+   * request transaction (the Pg implementation refuses to run outside one).
+   * Routes that bypass that transaction (SSE, LLM long-call) and workers must
+   * not call it. Used by approve, and by later undo/retry paths.
+   */
+  getForTenantForUpdate(tenantId: string): Promise<OnboardingDraft | null>;
   /** Creates the tenant's draft, or returns the existing one unchanged. */
   create(tenantId: string, input: CreateDraftRecord): Promise<OnboardingDraft>;
   /**
@@ -80,8 +92,13 @@ export interface OnboardingDraftRepository {
    * have run before the client knew its zone). Bumps `version`; refused once approved.
    */
   setClientTimezone(tenantId: string, clientTimezone: string): Promise<OnboardingDraft>;
-  /** Marks approved and records the proposal ids; a no-op returning the row when already approved. */
-  markApproved(tenantId: string, proposalIds: string[]): Promise<OnboardingDraft>;
+  /**
+   * Marks approved and records the proposal ids, only if the draft is still
+   * `draft` at `expectedVersion` (the version read under the lock). Throws
+   * DraftNotFoundError / DraftAlreadyApprovedError / DraftVersionConflictError
+   * and never returns a row it did not update.
+   */
+  markApproved(tenantId: string, proposalIds: string[], expectedVersion: number): Promise<OnboardingDraft>;
 }
 
 interface DraftRow {
@@ -134,6 +151,16 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
   async getForTenant(tenantId: string): Promise<OnboardingDraft | null> {
     return this.withTenant(tenantId, async (client) => {
       const r = await client.query<DraftRow>('SELECT * FROM onboarding_drafts WHERE tenant_id = $1', [tenantId]);
+      return r.rows.length > 0 ? mapRow(r.rows[0]) : null;
+    });
+  }
+
+  async getForTenantForUpdate(tenantId: string): Promise<OnboardingDraft | null> {
+    if (tenantContextStore.getStore()?.tenantId !== tenantId) {
+      throw new Error('getForTenantForUpdate requires the request transaction: a row lock taken outside it is released immediately');
+    }
+    return this.withTenant(tenantId, async (client) => {
+      const r = await client.query<DraftRow>('SELECT * FROM onboarding_drafts WHERE tenant_id = $1 FOR UPDATE', [tenantId]);
       return r.rows.length > 0 ? mapRow(r.rows[0]) : null;
     });
   }
@@ -217,7 +244,7 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
     });
   }
 
-  async markApproved(tenantId: string, proposalIds: string[]): Promise<OnboardingDraft> {
+  async markApproved(tenantId: string, proposalIds: string[], expectedVersion: number): Promise<OnboardingDraft> {
     return this.withTenant(tenantId, async (client) => {
       const updated = await client.query<DraftRow>(
         `UPDATE onboarding_drafts
@@ -226,14 +253,19 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
                 version = version + 1,
                 approved_at = NOW(),
                 updated_at = NOW()
-          WHERE tenant_id = $1 AND status = 'draft'
+          WHERE tenant_id = $1 AND status = 'draft' AND version = $3
           RETURNING *`,
-        [tenantId, JSON.stringify(proposalIds)],
+        [tenantId, JSON.stringify(proposalIds), expectedVersion],
       );
       if (updated.rows.length > 0) return mapRow(updated.rows[0]);
-      const existing = await client.query<DraftRow>('SELECT * FROM onboarding_drafts WHERE tenant_id = $1', [tenantId]);
+      // Zero rows: say why, but never hand back a row this call did not update.
+      const existing = await client.query<Pick<DraftRow, 'status' | 'version'>>(
+        'SELECT status, version FROM onboarding_drafts WHERE tenant_id = $1',
+        [tenantId],
+      );
       if (existing.rows.length === 0) throw new DraftNotFoundError(tenantId);
-      return mapRow(existing.rows[0]);
+      if (existing.rows[0].status === 'approved') throw new DraftAlreadyApprovedError();
+      throw new DraftVersionConflictError(expectedVersion, existing.rows[0].version);
     });
   }
 }
@@ -244,6 +276,11 @@ export class InMemoryOnboardingDraftRepository implements OnboardingDraftReposit
   private readonly byTenant = new Map<string, OnboardingDraft>();
 
   async getForTenant(tenantId: string): Promise<OnboardingDraft | null> {
+    return this.byTenant.get(tenantId) ?? null;
+  }
+
+  /** Plain read: in-memory callers are single-threaded, so there is nothing to lock. */
+  async getForTenantForUpdate(tenantId: string): Promise<OnboardingDraft | null> {
     return this.byTenant.get(tenantId) ?? null;
   }
 
@@ -289,10 +326,11 @@ export class InMemoryOnboardingDraftRepository implements OnboardingDraftReposit
     return next;
   }
 
-  async markApproved(tenantId: string, proposalIds: string[]): Promise<OnboardingDraft> {
+  async markApproved(tenantId: string, proposalIds: string[], expectedVersion: number): Promise<OnboardingDraft> {
     const d = this.byTenant.get(tenantId);
     if (!d) throw new DraftNotFoundError(tenantId);
-    if (d.status === 'approved') return d;
+    if (d.status === 'approved') throw new DraftAlreadyApprovedError();
+    if (d.version !== expectedVersion) throw new DraftVersionConflictError(expectedVersion, d.version);
     const next: OnboardingDraft = { ...d, status: 'approved', proposalIds: [...proposalIds], version: d.version + 1, approvedAt: new Date(), updatedAt: new Date() };
     this.byTenant.set(tenantId, next);
     return next;

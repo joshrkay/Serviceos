@@ -19,6 +19,7 @@ import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { loadOnboardingFacts } from '../../src/onboarding/load-facts';
 import { deriveOnboardingStatus } from '../../src/onboarding/derive-status';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { withTenantTransaction } from '../../src/middleware/tenant-context';
 
 describe('onboarding draft → approve (real DB)', () => {
   let pool: Pool;
@@ -39,6 +40,9 @@ describe('onboarding draft → approve (real DB)', () => {
       (req as AuthenticatedRequest).auth = { userId: tenant.userId, sessionId: 's', tenantId: tenant.tenantId, role: 'owner' };
       next();
     });
+    // The real request transaction, mounted exactly as app.ts does, so approve's
+    // row lock is held for the whole request like in production.
+    app.use('/api', withTenantTransaction(pool));
     app.use(
       '/api/onboarding/draft',
       createOnboardingDraftRouter({
@@ -85,6 +89,14 @@ describe('onboarding draft → approve (real DB)', () => {
     const approved = await request(app).post('/api/onboarding/draft/approve').send({});
     expect(approved.status).toBe(200);
     expect(approved.body.proposalIds).toHaveLength(2);
+
+    // A repeat tap is the idempotent success: the same ids, nothing new minted.
+    const again = await request(app).post('/api/onboarding/draft/approve').send({});
+    expect(again.status).toBe(200);
+    expect(again.body.approvedNow).toBe(false);
+    expect(again.body.proposalIds).toEqual(approved.body.proposalIds);
+    const count = await pool.query(`SELECT count(*)::int AS n FROM proposals WHERE tenant_id = $1`, [tenant.tenantId]);
+    expect(count.rows[0].n).toBe(2);
 
     const rows = await pool.query(
       `SELECT proposal_type, status, source_context FROM proposals WHERE tenant_id = $1 ORDER BY proposal_type`,

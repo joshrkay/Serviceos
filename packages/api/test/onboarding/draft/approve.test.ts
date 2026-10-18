@@ -1,6 +1,15 @@
-import { describe, it, expect } from 'vitest';
-import { ONBOARDING_READBACK_SURFACE, buildDraftProposals, resolveChoices } from '../../../src/onboarding/draft/approve';
-import { InMemoryOnboardingDraftRepository, type OnboardingDraft } from '../../../src/onboarding/draft/repository';
+import { describe, it, expect, vi } from 'vitest';
+import { ONBOARDING_READBACK_SURFACE, approveDraft, buildDraftProposals, resolveChoices } from '../../../src/onboarding/draft/approve';
+import {
+  DraftAlreadyApprovedError,
+  DraftNotFoundError,
+  DraftVersionConflictError,
+  InMemoryOnboardingDraftRepository,
+  type OnboardingDraft,
+  type OnboardingDraftRepository,
+} from '../../../src/onboarding/draft/repository';
+import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { assembleTypicalShop } from '../../../src/onboarding/choices/assemble';
 import { InMemoryRegionalPriceTierRepository } from '../../../src/onboarding/choices/price-tiers';
 import { onboardingTenantSettingsPayloadSchema, onboardingVoicePolicyPayloadSchema } from '../../../src/proposals/contracts/onboarding';
@@ -109,8 +118,8 @@ describe('buildDraftProposals', () => {
   });
 
   it('refuses an already approved draft', async () => {
-    const { repo } = await draftFor();
-    const approved = await repo.markApproved(TENANT, ['p1']);
+    const { repo, draft } = await draftFor();
+    const approved = await repo.markApproved(TENANT, ['p1'], draft.version);
     expect(() => buildDraftProposals(approved, 'u')).toThrow(/DRAFT_ALREADY_APPROVED/);
   });
 
@@ -122,5 +131,133 @@ describe('buildDraftProposals', () => {
     const { tenantSettings } = buildDraftProposals(draft, 'u');
     expect(tenantSettings.payload).not.toHaveProperty('city');
     expect(tenantSettings.payload).toMatchObject({ verticalPacks: ['hvac'], hourlyRateCents: 12500, tripFeeCents: 8900 });
+  });
+});
+
+const ACTOR = { userId: 'user_owner', role: 'owner' as const };
+
+async function approveHarness(overrides: Parameters<typeof draftFor>[0] = {}) {
+  const { repo, draft } = await draftFor(overrides);
+  const proposalRepo = new InMemoryProposalRepository();
+  const auditRepo = new InMemoryAuditRepository();
+  return { repo, draft, proposalRepo, auditRepo, deps: { draftRepo: repo as OnboardingDraftRepository, proposalRepo, auditRepo } };
+}
+
+async function approvedAudits(auditRepo: InMemoryAuditRepository) {
+  return (await auditRepo.findRecentByTenant(TENANT, { limit: 50 })).filter((a) => a.eventType === 'onboarding.draft_approved');
+}
+
+describe('approveDraft (lock, version check, idempotence)', () => {
+  it('approves with expectedVersion = draft.version, bumps the version, and audits once with draftVersion', async () => {
+    const h = await approveHarness();
+    const res = await approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: h.draft.version });
+    expect(res.approvedNow).toBe(true);
+    expect(res.proposalIds).toHaveLength(2);
+    expect(res.draft.status).toBe('approved');
+    expect(res.draft.version).toBe(h.draft.version + 1);
+    expect(res.draft.proposalIds).toEqual(res.proposalIds);
+    const proposals = await h.proposalRepo.findByTenant(TENANT);
+    expect(proposals).toHaveLength(2);
+    for (const p of proposals) {
+      expect(p.status).toBe('approved');
+      expect(p.sourceContext).toMatchObject({ draftId: h.draft.id });
+    }
+    const audits = await approvedAudits(h.auditRepo);
+    expect(audits).toHaveLength(1);
+    expect(audits[0].metadata).toMatchObject({ draftVersion: h.draft.version, proposalIds: res.proposalIds });
+  });
+
+  it('still approves when expectedVersion is omitted (lock-only mode)', async () => {
+    const h = await approveHarness();
+    const res = await approveDraft(h.deps, TENANT, ACTOR);
+    expect(res.approvedNow).toBe(true);
+    expect(await h.proposalRepo.findByTenant(TENANT)).toHaveLength(2);
+  });
+
+  it('a stale expectedVersion (behind or ahead) throws DraftVersionConflictError and mints nothing', async () => {
+    const h = await approveHarness();
+    const staged = await h.repo.stageChoice(TENANT, 'greeting', { option: 'b' }, h.draft.version);
+    const behind = approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: h.draft.version });
+    await expect(behind).rejects.toBeInstanceOf(DraftVersionConflictError);
+    await expect(behind).rejects.toMatchObject({ expected: h.draft.version, actual: staged.version });
+    await expect(approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: staged.version + 5 })).rejects.toBeInstanceOf(DraftVersionConflictError);
+    expect(await h.proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+    expect((await h.repo.getForTenant(TENANT))!.status).toBe('draft');
+    expect(await approvedAudits(h.auditRepo)).toHaveLength(0);
+  });
+
+  it('builds from the row getForTenantForUpdate returned, never from a plain read', async () => {
+    const h = await approveHarness();
+    const stale = (await h.repo.getForTenant(TENANT))!;
+    await h.repo.stageChoice(TENANT, 'greeting', { option: 'b' }, h.draft.version);
+    const calls: string[] = [];
+    const getForTenant = vi.fn(async () => {
+      calls.push('getForTenant');
+      return stale;
+    });
+    const double: OnboardingDraftRepository = {
+      getForTenant,
+      getForTenantForUpdate: async (t) => {
+        calls.push('getForTenantForUpdate');
+        return h.repo.getForTenantForUpdate(t);
+      },
+      create: (t, i) => h.repo.create(t, i),
+      stageChoice: (t, k, c, v) => h.repo.stageChoice(t, k, c, v),
+      setClientTimezone: (t, z) => h.repo.setClientTimezone(t, z),
+      markApproved: (t, ids, v) => h.repo.markApproved(t, ids, v),
+    };
+    await approveDraft({ ...h.deps, draftRepo: double }, TENANT, ACTOR);
+    expect(getForTenant).not.toHaveBeenCalled();
+    expect(calls[0]).toBe('getForTenantForUpdate');
+    const policy = (await h.proposalRepo.findByTenant(TENANT)).find((p) => p.proposalType === 'onboarding_voice_policy')!;
+    expect(policy.payload).toMatchObject({ voiceGreeting: "Thanks for calling Walsh Plumbing. What's going on today?" });
+  });
+
+  it('an already approved draft returns the first call\'s ids, mints nothing, and ignores a stale expectedVersion', async () => {
+    const h = await approveHarness();
+    const first = await approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: h.draft.version });
+    const second = await approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: h.draft.version });
+    expect(second.approvedNow).toBe(false);
+    expect(second.proposalIds).toEqual(first.proposalIds);
+    expect(await h.proposalRepo.findByTenant(TENANT)).toHaveLength(2);
+    expect(await approvedAudits(h.auditRepo)).toHaveLength(1);
+  });
+
+  it('no draft rejects with DraftNotFoundError', async () => {
+    const h = await approveHarness();
+    await expect(approveDraft(h.deps, '00000000-0000-0000-0000-00000000ffff', ACTOR)).rejects.toBeInstanceOf(DraftNotFoundError);
+  });
+
+  it('a missing timezone still rejects with TIMEZONE_REQUIRED after the locked read, minting nothing', async () => {
+    const h = await approveHarness({ clientTimezone: null });
+    const order: string[] = [];
+    const spy: OnboardingDraftRepository = {
+      getForTenant: (t) => h.repo.getForTenant(t),
+      getForTenantForUpdate: async (t) => {
+        order.push('lock');
+        return h.repo.getForTenantForUpdate(t);
+      },
+      create: (t, i) => h.repo.create(t, i),
+      stageChoice: (t, k, c, v) => h.repo.stageChoice(t, k, c, v),
+      setClientTimezone: (t, z) => h.repo.setClientTimezone(t, z),
+      markApproved: (t, ids, v) => h.repo.markApproved(t, ids, v),
+    };
+    await expect(approveDraft({ ...h.deps, draftRepo: spy }, TENANT, ACTOR)).rejects.toThrow(/TIMEZONE_REQUIRED/);
+    expect(order).toEqual(['lock']);
+    expect(await h.proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+});
+
+describe('InMemoryOnboardingDraftRepository.markApproved (compare-and-swap)', () => {
+  it('throws the typed error for a stale version, an approved draft, or no draft, and writes nothing', async () => {
+    const { repo, draft } = await draftFor();
+    await expect(repo.markApproved(TENANT, ['p1'], draft.version + 1)).rejects.toBeInstanceOf(DraftVersionConflictError);
+    await expect(repo.markApproved('00000000-0000-0000-0000-00000000ffff', ['p1'], 1)).rejects.toBeInstanceOf(DraftNotFoundError);
+    expect(await repo.getForTenant(TENANT)).toMatchObject({ status: 'draft', version: draft.version, proposalIds: [] });
+
+    const approved = await repo.markApproved(TENANT, ['p1'], draft.version);
+    expect(approved).toMatchObject({ status: 'approved', version: draft.version + 1, proposalIds: ['p1'] });
+    await expect(repo.markApproved(TENANT, ['p2'], approved.version)).rejects.toBeInstanceOf(DraftAlreadyApprovedError);
+    expect(await repo.getForTenant(TENANT)).toMatchObject({ status: 'approved', version: draft.version + 1, proposalIds: ['p1'] });
   });
 });

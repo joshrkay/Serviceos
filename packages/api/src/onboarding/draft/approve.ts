@@ -13,6 +13,16 @@
  * Runs inside the `/api` request transaction (middleware/tenant-context.ts):
  * any thrown error turns into a >= 400 response and the middleware rolls the
  * whole thing back, so a half-approved draft cannot exist.
+ *
+ * Concurrency: the first statement is a locking read of the draft row
+ * (`getForTenantForUpdate`), and the proposals are built only from the row it
+ * returns. A PUT /choices or a second approve therefore waits on the lock and
+ * sees the committed outcome: a PUT that wins is IN the payload; an approve
+ * that loses finds the draft `approved` and returns the winner's proposal ids
+ * (`approvedNow: false`) without minting anything. An optional `expectedVersion`
+ * lets a client that rendered version N refuse to approve a newer draft
+ * (DraftVersionConflictError, before anything is minted); `markApproved`
+ * re-checks the same version as the second guard.
  */
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';
@@ -26,7 +36,7 @@ import { isRuntimeTimezone } from '../../shared/timezone';
 import { CHOICE_KEYS, type AnyChoiceKey, type ChoiceWrites, type OptionKey } from '../choices/schema';
 import type { AssembledChoice, AssembledOption } from '../choices/assemble';
 import type { PriceTier } from '../choices/price-tiers';
-import type { OnboardingDraft, OnboardingDraftRepository } from './repository';
+import { DraftNotFoundError, DraftVersionConflictError, type OnboardingDraft, type OnboardingDraftRepository } from './repository';
 
 export const ONBOARDING_READBACK_SURFACE = 'onboarding_readback';
 
@@ -132,11 +142,17 @@ export async function approveDraft(
   deps: ApproveDraftDeps,
   tenantId: string,
   actor: { userId: string; role: Role },
+  opts: { expectedVersion?: number } = {},
 ): Promise<ApproveDraftResult> {
-  const draft = await deps.draftRepo.getForTenant(tenantId);
-  if (!draft) throw new ValidationError('DRAFT_NOT_FOUND');
+  const draft = await deps.draftRepo.getForTenantForUpdate(tenantId);
+  if (!draft) throw new DraftNotFoundError(tenantId);
   if (draft.status === 'approved') {
+    // Idempotent re-tap, a lost-response retry, or the loser of an approve race:
+    // the winner's ids, nothing minted. Runs before the version check on purpose.
     return { draft, proposalIds: draft.proposalIds, approvedNow: false };
+  }
+  if (opts.expectedVersion !== undefined && opts.expectedVersion !== draft.version) {
+    throw new DraftVersionConflictError(opts.expectedVersion, draft.version);
   }
 
   const inputs = buildDraftProposals(draft, actor.userId);
@@ -163,7 +179,7 @@ export async function approveDraft(
     throw new ConflictError(`DRAFT_APPROVAL_FAILED: ${reasons}`);
   }
 
-  const approved = await deps.draftRepo.markApproved(tenantId, ids);
+  const approved = await deps.draftRepo.markApproved(tenantId, ids, draft.version);
   await deps.auditRepo.create(
     createAuditEvent({
       tenantId,
@@ -172,7 +188,7 @@ export async function approveDraft(
       eventType: 'onboarding.draft_approved',
       entityType: 'onboarding_draft',
       entityId: approved.id,
-      metadata: { proposalIds: ids, choices: resolveChoices(draft).map((r) => ({ key: r.settingKey, source: r.source })) },
+      metadata: { proposalIds: ids, draftVersion: draft.version, choices: resolveChoices(draft).map((r) => ({ key: r.settingKey, source: r.source })) },
     }),
   );
   return { draft: approved, proposalIds: ids, approvedNow: true };

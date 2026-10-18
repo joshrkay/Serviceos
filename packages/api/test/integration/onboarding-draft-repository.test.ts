@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { Pool } from 'pg';
+import { applyTenantContext } from '../../src/db/rls-runtime-role';
+import { tenantContextStore } from '../../src/middleware/tenant-context';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import {
   PgOnboardingDraftRepository,
@@ -131,16 +133,20 @@ describe('onboarding_drafts repository', () => {
     await expect(repo.stageChoice(tenant.tenantId, 'greeting', { option: 'a' }, 1)).rejects.toBeInstanceOf(DraftNotFoundError);
     const assembled = await freshAssembled();
     const d = await repo.create(tenant.tenantId, { packId: 'plumbing', trade: 'plumbing', metroCode: 'CLE', metroName: 'Cleveland', businessName: 'Walsh Plumbing', ownerFirstName: 'Jenna', clientTimezone: null, assembled });
-    const approved = await repo.markApproved(tenant.tenantId, ['11111111-1111-1111-1111-111111111111']);
+    const approved = await repo.markApproved(tenant.tenantId, ['11111111-1111-1111-1111-111111111111'], d.version);
     expect(approved.status).toBe('approved');
     expect(approved.proposalIds).toEqual(['11111111-1111-1111-1111-111111111111']);
     expect(approved.approvedAt).toBeInstanceOf(Date);
     await expect(repo.stageChoice(tenant.tenantId, 'greeting', { option: 'a' }, approved.version)).rejects.toBeInstanceOf(DraftAlreadyApprovedError);
-    // Approving twice is a no-op that returns the same row.
-    const twice = await repo.markApproved(tenant.tenantId, ['22222222-2222-2222-2222-222222222222']);
-    expect(twice.proposalIds).toEqual(['11111111-1111-1111-1111-111111111111']);
-    expect(twice.version).toBe(approved.version);
-    void d;
+    // Approving twice is refused (never a silent no-op returning another row) and changes nothing.
+    await expect(
+      repo.markApproved(tenant.tenantId, ['22222222-2222-2222-2222-222222222222'], approved.version),
+    ).rejects.toBeInstanceOf(DraftAlreadyApprovedError);
+    const raw = await pool.query<{ proposal_ids: string[]; version: number }>(
+      'SELECT proposal_ids, version FROM onboarding_drafts WHERE tenant_id = $1',
+      [tenant.tenantId],
+    );
+    expect(raw.rows[0]).toEqual({ proposal_ids: ['11111111-1111-1111-1111-111111111111'], version: approved.version });
   });
 
   it('setClientTimezone round-trips the column, bumps version, and is refused once approved', async () => {
@@ -160,7 +166,7 @@ describe('onboarding_drafts repository', () => {
     expect(raw.rows[0]).toEqual({ client_timezone: 'America/Phoenix', version: d.version + 1 });
     expect((await repo.getForTenant(tenant.tenantId))!.clientTimezone).toBe('America/Phoenix');
 
-    await repo.markApproved(tenant.tenantId, ['11111111-1111-1111-1111-111111111111']);
+    await repo.markApproved(tenant.tenantId, ['11111111-1111-1111-1111-111111111111'], updated.version);
     await expect(repo.setClientTimezone(tenant.tenantId, 'America/Denver')).rejects.toBeInstanceOf(DraftAlreadyApprovedError);
     expect((await repo.getForTenant(tenant.tenantId))!.clientTimezone).toBe('America/Phoenix');
   });
@@ -200,5 +206,71 @@ describe('onboarding_drafts repository', () => {
       repo.stageChoice(tenant.tenantId, 'nope' as 'greeting', { option: 'a' }, d.version),
     ).rejects.toThrow();
     expect((await repo.getForTenant(tenant.tenantId))!.version).toBe(1);
+  });
+  const PID = '11111111-1111-1111-1111-111111111111';
+  async function seedDraft() {
+    const assembled = await freshAssembled();
+    return repo.create(tenant.tenantId, { packId: 'plumbing', trade: 'plumbing', metroCode: 'CLE', metroName: 'Cleveland', businessName: 'Walsh Plumbing', ownerFirstName: null, clientTimezone: 'America/New_York', assembled });
+  }
+  type RawDraft = { status: string; version: number; proposal_ids: string[]; approved_at: Date | null };
+  const rawDraft = async (): Promise<RawDraft> =>
+    (await pool.query<RawDraft>('SELECT status, version, proposal_ids, approved_at FROM onboarding_drafts WHERE tenant_id = $1', [tenant.tenantId])).rows[0];
+
+  it('markApproved writes status, proposal_ids, version + 1 and approved_at on the raw row', async () => {
+    const d = await seedDraft();
+    await repo.markApproved(tenant.tenantId, [PID], d.version);
+    const raw = await rawDraft();
+    expect(raw.status).toBe('approved');
+    expect(raw.proposal_ids).toEqual([PID]);
+    expect(raw.version).toBe(d.version + 1);
+    expect(raw.approved_at).toBeInstanceOf(Date);
+  });
+
+  it('markApproved with a stale version rejects with DraftVersionConflictError and leaves the row untouched', async () => {
+    const d = await seedDraft();
+    const staged = await repo.stageChoice(tenant.tenantId, 'greeting', { option: 'b' }, d.version);
+    await expect(repo.markApproved(tenant.tenantId, [PID], d.version)).rejects.toMatchObject({
+      name: 'DraftVersionConflictError',
+      expected: d.version,
+      actual: staged.version,
+    });
+    expect(await rawDraft()).toEqual({ status: 'draft', version: staged.version, proposal_ids: [], approved_at: null });
+  });
+
+  it('markApproved for a tenant with no draft rejects with DraftNotFoundError', async () => {
+    await expect(repo.markApproved(tenant.tenantId, [PID], 1)).rejects.toBeInstanceOf(DraftNotFoundError);
+  });
+
+  it('getForTenantForUpdate refuses to run outside the request transaction', async () => {
+    await seedDraft();
+    await expect(repo.getForTenantForUpdate(tenant.tenantId)).rejects.toThrow(/requires the request transaction/);
+  });
+
+  it('getForTenantForUpdate inside a request transaction returns the same mapped row as getForTenant, and null for another tenant', async () => {
+    const d = await seedDraft();
+    const other = await createTestTenant(pool);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await applyTenantContext(client, tenant.tenantId, { transactional: true });
+      const locked = await tenantContextStore.run({ client, tenantId: tenant.tenantId }, () => repo.getForTenantForUpdate(tenant.tenantId));
+      expect(locked).toEqual(await repo.getForTenant(tenant.tenantId));
+      expect(locked!.id).toBe(d.id);
+      // Another tenant's id inside this tenant's transaction: the guard refuses (ambient tenant differs).
+      await expect(tenantContextStore.run({ client, tenantId: tenant.tenantId }, () => repo.getForTenantForUpdate(other.tenantId))).rejects.toThrow(/requires the request transaction/);
+      await client.query('COMMIT');
+    } finally {
+      client.release();
+    }
+    // RLS: the other tenant's own transaction sees no draft to lock.
+    const c2 = await pool.connect();
+    try {
+      await c2.query('BEGIN');
+      await applyTenantContext(c2, other.tenantId, { transactional: true });
+      expect(await tenantContextStore.run({ client: c2, tenantId: other.tenantId }, () => repo.getForTenantForUpdate(other.tenantId))).toBeNull();
+      await c2.query('COMMIT');
+    } finally {
+      c2.release();
+    }
   });
 });
