@@ -11,6 +11,7 @@ import {
   createAiRun,
   completeAiRun,
   failAiRun,
+  isUuid,
   AiRun,
 } from '../ai-run';
 import { AIRoutingConfig, isVisionCapableModel, resolveTierDeadlineMs, TASK_TYPES } from '../../config/ai-routing';
@@ -415,6 +416,22 @@ export function redactMessagesForSnapshot(
   });
 }
 
+/**
+ * OBS-1 — split a caller's `metadata.promptVersionId` for the ai_runs row:
+ * a UUID goes in the UUID `prompt_version_id` column; any other string ref
+ * (the brand-voice composer sends 'brand_voice_v1') goes in the input
+ * snapshot as `promptRef`, so provenance survives without failing the INSERT.
+ * Shared by the gateway and the cache-hit path.
+ */
+export function promptRefFields(raw: unknown): {
+  promptVersionId?: string;
+  snapshot: { promptRef?: string };
+} {
+  if (isUuid(raw)) return { promptVersionId: raw, snapshot: {} };
+  if (typeof raw === 'string' && raw.length > 0) return { snapshot: { promptRef: raw } };
+  return { snapshot: {} };
+}
+
 export class LLMGateway {
   private readonly config: LLMGatewayConfig;
   private readonly providers: Map<string, LLMProvider>;
@@ -535,6 +552,9 @@ export class LLMGateway {
     const promptVersionId = request.metadata?.promptVersionId as string | undefined;
     // U10 — trace-session grouping (voice session id / chat conversation id).
     const sessionId = request.metadata?.sessionId as string | undefined;
+    // OBS-1: only a UUID may go in ai_runs.prompt_version_id; any other ref
+    // (e.g. 'brand_voice_v1') is kept as input_snapshot.promptRef.
+    const promptRef = promptRefFields(promptVersionId);
 
     // Create the ai_runs row (best-effort — failure must not abort the LLM call).
     // A single create() writes the run with status 'pending' and startedAt already
@@ -546,11 +566,12 @@ export class LLMGateway {
           tenantId,
           taskType: request.taskType,
           model: resolvedModel,
-          promptVersionId,
+          promptVersionId: promptRef.promptVersionId,
           inputSnapshot: {
             messages: redactMessagesForSnapshot(request.messages),
             temperature: request.temperature,
             maxTokens: request.maxTokens,
+            ...promptRef.snapshot,
           },
           createdBy: 'gateway',
           correlationId,

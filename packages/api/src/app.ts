@@ -7621,8 +7621,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const supervisorPricingBaseline = pool ? new PgPricingBaselineResolver(pool) : null;
   configureSupervisorReviewGate(
     createSupervisorReviewGate({
+      // OBS-5: llmGateway is built with aiRunRepo, so it writes the review's
+      // single ai_runs row itself.
       gateway: llmGateway,
-      aiRunRepo,
       // WS6 — reuse the hoisted instance (the digest worker deps share it).
       reviewsRepo: supervisorReviewsRepo,
       proposalRepo,

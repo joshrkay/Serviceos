@@ -10,6 +10,8 @@ import { OwnerNotificationService } from '../../../src/notifications/owner-notif
 import { InMemoryPushDeliveryProvider } from '../../../src/notifications/push-delivery-provider';
 import { InMemoryDeviceTokenRepository } from '../../../src/push/device-token-service';
 import { setOwnerNotifications } from '../../../src/notifications/owner-notifications-instance';
+import { LLMGateway } from '../../../src/ai/gateway/gateway';
+import type { LLMProvider } from '../../../src/ai/gateway/gateway';
 
 const TENANT = 'tenant-sup-1';
 const MODEL = 'claude-haiku-4-5-20251001';
@@ -74,14 +76,12 @@ function jsonGateway(signals: Record<string, unknown>): ReviewerGateway {
 }
 
 function setup(opts: GateOpts = {}) {
-  const aiRunRepo = new InMemoryAiRunRepository();
   const reviewsRepo = new InMemorySupervisorReviewRepository();
   const proposalRepo = makeProposalRepo();
   const gate = createSupervisorReviewGate({
     gateway:
       opts.gateway ??
       jsonGateway({ missedUrgency: false, medicalMentionUnescalated: false, registerDrift: false }),
-    aiRunRepo,
     reviewsRepo,
     proposalRepo,
     supervisorModel: MODEL,
@@ -92,7 +92,7 @@ function setup(opts: GateOpts = {}) {
     logger: silentLogger,
     ...(opts.budgetMs !== undefined ? { budgetMs: opts.budgetMs } : {}),
   });
-  return { gate, aiRunRepo, reviewsRepo, proposalRepo };
+  return { gate, reviewsRepo, proposalRepo };
 }
 
 describe('N-004 Supervisor reviewer — bad-day sims + budget + modes', () => {
@@ -198,22 +198,75 @@ describe('N-004 Supervisor reviewer — bad-day sims + budget + modes', () => {
     expect(reviews[0].verdict).toBe('timeout');
   });
 
-  it('logs one ai_runs row per LLM-bearing review (taskType supervisor_review)', async () => {
-    const { gate, aiRunRepo, reviewsRepo } = setup({ mode: 'shadow' });
+  // OBS-5 — the review links the GATEWAY's ai_runs row (the one with tokens,
+  // cost and the served model). The reviewer used to write a second, usage-
+  // less row of its own and link that one instead.
+  function realGateway() {
+    const aiRunRepo = new InMemoryAiRunRepository();
+    const provider: LLMProvider = {
+      name: 'stub',
+      isAvailable: async () => true,
+      complete: async () => ({
+        content: JSON.stringify({
+          missedUrgency: false,
+          medicalMentionUnescalated: false,
+          registerDrift: false,
+          rationale: 'fine',
+        }),
+        model: 'claude-haiku-4-5-20251001',
+        provider: 'stub',
+        tokenUsage: { input: 120, output: 20, total: 140 },
+        latencyMs: 3,
+      }),
+    };
+    const gateway = new LLMGateway(
+      { defaultProvider: 'stub' },
+      new Map([['stub', provider]]),
+      undefined,
+      aiRunRepo,
+    );
+    return { gateway, aiRunRepo };
+  }
+
+  it('writes exactly one ai_runs row per LLM-bearing review and links it', async () => {
+    const { gateway, aiRunRepo } = realGateway();
+    const { gate, reviewsRepo } = setup({ mode: 'shadow', gateway });
     const proposal = buildProposal();
 
     await gate.review({ proposal });
 
     const runs = await aiRunRepo.findByTaskType(TENANT, 'supervisor_review');
     expect(runs).toHaveLength(1);
-    expect(runs[0].model).toBe(MODEL);
-    // The review row references the persisted ai_run (real id, not fabricated).
+    expect(runs[0].status).toBe('completed');
+    expect(runs[0].tokenUsage).toEqual({ input: 120, output: 20, total: 140 });
+    expect(runs[0].costMicroCents).toBe(120 * 100 + 20 * 500);
+    expect(runs[0].model).toBe('claude-haiku-4-5-20251001');
+    // Findable from the proposal.
+    expect(runs[0].correlationId).toBe(proposal.id);
+    // The review row references that gateway row (real id, not fabricated).
     const reviews = await reviewsRepo.findByProposal(TENANT, proposal.id);
     expect(reviews[0].aiRunId).toBe(runs[0].id);
   });
 
+  it('links no ai_run when the gateway call fails (the gateway row is found by correlation id)', async () => {
+    const failing: ReviewerGateway = {
+      async complete() {
+        throw new Error('provider down');
+      },
+    };
+    const { gate, reviewsRepo } = setup({ mode: 'shadow', gateway: failing });
+    const proposal = buildProposal();
+
+    const res = await gate.review({ proposal });
+
+    expect(res.hold).toBe(false);
+    const reviews = await reviewsRepo.findByProposal(TENANT, proposal.id);
+    expect(reviews[0].aiRunId).toBeNull();
+  });
+
   it('mode=off fully skips (no review row, no ai_run)', async () => {
-    const { gate, aiRunRepo, reviewsRepo } = setup({ mode: 'off' });
+    const { gateway, aiRunRepo } = realGateway();
+    const { gate, reviewsRepo } = setup({ mode: 'off', gateway });
     const proposal = buildProposal();
 
     const res = await gate.review({ proposal });
