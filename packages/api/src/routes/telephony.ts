@@ -665,6 +665,12 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
 
     // Unknown CallSid — no live session to continue. Start a fresh inbound
     // Gather session (never Stream). Mirrors /voice's tenant resolution.
+    // LCR-05 — this is where a realtime call lands when the process that held
+    // it handed it off at shutdown (a deploy): the call starts over here.
+    logger.warn('telephony/gather-fallback: unknown call — starting it over (deploy_induced_restart)', {
+      event: 'deploy_induced_restart',
+      callSid,
+    });
     const from = body.From ?? '';
     const to = body.To ?? '';
     if (!from || !to) {
@@ -781,6 +787,11 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         speechResult,
         confidence: confidence !== undefined && Number.isFinite(confidence) ? confidence : undefined,
         tenantId,
+        // LCR-05 — what a session this process never held (a deploy cut-over)
+        // is started over from, instead of hanging up.
+        ...(body.From ? { from: body.From } : {}),
+        ...(body.To ? { to: body.To } : {}),
+        ...(body.StirVerstat ? { stirVerstat: body.StirVerstat } : {}),
       });
       res.status(200).type('text/xml').send(twiml);
     } catch (err) {
