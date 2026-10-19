@@ -282,7 +282,7 @@ describe('Postgres integration — demo call budget, allowance and release (S6-2
     const inner = leaseStep();
     let arrived = 0;
     let open!: () => void;
-    const gate = new Promise<void>((r) => (open = r));
+    const gate = new Promise<void>((r) => { open = r; });
     return {
       async takeLease(client, req, at) {
         arrived += 1;
@@ -551,7 +551,7 @@ describe('Postgres integration — demo call budget, allowance and release (S6-2
     const at = freshDay();
     const req = visitor();
     let fail!: () => void;
-    const failGate = new Promise<void>((r) => (fail = r));
+    const failGate = new Promise<void>((r) => { fail = r; });
     const first: StartTransactionSteps = {
       async takeLease() {
         await failGate;
@@ -570,9 +570,9 @@ describe('Postgres integration — demo call budget, allowance and release (S6-2
       );
       return rows[0].n;
     };
-    for (let i = 0; i < 100 && (await lockState(true)) === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    for (let i = 0; i < 100 && (await lockState(true)) === 0; i++) await new Promise((r) => { setTimeout(r, 20); });
     const secondRun = start({ ...req, correlationId: `demo-${randomUUID()}` }, at);
-    for (let i = 0; i < 100 && (await lockState(false)) === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    for (let i = 0; i < 100 && (await lockState(false)) === 0; i++) await new Promise((r) => { setTimeout(r, 20); });
     expect(await lockState(false)).toBe(1);
 
     fail();

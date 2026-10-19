@@ -170,7 +170,7 @@ describe('Postgres integration — PhoneRateLimiter.tryConsumeOn / releaseOn (S6
           [lockKey],
         );
         waited = rows[0].n > 0;
-        if (!waited) await new Promise((r) => setTimeout(r, 20));
+        if (!waited) await new Promise((r) => { setTimeout(r, 20); });
       }
       expect(waited).toBe(true);
       await holder.query('COMMIT');
