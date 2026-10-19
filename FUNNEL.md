@@ -57,6 +57,7 @@ four required fields; `tenant_id` comes from the onboarding status (or the draft
 | Event | Where it fires | Trigger | Extra props |
 |---|---|---|---|
 | `v3_ready_viewed` | `ConversationShell.tsx` | the owner first sees the finished shop ("<Business> is already set up"); once per mount | `trade`, `metro` |
+| `v3_metro_changed` | `ConversationShell.tsx` | "Not Cleveland?" on Ready: the owner picked another city and the server re-priced the shop for it (a refused change, because a choice was staged or the draft moved on in another window, does not fire) | `from`, `to` (metro codes), `shows_city` (bool: false when the new city has no prices of its own and the shop uses the national ones) |
 | `v3_turn_viewed` | `ConversationShell.tsx` | one of the seven choice turns first appears; once per choice per mount, so reopening a turn from the read-back does not fire it again | `choice_key` |
 | `v3_choice_made` | `ConversationShell.tsx` | an answer was saved to the draft (the stage call succeeded; a failed or conflicted save does not fire). Fires again when the owner changes an answer from the read-back | `choice_key`, `answer_mode` (`tap` \| `type`), `option` (`a` \| `b` \| `override`), `is_most_shops` (bool) |
 | `v3_keep_rest` | `ConversationShell.tsx` | the owner taps "Keep the rest as is" in a turn's header and skips to the read-back with the typical answers | `answered_count` (0-7) |
@@ -68,6 +69,8 @@ four required fields; `tenant_id` comes from the onboarding status (or the draft
 | `v3_number_viewed` | `AfterApproval.tsx` | the number turn first appears (getting it, asking for it, or showing it); once per mount | none |
 | `v3_number_ready` | `AfterApproval.tsx` | the owner's number is known while they are on the number turn; once per mount. A visit that picks up later in the flow never saw the wait and does not fire it | none |
 | `v3_test_call_viewed` | `AfterApproval.tsx` | the test-call turn ("Now you call me.") first appears; the voice getting ready before it is not counted; once per mount | none |
+| `v3_first_heard` | `hooks/useRivetVoice.ts` (mounted by `ConversationShell.tsx`) | the first of Rivet's lines is heard after the owner taps "Make it mine" or "Looks right as is": the server clip's `playing` event, or the browser voice starting when the clip fell back. Once per mount; a line heard before that tap (the Ready opener) is not counted | `ms_since_make_it_mine` (integer ms from the tap, >= 0; time to first heard), `source` (`server` \| `speech_synthesis`), `gesture` (`make_it_mine` \| `keep_as_is`) |
+| `v3_tts_fallback` | `hooks/useRivetVoice.ts` | a line could not be spoken in the tenant's voice and Rivet fell back: the voice route answered 429, 501 or 502, the request failed, the clip would not play, or the browser refused to play it. Once per turn per mount; the rest of that turn stays on the fallback | `reason` (`rate_limited` \| `not_configured` \| `tts_failed` \| `network` \| `playback` \| `autoplay`), `mode` (`speech_synthesis` \| `silent`: the browser voice, or no voice at all and the heading on screen), `turn` (the choice key, or `ready` \| `readback` \| `trial` \| `number`) |
 
 `choice_key` is one of the seven core setting keys (`greeting`, `trip_fee_and_rate`,
 `booking_posture`, `payment_collection_mode`, `booking_hours`, `emergency_target`,

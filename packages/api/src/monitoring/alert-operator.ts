@@ -36,6 +36,13 @@ export interface OperatorAlert {
   severity: 'warning' | 'critical';
   /** Stable rule key — also the cooldown key (e.g. 'call_completion_rate'). */
   rule: string;
+  /**
+   * Bounded label for slo_alerts_sent_total when `rule` is not bounded — a
+   * per-tenant rule keys its cooldown by tenant, but a tenant id must never
+   * become a metric label (permanent, scraped, never purged on erasure).
+   * Defaults to `rule`.
+   */
+  metricRule?: string;
   /** One-line human summary — becomes the Sentry message + SMS body lead. */
   summary: string;
   /** Structured context — appended to the SMS body and logged. */
@@ -90,7 +97,7 @@ export function createAlertOperator(deps: AlertOperatorDeps): AlertOperatorFn {
       // Sentry→Slack/DM rules fire; no-op client when unconfigured.
       try {
         deps.sentry.captureMessage(message, 'error');
-        sloAlertsSentTotal.inc({ rule: alert.rule, channel: 'sentry' });
+        sloAlertsSentTotal.inc({ rule: alert.metricRule ?? alert.rule, channel: 'sentry' });
       } catch (err) {
         deps.logger.error('SLO alert: Sentry channel failed', {
           rule: alert.rule,
@@ -113,7 +120,7 @@ export function createAlertOperator(deps: AlertOperatorDeps): AlertOperatorFn {
             alertClass: 'operator',
             idempotencyKey: `slo-alert-${alert.rule}-${t}`,
           });
-          sloAlertsSentTotal.inc({ rule: alert.rule, channel: 'sms' });
+          sloAlertsSentTotal.inc({ rule: alert.metricRule ?? alert.rule, channel: 'sms' });
         } catch (err) {
           deps.logger.error('SLO alert: SMS channel failed', {
             rule: alert.rule,

@@ -220,6 +220,22 @@ const configSchema = z.object({
   // Lookback (hours) for proposals that reached `execution_failed` with a
   // NULL `execution_error` — a terminal failure state carrying no reason.
   FAILURE_MONITOR_PROPOSAL_LOOKBACK_HOURS: z.coerce.number().positive().default(24),
+  // OBS-4 — volume floor for the PER-TENANT non-completion rule
+  // (ai_task_failure_rate:<task>:<tenant>). Lower than FAILURE_MONITOR_MIN_RUNS
+  // because one tenant's volume is a fraction of the platform's; the platform
+  // floor would silence exactly the diluted outage this rule exists for.
+  FAILURE_MONITOR_TENANT_MIN_RUNS: z.coerce.number().int().positive().default(10),
+  // OBS-4 — platform-wide ai_runs spend (integer cents) over one window above
+  // which `ai_spend_window` pages. Catches a loop that re-calls the model and
+  // COMPLETES every call (invisible to every failure-rate rule). 0 turns the
+  // rule off. Default 200 ($2 per 30-minute window), derived from the bucket
+  // math (review round 1): one tenant saturating its standard +
+  // classifier_standard buckets for a window spends ~3.55M tokens, ~53 cents
+  // on gpt-4o-mini, so 200 pages when about four tenants are driven to their
+  // ceiling at once — reachable at today's tenant count. The old 2000 needed
+  // ~38 saturated tenants and could never fire. Pinned in
+  // test/workers/failure-rate-monitor.test.ts; raise it as tenants grow.
+  FAILURE_MONITOR_SPEND_MAX_CENTS: z.coerce.number().int().min(0).default(200),
   // QUALITY-2026-07-12 WS5 — Microsoft Presidio PII redaction backend for
   // training-asset ingestion. Two separate REST services (matching Presidio's
   // standard deployment): the Analyzer detects PII spans, the Anonymizer
@@ -687,6 +703,27 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
         'limit, LLM tenant quota and WebSocket connection caps become per-process, ' +
         'and voice/dispatch fan-out stops crossing replicas, all silently; set ' +
         'REDIS_URL before raising numReplicas, or run a single replica)'
+    );
+  }
+
+  // LCR-05 — a live call's session lives in the memory of the process that
+  // answered it (VoiceSessionStore is a per-process Map; Redis only mirrors its
+  // events). With more than one replica the media-stream upgrade and every
+  // /gather turn are separate requests the load balancer may hand to a replica
+  // without that session: the stream upgrade is refused (403) and a Gather
+  // turn starts the call over. So REDIS_URL alone must not unlock a scale-out
+  // of any process that answers calls: every role but worker mounts the
+  // telephony routes and the stream upgrade (app.ts), whatever
+  // TELEPHONY_ENABLED says (that flag only stops outbound SMS). Unset
+  // PROCESS_ROLE is 'all'.
+  const processRole = env.PROCESS_ROLE ?? 'all';
+  if (Number.isFinite(numReplicas) && numReplicas > 1 && processRole !== 'worker') {
+    missing.push(
+      `NUM_REPLICAS=${numReplicas} on PROCESS_ROLE=${processRole} is not supported: this ` +
+        'process answers phone calls, and a call stays in the memory of the replica that ' +
+        'took it, so a second replica drops calls at the stream connect or on the next ' +
+        'turn. Run one replica of every process that answers calls (only PROCESS_ROLE=worker ' +
+        'may scale out) until call state is shared across replicas'
     );
   }
 

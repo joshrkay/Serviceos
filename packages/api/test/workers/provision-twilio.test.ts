@@ -431,6 +431,12 @@ describe('provision-twilio worker — number picker', () => {
     expect(purchaseBody).toContain(
       `VoiceUrl=${encodeURIComponent('https://voice.test/api/telephony/voice')}`,
     );
+    // LCR-04 — the fallback rides the same domain; Twilio fetches it when
+    // VoiceUrl fails, so the caller reaches voicemail instead of a dropped call.
+    expect(purchaseBody).toContain(
+      `VoiceFallbackUrl=${encodeURIComponent('https://voice.test/api/telephony/voice/fallback')}`,
+    );
+    expect(purchaseBody).toContain('VoiceFallbackMethod=POST');
     expect(purchaseBody).toContain(
       `StatusCallback=${encodeURIComponent(`https://voice.test/webhooks/twilio/status/${TENANT}`)}`,
     );
@@ -480,6 +486,9 @@ describe('provision-twilio worker — number picker', () => {
     const purchaseBody = String((purchaseCall![1] as RequestInit).body);
     expect(purchaseBody).toContain(
       `VoiceUrl=${encodeURIComponent('https://api.test/api/telephony/voice')}`,
+    );
+    expect(purchaseBody).toContain(
+      `VoiceFallbackUrl=${encodeURIComponent('https://api.test/api/telephony/voice/fallback')}`,
     );
     expect(purchaseBody).toContain(
       `StatusCallback=${encodeURIComponent(`https://api.test/webhooks/twilio/status/${TENANT}`)}`,

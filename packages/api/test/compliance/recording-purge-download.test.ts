@@ -177,3 +177,36 @@ describe('RV-132 — POST /api/voice/recordings/:id/retry on a purged recording'
     expect(rec!.status).toBe('completed');
   });
 });
+
+// PRIV-3 — the retention sweep deletes the audio of a recording on which a
+// card number was said (audio_purged_at), long before the horizon tombstone.
+// Neither route may hand out a URL to, or re-transcribe, the deleted object.
+describe('PRIV-3 — a recording whose audio was deleted because a card number was said', () => {
+  it('GET /recordings/:id/audio answers 410 and mints no S3 URL', async () => {
+    const voiceRepo = new InMemoryVoiceRepository();
+    const audioPurgedAt = new Date('2026-10-19T00:00:00Z');
+    await seedRecording(voiceRepo, { audioPurgedAt });
+    const storage = makeStorage();
+    const app = buildApp({ voiceRepo, storage, fileRepo: makeFileRepo() });
+
+    const res = await request(app).get(`/api/voice/recordings/${REC_ID}/audio`);
+    expect(res.status).toBe(410);
+    expect(res.body.error).toBe('RECORDING_PURGED');
+    expect(res.body.purgedAt).toBe(audioPurgedAt.toISOString());
+    expect(res.body.message).toBe(
+      'This recording\'s audio was deleted because a card number was said on it. The transcript, with the card number removed, is still available.',
+    );
+    expect(storage.generateDownloadUrl).not.toHaveBeenCalled();
+  });
+
+  it('POST /recordings/:id/retry answers 410 and leaves the row as it was', async () => {
+    const voiceRepo = new InMemoryVoiceRepository();
+    await seedRecording(voiceRepo, { audioPurgedAt: new Date() });
+    const app = buildApp({ voiceRepo, storage: makeStorage(), fileRepo: makeFileRepo() });
+
+    const res = await request(app).post(`/api/voice/recordings/${REC_ID}/retry`).send({});
+    expect(res.status).toBe(410);
+    expect(res.body.error).toBe('RECORDING_PURGED');
+    expect((await voiceRepo.findById(TENANT, REC_ID))!.status).toBe('completed');
+  });
+});

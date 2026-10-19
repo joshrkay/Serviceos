@@ -94,12 +94,12 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **78** |
+| Owner-only routes in code | **79** |
 | `cadence: daily` | **2** |
-| `cadence: onboarding` | **13** |
+| `cadence: onboarding` | **14** |
 | `cadence: occasional` | **63** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
-| `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **13** |
+| `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **14** |
 
 A PR that raises `ownerRequiredDailyWebActions` has to edit the number in the
 contract test, which is the point: adding an owner-only, non-SMS-reachable
@@ -109,12 +109,12 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 78,
+  "ownerOnlyRoutes": 79,
   "daily": 2,
-  "onboarding": 13,
+  "onboarding": 14,
   "occasional": 63,
   "ownerRequiredDailyWebActions": 1,
-  "ownerRequiredOnboardingWebActions": 13
+  "ownerRequiredOnboardingWebActions": 14
 }
 ```
 
@@ -137,6 +137,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `PUT /api/onboarding/draft/choices/:settingKey` | onboarding | Stages one this-or-this setup choice (tap or spoken "first"/"second") on the draft, compare-and-swap on version. | false | none | Reviewed: one-time activation. The choice is spoken or tapped on the setup surface; voice is the surface's own input, not the voice agent, and nothing is written to settings until the read-back is approved. |
 | `POST /api/onboarding/draft/approve` | onboarding | "That's right": mints onboarding_tenant_settings and onboarding_voice_policy from the draft and approves them in the request transaction. The owner's business is not configured until this runs. | false | none | Reviewed: one-time activation and the one approval that configures the whole business; a deliberate on-screen act after a spoken read-back, matching POST /api/voice/go-live. |
 | `PUT /api/onboarding/draft/owner-phone` | onboarding | Adds or changes the owner's cell on the setup draft (compare-and-swap on version); it is the number emergency calls ring and approval carries to settings. | false | none | Reviewed: one-time activation; the number is typed on the setup surface, nothing reaches settings until the read-back is approved, and SMS cannot be the channel for the number that SMS identity is later checked against. |
+| `PUT /api/onboarding/draft/metro` | onboarding | "Not Cleveland?" on the setup Ready screen: re-prices the unapproved draft for another curated metro (compare-and-swap on version), refused once any choice is staged so the prices the owner already picked from never change under them. | false | none | Reviewed: one-time activation; a city pick from a list on the setup surface before any choice is made, nothing reaches settings until the read-back is approved, and SMS has no setup-draft context to change it from. |
 | `POST /api/onboarding/draft/retry` | onboarding | Re-queues only the setup proposals whose execution failed after "That's right", so the owner is not stuck waiting on a save that will never finish. | false | none | Reviewed: one-time activation recovery on the setup surface's own "Something didn't save. Try again." action; it re-approves the owner's own already-approved proposals through the normal undo window and execution worker, and SMS has no setup-draft context to retry from. |
 | `POST /api/billing/connect/onboarding` | onboarding | Stripe Connect onboarding. Until it is done the tenant cannot take card payments, which is half of the time-to-cash metric. | false | none | Reviewed: one-time activation; Stripe's hosted onboarding is a browser flow by construction. |
 | `POST /api/voice/go-live` | onboarding | Flips the tenant's voice agent live. Until it is called the AI answers nothing, so it is the last forced step of activation. | false | none | Reviewed: one-time activation. Deliberately a considered on-screen act — the owner is handing their phone line to an AI. |

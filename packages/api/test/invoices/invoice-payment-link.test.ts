@@ -3,6 +3,12 @@ import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { MockPaymentLinkProvider } from '../../src/payments/payment-link-provider';
 import { createInvoicePaymentLink } from '../../src/invoices/invoice-payment-link';
 import { calculateDocumentTotals } from '../../src/shared/billing-engine';
+import { InMemorySettingsRepository } from '../../src/settings/settings';
+
+// S5a-1 — the mint reads `payment_collection_mode` first; an empty settings
+// repo is a successful read of an unset key, i.e. the D-039/D-040 default
+// (`pay_link`), so every case below behaves exactly as before the gate.
+const settingsRepo = new InMemorySettingsRepository();
 
 describe('createInvoicePaymentLink (INV-04)', () => {
   const tenantId = '00000000-0000-4000-8000-000000000001';
@@ -27,7 +33,7 @@ describe('createInvoicePaymentLink (INV-04)', () => {
     });
 
     const provider = new MockPaymentLinkProvider();
-    const result = await createInvoicePaymentLink(tenantId, invoice.id, repo, provider);
+    const result = await createInvoicePaymentLink(tenantId, invoice.id, { invoiceRepo: repo, provider, settingsRepo });
     expect(result.url).toBe('https://checkout.stripe.com/c/pay/existing');
   });
 
@@ -49,7 +55,7 @@ describe('createInvoicePaymentLink (INV-04)', () => {
     });
 
     const provider = new MockPaymentLinkProvider();
-    const result = await createInvoicePaymentLink(tenantId, invoice.id, repo, provider);
+    const result = await createInvoicePaymentLink(tenantId, invoice.id, { invoiceRepo: repo, provider, settingsRepo });
     expect(result.url).toMatch(/^https:\/\/pay\.mock\.com\//);
 
     const updated = await repo.findById(tenantId, invoice.id);
@@ -86,11 +92,16 @@ describe('createInvoicePaymentLink (INV-04)', () => {
       deactivateLink: async () => undefined,
     };
 
-    await createInvoicePaymentLink(tenantId, invoice.id, repo, provider, {
-      resolveTenantConnectAccount: async () => ({
-        accountId: 'acct_op_link',
-        chargesEnabled: true,
-      }),
+    await createInvoicePaymentLink(tenantId, invoice.id, {
+      invoiceRepo: repo,
+      provider,
+      settingsRepo,
+      connectAccountResolver: {
+        resolveTenantConnectAccount: async () => ({
+          accountId: 'acct_op_link',
+          chargesEnabled: true,
+        }),
+      },
     });
 
     expect(seen[0]?.stripeAccountId).toBe('acct_op_link');
@@ -127,7 +138,7 @@ describe('createInvoicePaymentLink (INV-04)', () => {
       },
       deactivateLink: async () => undefined,
     };
-    await createInvoicePaymentLink(tenantId, invoice.id, repo, provider, resolver);
+    await createInvoicePaymentLink(tenantId, invoice.id, { invoiceRepo: repo, provider, settingsRepo, connectAccountResolver: resolver });
     return seen[0]?.stripeAccountId;
   }
 
@@ -173,7 +184,7 @@ describe('createInvoicePaymentLink (INV-04)', () => {
 
     const provider = new MockPaymentLinkProvider();
     await expect(
-      createInvoicePaymentLink(tenantId, invoice.id, repo, provider),
+      createInvoicePaymentLink(tenantId, invoice.id, { invoiceRepo: repo, provider, settingsRepo }),
     ).rejects.toMatchObject({ statusCode: 409 });
   });
 });
@@ -516,7 +527,7 @@ describe('P0-9 mint leg — link persist is guarded against concurrent invoice m
     };
 
     await expect(
-      createInvoicePaymentLink(TENANT, invoiceId, invoiceRepo, provider),
+      createInvoicePaymentLink(TENANT, invoiceId, { invoiceRepo, provider, settingsRepo }),
     ).rejects.toThrow(/Invoice changed while the payment link was being created/);
 
     // The fresh link died and nothing was attached to the voided invoice.
@@ -547,7 +558,7 @@ describe('P0-9 mint leg — link persist is guarded against concurrent invoice m
     };
 
     await expect(
-      createInvoicePaymentLink(TENANT, invoiceId, invoiceRepo, provider),
+      createInvoicePaymentLink(TENANT, invoiceId, { invoiceRepo, provider, settingsRepo }),
     ).rejects.toThrow(/Invoice changed while the payment link was being created/);
     expect(deactivated).toEqual(['plink_reprice_race']);
     const reloaded = await invoiceRepo.findById(TENANT, invoiceId);
@@ -579,7 +590,7 @@ describe('P0-9 mint leg — link persist is guarded against concurrent invoice m
       deactivateLink: async (linkId: string) => { deactivated.push(linkId); },
     };
 
-    const result = await createInvoicePaymentLink(TENANT, invoiceId, invoiceRepo, provider);
+    const result = await createInvoicePaymentLink(TENANT, invoiceId, { invoiceRepo, provider, settingsRepo });
 
     expect(result.url).toBe('https://pay.stripe.com/winner');
     expect(deactivated).toEqual(['plink_loser']); // the loser's link died
@@ -625,7 +636,7 @@ describe('Codex P1 — a loser-link cleanup miss is audited with the link id', (
     };
 
     await expect(
-      createInvoicePaymentLink('tenant-1', invoice.id, invoiceRepo, provider, undefined, auditRepo),
+      createInvoicePaymentLink('tenant-1', invoice.id, { invoiceRepo, provider, settingsRepo, auditRepo }),
     ).rejects.toThrow(/Invoice changed/);
 
     // The orphaned-but-live link id is durably traceable.

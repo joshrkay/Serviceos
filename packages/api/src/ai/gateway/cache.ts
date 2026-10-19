@@ -4,6 +4,7 @@ import type { LLMRequest, LLMResponse, LLMGateway } from './gateway';
 import { redactMessagesForSnapshot, messagesContainImage, promptRefFields } from './gateway';
 import type { AiRunRepository } from '../ai-run';
 import { createAiRun } from '../ai-run';
+import { redactCardNumbersInUserMessages } from '../privacy/pan-redact';
 import type { LLMTraceExporter } from './trace-exporter';
 import { runOutsideRequestTransaction } from '../../middleware/tenant-context';
 import {
@@ -193,7 +194,9 @@ export class CachingGatewayWrapper {
         model: cachedResponse.model,
         promptVersionId: promptRef.promptVersionId,
         inputSnapshot: {
-          messages: redactMessagesForSnapshot(request.messages),
+          // PRIV-3 — a hit never reaches LLMGateway.complete, so this path
+          // scrubs card numbers itself before the snapshot is written.
+          messages: redactMessagesForSnapshot(redactCardNumbersInUserMessages(request.messages)),
           temperature: request.temperature,
           maxTokens: request.maxTokens,
           ...promptRef.snapshot,

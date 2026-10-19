@@ -1,17 +1,43 @@
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import type { SettingsRepository } from '../settings/settings';
 // Type-only: `invoice.ts` calls back into this module at runtime
 // (transitionInvoiceStatus → deactivateInvoicePaymentLink), so a value
 // import from './invoice' here would create a require cycle.
 import type { ConnectAccountResolver } from './public-invoice-service';
 import type { Invoice, InvoiceRepository } from './invoice';
+import {
+  auditPaymentModeUnavailable,
+  CollectOnSiteError,
+  PaymentModeUnavailableError,
+  readPaymentCollectionMode,
+} from './payment-collection-mode';
 
 const PAYABLE_STATUSES = new Set(['open', 'partially_paid']);
 
 export interface InvoicePaymentLinkResult {
   url: string;
   expiresAt: string | null;
+}
+
+export interface CreateInvoicePaymentLinkDeps {
+  invoiceRepo: InvoiceRepository;
+  provider: PaymentLinkProvider;
+  /**
+   * S5a-1 (U8) — the tenant's `payment_collection_mode` is read here, BEFORE
+   * any provider call: "Collect on the spot" means no link anywhere, and a
+   * policy that cannot be read never becomes `pay_link`.
+   */
+  settingsRepo: SettingsRepository;
+  connectAccountResolver?: ConnectAccountResolver;
+  /**
+   * When wired, a loser-link cleanup failure on the mint-guard path is
+   * audited with the link id — the id was never persisted anywhere else, so
+   * without this a still-live stale link would vanish without a trace. Also
+   * records `invoice.payment_mode_unavailable` (surface `checkout`).
+   */
+  auditRepo?: AuditRepository;
 }
 
 /**
@@ -22,19 +48,29 @@ export interface InvoicePaymentLinkResult {
 export async function createInvoicePaymentLink(
   tenantId: string,
   invoiceId: string,
-  invoiceRepo: InvoiceRepository,
-  provider: PaymentLinkProvider,
-  connectAccountResolver?: ConnectAccountResolver,
-  /**
-   * When wired, a loser-link cleanup failure on the mint-guard path is
-   * audited with the link id — the id was never persisted anywhere else, so
-   * without this a still-live stale link would vanish without a trace.
-   */
-  auditRepo?: AuditRepository,
+  deps: CreateInvoicePaymentLinkDeps,
 ): Promise<InvoicePaymentLinkResult> {
+  const { invoiceRepo, provider, settingsRepo, connectAccountResolver, auditRepo } = deps;
   const invoice = await invoiceRepo.findById(tenantId, invoiceId);
   if (!invoice) {
     throw new NotFoundError('Invoice', invoiceId);
+  }
+
+  // Policy before state: a collect-on-site tenant gets no link even when one
+  // is still stored (the switch cleanup, S5a-5, may not have run yet), and an
+  // unreadable policy is a 503 the operator retries — never a mint.
+  const mode = await readPaymentCollectionMode(settingsRepo, tenantId);
+  if (!mode.ok) {
+    await auditPaymentModeUnavailable(auditRepo, {
+      tenantId,
+      invoiceId: invoice.id,
+      surface: 'checkout',
+      error: mode.error,
+    });
+    throw new PaymentModeUnavailableError();
+  }
+  if (mode.mode === 'collect_on_site') {
+    throw new CollectOnSiteError();
   }
 
   if (!PAYABLE_STATUSES.has(invoice.status)) {

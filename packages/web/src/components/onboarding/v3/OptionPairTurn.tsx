@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { AssembledOnboardingChoice, OnboardingOptionKey, StagedOnboardingChoice } from '@ai-service-os/shared';
+import { RivetVoiceContext, useRivetLine } from '../../../hooks/useRivetVoice';
 import { Button, OptionCard } from '../../ui';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
+import { spokenLines } from './turns';
 import { TypeInsteadFields } from './TypeInsteadFields';
 import {
   initialTypedValues,
@@ -34,6 +36,8 @@ export interface OptionPairTurnProps {
 /**
  * One this-or-that choice. The owner selects a card, then taps Next, so a
  * mis-tap is recoverable. Nothing is saved until the shell stages the answer.
+ * Inside the shell Rivet says the question when the turn opens, and tapping a
+ * card plays what Rivet would say ("Tap one to hear it").
  */
 export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, onTypeInstead, editing }: OptionPairTurnProps) {
   const kind = onTypeInstead ? typedKind(choice.settingKey) : null;
@@ -41,6 +45,15 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
   const [typing, setTyping] = useState(kind !== null && isTypedAnswer(staged));
   const [typed, setTyped] = useState(() => initialTypedValues(staged));
   const [typedErrors, setTypedErrors] = useState<TypedErrors>({});
+
+  const voice = useContext(RivetVoiceContext);
+  const lines = useMemo(() => spokenLines(choice), [choice]);
+  useRivetLine(choice.settingKey, choice.question, lines);
+  const pick = (key: OnboardingOptionKey) => {
+    setSelected(key);
+    const line = choice.options.find((o) => o.key === key)?.rivetLine;
+    if (voice && line) void voice.speak(line, { turn: choice.settingKey, with: lines });
+  };
 
   // Each turn is a fresh mount, so put focus on Rivet's new question rather than let it fall to the page.
   // A turn that opens on the owner's typed words already focuses its own field.
@@ -85,7 +98,7 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
       {typing && kind ? (
         <TypeInsteadFields kind={kind} choice={choice} values={typed} errors={typedErrors} onChange={changeTyped} />
       ) : (
-        <OptionCard className="mt-5" label={choice.question} options={options} value={selected} onChange={setSelected} disabled={busy} />
+        <OptionCard className="mt-5" label={choice.question} options={options} value={selected} onChange={pick} disabled={busy} />
       )}
 
       <div className="min-h-6 flex-1" />

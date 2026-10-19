@@ -304,9 +304,16 @@ describe('P0-006 — Secrets/config framework', () => {
       ).toThrow(/REDIS_URL/);
     });
 
-    it('prod + NUM_REPLICAS=2 + REDIS_URL set — passes', () => {
+    it('prod + NUM_REPLICAS=2 + REDIS_URL set on a worker — passes', () => {
+      // LCR-05 — only a worker may scale out: every other role answers calls,
+      // and a call's state lives on the replica that took it (see below).
       expect(() =>
-        loadConfig({ ...baseMultiReplica, NUM_REPLICAS: '2', REDIS_URL: 'redis://cache:6379' })
+        loadConfig({
+          ...baseMultiReplica,
+          PROCESS_ROLE: 'worker',
+          NUM_REPLICAS: '2',
+          REDIS_URL: 'redis://cache:6379',
+        })
       ).not.toThrow();
     });
 
@@ -326,6 +333,63 @@ describe('P0-006 — Secrets/config framework', () => {
       expect(() =>
         loadConfig({ ...baseMultiReplica, NODE_ENV: 'dev', NUM_REPLICAS: '2' })
       ).not.toThrow();
+    });
+  });
+
+  describe('LCR-05 — more than one replica is refused on a process that answers calls', () => {
+    // A live call's session is held in the memory of the process that took it.
+    // With two replicas the stream upgrade and every /gather turn are separate
+    // requests the load balancer may send to the other replica, which has no
+    // session: the stream is refused (403) or the caller hears "your session
+    // has ended" and is hung up. REDIS_URL does not fix that (it only mirrors
+    // events), so it must not unlock the scale-out.
+    const base = {
+      NODE_ENV: 'prod',
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      WEB_URL: 'https://app.example.com',
+      PUBLIC_API_URL: 'https://api.example.com',
+      // TELEPHONY_ENABLED=false only stops outbound SMS: inbound calls are
+      // still answered in every role but worker, so the guard ignores it.
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+      RLS_RUNTIME_ROLE: 'true',
+      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
+      REDIS_URL: 'redis://cache:6379',
+      NUM_REPLICAS: '2',
+    };
+
+    it.each(['voice', 'web', 'all'])(
+      'prod + PROCESS_ROLE=%s + NUM_REPLICAS=2 + REDIS_URL set — fails naming NUM_REPLICAS',
+      (role) => {
+        expect(() => loadConfig({ ...base, PROCESS_ROLE: role })).toThrow(
+          new RegExp(`NUM_REPLICAS=2 on PROCESS_ROLE=${role}`),
+        );
+      },
+    );
+
+    it('PROCESS_ROLE unset resolves to all and is refused too', () => {
+      expect(() => loadConfig({ ...base })).toThrow(/NUM_REPLICAS=2 on PROCESS_ROLE=all/);
+    });
+
+    it('PROCESS_ROLE=worker may run more than one replica', () => {
+      expect(() => loadConfig({ ...base, PROCESS_ROLE: 'worker' })).not.toThrow();
+    });
+
+    it('NUM_REPLICAS=1 on a voice process still boots', () => {
+      expect(() => loadConfig({ ...base, PROCESS_ROLE: 'voice', NUM_REPLICAS: '1' })).not.toThrow();
+    });
+
+    it('staging is guarded the same way', () => {
+      expect(() => loadConfig({ ...base, NODE_ENV: 'staging', PROCESS_ROLE: 'voice' })).toThrow(
+        /NUM_REPLICAS=2 on PROCESS_ROLE=voice/,
+      );
     });
   });
 
