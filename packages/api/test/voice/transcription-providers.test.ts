@@ -381,3 +381,33 @@ describe('DeepgramStreamingProvider open timeout (VOX-01)', () => {
     expect(fakeWs.close).not.toHaveBeenCalled();
   });
 });
+
+describe('DeepgramStreamingProvider URL builder — card redaction (PRIV-3)', () => {
+  // Deepgram's `redact=pci` entity redaction is English-only on streaming
+  // (developers.deepgram.com/docs/redaction); Spanish sessions rely on the
+  // app-side scrub in callerTranscriptText, so the parameter is sent on
+  // English sessions only and a Spanish handshake is never put at risk.
+  type UrlBuilder = {
+    buildWsUrl: (
+      lang: 'en' | 'es',
+      options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number },
+    ) => string;
+  };
+  const provider = new DeepgramStreamingProvider('test-key') as unknown as UrlBuilder;
+
+  it('asks Deepgram to redact card numbers on an English stream', () => {
+    const url = new URL(provider.buildWsUrl('en'));
+    expect(url.searchParams.getAll('redact')).toEqual(['pci']);
+  });
+
+  it('keeps the parameter alongside boost terms', () => {
+    const url = new URL(provider.buildWsUrl('en', { keywords: ['heat pump:3'] }));
+    expect(url.searchParams.getAll('redact')).toEqual(['pci']);
+    expect(url.searchParams.getAll('keyterm')).toEqual(['heat pump']);
+  });
+
+  it('does not send the English-only entity redaction on a Spanish stream', () => {
+    const url = new URL(provider.buildWsUrl('es'));
+    expect(url.searchParams.has('redact')).toBe(false);
+  });
+});

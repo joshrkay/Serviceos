@@ -487,6 +487,10 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
       'wss://api.deepgram.com/v1/listen' +
       `?model=${this.model}&language=${language}&encoding=linear16&sample_rate=16000` +
       `&channels=1&interim_results=true&smart_format=true&endpointing=${endpointing}`;
+    // PRIV-3 — have Deepgram redact a recited card number before it reaches
+    // us. Entity (`pci`) redaction is English-only on streaming; Spanish
+    // relies on the app-side scrubber in callerTranscriptText.
+    if (language === 'en') url += '&redact=pci';
     if (options.keywords && options.keywords.length > 0) {
       // A2 — Nova-3 replaced Deepgram's legacy `keywords` boost param with
       // `keyterm` prompting; `keywords` is a Nova-2-era feature that Nova-3

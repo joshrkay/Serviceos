@@ -8,7 +8,8 @@ beyond the mock Layer-1 voice-quality gate.
 | Tool | What it proves | Cost | When |
 |------|----------------|------|------|
 | **Graph coverage** (`agent:graph-coverage`) | Every required FSM path has a corpus script and/or path-smoke case | Free (offline) | Every PR |
-| **Path smoke** (`agent:path-smoke`) | The **real model** classifies canonical utterances for those paths correctly | ~$0.50–1 | PR (if key) + daily + manual |
+| **Path smoke** (`agent:path-smoke`) | The **real model** classifies canonical utterances for those paths correctly | ~$0.50–1 | PR touching a prompt or routing file + daily + manual |
+| **Live intent + slot evals** (`run-intent-eval.ts --live`, `run-slot-eval.ts --live`) | The **real model** still meets the recorded live baselines (`packages/voice-eval/baselines/*-live.json`) | ~$1 | Same PR job (OBS-3) + weekly `voice-eval-live.yml` |
 
 Layer-1 voice-quality remains the plumbing/FSM cassette gate. It does **not**
 call a real LLM. Path smoke is the intentional thin real-model gate.
@@ -74,8 +75,56 @@ npm run agent:path-smoke --workspace=packages/api -- --gate
 ## CI
 
 - **PR:** `agent-graph-coverage` job in `pr-checks.yml` (offline, gated).
-- **PR + daily:** `.github/workflows/agent-path-smoke.yml` runs real-LLM smoke
-  when `ANTHROPIC_API_KEY` is present; skips with warning on forks.
+- **PR + daily:** `.github/workflows/agent-path-smoke.yml` runs the real-LLM
+  smoke and the live intent + slot evals against the recorded live baselines
+  with the production provider config (`secrets.OPENAI_API_KEY`); a missing
+  key fails the job, it never skips. The workflow runs on **every** pull
+  request; its `changes` job diffs the PR (the checked-out merge commit
+  against its base parent) against the `PATH_SMOKE_PATHS` list — every file
+  that defines a system prompt or routes a model (`packages/api/src/ai/**`,
+  `reputation/**`, `verticals/**` (the trade sections of the caller system
+  prompt), `workers/transcription.ts`, `workers/supervisor-review-worker.ts`,
+  `workers/verify-ai.ts`, `proposals/edit-interpreter.ts`,
+  `routes/assistant.ts`, `digest/weekly-feedback.ts`, `config/ai-routing.ts`,
+  `packages/voice-eval/**` and the workflow file itself). Add a new
+  prompt-defining file to that list; `test/voice-quality/ci-workflow-path-smoke.test.ts`
+  fails when a file under `packages/api/src` defines a system prompt or calls
+  the model outside it (wiring-only files such as `app.ts` are listed in that
+  test with the reason), and executes the `changes` step against a real
+  merge commit.
+- **One check run per PR:** when no listed file changed, `path-smoke` is
+  skipped by its job-level `if:`, and GitHub reports a job skipped by a
+  conditional as success — so `path-smoke` can be a required status check
+  without stalling unrelated PRs. There is exactly one `path-smoke` check run
+  per PR (the old same-named skip-pass shim workflow is gone: on a mixed PR it
+  reported green within seconds while the real run was still going). The
+  `if:` fails closed: if `changes` fails or cannot diff, the real evals run.
+- **Drafting golden set (OBS-3):** the same job runs
+  `packages/api/scripts/drafting-golden-eval.ts --live --gate --baseline
+  packages/voice-eval/baselines/drafting-live.json` — 10 cases
+  (`src/ai/voice-quality/drafting-golden/cases.ts`) through the production
+  task code: `draft_estimate` against a fixed price book, brand-voice
+  extraction, the Google-review public reply (one praise review, one
+  injection-shaped review) and the `brand_voice_v1` composer that writes the
+  customer reschedule and dropped-call SMS. Safety checks fail the step on
+  any case: an uncatalogued price that could auto-approve, a catalog line off
+  its catalog price, a reply or SMS carrying a link or discount, an SMS that
+  took its signoff from the caller context. Quality checks feed the baseline
+  metrics. The baseline ships as a **placeholder**: until it is recorded the
+  step turns the runner's exit 4 into a `::warning::` (safety violations,
+  cost aborts and a missing key still fail), so `path-smoke` is not red on
+  every AI pull request. Record it once with the file's `recordCommand`
+  (about 14 cents, needs the OpenAI key), check the console shows every
+  safety check green, and commit it before making `path-smoke` required.
+- **Base-branch changes:** the trigger lists `edited` with the default
+  pull-request types, so retargeting a PR (for example a stacked PR moved to
+  `main`) re-runs `changes` against the new base. A title or body edit on a
+  prompt PR re-runs the evals too (about $1); that is deliberate — a skip on
+  an edit would post a fresh green over an earlier red.
+- **Baseline drift:** the live steps exit 1 when the golden set changed or a
+  metric fell past tolerance. Re-record with the baseline file's
+  `recordCommand` (or `voice-eval-live.yml` with `record_baseline=true`) in
+  the same PR that changes the prompt, and justify the new numbers in the PR.
 
 ## Adding a path
 

@@ -281,11 +281,6 @@ const GENERIC_RECEIVER_SITES: ReadonlyArray<{
     why: 'Prompt-version records for the AI gateway; no customer-visible entity.',
   },
   {
-    file: 'ai/evaluation/dataset-hooks.ts',
-    as: 'ai-plane',
-    why: 'Eval dataset rows for the offline evaluation harness — AI-plane telemetry.',
-  },
-  {
     file: 'ai/evaluation/invoice-revision.ts',
     as: 'ai-plane',
     why: 'Marks a revision SNAPSHOT final-approved (`markFinalApproved`) in the revision store; it never writes the invoice. Surfaced in round 4 once the verb list was inverted.',

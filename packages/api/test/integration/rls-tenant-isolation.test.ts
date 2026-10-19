@@ -249,7 +249,17 @@ describe('RLS tenant isolation (DB-level enforcement)', () => {
     //     tenant row is purged and must stay readable by platform admins.
     //   oauth_states: short-lived (5 min) OAuth handshake rows looked up only
     //     by their unguessable PK, which is the handshake secret.
-    const RLS_EXEMPT = new Set(['platform_deprovision_log', 'oauth_states']);
+    //   demo_tenant_leases, demo_inflight_jobs, signup_handoffs (U7, migration
+    //     317): platform tables whose tenant_id only names the demo tenant a
+    //     call, a running job or a signup holds; read with no tenant context
+    //     by the reaper, the reset and the queue front door.
+    const RLS_EXEMPT = new Set([
+      'platform_deprovision_log',
+      'oauth_states',
+      'demo_tenant_leases',
+      'demo_inflight_jobs',
+      'signup_handoffs',
+    ]);
 
     it('every tenant-scoped table has RLS enabled (except documented exemptions)', async () => {
       const { rows } = await pool.query<{ tablename: string }>(`

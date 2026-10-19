@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { isTwilioTestNumber } from '../telephony/phone-policy';
+import { PROVISIONING_FAILURE_CODES } from './provisioning-failure';
 
 const TimeOfDay = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM');
 const DayHours = z.object({ open: TimeOfDay, close: TimeOfDay }).nullable();
@@ -133,10 +134,18 @@ export type OnboardingStepId = z.infer<typeof OnboardingStepIdSchema>;
 export const OnboardingStepStatusSchema = z.enum(['done', 'current', 'pending', 'error', 'skipped']);
 export type OnboardingStepStatus = z.infer<typeof OnboardingStepStatusSchema>;
 
+/**
+ * Why the phone step failed, as a closed code (onboarding/provisioning-failure.ts
+ * classifies the recorded text; the text itself never reaches the status).
+ */
+export const ProvisioningFailureCodeSchema = z.enum(PROVISIONING_FAILURE_CODES);
+
 export const OnboardingStepSchema = z.object({
   id: OnboardingStepIdSchema,
   status: OnboardingStepStatusSchema,
   blockers: z.array(z.string()).optional(),
+  /** Additive: set only on a failed phone step. */
+  failureCode: ProvisioningFailureCodeSchema.optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 export type OnboardingStep = z.infer<typeof OnboardingStepSchema>;
@@ -159,6 +168,14 @@ export type SubscriptionStatusValue = z.infer<typeof SubscriptionStatusSchema>;
  */
 export const DRAFT_EXECUTION_STATES = ['pending', 'executing', 'executed', 'failed', 'stopped'] as const;
 export type DraftExecution = (typeof DRAFT_EXECUTION_STATES)[number];
+
+/**
+ * The way out the shell may offer for a `failed` or `stopped` set (derived,
+ * never stored; `deriveDraftRecovery` in derive-status.ts): `reset` while the
+ * whole-draft reset can run, `settings` once only Settings can finish it.
+ */
+export const DRAFT_RECOVERY_HINTS = ['reset', 'settings'] as const;
+export type DraftRecovery = (typeof DRAFT_RECOVERY_HINTS)[number];
 
 export const OnboardingStatusResponseSchema = z.object({
   steps: z.array(OnboardingStepSchema).length(7),
@@ -185,6 +202,10 @@ export const OnboardingStatusResponseSchema = z.object({
       version: z.number().int().positive(),
       /** Additive: null while the draft is still being edited (or has nothing to track). */
       execution: z.enum(DRAFT_EXECUTION_STATES).nullable().optional(),
+      /** Additive: whether the whole-draft undo can still take back every listed proposal. Absent while editing. */
+      undoable: z.boolean().optional(),
+      /** Additive: present only while `execution` is `failed` or `stopped`. */
+      recovery: z.enum(DRAFT_RECOVERY_HINTS).optional(),
     })
     .optional(),
 });

@@ -1,12 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
+import type { ResetOnboardingDraftResponse, RetryOnboardingDraftResponse, UndoOnboardingDraftResponse } from '@ai-service-os/shared';
 import { useApiClient } from '../../../lib/apiClient';
 import { invalidateOnboardingStatusCache, type OnboardingStatusResult } from '../../../hooks/useOnboardingStatus';
+import type { DraftRecoveryAction, DraftRecoveryOutcome } from '../../../hooks/useOnboardingDraft';
 import { track, trackFunnel, type AnalyticsEvent } from '../../../lib/analytics';
 import { ONBOARDING_RERUN_PATH } from '../../../utils/onboarding-rerun';
 import { Button } from '../../ui';
-import { OnboardingDraftApiError, retryDraft } from '../../../lib/onboardingDraftApi';
-import { afterScreen, afterStage, phoneNumberOf, stepOf, type AfterScreen } from './after-screen';
+import {
+  afterControls,
+  afterRecovery,
+  afterScreen,
+  afterStage,
+  latestUndoHint,
+  phoneNumberOf,
+  statusUndoHint,
+  stepOf,
+  type AfterScreen,
+  type UndoHint,
+} from './after-screen';
 import { CONNECTION_ERROR, requestErrorCopy } from './connection-copy';
 import { GettingReadyTurn } from './GettingReadyTurn';
 import { NumberTurn } from './NumberTurn';
@@ -21,10 +33,23 @@ import { WaitScreen } from './WaitScreen';
 
 export interface AfterApprovalProps {
   status: OnboardingStatusResult;
-  /** "That's right" was tapped a moment ago: the undo window is still open. */
+  /** "That's right" (or a retry of the whole set) was tapped a moment ago: the undo window is still open. */
   saving: boolean;
   /** How many changes are being saved, for the line shown during the undo window. */
   changeCount: number;
+  /** The approved draft's version as the hook holds it: the approve or retry response's. */
+  draftVersion: number;
+  /**
+   * Undo, Try again and Start over. Each is passed the newest version this screen has seen (a status poll
+   * may know a later one than the hook) and answers how it ended; the caller moves the shell on a success.
+   */
+  onUndo: (seenVersion: number) => Promise<DraftRecoveryOutcome<UndoOnboardingDraftResponse>>;
+  onRetry: (seenVersion: number) => Promise<DraftRecoveryOutcome<RetryOnboardingDraftResponse>>;
+  onReset: (seenVersion: number) => Promise<DraftRecoveryOutcome<ResetOnboardingDraftResponse>>;
+  /** Which of the three is in flight. */
+  recovering: DraftRecoveryAction | null;
+  /** One line: this approval changed in another window, so the screen was refreshed. */
+  notice: string | null;
   /** The owner's pack, for the test-call scenario. */
   packId: string | null;
   userId: string | null | undefined;
@@ -61,7 +86,19 @@ const STATUS_LABEL: Record<AfterStage, string> = {
  * server opens the phones itself when a test call ends, so that screen reads
  * the live flag instead of assuming it is still off.
  */
-export function AfterApproval({ status, saving, changeCount, packId, userId }: AfterApprovalProps) {
+export function AfterApproval({
+  status,
+  saving,
+  changeCount,
+  draftVersion,
+  onUndo,
+  onRetry,
+  onReset,
+  recovering,
+  notice,
+  packId,
+  userId,
+}: AfterApprovalProps) {
   const navigate = useNavigate();
   const apiFetch = useApiClient();
   const { data, refetch: refetchShared } = status;
@@ -80,10 +117,15 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
   const [skipped, setSkipped] = useState(false);
   const [testLater, setTestLater] = useState<string | null>(null);
   const [skipping, setSkipping] = useState(false);
-  const [retrying, setRetrying] = useState(false);
-  const [retryError, setRetryError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  // Whether Undo can still take back the whole set, as last heard: right after "That's right" it can (both
+  // changes were approved together), then every status poll and a retry's answer replace it.
+  const [hint, setHint] = useState<UndoHint>(() => ({ version: draftVersion, undoable: saving }));
+  // Start over was refused for this approval because part of it went through: only Settings is offered for it.
+  const [settingsFor, setSettingsFor] = useState<number | null>(null);
+  // Start over was refused because part of it is being saved right now: wait for the status after the next one.
+  const [holdWaitPolls, setHoldWaitPolls] = useState(0);
   const testingLater = useRef(false);
-  const retryingSave = useRef(false);
   const highestProgress = useRef(0);
   const lowestMinutes = useRef(Infinity);
 
@@ -123,7 +165,16 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
     }
   }, [data?.isComplete, data?.voiceAgentLive, tenantId, userId]);
 
-  const screen: AfterScreen = isComplete ? 'test_call' : afterScreen(data);
+  useEffect(() => {
+    setHint((held) => latestUndoHint(held, statusUndoHint(data)));
+    setHoldWaitPolls((n) => Math.max(0, n - 1));
+  }, [data]);
+
+  const screen: AfterScreen = isComplete ? 'test_call' : afterScreen(data, { holdWait: holdWaitPolls > 0 });
+  const recovery = afterRecovery(data, settingsFor);
+  const controls = afterControls(screen, { saving, undoable: hint.undoable, recovery });
+  // The newest version known: the hook's (approve or retry response), the held hint's, or a later status poll's.
+  const seenVersion = Math.max(draftVersion, hint.version, statusUndoHint(data)?.version ?? 0);
 
   // Once per screen per visit, and only for a screen the owner is actually shown (not one handed past).
   const viewed = useRef<Set<AfterScreen>>(new Set());
@@ -177,30 +228,53 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
     });
   };
 
-  // Try again on a failed save. Whatever comes back, ask the status again for real: a 409 means it moved on
-  // (nothing is failed any more, or the change was undone), and the screen follows the status, not the error.
-  const retrySave = () => {
-    if (retryingSave.current) return;
-    retryingSave.current = true;
-    setRetrying(true);
-    setRetryError(null);
-    void (async () => {
-      try {
-        await retryDraft(apiFetch);
-      } catch (err) {
-        setRetryError(err instanceof OnboardingDraftApiError ? requestErrorCopy(err.status) : CONNECTION_ERROR);
-      }
-      await refetch();
-    })().finally(() => {
-      retryingSave.current = false;
-      setRetrying(false);
-    });
+  /** Why a request did not go through, in the screen's one line. */
+  const failedCopy = (outcome: { status: number | null }) => (outcome.status === null ? CONNECTION_ERROR : requestErrorCopy(outcome.status));
+
+  // Undo on the saving screen. A success puts the read-back back (the shell). A refusal means the hint was stale:
+  // the window closed, or part of the set is already being saved. Drop the button and keep waiting.
+  const undo = async () => {
+    setActionError(null);
+    const outcome = await onUndo(seenVersion);
+    if (outcome.kind === 'done') return;
+    if (outcome.kind === 'refused') setHint({ version: seenVersion, undoable: false });
+    if (outcome.kind === 'failed') setActionError(failedCopy(outcome));
+    await refetch();
   };
 
-  // An error belongs to the try that caused it: once the status moves off a failed save, a later failure is a new one.
+  // Try again on a failed save. Whatever comes back, ask the status again for real: the screen follows the
+  // status, not the error. "Not safe to retry" means a sibling was taken back since: the status now says so.
+  const retry = async () => {
+    setActionError(null);
+    const outcome = await onRetry(seenVersion);
+    if (outcome.kind === 'done') {
+      setHint({ version: outcome.response.draft.version, undoable: outcome.response.undoable === true });
+    } else if (outcome.kind === 'failed') {
+      setActionError(failedCopy(outcome));
+    } else if (outcome.kind === 'refused' && outcome.refusal !== 'DRAFT_RETRY_UNSAFE') {
+      setActionError(requestErrorCopy(409));
+    }
+    await refetch();
+  };
+
+  // Start over. A success puts the read-back back (the shell). Refused because part of it went through (or its
+  // window closed): Settings, for good, for this approval. Refused because part of it is landing right now: wait.
+  const reset = async () => {
+    setActionError(null);
+    const outcome = await onReset(seenVersion);
+    if (outcome.kind === 'done') return;
+    if (outcome.kind === 'refused') {
+      if (outcome.refusal === 'DRAFT_RESET_REFUSED' && outcome.resetReason === 'executing') setHoldWaitPolls(2);
+      else if (outcome.refusal === 'DRAFT_RESET_REFUSED' || outcome.refusal === 'UNDO_WINDOW_CLOSED') setSettingsFor(seenVersion);
+    }
+    if (outcome.kind === 'failed') setActionError(failedCopy(outcome));
+    await refetch();
+  };
+
+  // An error belongs to the screen that caused it: once the status moves on, a later failure is a new one.
   useEffect(() => {
-    if (screen !== 'save_failed') setRetryError(null);
-  }, [screen]);
+    setActionError(null);
+  }, [screen, saving]);
 
   if (handOff) return null;
 
@@ -217,17 +291,38 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
 
   return (
     <TurnFrame minutesLeft={lowestMinutes.current} progress={highestProgress.current} statusLabel={SAVE_PROBLEM_LABEL[screen] ?? STATUS_LABEL[stage]} escape={escape}>
+      {notice && !saving && screen !== 'save_failed' && screen !== 'save_stopped' ? (
+        <p role="status" className="mb-3 text-sm text-secondary-foreground">
+          {notice}
+        </p>
+      ) : null}
       {saving ? (
-        <SavingLine count={changeCount} />
+        <SavingLine
+          count={changeCount}
+          onUndo={controls.includes('undo') ? () => void undo() : undefined}
+          undoing={recovering === 'undo'}
+          error={actionError}
+        />
       ) : screen === 'save_failed' ? (
         <SaveFailedScreen
-          onRetry={retrySave}
-          retrying={retrying}
-          error={retryError}
+          onRetry={() => void retry()}
+          retrying={recovering === 'retry'}
+          onStartOver={controls.includes('start_over') ? () => void reset() : undefined}
+          startingOver={recovering === 'reset'}
+          error={actionError}
+          notice={notice}
           onStepByStep={() => void navigate(ONBOARDING_RERUN_PATH)}
         />
       ) : screen === 'save_stopped' ? (
-        <SaveStoppedScreen onStepByStep={() => void navigate(ONBOARDING_RERUN_PATH)} />
+        <SaveStoppedScreen
+          key={recovery ?? 'none'}
+          settings={controls.includes('settings')}
+          onStartOver={controls.includes('start_over') ? () => void reset() : undefined}
+          startingOver={recovering === 'reset'}
+          error={actionError}
+          notice={notice}
+          onStepByStep={() => void navigate(ONBOARDING_RERUN_PATH)}
+        />
       ) : screen === 'wait' ? (
         <WaitScreen
           heading="Getting your shop ready."
@@ -270,7 +365,18 @@ export function AfterApproval({ status, saving, changeCount, packId, userId }: A
   );
 }
 
-function SavingLine({ count }: { count: number }) {
+function SavingLine({
+  count,
+  onUndo,
+  undoing,
+  error,
+}: {
+  count: number;
+  /** Present only while the whole set can still be taken back. */
+  onUndo?: () => void;
+  undoing: boolean;
+  error: string | null;
+}) {
   return (
     <>
       <SpeakerLine />
@@ -280,6 +386,22 @@ function SavingLine({ count }: { count: number }) {
           ? `Saving ${count} ${count === 1 ? 'change' : 'changes'}. They go live in a few seconds.`
           : 'This takes a few seconds.'}
       </p>
+      {onUndo ? (
+        <>
+          <p className="mt-2 text-base leading-[1.45] text-secondary-foreground">Tap Undo if that&apos;s not right.</p>
+          <div className="min-h-6 flex-1" />
+          <div className="flex flex-col gap-2.5">
+            {error ? (
+              <p role="alert" className="text-center text-sm text-destructive">
+                {error}
+              </p>
+            ) : null}
+            <Button fullWidth variant="outline" size="lg" className="h-14 rounded-2xl text-[17px] font-semibold whitespace-normal" loading={undoing} onClick={onUndo}>
+              Undo
+            </Button>
+          </div>
+        </>
+      ) : null}
     </>
   );
 }
