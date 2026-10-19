@@ -592,6 +592,33 @@ describe('PRIV-1 — ai_runs prompt and reply content phase', () => {
     });
   });
 
+  // Review round 2 — "Legal holds are unconditionally exempt" (PRD-v5). A
+  // run within a day of a same-tenant held recording is that call's and keeps
+  // its content; the tenant's other due runs are still purged.
+  it('keeps the content of runs within a day of a held recording of the same tenant', async () => {
+    const repo = new InMemoryRecordingRetentionRepository(
+      [
+        row('held-call', { tenantId: 'tA', createdAt: ageDays(40), legalHold: true }),
+        // A held recording in another tenant protects nothing in tA.
+        row('held-elsewhere', { tenantId: 'tB', createdAt: ageDays(35), legalHold: true }),
+      ],
+      [],
+      [],
+      [
+        aiRun('r-held-call', 'tA', 40.5),
+        aiRun('r-held-summary', 'tA', 39.9, { taskType: 'summarize_conversation' }),
+        aiRun('r-other', 'tA', 35),
+      ],
+    );
+    const result = await runRecordingRetentionSweep({ repo, storage, logger: noopLogger, now: () => NOW });
+
+    expect(result.aiRunContentPurged).toBe(1);
+    const byId = new Map(repo.aiRuns.map((r) => [r.id, r]));
+    expect(byId.get('r-other')?.contentPurgedAt).toEqual(NOW);
+    expect(JSON.stringify(byId.get('r-held-call'))).toContain('Maria Lopez');
+    expect(JSON.stringify(byId.get('r-held-summary'))).toContain('Maria Lopez');
+  });
+
   it('a purged run with no reply keeps output_snapshot null', async () => {
     const run = { ...aiRun('r-pending', 'tA', 40), outputSnapshot: null };
     const repo = new InMemoryRecordingRetentionRepository([], [], [], [run]);

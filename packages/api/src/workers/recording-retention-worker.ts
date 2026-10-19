@@ -103,9 +103,12 @@
  * reads its model, tokens and cost. One `ai_run.content_purged` audit event
  * per tenant batch (runs carry no per-call key to audit against). Tenant
  * selection, bounded per-tenant batches and failure isolation follow the
- * #1208 phase. Legal hold cannot exempt these rows: `ai_runs` has no CallSid
- * or session key to match a held recording by; the hold keeps the
- * recording's own transcript, turns, summary and session row.
+ * #1208 phase. Legal hold exempts them, as everywhere: `ai_runs` has no CallSid
+ * or session key, so a run created within a day of a same-tenant recording
+ * on legal hold (the call's classify turns and its post-hangup summary) is
+ * treated as that call's and kept; the tenant's other due runs are still
+ * purged. The window can also keep another call's run from the same day,
+ * which errs toward the hold. Migration 318's partial index serves the probe.
  *
  * Pattern: cross-tenant batch drain like dropped-call-worker — per-row
  * failures are logged and left unpurged for the next sweep; the table query
@@ -126,6 +129,24 @@ import {
 
 /** Default rows purged per sweep — bounds S3 round-trips under a backlog. */
 export const RECORDING_RETENTION_SWEEP_BATCH = 50;
+
+/**
+ * PRIV-1 — how close to a held recording an `ai_runs` row counts as that
+ * call's (the classify turns before it, the summary after hangup).
+ */
+const HELD_CALL_WINDOW_MS = 24 * 3600 * 1000;
+
+/**
+ * PRIV-1 — the legal-hold probe over `ai_runs ar`: a same-tenant recording on
+ * legal hold within a day of the run. Served by the migration-318 partial
+ * index idx_voice_recordings_legal_hold (tenant_id, created_at) WHERE legal_hold.
+ */
+const HELD_CALL_WINDOW_PROBE = `SELECT 1
+                   FROM voice_recordings vr
+                  WHERE vr.tenant_id = ar.tenant_id
+                    AND vr.legal_hold
+                    AND vr.created_at BETWEEN ar.created_at - interval '1 day'
+                                          AND ar.created_at + interval '1 day'`;
 
 /** #1202 — tenants with expired unattached transcript turns served per sweep. */
 export const UNATTACHED_TURN_SWEEP_TENANT_LIMIT = 100;
@@ -273,14 +294,16 @@ export interface RecordingRetentionRepository extends TwilioCopyStateStore {
   ): Promise<PurgedSessionTranscript[]>;
   /**
    * PRIV-1 — cross-tenant: tenants holding an `ai_runs` row whose content is
-   * not yet purged and whose `created_at` is past the tenant's horizon,
-   * oldest backlog first.
+   * not yet purged, whose `created_at` is past the tenant's horizon and not
+   * within a day of a same-tenant recording on legal hold, oldest backlog
+   * first.
    */
   findTenantsWithDueAiRunContent(now: Date, limit: number): Promise<string[]>;
   /**
    * PRIV-1 — strip the content from up to `limit` of the tenant's runs past
    * its horizon (oldest first) in one tenant-scoped transaction, keeping the
-   * row and only the non-content snapshot keys. Idempotent
+   * row and only the non-content snapshot keys. Never touches a run within a
+   * day of a same-tenant recording on legal hold. Idempotent
    * (`content_purged_at IS NULL` guard).
    */
   purgeAiRunContent(tenantId: string, now: Date, limit: number): Promise<PurgedAiRunContent[]>;
@@ -677,6 +700,7 @@ export class PgRecordingRetentionRepository
                 AND ar.content_purged_at IS NULL
                 AND ar.created_at <
                     $1::timestamptz - make_interval(days => ts.recording_retention_days)
+                AND NOT EXISTS (${HELD_CALL_WINDOW_PROBE})
               ORDER BY ar.created_at ASC
               LIMIT 1
            ) oldest
@@ -725,6 +749,7 @@ export class PgRecordingRetentionRepository
                 AND ar.content_purged_at IS NULL
                 AND ar.created_at <
                     $2::timestamptz - make_interval(days => ts.recording_retention_days)
+                AND NOT EXISTS (${HELD_CALL_WINDOW_PROBE})
               ORDER BY ar.created_at ASC
               LIMIT $3
            ) due
@@ -835,7 +860,13 @@ export class InMemoryRecordingRetentionRepository
       .filter(
         (r) =>
           !r.contentPurgedAt &&
-          r.createdAt.getTime() < now.getTime() - r.retentionDays * 24 * 3600 * 1000,
+          r.createdAt.getTime() < now.getTime() - r.retentionDays * 24 * 3600 * 1000 &&
+          !this.rows.some(
+            (v) =>
+              v.tenantId === r.tenantId &&
+              v.legalHold &&
+              Math.abs(v.createdAt.getTime() - r.createdAt.getTime()) <= HELD_CALL_WINDOW_MS,
+          ),
       )
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   }

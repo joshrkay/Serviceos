@@ -7787,6 +7787,17 @@ export const MIGRATIONS = {
       ON ai_runs (tenant_id, created_at)
       WHERE content_purged_at IS NULL;
   `,
+
+  // PRIV-1 (review round 2) — the ai_runs content purge honours legal hold:
+  // a run within a day of a same-tenant held recording is kept. This partial
+  // index serves that probe (tenant, time window over the few held rows), so
+  // the per-run NOT EXISTS stays an index lookup. RLS rides the existing
+  // voice_recordings policy (migration 007). Additive and idempotent.
+  '318_voice_recordings_legal_hold_index': `
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_legal_hold
+      ON voice_recordings (tenant_id, created_at)
+      WHERE legal_hold;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

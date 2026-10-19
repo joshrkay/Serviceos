@@ -617,6 +617,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['315_voice_recordings_twilio_copy_deleted', '02163cc28f90807433f2526555aaee5cc60ab3c36c5b5c60833c81084a73d1b9'],
   // PRIV-1 — ai_runs.content_purged_at + partial due-index (prompt/reply content purged past retention).
   ['316_ai_runs_content_purged_at', '9d5dedac62a55a87f961fb97814dc3e899ccc3a09a15c57ec9548ead00001b7a'],
+  // PRIV-1 (review round 2) — partial index on held voice_recordings (ai_runs purge legal-hold probe).
+  ['318_voice_recordings_legal_hold_index', 'd76d4dfc8b243cbb41c97635409f9d53c076d1f5b59110141a9f767e4a9c9952'],
 ];
 
 function hashMigration(value: string): string {

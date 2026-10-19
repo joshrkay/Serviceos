@@ -41,6 +41,7 @@ import {
   type RecordingRetentionSweepResult,
 } from '../../src/workers/recording-retention-worker';
 import type { Logger } from '../../src/logging/logger';
+import { recordInboundCall } from '../../src/voice/voice-service';
 
 interface LoggedLine {
   level: 'debug' | 'info' | 'warn' | 'error';
@@ -399,5 +400,56 @@ describe('PRIV-1 — bounded batches (real Postgres)', () => {
     // One audit event per tenant batch: two sweeps, two batches.
     const events = await purgeEvents(t.tenantId);
     expect(events.map((e) => e.metadata?.runsPurged)).toEqual([1, 1]);
+  });
+});
+
+/**
+ * Review round 2 — legal hold. docs/PRD-v5-as-built.md: "Legal holds are
+ * unconditionally exempt", and every other retention phase honours a
+ * same-tenant held recording. ai_runs carry no CallSid, so a run within a
+ * day of a held recording (the call's classify turns and its post-hangup
+ * summary) is treated as that call's and kept; the tenant's other due runs
+ * are still purged in the same sweep.
+ */
+describe('PRIV-1 (review round 2) — a run around a recording on legal hold keeps its content (real Postgres)', () => {
+  it('keeps the run within a day of the held recording and purges the tenant\'s run outside that window', async () => {
+    const t = await seedTenant(1);
+    const callSid = `CA${crypto.randomUUID().replace(/-/g, '')}`;
+    const { voiceRecordingId } = await recordInboundCall(pool, {
+      tenantId: t.tenantId,
+      callSid,
+      recordingUrl: `https://api.twilio.com/2010-04-01/Recordings/RE${crypto.randomUUID().replace(/-/g, '')}`,
+      durationSeconds: 30,
+      storageBucket: 'test-bucket',
+      storageKey: `${t.tenantId}/${callSid}-RE1.mp3`,
+      sizeBytes: 1024,
+    });
+    // SQL fixture: legal_hold has no setter; the clock is aged, never the content.
+    await pool.query(
+      `UPDATE voice_recordings SET legal_hold = true, created_at = now() - interval '10 days'
+        WHERE tenant_id = $1 AND id = $2`,
+      [t.tenantId, voiceRecordingId],
+    );
+    // The held call's summary, written just after the recording landed, and
+    // the oldest due run of the tenant.
+    const heldCallRun = await seedSummaryRun(t, 24 * 10 - 2);
+    // Another call, five days later: past the horizon and nowhere near the hold.
+    const otherRun = await seedSummaryRun(t, 24 * 5);
+
+    await runRecordingRetentionSweep({
+      repo: new PgRecordingRetentionRepository(pool),
+      storage,
+      auditRepo,
+      logger: capturingLogger([]),
+    });
+
+    // Positive control: the same sweep purged this tenant's other due run.
+    const other = (await runRow(t.tenantId, otherRun))!;
+    expect(other.content_purged_at).toBeInstanceOf(Date);
+    expect(JSON.stringify(other.input_snapshot)).not.toContain('Maria Lopez');
+    const held = (await runRow(t.tenantId, heldCallRun))!;
+    expect(held.content_purged_at).toBeNull();
+    expect(JSON.stringify(held.input_snapshot)).toContain('Maria Lopez');
+    expect(held.output_snapshot).toMatchObject({ content: SUMMARY_REPLY });
   });
 });
