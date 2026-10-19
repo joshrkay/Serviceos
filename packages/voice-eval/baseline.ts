@@ -1,8 +1,8 @@
 /**
  * baseline.ts — the regression gate for the voice-eval harness (#839).
  *
- * A baseline is a committed JSON file describing one eval (intent | slot) in
- * one mode (offline | live): the metrics it scored, the golden set it scored
+ * A baseline is a committed JSON file describing one eval (intent | slot |
+ * drafting) in one mode (offline | live): the metrics it scored, the golden set it scored
  * them on (row count + order-independent fingerprint), and how far each metric
  * may drop before the gate fails (`tolerance`, an absolute fraction).
  *
@@ -20,7 +20,12 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 
-export type EvalName = 'intent' | 'slot';
+/**
+ * `drafting` (OBS-3 review round 1) is the drafting golden set run by
+ * packages/api/scripts/drafting-golden-eval.ts: draft_estimate, brand voice
+ * and the review reply, which the intent/slot evals never exercise.
+ */
+export type EvalName = 'intent' | 'slot' | 'drafting';
 export type EvalMode = 'offline' | 'live';
 
 export interface GoldenSet {
@@ -173,7 +178,7 @@ export function readBaseline(path: string): EvalBaseline {
   const b = JSON.parse(readFileSync(path, 'utf8')) as Partial<EvalBaseline>;
   const ok =
     b.schemaVersion === 1 &&
-    (b.eval === 'intent' || b.eval === 'slot') &&
+    (b.eval === 'intent' || b.eval === 'slot' || b.eval === 'drafting') &&
     (b.mode === 'offline' || b.mode === 'live') &&
     (b.status === 'recorded' || b.status === 'placeholder') &&
     isMetrics(b.metrics) &&

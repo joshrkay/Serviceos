@@ -196,13 +196,11 @@ export class ElevenLabsTtsProvider implements TtsProvider {
     // probe and the stream, so the media path can play the buffered result.
     // Every other caller keeps the mp3 default.
     const pcm = input.outputFormat === 'pcm_16000';
-    const res = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}${pcm ? '?output_format=pcm_16000' : ''}`,
     // S3-1 — a per-call voice (the tenant's resolved preset) wins over the
     // constructor default; the streaming path keeps the constructor voice.
     const voiceId = input.voice ?? this.voiceId;
     const res = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}${pcm ? '?output_format=pcm_16000' : ''}`,
       {
         method: 'POST',
         headers: {
