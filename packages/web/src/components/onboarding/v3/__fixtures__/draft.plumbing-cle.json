@@ -20,7 +20,7 @@
       {
         "settingKey": "greeting",
         "question": "How should I answer your phone?",
-        "supportLine": "Pick the one that sounds right.",
+        "supportLine": "Tap one to hear it. Say \"first\" or \"second\" to pick.",
         "options": [
           {
             "key": "a",
@@ -154,7 +154,7 @@
       {
         "settingKey": "emergency_target",
         "question": "Who do I ring first when it is an emergency?",
-        "supportLine": "Suppose a caller tells me \"there's water coming through my ceiling and my dad can't get upstairs to the shutoff\". Safety first, then a person. That part I always do. This part is yours.",
+        "supportLine": "Say a caller tells me \"there's water coming through my ceiling and my dad can't get upstairs to the shutoff\". Safety first, then a person. That part I always do. This part is yours.",
         "options": [
           {
             "key": "a",

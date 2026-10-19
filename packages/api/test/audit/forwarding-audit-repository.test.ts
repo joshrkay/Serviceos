@@ -133,4 +133,48 @@ describe('ForwardingAuditRepository', () => {
     const repo = new ForwardingAuditRepository(inner);
     expect(repo.findRecentByTenant).toBeUndefined();
   });
+
+  describe('hidden tenants (U7: demo pool and platform tenant)', () => {
+    it('drops the forward for a hidden tenant but still persists the audit row', async () => {
+      const inner = new InMemoryAuditRepository();
+      const record = vi.fn();
+      const isHiddenTenant = vi.fn(async (tenantId: string) => tenantId === 't_demo');
+      const repo = new ForwardingAuditRepository(inner, { isEnabled: () => true, record, isHiddenTenant });
+
+      await repo.create(auditEvent({ tenantId: 't_demo' }));
+      await repo.create(auditEvent({ tenantId: 't_owner' }));
+
+      expect(inner.getAll().map((e) => e.tenantId)).toEqual(['t_demo', 't_owner']);
+      expect(record).toHaveBeenCalledTimes(1);
+      expect(record.mock.calls[0][1].tenantId).toBe('t_owner');
+    });
+
+    it('drops the forward when the check fails (fail closed) without breaking the mutation', async () => {
+      const inner = new InMemoryAuditRepository();
+      const record = vi.fn();
+      const repo = new ForwardingAuditRepository(inner, {
+        isEnabled: () => true,
+        record,
+        isHiddenTenant: async () => {
+          throw new Error('db down');
+        },
+      });
+
+      const saved = await repo.create(auditEvent());
+      expect(saved.tenantId).toBe('t_1');
+      expect(inner.getAll()).toHaveLength(1);
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('does not ask the check while analytics is off', async () => {
+      const isHiddenTenant = vi.fn(async () => false);
+      const repo = new ForwardingAuditRepository(new InMemoryAuditRepository(), {
+        isEnabled: () => false,
+        record: vi.fn(),
+        isHiddenTenant,
+      });
+      await repo.create(auditEvent());
+      expect(isHiddenTenant).not.toHaveBeenCalled();
+    });
+  });
 });

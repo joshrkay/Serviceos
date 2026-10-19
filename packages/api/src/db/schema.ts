@@ -7732,6 +7732,198 @@ export const MIGRATIONS = {
         CHECK (owner_phone IS NULL OR owner_phone ~ '^[+][1-9][0-9]{7,14}$');
   `,
 
+  // "Pick, don't build" onboarding, U7: the pre-signup demo call
+  // (docs/plans/2026-10-18-001, Approach + deferred findings D1, D2, D4, D10,
+  // D11). Platform tables with the same posture as `tenants`: no RLS,
+  // admin-write, read as the connection principal. `demo_tenant_leases`,
+  // `demo_inflight_jobs` and `signup_handoffs` carry a tenant_id that only
+  // NAMES the demo tenant a call, a running job or a signup holds; they are
+  // read before and across tenant contexts (the reaper, the reset, the queue
+  // front door), so they are RLS-exempt on purpose and listed in
+  // test/db/schema.test.ts and test/integration/rls-runtime-audit.test.ts.
+  // Migration 219 (replayed every boot) revokes rls_app_runtime on them, but
+  // it runs BEFORE this one in corpus order and 217's default privileges
+  // grant the role on every new table, so the first boot would leave the
+  // role granted until the next replay: the guarded REVOKE at the end closes
+  // that window (same exception handling as 219).
+  //
+  // `tenants.demo` marks a pool tenant (`demo_trade` names its pack);
+  // `tenants.platform` marks the one durable hidden tenant (D1) that owns
+  // the demo visitor's phone_rate_limits, leads and platform-level audit
+  // rows (all NOT NULL FKs to tenants). Every tenant lister excludes both
+  // flags (tenants/list-tenant-ids.ts and the direct SELECTs under workers/,
+  // billing/ and admin/; pinned by test/integration/demo-tenants-excluded.test.ts).
+  // The platform tenant's uuid is fixed (demo/platform-tenant.ts) and
+  // immutable once applied anywhere.
+  '317_demo_calls': `
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS demo BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS platform BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS demo_trade TEXT;
+    CREATE INDEX IF NOT EXISTS idx_tenants_demo_trade ON tenants (demo_trade) WHERE demo = true;
+
+    INSERT INTO tenants (id, owner_id, owner_email, name, platform)
+    VALUES (
+      '00000000-0000-4000-8000-00000000d3a0',
+      'platform:demo',
+      'platform-demo@invalid.rivet.local',
+      'Rivet demo platform',
+      true
+    )
+    ON CONFLICT (id) DO NOTHING;
+
+    CREATE SEQUENCE IF NOT EXISTS demo_lease_generation_seq;
+
+    CREATE TABLE IF NOT EXISTS demo_tenant_leases (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      visitor_phone_hash TEXT NOT NULL,
+      call_sid TEXT,
+      leased_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      state TEXT NOT NULL DEFAULT 'active',
+      reset_started_at TIMESTAMPTZ,
+      reset_heartbeat_at TIMESTAMPTZ,
+      reset_token UUID,
+      generation BIGINT NOT NULL DEFAULT nextval('demo_lease_generation_seq'),
+      released_at TIMESTAMPTZ,
+      renewed_at TIMESTAMPTZ
+    );
+    ALTER TABLE demo_tenant_leases
+      ADD CONSTRAINT demo_tenant_leases_state_check
+      CHECK (state IN ('active', 'resetting', 'released')) NOT VALID;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_demo_tenant_leases_open_tenant
+      ON demo_tenant_leases (tenant_id) WHERE released_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_demo_tenant_leases_open_visitor
+      ON demo_tenant_leases (visitor_phone_hash) WHERE released_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_demo_tenant_leases_call_sid
+      ON demo_tenant_leases (call_sid) WHERE call_sid IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_demo_tenant_leases_active_expiry
+      ON demo_tenant_leases (expires_at) WHERE state = 'active';
+    CREATE INDEX IF NOT EXISTS idx_demo_tenant_leases_resetting_heartbeat
+      ON demo_tenant_leases (reset_heartbeat_at) WHERE state = 'resetting';
+    COMMENT ON TABLE demo_tenant_leases IS
+      'Platform table (U7): tenant_id names the demo tenant a call holds. RLS-exempt on purpose: read by the reaper, the reset and the queue front door with no tenant context.';
+
+    CREATE TABLE IF NOT EXISTS demo_calls (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      phone_hash TEXT NOT NULL,
+      trade TEXT NOT NULL,
+      business_name TEXT NOT NULL,
+      metro_code TEXT,
+      metro_name TEXT,
+      lease_id UUID NOT NULL REFERENCES demo_tenant_leases(id),
+      call_sid TEXT,
+      status TEXT NOT NULL DEFAULT 'initiating',
+      lead_id UUID NOT NULL REFERENCES leads(id),
+      callback_deadline_at TIMESTAMPTZ NOT NULL,
+      budget_day DATE NOT NULL,
+      reserved_cents INTEGER NOT NULL,
+      budget_released_at TIMESTAMPTZ,
+      allowance_window_start TIMESTAMPTZ NOT NULL,
+      allowance_released_at TIMESTAMPTZ,
+      correlation_id TEXT NOT NULL UNIQUE,
+      result JSONB,
+      result_written_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE demo_calls
+      ADD CONSTRAINT demo_calls_status_check
+      CHECK (status IN ('initiating', 'unconfirmed', 'queued', 'ringing', 'in-progress', 'completed', 'failed', 'busy', 'no-answer', 'canceled')) NOT VALID;
+    ALTER TABLE demo_calls
+      ADD CONSTRAINT demo_calls_reserved_cents_check
+      CHECK (reserved_cents >= 0) NOT VALID;
+    CREATE INDEX IF NOT EXISTS idx_demo_calls_lease ON demo_calls (lease_id);
+    CREATE INDEX IF NOT EXISTS idx_demo_calls_call_sid ON demo_calls (call_sid) WHERE call_sid IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_demo_calls_unconfirmed_deadline
+      ON demo_calls (callback_deadline_at) WHERE status = 'unconfirmed';
+    CREATE INDEX IF NOT EXISTS idx_demo_calls_phone_day ON demo_calls (phone_hash, budget_day);
+
+    CREATE TABLE IF NOT EXISTS demo_inflight_jobs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      lease_id UUID NOT NULL REFERENCES demo_tenant_leases(id),
+      generation BIGINT NOT NULL,
+      message_id TEXT NOT NULL,
+      attempt INTEGER NOT NULL DEFAULT 0,
+      claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (message_id, attempt)
+    );
+    CREATE INDEX IF NOT EXISTS idx_demo_inflight_jobs_tenant ON demo_inflight_jobs (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_demo_inflight_jobs_heartbeat ON demo_inflight_jobs (heartbeat_at);
+    COMMENT ON TABLE demo_inflight_jobs IS
+      'Platform table (U7): the in-flight registry the reset drain waits on. tenant_id names the demo tenant a running job holds; RLS-exempt on purpose.';
+
+    CREATE TABLE IF NOT EXISTS demo_call_budget (
+      day DATE PRIMARY KEY,
+      calls_reserved INTEGER NOT NULL DEFAULT 0,
+      calls_cap INTEGER NOT NULL,
+      est_cost_cents INTEGER NOT NULL DEFAULT 0,
+      cost_cap_cents INTEGER NOT NULL
+    );
+    ALTER TABLE demo_call_budget
+      ADD CONSTRAINT demo_call_budget_non_negative_check
+      CHECK (calls_reserved >= 0 AND calls_cap >= 0 AND est_cost_cents >= 0 AND cost_cap_cents >= 0) NOT VALID;
+
+    CREATE TABLE IF NOT EXISTS demo_handoff_outbox (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      demo_call_id UUID NOT NULL UNIQUE REFERENCES demo_calls(id),
+      lead_id UUID NOT NULL REFERENCES leads(id),
+      idempotency_key TEXT NOT NULL UNIQUE,
+      handoff_expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      sent_at TIMESTAMPTZ,
+      retired_at TIMESTAMPTZ,
+      send_claimed_at TIMESTAMPTZ,
+      attempts INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_demo_handoff_outbox_pending
+      ON demo_handoff_outbox (handoff_expires_at) WHERE sent_at IS NULL AND retired_at IS NULL;
+
+    CREATE TABLE IF NOT EXISTS signup_handoffs (
+      token_hash TEXT PRIMARY KEY,
+      lead_id UUID NOT NULL REFERENCES leads(id),
+      tenant_id UUID REFERENCES tenants(id),
+      expires_at TIMESTAMPTZ NOT NULL,
+      consumed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    COMMENT ON TABLE signup_handoffs IS
+      'Platform table (U7): the signup handoff token ledger. tenant_id is NULL until a signup binds it and only names that tenant; RLS-exempt on purpose, read before any tenant context exists.';
+
+    -- 249_backfill_owner_memberships replays every boot, BEFORE this, and
+    -- inserts an owner users row for every tenant without one: demo and
+    -- platform tenants included. They must have none (no owner can sign in
+    -- to one, and every surface that reads users would see it), so remove
+    -- exactly those rows here, in the same corpus statement, so no committed
+    -- state ever holds one. Guarded so it can never block a deploy.
+    DO $demo_owner_rows$
+    BEGIN
+      DELETE FROM users u
+       USING tenants t
+       WHERE u.tenant_id = t.id
+         AND (t.demo = true OR t.platform = true);
+    EXCEPTION
+      WHEN foreign_key_violation THEN
+        RAISE NOTICE 'a demo or platform tenant users row is still referenced; left in place';
+      WHEN insufficient_privilege OR undefined_object THEN
+        RAISE NOTICE 'cannot remove demo or platform tenant users rows here; skipping';
+    END
+    $demo_owner_rows$;
+
+    DO $demo_revoke$
+    BEGIN
+      REVOKE ALL ON demo_tenant_leases, demo_inflight_jobs, signup_handoffs FROM rls_app_runtime;
+    EXCEPTION
+      WHEN undefined_object THEN
+        RAISE NOTICE 'rls_app_runtime role absent; nothing to revoke';
+      WHEN insufficient_privilege THEN
+        RAISE NOTICE 'insufficient privilege to REVOKE from rls_app_runtime; skipping';
+    END
+    $demo_revoke$;
+  `,
+
   // PRIV-3 — a caller recited a card number on this recording. The stored
   // transcript only ever carries the `[card number]` marker
   // (callerTranscriptText / sanitizeTranscript), but the audio still holds
@@ -7764,6 +7956,51 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_invoices_live_payment_link
       ON invoices (tenant_id, id)
       WHERE stripe_payment_link_id IS NOT NULL AND status IN ('open', 'partially_paid');
+  // PRIV-2 — the Twilio-hosted copy of each inbound recording. The recording
+  // webhook and the voicemail route delete it once our storage and our row
+  // hold the audio, stamping `twilio_deleted_at`; the retention sweep retries
+  // every copy not yet confirmed gone (legacy rows, failed deletes) and stamps
+  // `twilio_delete_attempted_at` on a failure so it backs off instead of
+  // stalling the drain. `recording_url` is kept (the idempotency key in
+  // recordInboundCall). The partial index serves the sweep's retry query.
+  // RLS rides the existing voice_recordings policy (migration 007). Additive
+  // and idempotent.
+  '315_voice_recordings_twilio_copy_deleted': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS twilio_deleted_at TIMESTAMPTZ;
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS twilio_delete_attempted_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_twilio_copy_due
+      ON voice_recordings (twilio_delete_attempted_at NULLS FIRST, created_at)
+      WHERE twilio_deleted_at IS NULL AND recording_url IS NOT NULL AND legal_hold = false;
+  `,
+
+  // PRIV-1 — the retention sweep strips the prompt and reply content from an
+  // ai_runs row once it is past the tenant's recording_retention_days, and
+  // stamps `content_purged_at`. The row is kept (proposals, supervisor_reviews,
+  // document_revisions and estimate_provenance FK it; the spend report reads
+  // its model, tokens and cost). The partial index keeps the sweep's per-tenant
+  // (tenant_id, created_at) probe off the rows already purged, so its cost does
+  // not grow with history. RLS rides the existing ai_runs policy (migration
+  // 008). Additive and idempotent; nullable with no default, so the ALTER is
+  // metadata-only.
+  '316_ai_runs_content_purged_at': `
+    ALTER TABLE ai_runs
+      ADD COLUMN IF NOT EXISTS content_purged_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_ai_runs_content_purge_due
+      ON ai_runs (tenant_id, created_at)
+      WHERE content_purged_at IS NULL;
+  `,
+
+  // PRIV-1 (review round 2) — the ai_runs content purge honours legal hold:
+  // a run within a day of a same-tenant held recording is kept. This partial
+  // index serves that probe (tenant, time window over the few held rows), so
+  // the per-run NOT EXISTS stays an index lookup. RLS rides the existing
+  // voice_recordings policy (migration 007). Additive and idempotent.
+  '321_voice_recordings_legal_hold_index': `
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_legal_hold
+      ON voice_recordings (tenant_id, created_at)
+      WHERE legal_hold;
   `,
 };
 

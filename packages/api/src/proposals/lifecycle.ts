@@ -65,7 +65,11 @@ export const UNDO_WINDOW_MS = 5000;
  *  - now - approvedAt >= windowMs → false. Window has closed.
  */
 export function isInUndoWindow(
-  proposal: Proposal,
+  // Only `status` and `approvedAt` are read. Structural (not `Proposal`) so the
+  // onboarding status read's fact rows, which carry pg's `null` for an unset
+  // `approved_at`, are judged by this ONE predicate rather than a copy of it
+  // (onboarding/derive-status.ts). A full Proposal still satisfies it.
+  proposal: { readonly status: string; readonly approvedAt?: Date | null },
   nowMs: number = Date.now(),
   windowMs: number = UNDO_WINDOW_MS
 ): boolean {

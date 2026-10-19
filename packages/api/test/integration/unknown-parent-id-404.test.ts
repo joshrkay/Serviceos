@@ -28,7 +28,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
-import { getSharedTestDb, closeSharedTestDb, createTestTenant } from './shared';
+import { getSharedTestDb, closeSharedTestDb, createTestTenant, deleteTenantQueueMessages } from './shared';
 import type { AppWithLifecycle } from '../../src/app';
 
 function unsignedJwt(claims: Record<string, unknown>): string {
@@ -153,6 +153,11 @@ describe('#1187 — unknown parent ids answer 404 and write nothing, at real Pos
 
   afterAll(async () => {
     await app.gracefulDrain('test-cleanup');
+    // Section 3's legit photo attach enqueues an `image_post_process` job
+    // (RV-006). Nothing here consumes it, and PgQueue.receive() takes the
+    // oldest visible message of any type — left behind, it was received by
+    // voice-recording-provenance's redelivery test instead of its own job.
+    await deleteTenantQueueMessages(pool, [tenantA.tenantId, tenantB.tenantId]);
     const { resetConfig } = await import('../../src/shared/config');
     resetConfig();
     for (const [k, v] of Object.entries(prevEnv)) {

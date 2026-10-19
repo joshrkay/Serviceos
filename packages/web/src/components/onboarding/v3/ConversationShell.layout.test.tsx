@@ -20,7 +20,8 @@ import { AnswerAsScreen } from './AnswerAsScreen';
 import { OptionPairTurn } from './OptionPairTurn';
 import { ReadbackCard } from './ReadbackCard';
 import { ReadyScreen } from './ReadyScreen';
-import { TurnFrame } from './TurnFrame';
+import { SpeakerLine, TurnFrame } from './TurnFrame';
+import { RivetVoiceContext, type RivetVoice } from '../../../hooks/useRivetVoice';
 
 const LONG_NAME = 'WalshAndSonsPlumbingHeatingAndCoolingOfGreaterClevelandOhio';
 const REFUSED_CELL = 'That does not look like a US cell number. Include the 10-digit area code, for example (216) 555-0100.';
@@ -119,6 +120,34 @@ describe('v3 mobile layout contract', () => {
     });
   }
 
+  it('the "Speaking" mark adds no control and wraps with the speaker name at 320px', () => {
+    const speaking: RivetVoice = {
+      unlock: vi.fn(),
+      speak: vi.fn(),
+      prefetch: vi.fn(),
+      stop: vi.fn(),
+      speaking: true,
+      openMic: vi.fn(),
+      input: 'off',
+      stream: null,
+      keytermsOff: false,
+      noteInput: vi.fn(),
+    };
+    const { container } = render(
+      <RivetVoiceContext.Provider value={speaking}>
+        <TurnFrame minutesLeft={5} progress={0.5}>
+          <SpeakerLine />
+        </TurnFrame>
+      </RivetVoiceContext.Provider>,
+    );
+    const mark = screen.getByText('Speaking');
+    // Announced in words, politely: never the sound mark alone.
+    expect(mark.closest('[aria-live="polite"]')).not.toBeNull();
+    expect(container.querySelectorAll('button, [role="button"], a, input')).toHaveLength(0);
+    const line = mark.closest('[aria-live]')!.parentElement!;
+    expect(line.className).toMatch(/\bflex-wrap\b/);
+    expect(line.className).toMatch(/\bmin-w-0\b/);
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
   it('Ready with the city list open: every city, the search and the close are 44px targets that wrap, nothing wider than 320px', async () => {
     const { container } = render(<TurnFrame minutesLeft={6} progress={0.15} statusLabel="Nothing saved yet">{ready()}</TurnFrame>);
     await userEvent.click(screen.getByRole('button', { name: 'Not Cleveland?' }));
@@ -260,35 +289,58 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
     return { data, isLoading: false, error: null, accessRevoked: false, refetch: vi.fn(() => Promise.resolve()) };
   }
 
-  function after(data: OnboardingStatusResponse | null, saving = false) {
+  /** What the hook's undo, retry and start over answer here: they did not go through (the screens' error line). */
+  const notThrough = () => Promise.resolve({ kind: 'failed' as const, status: 409 });
+
+  function after(data: OnboardingStatusResponse | null, saving = false, notice: string | null = null) {
     return (
       <MemoryRouter>
-        <AfterApproval status={result(data)} saving={saving} changeCount={2} packId="plumbing" userId="user-1" />
+        <AfterApproval
+          status={result(data)}
+          saving={saving}
+          changeCount={2}
+          draftVersion={2}
+          onUndo={notThrough}
+          onRetry={notThrough}
+          onReset={notThrough}
+          recovering={null}
+          notice={notice}
+          packId="plumbing"
+          userId="user-1"
+        />
       </MemoryRouter>
     );
   }
 
-  const savedAs = (execution: 'failed' | 'stopped') =>
-    statusAt('identity', {}, { draft: { status: 'approved', choicesAnswered: 7, version: 2, execution } });
+  const savedAs = (execution: 'failed' | 'stopped', recovery?: 'reset' | 'settings') =>
+    statusAt('identity', {}, { draft: { status: 'approved', choicesAnswered: 7, version: 2, execution, ...(recovery ? { recovery } : {}) } });
   const claiming = statusAt('phone', { phone: { status: 'current', metadata: { lineState: 'claiming', pendingNumber: '+12165550199' } } });
   const asking = statusAt('phone', { phone: { status: 'current', metadata: { lineState: 'awaiting_pick' } } });
   const holding = statusAt('phone', { phone: { status: 'current', metadata: { phoneNumber: NUMBER } } });
   const noNumber = statusAt('phone', { phone: { status: 'error', blockers: ['twilio_provisioning_failed'] } });
+  const failedWith = (failureCode: 'area_code_unavailable' | 'credentials_missing' | 'provider_error') =>
+    statusAt('phone', { phone: { status: 'error', failureCode, blockers: ['twilio_provisioning_failed'] } });
   const voiceWaiting = statusAt('ai_check', { ...phoneDone, ai_check: { status: 'current', metadata: { verifying: true } } });
   const voiceFailed = statusAt('ai_check', { ...phoneDone, ai_check: { status: 'error', blockers: ['ai_verification_failed'] } });
 
   const screens: Array<[string, OnboardingStatusResponse | null, { saving?: boolean; ready?: () => Promise<unknown> }]> = [
-    ['Saving your choices', statusAt('identity'), { saving: true }],
+    ['Saving your choices, with Undo', statusAt('identity'), { saving: true }],
     ['Getting your shop ready', statusAt('identity'), {}],
     ['Before the first status arrives', null, {}],
     ['Save failed: Try again', savedAs('failed'), {}],
+    ['Save failed: Try again and Start over', savedAs('failed', 'reset'), {}],
     ['Save stopped: step by step', savedAs('stopped'), {}],
+    ['Save stopped: Start over', savedAs('stopped', 'reset'), {}],
+    ['Save stopped: Finish in Settings', savedAs('stopped', 'settings'), {}],
     ['Trial: the plans', statusAt('billing'), { ready: () => screen.findByRole('radiogroup') }],
     ['Trial: the plans cannot be shown', statusAt('billing'), { ready: () => screen.findByRole('alert') }],
     ['Number: getting it', claiming, {}],
     ['Number: asking for it', asking, {}],
     ['Number: here it is', holding, {}],
     ['Number: could not get one', noNumber, {}],
+    ['Number: pick a different area code', failedWith('area_code_unavailable'), {}],
+    ['Number: a problem on our side', failedWith('credentials_missing'), {}],
+    ['Number: the phone company did not answer', failedWith('provider_error'), {}],
     ['Voice: getting ready', voiceWaiting, {}],
     ['Voice: could not get ready', voiceFailed, {}],
     ['Test call: now you call me', statusAt('test_call', phoneDone), {}],
@@ -307,16 +359,37 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
     });
   }
 
-  it('Save failed: a failed retry adds one line under the buttons, not a wider page, and both buttons wrap at 320px', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(json(409, { error: 'CONFLICT', message: 'DRAFT_RETRY_UNSAFE' }))));
-    const { container } = render(after(savedAs('failed')));
+  it('Save failed: a failed retry adds one line under the buttons, not a wider page, and every button wraps at 320px', async () => {
+    const { container } = render(after(savedAs('failed', 'reset')));
     await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await screen.findByRole('alert');
     expectAllTapTargets(container, 'save failed after a failed retry');
     expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
-    for (const name of ['Try again', 'Go through setup step by step']) {
+    for (const name of ['Try again', 'Start over', 'Go through setup step by step']) {
       expect(screen.getByRole('button', { name }).className, name).toMatch(/whitespace-normal/);
     }
+  });
+
+  it('Saving: Undo is a full-width 44px target, and a failed undo adds one line, not a wider page', async () => {
+    const { container } = render(after(statusAt('identity'), true));
+    const undo = screen.getByRole('button', { name: 'Undo' });
+    expect(undo.className).toMatch(/w-full/);
+    expect(undo.className).toMatch(/whitespace-normal/);
+    await userEvent.click(undo);
+    await screen.findByRole('alert');
+    expectAllTapTargets(container, 'saving after a failed undo');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+  });
+
+  it('Save stopped: the Settings link is a full-width 44px target that wraps, beside the notice line', () => {
+    const { container } = render(after(savedAs('stopped', 'settings'), false, 'This changed in another window.'));
+    const link = screen.getByRole('link', { name: 'Finish in Settings' });
+    expectTapTarget(link, 'Finish in Settings');
+    expect(link.className).toMatch(/w-full/);
+    expect(link.className).toMatch(/whitespace-normal/);
+    expect(screen.getByText('This changed in another window.')).toBeInTheDocument();
+    expectAllTapTargets(container, 'stopped with Settings and a notice');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
   });
 
   it('Test call: "I\'ll test later" is a 44px target in the header, and a failed skip adds one line, not a wider page', async () => {
@@ -340,6 +413,34 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
     expectAllTapTargets(view.container, 'open for business');
     expect(fixedWidths(view.container).filter((w) => w > 320)).toEqual([]);
     expect(screen.queryByRole('button', { name: "I'll test later" })).not.toBeInTheDocument();
+  });
+
+  it('Number: the area-code form and the number offered are 44px targets, and a long place name wraps at 320px', async () => {
+    const place = 'SouthEuclidLyndhurstRichmondHeightsAndGreaterClevelandOhio';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(json(200, { numbers: [{ phoneNumber: '+12165550111', locality: place, region: 'OH' }] }))),
+    );
+    const { container } = render(after(asking));
+    await userEvent.click(screen.getByRole('button', { name: 'Pick a different area code' }));
+    const field = screen.getByLabelText('Area code');
+    expectTapTarget(field, 'area code field');
+    expectAllTapTargets(container, 'area-code form');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+    for (const name of ['Look for a number', 'Pick one near my business']) {
+      expect(screen.getByRole('button', { name }).className, name).toMatch(/whitespace-normal/);
+    }
+
+    await userEvent.type(field, '216');
+    await userEvent.click(screen.getByRole('button', { name: 'Look for a number' }));
+    await screen.findByRole('button', { name: 'That works' });
+    expectAllTapTargets(container, 'number offered');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+    expect(screen.getByText(`${place}, OH`).className).toMatch(/break-words/);
+    expect(screen.getByText('(216) 555-0111').className).toMatch(/break-words/);
+    for (const name of ['That works', 'Pick a different area code']) {
+      expect(screen.getByRole('button', { name }).className, name).toMatch(/whitespace-normal/);
+    }
   });
 
   it('long numbers and plan names wrap instead of widening the page', async () => {

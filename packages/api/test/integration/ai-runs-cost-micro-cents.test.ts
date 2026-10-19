@@ -73,7 +73,7 @@ describe('Postgres integration — ai_runs.cost_micro_cents (migration 254)', ()
       ...createAiRun({
         tenantId: tenant.tenantId,
         taskType: 'summarize_conversation',
-        model: 'gpt-4o-mini',
+        model: 'totally-unknown-model',
         inputSnapshot: { messages: [] },
         createdBy: 'test',
       }),
