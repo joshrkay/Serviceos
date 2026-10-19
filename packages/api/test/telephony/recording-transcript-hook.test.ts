@@ -421,10 +421,20 @@ describe('createRecordingTranscriptHook (U8)', () => {
   it('PRIV-3: a failing flag write is logged and never blocks the ingestion enqueue', async () => {
     const { hook, repo, send, markCardNumberDetected } = harness();
     markCardNumberDetected.mockRejectedValueOnce(new Error('db down'));
+    const errorLog = vi.spyOn(logger, 'error');
     await seedLeg(repo, SESSION_1, [['caller', 'my card is [card number]']]);
 
     await expect(hook(event())).resolves.toBeUndefined();
 
+    // The flag write was attempted (and failed) ...
+    expect(markCardNumberDetected).toHaveBeenCalledTimes(1);
+    // ... the failure is logged so the missed flag is visible ...
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining('flag write failed'),
+      expect.objectContaining({ tenantId: TENANT, voiceRecordingId: RECORDING_1, error: 'db down' }),
+    );
+    // ... and the ingestion enqueue still ran.
     expect(send).toHaveBeenCalledTimes(1);
+    errorLog.mockRestore();
   });
 });
