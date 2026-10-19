@@ -50,7 +50,7 @@ export interface Invoice {
   /** Stripe-hosted checkout URL returned with the payment link. */
   stripePaymentLinkUrl?: string;
   /**
-   * S5a-3 (U8, migration 314) — when a payment-link cleanup claimed the
+   * S5a-3 (U8, migration 322) — when a payment-link cleanup claimed the
    * CURRENT link for deactivation (the durable per-link claim). Written only
    * by the cleanup claim; every write of the link columns resets it, so it
    * never outlives the link it claimed. Not settable through `update`.

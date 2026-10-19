@@ -7759,7 +7759,7 @@ export const MIGRATIONS = {
   // index serves the cleanup and the daily sweep, which page through a
   // tenant's invoices that can still capture money through a hosted link.
   // RLS on invoices (025) covers the new column.
-  '314_invoices_cleanup_claimed_at': `
+  '322_invoices_cleanup_claimed_at': `
     ALTER TABLE invoices ADD COLUMN IF NOT EXISTS cleanup_claimed_at TIMESTAMPTZ;
     CREATE INDEX IF NOT EXISTS idx_invoices_live_payment_link
       ON invoices (tenant_id, id)

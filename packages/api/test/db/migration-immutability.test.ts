@@ -614,7 +614,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // PRIV-3 — voice_recordings.pci_detected + audio_purged_at (card number said on the call).
   ['314_voice_recordings_card_number_detected', '648f2696cce7ed17700f8b2d3b826ce8eb61987af91f7cbeed58c82ce01b0ce3'],
   // S5a (U8) — durable per-link cleanup claim + live-payment-link partial index.
-  ['314_invoices_cleanup_claimed_at', 'e8643fd8984b82bdf4a081da109d699b96467a1ce71d6e8f249ca6d7bf3f5735'],
+  ['322_invoices_cleanup_claimed_at', 'e8643fd8984b82bdf4a081da109d699b96467a1ce71d6e8f249ca6d7bf3f5735'],
 ];
 
 function hashMigration(value: string): string {

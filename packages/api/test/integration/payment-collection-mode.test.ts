@@ -480,9 +480,9 @@ describe('Postgres integration — payment_collection_mode at the pay surfaces (
     expect((await linkColumns(payLinkTenant.tenantId, invoice.id)).stripe_payment_link_url).toBe(recovered.url);
     expect(await unavailableRows(payLinkTenant.tenantId, invoice.id)).toHaveLength(2);
   });
-  // ── S5a-3 (U8): migration 314 and the cleanup primitives, by column name ──
+  // ── S5a-3 (U8): migration 322 and the cleanup primitives, by column name ──
 
-  /** Raw marker read — `invoices.cleanup_claimed_at` (migration 314). */
+  /** Raw marker read — `invoices.cleanup_claimed_at` (migration 322). */
   async function claimColumns(tenantId: string, invoiceId: string) {
     const { rows } = await pool.query<{
       cleanup_claimed_at: Date | null;
@@ -510,7 +510,7 @@ describe('Postgres integration — payment_collection_mode at the pay surfaces (
     await pool.query(`UPDATE invoices SET status = $3 WHERE tenant_id = $1 AND id = $2`, [tenantId, invoiceId, status]);
   }
 
-  it('migration 314: invoices.cleanup_claimed_at is a nullable timestamptz and the live-link partial index exists', async () => {
+  it('migration 322: invoices.cleanup_claimed_at is a nullable timestamptz and the live-link partial index exists', async () => {
     const col = await pool.query<{ data_type: string; is_nullable: string }>(
       `SELECT data_type, is_nullable FROM information_schema.columns
         WHERE table_schema = 'public' AND table_name = 'invoices' AND column_name = 'cleanup_claimed_at'`,

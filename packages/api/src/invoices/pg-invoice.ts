@@ -311,7 +311,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         setClauses.push(`stripe_payment_link_id = $${paramIndex++}`);
         values.push(updates.stripePaymentLinkId);
         // S5a-3 — the cleanup claim belongs to the link it claimed: any write
-        // of the link id drops it in the same statement (migration 314).
+        // of the link id drops it in the same statement (migration 322).
         setClauses.push('cleanup_claimed_at = NULL');
       }
       if (updates.stripePaymentLinkUrl !== undefined) {
@@ -678,7 +678,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
 
   /**
    * S5a-3 (U8) — keyset page of the tenant's invoices that can still capture
-   * money through a hosted link (served by migration 314's partial index).
+   * money through a hosted link (served by migration 322's partial index).
    */
   async findOpenWithPaymentLink(tenantId: string, afterId: string | null, limit: number): Promise<Invoice[]> {
     return this.withTenant(tenantId, async (client) => {

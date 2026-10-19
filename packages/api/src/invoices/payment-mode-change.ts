@@ -65,7 +65,7 @@ export interface DeactivatePaymentLinksPayload {
 /**
  * The SQL predicate for "this invoice can still capture money through a
  * stored hosted link". The repository's `findOpenWithPaymentLink` and the
- * claim both use it, so the definition lives once (migration 314's partial
+ * claim both use it, so the definition lives once (migration 322's partial
  * index serves it).
  */
 export const LIVE_PAYMENT_LINK_PREDICATE =
