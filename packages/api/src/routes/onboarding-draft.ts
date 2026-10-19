@@ -40,6 +40,7 @@ import { parseOwnerPhone } from '../onboarding/draft/owner-phone';
 import { maskPhone } from '../telephony/twilio-call-control';
 import {
   DraftAlreadyApprovedError,
+  DraftNotApprovedError,
   DraftNotFoundError,
   DraftVersionConflictError,
   type OnboardingDraftRepository,
@@ -55,7 +56,11 @@ export interface OnboardingDraftRouterDeps {
   approvalReferenceChecks?: ApprovalReferenceCheck[];
 }
 
-/** One mapping from repository errors to HTTP errors, shared by PUT /choices and POST /approve. */
+/**
+ * One mapping from repository errors to HTTP errors, shared by every draft
+ * write (the field PUTs, approve, retry; undo and reset follow). The typed
+ * errors are the ones `updateLocked` throws, in its order of checks.
+ */
 function rethrowDraftError(err: unknown, tenantId: string): never {
   if (err instanceof WritesNotAllowedError) throw new ValidationError(err.message);
   if (err instanceof DraftNotFoundError) throw new NotFoundError('OnboardingDraft', tenantId);
@@ -63,6 +68,7 @@ function rethrowDraftError(err: unknown, tenantId: string): never {
     throw new ConflictError(`VERSION_CONFLICT: expected ${err.expected}, found ${err.actual}; re-read the draft`);
   }
   if (err instanceof DraftAlreadyApprovedError) throw new ConflictError('DRAFT_APPROVED: the draft is already approved');
+  if (err instanceof DraftNotApprovedError) throw new ConflictError('DRAFT_NOT_APPROVED: the draft has not been approved');
   throw err;
 }
 
@@ -100,8 +106,8 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
           try {
             updated = await draftRepo.setClientTimezone(tenantId, clientTimezone);
           } catch (err) {
-            if (err instanceof DraftAlreadyApprovedError) throw new ConflictError('DRAFT_APPROVED: the draft is already approved');
-            throw err;
+            // Approved between the read above and the lock: 409 DRAFT_APPROVED, as for every draft write.
+            rethrowDraftError(err, tenantId);
           }
           await auditRepo.create(
             createAuditEvent({
@@ -260,21 +266,28 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
     }),
   );
 
-  // The request body carries nothing and is ignored. Errors are plain AppErrors (404/409).
+  // The request body carries nothing and is ignored. The retry's own guards are
+  // plain AppErrors (404/409); its version bump goes through the shared mapper.
   router.post(
     '/retry',
     ...guards,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const result = await retryFailedDraftProposals(
-        {
-          draftRepo,
-          proposalRepo,
-          auditRepo,
-          ...(approvalReferenceChecks ? { approvalOptions: { referenceChecks: approvalReferenceChecks } } : {}),
-        },
-        req.auth!.tenantId,
-        { userId: req.auth!.userId, role: req.auth!.role as Role },
-      );
+      const tenantId = req.auth!.tenantId;
+      let result;
+      try {
+        result = await retryFailedDraftProposals(
+          {
+            draftRepo,
+            proposalRepo,
+            auditRepo,
+            ...(approvalReferenceChecks ? { approvalOptions: { referenceChecks: approvalReferenceChecks } } : {}),
+          },
+          tenantId,
+          { userId: req.auth!.userId, role: req.auth!.role as Role },
+        );
+      } catch (err) {
+        rethrowDraftError(err, tenantId);
+      }
       res.json(result);
     }),
   );

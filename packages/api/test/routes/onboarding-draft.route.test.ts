@@ -2,7 +2,7 @@ import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createOnboardingDraftRouter } from '../../src/routes/onboarding-draft';
-import { InMemoryOnboardingDraftRepository } from '../../src/onboarding/draft/repository';
+import { DraftNotApprovedError, DraftVersionConflictError, InMemoryOnboardingDraftRepository } from '../../src/onboarding/draft/repository';
 import { ONBOARDING_READBACK_SURFACE } from '../../src/onboarding/draft/approve';
 import { InMemoryRegionalPriceTierRepository } from '../../src/onboarding/choices/price-tiers';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
@@ -13,8 +13,7 @@ const TENANT_ID = '00000000-0000-0000-0000-0000000000a1';
 const USER_ID = 'user-owner-1';
 const CLE = { standard: { tripFeeCents: 8900, hourlyRateCents: 15000 }, premium: { tripFeeCents: 12900, hourlyRateCents: 18500 } };
 
-function buildApp(role: 'owner' | 'dispatcher' = 'owner') {
-  const draftRepo = new InMemoryOnboardingDraftRepository();
+function buildApp(role: 'owner' | 'dispatcher' = 'owner', draftRepo: InMemoryOnboardingDraftRepository = new InMemoryOnboardingDraftRepository()) {
   const proposalRepo = new InMemoryProposalRepository();
   const auditRepo = new InMemoryAuditRepository();
   const app = express();
@@ -402,6 +401,26 @@ describe('POST /retry', () => {
 
   it('no draft is a 404', async () => {
     expect((await request(ctx.app).post('/api/onboarding/draft/retry').send()).status).toBe(404);
+  });
+
+  /** The version bump goes through updateLocked; its typed refusals answer through the same mapper as every draft write. */
+  it.each([
+    { thrown: () => new DraftNotApprovedError(), code: /DRAFT_NOT_APPROVED/ },
+    { thrown: () => new DraftVersionConflictError(4, 5), code: /VERSION_CONFLICT: expected 4, found 5/ },
+  ])('a refused version bump ($code) is a 409, not a 500, and no retry is recorded', async ({ thrown, code }) => {
+    class RefusingBump extends InMemoryOnboardingDraftRepository {
+      override async markRetried(): Promise<never> {
+        throw thrown();
+      }
+    }
+    ctx = buildApp('owner', new RefusingBump());
+    const [a] = await approved();
+    await fail(a);
+    const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
+    expect(res.status).toBe(409);
+    expect(errText(res)).toMatch(code);
+    const retried = (await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 100 })).filter((e) => e.eventType === 'proposal.retried');
+    expect(retried).toHaveLength(0);
   });
 
   it('is owner-only', async () => {
