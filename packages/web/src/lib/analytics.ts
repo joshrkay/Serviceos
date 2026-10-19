@@ -55,6 +55,7 @@ export type AnalyticsEvent =
   // "Pick, don't build" onboarding (components/onboarding/v3). Each fires once
   // per mount via trackFunnel(); see FUNNEL.md "v3 (pick, don't build)".
   | 'v3_ready_viewed'
+  | 'v3_metro_changed'
   | 'v3_turn_viewed'
   | 'v3_choice_made'
   | 'v3_keep_rest'

@@ -167,3 +167,47 @@ describe('LCR-05 — /gather for a session this process does not hold (deploy cu
     expect(proc.store.liveCount()).toBe(0);
   });
 });
+
+describe('LCR-05 — /dial-result for a session this process does not hold (deploy cut-over)', () => {
+  // The caller's transfer <Dial> was ringing on the old process when traffic
+  // switched; the dispatcher's no-answer reaches the new process.
+  const dialParams = (status: string) => ({
+    CallSid: 'CA-deploy-dial',
+    From: CALLER,
+    To: DIALLED,
+    DialCallStatus: status,
+  });
+
+  it('an unanswered transfer takes a callback message instead of hanging up', async () => {
+    const newProcess = buildProcess();
+    const res = await signedPost(
+      newProcess.app,
+      '/api/telephony/dial-result?sid=stale-dial',
+      dialParams('no-answer'),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('<Hangup/>');
+    expect(res.text).toContain('<Gather input="speech"');
+    expect(res.text).toContain(`${PUBLIC_BASE_URL}/api/telephony/callback-message?sid=stale-dial`);
+  });
+
+  it('a busy or failed transfer does the same', async () => {
+    const newProcess = buildProcess();
+    for (const status of ['busy', 'failed']) {
+      const res = await signedPost(newProcess.app, '/api/telephony/dial-result?sid=stale-dial', dialParams(status));
+      expect(res.text).toContain('/api/telephony/callback-message?sid=stale-dial');
+      expect(res.text).not.toContain('<Hangup/>');
+    }
+  });
+
+  it('an answered transfer is over: the IVR leg still hangs up', async () => {
+    const newProcess = buildProcess();
+    for (const status of ['completed', 'answered']) {
+      const res = await signedPost(newProcess.app, '/api/telephony/dial-result?sid=stale-dial', dialParams(status));
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('<Hangup/>');
+      expect(res.text).not.toContain('<Gather');
+    }
+  });
+});

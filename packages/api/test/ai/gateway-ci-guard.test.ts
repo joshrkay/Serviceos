@@ -472,7 +472,7 @@ describeSdk('§5 I15 scope caveat (STRUCTURAL) — NO provider SDK, not just Ope
       // not a chat completion. Harness-only: no production route reaches it.
       'src/ai/voice-quality/audio/openai-whisper-buffer-transcriber.ts:17',
       'src/voice/transcription-providers.ts:254',
-      'src/voice/voice-service.ts:315',
+      'src/voice/voice-service.ts:329',
     ]);
   });
 
