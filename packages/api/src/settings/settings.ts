@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import type { PoolClient } from 'pg';
 import { ValidationError } from '../shared/errors';
 
 import { isValidTimezone } from '../shared/timezone';
@@ -928,9 +929,33 @@ export const VOICE_APPROVAL_PIN_CREDENTIAL_KEYS = [
   'voice_approval_challenge',
 ] as const;
 
+/**
+ * S5a-4 (U8) — what an `afterWrite` hook sees: the transaction's own client
+ * (null on the in-memory repository, which has no transaction to join), and
+ * the row before and after the write, both read inside the transaction.
+ * When the patch names `paymentCollectionMode`, both are read under the
+ * EXCLUSIVE payment-mode lock (`paymentModeLockKey`), the only ordering that
+ * exists for a tenant with no settings row yet. In Postgres `before` is the
+ * row after the minimal seed insert, so a first write sees an unset key
+ * (the default), never null.
+ */
+export interface SettingsWriteContext {
+  client: PoolClient | null;
+  tenantId: string;
+  before: TenantSettings | null;
+  after: TenantSettings;
+}
+
 export interface SettingsUpdateOptions {
   /** See SettingsRepository.update. */
   preserveVoiceApprovalPin?: boolean;
+  /**
+   * S5a-4 (U8) — runs inside `update`'s transaction after the row write and
+   * before commit (on the HTTP path the commit is the request's, at response
+   * end). A throw rolls the write back and propagates. Never make a network
+   * call here: the payment-mode lock and the row lock are held.
+   */
+  afterWrite?: (ctx: SettingsWriteContext) => Promise<void>;
 }
 
 export interface ActiveVerticalPackValidationOptions {
@@ -1292,10 +1317,16 @@ export async function updateSettings(
   // stores the null). The type cast bridges the gap without widening
   // every TenantSettings consumer to handle null reads — those still
   // see undefined because mapRow normalizes NULL → undefined.
+  // Options are passed only when one is set, so a plain save keeps its
+  // two-argument repository call.
+  const repoOptions: SettingsUpdateOptions = {
+    ...(options?.preserveVoiceApprovalPin ? { preserveVoiceApprovalPin: true } : {}),
+    ...(options?.afterWrite ? { afterWrite: options.afterWrite } : {}),
+  };
   return repository.update(
     tenantId,
     { ...normalizedInput, updatedAt: new Date() } as Partial<TenantSettings>,
-    ...(options?.preserveVoiceApprovalPin ? [{ preserveVoiceApprovalPin: true }] : []),
+    ...(Object.keys(repoOptions).length > 0 ? [repoOptions] : []),
   );
 }
 
@@ -1499,8 +1530,21 @@ export class InMemorySettingsRepository implements SettingsRepository {
     for (const key of Object.keys(safeUpdates) as (keyof typeof safeUpdates)[]) {
       if (safeUpdates[key] === undefined) delete safeUpdates[key];
     }
+    // S5a-4 parity with Pg: a payment-mode write always moves updatedAt.
+    if (safeUpdates.paymentCollectionMode !== undefined && safeUpdates.updatedAt === undefined) {
+      safeUpdates.updatedAt = new Date();
+    }
     const updated = { ...s, ...safeUpdates };
     this.settings.set(tenantId, updated);
+    if (options?.afterWrite) {
+      // Parity with the Pg transaction: a throwing hook undoes the write.
+      try {
+        await options.afterWrite({ client: null, tenantId, before: { ...s }, after: { ...updated } });
+      } catch (err) {
+        this.settings.set(tenantId, s);
+        throw err;
+      }
+    }
     return { ...updated };
   }
 

@@ -66,6 +66,20 @@ const logger = createLogger({
   environment: process.env.NODE_ENV || 'dev',
 });
 
+/**
+ * S5a-4 (U8) — the per-tenant payment-mode lock key, hashed with
+ * `pg_advisory_xact_lock(hashtext($1))` like `job_number:<tenantId>`.
+ * ONE function so the three holders cannot drift: the settings write takes it
+ * EXCLUSIVELY whenever its patch names `payment_collection_mode`
+ * (`PgSettingsRepository.update`); the guarded link attach
+ * (`PgInvoiceRepository.attachPaymentLink`) and the cleanup claim (S5a-5)
+ * take it SHARED. A key exists for every tenant, where a settings row may
+ * not — so it orders the attach against the FIRST collect-on-site write too.
+ */
+export function paymentModeLockKey(tenantId: string): string {
+  return `payment_mode:${tenantId}`;
+}
+
 export async function readPaymentCollectionMode(
   settingsRepo: SettingsRepository,
   tenantId: string,
