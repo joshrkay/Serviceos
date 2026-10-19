@@ -132,7 +132,8 @@ export interface FailureMonitorThresholds {
   tenantMinRuns: number;
   /**
    * OBS-4 — platform-wide spend (integer cents) over the window above which
-   * `ai_spend_window` breaches. 0 turns the rule off. Default 2000 ($20).
+   * `ai_spend_window` breaches. 0 turns the rule off. Default 200 ($2);
+   * config.ts records the bucket math behind it.
    */
   spendMaxCents: number;
 }

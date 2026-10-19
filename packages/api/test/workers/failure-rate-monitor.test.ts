@@ -864,3 +864,46 @@ describe('evaluateUnpricedSpend', () => {
     );
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OBS-4 review round 1 — the SHIPPED default spend threshold must be
+// reachable at today's scale. Per-tenant spend is capped by the gateway's
+// token buckets, so the only loop this rule exists for is one that fans
+// out across tenants; the default must page when a handful of tenants are
+// driven to their bucket ceiling at production prices.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('ai_spend_window — the shipped default is reachable at current scale', () => {
+  /** Few tenants today; a cross-tenant loop saturating this many must page. */
+  const CURRENT_SCALE_TENANTS = 4;
+
+  it('N tenants saturating their standard + classifier buckets on gpt-4o-mini breach the default; one tenant does not', async () => {
+    const { loadConfig } = await import('../../src/shared/config');
+    const { DEFAULT_TIER_CONFIG } = await import('../../src/ai/gateway/tenant-quota');
+    const { computeCostMicroCents } = await import('../../src/ai/gateway/model-pricing');
+    const config = loadConfig({ NODE_ENV: 'dev' });
+    const windowSec = config.FAILURE_MONITOR_WINDOW_MIN * 60;
+    // Every tenant gets 'standard' + 'classifier_standard' (nothing sets
+    // tenantTier). A bucket can spend its burst plus refill over a window.
+    const saturatedTokens = (['standard', 'classifier_standard'] as const).reduce(
+      (sum, tier) =>
+        sum + DEFAULT_TIER_CONFIG[tier].bucketCapacity + DEFAULT_TIER_CONFIG[tier].refillTokensPerSec * windowSec,
+      0,
+    );
+    expect(saturatedTokens).toBe(3_550_000);
+    // Price every token as INPUT on the live primary — the cheapest case,
+    // so the bound is conservative: 3,550,000 × 15 = 53,250,000 micro-cents.
+    const perTenantMicroCents = computeCostMicroCents('gpt-4o-mini-2024-07-18', { input: saturatedTokens })!;
+    expect(perTenantMicroCents).toBe(53_250_000);
+
+    const defaults = {
+      spendMaxCents: config.FAILURE_MONITOR_SPEND_MAX_CENTS,
+      windowMin: config.FAILURE_MONITOR_WINDOW_MIN,
+    };
+    const loopRows = Array.from({ length: CURRENT_SCALE_TENANTS }, (_, i) =>
+      tenantCounts({ tenantId: `tenant-${i}`, taskType: 'supervisor_annotate', costMicroCents: perTenantMicroCents }),
+    );
+    expect(evaluateWindowSpend(loopRows, defaults)!.breached).toBe(true);
+    // One tenant at its ceiling is the per-tenant quota's job, not a page.
+    expect(evaluateWindowSpend(loopRows.slice(0, 1), defaults)!.breached).toBe(false);
+  });
+});

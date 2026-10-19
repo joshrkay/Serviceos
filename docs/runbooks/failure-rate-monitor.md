@@ -80,7 +80,7 @@ keyed per tenant **and** task.
 ### 5. `ai_spend_window` — critical (OBS-4)
 
 Platform-wide `SUM(ai_runs.cost_micro_cents)` over the same settled window,
-compared against `FAILURE_MONITOR_SPEND_MAX_CENTS` (integer cents; default 2000;
+compared against `FAILURE_MONITOR_SPEND_MAX_CENTS` (integer cents; default 200;
 0 turns the rule off). A sweep that regresses into re-calling the model in a
 loop but **completing** every call — the supervisor_annotate storm shape,
 succeeding — keeps every failure-rate rule at 0%; only the bill moves. The page
@@ -215,6 +215,12 @@ documented in `.env.production.example`). Raise `FAILURE_MONITOR_MIN_RUNS` if a
 low-traffic task pages on small denominators; raise `FAILURE_MONITOR_RATE_MAX`
 only with a recorded reason — healthy task types sit near 0, and the incidents
 this exists for were 0.85 and 1.00. Raise `FAILURE_MONITOR_TENANT_MIN_RUNS` if a
-small tenant pages on a handful of calls. Set `FAILURE_MONITOR_SPEND_MAX_CENTS`
-to roughly three times a busy half-hour's normal spend; 0 turns the spend rule
-off, which also stops the `ai_spend_window_micro_cents` gauge updating.
+small tenant pages on a handful of calls. `FAILURE_MONITOR_SPEND_MAX_CENTS`
+defaults to 200 cents per window, derived from the quota buckets: one tenant
+driven to its `standard` + `classifier_standard` ceiling for a 30-minute window
+spends about 3.55M tokens, roughly 53 cents on gpt-4o-mini, so the default
+pages when about four tenants are saturated at once. That is the cross-tenant
+loop this rule exists for, at today's tenant count. If normal busy-half-hour
+spend approaches 200 cents as tenants grow, raise it to roughly three times
+that spend. 0 turns the spend rule off, which also stops the
+`ai_spend_window_micro_cents` gauge updating.
