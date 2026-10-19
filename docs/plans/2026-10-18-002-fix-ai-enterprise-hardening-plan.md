@@ -897,6 +897,16 @@ flowchart LR
           `quickbooks-client.ts:93-103` stores it as `DisplayName`, so clearing email and phone
           alone leaves the name.
         - Clear the email and the phone.
+      - **Twilio calls.** Deleting recordings and messages still leaves Twilio's Call resource, and
+        with it the call log of both parties' phone numbers. Twilio exposes a separate DELETE for a
+        completed Call record, and deleting a recording doesn't remove it. So:
+        - The erase deletes the subject's Call resources: the primary call, plus any child legs
+          such as a dialed transfer or the on-call page.
+        - It selects them only by the Call SIDs we keep linked to the subject:
+          `voice_sessions.call_sid`, and the outbound call results we store.
+        - A call still in progress can't be deleted. The erase waits for it to complete, and until
+          then the Twilio calls store is `incomplete`.
+        - A 404 counts as done, and a re-check after the delete must come back clean.
       - **Twilio messages.** `notifications/twilio-delivery-provider.ts:238-268` posts the recipient
         and the body to Twilio's Messages resource, and we keep the returned message SIDs. The
         erase redacts or deletes the customer's SMS/MMS Message resources, media included, through
@@ -1193,7 +1203,9 @@ flowchart LR
     alerts.
   - a trace queued before the erase whose transport is delayed until after it is never recreated: it
     is dropped at the send boundary, or deleted again on the second pass
-  - against mocked Stripe, QuickBooks and Twilio Messages APIs:
+  - against mocked Stripe, QuickBooks, Twilio Messages and Twilio Calls APIs:
+    - the subject's completed Call resources, child legs included, are deleted. A call still in
+      progress keeps the store `incomplete` until it completes, and then it is deleted.
     - the Stripe Customer is deleted
     - the QuickBooks customer's `DisplayName` is replaced and its email and phone are cleared
     - the customer's linked Twilio Message resources and their media are redacted or deleted
@@ -1255,11 +1267,22 @@ flowchart LR
       - The reconcile is a recompute, not an increment. Running it again is exactly-once by
         construction, a late pre-ledger write is picked up on the next run, and nothing is counted
         twice, because ledger-era runs carry their `attempt_id`.
-      - It runs when a cap is enabled, on every reserve for a capped tenant whose last reconcile is
-        older than a short interval, and periodically.
+      - **A cap can be enabled only after a durable cutover checkpoint, so no stale reconcile can
+        admit an overspend.** A reconcile on an interval leaves a window. An old-version request
+        can write a $90 untagged charge just after a reconcile, and a $15 request arriving before
+        the next one would see the stale total and pass a $100 cap. So:
+        - The first new-version process records a `spend_ledger_cutover` row: its boot time, plus
+          the old process's maximum lifetime. That lifetime is the graceful-shutdown drain plus
+          `MAX_GATEWAY_DEADLINE_MS`, plus a margin.
+        - After that moment no old writer can be alive, so no untagged charge can appear any more.
+        - A final reconcile runs once the cutover moment has passed, and marks the cutover
+          `complete`. `pre_ledger_spent` is then final.
+        - Until the cutover is `complete`, the settings write that enables a cap is refused, with a
+          plain "try again in a few minutes". A capped reservation can therefore never be admitted
+          against a stale pre-ledger total.
+        - From the next month on, `pre_ledger_spent` is zero, because every run carries its
+          `attempt_id`.
       - The cap compares `spent + pre_ledger_spent + reserved`.
-      - Once the deploy completes and the maximum gateway deadline has passed, no old writer
-        remains. `pre_ledger_spent` is then final for the month, and the next month starts at zero.
     - Rows with a null cost (unpriced models) are counted into `unpriced_runs` on the ledger row.
       The settings response shows that count, so the owner can see the pre-ledger figure is a
       floor.
@@ -1367,9 +1390,13 @@ flowchart LR
     - A reaper racing a late completion produces exactly one transition.
   - **Integration (mid-month cap):** a tenant has $90 of `ai_runs` cost this month, all from before
     deploy. After a reconcile, it enables a $100 cap, and a $15 worst-case call is refused.
-  - **Integration (rolling deploy):** an old-version request writes a $20 `ai_runs` cost, with no
-    `attempt_id`, after the first reconcile. The next reconcile adds it exactly once, and a second
-    reconcile changes nothing.
+  - **Integration (rolling deploy):**
+    - An old-version request writes a $20 `ai_runs` cost, with no `attempt_id`, after the first
+      reconcile. The final reconcile at cutover adds it exactly once, and a second reconcile changes
+      nothing.
+    - Enabling a cap before the cutover is `complete` is refused.
+    - An untagged $90 charge lands just before the cutover. After the cutover, a $100 cap refuses a
+      $15 call.
 
 ## Owner decisions and actions (not code)
 
