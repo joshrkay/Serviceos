@@ -1319,4 +1319,33 @@ describe('GET /api/public/portal/:token/invoices — a mint that stalls across t
     expect(h.provider.deactivations).toHaveLength(1);
     expect(h.provider.deactivations[0].linkId).not.toBe(winner.linkId);
   });
+
+  it('a competing mint won and our link will not die at Stripe → its id is audited (mint_guard_lost), the winner is still served', async () => {
+    const h = await buildStallPortal({});
+    const winner = { linkId: 'plink_winner_2', linkUrl: 'https://pay.mock.com/plink_winner_2' };
+    const inner = h.invoiceRepo;
+    const original = inner.attachPaymentLink.bind(inner);
+    inner.attachPaymentLink = async (...args) => {
+      await inner.update(TENANT, h.invoice.id, { stripePaymentLinkId: winner.linkId, stripePaymentLinkUrl: winner.linkUrl, updatedAt: new Date() });
+      return original(...args);
+    };
+    const minted: string[] = [];
+    const counting = CountingProvider.prototype.generateLink.bind(h.provider);
+    h.provider.generateLink = async (req) => {
+      const result = await counting(req);
+      minted.push(result.linkId);
+      return result;
+    };
+    h.provider.deactivateLink = async () => {
+      throw new Error('stripe deactivate unavailable');
+    };
+    const res = await request(h.app).get(`/api/public/portal/${PORTAL_TOKEN}/invoices`);
+    expect(res.body.invoices[0]).toMatchObject({ payNowUrl: winner.linkUrl, collectOnSite: false });
+    const failed = await auditOf(h.audit, h.invoice.id, 'invoice.payment_link_deactivation_failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].metadata).toMatchObject({ reason: 'mint_guard_lost', error: 'stripe deactivate unavailable' });
+    expect(minted).toHaveLength(1);
+    expect(failed[0].metadata?.stripePaymentLinkId).toBe(minted[0]);
+    expect(minted[0]).not.toBe(winner.linkId);
+  });
 });
