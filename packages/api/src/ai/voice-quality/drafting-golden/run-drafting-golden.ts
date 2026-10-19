@@ -15,7 +15,8 @@
  *     the recorded baseline compares with its noise tolerance.
  */
 import type { LLMGateway } from '../../gateway/gateway';
-import { InMemoryCatalogItemRepository } from '../../../catalog/catalog-item';
+import { InMemoryCatalogItemRepository, type CatalogItem } from '../../../catalog/catalog-item';
+import type { Proposal } from '../../../proposals/proposal';
 import { EstimateTaskHandler } from '../../tasks/estimate-task';
 import { extractBrandVoiceProposalFields, BRAND_VOICE_GATE_FIELD } from '../../tasks/brand-voice-task';
 import { UNCATALOGUED_CONFIDENCE_CAP } from '../../resolution/catalog-resolver';
@@ -68,29 +69,19 @@ const check = (name: string, kind: DraftingGoldenCheck['kind'], pass: boolean, d
   detail,
 });
 
-async function runEstimate(
-  gateway: LLMGateway,
-  c: Extract<DraftingGoldenCase, { task: 'draft_estimate' }>,
-): Promise<DraftingGoldenCheck[]> {
-  const catalog = new InMemoryCatalogItemRepository();
-  for (const row of DRAFTING_GOLDEN_CATALOG) await catalog.create(row);
-  const { proposal } = await new EstimateTaskHandler(gateway, catalog).handle({
-    tenantId: DRAFTING_GOLDEN_TENANT_ID,
-    userId: 'drafting-golden',
-    message: c.message,
-    existingEntities: { customerId: DRAFTING_GOLDEN_CUSTOMER_ID },
-  });
-  const payload = proposal.payload as Record<string, unknown>;
+/**
+ * The draft_estimate safety checks, pure so each can be driven red directly
+ * (OBS-3 review round 2): the production resolver never lets a scripted model
+ * produce these violations, so only a direct input proves the check can fail.
+ */
+export function estimateSafetyChecks(
+  proposal: Pick<Proposal, 'payload' | 'confidenceScore' | 'status'>,
+  catalog: readonly CatalogItem[],
+): DraftingGoldenCheck[] {
+  const payload = proposal.payload;
   const lines = (Array.isArray(payload.lineItems) ? payload.lineItems : []) as Array<Record<string, unknown>>;
-  const byId = new Map(DRAFTING_GOLDEN_CATALOG.map((i) => [i.id, i]));
+  const byId = new Map(catalog.map((i) => [i.id, i]));
   const checks: DraftingGoldenCheck[] = [];
-
-  checks.push(check('drafted at least one line item', 'quality', lines.length > 0, `${lines.length} line(s)`));
-  for (const name of c.expectCatalogItems) {
-    const want = DRAFTING_GOLDEN_CATALOG.find((i) => i.name === name)!;
-    const hit = lines.some((l) => l.pricingSource === 'catalog' && l.catalogItemId === want.id);
-    checks.push(check(`priced '${name}' from the price book`, 'quality', hit, hit ? 'catalog match' : 'no catalog match'));
-  }
 
   const offCatalog = lines.filter((l) => {
     if (l.pricingSource !== 'catalog') return false;
@@ -129,6 +120,32 @@ async function runEstimate(
   return checks;
 }
 
+async function runEstimate(
+  gateway: LLMGateway,
+  c: Extract<DraftingGoldenCase, { task: 'draft_estimate' }>,
+): Promise<DraftingGoldenCheck[]> {
+  const catalog = new InMemoryCatalogItemRepository();
+  for (const row of DRAFTING_GOLDEN_CATALOG) await catalog.create(row);
+  const { proposal } = await new EstimateTaskHandler(gateway, catalog).handle({
+    tenantId: DRAFTING_GOLDEN_TENANT_ID,
+    userId: 'drafting-golden',
+    message: c.message,
+    existingEntities: { customerId: DRAFTING_GOLDEN_CUSTOMER_ID },
+  });
+  const payload = proposal.payload as Record<string, unknown>;
+  const lines = (Array.isArray(payload.lineItems) ? payload.lineItems : []) as Array<Record<string, unknown>>;
+  const checks: DraftingGoldenCheck[] = [];
+
+  checks.push(check('drafted at least one line item', 'quality', lines.length > 0, `${lines.length} line(s)`));
+  for (const name of c.expectCatalogItems) {
+    const want = DRAFTING_GOLDEN_CATALOG.find((i) => i.name === name)!;
+    const hit = lines.some((l) => l.pricingSource === 'catalog' && l.catalogItemId === want.id);
+    checks.push(check(`priced '${name}' from the price book`, 'quality', hit, hit ? 'catalog match' : 'no catalog match'));
+  }
+  checks.push(...estimateSafetyChecks(proposal, DRAFTING_GOLDEN_CATALOG));
+  return checks;
+}
+
 async function runBrandVoice(
   gateway: LLMGateway,
   c: Extract<DraftingGoldenCase, { task: 'update_brand_voice' }>,
@@ -147,18 +164,28 @@ async function runBrandVoice(
     const want = c.expect.bannedPhrase.toLowerCase();
     checks.push(check('banned phrase mapped', 'quality', banned.some((b) => b.toLowerCase().includes(want)), `got [${banned.join(', ')}]`));
   }
+  checks.push(brandVoiceConfigSafetyCheck(payload, missingFields));
+  return checks;
+}
+
+/**
+ * The update_brand_voice safety check, pure so it can be driven red directly
+ * (OBS-3 review round 2): an instruction that mapped no field must carry the
+ * gate field, or an empty config change would be approvable.
+ */
+export function brandVoiceConfigSafetyCheck(
+  payload: Record<string, unknown>,
+  missingFields: readonly string[],
+): DraftingGoldenCheck {
   const mapped = ['register', 'pronoun', 'persona_name', 'signoff', 'opening_lines', 'banned_phrases'].some(
     (f) => payload[f] !== undefined,
   );
-  checks.push(
-    check(
-      'an unmapped instruction is never approvable',
-      'safety',
-      mapped || missingFields.includes(BRAND_VOICE_GATE_FIELD),
-      mapped ? 'fields mapped' : `missingFields [${missingFields.join(', ')}]`,
-    ),
+  return check(
+    'an unmapped instruction is never approvable',
+    'safety',
+    mapped || missingFields.includes(BRAND_VOICE_GATE_FIELD),
+    mapped ? 'fields mapped' : `missingFields [${missingFields.join(', ')}]`,
   );
-  return checks;
 }
 
 const LINK = /https?:\/\/|www\.|\b[a-z0-9-]+\.(?:biz|com|net|org|io|co)\b/i;

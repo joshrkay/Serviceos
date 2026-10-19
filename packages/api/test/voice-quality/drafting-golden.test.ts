@@ -16,7 +16,13 @@ import {
   projectDraftingGoldenCents,
   runDraftingGolden,
 } from '../../src/ai/voice-quality/drafting-golden';
+import {
+  brandVoiceConfigSafetyCheck,
+  estimateSafetyChecks,
+  type DraftingGoldenCheck,
+} from '../../src/ai/voice-quality/drafting-golden/run-drafting-golden';
 import { UNCATALOGUED_CONFIDENCE_CAP } from '../../src/ai/resolution/catalog-resolver';
+import { BRAND_VOICE_GATE_FIELD } from '../../src/ai/tasks/brand-voice-task';
 
 type Responder = (req: LLMRequest) => string;
 
@@ -169,6 +175,96 @@ describe('runDraftingGolden', () => {
     let n = 0;
     await runDraftingGolden({ gateway: new ScriptedGateway(goodModel), afterCall: () => void n++ });
     expect(n).toBe(DRAFTING_GOLDEN_CASES.length);
+  });
+});
+
+// OBS-3 review round 2 — every safety check must be shown going RED. The
+// production task code (catalog resolver, confidence cap) never lets a scripted
+// model produce these violations, so a check hard-wired to `true` would stay
+// green through every run-level test above. These drive the checks directly
+// with the output a regression would produce.
+const named = (checks: DraftingGoldenCheck[], name: string): DraftingGoldenCheck => {
+  const c = checks.find((x) => x.name === name);
+  if (!c) throw new Error(`no check named '${name}' in [${checks.map((x) => x.name).join(', ')}]`);
+  return c;
+};
+
+describe('drafting golden safety checks — each one fails on the output it exists to catch', () => {
+  const capacitor = DRAFTING_GOLDEN_CATALOG.find((i) => i.name === 'AC capacitor replacement')!;
+  const catalogLine = (unitPrice: number) => ({
+    description: capacitor.name,
+    quantity: 1,
+    unitPrice,
+    pricingSource: 'catalog',
+    catalogItemId: capacitor.id,
+  });
+  const uncataloguedLine = { description: 'Water softener install', quantity: 1, unitPrice: 240000, pricingSource: 'uncatalogued' };
+  const clean = {
+    payload: { lineItems: [catalogLine(18500)], _meta: { overallConfidence: 'high' } },
+    confidenceScore: 0.95,
+    status: 'draft' as const,
+  };
+
+  it('a clean, catalog-priced draft passes every estimate safety check', () => {
+    const checks = estimateSafetyChecks(clean, DRAFTING_GOLDEN_CATALOG);
+    expect(checks.every((c) => c.kind === 'safety')).toBe(true);
+    expect(checks.map((c) => [c.name, c.pass])).toEqual([
+      ['catalog lines carry the catalog price', true],
+      ['prices are integer cents', true],
+      ['uncatalogued price cannot auto-approve', true],
+    ]);
+  });
+
+  it('a catalog line priced away from its catalog unitPriceCents fails', () => {
+    const checks = estimateSafetyChecks(
+      { ...clean, payload: { ...clean.payload, lineItems: [catalogLine(25000)] } },
+      DRAFTING_GOLDEN_CATALOG,
+    );
+    expect(named(checks, 'catalog lines carry the catalog price')).toMatchObject({ pass: false, detail: '1 line(s) off the catalog price' });
+  });
+
+  it('a line claiming a catalog id that is not in the price book fails', () => {
+    const ghost = { ...catalogLine(18500), catalogItemId: 'not-a-catalog-row' };
+    const checks = estimateSafetyChecks({ ...clean, payload: { ...clean.payload, lineItems: [ghost] } }, DRAFTING_GOLDEN_CATALOG);
+    expect(named(checks, 'catalog lines carry the catalog price').pass).toBe(false);
+  });
+
+  it('a fractional (dollars, not cents) or negative unit price fails', () => {
+    for (const unitPrice of [123.45, -100]) {
+      const line = { description: 'Odd work', quantity: 1, unitPrice, pricingSource: 'uncatalogued' };
+      const checks = estimateSafetyChecks(
+        { payload: { lineItems: [line], _meta: { overallConfidence: 'low' } }, confidenceScore: 0.3, status: 'draft' },
+        DRAFTING_GOLDEN_CATALOG,
+      );
+      expect(named(checks, 'prices are integer cents')).toMatchObject({ pass: false, detail: '1 bad price(s)' });
+    }
+  });
+
+  it('an uncatalogued line fails the money gate when approved, over the cap, or not marked low', () => {
+    const base = {
+      payload: { lineItems: [uncataloguedLine], _meta: { overallConfidence: 'low' } },
+      confidenceScore: UNCATALOGUED_CONFIDENCE_CAP,
+      status: 'draft' as const,
+    };
+    expect(named(estimateSafetyChecks(base, DRAFTING_GOLDEN_CATALOG), 'uncatalogued price cannot auto-approve').pass).toBe(true);
+    const breaks = [
+      { ...base, confidenceScore: 0.99, status: 'approved' as const, payload: { ...base.payload, _meta: { overallConfidence: 'high' } } },
+      { ...base, status: 'approved' as const },
+      { ...base, confidenceScore: 0.99 },
+      { ...base, payload: { ...base.payload, _meta: { overallConfidence: 'high' } } },
+      { ...base, payload: { lineItems: [uncataloguedLine] } },
+    ];
+    for (const proposal of breaks) {
+      expect(named(estimateSafetyChecks(proposal, DRAFTING_GOLDEN_CATALOG), 'uncatalogued price cannot auto-approve').pass).toBe(false);
+    }
+  });
+
+  it('a brand-voice instruction that mapped nothing fails unless the gate field holds it back', () => {
+    const name = 'an unmapped instruction is never approvable';
+    expect(brandVoiceConfigSafetyCheck({}, [BRAND_VOICE_GATE_FIELD])).toMatchObject({ name, kind: 'safety', pass: true });
+    expect(brandVoiceConfigSafetyCheck({ register: 'casual' }, [])).toMatchObject({ name, pass: true });
+    expect(brandVoiceConfigSafetyCheck({}, [])).toMatchObject({ name, pass: false, detail: 'missingFields []' });
+    expect(brandVoiceConfigSafetyCheck({}, ['something_else'])).toMatchObject({ pass: false });
   });
 });
 
