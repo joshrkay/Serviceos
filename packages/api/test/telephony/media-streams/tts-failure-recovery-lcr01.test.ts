@@ -301,11 +301,16 @@ describe('LCR-01 — the greeting turn (recording notice)', () => {
 });
 
 describe('LCR-01 — a turn later in the call', () => {
-  function midCallSetup(opts: { synthesize: TtsProvider['synthesize'] }) {
+  function midCallSetup(opts: {
+    synthesize: TtsProvider['synthesize'];
+    speechTurn?: () => Promise<SideEffect[]>;
+    maxCallDurationMs?: number;
+  }) {
+    const synthesizeStream = vi.fn(() => deadStream());
     const tts: TtsProvider = {
       synthesize: opts.synthesize,
       // Every reply's stream dies (the vendor's streaming endpoint is down).
-      synthesizeStream: vi.fn(() => deadStream()),
+      synthesizeStream,
     };
     const ws = new FakeWs();
     const stt = makeStreamingProvider();
@@ -321,16 +326,120 @@ describe('LCR-01 — a turn later in the call', () => {
         ttsProvider: tts,
         restRedirect,
         realtimeCircuit: circuit,
-        speechTurn: async (): Promise<SideEffect[]> => [
-          { type: 'tts_play', payload: { text: 'You are booked for Tuesday at nine.' } },
-        ],
+        speechTurn:
+          opts.speechTurn ??
+          (async (): Promise<SideEffect[]> => [
+            { type: 'tts_play', payload: { text: 'You are booked for Tuesday at nine.' } },
+          ]),
+        ...(opts.maxCallDurationMs !== undefined ? { maxCallDurationMs: opts.maxCallDurationMs } : {}),
       },
       ws,
     );
     adapter.start();
     ws.inboundJson(startFrame('CA-mid'));
-    return { ws, stt, circuit, restRedirect, session };
+    return { ws, stt, circuit, restRedirect, session, synthesizeStream };
   }
+
+  const dead503 = () =>
+    vi.fn(async (): Promise<TtsSynthesizeResult> => {
+      throw new Error('ElevenLabs 503');
+    });
+
+  it('a caller who barges in while the buffered recovery synthesizes is not a vendor failure', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let synthStarted = false;
+    const synthesize = vi.fn(async (input: TtsSynthesizeInput): Promise<TtsSynthesizeResult> => {
+      synthStarted = true;
+      await gate;
+      return input.outputFormat === 'pcm_16000'
+        ? { audio: Buffer.alloc(640 * 2), contentType: 'audio/pcm', provider: 'elevenlabs' }
+        : { audio: Buffer.from([0xff]), contentType: 'audio/mpeg', provider: 'elevenlabs' };
+    });
+    const { ws, stt, circuit, restRedirect } = midCallSetup({ synthesize });
+    await flush();
+    stt.emit({ type: 'final', isFinal: true, transcript: 'can I book for Tuesday', confidence: 0.95 });
+    await vi.waitFor(() => expect(synthStarted).toBe(true));
+    // The caller talks over the line while its recovery is still pending.
+    stt.emit({ type: 'partial', isFinal: false, transcript: 'actually wait', confidence: 0.9 });
+    await flush();
+    release();
+    await flush();
+    await flush();
+    await flush();
+
+    expect(restRedirect).not.toHaveBeenCalled();
+    expect(circuit.recordFailure).not.toHaveBeenCalledWith('tts_unavailable');
+    expect(ws.closed).toBe(false);
+    ws.close();
+  });
+
+  it('after a move to Gather the rest of the batch is not synthesized against the dead vendor', async () => {
+    const synthesize = dead503();
+    const { ws, stt, restRedirect, synthesizeStream } = midCallSetup({
+      synthesize,
+      speechTurn: async () => [
+        { type: 'tts_play', payload: { text: 'You are booked for Tuesday at nine.' } },
+        { type: 'tts_play', payload: { text: 'Anything else I can help with?' } },
+      ],
+    });
+    await flush();
+    stt.emit({ type: 'final', isFinal: true, transcript: 'can I book for Tuesday', confidence: 0.95 });
+    await vi.waitFor(() => expect(ws.closed).toBe(true));
+    await flush();
+    await flush();
+
+    expect(restRedirect).toHaveBeenCalledTimes(1);
+    expect(synthesizeStream).toHaveBeenCalledTimes(1);
+    expect(synthesizeStream).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'You are booked for Tuesday at nine.' }),
+    );
+  });
+
+  describe('a conversation that is already ending is not reopened on Gather', () => {
+    it('the batch ends the session (a goodbye whose line cannot be spoken)', async () => {
+      const synthesize = dead503();
+      const { ws, stt, restRedirect } = midCallSetup({
+        synthesize,
+        speechTurn: async () => [
+          { type: 'tts_play', payload: { text: 'Thanks for calling, goodbye.' } },
+          { type: 'end_session', payload: { reason: 'caller_goodbye' } },
+        ],
+      });
+      await flush();
+      stt.emit({ type: 'final', isFinal: true, transcript: 'thanks, bye', confidence: 0.95 });
+      await vi.waitFor(() => expect(synthesize).toHaveBeenCalled());
+      await flush();
+      await flush();
+      expect(restRedirect).not.toHaveBeenCalled();
+      ws.close();
+    });
+
+    it('a life-safety (E1) close is pending', async () => {
+      const synthesize = dead503();
+      const { ws, stt, restRedirect } = midCallSetup({ synthesize });
+      await flush();
+      // A gas smell latches the E1 close before the turn runs.
+      stt.emit({ type: 'final', isFinal: true, transcript: 'I smell gas in the kitchen', confidence: 0.95 });
+      await vi.waitFor(() => expect(synthesize).toHaveBeenCalled());
+      await flush();
+      await flush();
+      expect(restRedirect).not.toHaveBeenCalled();
+      ws.close();
+    });
+
+    it('the max-duration wrap-up line is the one that cannot be spoken', async () => {
+      const synthesize = dead503();
+      // Under a minute: no early warning, the wrap-up is spoken at the limit.
+      const { ws, restRedirect } = midCallSetup({ synthesize, maxCallDurationMs: 30 });
+      await vi.waitFor(() => expect(ws.closed).toBe(true));
+      expect(synthesize).toHaveBeenCalled();
+      expect(restRedirect).not.toHaveBeenCalled();
+      expect(ws.closeReason).not.toBe('degraded_to_gather');
+    });
+  });
 
   it('stream and buffered recovery both fail → the call continues on Gather instead of going mute', async () => {
     const synthesize = vi.fn(async () => {
