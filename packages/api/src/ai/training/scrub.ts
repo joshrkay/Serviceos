@@ -193,12 +193,14 @@ function replaceRegex(
 const DIGIT_RUN_REGEX = /[0-9]{7,}/g;
 
 /**
- * PRIV-3 — digit groups joined by spaces or dashes adding up to 12+ digits
+ * PRIV-3 — digit groups joined by spaces, dashes, commas or periods (the
+ * card scrubber's group separator) adding up to 12+ digits
  * ("4111 1111 1111 1112", a non-Luhn card-shaped run the card pass left in
  * place). DIGIT_RUN_REGEX only sees unbroken runs, so grouped digits used to
  * pass the gate. Phones are already placeholders by the time this runs.
  */
-const GROUPED_DIGIT_RUN_REGEX = /(?<![0-9])\d{2,}(?:[ -]\d{2,}){2,}(?![0-9])/g;
+const GROUPED_DIGIT_RUN_REGEX =
+  /(?<![0-9])\d{2,}(?:(?:[ \t]*[,.\-][ \t]*|[ \t]+)\d{2,}){2,}(?![0-9])/g;
 const MIN_GROUPED_RESIDUAL_DIGITS = 12;
 
 /**
@@ -229,7 +231,7 @@ function detectResidualPii(scrubbed: string): string[] {
   }
   GROUPED_DIGIT_RUN_REGEX.lastIndex = 0;
   const grouped = placeholderless.match(GROUPED_DIGIT_RUN_REGEX) ?? [];
-  if (grouped.some((run) => run.replace(/[ -]/g, '').length >= MIN_GROUPED_RESIDUAL_DIGITS)) {
+  if (grouped.some((run) => run.replace(/\D/g, '').length >= MIN_GROUPED_RESIDUAL_DIGITS)) {
     signals.push('grouped_digit_run');
   }
   if (testRegex(ALL_CAPS_NAME_REGEX, placeholderless)) {

@@ -146,6 +146,17 @@ describe('scrubPii — card numbers (PRIV-3)', () => {
     expect(result.residualSignals).toContain('grouped_digit_run');
   });
 
+  it('redacts a comma-grouped card number the way STT punctuates paused groups', () => {
+    const result = scrubPii('caller: my card is 4111, 1111, 1111, 1111.');
+    expect(result.scrubbed).toBe('caller: my card is [CARD_NUMBER].');
+  });
+
+  it('flags a comma- or period-grouped digit run that is not a valid card for review', () => {
+    expect(scrubPii('ref 4111, 1111, 1111, 1112 please').residualSignals).toContain('grouped_digit_run');
+    expect(scrubPii('ref 4111. 1111. 1111. 1112 please').residualSignals).toContain('grouped_digit_run');
+    expect(scrubPii('ref 4111  1111  1111  1112 please').residualSignals).toContain('grouped_digit_run');
+  });
+
   it('does not flag an ordinary phone and street address once they are scrubbed', () => {
     const result = scrubPii('Call 602-555-0199 about 4821 Bridgewater Road');
     expect(result.residualSignals).not.toContain('grouped_digit_run');
