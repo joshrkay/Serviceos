@@ -25,10 +25,19 @@ export type OnboardingStepStatus =
   | 'error'
   | 'skipped';
 
+/**
+ * Why the phone step failed, as a closed code (ProvisioningFailureCodeSchema in
+ * the API's onboarding/contracts.ts). Set only on a failed phone step, and absent
+ * from an older server, so readers fall back to `blockers` without it.
+ */
+export type PhoneFailureCode = 'area_code_unavailable' | 'credentials_missing' | 'provider_error' | 'unknown';
+
 export interface OnboardingStep {
   id: OnboardingStepId;
   status: OnboardingStepStatus;
   blockers?: string[];
+  /** Phone step only, when it failed: why, as a code (never the recorded text). */
+  failureCode?: PhoneFailureCode;
   metadata?: Record<string, unknown>;
 }
 

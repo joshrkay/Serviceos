@@ -243,6 +243,8 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
   const asking = statusAt('phone', { phone: { status: 'current', metadata: { lineState: 'awaiting_pick' } } });
   const holding = statusAt('phone', { phone: { status: 'current', metadata: { phoneNumber: NUMBER } } });
   const noNumber = statusAt('phone', { phone: { status: 'error', blockers: ['twilio_provisioning_failed'] } });
+  const failedWith = (failureCode: 'area_code_unavailable' | 'credentials_missing' | 'provider_error') =>
+    statusAt('phone', { phone: { status: 'error', failureCode, blockers: ['twilio_provisioning_failed'] } });
   const voiceWaiting = statusAt('ai_check', { ...phoneDone, ai_check: { status: 'current', metadata: { verifying: true } } });
   const voiceFailed = statusAt('ai_check', { ...phoneDone, ai_check: { status: 'error', blockers: ['ai_verification_failed'] } });
 
@@ -258,6 +260,9 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
     ['Number: asking for it', asking, {}],
     ['Number: here it is', holding, {}],
     ['Number: could not get one', noNumber, {}],
+    ['Number: pick a different area code', failedWith('area_code_unavailable'), {}],
+    ['Number: a problem on our side', failedWith('credentials_missing'), {}],
+    ['Number: the phone company did not answer', failedWith('provider_error'), {}],
     ['Voice: getting ready', voiceWaiting, {}],
     ['Voice: could not get ready', voiceFailed, {}],
     ['Test call: now you call me', statusAt('test_call', phoneDone), {}],
@@ -309,6 +314,34 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
     expectAllTapTargets(view.container, 'open for business');
     expect(fixedWidths(view.container).filter((w) => w > 320)).toEqual([]);
     expect(screen.queryByRole('button', { name: "I'll test later" })).not.toBeInTheDocument();
+  });
+
+  it('Number: the area-code form and the number offered are 44px targets, and a long place name wraps at 320px', async () => {
+    const place = 'SouthEuclidLyndhurstRichmondHeightsAndGreaterClevelandOhio';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(json(200, { numbers: [{ phoneNumber: '+12165550111', locality: place, region: 'OH' }] }))),
+    );
+    const { container } = render(after(asking));
+    await userEvent.click(screen.getByRole('button', { name: 'Pick a different area code' }));
+    const field = screen.getByLabelText('Area code');
+    expectTapTarget(field, 'area code field');
+    expectAllTapTargets(container, 'area-code form');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+    for (const name of ['Look for a number', 'Pick one near my business']) {
+      expect(screen.getByRole('button', { name }).className, name).toMatch(/whitespace-normal/);
+    }
+
+    await userEvent.type(field, '216');
+    await userEvent.click(screen.getByRole('button', { name: 'Look for a number' }));
+    await screen.findByRole('button', { name: 'That works' });
+    expectAllTapTargets(container, 'number offered');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+    expect(screen.getByText(`${place}, OH`).className).toMatch(/break-words/);
+    expect(screen.getByText('(216) 555-0111').className).toMatch(/break-words/);
+    for (const name of ['That works', 'Pick a different area code']) {
+      expect(screen.getByRole('button', { name }).className, name).toMatch(/whitespace-normal/);
+    }
   });
 
   it('long numbers and plan names wrap instead of widening the page', async () => {
