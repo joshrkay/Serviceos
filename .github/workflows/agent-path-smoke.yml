@@ -9,19 +9,51 @@
 # vars. ANTHROPIC_API_KEY is deliberately NOT wired here — production does not
 # use Anthropic, so a green run on it would prove the wrong provider.
 #
-# Cost: 11 classify calls, capped at AGENT_PATH_SMOKE_COST_CAP_CENTS (default $1).
-# Missing credentials fail as an explicit unmet prerequisite; they are never
-# reported as green execution evidence.
+# OBS-3 — this is the ONLY merge-path check that calls the real model, so
+# the same job also runs the live intent + slot evals against the recorded
+# live baselines (packages/voice-eval/baselines/*-live.json, the bar
+# voice-eval-live.yml measures weekly): a prompt or routing change meets
+# that bar BEFORE merge. The PR trigger covers every prompt-defining or
+# model-routing file, and agent-path-smoke-skip.yml reports the same check
+# green on PRs that touch none of them, so branch protection can require
+# `path-smoke` without stalling unrelated PRs.
+#
+# Cost: 11 classify calls capped at AGENT_PATH_SMOKE_COST_CAP_CENTS (default
+# $1), plus the two sampled evals, each capped per step by
+# VOICE_EVAL_COST_CAP_CENTS (about $1 per keyed run in total). Missing
+# credentials fail as an explicit unmet prerequisite; they are never reported
+# as green execution evidence.
 name: Agent Path Smoke
 
 on:
   pull_request:
     paths:
+      # Every file that defines a system prompt or routes a model (grep of
+      # system prompts and gateway.complete call sites), not only src/ai/**:
+      # OBS-3 — reputation/, the vertical sections of the caller prompt, the
+      # transcription corrector and the tier map used to reach main with no
+      # real-model eval. app.ts and voice/quality/grade-voice-session.ts
+      # only WIRE the gateway (the prompt text they pass lives in the files
+      # below) and app.ts changes on most PRs, so they are left out on
+      # purpose. Keep this list identical to the paths-ignore list in
+      # agent-path-smoke-skip.yml. ci-workflow-path-smoke.test.ts pins both,
+      # and fails when a file under packages/api/src defines a prompt or
+      # calls the model outside this list.
       - 'packages/api/src/ai/**'
+      - 'packages/api/src/reputation/**'
+      - 'packages/api/src/verticals/**'
+      - 'packages/api/src/workers/transcription.ts'
+      - 'packages/api/src/workers/supervisor-review-worker.ts'
+      - 'packages/api/src/workers/verify-ai.ts'
+      - 'packages/api/src/proposals/edit-interpreter.ts'
+      - 'packages/api/src/routes/assistant.ts'
+      - 'packages/api/src/digest/weekly-feedback.ts'
+      - 'packages/api/src/config/ai-routing.ts'
       - 'packages/api/scripts/agent-path-smoke.ts'
       - 'packages/api/scripts/agent-graph-coverage.ts'
-      - 'packages/api/src/ai/voice-quality/**'
+      - 'packages/voice-eval/**'
       - '.github/workflows/agent-path-smoke.yml'
+      - '.github/workflows/agent-path-smoke-skip.yml'
   workflow_dispatch:
   schedule:
     # Daily 06:30 UTC — offset from voice-eval-live Monday job
@@ -33,7 +65,7 @@ permissions:
 jobs:
   path-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       AI_PROVIDER_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       AI_PROVIDER_BASE_URL: https://api.openai.com/v1
@@ -55,10 +87,12 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'npm'
       - name: Install deps
+        id: install
         run: npm ci
       - name: Offline graph coverage (always meaningful)
         run: npm run agent:graph-coverage --workspace=packages/api -- --gate --markdown
       - name: Verify API key is present
+        id: key
         run: |
           if [ -z "$AI_PROVIDER_API_KEY" ]; then
             echo "::error::AI_PROVIDER_API_KEY is not set (secrets.OPENAI_API_KEY) — real-LLM path smoke was not executed."
@@ -71,6 +105,31 @@ jobs:
           set -o pipefail
           npm run agent:path-smoke --workspace=packages/api -- --gate \
             | tee agent-path-smoke-console.txt
+      # OBS-3 — the recorded live baselines are the merge bar. --baseline
+      # exits 1 on a regression past tolerance and ALSO when the sample's
+      # rows/fingerprint differ from the recorded set, so --max-utterances
+      # must equal each baseline's goldenSet.rows (200 intent / 100 slot).
+      # Per-step caps mirror voice-eval-live.yml; the runner projects cost
+      # before spending and aborts (exit 3) past the cap.
+      # ci-workflow-path-smoke.test.ts pins sample, baseline and cap.
+      - name: Live intent eval vs recorded live baseline (gated)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.key.outcome == 'success' }}
+        env:
+          VOICE_EVAL_COST_CAP_CENTS: '150'    # projection ~63c at N=200 (gpt-4o-mini)
+        run: |
+          set -o pipefail
+          npx tsx packages/voice-eval/run-intent-eval.ts --live --gate --max-utterances 200 --baseline packages/voice-eval/baselines/intent-live.json \
+            | tee -a agent-path-smoke-console.txt
+      # Runs even when the smoke or the intent eval failed, so one run
+      # reports all three.
+      - name: Live slot eval vs recorded live baseline (gated)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.key.outcome == 'success' }}
+        env:
+          VOICE_EVAL_COST_CAP_CENTS: '80'     # projection ~32c at N=100 (gpt-4o-mini)
+        run: |
+          set -o pipefail
+          npx tsx packages/voice-eval/run-slot-eval.ts --live --gate --max-utterances 100 --baseline packages/voice-eval/baselines/slot-live.json \
+            | tee -a agent-path-smoke-console.txt
       - name: Upload path-smoke report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -11,8 +11,11 @@
 # list — test/voice-quality/ci-workflow-path-smoke.test.ts pins the two
 # equal), with one step that succeeds. A PR that touches no prompt or routing
 # file gets an instant green `path-smoke`; a PR that touches one runs the real
-# smoke. When a PR touches both kinds of file, both workflows report; the real
-# one finishes last and is the result GitHub shows.
+# smoke. paths-ignore skips only when EVERY changed file is ignored, so a PR
+# that touches a prompt file and any other file runs BOTH workflows and both
+# report `path-smoke`; the shim's green lands first. Confirm on the first such
+# PR after the check is made required that the merge box waits for the real
+# run (docs/runbooks/agent-graph-and-path-smoke.md, "Skip-pass shim").
 #
 # Keep this job free of secrets, installs and model calls: it must pass on a
 # fork PR with no credentials, and it must never be mistaken for evidence
@@ -23,10 +26,20 @@ on:
   pull_request:
     paths-ignore:
       - 'packages/api/src/ai/**'
+      - 'packages/api/src/reputation/**'
+      - 'packages/api/src/verticals/**'
+      - 'packages/api/src/workers/transcription.ts'
+      - 'packages/api/src/workers/supervisor-review-worker.ts'
+      - 'packages/api/src/workers/verify-ai.ts'
+      - 'packages/api/src/proposals/edit-interpreter.ts'
+      - 'packages/api/src/routes/assistant.ts'
+      - 'packages/api/src/digest/weekly-feedback.ts'
+      - 'packages/api/src/config/ai-routing.ts'
       - 'packages/api/scripts/agent-path-smoke.ts'
       - 'packages/api/scripts/agent-graph-coverage.ts'
-      - 'packages/api/src/ai/voice-quality/**'
+      - 'packages/voice-eval/**'
       - '.github/workflows/agent-path-smoke.yml'
+      - '.github/workflows/agent-path-smoke-skip.yml'
 
 permissions:
   contents: read
