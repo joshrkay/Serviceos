@@ -7,7 +7,7 @@
  * delivery boundary in S6-5) ask this check instead.
  *
  * One primary-key read per tenant id, cached for the process: the two flags
- * are written once, when the row is inserted (migration 314 for the platform
+ * are written once, when the row is inserted (migration 317 for the platform
  * tenant, the pool seed for demo tenants), and never change, so a cached
  * answer cannot go stale. An unknown id is not hidden (and is not cached, so
  * a tenant inserted later is read fresh). A failed read throws and is not

@@ -250,7 +250,7 @@ describe('RLS tenant isolation (DB-level enforcement)', () => {
     //   oauth_states: short-lived (5 min) OAuth handshake rows looked up only
     //     by their unguessable PK, which is the handshake secret.
     //   demo_tenant_leases, demo_inflight_jobs, signup_handoffs (U7, migration
-    //     314): platform tables whose tenant_id only names the demo tenant a
+    //     317): platform tables whose tenant_id only names the demo tenant a
     //     call, a running job or a signup holds; read with no tenant context
     //     by the reaper, the reset and the queue front door.
     const RLS_EXEMPT = new Set([

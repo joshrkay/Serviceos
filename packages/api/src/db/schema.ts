@@ -7755,7 +7755,7 @@ export const MIGRATIONS = {
   // billing/ and admin/; pinned by test/integration/demo-tenants-excluded.test.ts).
   // The platform tenant's uuid is fixed (demo/platform-tenant.ts) and
   // immutable once applied anywhere.
-  '314_demo_calls': `
+  '317_demo_calls': `
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS demo BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS platform BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS demo_trade TEXT;

@@ -13,7 +13,7 @@ import type { Pool } from 'pg';
  * Deprovisioning hard-deletes the tenant row (`DELETE FROM tenants`, see
  * `deprovision.ts`), so there is no lifecycle column to exclude and every row
  * here is a live tenant. The one filter is the hidden tenants of the
- * pre-signup demo call (U7, migration 314): the demo pool (`demo`) and the
+ * pre-signup demo call (U7, migration 317): the demo pool (`demo`) and the
  * platform tenant that owns the demo visitor's rows (`platform`, D1). No
  * owner, billing or report sweep may ever visit one. If tenants ever become a
  * soft delete, this is the one place that has to learn about it — which is

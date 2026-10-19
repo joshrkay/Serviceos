@@ -102,12 +102,12 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     // platform_deprovision_log: cross-tenant audit trail of tenant
     // hard-deletes. By design, this row outlives the tenant it records.
     'platform_deprovision_log',
-    // U7 demo call (migration 314): platform tables whose tenant_id only
+    // U7 demo call (migration 317): platform tables whose tenant_id only
     // NAMES the demo tenant a call, a running job or a signup holds. They are
     // read by the reaper, the reset and the queue front door with no tenant
     // context (the lease is how the tenant is discovered), so an
     // app.current_tenant_id policy would hide every row from the code that
-    // needs it. The runtime role is revoked on them (219 and 314).
+    // needs it. The runtime role is revoked on them (219 and 317).
     'demo_tenant_leases',
     'demo_inflight_jobs',
     'signup_handoffs',

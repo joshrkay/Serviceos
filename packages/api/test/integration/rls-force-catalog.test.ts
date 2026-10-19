@@ -16,7 +16,7 @@
  *
  * The documented, backstopped exemptions (oauth_states,
  * platform_deprovision_log — see schema.ts migrations 218/219 — and the three
- * U7 demo-call platform tables of migration 314) are asserted to be EXACTLY
+ * U7 demo-call platform tables of migration 317) are asserted to be EXACTLY
  * those, so the exemption set can never silently grow at runtime.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -29,10 +29,10 @@ import { getSharedTestDb, closeSharedTestDb } from './shared';
 const RLS_EXEMPT_TABLES = new Set<string>([
   'oauth_states',
   'platform_deprovision_log',
-  // U7 demo call (migration 314): tenant_id only names the demo tenant a
+  // U7 demo call (migration 317): tenant_id only names the demo tenant a
   // lease, a running job or a signup handoff holds; the reaper, the reset
   // and the queue front door read them with no tenant context. The runtime
-  // role is revoked on them (219 and 314's own guarded REVOKE).
+  // role is revoked on them (219 and 317's own guarded REVOKE).
   'demo_tenant_leases',
   'demo_inflight_jobs',
   'signup_handoffs',

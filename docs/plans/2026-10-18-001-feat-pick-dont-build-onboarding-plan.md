@@ -2809,8 +2809,8 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Files:**
   - modify `packages/api/src/integrations/credentials.ts` (explicit `PLATFORM_TWILIO_*`)
   - create `packages/api/src/demo/{routes,service,script,lease,lease-token,twilio-outcome,reset,job-guard,inflight,write-fence,call-budget,handoff-outbox}.ts`,
-    migration `314_demo_calls` (313 went to the owner-cell column in S1b; 314 was the next free
-    key on main when S6 was written and is renumbered at merge if a sibling slice lands one first;
+    migration `317_demo_calls` (313 went to the owner-cell column in S1b and 314-316 are claimed by
+    the privacy work; renumbered again at merge if a sibling slice lands one first;
     phone hash, trade, name, lease_id, call_sid, status, lead_id, `callback_deadline_at` (the
     status token's `sexp`, written in the lease transaction), and the budget reservation the
     call holds: `budget_day`, `reserved_cents`, `budget_released_at`; no `tenant_id`; the
@@ -3291,7 +3291,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
     `app.ts` wraps the one `rawMessageDelivery` in it and every consumer, the customer-message
     sender included, takes the wrapped object. Its `sendSms` and `sendEmail` get a first check,
     ahead of the kill switch's alert exemption and the owner bypass: when the message carries a
-    `tenantId`, one primary-key read of `tenants.demo` (the flag migration 314 adds and the seed
+    `tenantId`, one primary-key read of `tenants.demo` (the flag migration 317 adds and the seed
     script sets on every pool tenant) decides, at send time, inside the function the resumed
     handler calls. A demo tenant's message is not sent. The gate logs it, counts it beside the
     kill-switch counter, writes the gate's existing best-effort audit row as
@@ -3455,7 +3455,7 @@ Server modules: `packages/api/src/onboarding/choices/{registry,assemble,override
 - **Consent, limits, handoff.** Consent line first; two-layer rate limits; the daily budget
   above, the only aggregate bound; a lead row in a platform marketing tenant (nothing yet
   provisions that tenant or the sentinel tenant; see Deferred review findings D1). The signup
-  SMS link carries a signed, single-use handoff token (HMAC over `lead_id` and an expiry). Migration 314 also adds a platform table
+  SMS link carries a signed, single-use handoff token (HMAC over `lead_id` and an expiry). Migration 317 also adds a platform table
   `signup_handoffs(token_hash PK, lead_id, tenant_id NULL, expires_at, consumed_at)`, whose
   row is inserted by the `completed` status callback's platform transaction with the outbox
   row, so it is committed before the handler can send the token (Late status callbacks, above):
@@ -3968,10 +3968,10 @@ designed further. Each is exposed first by the Docker-gated, real-column test na
 
 - **D1. A platform tenant must exist (U7, S6; P1).** `phone_rate_limits.tenant_id` and
   `leads.tenant_id` are both `NOT NULL REFERENCES tenants(id)` (`schema.ts`,
-  `111_phone_rate_limits` ~2871 and `057_create_leads` ~1399), but migration 314 and the seed
+  `111_phone_rate_limits` ~2871 and `057_create_leads` ~1399), but migration 317 and the seed
   script create only demo-pool tenants and nothing creates the sentinel or marketing tenant,
   so on a clean deployment the visitor allowance and the lead insert fail their foreign key;
-  a pool tenant cannot stand in because reset purges its rows. *Direction:* migration 314
+  a pool tenant cannot stand in because reset purges its rows. *Direction:* migration 317
   inserts one durable hidden platform tenant at a fixed uuid, flagged so owner surfaces,
   tenant-listing sweeps, the reaper and pool selection never touch it, and it owns the demo
   `phone_rate_limits` and `leads` rows. Platform-scoped tables are the rejected alternative

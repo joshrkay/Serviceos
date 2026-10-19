@@ -1,7 +1,7 @@
 /**
  * Postgres integration — S6-1 of the "pick, don't build" plan (U7, D1).
  *
- * Migration 314_demo_calls, the platform tenant, the demo-tenant pool seed
+ * Migration 317_demo_calls, the platform tenant, the demo-tenant pool seed
  * and the one rule every owner, billing and analytics surface must obey: a
  * demo tenant (`tenants.demo`) and the platform tenant (`tenants.platform`)
  * are never listed, never reported, never forwarded to analytics.
@@ -123,7 +123,7 @@ describe('Postgres integration — demo tenants and the platform tenant are excl
     await closeSharedTestDb();
   });
 
-  describe('migration 314_demo_calls', () => {
+  describe('migration 317_demo_calls', () => {
     it('creates the platform tenant at its fixed uuid, flagged platform and not demo (D1)', async () => {
       const { rows } = await pool.query(
         `SELECT id, owner_id, owner_email, demo, platform, demo_trade FROM tenants WHERE id = $1`,
@@ -202,7 +202,7 @@ describe('Postgres integration — demo tenants and the platform tenant are excl
 
     it('the corpus revokes rls_app_runtime on the tenant_id-naming platform tables (effect, not ambient state)', async () => {
       // Sibling suites GRANT ... ON ALL TABLES to the runtime role; reproduce
-      // that dirty state and prove the replayed corpus (219 + 314's own
+      // that dirty state and prove the replayed corpus (219 + 317's own
       // revoke) clears exactly these tables.
       await pool.query(
         `GRANT SELECT, INSERT, UPDATE, DELETE ON ${NAMED_TENANT_TABLES.join(', ')} TO rls_app_runtime`,
@@ -240,7 +240,7 @@ describe('Postgres integration — demo tenants and the platform tenant are excl
     });
 
     it('re-applies idempotently: the whole corpus replays on the populated database', async () => {
-      expect(Object.keys(MIGRATIONS).at(-1)).toBe('314_demo_calls');
+      expect(Object.keys(MIGRATIONS).at(-1)).toBe('317_demo_calls');
       await pool.query(getMigrationSQL());
       const { rowCount } = await pool.query(`SELECT 1 FROM tenants WHERE id = $1`, [DEMO_PLATFORM_TENANT_ID]);
       expect(rowCount).toBe(1);
@@ -250,7 +250,7 @@ describe('Postgres integration — demo tenants and the platform tenant are excl
       // 249_backfill_owner_memberships replays on every boot and inserts an
       // owner users row for EVERY tenant whose owner_id has none, which would
       // hand each demo tenant and the platform tenant a sign-in-shaped owner
-      // (and put them on every surface that reads users). 314 runs after 249
+      // (and put them on every surface that reads users). 317 runs after 249
       // in the same corpus statement and removes exactly those rows.
       const demoId = crypto.randomUUID();
       await pool.query(

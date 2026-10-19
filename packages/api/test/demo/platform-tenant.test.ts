@@ -12,9 +12,9 @@ import {
  * constant the code reads. They must never drift.
  */
 describe('demo platform tenant constants', () => {
-  const sql = MIGRATIONS['314_demo_calls'];
+  const sql = MIGRATIONS['317_demo_calls'];
 
-  it('the fixed uuid is the one migration 314 inserts', () => {
+  it('the fixed uuid is the one migration 317 inserts', () => {
     expect(DEMO_PLATFORM_TENANT_ID).toBe('00000000-0000-4000-8000-00000000d3a0');
     expect(sql).toContain(`'${DEMO_PLATFORM_TENANT_ID}'`);
   });
