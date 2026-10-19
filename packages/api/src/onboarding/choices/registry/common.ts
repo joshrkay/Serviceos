@@ -18,7 +18,7 @@ export function greetingEntry(): ChoiceEntry {
   return {
     settingKey: 'greeting',
     question: 'How should I answer your phone?',
-    supportLine: 'Tap one to hear it.',
+    supportLine: 'Tap one to hear it. Say "first" or "second" to pick.',
     options: [
       {
         key: 'a',
@@ -145,7 +145,7 @@ export function emergencyEntry(v: TradeVoice): ChoiceEntry {
   return {
     settingKey: 'emergency_target',
     question: 'Who do I ring first when it is an emergency?',
-    supportLine: `Suppose a caller tells me "${v.emergencyExample}". Safety first, then a person. That part I always do. This part is yours.`,
+    supportLine: `Say a caller tells me "${v.emergencyExample}". Safety first, then a person. That part I always do. This part is yours.`,
     options: [
       {
         key: 'a',

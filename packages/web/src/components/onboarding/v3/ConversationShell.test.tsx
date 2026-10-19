@@ -105,6 +105,13 @@ function stubNetwork(initial: Server) {
       requests.push({ method, path, body });
       const tts = ttsAnswer(path, method, body);
       if (tts) return resolved(tts);
+      if (path.startsWith('/api/voice/stream-token') && method === 'POST') {
+        return resolved(
+          (server.streamToken ?? 200) === 200
+            ? json(200, { token: 'dg-temp', expiresIn: 30, model: 'nova-3' })
+            : json(503, { error: 'NOT_CONFIGURED', message: 'Live transcription is not configured' }),
+        );
+      }
       if (path === '/api/onboarding/status') return resolved(json(200, server.status));
       if (path === '/api/onboarding/billing/plans') return resolved(json(200, { plans: PLANS }));
       if (path === '/api/onboarding/draft' && method === 'GET') {
@@ -273,9 +280,11 @@ describe('ConversationShell', () => {
 
       // Turn 1: Rivet's own words, both options, the typical one marked, nothing selected, Next waiting.
       expect(await onTurn(0)).toBeInTheDocument();
-      // Rivet speaks (S3-3): tapping an option plays it. Nothing listens yet (S3-5), so nothing says "say first".
+      // Rivet speaks: tapping an option plays it. This browser cannot listen (jsdom has no microphone),
+      // so the line keeps only its hearing half; "Rivet listens" below has the whole line.
       expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
       expect(screen.queryByText(/say "first"|say "second"/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Answer out loud' })).not.toBeInTheDocument();
       expect(screen.getAllByRole('radio')).toHaveLength(2);
       expect(screen.getAllByText('Most shops like yours')).toHaveLength(1);
       expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
@@ -593,6 +602,147 @@ describe('ConversationShell', () => {
       expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
       await waitFor(() => expect(played.at(-1)).toBe(srcFor(READBACK.name)));
       expect(ttsPosts().find((r) => r.body?.text === READBACK.name)?.path).toBe('/api/voice/tts');
+    });
+  });
+
+  describe('Rivet listens (S3-5)', () => {
+    // The microphone and Deepgram's socket are the browser/vendor boundary, faked as in
+    // useDeepgramDictation.test.ts; the shell, its hooks, the matcher and the stage path are real.
+    class FakeWebSocket {
+      static OPEN = 1;
+      static instances: FakeWebSocket[] = [];
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((e: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor(readonly url: string) {
+        FakeWebSocket.instances.push(this);
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+      }
+    }
+    class FakeMediaRecorder {
+      state = 'inactive';
+      ondataavailable: unknown = null;
+      start() {
+        this.state = 'recording';
+      }
+      stop() {
+        this.state = 'inactive';
+      }
+    }
+    let micRefused: boolean;
+    const getUserMedia = vi.fn(async () => {
+      if (micRefused) throw new DOMException('Permission denied', 'NotAllowedError');
+      return { getTracks: () => [{ stop: vi.fn() }] };
+    });
+
+    beforeEach(() => {
+      FakeWebSocket.instances = [];
+      micRefused = false;
+      getUserMedia.mockClear();
+      vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket);
+      vi.stubGlobal('MediaRecorder', FakeMediaRecorder as unknown as typeof MediaRecorder);
+      vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } });
+    });
+
+    /** The turn's socket opens (Deepgram accepted the token). */
+    async function socketOpens() {
+      await waitFor(() => expect(FakeWebSocket.instances.at(-1)?.onopen).toBeTruthy());
+      act(() => {
+        const ws = FakeWebSocket.instances.at(-1)!;
+        ws.readyState = 1;
+        ws.onopen?.();
+      });
+    }
+    function ownerSays(transcript: string) {
+      act(() => {
+        FakeWebSocket.instances
+          .at(-1)!
+          .onmessage?.({ data: JSON.stringify({ is_final: true, speech_final: true, channel: { alternatives: [{ transcript }] } }) });
+      });
+    }
+
+    it('asks the greeting with the whole line, and a spoken "the second one" saves through the same call as a tap', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody() });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      expect(getUserMedia).toHaveBeenCalledTimes(1);
+      expect(screen.getByText('Tap one to hear it. Say "first" or "second" to pick.')).toBeInTheDocument();
+      await socketOpens();
+      expect(screen.getByRole('button', { name: 'Answer out loud' })).toHaveAttribute('aria-pressed', 'true');
+
+      ownerSays('the second one');
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(stagedCalls().map((r) => [r.path, r.body])).toEqual([
+        ['/api/onboarding/draft/choices/greeting', { choice: { option: 'b' }, version: 1 }],
+      ]);
+      expect(funnel('v3_choice_made')).toEqual([{ choice_key: 'greeting', answer_mode: 'voice', option: 'b', is_most_shops: false }]);
+      // The transcript never reaches the funnel.
+      expect(JSON.stringify(track.trackFunnel.mock.calls)).not.toContain('second one');
+      // The next turn listens on its own socket, on the same microphone.
+      await socketOpens();
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      expect(getUserMedia).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows "Heard" under the card it picked while the answer is being saved', async () => {
+      let release!: () => void;
+      const stageGate = new Promise<void>((r) => {
+        release = r;
+      });
+      stubNetwork({ draft: draftJson, status: statusBody(), stageGate });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      await socketOpens();
+      ownerSays('the first one');
+      const picked = screen.getByRole('radio', { name: turn(0).a });
+      expect(picked).toHaveAttribute('aria-checked', 'true');
+      expect(within(picked).getByText('Heard: “the first one”')).toBeInTheDocument();
+      release();
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(funnel('v3_choice_made')).toHaveLength(1);
+    });
+
+    it('with the microphone refused, every turn is still answered by tap, with no alert and no mic', async () => {
+      micRefused = true;
+      stubNetwork({ draft: draftJson, status: statusBody() });
+      renderShell();
+      await makeItMine();
+      for (let i = 0; i < TURNS.length; i += 1) {
+        expect(await onTurn(i)).toBeInTheDocument();
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Answer out loud' })).not.toBeInTheDocument();
+        if (i === 0) {
+          expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
+          expect(screen.queryByText(/say "first"/i)).not.toBeInTheDocument();
+        }
+        await choose(turn(i).a);
+      }
+      expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
+      expect(funnel('v3_choice_made').map((e) => (e as { answer_mode: string }).answer_mode)).toEqual(Array(7).fill('tap'));
+      expect(funnel('v3_voice_input')).toEqual([{ state: 'denied' }]);
+      expect(requests.filter((r) => r.path.startsWith('/api/voice/stream-token'))).toEqual([]);
+      expect(getUserMedia).toHaveBeenCalledTimes(1);
+    });
+
+    it('with no transcription on the server (503), the mic goes away and the turn is the cards', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), streamToken: 503 });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      await waitFor(() => expect(funnel('v3_voice_input')).toEqual([{ state: 'unavailable' }]));
+      expect(screen.queryByRole('button', { name: 'Answer out loud' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
+      await choose(turn(0).a);
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(requests.filter((r) => r.path.startsWith('/api/voice/stream-token'))).toHaveLength(1);
     });
   });
 
