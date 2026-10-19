@@ -1335,6 +1335,13 @@ flowchart LR
       and still get close to another $100. So:
       - Once a verified price exists for a run's model, the run is repriced from its stored
         `model` and `token_usage`, and the computed cost is written back.
+      - **Repricing reconciles the ledger in the same transaction, exactly once per physical
+        attempt.** The run's `settled_unpriced` reservation row takes one guarded transition to
+        `settled`, `WHERE attempt_id = $1 AND state = 'settled_unpriced'`. The ledger's `spent` grows
+        by exactly the repriced amount. A repricing that runs twice matches no row the second time.
+        Retried attempts each have their own row, so each one is counted.
+      - The cap-enable check counts `settled_unpriced` rows for the current month, not just null
+        `ai_runs` costs. Once all of them are repriced, the ledger already holds that spend.
       - While any current-month run is still unpriced after that repricing, the settings write that
         enables a cap is refused. The message says plainly that this month's usage can't be fully
         counted yet.
@@ -1378,7 +1385,15 @@ flowchart LR
       was already reconciled, or whether a retried completion has already been counted. So:
       - An `ai_spend_reservations` row is keyed by a unique `attempt_id`. It holds `tenant_id`, the
         month, `amount_micro_cents`, `state` and `lease_expires_at`, plus the `ai_run_id` once known.
-        The states are `reserved`, `settled`, `released` and `expired_charged`.
+        The states, and the only transitions allowed out of `reserved`:
+        - `settled`: the actual cost from the usage object is charged.
+        - `released`: a definitive no-dispatch failure, so nothing is charged.
+        - `charged_unreconciled`: an ambiguous failure or an expired lease, charged at the
+          worst-case amount. If the provider's usage later becomes known, one guarded transition
+          `charged_unreconciled → settled` adjusts `spent` by the actual cost minus the worst case.
+        - `settled_unpriced`: an uncapped tenant's call to a model with no verified price. There is
+          no amount to charge yet; see "Unpriced usage" below.
+        A check constraint holds exactly these states.
       - Its RLS matches every tenant table.
       - A per-tenant monthly `ai_spend_ledger` row holds `spent` and `reserved`.
       - **Reserve** is one transaction. A conditional
@@ -1400,8 +1415,8 @@ flowchart LR
     - **Only a failure that definitively never reached the provider releases the reservation.**
       Examples: preflight rejection, quota rejection, a connection refused before send, a 4xx
       validation error. An ambiguous failure — a timeout or connection reset after send, a 5xx after
-      streaming started — has no usage object, so charge the full worst-case reservation and mark it
-      `unreconciled`. Otherwise outage retries would be free in the ledger and could exceed the cap.
+      streaming started — has no usage object, so charge the full worst-case reservation and move it
+      to `charged_unreconciled`. Otherwise outage retries would be free in the ledger and could exceed the cap.
       This is the same definitive-no-call rule as the onboarding plan's demo-call budget (D11).
     - **Reserve every physical dispatch, not every logical call.** `ProviderRetryDeadlineWrapper`
       can send another attempt to the same provider after a timeout
@@ -1410,7 +1425,7 @@ flowchart LR
       - The reservation, and the ambiguous-failure charge, wrap each attempt inside the retry loop.
       - A failover hop reserves again at the fallback model's price.
     - A reservation carries a lease expiry. A crashed process can't say whether its call went out, so
-      an expired lease is charged at worst case and marked `unreconciled`; it is not released.
+      an expired lease is charged at worst case and marked `charged_unreconciled`; it is not released.
     - **Fail closed on unpriced models.** A worst-case reservation can't be computed without a price.
       U3 deliberately leaves unverified models unpriced (null, with a boot warning), and the default
       `gpt-4o-mini` is not in the built-in table.
@@ -1430,7 +1445,11 @@ flowchart LR
     least its true cost.
   - **Concurrency:** N requests start together just below the ceiling. Admitted reservations never
     exceed the cap, and every rejection is typed.
-  - **Unit:** an expired lease is charged at worst case and marked `unreconciled`.
+  - **Unit:** an expired lease is charged at worst case and marked `charged_unreconciled`. A usage
+    object that arrives later settles it once, with the difference.
+  - **Integration (unpriced, uncapped):** an uncapped tenant makes two unpriced attempts, one a
+    retry. After a price is added, repricing moves both rows to `settled` and adds both amounts to
+    `spent`. A second repricing changes nothing, and enabling a cap then counts that spend.
   - **Unit:** a definitive no-dispatch failure releases its reservation, and an ambiguous timeout keeps
     the worst-case charge.
   - **Unit:** a capped tenant's request to an unpriced model is rejected with a typed error.
