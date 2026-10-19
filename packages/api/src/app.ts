@@ -2645,7 +2645,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // `supervisor_annotate` ran 26,894 times and completed ZERO times, and
     // estimate executions terminal-failed for weeks with `execution_error`
     // NULL. This sweep reads `ai_runs` (non-completion rate per task_type over
-    // a settled window, behind a volume floor) and `proposals` (stuck in
+    // a settled window, behind a volume floor; OBS-4: the same rate per
+    // tenant AND task behind its own floor, so one tenant's outage is not
+    // diluted by healthy tenants, plus platform-wide window spend so a
+    // completing runaway loop pages) and `proposals` (stuck in
     // `executing`; `execution_failed` with no reason) every 10 minutes and
     // pages through the SAME alertOperator seam as the SLO monitor above —
     // Sentry error event always, owner-class operator SMS when ALERT_SMS_TO is
@@ -2673,6 +2676,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             failureMonitorRepo
               ? failureMonitorRepo.taskRunCounts(windowStart, windowEnd)
               : Promise.resolve([]),
+          getTenantTaskRunCounts: (windowStart, windowEnd) =>
+            failureMonitorRepo
+              ? failureMonitorRepo.tenantTaskRunCounts(windowStart, windowEnd)
+              : Promise.resolve([]),
           getProposalExecutionCounts: (stalledBefore, failedSince) =>
             failureMonitorRepo
               ? failureMonitorRepo.proposalExecutionCounts(stalledBefore, failedSince)
@@ -2691,6 +2698,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             maxTaskAlerts: config.FAILURE_MONITOR_MAX_TASK_ALERTS,
             proposalStaleMin: config.FAILURE_MONITOR_PROPOSAL_STALE_MIN,
             proposalLookbackHours: config.FAILURE_MONITOR_PROPOSAL_LOOKBACK_HOURS,
+            tenantMinRuns: config.FAILURE_MONITOR_TENANT_MIN_RUNS,
+            spendMaxCents: config.FAILURE_MONITOR_SPEND_MAX_CENTS,
           },
           logger: failureMonitorLogger,
         });
