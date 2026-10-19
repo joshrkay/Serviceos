@@ -15,7 +15,7 @@ import { defineConfig, devices } from '@playwright/test';
  *     npx playwright test -c e2e/onboarding-v3.config.ts
  *
  * Optional: E2E_V3_DATABASE_URL (default postgres://postgres:postgres@localhost:5432/serviceos_e2e),
- * E2E_V3_API_PORT (3011), E2E_V3_WEB_PORT (5176).
+ * E2E_V3_API_PORT (3011), E2E_V3_WEB_PORT (5176), E2E_V3_SERVER_TIMEOUT_MS (180000, the API's boot).
  *
  * Billing is hermetic (synthetic Stripe keys, no plan prices): the trial turn is
  * proven against the real routes' real answers, and a trial cannot be completed
@@ -26,6 +26,9 @@ const webPort = process.env.E2E_V3_WEB_PORT ?? '5176';
 const databaseUrl = process.env.E2E_V3_DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/serviceos_e2e';
 const apiURL = `http://127.0.0.1:${apiPort}`;
 const baseURL = `http://127.0.0.1:${webPort}`;
+// How long the API may take to migrate and boot. ts-node compiles the whole API on start, which takes minutes
+// on a loaded shared machine; E2E_V3_SERVER_TIMEOUT_MS raises it there without changing what CI waits for.
+const serverTimeout = Number(process.env.E2E_V3_SERVER_TIMEOUT_MS ?? 180_000);
 
 // Tells the spec it is on the stack it needs; it skips itself under any other config.
 process.env.E2E_ONBOARDING_V3_STACK = '1';
@@ -34,7 +37,7 @@ process.env.E2E_V3_API_URL = apiURL;
 
 export default defineConfig({
   testDir: './',
-  testMatch: ['onboarding-v3-ready-readback.spec.ts'],
+  testMatch: ['onboarding-v3-ready-readback.spec.ts', 'onboarding-v3-undo-reset.spec.ts'],
   fullyParallel: false,
   workers: 1,
   retries: 0,
@@ -58,7 +61,7 @@ export default defineConfig({
       cwd: '../',
       url: `${apiURL}/health`,
       reuseExistingServer: false,
-      timeout: 180_000,
+      timeout: serverTimeout,
       stdout: 'ignore',
       stderr: 'pipe',
       env: {
@@ -80,6 +83,9 @@ export default defineConfig({
         STRIPE_PRICE_ID: '',
         DATABASE_URL: databaseUrl,
         E2E_V3_DATABASE_URL: databaseUrl,
+        // The e2e database is a local Postgres with no TLS (CI sets the same at job level); without it the pool
+        // asks for SSL, every query fails while /health still answers, and the specs fail with no clear cause.
+        DB_SSL: process.env.DB_SSL ?? 'false',
       },
     },
     {
