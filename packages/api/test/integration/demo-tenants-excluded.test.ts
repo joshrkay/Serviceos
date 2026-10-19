@@ -240,7 +240,11 @@ describe('Postgres integration — demo tenants and the platform tenant are excl
     });
 
     it('re-applies idempotently: the whole corpus replays on the populated database', async () => {
-      expect(Object.keys(MIGRATIONS).at(-1)).toBe('317_demo_calls');
+      // 317 must run after 249 in the corpus (see the next test). It is no
+      // longer the last key: later migrations follow it in file order.
+      const keys = Object.keys(MIGRATIONS);
+      expect(keys).toContain('317_demo_calls');
+      expect(keys.indexOf('317_demo_calls')).toBeGreaterThan(keys.indexOf('249_backfill_owner_memberships'));
       await pool.query(getMigrationSQL());
       const { rowCount } = await pool.query(`SELECT 1 FROM tenants WHERE id = $1`, [DEMO_PLATFORM_TENANT_ID]);
       expect(rowCount).toBe(1);
