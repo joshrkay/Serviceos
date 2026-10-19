@@ -11,8 +11,18 @@ import { test, expect, type Page, type Request } from '@playwright/test';
  * answerable by tap, nothing raises an alert, each choice turn's lines go out
  * as one request of at most three clips, the next turn is asked for while the
  * current one is on screen and never two turns ahead, and a full pass is 21
- * clips. S3-6 extends this file with the dev-only fixture voice (audio that
- * really plays after the gesture) and the WebKit project.
+ * clips.
+ *
+ * S3-5 (Rivet listens) proves the listening half's degrade on the real routes:
+ * the lane has no transcription key, so whether the browser refuses the
+ * microphone (Playwright's default) or grants it (the fake device) and the real
+ * POST /api/voice/stream-token answers 503, the turn has no mic, no alert,
+ * the greeting keeps only "Tap one to hear it." (the listening half is never
+ * promised where nothing listens), and every turn is answered by tap. A live
+ * transcription run needs a Deepgram key and a microphone: a device run
+ * through the web verify skill (owner action). S3-6 extends this file with the
+ * dev-only fixture voice (audio that really plays after the gesture) and the
+ * WebKit project.
  *
  * Run: QA_CHROMIUM_PATH=... npx playwright test -c e2e/onboarding-v3.config.ts
  */
@@ -134,9 +144,11 @@ for (const vp of viewports) {
       for (let i = 0; i < QUESTIONS.length; i += 1) {
         await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[i] })).toBeVisible();
         if (i === 0) {
-          // The greeting tells the owner a tap plays the option; nothing listens yet (S3-5).
-          await expect(page.getByText('Tap one to hear it.')).toBeVisible();
+          // The greeting tells the owner a tap plays the option. Nothing listens in this keyless lane
+          // (the browser refuses the microphone), so the line never says to say "first" or "second".
+          await expect(page.getByText('Tap one to hear it.', { exact: true })).toBeVisible();
           await expect(page.getByText(/say "first"/i)).toHaveCount(0);
+          await expect(page.getByRole('button', { name: 'Answer out loud' })).toHaveCount(0);
         }
         // Whatever the voice route answered, the turn is all there: two cards, Next, no alert.
         await expect(page.getByRole('radio')).toHaveCount(2);
@@ -169,3 +181,82 @@ for (const vp of viewports) {
     });
   });
 }
+
+/** Answer What-should-I-answer-as and land on Ready. */
+async function startShop(page: Page): Promise<void> {
+  await page.goto('/onboarding');
+  await expect(page.getByRole('heading', { level: 1, name: 'What should I answer as?' })).toBeVisible();
+  await page.getByLabel('Business name').fill('Walsh Plumbing');
+  await page.getByRole('button', { name: 'Plumbing' }).click();
+  await page.getByLabel('Your cell').fill('(216) 555-0142');
+  await page.getByRole('button', { name: 'Show me my shop' }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Walsh Plumbing is already set up.' })).toBeVisible();
+}
+
+/** Every request the shell makes for a live-transcription token, with the real API's answer. */
+function recordTokenMints(page: Page): Array<{ status?: number }> {
+  const mints: Array<{ status?: number }> = [];
+  const byRequest = new Map<Request, { status?: number }>();
+  page.on('request', (req) => {
+    if (!new URL(req.url()).pathname.startsWith('/api/voice/stream-token')) return;
+    const mint = {};
+    mints.push(mint);
+    byRequest.set(req, mint);
+  });
+  page.on('response', (res) => {
+    const mint = byRequest.get(res.request());
+    if (mint) mint.status = res.status();
+  });
+  return mints;
+}
+
+async function answerEveryTurnByTap(page: Page): Promise<void> {
+  for (let i = 0; i < QUESTIONS.length; i += 1) {
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[i] })).toBeVisible();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Answer out loud' })).toHaveCount(0);
+    if (i === 0) await expect(page.getByText('Tap one to hear it.', { exact: true })).toBeVisible();
+    await expectScreenFits(page);
+    await page.getByRole('radio').first().click();
+    const saved = page.waitForResponse((r) => r.url().includes('/api/onboarding/draft/choices/') && r.request().method() === 'PUT');
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    expect((await saved).status()).toBe(200);
+  }
+  await expect(page.getByRole('heading', { level: 1, name: READBACK_HEADING })).toBeVisible();
+}
+
+test.describe('v3 listening, where nothing can listen (S3-5) at 320x568', () => {
+  test.use({ viewport: { width: 320, height: 568 } });
+
+  test('a refused microphone: no mic, no alert, no token asked for, and all seven turns by tap', async ({ page }) => {
+    test.setTimeout(90_000);
+    await signInAsFreshOwner(page, 'mic_refused');
+    const mints = recordTokenMints(page);
+    await startShop(page);
+    await expect(page.getByText('Tap the one that sounds right, or say "first" or "second".', { exact: false })).toBeVisible();
+    await page.getByRole('button', { name: 'Make it mine, 7 choices' }).click();
+    await answerEveryTurnByTap(page);
+    expect(mints).toEqual([]);
+  });
+});
+
+test.describe('v3 listening, microphone granted, no transcription on the server (S3-5) at 320x568', () => {
+  // The lane's Chromium runs with a fake microphone device (e2e/onboarding-v3.config.ts); granting the
+  // permission is what lets the page open it.
+  test.use({ viewport: { width: 320, height: 568 }, permissions: ['microphone'] });
+
+  test('the real token route answers 503, the mic goes away with no alert, and every turn is still a tap', async ({ page, browserName }) => {
+    test.skip(browserName !== 'chromium', 'The fake microphone device is a Chromium flag');
+    test.setTimeout(90_000);
+    await signInAsFreshOwner(page, 'no_transcription');
+    const mints = recordTokenMints(page);
+    await startShop(page);
+    await page.getByRole('button', { name: 'Make it mine, 7 choices' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[0] })).toBeVisible();
+    // One mint for the pass: the real route has no key here and says so (503); nothing asks again.
+    await expect.poll(() => mints.map((m) => m.status)).toEqual([503]);
+    await answerEveryTurnByTap(page);
+    expect(mints.map((m) => m.status)).toEqual([503]);
+  });
+});
+

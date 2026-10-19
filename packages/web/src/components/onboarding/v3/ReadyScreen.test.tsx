@@ -1,15 +1,41 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ReactNode } from 'react';
+import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
 import { plumbingCleDraft, withDraft } from './__fixtures__';
 import { ReadyScreen } from './ReadyScreen';
 
-function setup(draft = plumbingCleDraft) {
+vi.mock('../../../lib/analytics', () => ({ trackFunnel: vi.fn(), track: vi.fn() }));
+
+/** The shell's real voice; jsdom has no microphone unless a test gives it one. */
+function Shell({ children }: { children: ReactNode }) {
+  const voice = useRivetVoice({ funnel: { tenantId: 't', userId: 'u' } });
+  return <RivetVoiceContext.Provider value={voice}>{children}</RivetVoiceContext.Provider>;
+}
+
+function setup(draft = plumbingCleDraft, opts: { inShell?: boolean } = {}) {
   const onMakeItMine = vi.fn();
   const onKeepAsIs = vi.fn();
-  render(<ReadyScreen draft={draft} onMakeItMine={onMakeItMine} onKeepAsIs={onKeepAsIs} />);
+  const screenEl = <ReadyScreen draft={draft} onMakeItMine={onMakeItMine} onKeepAsIs={onKeepAsIs} />;
+  render(opts.inShell ? <Shell>{screenEl}</Shell> : screenEl);
   return { onMakeItMine, onKeepAsIs };
 }
+
+/** A browser that can listen: a microphone, a recorder and a socket exist. */
+function withMicrophone() {
+  vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia: vi.fn() } });
+  vi.stubGlobal('MediaRecorder', class {});
+  vi.stubGlobal('WebSocket', class {});
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 501 })));
+  vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve());
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe('ReadyScreen', () => {
   it('says the shop is already set up, in Rivet’s first person', () => {
@@ -20,11 +46,17 @@ describe('ReadyScreen', () => {
     ).toBeInTheDocument();
   });
 
-  it('only promises what the shell can do: Rivet speaks (S3-3), but nothing listens yet', () => {
-    // Hearing is wired; listening is S3-5. Until the mic is, the copy must not
-    // tell the owner to say "first" or "second", or that they can say "neither".
+  it('in the shell, on a browser that can listen, says the owner can tap or say "first" or "second"', () => {
+    withMicrophone();
+    setup(plumbingCleDraft, { inShell: true });
+    expect(
+      screen.getByText('Each choice is two options. Tap the one that sounds right, or say "first" or "second". Nothing is saved until you say so.'),
+    ).toBeInTheDocument();
+  });
+
+  it('promises only the tap where nothing can listen: outside the shell, or a browser with no microphone', () => {
     setup();
-    expect(screen.getByText(/Tap the one that sounds right\. Nothing is saved until you say so\./)).toBeInTheDocument();
+    expect(screen.getByText('Each choice is two options. Tap the one that sounds right. Nothing is saved until you say so.')).toBeInTheDocument();
     expect(screen.queryByText(/say .?first|say .?second|say .?neither/i)).not.toBeInTheDocument();
   });
 

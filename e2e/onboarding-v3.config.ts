@@ -48,7 +48,13 @@ export default defineConfig({
     screenshot: 'only-on-failure',
     actionTimeout: 10_000,
     navigationTimeout: 20_000,
-    ...(process.env.QA_CHROMIUM_PATH ? { launchOptions: { executablePath: process.env.QA_CHROMIUM_PATH } } : {}),
+    launchOptions: {
+      ...(process.env.QA_CHROMIUM_PATH ? { executablePath: process.env.QA_CHROMIUM_PATH } : {}),
+      // A fake microphone, so a test that grants the permission can open one (S3-5). A test that does not
+      // grant it is refused, as an owner who taps "Don't allow" is: headless Chromium would otherwise leave
+      // the prompt unanswered forever, which no owner can do to a visible prompt.
+      args: ['--use-fake-device-for-media-stream', '--deny-permission-prompts'],
+    },
   },
   projects: [{ name: 'onboarding-v3' }],
   webServer: [
@@ -78,6 +84,9 @@ export default defineConfig({
         STRIPE_STARTER_PRICE_ID: '',
         STRIPE_GROWTH_PRICE_ID: '',
         STRIPE_PRICE_ID: '',
+        // No live transcription in the lane (blanked so a developer's own key cannot open a real socket):
+        // POST /api/voice/stream-token answers 503 and the shell's tap-only path is what is proven.
+        DEEPGRAM_API_KEY: '',
         DATABASE_URL: databaseUrl,
         E2E_V3_DATABASE_URL: databaseUrl,
       },

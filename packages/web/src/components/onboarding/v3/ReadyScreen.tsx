@@ -1,5 +1,5 @@
 import type { OnboardingDraft } from '@ai-service-os/shared';
-import { useRivetLine } from '../../../hooks/useRivetVoice';
+import { useRivetCanListen, useRivetLine } from '../../../hooks/useRivetVoice';
 import { Button } from '../../ui';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
 import { CHOICE_COUNT, readyRows, typicalShopPhrase } from './summarize';
@@ -17,6 +17,7 @@ export function ReadyScreen({ draft, onMakeItMine, onKeepAsIs }: ReadyScreenProp
   const rows = readyRows(draft);
   const opener = `${draft.businessName} is already set up.`;
   useRivetLine('ready', opener);
+  const canListen = useRivetCanListen();
   return (
     <>
       <SpeakerLine />
@@ -43,7 +44,9 @@ export function ReadyScreen({ draft, onMakeItMine, onKeepAsIs }: ReadyScreenProp
       </ul>
 
       <p className="mt-3.5 text-sm leading-[1.45] text-muted-foreground">
-        Each choice is two options. Tap the one that sounds right. Nothing is saved until you say so.
+        {canListen
+          ? 'Each choice is two options. Tap the one that sounds right, or say "first" or "second". Nothing is saved until you say so.'
+          : 'Each choice is two options. Tap the one that sounds right. Nothing is saved until you say so.'}
       </p>
 
       <div className="min-h-6 flex-1" />
