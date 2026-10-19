@@ -16,6 +16,9 @@ export const es: Record<keyof EnglishNotifications, string> = {
   'sms.invoice.amount': 'Factura {{number}}: {{total}}',
   'sms.invoice.due': 'Vence {{date}}',
   'sms.invoice.cta': 'Pague en línea: {{url}}',
+  'sms.invoice.cta_view': 'Vea su factura: {{url}}',
+  'sms.invoice.collect_on_site':
+    '{{business}} cobra en persona. Liquide el pago cuando el trabajo esté terminado.',
 
   // ── Appointment SMS ──────────────────────────────────────────────────
   'sms.appointment.confirm.line1':
@@ -78,6 +81,10 @@ export const es: Record<keyof EnglishNotifications, string> = {
   'email.invoice.number': 'Número de factura: {{number}}',
   'email.invoice.cta_text': 'Pague en línea aquí: {{url}}',
   'email.invoice.button': 'Pagar factura en línea',
+  'email.invoice.cta_view_text': 'Vea su factura aquí: {{url}}',
+  'email.invoice.button_view': 'Ver factura',
+  'email.invoice.collect_on_site':
+    '{{business}} cobra en persona. Liquide el pago cuando el trabajo esté terminado.',
 
   // ── Transactional email subjects ─────────────────────────────────────
   'email.payment_receipt.subject': 'Pago recibido — {{business}}',

@@ -28,7 +28,12 @@ import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
 import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
+import {
+  createLiveRealtimeCalls,
+  SHUTDOWN_HAND_OFF_TIMEOUT_MS,
+} from './telephony/media-streams/live-realtime-calls';
 import { createTwilioCallRedirector } from './telephony/twilio-call-redirect';
+import { createVoicemailRedelivery } from './telephony/voicemail-redelivery';
 import { createRecordingTranscriptHook } from './telephony/recording-transcript-hook';
 import { RealtimeHealthCircuit } from './telephony/realtime-health-circuit';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
@@ -284,6 +289,7 @@ import { createVoicePersonaResolver } from './settings/voice-persona-resolver';
 // Postgres-backed repositories (production)
 import { PgAuditRepository } from './audit/pg-audit';
 import { ForwardingAuditRepository } from './audit/forwarding-audit-repository';
+import { createHiddenTenantCheck } from './demo/hidden-tenant';
 import { recordApiError } from './analytics/posthog';
 import { runCallMeBackSweep } from './workers/call-me-back-worker';
 import { createInflightSweeps } from './workers/inflight-sweeps';
@@ -543,6 +549,10 @@ import {
 } from './workers/dropped-call-worker';
 import { PgConversationLinkRepository } from './conversations/pg-conversation-link';
 import { TwilioRecordingControl } from './telephony/recording-control';
+import {
+  TwilioRecordingApiDeleter,
+  createTwilioCopyRemover,
+} from './telephony/twilio-recording-deleter';
 // RV-050 — inbound MMS photo ingestion from registered tech phones.
 // P0-009: the webhook seam enqueues; the worker runs the pipeline.
 import {
@@ -1154,6 +1164,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // POSTHOG_API_KEY is set, and it can never break a mutation.
   const webhookAuditRepo = new ForwardingAuditRepository(
     pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository(),
+    // U7: demo-pool and platform tenants never reach product analytics.
+    pool ? { isHiddenTenant: createHiddenTenantCheck(pool) } : {},
   );
   // Blocker 1 — durable idempotency store for the Stripe/Clerk dedup path
   // (handleWebhookEvent). Postgres-backed in real deploys; left undefined
@@ -1631,6 +1643,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         customerRepo,
         settingsRepo,
         dispatchRepo,
+        // S5a-1 (U8) — audits `invoice.payment_mode_unavailable` when a
+        // send goes out fail-closed (no pay CTA) because the policy read failed.
+        auditRepo,
         publicBaseUrl,
       })
     : undefined;
@@ -1763,6 +1778,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // is not retained (no plaintext PII at rest).
       rawTranscriptEncryptionKey:
         process.env.TRANSCRIPT_ENCRYPTION_KEY ?? process.env.TENANT_ENCRYPTION_KEY,
+      // PRIV-3 — audits the card-number flag on a transcribed recording.
+      auditRepo,
     }
   );
 
@@ -3426,6 +3443,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/public-payments',
     createPublicPaymentsRouter({
       invoiceRepo,
+      // S5a-1 (U8) — the PaymentIntent mint honours payment_collection_mode.
+      settingsRepo,
+      auditRepo,
       stripeConfig: process.env.STRIPE_SECRET_KEY
         ? { apiKey: process.env.STRIPE_SECRET_KEY }
         : null,
@@ -3555,6 +3575,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     transport: voiceEventTransport,
     callTranscriptTurnRepo,
   });
+  // LCR-04 — voicemail recording callbacks that arrive while the database is
+  // down are re-POSTed (exactly as Twilio signed them) until acknowledged:
+  // Twilio itself never redelivers a 5xx recording callback.
+  const voicemailRedelivery = createVoicemailRedelivery();
+  // LCR-05 — the live realtime call legs on this process (filled by the
+  // media-stream server below), so runShutdown can hand them to the next
+  // process instead of hanging up. Empty when media streams are off.
+  const liveRealtimeCalls = createLiveRealtimeCalls();
   // F6b: Process-local whisper TwiML cache. Shared between:
   //   - whisperRouter (serves TwiML to Twilio when dispatcher answers)
   //   - MediaStreamAdapter (stores whisper text after escalation_started)
@@ -4338,6 +4366,32 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     onAccepted: transferScreenHooks.onAccepted,
   });
 
+  // PRIV-2 — the Twilio-hosted copy of each recording is deleted once our
+  // storage and our row hold it (recording webhook, voicemail route) and
+  // retried by the retention sweep. Same platform credentials that fetch the
+  // recording; the DELETE is built from the recording's own (subaccount) URL.
+  const twilioRecordingDeleter =
+    process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
+      ? new TwilioRecordingApiDeleter(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+      : undefined;
+  const twilioCopyRemoverFor = (actorId: string) =>
+    twilioRecordingDeleter && pool
+      ? createTwilioCopyRemover(
+          {
+            deleter: twilioRecordingDeleter,
+            repo: new PgRecordingRetentionRepository(pool),
+            auditRepo,
+            logger: createLogger({
+              service: 'twilio-recording-copy',
+              environment: process.env.NODE_ENV || 'development',
+            }),
+          },
+          actorId,
+        )
+      : undefined;
+  const recordingTwilioCopyRemover = twilioCopyRemoverFor('recording_webhook');
+  const voicemailTwilioCopyRemover = twilioCopyRemoverFor('voicemail_webhook');
+
   app.use(
     '/api/telephony',
     createTelephonyRouter({
@@ -4385,6 +4439,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           onPersisted: createRecordingTranscriptHook({
             store: voiceSessionStore,
             callTranscriptTurnRepo,
+            voiceRepo,
             auditRepo,
             ...(embeddingProvider ? { queue } : {}),
             logger: createLogger({
@@ -4392,6 +4447,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
               environment: process.env.NODE_ENV || 'development',
             }),
           }),
+          ...(recordingTwilioCopyRemover ? { twilioCopyRemover: recordingTwilioCopyRemover } : {}),
         },
       },
       // U9 (voicemail → action) — replay-receipt store for the lead leg plus
@@ -4399,6 +4455,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // storage/Twilio-cred deps are shared with `recording` above.
       voicemail: {
         webhookEventRepo,
+        redelivery: voicemailRedelivery,
         options: {
           onVoicemailPersisted: async (event) => {
             // Enqueue on EVERY invocation, including event.inserted=false
@@ -4425,6 +4482,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
               `${event.tenantId}:${event.voiceRecordingId}:transcription:voicemail`,
             );
           },
+          ...(voicemailTwilioCopyRemover ? { twilioCopyRemover: voicemailTwilioCopyRemover } : {}),
         },
       },
       // WS3 — per-tenant staged rollout of the realtime path (default ON) and
@@ -4836,6 +4894,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             store: voiceSessionStore,
             connectionRegistry,
             streamingProvider,
+            liveCalls: liveRealtimeCalls,
             // WS3 — feed the shared realtime health circuit (the /voice branch
             // reads it) and emit the alertable resilience audit events
             // (session_failed / disclosure.init_failed).
@@ -6434,6 +6493,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           storage: storageProvider,
           auditRepo,
           logger: recordingRetentionLogger,
+          ...(twilioRecordingDeleter ? { twilioRecordingDeleter } : {}),
         });
       }).catch((err) => {
         recordingRetentionLogger.error('Recording-retention sweep failed', {
@@ -7848,6 +7908,25 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // index.ts's force-exit and Railway's stop grace period; calls still live
       // at the deadline are closed by the teardown below (Twilio ends the call).
       const drainDeadline = Date.now() + (Number(process.env.DRAIN_TIMEOUT_MS) || 25_000);
+      // LCR-05 — a call's session lives only in this process, and a realtime
+      // call has no next webhook: left alone it is hung up at the teardown
+      // below. So first move every live realtime call to the Gather fallback
+      // (REST redirect to /voice/gather-fallback). index.ts has already stopped
+      // this server accepting connections, so the redirected request reaches
+      // the new deployment, which starts the call over as a fresh disclosed
+      // session. Each handed-off session is marked ended here, so the drain
+      // below only waits for what is left. Runs inside the drain window (its
+      // bound comes out of the same deadline), so it adds nothing to the
+      // force-exit budget. No redirector (PUBLIC_API_URL unset) → every
+      // hand-off is refused and the drain behaves as before.
+      if (liveRealtimeCalls.size() > 0) {
+        const handOff = await liveRealtimeCalls.handOffAll({
+          timeoutMs: Math.max(0, Math.min(SHUTDOWN_HAND_OFF_TIMEOUT_MS, drainDeadline - Date.now())),
+        });
+        console.log(
+          `[app] handed ${handOff.handedOff} of ${handOff.attempted} live realtime call(s) to the next process`,
+        );
+      }
       while (voiceSessionStore.liveCount() > 0 && Date.now() < drainDeadline) {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
@@ -7869,6 +7948,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
+      // LCR-04 — stop redelivery timers; anything still queued is logged by
+      // RecordingSid (process-local: there is no store to hand it to).
+      voicemailRedelivery.stop();
       // Flush any queued PostHog server-side funnel events before the
       // process exits so Railway shutdown doesn't drop in-flight
       // signup/trial/conversion captures.
