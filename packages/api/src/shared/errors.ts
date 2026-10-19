@@ -102,3 +102,17 @@ export function toErrorResponse(err: unknown): { statusCode: number; body: Recor
     },
   };
 }
+
+/**
+ * S5a-1 (U8) — a dependency the request needs is not answering right now and
+ * the caller may retry. Distinct from a policy refusal (409): the client is
+ * told to come back, not that the action is forbidden. `code` is caller-
+ * supplied so a surface can name WHICH dependency (e.g.
+ * `PAYMENT_MODE_UNAVAILABLE`) without a class per dependency.
+ */
+export class ServiceUnavailableError extends AppError {
+  constructor(message: string, code: string = 'SERVICE_UNAVAILABLE') {
+    super(code, message, 503);
+    this.name = 'ServiceUnavailableError';
+  }
+}

@@ -117,7 +117,9 @@ const OWNER_REQUIRED_DAILY_WEB_ACTIONS = 1;
 // one-time, the owner's own cell on the setup draft.
 // U9x (S1 follow-ups): +1 onboarding — POST /api/onboarding/draft/retry, the
 // setup surface's "Something didn't save. Try again." after a failed execution.
-const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 13;
+// U5 metro (slice S4): +1 onboarding — PUT /api/onboarding/draft/metro, the
+// Ready screen's "Not Cleveland?" re-price before any choice is staged.
+const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 14;
 // #1386: +2 (PUT/DELETE /api/settings/e1-script — occasional, reviewed E1 script).
 // #1402 §13: +1 (POST /api/users/:id/deactivate — occasional, offboarding).
 // #1563: +1 (POST /api/onboarding/phone/change — occasional, Settings → Phone).
@@ -126,7 +128,8 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 13;
 // Hardening: +7 occasional (QuickBooks connect/disconnect/sync + Google
 // Business connect/delete now require settings:update; operator-hours PUT +
 // phone/retry now require owner — previously open to any member).
-const OWNER_ONLY_ROUTES = 78;
+// "Pick, don't build" S4: +1 onboarding (PUT /api/onboarding/draft/metro).
+const OWNER_ONLY_ROUTES = 79;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 
