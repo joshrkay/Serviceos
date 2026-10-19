@@ -128,7 +128,7 @@ describe('gateway.complete() — per-call cost accounting', () => {
     const gateway = makeGateway(providers, {}, aiRunRepo);
 
     const response = await gateway.complete(
-      makeRequest({ model: 'gpt-4o-mini', tenantId: 'tenant-1', taskType: 'summarize_conversation' })
+      makeRequest({ model: 'totally-unknown-model', tenantId: 'tenant-1', taskType: 'summarize_conversation' })
     );
 
     expect(response.costMicroCents).toBeNull();
@@ -137,7 +137,7 @@ describe('gateway.complete() — per-call cost accounting', () => {
     expect(runs[0].costMicroCents).toBeNull();
 
     const value = await gatewayRequestCostMicroCentsTotal.get();
-    const sample = value.values.find((v) => v.labels.model === 'gpt-4o-mini');
+    const sample = value.values.find((v) => v.labels.model === 'totally-unknown-model');
     expect(sample).toBeUndefined();
   });
 

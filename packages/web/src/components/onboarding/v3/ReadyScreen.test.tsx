@@ -1,5 +1,8 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ReactNode } from 'react';
+import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
 import { describe, expect, it, vi } from 'vitest';
 import { ONBOARDING_METROS } from '@ai-service-os/shared';
 import { expectAllTapTargets } from '../../../test-utils/tap-target';
@@ -16,6 +19,21 @@ function setup(draft = plumbingCleDraft, over: Partial<ReadyScreenProps> = {}) {
   return { onMakeItMine, onKeepAsIs, onChangeMetro, container: view.container };
 }
 
+/** A browser that can listen: a microphone, a recorder and a socket exist. */
+function withMicrophone() {
+  vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia: vi.fn() } });
+  vi.stubGlobal('MediaRecorder', class {});
+  vi.stubGlobal('WebSocket', class {});
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 501 })));
+  vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve());
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
 describe('ReadyScreen', () => {
   it('says the shop is already set up, in Rivet’s first person', () => {
     setup();
@@ -25,12 +43,18 @@ describe('ReadyScreen', () => {
     ).toBeInTheDocument();
   });
 
-  it('only promises what this screen can do: tap, not speech', () => {
-    // Voice in and out is a later slice. Until it is wired, the copy must not
-    // tell the owner to say "first" or "second", or that they can say "neither".
+  it('in the shell, on a browser that can listen, says the owner can tap or say "first" or "second"', () => {
+    withMicrophone();
+    setup(plumbingCleDraft, { inShell: true });
+    expect(
+      screen.getByText('Each choice is two options. Tap the one that sounds right, or say "first" or "second". Nothing is saved until you say so.'),
+    ).toBeInTheDocument();
+  });
+
+  it('promises only the tap where nothing can listen: outside the shell, or a browser with no microphone', () => {
     setup();
-    expect(screen.getByText(/Tap the one that sounds right\. Nothing is saved until you say so\./)).toBeInTheDocument();
-    expect(screen.queryByText(/say .?first|say .?second|say .?neither|tap to hear/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Each choice is two options. Tap the one that sounds right. Nothing is saved until you say so.')).toBeInTheDocument();
+    expect(screen.queryByText(/say .?first|say .?second|say .?neither/i)).not.toBeInTheDocument();
   });
 
   it('shows the finished shop from the assembled draft, with Most shops marks', () => {

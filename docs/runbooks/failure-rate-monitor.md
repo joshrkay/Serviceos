@@ -60,6 +60,64 @@ benign version, so one row breaches. Severity is `warning` rather than
 `critical` because the work has already failed — what this page buys is the
 diagnosability that was missing, not a live outage response.
 
+### 4. `ai_task_failure_rate:<task_type>:<tenant_id>` — critical (OBS-4)
+
+Rule 1 is a cross-tenant aggregate. One tenant whose every classify is
+rejected by its quota bucket is diluted by healthy tenants' traffic and never
+breaches rule 1 unless that tenant is more than `FAILURE_MONITOR_RATE_MAX` of
+platform volume. This rule is the same non-completion rate over the same
+settled window, grouped by **tenant and task**, behind its own floor
+`FAILURE_MONITOR_TENANT_MIN_RUNS` (default 10 — lower than the platform floor
+because one tenant's volume is a fraction of the platform's).
+
+When rule 1 already breaches for a task type, the per-tenant breaches of that
+task are **subsumed**: logged, not paged. The platform page is the
+self-explaining one, and a platform outage must not fan out into one page per
+tenant. Per-tenant pages have their own per-tick cap of
+`FAILURE_MONITOR_MAX_TASK_ALERTS`, worst rate first, and their cooldown is
+keyed per tenant **and** task.
+
+### 5. `ai_spend_window` — critical (OBS-4)
+
+Platform-wide `SUM(ai_runs.cost_micro_cents)` over the same settled window,
+compared against `FAILURE_MONITOR_SPEND_MAX_CENTS` (integer cents; default 200;
+0 turns the rule off). A sweep that regresses into re-calling the model in a
+loop but **completing** every call — the supervisor_annotate storm shape,
+succeeding — keeps every failure-rate rule at 0%; only the bill moves. The page
+names the top three tenants and task types by spend. Unpriced runs (an unknown
+model price, `cost_micro_cents` NULL) count 0, so the rule can under-count but
+never fabricate. It keys on the cross-tenant total because per-tenant spend is
+already bounded by the gateway's quota buckets; a loop that fans out across
+tenants is not.
+
+### 6. `ai_spend_unpriced` — warning (OBS-4)
+
+Rule 5 can only see priced runs. A model with no entry in
+`DEFAULT_MODEL_PRICING` (`packages/api/src/ai/gateway/model-pricing.ts`) or
+`AI_MODEL_PRICING_JSON` stores `cost_micro_cents` NULL, which sums as 0 — so a
+production profile running on an unpriced model makes rule 5 read 0 forever.
+This rule pages a **warning** when, over the same window, at least
+`FAILURE_MONITOR_MIN_RUNS` completed runs carry no price **and** they are more
+than 10% of all completed runs. Only rows the priced gateway path wrote
+(`created_by = 'gateway'`) can count as unpriced: the supervisor review
+wrapper row (`created_by = 'system'`) and a cache hit (`'gateway-cache'`)
+never carry a cost and are not an unpriced model. The page names the task
+types with the most unpriced runs (not the model names; the triage query below
+and the gateway's boot warning "AI primary model(s) have no price" name the
+model). It is off whenever rule 5 is off.
+
+**Production prerequisite.** OpenAI models are deliberately unpriced by default
+(GATEWAY-04, #1699: no hard-coded vendor prices), so the Profile A deploy
+(gpt-4o-mini / gpt-4o) records no spend, rule 5 reads 0 and this rule keeps
+firing (once per `SLO_ALERT_COOLDOWN_MIN`) until ops set, in Railway:
+
+```
+AI_MODEL_PRICING_JSON={"gpt-4o-mini":{"inputCentsPerMillionTokens":15,"outputCentsPerMillionTokens":60},"gpt-4o":{"inputCentsPerMillionTokens":250,"outputCentsPerMillionTokens":1000}}
+```
+
+(OpenAI list prices, integer cents per 1M tokens: $0.15 / $0.60 and
+$2.50 / $10.00. Update the JSON when the provider's price changes.)
+
 ## How it reaches a human
 
 The **same `alertOperator` seam the SLO monitor uses**
@@ -74,8 +132,12 @@ The **same `alertOperator` seam the SLO monitor uses**
 Both monitors share one `alertOperator` instance, so they also share its
 per-rule cooldown (`SLO_ALERT_COOLDOWN_MIN`, default 60 min). The task-failure
 rule keys its cooldown **per task type**
-(`ai_task_failure_rate:supervisor_annotate`), so one noisy task cannot mask
-another.
+(`ai_task_failure_rate:supervisor_annotate`), and the per-tenant rule per task
+**and** tenant (`ai_task_failure_rate:classify_intent:<tenant_id>`), so one
+noisy task or tenant cannot mask another. The tenant id is only in the
+cooldown key and the page text: `slo_alerts_sent_total` counts a per-tenant
+page under the bounded label `rule="ai_task_failure_rate_tenant:<task_type>"`,
+so no tenant id is ever written into a metric series.
 
 ## Why it cannot become the incident
 
@@ -120,6 +182,50 @@ GROUP BY 1, 2 ORDER BY 3 DESC;
 strings. If another task type is also breaching at higher volume, that one is
 probably the cause and this one is collateral; fix the noisy one first.
 
+**`ai_task_failure_rate:<task>:<tenant_id>`** — one tenant is failing. Read the
+end of the summary (and `details.platformRate`) before deciding the rest of the
+platform is fine: "below threshold" means the platform rule judged this task
+and it is healthy for everyone else; "not judged" means the task had too few
+runs platform-wide to judge (often this tenant is its only traffic) or the
+platform read failed — the task may be broken for every tenant, so run the
+platform query above too. Then check `error_message` for that tenant's runs: quota / token-budget
+strings mean the tenant has outgrown the standard classify bucket (every
+tenant currently gets `classifier_standard` — concurrency 2 — because nothing
+sets `tenantTier`); anything else is specific to that tenant's data or
+configuration.
+
+```sql
+SELECT task_type, status, LEFT(error_message, 60) AS error, COUNT(*)
+FROM ai_runs
+WHERE tenant_id = '<tenant_id>' AND created_at > NOW() - INTERVAL '1 hour'
+GROUP BY 1, 2, 3 ORDER BY 4 DESC;
+```
+
+**`ai_spend_window`** — the alert details name the top tenants and task types.
+A single task type carrying almost all of the spend at 100% completion is a
+loop; find the caller that re-enqueues on success. Spend is per settled window,
+so compare against the same window a day earlier before deciding it is growth:
+
+```sql
+SELECT task_type, COUNT(*), SUM(cost_micro_cents) / 1000000.0 AS cents
+FROM ai_runs
+WHERE created_at > NOW() - INTERVAL '35 minutes'
+GROUP BY 1 ORDER BY 3 DESC NULLS LAST;
+```
+
+**`ai_spend_unpriced`** — the spend rule is blind, not the platform broken.
+Find the model that is serving without a price and add it to
+`DEFAULT_MODEL_PRICING` (a deploy) or `AI_MODEL_PRICING_JSON` (no deploy):
+
+```sql
+SELECT model, task_type, COUNT(*)
+FROM ai_runs
+WHERE created_at > NOW() - INTERVAL '35 minutes'
+  AND status = 'completed' AND cost_micro_cents IS NULL
+  AND created_by = 'gateway'
+GROUP BY 1, 2 ORDER BY 3 DESC;
+```
+
 **`proposal_execution_stalled`** — the sample ids are in the alert details.
 Check the execution worker is alive and the queue is draining
 (`queue_staleness` in [`slo-alerts.md`](./slo-alerts.md) covers the queue side).
@@ -134,4 +240,14 @@ All knobs are env vars with defaults (`packages/api/src/shared/config.ts`,
 documented in `.env.production.example`). Raise `FAILURE_MONITOR_MIN_RUNS` if a
 low-traffic task pages on small denominators; raise `FAILURE_MONITOR_RATE_MAX`
 only with a recorded reason — healthy task types sit near 0, and the incidents
-this exists for were 0.85 and 1.00.
+this exists for were 0.85 and 1.00. Raise `FAILURE_MONITOR_TENANT_MIN_RUNS` if a
+small tenant pages on a handful of calls. `FAILURE_MONITOR_SPEND_MAX_CENTS`
+defaults to 200 cents per window, derived from the quota buckets: one tenant
+driven to its `standard` + `classifier_standard` ceiling for a 30-minute window
+spends about 3.55M tokens, roughly 53 cents on gpt-4o-mini (priced through
+`AI_MODEL_PRICING_JSON`, rule 6), so the default
+pages when about four tenants are saturated at once. That is the cross-tenant
+loop this rule exists for, at today's tenant count. If normal busy-half-hour
+spend approaches 200 cents as tenants grow, raise it to roughly three times
+that spend. 0 turns the spend rule off, which also stops the
+`ai_spend_window_micro_cents` gauge updating.

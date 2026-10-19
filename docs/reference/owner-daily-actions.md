@@ -94,12 +94,12 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **79** |
+| Owner-only routes in code | **81** |
 | `cadence: daily` | **2** |
-| `cadence: onboarding` | **14** |
+| `cadence: onboarding` | **16** |
 | `cadence: occasional` | **63** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
-| `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **14** |
+| `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **16** |
 
 A PR that raises `ownerRequiredDailyWebActions` has to edit the number in the
 contract test, which is the point: adding an owner-only, non-SMS-reachable
@@ -109,12 +109,12 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 79,
+  "ownerOnlyRoutes": 81,
   "daily": 2,
-  "onboarding": 14,
+  "onboarding": 16,
   "occasional": 63,
   "ownerRequiredDailyWebActions": 1,
-  "ownerRequiredOnboardingWebActions": 14
+  "ownerRequiredOnboardingWebActions": 16
 }
 ```
 
@@ -139,6 +139,8 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `PUT /api/onboarding/draft/owner-phone` | onboarding | Adds or changes the owner's cell on the setup draft (compare-and-swap on version); it is the number emergency calls ring and approval carries to settings. | false | none | Reviewed: one-time activation; the number is typed on the setup surface, nothing reaches settings until the read-back is approved, and SMS cannot be the channel for the number that SMS identity is later checked against. |
 | `PUT /api/onboarding/draft/metro` | onboarding | "Not Cleveland?" on the setup Ready screen: re-prices the unapproved draft for another curated metro (compare-and-swap on version), refused once any choice is staged so the prices the owner already picked from never change under them. | false | none | Reviewed: one-time activation; a city pick from a list on the setup surface before any choice is made, nothing reaches settings until the read-back is approved, and SMS has no setup-draft context to change it from. |
 | `POST /api/onboarding/draft/retry` | onboarding | Re-queues only the setup proposals whose execution failed after "That's right", so the owner is not stuck waiting on a save that will never finish. | false | none | Reviewed: one-time activation recovery on the setup surface's own "Something didn't save. Try again." action; it re-approves the owner's own already-approved proposals through the normal undo window and execution worker, and SMS has no setup-draft context to retry from. |
+| `POST /api/onboarding/draft/undo` | onboarding | Undo on the setup saving screen: inside the undo window, takes back the whole "That's right" approval at once (every setup proposal back from approved, the draft editable again with the answers kept), refused for a stale tab's version or once any part is past its window. | false | none | Reviewed: one-time activation recovery on the setup surface's own Undo, shown only for the few seconds the save can still be taken back; SMS has no setup-draft context and could not answer inside the window. |
+| `POST /api/onboarding/draft/reset` | onboarding | "Start over" after a setup save failed or was split: reverts what is still undoable, retires the still-open setup proposals so none stays approvable, and returns the draft to editable with the answers kept; refused once any part is saved or saving, which sends the owner to Settings. | false | none | Reviewed: one-time activation recovery on the setup surface's own Start over; it only takes back the owner's own unsaved setup, and SMS has no setup-draft context to start over from. |
 | `POST /api/billing/connect/onboarding` | onboarding | Stripe Connect onboarding. Until it is done the tenant cannot take card payments, which is half of the time-to-cash metric. | false | none | Reviewed: one-time activation; Stripe's hosted onboarding is a browser flow by construction. |
 | `POST /api/voice/go-live` | onboarding | Flips the tenant's voice agent live. Until it is called the AI answers nothing, so it is the last forced step of activation. | false | none | Reviewed: one-time activation. Deliberately a considered on-screen act — the owner is handing their phone line to an AI. |
 | `PUT /api/settings/texting-registration/` | onboarding | US A2P 10DLC registration (#1564): the owner submits the business's legal name, EIN, address and authorized contact once; Rivet (as ISV) registers the Brand and campaign with the carriers. Until it is approved the tenant's texts are unregistered 10DLC traffic. | false | none | Reviewed: one-time activation. The carriers vet exact legal identity data (legal name must match the EIN record), so this is a deliberate form entry, not a spoken or SMS action; the long carrier review that follows needs no owner action (the worker polls it). |

@@ -41,6 +41,7 @@ import { transitionJobStatus } from '../../src/jobs/job-lifecycle';
 import { runReviewRequestSweep } from '../../src/workers/review-request-worker';
 import type { QueueMessage } from '../../src/queues/queue';
 import { createLogger } from '../../src/logging/logger';
+import { packHeadlinePrices } from '../../src/packs/seed-pack-defaults';
 import { createTestTenant, ensureRlsRuntimeRole, type TestTenant } from './shared';
 
 const silentLogger = createLogger({ service: 'test', environment: 'test', level: 'error' });
@@ -444,6 +445,81 @@ describe('Postgres integration — migration corpus replays over a populated dat
           'USING btree (tenant_id, session_id, reason) WHERE (session_id IS NOT NULL)',
       },
     ]);
+  });
+
+  it('rows written before 318 keep no seed provenance through the migration and the next replay (318)', async () => {
+    // Back to the pre-318 shape: the columns 318 adds do not exist yet, so
+    // production rows written then carry nothing that could become a baseline.
+    await pool.query(`ALTER TABLE catalog_items DROP COLUMN IF EXISTS seed_key, DROP COLUMN IF EXISTS seeded_unit_price_cents`);
+    await pool.query(
+      `ALTER TABLE tenant_settings
+         DROP COLUMN IF EXISTS forwarding_confirmed_at, DROP COLUMN IF EXISTS forwarding_verified_at,
+         DROP COLUMN IF EXISTS forwarding_source_number, DROP COLUMN IF EXISTS forwarding_carrier,
+         DROP COLUMN IF EXISTS forwarding_generation, DROP COLUMN IF EXISTS forwarding_probe_generation,
+         DROP COLUMN IF EXISTS forwarding_probe_at`,
+    );
+
+    // A legacy HVAC tenant: its pack's headline items (one priced exactly at
+    // the national labor price a tier would show), a non-headline item, and a
+    // job type whose lines carry the same prices, all in the old column set.
+    const tenant = await createTestTenant(pool);
+    const laborCents = packHeadlinePrices('hvac')!.laborCents;
+    const visitCents = packHeadlinePrices('hvac')!.visitCents;
+    await pool.query(
+      `INSERT INTO catalog_items (tenant_id, name, category, unit, unit_price_cents, product_service_type)
+       VALUES ($1, 'HVAC Labor', 'Labor', 'hour', $2, 'service'),
+              ($1, 'HVAC Diagnostic Fee', 'Labor', 'each', $3, 'service'),
+              ($1, 'Filter Replacement', 'Parts', 'each', 3900, 'product')`,
+      [tenant.tenantId, laborCents, visitCents],
+    );
+    const legacyLines = [
+      { description: 'Diagnostic + trip fee', category: 'labor', defaultQuantity: 1, defaultUnitPriceCents: visitCents, taxable: false, sortOrder: 0, isOptional: false },
+      { description: 'AC repair labor', category: 'labor', defaultQuantity: 1, defaultUnitPriceCents: laborCents, taxable: false, sortOrder: 1, isOptional: false },
+    ];
+    await pool.query(
+      `INSERT INTO estimate_templates (tenant_id, vertical_type, category_id, name, line_item_templates, created_by)
+       VALUES ($1, 'hvac', 'ac-repair', 'Standard AC Repair', $2::jsonb, $3)`,
+      [tenant.tenantId, JSON.stringify(legacyLines), tenant.userId],
+    );
+    await pool.query(`INSERT INTO tenant_settings (tenant_id, business_name) VALUES ($1, 'Legacy Co')`, [tenant.tenantId]);
+
+    async function expectNoProvenance(): Promise<void> {
+      const catalog = await pool.query<{ name: string; seed_key: string | null; seeded_unit_price_cents: number | null }>(
+        `SELECT name, seed_key, seeded_unit_price_cents FROM catalog_items WHERE tenant_id = $1 ORDER BY name`,
+        [tenant.tenantId],
+      );
+      expect(catalog.rows).toEqual([
+        { name: 'Filter Replacement', seed_key: null, seeded_unit_price_cents: null },
+        { name: 'HVAC Diagnostic Fee', seed_key: null, seeded_unit_price_cents: null },
+        { name: 'HVAC Labor', seed_key: null, seeded_unit_price_cents: null },
+      ]);
+      const templates = await pool.query<{ line_item_templates: unknown }>(
+        `SELECT line_item_templates FROM estimate_templates WHERE tenant_id = $1`,
+        [tenant.tenantId],
+      );
+      expect(templates.rows[0].line_item_templates).toEqual(legacyLines);
+      const settings = await pool.query(
+        `SELECT forwarding_confirmed_at, forwarding_verified_at, forwarding_source_number, forwarding_carrier,
+                forwarding_generation, forwarding_probe_generation, forwarding_probe_at
+           FROM tenant_settings WHERE tenant_id = $1`,
+        [tenant.tenantId],
+      );
+      expect(settings.rows[0]).toEqual({
+        forwarding_confirmed_at: null,
+        forwarding_verified_at: null,
+        forwarding_source_number: null,
+        forwarding_carrier: null,
+        forwarding_generation: 0,
+        forwarding_probe_generation: null,
+        forwarding_probe_at: null,
+      });
+    }
+
+    // Deploy N+1 applies 318 over them; deploy N+2 replays it.
+    await deploy(pool);
+    await expectNoProvenance();
+    await deploy(pool);
+    await expectNoProvenance();
   });
 
   /**

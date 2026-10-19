@@ -57,6 +57,8 @@ const ELIGIBLE_SQL = `
   SELECT id AS tenant_id, owner_email, trial_ends_at
     FROM tenants
    WHERE subscription_status = 'trialing'
+     AND demo = false
+     AND platform = false
      AND trial_ends_at IS NOT NULL
      AND trial_ends_at > $1
      AND trial_ends_at <= $2

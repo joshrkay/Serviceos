@@ -13,6 +13,11 @@
  *     and is wrapped in try/catch. If `inner.create` rejects, nothing
  *     persisted, so nothing forwards. The inner result is returned verbatim.
  *   - Read methods delegate unchanged.
+ *   - Hidden tenants never reach analytics (U7, "Never visible to owners"):
+ *     an event whose tenant is a demo-pool or platform tenant is dropped
+ *     before mapping. The check is one cached primary-key read per tenant
+ *     (`demo/hidden-tenant.ts`); if it fails, the event is dropped too (an
+ *     unforwarded event is harmless, a forwarded demo event is not).
  *
  * Deps are injectable so the unit + integration tests can substitute a spy
  * without mocking the module graph; they default to the real functions.
@@ -33,12 +38,15 @@ export interface ForwardingDeps {
   isEnabled?: () => boolean;
   map?: (event: AuditEvent) => ProductEvent | null;
   record?: (name: ProductEventName, payload: ProductEventPayload) => void;
+  /** True for a demo-pool or platform tenant; absent means no tenant is hidden (in-memory boots). */
+  isHiddenTenant?: (tenantId: string) => Promise<boolean>;
 }
 
 export class ForwardingAuditRepository implements AuditRepository {
   private readonly isEnabled: () => boolean;
   private readonly map: (event: AuditEvent) => ProductEvent | null;
   private readonly record: (name: ProductEventName, payload: ProductEventPayload) => void;
+  private readonly isHiddenTenant: ((tenantId: string) => Promise<boolean>) | undefined;
 
   constructor(
     private readonly inner: AuditRepository,
@@ -47,6 +55,7 @@ export class ForwardingAuditRepository implements AuditRepository {
     this.isEnabled = deps.isEnabled ?? isProductAnalyticsEnabled;
     this.map = deps.map ?? auditEventToProductEvent;
     this.record = deps.record ?? recordProductEvent;
+    this.isHiddenTenant = deps.isHiddenTenant;
 
     // `findRecentByTenant` is optional on the interface — mirror the inner
     // repo's capability exactly so the activity-feed reporter's presence check
@@ -60,6 +69,7 @@ export class ForwardingAuditRepository implements AuditRepository {
     const saved = await this.inner.create(event);
     if (this.isEnabled()) {
       try {
+        if (this.isHiddenTenant && (await this.isHiddenTenant(saved.tenantId))) return saved;
         const productEvent = this.map(saved);
         if (productEvent) {
           this.record(productEvent.name, {

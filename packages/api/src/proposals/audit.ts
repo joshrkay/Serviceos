@@ -12,12 +12,22 @@ export const PROPOSAL_EVENT_TYPES = [
   // Emitted by workers/execution-worker.ts, not logProposalEvent above (the
   // sweep has no `actor` in the human-approval sense — see the
   // 'system:execution-worker' sentinel at the call site) — listed here so
-  // this registry stays a complete inventory of proposal.* event types.
+  // this registry stays a complete inventory of the proposal-lifecycle event
+  // types emitted by proposals/actions.ts and onboarding/draft/*.ts (pinned by
+  // test/proposals/audit.test.ts). Channel-specific events (proposal.sms_*,
+  // proposal.voice_*) belong to their own modules and are not listed here.
   'proposal.execution_timed_out',
   'proposal.edited',
   // Emitted by onboarding/draft/retry.ts through logProposalEvent when the owner
   // re-queues a proposal whose execution failed (execution_failed -> draft -> approved).
   'proposal.retried',
+  // Emitted by proposals/actions.ts (the inbox's per-proposal undo) and by
+  // onboarding/draft/undo.ts (the whole-draft undo, once per member).
+  'proposal.undone',
+  // Emitted by proposals/actions.ts (reproposeProposal; chain-set approval).
+  'proposal.reproposed',
+  'proposal.chain_set_warning',
+  'proposal.chain_set_member_skipped',
 ] as const;
 
 export type ProposalEventType = (typeof PROPOSAL_EVENT_TYPES)[number];

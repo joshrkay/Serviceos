@@ -1,3 +1,6 @@
+import type { OnboardingDraft } from '@ai-service-os/shared';
+import { useRivetCanListen, useRivetLine } from '../../../hooks/useRivetVoice';
+import { Button } from '../../ui';
 import { useState } from 'react';
 import { ONBOARDING_METROS, type OnboardingDraft, type OnboardingMetroCode } from '@ai-service-os/shared';
 import { Button, Input } from '../../ui';
@@ -22,6 +25,9 @@ export interface ReadyScreenProps {
 /** The finished shop, shown before anything is asked. */
 export function ReadyScreen({ draft, onMakeItMine, onKeepAsIs, onChangeMetro, changingMetro, notice, error }: ReadyScreenProps) {
   const rows = readyRows(draft);
+  const opener = `${draft.businessName} is already set up.`;
+  useRivetLine('ready', opener);
+  const canListen = useRivetCanListen();
   const [picking, setPicking] = useState(false);
   // The server refuses a metro change once ANY choice is staged (a staged pick names a price the
   // owner saw), so the control exists only while nothing is.
@@ -34,7 +40,7 @@ export function ReadyScreen({ draft, onMakeItMine, onKeepAsIs, onChangeMetro, ch
   return (
     <>
       <SpeakerLine />
-      <RivetHeading>{draft.businessName} is already set up.</RivetHeading>
+      <RivetHeading>{opener}</RivetHeading>
       <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">
         I built it the way {typicalShopPhrase(draft)} run. {numberWord(CHOICE_COUNT)} quick choices make it yours. Nothing to type.
       </p>
@@ -72,7 +78,9 @@ export function ReadyScreen({ draft, onMakeItMine, onKeepAsIs, onChangeMetro, ch
       </ul>
 
       <p className="mt-3.5 text-sm leading-[1.45] text-muted-foreground">
-        Each choice is two options. Tap the one that sounds right. Nothing is saved until you say so.
+        {canListen
+          ? 'Each choice is two options. Tap the one that sounds right, or say "first" or "second". Nothing is saved until you say so.'
+          : 'Each choice is two options. Tap the one that sounds right. Nothing is saved until you say so.'}
       </p>
 
       <div className="min-h-6 flex-1" />

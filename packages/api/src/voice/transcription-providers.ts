@@ -387,9 +387,14 @@ export type StreamingTranscriptCallback = (event: StreamingTranscriptEvent) => v
 export interface StreamingSession {
   /** Push raw PCM audio (16 kHz, 16-bit mono LE) into the stream. */
   send(chunk: Buffer): void;
-  /** Signal end of audio — provider flushes any pending results, then closes. */
+  /**
+   * Signal end of audio, then close. The session emits no further events:
+   * results the provider sends while closing — including the rest of a
+   * sentence that was cut off — are dropped, so no turn is dispatched into a
+   * leg that is tearing down (LCR-03).
+   */
   finish(): void;
-  /** Abort immediately without waiting for results. */
+  /** Abort immediately without waiting for results; emits no further events. */
   destroy(): void;
 }
 
@@ -518,6 +523,10 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
         .join('&');
       url += `&${params}`;
     }
+    // LCR-03 — ask for an UtteranceEnd frame after 1 s without a word, the
+    // end-of-sentence signal for segments that never get a speech_final
+    // (requires interim_results=true, set above).
+    url += '&utterance_end_ms=1000';
     return url;
   }
 
@@ -589,21 +598,70 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
       );
     });
 
+    // LCR-03 — one caller sentence is one `final`. With interim_results on,
+    // Deepgram closes segments mid-sentence (`is_final:true,
+    // speech_final:false`) and marks the end of the sentence with
+    // `speech_final:true` — often on an EMPTY trailing segment — or, when the
+    // endpoint is missed, with a separate `UtteranceEnd` frame. Segments are
+    // buffered until then and emitted as ONE final (joined text, weakest
+    // confidence). Meanwhile every segment and interim is forwarded as a
+    // partial carrying the sentence so far, so barge-in, the life-safety
+    // latch and the interim emergency scan still see a phrase that spans a
+    // segment boundary. Mirrors packages/web useDeepgramDictation.
+    const segments: Array<{ transcript: string; confidence: number }> = [];
+    // Set by finish()/destroy(): nothing is emitted after teardown (Deepgram
+    // still sends its remaining results in answer to CloseStream).
+    let ended = false;
+    const sentenceSoFar = (live?: string): string =>
+      [...segments.map((seg) => seg.transcript), ...(live ? [live] : [])].join(' ');
+    const weakestConfidence = (): number =>
+      Math.min(...segments.map((seg) => seg.confidence));
+    const flushSentence = (): void => {
+      if (segments.length === 0) return;
+      const transcript = sentenceSoFar();
+      const confidence = weakestConfidence();
+      segments.length = 0;
+      onEvent({ type: 'final', transcript, confidence, isFinal: true });
+    };
+
     ws.addEventListener('message', (msg) => {
+      if (ended) return;
       try {
         const data = JSON.parse(msg.data as string) as {
           type?: string;
-          channel?: { alternatives?: Array<{ transcript: string; confidence: number }> };
+          channel?: { alternatives?: Array<{ transcript: string; confidence?: number }> };
           is_final?: boolean;
+          speech_final?: boolean;
         };
+        if (data.type === 'UtteranceEnd') {
+          flushSentence();
+          return;
+        }
         if (data.type !== 'Results') return;
         const alt = data.channel?.alternatives?.[0];
-        if (!alt || alt.transcript.trim() === '') return;
+        const text = alt?.transcript.trim() ?? '';
+        if (data.is_final) {
+          if (text !== '') {
+            segments.push({ transcript: text, confidence: alt?.confidence ?? 1 });
+            if (!data.speech_final) {
+              onEvent({
+                type: 'partial',
+                transcript: sentenceSoFar(),
+                confidence: weakestConfidence(),
+                isFinal: false,
+              });
+            }
+          }
+          // Read BEFORE the empty check: the endpoint frame is often empty.
+          if (data.speech_final) flushSentence();
+          return;
+        }
+        if (text === '') return;
         onEvent({
-          type: data.is_final ? 'final' : 'partial',
-          transcript: alt.transcript,
-          confidence: alt.confidence ?? 1,
-          isFinal: data.is_final ?? false,
+          type: 'partial',
+          transcript: sentenceSoFar(text),
+          confidence: alt?.confidence ?? 1,
+          isFinal: false,
         });
       } catch {
         // malformed JSON from provider — ignore single frame
@@ -620,12 +678,19 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
         if (ws.readyState === WebSocketClient.OPEN) ws.send(chunk);
       },
       finish() {
+        // LCR-03 — a sentence still buffered here was cut off by the leg
+        // ending (hang-up, idle timeout, language switch): drop it rather
+        // than dispatch a turn into a closing or replaced session.
+        ended = true;
+        segments.length = 0;
         // Deepgram flushes on close_stream message
         if (ws.readyState === WebSocketClient.OPEN) {
           ws.send(JSON.stringify({ type: 'CloseStream' }));
         }
       },
       destroy() {
+        ended = true;
+        segments.length = 0;
         ws.close();
       },
     };
