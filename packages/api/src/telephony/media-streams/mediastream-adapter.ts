@@ -888,6 +888,17 @@ interface RuntimeState {
    */
   degradedToGather: boolean;
   /**
+   * LCR-05 — the close that arrived while a degrade redirect was still in
+   * flight. Twilio ends the stream (`stop` / socket close) as soon as it applies
+   * the redirect, usually before the REST response lands; settling that close
+   * at once would stamp a terminal outcome on a call that is continuing on the
+   * Gather leg. It is held here and settled once the redirect result is known
+   * (accepted → no outcome stamp; refused → the ordinary close). Same shape as
+   * the hand-off `delivering` deferral.
+   */
+  degradeInFlight: boolean;
+  degradeDeferredCloseReason: string | null;
+  /**
    * UB-C1 — set once the first FINAL transcript has been through the
    * one-shot language-detection trigger, so utterance #2+ can only
    * switch via the explicit-request path.
@@ -1193,6 +1204,8 @@ export class TwilioMediaStreamAdapter {
       languageSwitchCount: 0,
       deepgramGeneration: 0,
       degradedToGather: false,
+      degradeInFlight: false,
+      degradeDeferredCloseReason: null,
       firstFinalLanguageChecked: false,
       circuitRecorded: false,
       consecutiveSpeechTurnFailures: 0,
@@ -1789,6 +1802,7 @@ export class TwilioMediaStreamAdapter {
       this.deps.setPendingTransferTwiml(session.id, undeliveredHandoff);
     }
     let redirected = false;
+    this.state.degradeInFlight = true;
     try {
       redirected =
         (await restRedirect({
@@ -1797,7 +1811,15 @@ export class TwilioMediaStreamAdapter {
         })) === true;
     } catch {
       redirected = false;
+    } finally {
+      this.state.degradeInFlight = false;
     }
+    // LCR-05 — set before anything else awaits: a close from here on must see
+    // the call as continuing on Gather, not as ended.
+    if (redirected) this.state.degradedToGather = true;
+    const closedDuringRedirect = this.state.degradeDeferredCloseReason;
+    this.state.degradeDeferredCloseReason = null;
+    if (closedDuringRedirect !== null) this.settleCloseOutcome(closedDuringRedirect);
     if (!redirected) {
       if (claimedHandoff) {
         // The degrade failed but the call is still on the stream: give the
@@ -1819,9 +1841,9 @@ export class TwilioMediaStreamAdapter {
       });
     }
     // The session stays LIVE — the caller continues on the Gather leg, which
-    // owns finalization from here. handleClose reads this flag and skips
-    // finalizeOnClose (a terminal outcome stamped now would be mid-call).
-    this.state.degradedToGather = true;
+    // owns finalization from here. handleClose reads `degradedToGather` (set
+    // above, as soon as the redirect was accepted) and skips finalizeOnClose
+    // (a terminal outcome stamped now would be mid-call).
     this.closeWs(1000, 'degraded_to_gather');
     // OBS — fire-and-forget after the degrade has actually happened; never
     // alters the redirect/close behavior above.
@@ -1831,6 +1853,57 @@ export class TwilioMediaStreamAdapter {
       callSid,
       tenantId: this.state.tenantId,
     });
+    return true;
+  }
+
+  /**
+   * LCR-05 — shutdown hand-off (see live-realtime-calls.ts). This process is
+   * going away and the call's session lives only in its memory, so the call is
+   * moved to the Gather fallback through the same degrade as any terminal
+   * realtime failure; that request reaches the next process, which starts the
+   * call over as a fresh disclosed session.
+   *
+   * On an accepted redirect this leg's session is marked ended WITHOUT a
+   * terminal outcome: the call continues elsewhere (no outcome stamp, no
+   * dropped-call text), and an ended session stops counting as live, so the
+   * shutdown drain does not wait out its window and raise the abandonment
+   * alarm for a call that was handed over. The `degraded_to_gather` audit
+   * event (reason `deploy_shutdown`) records the hand-off. A refused or
+   * timed-out redirect leaves the session live (the drain waits for it as
+   * before). Never throws.
+   *
+   * Stands down (returns `false`; the drain waits for the leg, which ends on
+   * its own within the bounded playout wait) when the call is already ending
+   * or being handed off — the new process knows neither, so a redirect would
+   * restart it with a fresh greeting:
+   *   - a hand-off is pending or in flight (`handoff` not 'none', or a
+   *     transfer is held): its `<Dial>` lives in this process's memory, and
+   *     once delivered the call no longer depends on this process;
+   *   - the conversation is ending: an `end_session` awaiting playout (a
+   *     goodbye, the 911 script), the FSM terminated or an E1 latched or
+   *     still running, the session ended, or the max-duration wrap-up began.
+   */
+  async handOffForShutdown(): Promise<boolean> {
+    if (this.state.closed || !this.state.callSid) return false;
+    const session = this.state.session;
+    if (
+      this.state.handoff !== 'none' ||
+      this.state.handoffTwiml !== null ||
+      this.state.pendingFinalizeEffects.length > 0 ||
+      this.state.e1TurnsInFlight > 0 ||
+      this.state.maxCallDurationWrapUp !== 'idle' ||
+      (session !== null && (session.ended || this.lifeSafetyPending(session)))
+    ) {
+      return false;
+    }
+    let handedOff: boolean;
+    try {
+      handedOff = await this.attemptDegradeToGather('deploy_shutdown');
+    } catch {
+      handedOff = false;
+    }
+    if (!handedOff) return false;
+    if (this.state.session) this.state.session.ended = true;
     return true;
   }
 
@@ -4295,6 +4368,9 @@ export class TwilioMediaStreamAdapter {
     // caller hang-up that would pre-empt /dial-result's 'transferred'.
     if (this.state.handoff === 'delivering') {
       this.state.handoffDeferredCloseReason = reason;
+    } else if (this.state.degradeInFlight) {
+      // LCR-05 — settled by attemptDegradeToGather once the redirect result is in.
+      this.state.degradeDeferredCloseReason = reason;
     } else {
       // Twilio ending the stream after a delivered hand-off is the hand-off
       // taking effect, not the caller hanging up.

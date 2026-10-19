@@ -763,6 +763,24 @@ export function buildTwiML(
 
 // ─── Adapter ─────────────────────────────────────────────────────────────────
 
+/** One `<Gather>` callback, as the /gather route hands it to the adapter. */
+export interface GatherTurn {
+  sessionId: string;
+  callSid: string;
+  speechResult: string;
+  confidence: number | undefined;
+  tenantId: string;
+  /**
+   * LCR-05 — the caller and dialled numbers from the callback. Only read when
+   * `sessionId` is unknown to this process (a deploy cut-over): they are what
+   * a fresh session is started from. Absent → the turn hangs up as before.
+   */
+  from?: string;
+  to?: string;
+  /** Twilio `StirVerstat`, carried into a restarted session (#1223). */
+  stirVerstat?: string;
+}
+
 export class TwilioGatherAdapter {
   /**
    * Per-session pending TwiML override. Set by `handleNotifyOncall` when
@@ -2261,13 +2279,7 @@ export class TwilioGatherAdapter {
    * Handle a `<Gather>` callback — the caller spoke, Twilio sent us the
    * transcript. Classify intent → drive FSM → emit next TwiML.
    */
-  async handleGather(opts: {
-    sessionId: string;
-    callSid: string;
-    speechResult: string;
-    confidence: number | undefined;
-    tenantId: string;
-  }): Promise<string> {
+  async handleGather(opts: GatherTurn): Promise<string> {
     // PRIV-3 — Twilio's speech result has no upstream card redaction, so a
     // recited card number is scrubbed here, before classification, the FSM
     // and every task handler (see processCallerUtterance).
@@ -2278,15 +2290,34 @@ export class TwilioGatherAdapter {
     return this.deps.store.withSessionLock(opts.sessionId, () => this._handleGatherLocked(scrubbed));
   }
 
-  private async _handleGatherLocked(opts: {
-    sessionId: string;
-    callSid: string;
-    speechResult: string;
-    confidence: number | undefined;
-    tenantId: string;
-  }): Promise<string> {
+  private async _handleGatherLocked(opts: GatherTurn): Promise<string> {
     const session = this.deps.store.get(opts.sessionId);
     if (!session) {
+      // LCR-05 — sessions live in the memory of the process that answered the
+      // call, so after a deploy (Railway moves traffic to the new process as
+      // soon as it is healthy) a live call's next turn arrives here with a
+      // session id this process never held. Start the call over as a fresh,
+      // disclosed session on the dialled number's tenant (the route resolved
+      // it by DID, exactly as /voice does) rather than hanging up on a caller
+      // mid-conversation. The greeting and recording notice replay and the
+      // conversation so far is lost, so it is logged as a restart. A Twilio
+      // retry of this same turn reuses the restarted session (handleInbound's
+      // CallSid replay check).
+      if (opts.from && opts.to) {
+        logger.warn('handleGather: unknown session, starting the call over (deploy_induced_restart)', {
+          event: 'deploy_induced_restart',
+          sessionId: opts.sessionId,
+          callSid: opts.callSid,
+          tenantId: opts.tenantId,
+        });
+        return this.handleInbound({
+          callSid: opts.callSid,
+          from: opts.from,
+          to: opts.to,
+          tenantId: opts.tenantId,
+          ...(opts.stirVerstat ? { stirVerstat: opts.stirVerstat } : {}),
+        });
+      }
       logger.warn('handleGather: unknown session', { sessionId: opts.sessionId });
       return buildTwiML(
         [
