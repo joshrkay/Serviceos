@@ -189,6 +189,8 @@ export interface ProposalExecutionCounts {
 export interface FailureFinding {
   /** Stable rule key — also the alertOperator cooldown key. */
   rule: string;
+  /** Bounded slo_alerts_sent_total label when `rule` carries a tenant id. */
+  metricRule?: string;
   breached: boolean;
   /** Value exported to the corresponding gauge. */
   value: number;
@@ -241,7 +243,9 @@ export function evaluateTaskFailureRate(
 /**
  * Rule 4 (OBS-4) — non-completion rate for ONE tenant's ONE task type. Same
  * arithmetic as rule 1 behind the tenant floor; the rule key carries the
- * tenant so the alertOperator cooldown is per tenant AND task. The summary
+ * tenant so the alertOperator cooldown is per tenant AND task; its
+ * `metricRule` is the bounded `ai_task_failure_rate_tenant:<task>` family, so
+ * the tenant id never becomes a slo_alerts_sent_total label. The summary
  * says nothing about the platform-wide rate: only the tick knows whether
  * rule 1 judged this task (see withPlatformContext).
  */
@@ -258,6 +262,8 @@ export function evaluateTenantTaskFailureRate(
       : `${counts.failed} failed / ${counts.unresolved} stuck`;
   return {
     rule: `ai_task_failure_rate:${counts.taskType}:${counts.tenantId}`,
+    // The cooldown is per tenant; the metric label is per task only.
+    metricRule: `ai_task_failure_rate_tenant:${counts.taskType}`,
     breached: rate > thresholds.rateMax,
     value: rate,
     summary:
@@ -675,6 +681,7 @@ export async function runFailureRateMonitor(
         await deps.alert({
           severity: f.severity,
           rule: f.rule,
+          ...(f.metricRule ? { metricRule: f.metricRule } : {}),
           summary: f.summary,
           details: f.details,
         });

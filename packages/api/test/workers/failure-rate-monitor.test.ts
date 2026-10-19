@@ -26,6 +26,8 @@ import {
   type TenantTaskRunCounts,
 } from '../../src/workers/failure-rate-monitor';
 import { createAlertOperator } from '../../src/monitoring/alert-operator';
+import { sloAlertsSentTotal } from '../../src/monitoring/metrics';
+import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
 import type { Logger } from '../../src/logging/logger';
 
 const thresholds: FailureMonitorThresholds = {
@@ -692,6 +694,55 @@ describe('runFailureRateMonitor — OBS-4 per-tenant rule', () => {
     // Same tick, same cooldown window — nothing re-pages.
     await runFailureRateMonitor(deps);
     expect(captured).toHaveLength(2);
+  });
+
+  it('a per-tenant page never writes the tenant id into a metric label (cooldown stays per tenant)', async () => {
+    // Review round 101 (panel:privacy): the cooldown key carries the tenant,
+    // but slo_alerts_sent_total is a permanent, scraped series with no purge
+    // on tenant erasure — its rule label must be the bounded per-task family.
+    const tenant = '33333333-3333-4333-8333-333333333333';
+    sloAlertsSentTotal.reset();
+    const delivery = new InMemoryDeliveryProvider();
+    const captured: string[] = [];
+    const alertOperator = createAlertOperator({
+      sentry: {
+        captureMessage: (msg: string) => {
+          captured.push(msg);
+        },
+      } as never,
+      delivery,
+      alertSmsTo: '+15551230000',
+      cooldownMs: 60 * 60 * 1000,
+      logger: noopLogger,
+      now: () => 1_700_000_000_000,
+    });
+    await runFailureRateMonitor(
+      buildDeps({
+        alert: alertOperator,
+        getTaskRunCounts: vi
+          .fn()
+          .mockResolvedValue([counts({ taskType: 'classify_intent', total: 500, completed: 490, failed: 10 })]),
+        getTenantTaskRunCounts: vi.fn().mockResolvedValue([
+          tenantCounts({ tenantId: tenant, total: 10, completed: 0, failed: 10 }),
+          tenantCounts({ tenantId: 'healthy', total: 490, completed: 490 }),
+        ]),
+      }),
+    );
+    // The page itself still names the tenant (Sentry + SMS) so the responder can act.
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain(tenant);
+    expect(delivery.sentSms).toHaveLength(1);
+
+    const series = (await sloAlertsSentTotal.get()).values;
+    expect(series.map((v) => [v.labels.rule, v.labels.channel, v.value])).toEqual([
+      ['ai_task_failure_rate_tenant:classify_intent', 'sentry', 1],
+      ['ai_task_failure_rate_tenant:classify_intent', 'sms', 1],
+    ]);
+    for (const v of series) {
+      for (const label of Object.values(v.labels)) {
+        expect(String(label)).not.toContain(tenant);
+      }
+    }
   });
 });
 

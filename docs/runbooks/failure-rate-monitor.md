@@ -117,7 +117,10 @@ per-rule cooldown (`SLO_ALERT_COOLDOWN_MIN`, default 60 min). The task-failure
 rule keys its cooldown **per task type**
 (`ai_task_failure_rate:supervisor_annotate`), and the per-tenant rule per task
 **and** tenant (`ai_task_failure_rate:classify_intent:<tenant_id>`), so one
-noisy task or tenant cannot mask another.
+noisy task or tenant cannot mask another. The tenant id is only in the
+cooldown key and the page text: `slo_alerts_sent_total` counts a per-tenant
+page under the bounded label `rule="ai_task_failure_rate_tenant:<task_type>"`,
+so no tenant id is ever written into a metric series.
 
 ## Why it cannot become the incident
 

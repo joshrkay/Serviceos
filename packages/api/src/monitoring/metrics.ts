@@ -385,7 +385,12 @@ export const proposalSilentFailureFindings = new Gauge({
   registers: [metricsRegistry],
 });
 
-/** WS15 — operator alerts actually dispatched, per channel (post-cooldown). */
+/**
+ * WS15 — operator alerts actually dispatched, per channel (post-cooldown).
+ * `rule` is OperatorAlert.metricRule when set: a per-tenant rule keys its
+ * cooldown by tenant but labels this series by task family only, so no
+ * tenant id ever lands in a label here.
+ */
 export const sloAlertsSentTotal = new Counter({
   name: 'slo_alerts_sent_total',
   help: 'Operator alerts dispatched by alertOperator, by rule and channel (sentry|sms)',
