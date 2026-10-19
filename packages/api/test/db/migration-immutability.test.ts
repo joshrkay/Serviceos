@@ -614,6 +614,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['317_demo_calls', '1f2e2793272ab397224a1feb5307f583c121d5c138d06ed7fb533d6c698045de'],
   // PRIV-3 — voice_recordings.pci_detected + audio_purged_at (card number said on the call).
   ['314_voice_recordings_card_number_detected', '648f2696cce7ed17700f8b2d3b826ce8eb61987af91f7cbeed58c82ce01b0ce3'],
+  // PRIV-2 — voice_recordings.twilio_deleted_at + twilio_delete_attempted_at (Twilio copy deleted).
+  ['315_voice_recordings_twilio_copy_deleted', '02163cc28f90807433f2526555aaee5cc60ab3c36c5b5c60833c81084a73d1b9'],
 ];
 
 function hashMigration(value: string): string {

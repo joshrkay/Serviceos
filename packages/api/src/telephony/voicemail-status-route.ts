@@ -30,6 +30,13 @@
  *      recording_url), and the enqueue uses a stable queue idempotency key
  *      (with the router itself idempotent on recordingId downstream).
  *
+ *   3. PRIV-2 — once that whole pipeline has landed (row, hand-off, success
+ *      receipt), the Twilio-hosted copy is deleted (`twilioCopyRemover`).
+ *      Not earlier: a failed hand-off answers 500 and the Twilio retry
+ *      re-FETCHES the recording, so deleting right after the insert would
+ *      turn that retry into a permanent 404. Failure-soft; an unconfirmed
+ *      delete is retried by the retention sweep. `recording_url` is kept.
+ *
  * Caller identity / tenant resolution
  * ───────────────────────────────────
  * Twilio's recordingStatusCallback body carries only recording metadata —
@@ -70,6 +77,7 @@ import {
   scrubAuthToken,
 } from './recording-webhook';
 import { recordInboundCall } from '../voice/voice-service';
+import type { TwilioCopyRemover } from './twilio-recording-deleter';
 import { v4 as uuidv4 } from 'uuid';
 
 const logger = createLogger({
@@ -79,13 +87,19 @@ const logger = createLogger({
 
 /**
  * Storage key for a voicemail recording. DELIBERATELY distinct from
- * `buildRecordingStorageKey` (`<tenant>/<callSid>.mp3`): the dial-result
+ * `buildRecordingStorageKey` (`<tenant>/<callSid>-<recordingSid>.mp3`): the dial-result
  * voicemail path runs on a call whose live leg may itself be recorded via
  * `<Start><Record>` → /recording, and both objects share one CallSid — a
  * shared key would have the voicemail bytes overwrite the call recording.
+ *
+ * Per RECORDING, not per call (PRIV-2, review round 2): the voicemail
+ * `<Record>` has no action, so Twilio re-requests the after-hours TwiML and a
+ * caller can leave a second message on the same CallSid. A per-call key had
+ * the second PUT overwrite the first message, and once each Twilio copy is
+ * deleted after storage, message 1 existed nowhere.
  */
-export function buildVoicemailStorageKey(tenantId: string, callSid: string): string {
-  return `${tenantId}/${callSid}-voicemail.mp3`;
+export function buildVoicemailStorageKey(tenantId: string, callSid: string, recordingSid: string): string {
+  return `${tenantId}/${callSid}-${recordingSid}-voicemail.mp3`;
 }
 
 /**
@@ -152,6 +166,12 @@ export interface VoicemailStatusHandlerOptions {
   uploadObject?: typeof uploadToS3;
   /** App-layer hook: enqueue transcription for the persisted voicemail. */
   onVoicemailPersisted?: (event: VoicemailPersistedEvent) => Promise<void> | void;
+  /**
+   * PRIV-2 — deletes the Twilio-hosted copy once the whole transcription leg
+   * has landed. Never throws. Absent → the retention sweep's retry phase
+   * deletes it.
+   */
+  twilioCopyRemover?: TwilioCopyRemover;
 }
 
 export interface VoicemailStatusRouterDeps {
@@ -498,7 +518,7 @@ export function createVoicemailStatusRouter(
       const durationRaw = body.RecordingDuration ?? '0';
       const parsedDuration = Number.parseInt(durationRaw, 10);
       const durationSeconds = Number.isFinite(parsedDuration) ? parsedDuration : 0;
-      const storageKey = buildVoicemailStorageKey(tenantId, callSid);
+      const storageKey = buildVoicemailStorageKey(tenantId, callSid, recordingSid);
       const contentType = 'audio/mpeg';
 
       // 1. Authenticated fetch of the recording bytes from Twilio — the
@@ -616,6 +636,18 @@ export function createVoicemailStatusRouter(
             error: err instanceof Error ? err.message : String(err),
           });
         }
+      }
+
+      // 6. PRIV-2 — the whole pipeline landed; our storage holds the audio.
+      //    Delete the Twilio copy. Never throws; an unconfirmed delete is
+      //    retried by the retention sweep.
+      if (options.twilioCopyRemover) {
+        await options.twilioCopyRemover({
+          tenantId,
+          voiceRecordingId: result.voiceRecordingId,
+          callSid,
+          recordingUrl: recordingUrl!,
+        });
       }
     } catch (err) {
       logger.error('voicemail-status: transcription leg failed', {
