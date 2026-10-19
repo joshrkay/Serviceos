@@ -29,6 +29,7 @@ import type {
 import type { Logger } from '../logging/logger';
 import type { SettingsRepository } from '../settings/settings';
 import { isValidTimezone } from '../shared/timezone';
+import { runOutsideRequestTransaction } from '../middleware/tenant-context';
 
 export type AssignmentChangeKind = 'assigned' | 'unassigned';
 
@@ -215,8 +216,11 @@ export class TechnicianAssignmentNotifier {
     const key = `${change.tenantId}:${change.appointmentId}:${change.technicianId}`;
     const existing = this.pendingSms.get(key);
     if (existing) clearTimeout(existing.timer);
+    // TI-01 — the timer inherits the arming request's tenant context but fires
+    // after that request has released its pg client; flush outside it so the
+    // re-reads open their own tenant transactions.
     const timer = setTimeout(() => {
-      void this.flushSms(key);
+      void runOutsideRequestTransaction(() => this.flushSms(key));
     }, this.deps.smsChurnWindowMs);
     timer.unref?.();
     this.pendingSms.set(key, {

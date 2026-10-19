@@ -24,6 +24,7 @@
  * lands in a follow-up.
  */
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
+import { runOutsideRequestTransaction } from '../../middleware/tenant-context';
 import {
   actionClassForProposalType,
   Proposal,
@@ -242,7 +243,11 @@ export class SupervisorPolicyService implements SupervisorCreationHook {
   private refresh(tenantId: string): Promise<void> {
     const existing = this.inflight.get(tenantId);
     if (existing) return existing;
-    const job = (async () => {
+    // TI-01 — detached from whichever request triggered it: the job is shared
+    // (deduplicated above) and its snapshot is cached for every later request,
+    // and its reads routinely land after that request has committed and
+    // released its pg client. Each repo call opens its own tenant transaction.
+    const job = runOutsideRequestTransaction(async () => {
       try {
         const now = this.now();
 
@@ -324,7 +329,7 @@ export class SupervisorPolicyService implements SupervisorCreationHook {
       } finally {
         this.inflight.delete(tenantId);
       }
-    })();
+    });
     this.inflight.set(tenantId, job);
     return job;
   }
