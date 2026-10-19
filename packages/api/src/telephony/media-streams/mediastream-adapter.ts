@@ -1874,7 +1874,7 @@ export class TwilioMediaStreamAdapter {
    */
   async handOffForShutdown(): Promise<boolean> {
     if (this.state.closed || !this.state.callSid) return false;
-    let handedOff = false;
+    let handedOff: boolean;
     try {
       handedOff = await this.attemptDegradeToGather('deploy_shutdown');
     } catch {

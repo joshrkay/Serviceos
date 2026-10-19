@@ -82,7 +82,7 @@ const START_FRAME = (callSid: string, streamSid: string) => ({
   start: { callSid, accountSid: 'AC-sub', streamSid, tracks: ['inbound'] },
 });
 
-const flush = () => new Promise((r) => setImmediate(r));
+const flush = () => new Promise<void>((r) => { setImmediate(r); });
 
 let store: VoiceSessionStore;
 let auditRepo: InMemoryAuditRepository;
@@ -243,12 +243,12 @@ describe('LCR-05 — attachMediaStreamServer tracks live legs for the shutdown h
 
   beforeEach(async () => {
     server = http.createServer();
-    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    await new Promise<void>((r) => { server.listen(0, '127.0.0.1', r); });
     port = (server.address() as AddressInfo).port;
   });
   afterEach(async () => {
     dispose();
-    await new Promise<void>((r) => server.close(() => r()));
+    await new Promise<void>((r) => { server.close(() => r()); });
   });
 
   it('adds the leg when the stream upgrades and forgets it when the stream closes', async () => {
@@ -284,7 +284,7 @@ describe('LCR-05 — attachMediaStreamServer tracks live legs for the shutdown h
       socket.destroy();
     }
     for (let i = 0; i < 50 && liveCalls.size() > 0; i++) {
-      await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => { setTimeout(r, 10); });
     }
     expect(liveCalls.size()).toBe(0);
   });
