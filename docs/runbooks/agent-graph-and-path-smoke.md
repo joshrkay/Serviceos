@@ -101,17 +101,26 @@ npm run agent:path-smoke --workspace=packages/api -- --gate
   `if:` fails closed: if `changes` fails or cannot diff, the real evals run.
 - **Drafting golden set (OBS-3):** the same job runs
   `packages/api/scripts/drafting-golden-eval.ts --live --gate --baseline
-  packages/voice-eval/baselines/drafting-live.json` — 7 cases
+  packages/voice-eval/baselines/drafting-live.json` — 10 cases
   (`src/ai/voice-quality/drafting-golden/cases.ts`) through the production
   task code: `draft_estimate` against a fixed price book, brand-voice
-  extraction, and the Google-review public reply (one praise review, one
-  injection-shaped review). Safety checks fail the step on any case: an
-  uncatalogued price that could auto-approve, a catalog line off its catalog
-  price, a reply carrying a link or discount. Quality checks (named the
-  price-book work, mapped the brand-voice fields, signed the reply) feed the
-  baseline metrics. The baseline ships as a **placeholder**, which fails closed
-  (exit 4): record it once with the file's `recordCommand` (about 10 cents)
-  and commit it before making `path-smoke` required.
+  extraction, the Google-review public reply (one praise review, one
+  injection-shaped review) and the `brand_voice_v1` composer that writes the
+  customer reschedule and dropped-call SMS. Safety checks fail the step on
+  any case: an uncatalogued price that could auto-approve, a catalog line off
+  its catalog price, a reply or SMS carrying a link or discount, an SMS that
+  took its signoff from the caller context. Quality checks feed the baseline
+  metrics. The baseline ships as a **placeholder**: until it is recorded the
+  step turns the runner's exit 4 into a `::warning::` (safety violations,
+  cost aborts and a missing key still fail), so `path-smoke` is not red on
+  every AI pull request. Record it once with the file's `recordCommand`
+  (about 14 cents, needs the OpenAI key), check the console shows every
+  safety check green, and commit it before making `path-smoke` required.
+- **Base-branch changes:** the trigger lists `edited` with the default
+  pull-request types, so retargeting a PR (for example a stacked PR moved to
+  `main`) re-runs `changes` against the new base. A title or body edit on a
+  prompt PR re-runs the evals too (about $1); that is deliberate — a skip on
+  an edit would post a fresh green over an earlier red.
 - **Baseline drift:** the live steps exit 1 when the golden set changed or a
   metric fell past tolerance. Re-record with the baseline file's
   `recordCommand` (or `voice-eval-live.yml` with `record_baseline=true`) in

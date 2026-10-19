@@ -132,17 +132,29 @@ jobs:
       # (an uncatalogued price that could auto-approve, a catalog line off its
       # catalog price, a reply or SMS carrying a link or discount, an SMS that
       # took its signoff from the caller context), and --baseline compares the quality
-      # metrics with the recorded live baseline (a placeholder fails closed,
-      # exit 4 — record it with the baseline file's recordCommand).
+      # metrics with the recorded live baseline.
+      # OBS-3 review round 3 — until drafting-live.json is recorded (its
+      # recordCommand, a paid run with the key), exit 4 is a warning, not a
+      # red: a check that is red on every AI pull request gets waved through,
+      # intent and slot regressions with it. Safety violations still fail
+      # (exit 1, checked before the baseline), as do a regression past a
+      # recorded baseline (1), a cost abort (3) and a missing key (2).
       - name: Live drafting golden set vs recorded live baseline (gated)
+        id: drafting
         if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.key.outcome == 'success' }}
         env:
           VOICE_EVAL_COST_CAP_CENTS: '25'     # projection ~13.5c for 10 calls priced at gpt-4o
           DRAFTING_GOLDEN_OUT: drafting-golden-report.json
         run: |
           set -o pipefail
+          code=0
           npx tsx packages/api/scripts/drafting-golden-eval.ts --live --gate --baseline packages/voice-eval/baselines/drafting-live.json \
-            | tee -a agent-path-smoke-console.txt
+            | tee -a agent-path-smoke-console.txt || code=$?
+          if [ "$code" -eq 4 ]; then
+            echo "::warning::packages/voice-eval/baselines/drafting-live.json has not been recorded yet, so only the drafting safety checks gated this run. Record it with the recordCommand in that file and commit it."
+            exit 0
+          fi
+          exit "$code"
       - name: Upload path-smoke report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

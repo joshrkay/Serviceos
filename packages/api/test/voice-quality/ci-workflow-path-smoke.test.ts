@@ -5,10 +5,10 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import { loadIntentTestSplit, loadSlotTranscripts } from '../../../voice-eval/corpus';
 import { checkCostCap, sampleDeterministic } from '../../../voice-eval/live-support';
-import { readBaseline } from '../../../voice-eval/baseline';
+import { BASELINE_EXIT_NO_BASELINE, readBaseline } from '../../../voice-eval/baseline';
 import { DRAFTING_GOLDEN_CASES, projectDraftingGoldenCents } from '../../src/ai/voice-quality/drafting-golden';
 import {
   MAX_CAP_OVER_PROJECTION,
@@ -436,6 +436,55 @@ describe('agent-path-smoke.yml — live drafting golden set (draft_estimate, bra
     expect(projected, msg).toBeGreaterThan(0);
     expect(projected, msg).toBeLessThanOrEqual(cap);
     expect(cap, msg).toBeLessThanOrEqual(projected * MAX_CAP_OVER_PROJECTION);
+  });
+
+  // OBS-3 review round 3 — drafting-live.json ships as an unrecorded
+  // placeholder (recording needs a paid run with the OpenAI key). Failing
+  // closed on it (exit 4) turned every AI pull request, the daily run and
+  // this PR red whatever they changed, and a check that is always red gets
+  // waved through — intent and slot regressions with it. Until it is
+  // recorded, exit 4 is a visible warning; a safety violation (exit 1), a
+  // quality regression against a recorded baseline (1), a cost abort (3)
+  // and a missing key (2) still fail the step. Executes the step's own
+  // script with the eval runner stubbed to exit with each code.
+  describe('the step, executed with the eval runner exiting each code', () => {
+    function runStep(runnerExit: number): { status: number; stdout: string } {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'path-smoke-drafting-'));
+      const bin = path.join(dir, 'bin');
+      fs.mkdirSync(bin);
+      fs.writeFileSync(path.join(bin, 'npx'), `#!/usr/bin/env bash\necho "runner $*"\nexit ${runnerExit}\n`, { mode: 0o755 });
+      const res = spawnSync('bash', ['-e', '-c', stepScript(read(), 'drafting')], {
+        cwd: dir,
+        encoding: 'utf-8',
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      });
+      expect(fs.readFileSync(path.join(dir, 'agent-path-smoke-console.txt'), 'utf-8')).toMatch(
+        /^runner tsx packages\/api\/scripts\/drafting-golden-eval\.ts --live --gate --baseline /,
+      );
+      return { status: res.status ?? -1, stdout: res.stdout };
+    }
+
+    it('an unrecorded placeholder baseline (exit 4) passes with a warning naming the file to record', () => {
+      const { status, stdout } = runStep(BASELINE_EXIT_NO_BASELINE);
+      expect(status).toBe(0);
+      expect(stdout).toMatch(/^::warning::.*packages\/voice-eval\/baselines\/drafting-live\.json/m);
+    });
+
+    it.each([
+      [1, 'a safety violation or a regression past the recorded baseline'],
+      [2, 'no key'],
+      [3, 'a cost-cap abort'],
+    ])('exit %i (%s) still fails the step', (code) => {
+      const { status, stdout } = runStep(code);
+      expect(status).toBe(code);
+      expect(stdout).not.toMatch(/::warning::/);
+    });
+
+    it('a pass (exit 0) passes without a warning', () => {
+      const { status, stdout } = runStep(0);
+      expect(status).toBe(0);
+      expect(stdout).not.toMatch(/::warning::/);
+    });
   });
 
   it('the committed baseline is a live drafting baseline whose record command uses the same runner', () => {
