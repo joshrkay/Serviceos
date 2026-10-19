@@ -108,7 +108,7 @@
  * on legal hold (the call's classify turns and its post-hangup summary) is
  * treated as that call's and kept; the tenant's other due runs are still
  * purged. The window can also keep another call's run from the same day,
- * which errs toward the hold. Migration 318's partial index serves the probe.
+ * which errs toward the hold. Migration 321's partial index serves the probe.
  *
  * Pattern: cross-tenant batch drain like dropped-call-worker — per-row
  * failures are logged and left unpurged for the next sweep; the table query
@@ -138,7 +138,7 @@ const HELD_CALL_WINDOW_MS = 24 * 3600 * 1000;
 
 /**
  * PRIV-1 — the legal-hold probe over `ai_runs ar`: a same-tenant recording on
- * legal hold within a day of the run. Served by the migration-318 partial
+ * legal hold within a day of the run. Served by the migration-321 partial
  * index idx_voice_recordings_legal_hold (tenant_id, created_at) WHERE legal_hold.
  */
 const HELD_CALL_WINDOW_PROBE = `SELECT 1

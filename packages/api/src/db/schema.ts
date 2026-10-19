@@ -7793,7 +7793,7 @@ export const MIGRATIONS = {
   // index serves that probe (tenant, time window over the few held rows), so
   // the per-run NOT EXISTS stays an index lookup. RLS rides the existing
   // voice_recordings policy (migration 007). Additive and idempotent.
-  '318_voice_recordings_legal_hold_index': `
+  '321_voice_recordings_legal_hold_index': `
     CREATE INDEX IF NOT EXISTS idx_voice_recordings_legal_hold
       ON voice_recordings (tenant_id, created_at)
       WHERE legal_hold;
