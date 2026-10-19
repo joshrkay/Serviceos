@@ -85,7 +85,11 @@ export class PgFailureMonitorRepository extends PgBaseRepository {
    * never fabricate; it is returned as a JS number (pg hands BIGINT back as
    * a string). `unpriced_completed` counts the completed runs that summed as
    * 0 that way, so the monitor can tell "no spend" from "spend it cannot
-   * see" (ai_spend_unpriced).
+   * see" (ai_spend_unpriced). It counts only rows the priced gateway path
+   * wrote (created_by 'gateway'): the supervisor review wrapper row
+   * ('system', its own gateway call is a separate priced row) and a cache
+   * hit ('gateway-cache') never carry a cost by design and are not an
+   * unpriced model (review round 101).
    */
   async tenantTaskRunCounts(windowStart: Date, windowEnd: Date): Promise<TenantTaskRunCounts[]> {
     return this.withCrossTenantSweep(async (client) => {
@@ -107,7 +111,9 @@ export class PgFailureMonitorRepository extends PgBaseRepository {
            COUNT(*) FILTER (WHERE status = 'failed') AS failed,
            COUNT(*) FILTER (WHERE status IN ('pending', 'running')) AS unresolved,
            COALESCE(SUM(cost_micro_cents), 0) AS cost_micro_cents,
-           COUNT(*) FILTER (WHERE status = 'completed' AND cost_micro_cents IS NULL) AS unpriced_completed
+           COUNT(*) FILTER (
+             WHERE status = 'completed' AND cost_micro_cents IS NULL AND created_by = 'gateway'
+           ) AS unpriced_completed
          FROM ai_runs
          WHERE created_at >= $1
            AND created_at < $2

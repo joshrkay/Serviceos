@@ -313,6 +313,56 @@ describe('Postgres integration — OBS-4 per-tenant failure rate and window spen
     }
   });
 
+  it('bookkeeping rows with no cost (supervisor wrapper, cache hit) never page the blind-spend warning', async () => {
+    // Review round 101 (panel:sre): two production writers complete ai_runs
+    // rows that never carry a cost and are not unpriced models — the
+    // supervisor review gate's wrapper row (created_by 'system', its own
+    // gateway call writes a separate priced row) and a cache hit
+    // (created_by 'gateway-cache'). Only rows the priced gateway path wrote
+    // can say "this model has no price".
+    const busy = await createTestTenant(pool);
+    try {
+      await pool.query(
+        `INSERT INTO ai_runs (tenant_id, task_type, model, status, cost_micro_cents, created_by, created_at)
+         SELECT $1, 'supervisor_review', 'gpt-4o-mini', 'completed', 21000, 'gateway', $2
+         FROM generate_series(1, 30)`,
+        [busy.tenantId, IN_WINDOW],
+      );
+      await pool.query(
+        `INSERT INTO ai_runs (tenant_id, task_type, model, status, cost_micro_cents, created_by, created_at)
+         SELECT $1, 'supervisor_review', 'gpt-4o-mini', 'completed', NULL, 'system', $2
+         FROM generate_series(1, 30)`,
+        [busy.tenantId, IN_WINDOW],
+      );
+      await pool.query(
+        `INSERT INTO ai_runs (tenant_id, task_type, model, status, cost_micro_cents, created_by, created_at)
+         SELECT $1, 'classify_intent', 'gpt-4o-mini', 'completed', NULL, 'gateway-cache', $2
+         FROM generate_series(1, 30)`,
+        [busy.tenantId, IN_WINDOW],
+      );
+      const rows = await repo.tenantTaskRunCounts(WINDOW_START, WINDOW_END);
+      const ours = rows.filter((r) => r.tenantId === busy.tenantId);
+      expect(ours).toHaveLength(2);
+      for (const r of ours) expect(r.unpricedCompleted).toBe(0);
+
+      const alert = vi.fn().mockResolvedValue(undefined);
+      const result = await runFailureRateMonitor({
+        getTaskRunCounts: (s, e) => repo.taskRunCounts(s, e),
+        getTenantTaskRunCounts: (s, e) => repo.tenantTaskRunCounts(s, e),
+        getProposalExecutionCounts: (s, f) => repo.proposalExecutionCounts(s, f),
+        alert,
+        thresholds,
+        logger: noopLogger,
+        now: () => NOW,
+      });
+      expect(result.evaluated).toContain('ai_spend_unpriced');
+      expect(result.breached).not.toContain('ai_spend_unpriced');
+      expect(alert).not.toHaveBeenCalledWith(expect.objectContaining({ rule: 'ai_spend_unpriced' }));
+    } finally {
+      await pool.query('DELETE FROM ai_runs WHERE tenant_id = $1', [busy.tenantId]);
+    }
+  });
+
   it('the spend rule pages on a completing loop that the failure rules cannot see', async () => {
     // 1,100 completed runs at 2 cents each in the window = 2,200 cents > 2,000.
     const loop = await createTestTenant(pool);

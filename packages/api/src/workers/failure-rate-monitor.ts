@@ -167,8 +167,9 @@ export interface TenantTaskRunCounts extends TaskRunCounts {
    */
   costMicroCents: number;
   /**
-   * Completed runs in this row whose cost_micro_cents is NULL — a model the
-   * gateway has no price for. They add 0 to `costMicroCents`, so a window
+   * Completed gateway-written runs (created_by 'gateway') in this row whose
+   * cost_micro_cents is NULL — a model the gateway has no price for. Cost-free
+   * bookkeeping rows (supervisor wrapper, cache hit) are excluded. They add 0 to `costMicroCents`, so a window
    * dominated by them makes the spend rule blind (see evaluateUnpricedSpend).
    */
   unpricedCompleted: number;

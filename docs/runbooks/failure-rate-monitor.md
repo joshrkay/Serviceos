@@ -98,8 +98,11 @@ Rule 5 can only see priced runs. A model with no entry in
 production profile running on an unpriced model makes rule 5 read 0 forever.
 This rule pages a **warning** when, over the same window, at least
 `FAILURE_MONITOR_MIN_RUNS` completed runs carry no price **and** they are more
-than 10% of all completed runs. The page names the task types with the most
-unpriced runs. It is off whenever rule 5 is off.
+than 10% of all completed runs. Only rows the priced gateway path wrote
+(`created_by = 'gateway'`) can count as unpriced: the supervisor review
+wrapper row (`created_by = 'system'`) and a cache hit (`'gateway-cache'`)
+never carry a cost and are not an unpriced model. The page names the task
+types with the most unpriced runs. It is off whenever rule 5 is off.
 
 ## How it reaches a human
 
@@ -205,6 +208,7 @@ SELECT model, task_type, COUNT(*)
 FROM ai_runs
 WHERE created_at > NOW() - INTERVAL '35 minutes'
   AND status = 'completed' AND cost_micro_cents IS NULL
+  AND created_by = 'gateway'
 GROUP BY 1, 2 ORDER BY 3 DESC;
 ```
 
