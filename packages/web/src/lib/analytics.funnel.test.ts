@@ -44,6 +44,9 @@ const WEB_FUNNEL_EVENTS: AnalyticsEvent[] = [
   'v3_number_viewed',
   'v3_number_ready',
   'v3_test_call_viewed',
+  'v3_first_heard',
+  'v3_tts_fallback',
+  'v3_voice_input',
 ];
 
 const REQUIRED_FIELDS = ['tenant_id', 'user_id', 'timestamp', 'source'] as const;
