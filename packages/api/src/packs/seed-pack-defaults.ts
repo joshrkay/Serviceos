@@ -725,6 +725,26 @@ export function packHeadlinePrices(packId: string): HeadlinePrices | undefined {
   return packSeedConfig(packId, '')?.headline;
 }
 
+/** The two headline roles a re-run may reprice (U6). */
+type SeedRole = 'visit' | 'labor';
+
+/**
+ * The one role rule shared by pricing and provenance: a seed priced at the
+ * pack's visit or labor headline price IS that role. Every pack ships exactly
+ * one catalog seed per role (pinned in seed-pack-defaults.provenance.test.ts),
+ * so the rule names one item per role and the template lines that follow it.
+ */
+function seedRole(cents: number, headline: HeadlinePrices): SeedRole | null {
+  if (cents === headline.visitCents) return 'visit';
+  if (cents === headline.laborCents) return 'labor';
+  return null;
+}
+
+/** `catalog_items.seed_key` for a pack's headline role: '<packId>:visit' | '<packId>:labor'. */
+function seedKeyFor(packId: string, role: SeedRole): string {
+  return `${packId}:${role}`;
+}
+
 /**
  * Price a seed given the owner's chosen pricing: headline items land exactly,
  * everything else scales by the hourly-rate ratio under the shared rounding
@@ -732,8 +752,9 @@ export function packHeadlinePrices(packId: string): HeadlinePrices | undefined {
  */
 function priceSeed(cents: number, headline: HeadlinePrices, pricing: ChosenPricing | undefined, ratioBps: number): number {
   if (!pricing) return cents;
-  if (cents === headline.visitCents) return pricing.tripFeeCents;
-  if (cents === headline.laborCents) return pricing.hourlyRateCents;
+  const role = seedRole(cents, headline);
+  if (role === 'visit') return pricing.tripFeeCents;
+  if (role === 'labor') return pricing.hourlyRateCents;
   return scaleCentsBps(cents, ratioBps);
 }
 
@@ -809,12 +830,25 @@ export async function seedPackDefaults(
   }
   const ratioBps = pricing ? Math.round((pricing.hourlyRateCents / config.headline.laborCents) * 10_000) : 10_000;
 
+  // U6 seeded-price baseline: the headline item per role that template lines
+  // seeded now will follow on a setup re-run. An item already carrying the
+  // pack's seed_key is that role's item even if the owner renamed it (found by
+  // key, never by name), and the seeder does not create a second one: the
+  // partial unique index on (tenant_id, seed_key) allows one live row.
+  const headlineItemIds = new Map<SeedRole, string>();
+  for (const role of ['visit', 'labor'] as const) {
+    const existing = existingCatalog.find((c) => c.seedKey === seedKeyFor(packId, role));
+    if (existing) headlineItemIds.set(role, existing.id);
+  }
+
   const now = new Date().toISOString();
   let catalogItemsCreated = 0;
   for (const seed of config.catalogSeeds()) {
-    if (existingCatalogNames.has(seed.name.toLowerCase())) {
+    const role = seedRole(seed.unitPriceCents, config.headline);
+    if (existingCatalogNames.has(seed.name.toLowerCase()) || (role && headlineItemIds.has(role))) {
       continue;
     }
+    const unitPriceCents = priceSeed(seed.unitPriceCents, config.headline, pricing, ratioBps);
     const item: CatalogItem = {
       id: uuidv4(),
       tenantId,
@@ -822,13 +856,17 @@ export async function seedPackDefaults(
       description: seed.description,
       category: seed.category,
       unit: seed.unit,
-      unitPriceCents: priceSeed(seed.unitPriceCents, config.headline, pricing, ratioBps),
+      unitPriceCents,
       productServiceType: seed.category === 'Labor' ? 'service' : 'product',
+      // Provenance in the same INSERT as the row: only the two headline items.
+      seedKey: role ? seedKeyFor(packId, role) : null,
+      seededUnitPriceCents: role ? unitPriceCents : null,
       archivedAt: null,
       createdAt: now,
       updatedAt: now,
     };
     await deps.catalogRepo.create(item);
+    if (role) headlineItemIds.set(role, item.id);
     catalogItemsCreated += 1;
   }
 
@@ -847,10 +885,17 @@ export async function seedPackDefaults(
       categoryId: seed.categoryId,
       name: seed.name,
       description: seed.description,
-      lineItemTemplates: seed.lineItems.map((l) => ({
-        ...l,
-        defaultUnitPriceCents: priceSeed(l.defaultUnitPriceCents, config.headline, pricing, ratioBps),
-      })),
+      lineItemTemplates: seed.lineItems.map((l): LineItemTemplate => {
+        const defaultUnitPriceCents = priceSeed(l.defaultUnitPriceCents, config.headline, pricing, ratioBps);
+        const role = seedRole(l.defaultUnitPriceCents, config.headline);
+        const followsItemId = role ? headlineItemIds.get(role) : undefined;
+        // Both keys or neither: a line whose headline item was skipped (the
+        // name is an owner's row with no seed_key) has nothing to follow and
+        // is the owner's.
+        return followsItemId
+          ? { ...l, defaultUnitPriceCents, seededUnitPriceCents: defaultUnitPriceCents, seededCatalogItemId: followsItemId }
+          : { ...l, defaultUnitPriceCents };
+      }),
       defaultDiscountCents: 0,
       defaultTaxRateBps: 0,
       defaultCustomerMessage: seed.customerMessage,

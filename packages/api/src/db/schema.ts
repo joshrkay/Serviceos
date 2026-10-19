@@ -7731,6 +7731,43 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS owner_phone TEXT
         CHECK (owner_phone IS NULL OR owner_phone ~ '^[+][1-9][0-9]{7,14}$');
   `,
+
+  // "Pick, don't build" onboarding, re-run pricing (U6). Positive, per-row
+  // provenance for what a setup re-run may reprice: the pack seeder stamps
+  // its two headline items with seed_key ('<packId>:visit' | '<packId>:labor',
+  // so a renamed item is still found by its role) and the baseline price it
+  // wrote, in the same INSERT as the row; any later price write clears the
+  // baseline in the same UPDATE as the price (PgCatalogItemRepository.update).
+  // A NULL baseline is the owner's. NO backfill: rows seeded before this
+  // migration have no proof of who set their price and stay the owner's.
+  // The template-line half (seededUnitPriceCents, seededCatalogItemId) is
+  // two keys inside estimate_templates.line_item_templates, no DDL.
+  // The same migration adds the tenant_settings forwarding columns (the
+  // owner's existing business line and its confirm/probe stamps, bound to
+  // the line by forwarding_generation); the CHECK is NOT VALID per
+  // docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md.
+  '318_seeded_price_baseline': `
+    ALTER TABLE catalog_items
+      ADD COLUMN IF NOT EXISTS seed_key TEXT,
+      ADD COLUMN IF NOT EXISTS seeded_unit_price_cents INTEGER;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_items_tenant_seed_key
+      ON catalog_items (tenant_id, seed_key)
+      WHERE seed_key IS NOT NULL AND archived_at IS NULL;
+
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS forwarding_confirmed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS forwarding_verified_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS forwarding_source_number TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_carrier TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_generation INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS forwarding_probe_generation INTEGER,
+      ADD COLUMN IF NOT EXISTS forwarding_probe_at TIMESTAMPTZ;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_forwarding_carrier_check,
+      ADD CONSTRAINT tenant_settings_forwarding_carrier_check
+        CHECK (forwarding_carrier IS NULL
+               OR forwarding_carrier IN ('verizon', 'att', 'tmobile', 'other')) NOT VALID;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
