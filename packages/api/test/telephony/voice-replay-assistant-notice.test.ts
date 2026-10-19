@@ -73,7 +73,9 @@ describe('PRIV-4 — a /voice retry still carries the virtual-assistant notice',
 
     const firstPending = adapter.handleInbound(call);
     for (let i = 0; i < 50 && !store.findByCallSid(call.callSid); i++) {
-      await new Promise<void>((r) => setTimeout(r, 0));
+      await new Promise<void>((r) => {
+        setTimeout(r, 0);
+      });
     }
     expect(store.findByCallSid(call.callSid)).toBeDefined();
 
