@@ -73,7 +73,28 @@ export interface TwilioWebhookCredentialResolverDeps {
    * were. Overridable for tests.
    */
   env?: () => NodeJS.ProcessEnv;
+  /**
+   * LCR-04 — how long the last successful lookup for a key may answer for a
+   * lookup that THROWS. Default {@link CREDENTIAL_OUTAGE_CACHE_TTL_MS}.
+   */
+  cacheTtlMs?: number;
+  /** Clock seam for the outage cache (tests). */
+  now?: () => number;
 }
+
+/**
+ * LCR-04 — every telephony webhook is signature-checked before its route runs,
+ * and the check reads tenant_integrations. Without this cache a database
+ * brownout answered 500 at the middleware for EVERY live call — a 5xx Twilio
+ * does not retry — so no route-level voicemail could ever run. The last
+ * successful lookup per key (DID, tenant, subaccount) is kept and used ONLY
+ * when a lookup throws; a working lookup always wins. Encrypted rows are
+ * cached, never decrypted tokens. Fifteen minutes covers a brownout while
+ * bounding how long a revoked or rotated credential could outlive the database.
+ */
+export const CREDENTIAL_OUTAGE_CACHE_TTL_MS = 15 * 60 * 1000;
+/** Bound on cached keys; the oldest entry is evicted first. */
+const CREDENTIAL_OUTAGE_CACHE_MAX_ENTRIES = 10_000;
 
 /**
  * Run a cross-tenant read against `tenant_integrations` under the
@@ -173,6 +194,45 @@ export function createTwilioWebhookCredentialResolver(
   deps: TwilioWebhookCredentialResolverDeps,
 ): TwilioAuthTokenGetter {
   const readEnv = deps.env ?? (() => process.env);
+  const now = deps.now ?? Date.now;
+  const cacheTtlMs = deps.cacheTtlMs ?? CREDENTIAL_OUTAGE_CACHE_TTL_MS;
+  const outageCache = new Map<string, { row: IntegrationRow | null; at: number }>();
+
+  const remember = (key: string, row: IntegrationRow | null): void => {
+    outageCache.delete(key);
+    outageCache.set(key, { row, at: now() });
+    if (outageCache.size > CREDENTIAL_OUTAGE_CACHE_MAX_ENTRIES) {
+      const oldest = outageCache.keys().next().value;
+      if (oldest !== undefined) outageCache.delete(oldest);
+    }
+  };
+
+  /** Run a lookup; on success remember it, on a throw answer the remembered row. */
+  const lookupWithOutageCache = async (
+    key: string,
+    run: () => Promise<IntegrationRow | null>,
+  ): Promise<IntegrationRow | null> => {
+    try {
+      const row = await run();
+      remember(key, row);
+      // The row a DID resolves to is the same row the tenant-keyed lookup
+      // reads, so a call's mid-call callbacks (verified on the session's
+      // tenant) survive a brownout that starts right after its /voice.
+      if (row && key.startsWith('did:')) remember(`tenant:${row.tenant_id}`, row);
+      return row;
+    } catch (err) {
+      const hit = outageCache.get(key);
+      if (hit && now() - hit.at <= cacheTtlMs) {
+        logger.warn('telephony.credential_lookup_served_from_cache', {
+          lookup: key.slice(0, key.indexOf(':')),
+          ageMs: now() - hit.at,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return hit.row;
+      }
+      throw err;
+    }
+  };
 
   return async ({ accountSid, to, tenantId }): Promise<TwilioCredentialDecision> => {
     const env = readEnv();
@@ -195,12 +255,19 @@ export function createTwilioWebhookCredentialResolver(
 
     let owner: IntegrationRow | null = null;
     try {
-      if (tenantId) owner = await findByTenant(pool, tenantId);
-      else if (to) owner = await findByPhoneNumber(pool, to);
+      if (tenantId) {
+        owner = await lookupWithOutageCache(`tenant:${tenantId}`, () => findByTenant(pool, tenantId));
+      } else if (to) {
+        owner = await lookupWithOutageCache(`did:${normalizeE164(to) || to}`, () =>
+          findByPhoneNumber(pool, to),
+        );
+      }
     } catch (err) {
       // A lookup failure must never silently downgrade to "verify with whatever
       // token we have": that is exactly the unbound behaviour #1072 closes.
-      // Fail closed and let the operator see it (500 → Twilio retries).
+      // Fail closed and let the operator see it. (LCR-04: reached only when no
+      // recent successful lookup for this key is cached; Twilio then falls
+      // back to the number's VoiceFallbackUrl voicemail.)
       logger.error('telephony.credential_lookup_failed', {
         error: err instanceof Error ? err.message : String(err),
         ...(tenantId ? { tenantId } : {}),
@@ -273,7 +340,9 @@ export function createTwilioWebhookCredentialResolver(
     if (accountSid) {
       let row: IntegrationRow | null = null;
       try {
-        row = await findBySubaccount(pool, accountSid);
+        row = await lookupWithOutageCache(`subaccount:${accountSid}`, () =>
+          findBySubaccount(pool, accountSid),
+        );
       } catch (err) {
         logger.error('telephony.credential_lookup_failed', {
           error: err instanceof Error ? err.message : String(err),

@@ -268,16 +268,28 @@ export function reconstructWebhookUrl(
  */
 export function requireTwilioSignature(
   authTokenGetter: TwilioAuthTokenGetter,
-  options: { publicBaseUrl?: string | (() => string | undefined) } = {},
+  options: {
+    publicBaseUrl?: string | (() => string | undefined);
+    /**
+     * LCR-04 — the tenant a request already belongs to from trusted,
+     * in-process state (a session-scoped callback's live session), the same
+     * way the media-stream upgrade passes its session's tenant. When it
+     * answers, the credential is that tenant's own — a stronger binding than
+     * the payload's dialled number — and the resolver's outage cache is keyed
+     * on it. Undefined keeps the dialled-number binding.
+     */
+    trustedTenantId?: (req: Request) => string | undefined;
+  } = {},
 ): (req: Request, res: Response, next: NextFunction) => Promise<void> {
   return async (req: Request, res: Response, next: NextFunction) => {
     const accountSid = readAccountSid(req);
     const to = readDialedNumber(req);
+    const tenantId = options.trustedTenantId?.(req);
 
     const resolved = await Promise.resolve(
       authTokenGetter({
         ...(accountSid ? { accountSid } : {}),
-        ...(to ? { to } : {}),
+        ...(tenantId ? { tenantId } : to ? { to } : {}),
       }),
     );
 

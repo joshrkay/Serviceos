@@ -265,10 +265,16 @@ export function createVoicemailStatusRouter(
       try {
         tenantId = await Promise.resolve(deps.resolveTenantIdFallback({ to, from }));
       } catch (err) {
-        logger.warn('voicemail-status: tenant fallback lookup failed', {
+        // LCR-04 — a database outage, not a miss. Nothing has been written
+        // yet (the lead leg is below), so answer 500 and let the callback be
+        // delivered again rather than 200-dropping a voicemail that was left
+        // during the outage.
+        logger.warn('voicemail-status: tenant fallback lookup failed — answering 500 for redelivery', {
           callSid,
           error: err instanceof Error ? err.message : String(err),
         });
+        res.status(500).send('tenant lookup unavailable');
+        return;
       }
       if (tenantId) {
         logger.info('voicemail-status: tenant resolved via fallback (no in-process session)', {
