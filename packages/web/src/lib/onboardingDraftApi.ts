@@ -17,7 +17,9 @@ import {
   type CreateOnboardingDraftResponse,
   type OnboardingChoiceKey,
   type OnboardingDraft,
+  type OnboardingMetroCode,
   type RetryOnboardingDraftResponse,
+  type SetOnboardingMetroBody,
   type StagedOnboardingChoice,
 } from '@ai-service-os/shared';
 import type { ApiFetch } from './apiClient';
@@ -30,11 +32,15 @@ interface DraftFieldIssue {
   message: string;
 }
 
-/** A failed draft call. `versionConflict` means another writer changed the draft first. */
+/**
+ * A failed draft call. `versionConflict` means another writer changed the draft first;
+ * `metroLocked` means a choice is staged, so the city can no longer change.
+ */
 export class OnboardingDraftApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly versionConflict: boolean;
+  readonly metroLocked: boolean;
   /** Per-field reasons from a 400; empty for every other failure. */
   readonly issues: readonly DraftFieldIssue[];
 
@@ -44,6 +50,7 @@ export class OnboardingDraftApiError extends Error {
     this.status = status;
     this.code = code;
     this.versionConflict = status === 409 && message.startsWith('VERSION_CONFLICT');
+    this.metroLocked = status === 409 && message.startsWith('DRAFT_METRO_LOCKED');
     this.issues = issues;
   }
 
@@ -111,6 +118,18 @@ export async function stageChoice(
     method: 'PUT',
     body: JSON.stringify({ choice, version }),
   });
+  if (!res.ok) throw await failure(res);
+  return (await parse(res, OnboardingDraftResponseSchema)).draft;
+}
+
+/**
+ * "Not Cleveland?": re-price a draft with nothing staged for another curated city. `version` is the one
+ * the Ready screen rendered; a stale one rejects with `versionConflict`, and a draft that has a staged
+ * choice by now rejects with `metroLocked`.
+ */
+export async function setMetro(apiFetch: ApiFetch, metro: OnboardingMetroCode, version: number): Promise<OnboardingDraft> {
+  const body: SetOnboardingMetroBody = { metro, version };
+  const res = await apiFetch(`${DRAFT_PATH}/metro`, { method: 'PUT', body: JSON.stringify(body) });
   if (!res.ok) throw await failure(res);
   return (await parse(res, OnboardingDraftResponseSchema)).draft;
 }

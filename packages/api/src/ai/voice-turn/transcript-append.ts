@@ -15,6 +15,7 @@
  * `ai/voice-turn`, so this is import-graph safe.
  */
 import type { SideEffect } from '../agents/customer-calling/types';
+import { redactCardNumbers } from '../privacy/pan-redact';
 
 /**
  * Minimal slice of VoiceSessionStore needed by this helper (avoids importing
@@ -40,7 +41,8 @@ export interface ChallengeAwareSession {
 
 /**
  * The text to store for a caller utterance — redacted when the session is
- * awaiting a spoken money-approval challenge (#850).
+ * awaiting a spoken money-approval challenge (#850), and with any recited
+ * card number replaced by `[card number]` (PRIV-3).
  *
  * Money- and irreversible-class voice approvals require a spoken challenge
  * (`ai/tasks/proposal-approval-task.ts`). It is a STATIC per-tenant secret
@@ -48,6 +50,13 @@ export interface ChallengeAwareSession {
  * another copy of it into the transcript — and into everything derived from
  * one. Encryption at rest protects the store; it does nothing about a secret
  * whose exposure grows with each use.
+ *
+ * PRIV-3 — card numbers ARE matched on shape (Luhn-valid 13–19 digit runs,
+ * `ai/privacy/pan-redact.ts`): a caller can recite one at any stage, and this
+ * is the one place every transport's stored caller turn passes through, so
+ * every store derived from the transcript (call_transcript_turns,
+ * voice_sessions.transcript, summaries, knowledge chunks) inherits it. The
+ * marker also flags the call's recording for prompt audio purge.
  *
  * Keyed on the dialogue STAGE, never on the shape of the utterance: matching
  * on "looks like a code" would both leak (an owner who says "the code is
@@ -62,7 +71,9 @@ export function callerTranscriptText(
   session: ChallengeAwareSession | undefined,
   spoken: string,
 ): string {
-  return session?.pendingVoiceApproval?.stage === 'challenge' ? REDACTED_CHALLENGE_TEXT : spoken;
+  return session?.pendingVoiceApproval?.stage === 'challenge'
+    ? REDACTED_CHALLENGE_TEXT
+    : redactCardNumbers(spoken);
 }
 
 /**

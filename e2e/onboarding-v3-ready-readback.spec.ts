@@ -395,6 +395,74 @@ for (const vp of viewports) {
       expect(seenOnReload).not.toContain('Getting your shop ready.');
     });
 
+    test('"Not Cleveland?": the owner changes the city on Ready, the new city and prices show on the price turn and the read-back, and the saved settings carry them', async ({ page }) => {
+      test.setTimeout(120_000);
+      const token = await reachReady(page, `${vp.name}-metro`);
+
+      // The city the shop was priced for is named, and can be changed with one tap.
+      await page.getByRole('button', { name: 'Not Cleveland?' }).click();
+      await expect(page.getByRole('searchbox', { name: 'Your city' })).toBeVisible();
+      await expectScreenFits(page);
+      await page.getByRole('searchbox', { name: 'Your city' }).fill('colum');
+      await expect(page.getByRole('list', { name: 'Cities' }).getByRole('button')).toHaveText(['Columbus']);
+      const changed = page.waitForResponse((r) => r.url().endsWith('/api/onboarding/draft/metro') && r.request().method() === 'PUT');
+      await page.getByRole('list', { name: 'Cities' }).getByRole('button', { name: 'Columbus' }).click();
+      const changedResponse = await changed;
+      expect(changedResponse.status()).toBe(200);
+      expect(changedResponse.request().postDataJSON()).toEqual({ metro: 'CMH', version: 1 });
+      const changedBody = await changedResponse.json();
+      expect(changedBody.draft).toMatchObject({ metroCode: 'CMH', metroName: 'Columbus', version: 2, choices: {} });
+
+      // Ready now names Columbus and shows Columbus's prices; nothing of Cleveland is left.
+      await expect(page.getByText(/the way most Columbus plumbing shops run/)).toBeVisible();
+      await expect(page.getByText('$79, then $135 an hour')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Not Columbus?' })).toBeVisible();
+      await expect(page.getByText(/Cleveland/)).toHaveCount(0);
+      await expectScreenFits(page);
+
+      // The first price turn: Columbus's two options. Picking the premium one stages it against them.
+      await page.getByRole('button', { name: 'Make it mine, 7 choices' }).click();
+      await expectTurn(page, QUESTIONS.greeting);
+      await choose(page, 'Walsh Plumbing, how can I help?');
+      await expectTurn(page, QUESTIONS.price);
+      await expect(page.getByText("This is the first number a caller hears. Here's where plumbing shops in Columbus land.")).toBeVisible();
+      await expect(page.getByRole('radio', { name: '$79 to come out, then $135 an hour', exact: true })).toBeVisible();
+      // Once a choice is staged there is no city change anywhere: the read-back names the city as text.
+      await choose(page, '$109 to come out, then $165 an hour');
+      await expectTurn(page, QUESTIONS.posture);
+      await page.getByRole('button', { name: 'Keep the rest as is' }).click();
+      await expect(page.getByRole('heading', { level: 1, name: READBACK_HEADING })).toBeVisible();
+      await expect(page.getByText('$109 to come out, $165 an hour after')).toBeVisible();
+      await expect(page.getByText(/Typical for Columbus plumbers\./)).toBeVisible();
+      await expect(page.getByRole('button', { name: /Not Columbus|Set my city/ })).toHaveCount(0);
+      await expectScreenFits(page);
+
+      // A stale tab cannot change the city behind the staged pick: the real route refuses it.
+      const late = await page.request.put(`${apiUrl}/api/onboarding/draft/metro`, {
+        headers: { authorization: `Bearer ${token}` },
+        data: { metro: 'CLE', version: 3 },
+      });
+      expect(late.status()).toBe(409);
+      expect((await late.json()).message).toMatch(/^DRAFT_METRO_LOCKED/);
+
+      // That's right: the saved settings, once live, carry the Columbus city and the price the owner picked.
+      const approved = page.waitForResponse(isApprove);
+      await page.getByRole('button', { name: "That's right" }).click();
+      expect((await approved).status()).toBe(200);
+      await expect(page.getByText('Saving 2 changes. They go live in a few seconds.')).toBeVisible();
+      await expect
+        .poll(
+          async () => {
+            const res = await page.request.get(`${apiUrl}/api/settings`, { headers: { authorization: `Bearer ${token}` } });
+            if (!res.ok()) return null;
+            const settings = await res.json();
+            return { city: settings.serviceAreaText ?? null, hourlyRateCents: settings.hourlyRateCents ?? null };
+          },
+          { timeout: 40_000, intervals: [1_000] },
+        )
+        .toEqual({ city: 'Columbus', hourlyRateCents: 16500 });
+    });
+
     test('Answer two, keep the rest as is, reload: the two choices are still staged and the owner picks up where they left off', async ({ page }) => {
       test.setTimeout(60_000);
       await reachReady(page, `${vp.name}-resume`);

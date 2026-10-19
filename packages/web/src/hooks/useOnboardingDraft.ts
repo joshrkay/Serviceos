@@ -4,6 +4,7 @@ import type {
   CreateOnboardingDraftBody,
   OnboardingChoiceKey,
   OnboardingDraft,
+  OnboardingMetroCode,
   StagedOnboardingChoice,
 } from '@ai-service-os/shared';
 import { useApiClient } from '../lib/apiClient';
@@ -12,13 +13,16 @@ import {
   approveDraft,
   createDraft,
   getDraft,
+  setMetro,
   stageChoice,
 } from '../lib/onboardingDraftApi';
 import { browserTimezoneOrUndefined } from './useOnboardingConversation';
 
 const LOAD_ERROR = "I couldn't load your setup. Check your connection and try again.";
 const SAVE_ERROR = "That didn't go through. Try again.";
-const CONFLICT_NOTICE = 'Your answers changed somewhere else, so I refreshed them. Tap again.';
+/** After a re-read that changed what is on screen. Alone when the control the owner tapped may be gone. */
+const REFRESHED_NOTICE = 'Your answers changed somewhere else, so I refreshed them.';
+const CONFLICT_NOTICE = `${REFRESHED_NOTICE} Tap again.`;
 
 export interface UseOnboardingDraftResult {
   draft: OnboardingDraft | null;
@@ -38,6 +42,12 @@ export interface UseOnboardingDraftResult {
   approving: boolean;
   /** Resolves true when staged; false after a refresh-on-conflict or a failure (see `notice` / `error`). */
   stage: (key: OnboardingChoiceKey, choice: StagedOnboardingChoice) => Promise<boolean>;
+  /**
+   * "Not Cleveland?": re-price the shop for another city. The re-priced draft when saved; null after a
+   * refresh (any 409: the draft moved on, a choice was staged elsewhere, or it was approved) or a failure.
+   * Never repeated.
+   */
+  changeMetro: (metro: OnboardingMetroCode) => Promise<OnboardingDraft | null>;
   /** The approve response, or null when it did not go through. */
   approve: () => Promise<ApproveOnboardingDraftResponse | null>;
   reload: () => Promise<void>;
@@ -88,7 +98,9 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
         if (!next && input) {
           next = (await createDraft(apiFetch, { ...input, clientTimezone: input.clientTimezone ?? browserTimezoneOrUndefined() })).draft;
         } else if (next) {
-          next = await backfillTimezone(apiFetch, next, input?.clientTimezone);
+          // Best effort here: approve tries again before it sends, so a failure now is not a dead end.
+          const loaded = next;
+          next = await recordTimezone(apiFetch, loaded, input?.clientTimezone).catch(() => loaded);
         }
         if (!isStale()) commit(next);
       } catch (err) {
@@ -159,6 +171,33 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
     [apiFetch, commit, refresh, serially],
   );
 
+  const changeMetro = useCallback(
+    (metro: OnboardingMetroCode): Promise<OnboardingDraft | null> =>
+      serially(async () => {
+        const current = draftRef.current;
+        if (!current) return null;
+        setError(null);
+        setNotice(null);
+        try {
+          const next = await setMetro(apiFetch, metro, current.version);
+          commit(next);
+          return next;
+        } catch (err) {
+          if (err instanceof OnboardingDraftApiError && err.status === 409) {
+            // The draft moved on (VERSION_CONFLICT), a choice was staged in another window
+            // (DRAFT_METRO_LOCKED), or it was approved (DRAFT_APPROVED). Re-read once and show what is
+            // current; the call is not repeated, because the screen it came from may be gone.
+            const refreshed = await refresh();
+            if (refreshed && draftRef.current?.status !== 'approved') setNotice(REFRESHED_NOTICE);
+          } else {
+            setError(SAVE_ERROR);
+          }
+          return null;
+        }
+      }),
+    [apiFetch, commit, refresh, serially],
+  );
+
   const approve = useCallback(
     (): Promise<ApproveOnboardingDraftResponse | null> =>
       serially(async () => {
@@ -166,6 +205,17 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
         setNotice(null);
         setApproving(true);
         try {
+          // A zone that could not be recorded when the draft loaded is recorded now: the API refuses to
+          // approve a draft without one, and only this call can lift that.
+          const held = draftRef.current;
+          if (held && held.status === 'draft' && held.clientTimezone === null) {
+            try {
+              commit(await recordTimezone(apiFetch, held, input?.clientTimezone));
+            } catch {
+              setError(SAVE_ERROR);
+              return null;
+            }
+          }
           // The version is read here, after earlier writes in the queue have landed, so it is the one the
           // read-back on screen was rendered from. A stale tab then gets a 409 instead of approving a read-back
           // that changed, and a repeat tap is told apart from a stale one.
@@ -191,10 +241,10 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
           setApproving(false);
         }
       }),
-    [apiFetch, commit, refresh, serially],
+    [apiFetch, commit, refresh, serially, input],
   );
 
-  return { draft, version: draft?.version ?? null, loading, error, cellProblem, notice, approving, stage, approve, reload };
+  return { draft, version: draft?.version ?? null, loading, error, cellProblem, notice, approving, stage, changeMetro, approve, reload };
 }
 
 
@@ -203,10 +253,11 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
  * than guess one), so an owner who reloads keeps hitting the same wall. The
  * create route is idempotent and records a zone on an existing unapproved
  * draft, so re-post the draft's own facts with the zone we can detect now.
- * Best effort: if that call fails, the draft is still shown and approval
- * reports its own error.
+ * Returns the draft unchanged when there is nothing to record (approved, already
+ * zoned, or no zone detectable); rejects when the call fails, so the caller
+ * decides: the load shows the draft anyway, and approve tries once more first.
  */
-async function backfillTimezone(
+async function recordTimezone(
   apiFetch: Parameters<typeof getDraft>[0],
   draft: OnboardingDraft,
   preferredTimezone: string | undefined,
@@ -214,15 +265,11 @@ async function backfillTimezone(
   if (draft.status !== 'draft' || draft.clientTimezone !== null) return draft;
   const clientTimezone = preferredTimezone ?? browserTimezoneOrUndefined();
   if (!clientTimezone) return draft;
-  try {
-    const res = await createDraft(apiFetch, {
-      packId: draft.packId,
-      businessName: draft.businessName,
-      ...(draft.ownerFirstName ? { ownerFirstName: draft.ownerFirstName } : {}),
-      clientTimezone,
-    });
-    return res.draft;
-  } catch {
-    return draft;
-  }
+  const res = await createDraft(apiFetch, {
+    packId: draft.packId,
+    businessName: draft.businessName,
+    ...(draft.ownerFirstName ? { ownerFirstName: draft.ownerFirstName } : {}),
+    clientTimezone,
+  });
+  return res.draft;
 }

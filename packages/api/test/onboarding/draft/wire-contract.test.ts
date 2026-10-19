@@ -13,10 +13,12 @@ import {
   ONBOARDING_CHOICE_KEYS,
   ONBOARDING_CORE_CHOICE_KEYS,
   ONBOARDING_DRAFT_EXECUTION_STATES,
+  ONBOARDING_METROS,
   ONBOARDING_REGISTRY_TRADES,
   OnboardingDraftResponseSchema,
   OnboardingDraftSchema,
   RetryOnboardingDraftResponseSchema,
+  SetOnboardingMetroBodySchema,
   StageOnboardingChoiceBodySchema,
 } from '@ai-service-os/shared';
 import { DRAFT_EXECUTION_STATES } from '../../../src/onboarding/contracts';
@@ -24,9 +26,9 @@ import { assembleTypicalShop } from '../../../src/onboarding/choices/assemble';
 import { InMemoryRegionalPriceTierRepository } from '../../../src/onboarding/choices/price-tiers';
 import { ALL_CHOICE_KEYS, CHOICE_KEYS } from '../../../src/onboarding/choices/schema';
 import { REGISTRY_TRADES } from '../../../src/onboarding/choices/registry';
-import { metroForPhone } from '../../../src/compliance/us-geography';
+import { NPA_METROS, metroForPhone } from '../../../src/compliance/us-geography';
 import { InMemoryOnboardingDraftRepository } from '../../../src/onboarding/draft/repository';
-import { ApproveDraftBodySchema, CreateDraftInputSchema, StageChoiceBodySchema } from '../../../src/onboarding/draft/contracts';
+import { ApproveDraftBodySchema, CreateDraftInputSchema, SetMetroBodySchema, StageChoiceBodySchema } from '../../../src/onboarding/draft/contracts';
 
 const TENANT_ID = '00000000-0000-0000-0000-0000000000a1';
 const CLE = { standard: { tripFeeCents: 8900, hourlyRateCents: 15000 }, premium: { tripFeeCents: 12900, hourlyRateCents: 18500 } };
@@ -154,6 +156,48 @@ describe('onboarding draft wire contract (api <-> shared)', () => {
       expect(ApproveOnboardingDraftBodySchema.safeParse(body).success, JSON.stringify(body)).toBe(ok);
       expect(ApproveDraftBodySchema.safeParse(body).success, `api ${JSON.stringify(body)}`).toBe(ok);
     }
+  });
+
+  it('keeps the metro list the web offers equal to the API table, code and name, in order', () => {
+    expect(ONBOARDING_METROS.map((m) => ({ code: m.code, name: m.name }))).toEqual(
+      Object.entries(NPA_METROS).map(([code, entry]) => ({ code, name: entry.name })),
+    );
+  });
+
+  it('accepts exactly the metro bodies the API accepts', () => {
+    const cases: unknown[] = [
+      { metro: 'CMH', version: 1 },
+      { metro: 'CLE', version: 9 },
+      ...Object.keys(NPA_METROS).map((metro) => ({ metro, version: 2 })),
+      { metro: 'cmh', version: 1 },
+      { metro: 'Columbus', version: 1 },
+      { metro: 'ZZZ', version: 1 },
+      { metro: 'US', version: 1 },
+      { metro: 'CMH' },
+      { metro: 'CMH', version: 0 },
+      { metro: 'CMH', version: 1.5 },
+      { version: 1 },
+      { metro: 'CMH', version: 1, name: 'Columbus' },
+    ];
+    for (const body of cases) {
+      expect(SetOnboardingMetroBodySchema.safeParse(body).success, JSON.stringify(body)).toBe(SetMetroBodySchema.safeParse(body).success);
+    }
+    expect(SetMetroBodySchema.safeParse({ metro: 'CMH', version: 1 }).success).toBe(true);
+    expect(SetMetroBodySchema.safeParse({ metro: 'Columbus', version: 1 }).success).toBe(false);
+  });
+
+  it('parses a metro-changed draft and loses no field', async () => {
+    const { repo, draft } = await buildDraft('plumbing', '(216) 555-0142');
+    const tierRepo = new InMemoryRegionalPriceTierRepository({ 'plumbing|CLE': CLE });
+    for (const [code, name] of [['CMH', 'Columbus'], ['BUF', 'Buffalo']] as const) {
+      const current = (await repo.getForTenant(TENANT_ID))!;
+      const changed = await repo.setMetro(TENANT_ID, code, current.version, (row) =>
+        assembleTypicalShop(tierRepo, { packId: row.packId, businessName: row.businessName, metro: { kind: 'metro', metroCode: code, name } }),
+      );
+      const wire = overTheWire(changed);
+      expect(OnboardingDraftResponseSchema.parse({ draft: wire }).draft).toEqual(wire);
+    }
+    expect((await repo.getForTenant(TENANT_ID))!.version).toBe(draft.version + 2);
   });
 
   it('keeps the execution states equal to the API list', () => {

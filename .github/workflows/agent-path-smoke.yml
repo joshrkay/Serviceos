@@ -9,19 +9,40 @@
 # vars. ANTHROPIC_API_KEY is deliberately NOT wired here — production does not
 # use Anthropic, so a green run on it would prove the wrong provider.
 #
-# Cost: 11 classify calls, capped at AGENT_PATH_SMOKE_COST_CAP_CENTS (default $1).
-# Missing credentials fail as an explicit unmet prerequisite; they are never
-# reported as green execution evidence.
+# OBS-3 — this is the ONLY merge-path check that calls the real model, so
+# the same job also runs the live intent + slot evals against the recorded
+# live baselines (packages/voice-eval/baselines/*-live.json, the bar
+# voice-eval-live.yml measures weekly): a prompt or routing change meets
+# that bar BEFORE merge.
+#
+# ONE check run per pull request (OBS-3 review round 1). The workflow runs
+# on every pull request; the `changes` job diffs the PR against the one
+# PATH_SMOKE_PATHS list, and `path-smoke` is skipped by its job-level `if:`
+# when no listed file changed. GitHub reports a job skipped by a conditional
+# as success, so branch protection can require `path-smoke` without stalling
+# unrelated PRs, and there is no second same-named check run (the old
+# skip-pass shim workflow) whose instant green could race a red real run.
+#
+# Cost: 11 classify calls capped at AGENT_PATH_SMOKE_COST_CAP_CENTS (default
+# $1), plus the two sampled evals and the 7-call drafting golden set, each
+# capped per step by VOICE_EVAL_COST_CAP_CENTS (about $1 per keyed run in
+# total). Missing
+# credentials fail as an explicit unmet prerequisite; they are never reported
+# as green execution evidence.
 name: Agent Path Smoke
 
 on:
+  # Every pull request — the `changes` job below decides whether the real
+  # evals run. Never add a paths filter here: a required check that never
+  # starts leaves the PR waiting forever.
+  # `edited` (OBS-3 review round 3): a base-branch change is an edit, and
+  # the default types (opened, synchronize, reopened) would keep a skip
+  # decided against the OLD base — a stacked PR retargeted to main would
+  # carry its parent's prompt edit in under a stale green. Not filtered to
+  # base changes: a skip on a title edit would post a fresh green over an
+  # earlier red, so a title edit on a prompt PR re-runs the evals (~$1).
   pull_request:
-    paths:
-      - 'packages/api/src/ai/**'
-      - 'packages/api/scripts/agent-path-smoke.ts'
-      - 'packages/api/scripts/agent-graph-coverage.ts'
-      - 'packages/api/src/ai/voice-quality/**'
-      - '.github/workflows/agent-path-smoke.yml'
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
   schedule:
     # Daily 06:30 UTC — offset from voice-eval-live Monday job
@@ -32,8 +53,13 @@ permissions:
 
 jobs:
   path-smoke:
+    needs: changes
+    # Fail closed: when `changes` failed or was skipped its output is empty,
+    # which is not 'false', so the real evals still run. Skipped (reported as
+    # success) ONLY when the diff positively found no listed file.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.match != 'false') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       AI_PROVIDER_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       AI_PROVIDER_BASE_URL: https://api.openai.com/v1
@@ -55,10 +81,12 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'npm'
       - name: Install deps
+        id: install
         run: npm ci
       - name: Offline graph coverage (always meaningful)
         run: npm run agent:graph-coverage --workspace=packages/api -- --gate --markdown
       - name: Verify API key is present
+        id: key
         run: |
           if [ -z "$AI_PROVIDER_API_KEY" ]; then
             echo "::error::AI_PROVIDER_API_KEY is not set (secrets.OPENAI_API_KEY) — real-LLM path smoke was not executed."
@@ -71,6 +99,62 @@ jobs:
           set -o pipefail
           npm run agent:path-smoke --workspace=packages/api -- --gate \
             | tee agent-path-smoke-console.txt
+      # OBS-3 — the recorded live baselines are the merge bar. --baseline
+      # exits 1 on a regression past tolerance and ALSO when the sample's
+      # rows/fingerprint differ from the recorded set, so --max-utterances
+      # must equal each baseline's goldenSet.rows (200 intent / 100 slot).
+      # Per-step caps mirror voice-eval-live.yml; the runner projects cost
+      # before spending and aborts (exit 3) past the cap.
+      # ci-workflow-path-smoke.test.ts pins sample, baseline and cap.
+      - name: Live intent eval vs recorded live baseline (gated)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.key.outcome == 'success' }}
+        env:
+          VOICE_EVAL_COST_CAP_CENTS: '150'    # projection ~63c at N=200 (gpt-4o-mini)
+        run: |
+          set -o pipefail
+          npx tsx packages/voice-eval/run-intent-eval.ts --live --gate --max-utterances 200 --baseline packages/voice-eval/baselines/intent-live.json \
+            | tee -a agent-path-smoke-console.txt
+      # Runs even when the smoke or the intent eval failed, so one run
+      # reports all three.
+      - name: Live slot eval vs recorded live baseline (gated)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.key.outcome == 'success' }}
+        env:
+          VOICE_EVAL_COST_CAP_CENTS: '80'     # projection ~32c at N=100 (gpt-4o-mini)
+        run: |
+          set -o pipefail
+          npx tsx packages/voice-eval/run-slot-eval.ts --live --gate --max-utterances 100 --baseline packages/voice-eval/baselines/slot-live.json \
+            | tee -a agent-path-smoke-console.txt
+      # OBS-3 review round 1 — the steps above only exercise the classifier.
+      # The drafting golden set runs draft_estimate (catalog-grounded),
+      # the spoken brand-voice instruction, the Google-review reply and the
+      # brand_voice_v1 composer (customer reschedule and dropped-call SMS)
+      # through the production task code: --gate fails on any safety check
+      # (an uncatalogued price that could auto-approve, a catalog line off its
+      # catalog price, a reply or SMS carrying a link or discount, an SMS that
+      # took its signoff from the caller context), and --baseline compares the quality
+      # metrics with the recorded live baseline.
+      # OBS-3 review round 3 — until drafting-live.json is recorded (its
+      # recordCommand, a paid run with the key), exit 4 is a warning, not a
+      # red: a check that is red on every AI pull request gets waved through,
+      # intent and slot regressions with it. Safety violations still fail
+      # (exit 1, checked before the baseline), as do a regression past a
+      # recorded baseline (1), a cost abort (3) and a missing key (2).
+      - name: Live drafting golden set vs recorded live baseline (gated)
+        id: drafting
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.key.outcome == 'success' }}
+        env:
+          VOICE_EVAL_COST_CAP_CENTS: '25'     # projection ~13.5c for 10 calls priced at gpt-4o
+          DRAFTING_GOLDEN_OUT: drafting-golden-report.json
+        run: |
+          set -o pipefail
+          code=0
+          npx tsx packages/api/scripts/drafting-golden-eval.ts --live --gate --baseline packages/voice-eval/baselines/drafting-live.json \
+            | tee -a agent-path-smoke-console.txt || code=$?
+          if [ "$code" -eq 4 ]; then
+            echo "::warning::packages/voice-eval/baselines/drafting-live.json has not been recorded yet, so only the drafting safety checks gated this run. Record it with the recordCommand in that file and commit it."
+            exit 0
+          fi
+          exit "$code"
       - name: Upload path-smoke report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -79,5 +163,81 @@ jobs:
           path: |
             agent-path-smoke-report.json
             agent-path-smoke-console.txt
+            drafting-golden-report.json
           retention-days: 90
           if-no-files-found: ignore
+
+  # Decides whether this pull request runs the real-model evals. Defined
+  # after path-smoke so path-smoke's job-level env stays the first in the
+  # file (the contract tests read it). No secrets, no install: it must pass
+  # on a fork PR.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      match: ${{ steps.diff.outputs.match }}
+    steps:
+      # A pull_request run checks out the merge commit: parent 1 is the base
+      # tip and parent 2 the PR head, so depth 2 is enough to diff the PR.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 2
+      # PATH_SMOKE_PATHS — every file that defines a system prompt or routes
+      # a model (grep of system prompts and gateway.complete call sites), not
+      # only src/ai/**: OBS-3 — reputation/, the vertical sections of the
+      # caller prompt, the transcription corrector and the tier map used to
+      # reach main with no real-model eval. app.ts and
+      # voice/quality/grade-voice-session.ts only WIRE the gateway (the
+      # prompt text they pass lives in the files below) and app.ts changes on
+      # most PRs, so they are left out on purpose.
+      # ci-workflow-path-smoke.test.ts pins this list, fails when a file
+      # under packages/api/src defines a prompt or calls the model outside
+      # it, and executes this step against a real merge commit. One glob per
+      # line: `dir/**` or an exact path.
+      - name: Did this pull request change a prompt or model-routing file
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PATH_SMOKE_PATHS: |
+            packages/api/src/ai/**
+            packages/api/src/reputation/**
+            packages/api/src/verticals/**
+            packages/api/src/workers/transcription.ts
+            packages/api/src/workers/supervisor-review-worker.ts
+            packages/api/src/workers/verify-ai.ts
+            packages/api/src/proposals/edit-interpreter.ts
+            packages/api/src/routes/assistant.ts
+            packages/api/src/digest/weekly-feedback.ts
+            packages/api/src/config/ai-routing.ts
+            packages/api/scripts/agent-path-smoke.ts
+            packages/api/scripts/agent-graph-coverage.ts
+            packages/api/scripts/drafting-golden-eval.ts
+            packages/voice-eval/**
+            .github/workflows/agent-path-smoke.yml
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "match=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fail closed: if the merge commit's parents are not there to diff,
+          # run the real evals rather than guess.
+          if ! git rev-parse -q --verify 'HEAD^2' > /dev/null \
+            || ! changed=$(git diff --name-only --no-renames 'HEAD^1' HEAD); then
+            echo "::warning::Could not list this pull request's changed files; running the real-model evals."
+            echo "match=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          match=false
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            while IFS= read -r pattern; do
+              [ -n "$pattern" ] || continue
+              # Unquoted on purpose: `dir/**` must glob-match nested paths.
+              # shellcheck disable=SC2053
+              if [[ "$file" == $pattern ]]; then
+                echo "changed: $file (matches $pattern)"
+                match=true
+              fi
+            done <<< "$PATH_SMOKE_PATHS"
+          done <<< "$changed"
+          echo "match=$match" >> "$GITHUB_OUTPUT"
