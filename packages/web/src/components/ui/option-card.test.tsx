@@ -139,6 +139,31 @@ describe('OptionCard', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  describe('heard (S3-5: the owner answered out loud)', () => {
+    const heardOptions: [OptionCardOption<'a' | 'b'>, OptionCardOption<'a' | 'b'>] = [OPTIONS[0], { ...OPTIONS[1], heard: 'the second one' }];
+
+    it('shows what was heard under the matching card only, quoted', () => {
+      setup({ options: heardOptions, value: 'b' });
+      const [book, hold] = screen.getAllByRole('radio');
+      expect(within(hold).getByText('Heard: “the second one”')).toBeInTheDocument();
+      expect(within(book).queryByText(/Heard:/)).not.toBeInTheDocument();
+    });
+
+    it('is part of that card\'s description, so a screen reader hears it with the card', () => {
+      setup({ options: heardOptions, value: 'b' });
+      expect(screen.getByRole('radio', { name: 'Hold it for me' })).toHaveAccessibleDescription(/Heard: “the second one”$/);
+    });
+
+    it('wraps a long transcript, and the row stays min-h-14 and full width', () => {
+      setup({ options: [OPTIONS[0], { ...OPTIONS[1], heard: LONG }], value: 'b' });
+      expect(screen.getByText(`Heard: “${LONG}”`).className).toMatch(/break-words/);
+      for (const radio of screen.getAllByRole('radio')) {
+        expect(radio.className).toMatch(/(^|\s)min-h-14(\s|$)/);
+        expect(radio.className).toMatch(/(^|\s)w-full(\s|$)/);
+      }
+    });
+  });
+
   describe('class contract (jsdom cannot measure; e2e measures at 320px and 390px)', () => {
     it('gives every row min-h-14 and full width, so a row is never under 56px or narrower than the screen', () => {
       setup({ value: 'a' });

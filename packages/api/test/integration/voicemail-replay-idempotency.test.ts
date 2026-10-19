@@ -49,7 +49,7 @@ describe('Postgres integration — U9 voicemail replay idempotency', () => {
       recordingUrl: 'https://api.twilio.com/2010-04-01/Recordings/RE-vm-int',
       durationSeconds: 27,
       storageBucket: 'serviceos-recordings',
-      storageKey: buildVoicemailStorageKey(tenant.tenantId, callSid),
+      storageKey: buildVoicemailStorageKey(tenant.tenantId, callSid, 'RE-vm-int'),
       sizeBytes: 12345,
       contentType: 'audio/mpeg',
       createdBy: 'voicemail_webhook',
@@ -68,7 +68,7 @@ describe('Postgres integration — U9 voicemail replay idempotency', () => {
     const liveLegInput = {
       ...voicemailInput,
       recordingUrl: 'https://api.twilio.com/2010-04-01/Recordings/RE-live-int',
-      storageKey: `${tenant.tenantId}/${callSid}.mp3`,
+      storageKey: `${tenant.tenantId}/${callSid}-RE-live-int.mp3`,
       createdBy: 'twilio-recording-webhook',
       durationSeconds: 95,
     };
@@ -102,7 +102,7 @@ describe('Postgres integration — U9 voicemail replay idempotency', () => {
     expect(vmRow?.recording_url).toBe(voicemailInput.recordingUrl);
 
     // Each recording's files FK target carries its own storage key (the
-    // voicemail never clobbers the live leg's `<tenant>/<callSid>.mp3`).
+    // voicemail never clobbers the live leg's `<tenant>/<callSid>-<recordingSid>.mp3`).
     // Sort BOTH sides with the same JS comparator: Postgres ORDER BY uses the
     // database collation (linguistic — ranks "….mp3" before "…-voicemail.mp3"),
     // which disagrees with JS's code-unit sort ("-" < "."), so relying on the
@@ -113,8 +113,8 @@ describe('Postgres integration — U9 voicemail replay idempotency', () => {
     );
     expect(files.rows.map((r) => r.s3_key).sort()).toEqual(
       [
-        buildVoicemailStorageKey(tenant.tenantId, callSid),
-        `${tenant.tenantId}/${callSid}.mp3`,
+        buildVoicemailStorageKey(tenant.tenantId, callSid, 'RE-vm-int'),
+        `${tenant.tenantId}/${callSid}-RE-live-int.mp3`,
       ].sort(),
     );
   });

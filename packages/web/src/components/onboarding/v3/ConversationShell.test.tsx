@@ -3,14 +3,16 @@
  * The draft is a fixture captured from the API (pinned to the shared contract
  * in __fixtures__), so the screens render what the API really sends. The stub
  * server behaves like the draft routes: PUT /choices/:key is a compare-and-swap
- * on `version` that merges the staged choice and bumps it.
+ * on `version` that merges the staged choice and bumps it. The voice routes
+ * answer as the API does: by default as a keyless environment (501, so Rivet
+ * falls back), or with clips when a test turns the voice on (`tts: 'ok'`).
  */
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import type { OnboardingDraft } from '@ai-service-os/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fullyAnsweredDraft, plumbingCleDraft, withChoices } from './__fixtures__';
+import { fullyAnsweredDraft, plumbingCleDraft, plumbingCmhDraft, withChoices } from './__fixtures__';
 import { PLANS, statusAt } from './__fixtures__/after';
 import { _resetOnboardingStatusCacheForTests } from '../../../hooks/useOnboardingStatus';
 import { expectAllTapTargets } from '../../../test-utils/tap-target';
@@ -52,12 +54,39 @@ interface Server {
   approveFails?: boolean;
   /** Hold the next staged choice until this settles, so a test can act while a save is in flight. */
   stageGate?: Promise<void>;
+  /** How the voice routes answer: with clips, or with the API's error for that status. Default 501 (no voice configured). */
+  tts?: 'ok' | 429 | 501 | 502;
+  /**
+   * What happens to the next metro change before it lands: another window staged a choice
+   * (the API answers DRAFT_METRO_LOCKED), or moved the version without staging (VERSION_CONFLICT).
+   */
+  metroFault?: 'staged_elsewhere' | 'moved_elsewhere';
 }
 
 interface Request {
   method: string;
   path: string;
-  body: { choice?: unknown; version?: number } | undefined;
+  body: { choice?: unknown; version?: number; items?: string[]; text?: string } | undefined;
+}
+
+const TTS_ERRORS = {
+  429: { error: 'RATE_LIMITED', message: 'Too many spoken answers in a row. The answer is still on screen.' },
+  501: { error: 'NOT_CONFIGURED', message: 'Speech synthesis is not configured' },
+  502: { error: 'TTS_FAILED', message: "Couldn't speak that answer right now — it's still on screen." },
+} as const;
+const audioOf = (text: string) => btoa(encodeURIComponent(text));
+/** What the audio element is given for a line the server spoke. */
+const srcFor = (text: string) => `data:audio/mpeg;base64,${audioOf(text)}`;
+const clipFor = (text: string, i: number) => ({ clipHash: String(i).padStart(64, '0'), audio: audioOf(text), contentType: 'audio/mpeg', cached: false });
+
+function ttsAnswer(path: string, method: string, body: Request['body']): Response | null {
+  if (!path.startsWith('/api/voice/tts')) return null;
+  if (method === 'GET') return json(404, { error: 'NOT_CACHED', message: 'That clip is not cached here' });
+  const mode = server.tts ?? 501;
+  if (mode !== 'ok') return json(mode, TTS_ERRORS[mode]);
+  if (path === '/api/voice/tts/batch') return json(200, { clips: body!.items!.map((text, i) => ({ text, ...clipFor(text, i) })) });
+  return json(200, clipFor(body!.text!, 0));
+  body: { choice?: unknown; version?: number; metro?: string } | undefined;
 }
 
 let server: Server;
@@ -75,6 +104,8 @@ function stubNetwork(initial: Server) {
       const method = init?.method ?? 'GET';
       const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Request['body']) : undefined;
       requests.push({ method, path, body });
+      const tts = ttsAnswer(path, method, body);
+      if (tts) return resolved(tts);
       if (path === '/api/onboarding/status') return resolved(json(200, server.status));
       if (path === '/api/onboarding/billing/plans') return resolved(json(200, { plans: PLANS }));
       if (path === '/api/onboarding/draft' && method === 'GET') {
@@ -114,6 +145,25 @@ function stubNetwork(initial: Server) {
         };
         return gate ? gate.then(respond) : resolved(respond());
       }
+      if (path === '/api/onboarding/draft/metro' && method === 'PUT') {
+        const current = server.draft!;
+        const fault = server.metroFault;
+        server.metroFault = undefined;
+        if (fault === 'staged_elsewhere') {
+          server.draft = withChoices(current, { greeting: { option: 'b' } });
+          return resolved(json(409, { error: 'CONFLICT', message: 'DRAFT_METRO_LOCKED: a choice is already staged, so the city can no longer change here' }));
+        }
+        if (fault === 'moved_elsewhere') server.draft = { ...current, version: current.version + 1, clientTimezone: 'America/Chicago' };
+        if (Object.keys(server.draft!.choices).length > 0) {
+          return resolved(json(409, { error: 'CONFLICT', message: 'DRAFT_METRO_LOCKED: a choice is already staged, so the city can no longer change here' }));
+        }
+        if (body?.version !== server.draft!.version) {
+          return resolved(json(409, { error: 'CONFLICT', message: `VERSION_CONFLICT: expected ${body?.version}, found ${server.draft!.version}; re-read the draft` }));
+        }
+        if (body.metro !== 'CMH') throw new Error(`the stub only knows Columbus, got ${body.metro}`);
+        server.draft = { ...plumbingCmhDraft, version: server.draft!.version + 1 };
+        return resolved(json(200, { draft: server.draft }));
+      }
       if (path === '/api/onboarding/draft/approve' && method === 'POST') {
         if (server.approveFails) return resolved(json(500, { error: 'INTERNAL', message: 'boom' }));
         const base = server.draft ?? draftJson;
@@ -135,6 +185,17 @@ function renderShell(url = '/onboarding') {
     </MemoryRouter>,
   );
 }
+
+/** The audio element: jsdom plays nothing, so play() records the clip and the test fires the element's own events. */
+let played: string[];
+const play = vi.fn(function (this: HTMLMediaElement) {
+  played.push(this.src);
+  queueMicrotask(() => this.dispatchEvent(new Event('playing')));
+  return Promise.resolve();
+});
+const audio = () => play.mock.contexts.at(-1) as HTMLMediaElement;
+const ttsBatches = () => requests.filter((r) => r.path === '/api/voice/tts/batch').map((r) => r.body?.items ?? []);
+const ttsPosts = () => requests.filter((r) => r.path.startsWith('/api/voice/tts') && r.method === 'POST');
 
 const draftCalls = () => requests.filter((r) => r.path.startsWith('/api/onboarding/draft')).map((r) => `${r.method} ${r.path}`);
 const stagedCalls = () => requests.filter((r) => r.method === 'PUT');
@@ -169,8 +230,20 @@ describe('ConversationShell', () => {
   beforeEach(() => {
     _resetOnboardingStatusCacheForTests();
     track.trackFunnel.mockClear();
+    played = [];
+    play.mockClear();
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(play as unknown as () => Promise<void>);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    try {
+      sessionStorage.clear();
+    } catch {
+      /* no storage */
+    }
   });
   afterEach(() => {
+    // Unmount first, while play/pause are still stubbed: unmounting stops Rivet, which pauses the element.
+    cleanup();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -201,9 +274,9 @@ describe('ConversationShell', () => {
 
       // Turn 1: Rivet's own words, both options, the typical one marked, nothing selected, Next waiting.
       expect(await onTurn(0)).toBeInTheDocument();
-      // Nothing here plays a greeting or listens, so no line promises it (S3 brings voice).
-      expect(screen.getByText('Pick the one that sounds right.')).toBeInTheDocument();
-      expect(screen.queryByText(/hear it|say "first"/i)).not.toBeInTheDocument();
+      // Rivet speaks (S3-3): tapping an option plays it. Nothing listens yet (S3-5), so nothing says "say first".
+      expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
+      expect(screen.queryByText(/say "first"|say "second"/i)).not.toBeInTheDocument();
       expect(screen.getAllByRole('radio')).toHaveLength(2);
       expect(screen.getAllByText('Most shops like yours')).toHaveLength(1);
       expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
@@ -411,6 +484,116 @@ describe('ConversationShell', () => {
       await userEvent.dblClick(next);
       await onTurn(1);
       expect(stagedCalls().filter((r) => r.path.endsWith('/greeting'))).toHaveLength(1);
+    });
+  });
+
+  describe('Rivet speaks', () => {
+    const lines = (i: number) => {
+      const t = draftJson.assembled.choices.find((c) => c.settingKey === turn(i).key)!;
+      return [t.question, t.options[0].rivetLine, t.options[1].rivetLine];
+    };
+
+    it('the "Make it mine" tap plays the audio inside the tap, then the first question is spoken in the server voice', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
+      renderShell();
+      const button = await screen.findByRole('button', { name: 'Make it mine, 7 choices' });
+      play.mockClear();
+      button.click();
+      // Same task as the tap: the element is unlocked before anything is awaited.
+      expect(play).toHaveBeenCalled();
+      await onTurn(0);
+      await waitFor(() => expect(played).toContain(srcFor(turn(0).question)));
+      // The turn's three lines came in one request (fetched while Ready was on screen).
+      expect(ttsBatches()).toContainEqual(lines(0));
+      await waitFor(() =>
+        expect(track.trackFunnel).toHaveBeenCalledWith(
+          'v3_first_heard',
+          expect.objectContaining({ tenantId: TENANT }),
+          expect.objectContaining({ source: 'server', gesture: 'make_it_mine', ms_since_make_it_mine: expect.any(Number) }),
+        ),
+      );
+    });
+
+    it('shows that Rivet is speaking, in words, while a line plays', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      await waitFor(() => expect(played.at(-1)).toBe(srcFor(turn(0).question)));
+      expect(await screen.findByText('Speaking')).toBeInTheDocument();
+      act(() => {
+        audio().dispatchEvent(new Event('ended'));
+      });
+      await waitFor(() => expect(screen.queryByText('Speaking')).not.toBeInTheDocument());
+    });
+
+    it('tapping an option plays what Rivet would say, from the turn already fetched', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      await choose(turn(0).a);
+      await onTurn(1);
+      await userEvent.click(screen.getByRole('radio', { name: turn(1).a }));
+      await userEvent.click(screen.getByRole('button', { name: 'Next' }));
+      await onTurn(2);
+      await waitFor(() => expect(played.at(-1)).toBe(srcFor(turn(2).question)));
+      const before = ttsPosts().length;
+      await userEvent.click(screen.getByRole('radio', { name: turn(2).b }));
+      await waitFor(() => expect(played.at(-1)).toBe(srcFor(lines(2)[2])));
+      expect(screen.getByRole('radio', { name: turn(2).b })).toHaveAttribute('aria-checked', 'true');
+      expect(ttsPosts().length).toBe(before);
+    });
+
+    it('counts the clips of a full pass: one request a turn, at most three clips each, never two turns ahead', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
+      renderShell();
+      await makeItMine();
+      for (let i = 0; i < TURNS.length; i += 1) {
+        await onTurn(i);
+        await waitFor(() => expect(played).toContain(srcFor(turn(i).question)));
+        // Fetched so far: this turn and at most the next one.
+        const asked = ttsBatches().map((items) => items[0]);
+        expect(asked.every((q) => TURNS.slice(0, i + 2).some((t) => t.question === q))).toBe(true);
+        if (i === 1) {
+          await userEvent.click(screen.getByRole('radio', { name: turn(1).a }));
+          await userEvent.click(screen.getByRole('button', { name: 'Next' }));
+        } else {
+          await choose(turn(i).a);
+        }
+      }
+      expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
+      const batches = ttsBatches();
+      expect(batches).toEqual(TURNS.map((_, i) => lines(i)));
+      expect(batches.every((items) => items.length <= 3)).toBe(true);
+      expect(batches.flat()).toHaveLength(21);
+    });
+
+    it.each([429, 501, 502] as const)('a %s from the voice routes still leaves every turn answerable by tap, with no alert', async (status) => {
+      stubNetwork({ draft: draftJson, status: statusBody(), tts: status });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      expect(screen.getAllByRole('radio')).toHaveLength(2);
+      expect(screen.getByRole('button', { name: 'Next' })).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      await choose(turn(0).a);
+      await onTurn(1);
+      const reason = { 429: 'rate_limited', 501: 'not_configured', 502: 'tts_failed' }[status];
+      await waitFor(() => expect(funnel('v3_tts_fallback')).toContainEqual({ reason, mode: 'silent', turn: 'greeting' }));
+      expect(played).not.toContain(srcFor(turn(0).question));
+    });
+
+    it('"Looks right as is" unlocks the audio too, and Rivet reads the read-back heading', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
+      renderShell();
+      const keep = await screen.findByRole('button', { name: 'Looks right as is, skip the choices' });
+      play.mockClear();
+      keep.click();
+      expect(play).toHaveBeenCalled();
+      expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
+      await waitFor(() => expect(played.at(-1)).toBe(srcFor(READBACK.name)));
+      expect(ttsPosts().find((r) => r.body?.text === READBACK.name)?.path).toBe('/api/voice/tts');
     });
   });
 
@@ -669,6 +852,89 @@ describe('ConversationShell', () => {
       await userEvent.click(screen.getByRole('button', { name: 'Back' }));
       await screen.findByRole('heading', READBACK);
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('"Not Cleveland?" on Ready', () => {
+    const metroCalls = () => requests.filter((r) => r.path === '/api/onboarding/draft/metro');
+    const REFRESHED = 'Your answers changed somewhere else, so I refreshed them.';
+
+    async function pickColumbus() {
+      await userEvent.click(await screen.findByRole('button', { name: 'Not Cleveland?' }));
+      await userEvent.type(screen.getByRole('searchbox', { name: 'Your city' }), 'Columbus');
+      await userEvent.click(within(screen.getByRole('list', { name: 'Cities' })).getByRole('button', { name: 'Columbus' }));
+    }
+
+    it('re-prices the shop for the city the owner picks, and the new city and prices carry through the turns and the read-back', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody() });
+      const { container } = renderShell();
+      expect(await screen.findByText(/the way most Cleveland plumbing shops run/)).toBeInTheDocument();
+      expectAllTapTargets(container, 'Ready');
+      await pickColumbus();
+
+      expect(await screen.findByText(/I built it the way most Columbus plumbing shops run\./)).toBeInTheDocument();
+      expect(metroCalls().map((r) => [r.method, r.body])).toEqual([['PUT', { metro: 'CMH', version: 1 }]]);
+      expect(screen.getByText('$79, then $135 an hour')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Not Columbus?' })).toBeInTheDocument();
+      expect(funnel('v3_metro_changed')).toEqual([{ from: 'CLE', to: 'CMH', shows_city: true }]);
+
+      // The first price turn and the read-back are Columbus's, and the next stage carries the new version.
+      await makeItMine();
+      await onTurn(0);
+      await choose(turn(0).a);
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(stagedCalls().filter((r) => r.path.includes('/choices/')).map((r) => r.body?.version)).toEqual([2]);
+      expect(screen.getByRole('radio', { name: /\$79 to come out, then \$135 an hour/ })).toBeInTheDocument();
+      expect(screen.getByText("This is the first number a caller hears. Here's where plumbing shops in Columbus land.")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Keep the rest as is' }));
+      expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
+      expect(screen.getByText('$79 to come out, $135 an hour after')).toBeInTheDocument();
+      expect(screen.getByText(/Typical for Columbus plumbers\./)).toBeInTheDocument();
+      // The read-back names the city as text: no change control there.
+      expect(screen.queryByRole('button', { name: /Not Columbus|Set my city/ })).not.toBeInTheDocument();
+      expect(screen.queryByText(/Cleveland/)).not.toBeInTheDocument();
+    });
+
+    it('a choice staged in another window: the refused change re-reads once, opens on the next turn with the one-line notice, and is not sent again', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), metroFault: 'staged_elsewhere' });
+      renderShell();
+      await pickColumbus();
+
+      // The greeting was staged elsewhere, so the owner picks up on the price turn, still Cleveland's.
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(screen.getByRole('status')).toHaveTextContent(REFRESHED);
+      expect(screen.getByRole('radio', { name: /\$89 to come out, then \$150 an hour/ })).toBeInTheDocument();
+      expect(metroCalls()).toHaveLength(1);
+      expect(draftCalls().filter((c) => c === 'GET /api/onboarding/draft')).toHaveLength(2);
+      expect(funnel('v3_metro_changed')).toEqual([]);
+    });
+
+    it('a version moved in another window: the refused change re-reads once, stays on Ready with the notice, and is not sent again', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), metroFault: 'moved_elsewhere' });
+      renderShell();
+      await pickColumbus();
+
+      expect(await screen.findByRole('status')).toHaveTextContent(REFRESHED);
+      expect(screen.getByRole('heading', { level: 1, name: 'Walsh Plumbing is already set up.' })).toBeInTheDocument();
+      expect(screen.getByText(/the way most Cleveland plumbing shops run/)).toBeInTheDocument();
+      expect(metroCalls()).toHaveLength(1);
+      // Picking again sends the re-read version, once.
+      await pickColumbus();
+      expect(await screen.findByText(/the way most Columbus plumbing shops run/)).toBeInTheDocument();
+      expect(metroCalls().map((r) => r.body?.version)).toEqual([1, 2]);
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('a resumed draft with a staged choice opens on its next turn and never offers the change; the read-back names the city as text', async () => {
+      stubNetwork({ draft: withChoices(draftJson, { greeting: { option: 'a' } }), status: statusBody() });
+      renderShell();
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Not Cleveland|Set my city/ })).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Keep the rest as is' }));
+      expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
+      expect(screen.getByText(/Typical for Cleveland plumbers\./)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Not Cleveland|Set my city/ })).not.toBeInTheDocument();
+      expect(metroCalls()).toHaveLength(0);
     });
   });
 

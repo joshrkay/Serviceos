@@ -14,9 +14,13 @@ import {
 
 const REQUIRED: readonly ChoiceKey[] = CHOICE_KEYS;
 
-/** Whole words that tell the owner they can hear, speak, play or listen to something. "hears" (what a caller does) is not one. */
-const SPEECH_PROMISE = /\b(hear|say|speak|talk|listen|play|mic|microphone|voice|aloud|out loud)\b/i;
-const promisesSpeech = (text: string): boolean => SPEECH_PROMISE.test(text);
+/**
+ * Whole words that tell the owner they can speak to Rivet. S3-3 wired Rivet's voice (the shell
+ * speaks each question and plays an option's line when its card is tapped), so hearing is no
+ * longer a promise the shell cannot keep; listening is, until the mic is wired (S3-5).
+ */
+const LISTENING_PROMISE = /\b(say|speak|talk|mic|microphone)\b/i;
+const promisesListening = (text: string): boolean => LISTENING_PROMISE.test(text);
 
 describe('choice registry', () => {
   it('declares exactly the seven core choice keys in a fixed order', () => {
@@ -97,41 +101,44 @@ describe('choice registry', () => {
     }
   });
 
-  // The owner reads two options and taps one. Nothing in the shell plays a greeting, listens, or
-  // answers to "first" or "second" (S3, the voice slice, wires that), so what Rivet asks and the
-  // line under it must not promise it. When S3 lands it removes this guard deliberately, with the
-  // capability it stands in for.
-  describe('while the shell cannot speak or listen', () => {
-    it.each(REGISTRY_TRADES)('%s: no question or support line promises to hear, say, play or listen to anything', (trade) => {
+  // The owner hears Rivet (S3-3) and taps one. Nothing in the shell listens or answers to "first"
+  // or "second" yet (S3-5 wires the mic), so what Rivet asks and the line under it must not promise
+  // it. When S3-5 lands it removes this guard deliberately, with the capability it stands in for.
+  describe('while the shell cannot listen', () => {
+    it.each(REGISTRY_TRADES)('%s: no question or support line asks the owner to say or speak anything', (trade) => {
       for (const entry of getChoiceRegistry(trade)) {
         for (const text of [entry.question, entry.supportLine ?? '']) {
-          expect(promisesSpeech(text), `${entry.settingKey}: "${text}"`).toBe(false);
+          expect(promisesListening(text), `${entry.settingKey}: "${text}"`).toBe(false);
         }
       }
     });
 
-    it('the guard itself catches the promises it exists for, and lets plain copy through', () => {
+    it('the guard itself catches the promises it exists for, and lets plain and hearing copy through', () => {
       for (const promise of [
         'Tap one to hear it. Say "first" or "second" to pick.',
         'Say "second" to pick.',
-        'Tap to listen.',
         'Tap the mic and answer.',
         'Use the microphone.',
-        'Read it out loud.',
-        'Tap play to hear the greeting.',
         'Talk to me in your own voice.',
+        'Speak your answer.',
       ]) {
-        expect(promisesSpeech(promise), promise).toBe(true);
+        expect(promisesListening(promise), promise).toBe(true);
       }
       for (const plain of [
+        'Tap one to hear it.',
         'Pick the one that sounds right.',
         "This is the first number a caller hears. Here's where plumbing shops in Cleveland land.",
         'Emergencies skip this. Those always come straight to you.',
         'Do customers already call a business number?',
       ]) {
-        expect(promisesSpeech(plain), plain).toBe(false);
+        expect(promisesListening(plain), plain).toBe(false);
       }
     });
+  });
+
+  // S3-3 — Rivet speaks: the greeting's options are what Rivet says, so tapping one plays it.
+  it.each(REGISTRY_TRADES)('%s: the greeting tells the owner to tap an option to hear it', (trade) => {
+    expect(getChoiceEntry(trade, 'greeting').supportLine).toBe('Tap one to hear it.');
   });
 
   it('rejects a registry missing a core key', () => {

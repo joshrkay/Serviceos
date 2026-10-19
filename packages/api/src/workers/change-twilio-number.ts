@@ -6,6 +6,7 @@ import {
   attachNumberToMessagingService,
   listSubaccountPhoneNumbers,
   purchasePhoneNumber,
+  buildPhoneNumberWebhooks,
   releasePhoneNumber,
 } from '../integrations/twilio/provisioning';
 import type { VapiClient } from '../integrations/vapi/client';
@@ -104,8 +105,7 @@ export async function changeTenantNumber(input: {
         subaccountSid,
         authToken,
         null,
-        `${voiceBaseUrl}/api/telephony/voice`,
-        `${voiceBaseUrl}/webhooks/twilio/status/${tenantId}`,
+        buildPhoneNumberWebhooks(voiceBaseUrl, tenantId),
         changeTo,
       );
       newSid = bought.sid;
