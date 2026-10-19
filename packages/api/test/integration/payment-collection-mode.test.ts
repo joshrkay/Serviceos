@@ -621,14 +621,14 @@ describe('Postgres integration — payment_collection_mode at the pay surfaces (
     // A leftover marker with no link (pinned state) is dropped by the attach.
     const attached = await seedOpenInvoice(payLinkTenant, payLinkJobId, 'ATT-MARK');
     await pool.query(`UPDATE invoices SET cleanup_claimed_at = NOW() WHERE id = $1`, [attached.id]);
-    const row = await invoiceRepo.setPaymentLinkIfPayable(
+    const row = await invoiceRepo.attachPaymentLink(
       payLinkTenant.tenantId,
       attached.id,
       { linkId: 'plink_att_mark', linkUrl: 'https://pay.stripe.com/att' },
       40000,
       new Date(),
     );
-    expect(row?.stripePaymentLinkId).toBe('plink_att_mark');
+    expect(row.ok && row.invoice.stripePaymentLinkId).toBe('plink_att_mark');
     expect(await claimColumns(payLinkTenant.tenantId, attached.id)).toEqual({
       cleanup_claimed_at: null,
       stripe_payment_link_id: 'plink_att_mark',

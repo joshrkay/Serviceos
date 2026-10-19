@@ -36,6 +36,7 @@ import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
 import { createLogger } from '../logging/logger';
 import { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { createInvoicePaymentLink } from '../invoices/invoice-payment-link';
+import { CollectOnSiteError, PaymentModeUnavailableError } from '../invoices/payment-collection-mode';
 import { ConnectAccountResolver } from '../invoices/public-invoice-service';
 import { InvoiceScheduleRepository } from '../invoices/invoice-schedule';
 import { wholeInvoiceBlockedByPlan } from '../invoices/milestone-billing-guard';
@@ -497,6 +498,15 @@ export function createInvoiceRouter(
         });
         res.json(result);
       } catch (err) {
+        // S5a-4 (U8) — a payment-mode refusal writes nothing but its audit
+        // rows (the attach rolled back to its savepoint; the CAS clear is a
+        // no-op on a link that was never stored), and the link it minted is
+        // already deactivated at Stripe. Commit those rows with the 409/503,
+        // or the request transaction's rollback would erase the only record
+        // of that link.
+        if (err instanceof CollectOnSiteError || err instanceof PaymentModeUnavailableError) {
+          res.locals.forceCommit = true;
+        }
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }

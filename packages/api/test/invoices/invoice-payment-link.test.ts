@@ -573,7 +573,7 @@ describe('P0-9 mint leg — link persist is guarded against concurrent invoice m
     const provider = {
       generateLink: async () => {
         // The competing mint persists its link first (same balance).
-        await invoiceRepo.setPaymentLinkIfPayable(
+        await invoiceRepo.attachPaymentLink(
           TENANT,
           invoiceId,
           { linkId: 'plink_winner', linkUrl: 'https://pay.stripe.com/winner' },
@@ -682,7 +682,7 @@ describe('Codex P1 — void deactivation uses the POST-transition snapshot', () 
         if (prop === 'update' && !mintInjected) {
           return async (tenantId: string, id: string, updates: unknown) => {
             mintInjected = true;
-            await inner.setPaymentLinkIfPayable(
+            await inner.attachPaymentLink(
               tenantId,
               id,
               { linkId: 'plink_mid_transition', linkUrl: 'https://pay.stripe.com/mid' },
@@ -949,7 +949,7 @@ describe('S5a-3 — InMemoryInvoiceRepository cleanup primitives mirror Pg', () 
     expect(await repo.clearPaymentLinkIfMatches(TENANT, a, 'plink_a')).toBe(true);
     expect((await repo.findById(TENANT, a))!.cleanupClaimedAt).toBeUndefined();
 
-    await repo.setPaymentLinkIfPayable(TENANT, b, { linkId: 'plink_b', linkUrl: 'https://x/b' }, 1000, new Date());
+    await repo.attachPaymentLink(TENANT, b, { linkId: 'plink_b', linkUrl: 'https://x/b' }, 1000, new Date());
     expect((await repo.findById(TENANT, b))!.cleanupClaimedAt).toBeUndefined();
 
     await repo.update(TENANT, c, { stripePaymentLinkId: 'plink_c2', stripePaymentLinkUrl: 'https://x/c2', updatedAt: new Date() });
