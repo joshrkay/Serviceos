@@ -16,8 +16,10 @@ const noopLogger = {
   debug: () => undefined,
 } as never;
 
+/** PRIV-2 — sweeps without a Twilio deleter (or with nothing due) report zero for the retry phase. */
+const NO_TWILIO_COPIES = { twilioCopiesDeleted: 0, twilioCopiesFailed: 0 };
 /** PRIV-3 — sweeps with no card-number-flagged recordings report zero for that phase. */
-const NO_CARD_AUDIO = { cardNumberAudioPurged: 0, cardNumberAudioFailed: 0 };
+const NO_CARD_AUDIO = { cardNumberAudioPurged: 0, cardNumberAudioFailed: 0, ...NO_TWILIO_COPIES };
 /** #1202 — sweeps with no unattached transcript turns report zero for that phase. */
 const NO_SESSIONS = {
   sessionTranscriptsPurged: 0,
@@ -34,6 +36,7 @@ function row(
   id: string,
   opts: Partial<{
     tenantId: string;
+    callSid: string;
     createdAt: Date;
     retentionDays: number;
     legalHold: boolean;
@@ -42,12 +45,15 @@ function row(
     storageKey: string | null;
     pciDetected: boolean;
     audioPurgedAt: Date | null;
+    recordingUrl: string | null;
+    twilioDeletedAt: Date | null;
+    twilioDeleteAttemptedAt: Date | null;
   }> = {},
 ) {
   return {
     id,
     tenantId: opts.tenantId ?? 't1',
-    callSid: `CA-${id}`,
+    callSid: opts.callSid ?? `CA-${id}`,
     storageBucket: opts.storageBucket === undefined ? 'bkt' : opts.storageBucket,
     storageKey: opts.storageKey === undefined ? `t1/${id}.mp3` : opts.storageKey,
     createdAt: opts.createdAt ?? ageDays(400),
@@ -56,6 +62,9 @@ function row(
     purgedAt: opts.purgedAt ?? null,
     pciDetected: opts.pciDetected ?? false,
     audioPurgedAt: opts.audioPurgedAt ?? null,
+    recordingUrl: opts.recordingUrl ?? null,
+    twilioDeletedAt: opts.twilioDeletedAt ?? null,
+    twilioDeleteAttemptedAt: opts.twilioDeleteAttemptedAt ?? null,
   };
 }
 
@@ -558,6 +567,9 @@ describe('PRIV-3 — card-number audio purge', () => {
       callSid: 'CA-flagged',
       reason: 'card_number_detected',
       hadStoredObject: true,
+      // PRIV-2 — a memo-style row with no recording_url never had a Twilio copy.
+      hadTwilioCopy: false,
+      twilioDeleted: false,
       recordedAt: ageDays(0).toISOString(),
     });
   });
@@ -608,7 +620,7 @@ describe('PRIV-3 — card-number audio purge', () => {
     const result = await runRecordingRetentionSweep({
       repo,
       storage,
-      logger: { ...noopLogger, warn } as never,
+      logger: { ...(noopLogger as object), warn } as never,
       now: () => NOW,
     });
 
@@ -646,7 +658,7 @@ describe('PRIV-3 — card-number audio purge', () => {
     const result = await runRecordingRetentionSweep({
       repo,
       storage: new DevStorageProvider({ bucket: 'dev', publicUrlBase: 'http://localhost/dev' }),
-      logger: { ...noopLogger, error } as never,
+      logger: { ...(noopLogger as object), error } as never,
       now: () => NOW,
     });
 
@@ -656,5 +668,286 @@ describe('PRIV-3 — card-number audio purge', () => {
       'recording-retention sweep: card-number audio selection failed',
       expect.objectContaining({ error: 'db down' }),
     );
+  });
+});
+
+describe('PRIV-2 — the Twilio-hosted copy of each recording', () => {
+  const twilioUrl = (n: string) =>
+    `https://api.twilio.com/2010-04-01/Accounts/AC${'b'.repeat(32)}/Recordings/RE${n.padEnd(32, '0')}`;
+
+  function deleterThat(outcomes: Record<string, 'deleted' | 'already_gone' | Error> = {}) {
+    return {
+      deleteRecording: vi.fn(async (url: string) => {
+        const outcome = outcomes[url] ?? 'deleted';
+        if (outcome instanceof Error) throw outcome;
+        return outcome;
+      }),
+    };
+  }
+
+  it('the horizon purge deletes a legacy recording\'s Twilio copy and records twilioDeleted; recording_url is kept', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('old', { recordingUrl: twilioUrl('1') }),
+    ]);
+    const storage = { deleteObject: vi.fn(async () => undefined) } as unknown as StorageProvider;
+    const auditRepo = new InMemoryAuditRepository();
+    const twilioRecordingDeleter = deleterThat();
+
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage,
+      auditRepo,
+      twilioRecordingDeleter,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+
+    expect(result.purged).toBe(1);
+    expect(twilioRecordingDeleter.deleteRecording).toHaveBeenCalledTimes(1);
+    expect(twilioRecordingDeleter.deleteRecording).toHaveBeenCalledWith(twilioUrl('1'));
+    const old = repo.rows.find((r) => r.id === 'old')!;
+    expect(old.purgedAt).toEqual(NOW);
+    expect(old.twilioDeletedAt).toEqual(NOW);
+    expect(old.recordingUrl).toBe(twilioUrl('1'));
+    const purged = auditRepo.getAll().find((e) => e.eventType === 'voice_recording.purged');
+    expect(purged?.metadata).toMatchObject({ hadStoredObject: true, hadTwilioCopy: true, twilioDeleted: true });
+    const copy = auditRepo.getAll().filter((e) => e.eventType === 'voice_recording.twilio_copy_deleted');
+    expect(copy).toHaveLength(1);
+    expect(copy[0]).toMatchObject({ entityId: 'old', metadata: { reason: 'past_retention' } });
+  });
+
+  it('a failed Twilio delete does not hold the horizon purge hostage: the row is tombstoned, the audit says twilioDeleted:false, and the attempt is recorded for the retry', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('old', { recordingUrl: twilioUrl('1') }),
+    ]);
+    const deleteObject = vi.fn(async () => undefined);
+    const auditRepo = new InMemoryAuditRepository();
+
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject } as unknown as StorageProvider,
+      auditRepo,
+      twilioRecordingDeleter: deleterThat({ [twilioUrl('1')]: new Error('Twilio recording delete failed 503') }),
+      logger: noopLogger,
+      now: () => NOW,
+    });
+
+    expect(result.purged).toBe(1);
+    expect(deleteObject).toHaveBeenCalledWith('bkt', 't1/old.mp3');
+    const old = repo.rows.find((r) => r.id === 'old')!;
+    expect(old.purgedAt).toEqual(NOW);
+    expect(old.twilioDeletedAt).toBeNull();
+    expect(old.twilioDeleteAttemptedAt).toEqual(NOW);
+    const purged = auditRepo.getAll().find((e) => e.eventType === 'voice_recording.purged');
+    expect(purged?.metadata).toMatchObject({ hadTwilioCopy: true, twilioDeleted: false });
+  });
+
+  it('a copy already deleted at ingest is not deleted again; the purge audit still records it gone', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('old', { recordingUrl: twilioUrl('1'), twilioDeletedAt: ageDays(399) }),
+    ]);
+    const auditRepo = new InMemoryAuditRepository();
+    const twilioRecordingDeleter = deleterThat();
+
+    await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn(async () => undefined) } as unknown as StorageProvider,
+      auditRepo,
+      twilioRecordingDeleter,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+
+    expect(twilioRecordingDeleter.deleteRecording).not.toHaveBeenCalled();
+    const purged = auditRepo.getAll().find((e) => e.eventType === 'voice_recording.purged');
+    expect(purged?.metadata).toMatchObject({ hadTwilioCopy: true, twilioDeleted: true });
+  });
+
+  it('the retry phase deletes legacy and failed copies, oldest first, and skips fresh, held, recently attempted and confirmed rows', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      // Tombstoned before PRIV-2: the S3 copy is gone, the Twilio copy is not.
+      row('legacy-tombstoned', { createdAt: ageDays(500), purgedAt: ageDays(100), recordingUrl: twilioUrl('1') }),
+      // Within the horizon; the ingest delete failed two days ago.
+      row('failed-ingest', {
+        createdAt: ageDays(3),
+        recordingUrl: twilioUrl('2'),
+        twilioDeleteAttemptedAt: ageDays(2),
+      }),
+      // Ingested an hour ago: the voicemail retry window still needs the copy.
+      row('fresh', { createdAt: new Date(NOW.getTime() - 3600_000), recordingUrl: twilioUrl('3') }),
+      row('held', { createdAt: ageDays(30), legalHold: true, recordingUrl: twilioUrl('4') }),
+      // Failed an hour ago: backs off rather than being hammered every sweep.
+      row('just-failed', {
+        createdAt: ageDays(30),
+        recordingUrl: twilioUrl('5'),
+        twilioDeleteAttemptedAt: new Date(NOW.getTime() - 3600_000),
+      }),
+      row('confirmed', { createdAt: ageDays(30), recordingUrl: twilioUrl('6'), twilioDeletedAt: ageDays(30) }),
+      // A memo upload: never had a Twilio copy.
+      row('memo', { createdAt: ageDays(30) }),
+    ]);
+    const auditRepo = new InMemoryAuditRepository();
+    const twilioRecordingDeleter = deleterThat({ [twilioUrl('2')]: 'already_gone' });
+
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn(async () => undefined) } as unknown as StorageProvider,
+      auditRepo,
+      twilioRecordingDeleter,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+
+    expect(twilioRecordingDeleter.deleteRecording.mock.calls.map((c) => c[0])).toEqual([
+      twilioUrl('1'),
+      twilioUrl('2'),
+    ]);
+    expect(result).toMatchObject({ twilioCopiesDeleted: 2, twilioCopiesFailed: 0 });
+    const byId = (id: string) => repo.rows.find((r) => r.id === id)!;
+    expect(byId('legacy-tombstoned').twilioDeletedAt).toEqual(NOW);
+    expect(byId('legacy-tombstoned').recordingUrl).toBe(twilioUrl('1'));
+    expect(byId('failed-ingest').twilioDeletedAt).toEqual(NOW);
+    for (const id of ['fresh', 'held', 'just-failed', 'memo']) expect(byId(id).twilioDeletedAt).toBeNull();
+    const copy = auditRepo.getAll().filter((e) => e.eventType === 'voice_recording.twilio_copy_deleted');
+    expect(copy.map((e) => [e.entityId, (e.metadata as { reason: string }).reason])).toEqual([
+      ['legacy-tombstoned', 'retry'],
+      ['failed-ingest', 'retry'],
+    ]);
+  });
+
+  // Review round 2 — before per-recording keys, two recordings of one call
+  // were stored at one key and the second PUT overwrote the first; the first
+  // recording's only copy is at Twilio. The retry phase leaves such rows
+  // alone until a purge deliberately deletes their audio.
+  it('the retry phase keeps the Twilio copies of legacy rows of one call that share a stored object until a purge', async () => {
+    const shared = { callSid: 'CA-shared', storageKey: 't1/CA-shared.mp3', createdAt: ageDays(30) };
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('shared-a', { ...shared, recordingUrl: twilioUrl('1') }),
+      row('shared-b', { ...shared, recordingUrl: twilioUrl('2') }),
+      row('shared-tombstoned', {
+        ...shared,
+        storageKey: 't1/CA-shared-2.mp3',
+        callSid: 'CA-shared-2',
+        purgedAt: ageDays(1),
+        recordingUrl: twilioUrl('3'),
+      }),
+      row('shared-tombstoned-twin', {
+        ...shared,
+        storageKey: 't1/CA-shared-2.mp3',
+        callSid: 'CA-shared-2',
+        recordingUrl: twilioUrl('4'),
+      }),
+      // Positive control: a lone legacy row of the same age.
+      row('lone', { createdAt: ageDays(30), recordingUrl: twilioUrl('5') }),
+    ]);
+    const twilioRecordingDeleter = deleterThat();
+
+    await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn(async () => undefined) } as unknown as StorageProvider,
+      twilioRecordingDeleter,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+
+    expect(twilioRecordingDeleter.deleteRecording.mock.calls.map((c) => c[0]).sort()).toEqual(
+      [twilioUrl('3'), twilioUrl('5')].sort(),
+    );
+    const byId = (id: string) => repo.rows.find((r) => r.id === id)!;
+    for (const id of ['shared-a', 'shared-b', 'shared-tombstoned-twin']) {
+      expect(byId(id).twilioDeletedAt).toBeNull();
+    }
+  });
+
+  it('a re-run is idempotent: no second delete, no second audit', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('legacy', { createdAt: ageDays(500), purgedAt: ageDays(100), recordingUrl: twilioUrl('1') }),
+    ]);
+    const auditRepo = new InMemoryAuditRepository();
+    const twilioRecordingDeleter = deleterThat();
+    const deps = {
+      repo,
+      storage: { deleteObject: vi.fn(async () => undefined) } as unknown as StorageProvider,
+      auditRepo,
+      twilioRecordingDeleter,
+      logger: noopLogger,
+      now: () => NOW,
+    };
+
+    await runRecordingRetentionSweep(deps);
+    const second = await runRecordingRetentionSweep(deps);
+
+    expect(second).toMatchObject({ twilioCopiesDeleted: 0, twilioCopiesFailed: 0 });
+    expect(twilioRecordingDeleter.deleteRecording).toHaveBeenCalledTimes(1);
+    expect(auditRepo.getAll().filter((e) => e.eventType === 'voice_recording.twilio_copy_deleted')).toHaveLength(1);
+  });
+
+  it('a failed retry is counted, stamped for back-off, and does not stop the rest', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('bad', { createdAt: ageDays(40), recordingUrl: twilioUrl('1') }),
+      row('good', { createdAt: ageDays(30), recordingUrl: twilioUrl('2') }),
+    ]);
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn(async () => undefined) } as unknown as StorageProvider,
+      twilioRecordingDeleter: deleterThat({ [twilioUrl('1')]: new Error('Twilio recording delete failed 401') }),
+      logger: noopLogger,
+      now: () => NOW,
+    });
+
+    expect(result).toMatchObject({ twilioCopiesDeleted: 1, twilioCopiesFailed: 1 });
+    expect(repo.rows.find((r) => r.id === 'bad')!.twilioDeleteAttemptedAt).toEqual(NOW);
+    expect(repo.rows.find((r) => r.id === 'good')!.twilioDeletedAt).toEqual(NOW);
+  });
+
+  it('without Twilio credentials (no deleter) nothing is sent and the purge audit says the copy is not deleted', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('old', { recordingUrl: twilioUrl('1') }),
+    ]);
+    const auditRepo = new InMemoryAuditRepository();
+
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn(async () => undefined) } as unknown as StorageProvider,
+      auditRepo,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+
+    expect(result).toMatchObject({ purged: 1, twilioCopiesDeleted: 0, twilioCopiesFailed: 0 });
+    const purged = auditRepo.getAll().find((e) => e.eventType === 'voice_recording.purged');
+    expect(purged?.metadata).toMatchObject({ hadTwilioCopy: true, twilioDeleted: false });
+  });
+
+  it('the card-number audio purge deletes the Twilio copy too, at once, and records it', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      // Flagged minutes after ingest: no grace window for a card number.
+      row('flagged', {
+        createdAt: new Date(NOW.getTime() - 600_000),
+        pciDetected: true,
+        recordingUrl: twilioUrl('1'),
+      }),
+    ]);
+    const auditRepo = new InMemoryAuditRepository();
+    const twilioRecordingDeleter = deleterThat();
+
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn(async () => undefined) } as unknown as StorageProvider,
+      auditRepo,
+      twilioRecordingDeleter,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+
+    expect(result.cardNumberAudioPurged).toBe(1);
+    expect(twilioRecordingDeleter.deleteRecording).toHaveBeenCalledTimes(1);
+    const flagged = repo.rows.find((r) => r.id === 'flagged')!;
+    expect(flagged.twilioDeletedAt).toEqual(NOW);
+    const audit = auditRepo.getAll().find((e) => e.eventType === 'voice_recording.audio_purged');
+    expect(audit?.metadata).toMatchObject({ hadTwilioCopy: true, twilioDeleted: true });
+    const copy = auditRepo.getAll().filter((e) => e.eventType === 'voice_recording.twilio_copy_deleted');
+    expect(copy).toHaveLength(1);
+    expect(copy[0].metadata).toMatchObject({ reason: 'card_number_detected' });
   });
 });

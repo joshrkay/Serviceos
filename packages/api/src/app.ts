@@ -549,6 +549,10 @@ import {
 } from './workers/dropped-call-worker';
 import { PgConversationLinkRepository } from './conversations/pg-conversation-link';
 import { TwilioRecordingControl } from './telephony/recording-control';
+import {
+  TwilioRecordingApiDeleter,
+  createTwilioCopyRemover,
+} from './telephony/twilio-recording-deleter';
 // RV-050 — inbound MMS photo ingestion from registered tech phones.
 // P0-009: the webhook seam enqueues; the worker runs the pipeline.
 import {
@@ -4362,6 +4366,32 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     onAccepted: transferScreenHooks.onAccepted,
   });
 
+  // PRIV-2 — the Twilio-hosted copy of each recording is deleted once our
+  // storage and our row hold it (recording webhook, voicemail route) and
+  // retried by the retention sweep. Same platform credentials that fetch the
+  // recording; the DELETE is built from the recording's own (subaccount) URL.
+  const twilioRecordingDeleter =
+    process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
+      ? new TwilioRecordingApiDeleter(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+      : undefined;
+  const twilioCopyRemoverFor = (actorId: string) =>
+    twilioRecordingDeleter && pool
+      ? createTwilioCopyRemover(
+          {
+            deleter: twilioRecordingDeleter,
+            repo: new PgRecordingRetentionRepository(pool),
+            auditRepo,
+            logger: createLogger({
+              service: 'twilio-recording-copy',
+              environment: process.env.NODE_ENV || 'development',
+            }),
+          },
+          actorId,
+        )
+      : undefined;
+  const recordingTwilioCopyRemover = twilioCopyRemoverFor('recording_webhook');
+  const voicemailTwilioCopyRemover = twilioCopyRemoverFor('voicemail_webhook');
+
   app.use(
     '/api/telephony',
     createTelephonyRouter({
@@ -4417,6 +4447,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
               environment: process.env.NODE_ENV || 'development',
             }),
           }),
+          ...(recordingTwilioCopyRemover ? { twilioCopyRemover: recordingTwilioCopyRemover } : {}),
         },
       },
       // U9 (voicemail → action) — replay-receipt store for the lead leg plus
@@ -4451,6 +4482,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
               `${event.tenantId}:${event.voiceRecordingId}:transcription:voicemail`,
             );
           },
+          ...(voicemailTwilioCopyRemover ? { twilioCopyRemover: voicemailTwilioCopyRemover } : {}),
         },
       },
       // WS3 — per-tenant staged rollout of the realtime path (default ON) and
@@ -6461,6 +6493,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           storage: storageProvider,
           auditRepo,
           logger: recordingRetentionLogger,
+          ...(twilioRecordingDeleter ? { twilioRecordingDeleter } : {}),
         });
       }).catch((err) => {
         recordingRetentionLogger.error('Recording-retention sweep failed', {
