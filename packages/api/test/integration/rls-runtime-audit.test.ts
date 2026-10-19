@@ -29,6 +29,14 @@ const EXEMPT_TABLES: string[] = [
   // being destroyed and read by platform admins with no tenant context.
   // See migration 123.
   'platform_deprovision_log',
+  // U7 demo call (migration 314): the lease, the in-flight job registry and
+  // the signup handoff ledger. tenant_id only names the demo tenant a call,
+  // a running job or a signup holds; the reaper, the reset and the queue
+  // front door read them with no tenant context. See migration 314's comment
+  // and test/integration/demo-tenants-excluded.test.ts.
+  'demo_tenant_leases',
+  'demo_inflight_jobs',
+  'signup_handoffs',
 ];
 
 describe('runtime RLS audit — live pg catalog', () => {

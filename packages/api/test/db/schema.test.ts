@@ -102,6 +102,15 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     // platform_deprovision_log: cross-tenant audit trail of tenant
     // hard-deletes. By design, this row outlives the tenant it records.
     'platform_deprovision_log',
+    // U7 demo call (migration 314): platform tables whose tenant_id only
+    // NAMES the demo tenant a call, a running job or a signup holds. They are
+    // read by the reaper, the reset and the queue front door with no tenant
+    // context (the lease is how the tenant is discovered), so an
+    // app.current_tenant_id policy would hide every row from the code that
+    // needs it. The runtime role is revoked on them (219 and 314).
+    'demo_tenant_leases',
+    'demo_inflight_jobs',
+    'signup_handoffs',
   ]);
 
   it('Blocker 3 — every ENABLE-RLS table also FORCEs RLS', () => {
@@ -202,7 +211,13 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
     // the "FORCE everywhere" assertion uses, so any add to that set
     // breaks this pin as well — otherwise the test compares a duplicate
     // constant against itself and is tautological.
-    const ALLOWED_EXEMPT = ['oauth_states', 'platform_deprovision_log'];
+    const ALLOWED_EXEMPT = [
+      'oauth_states',
+      'platform_deprovision_log',
+      'demo_tenant_leases',
+      'demo_inflight_jobs',
+      'signup_handoffs',
+    ];
     expect([...RLS_EXEMPT_TABLES_SHARED].sort()).toEqual(ALLOWED_EXEMPT.sort());
   });
 
