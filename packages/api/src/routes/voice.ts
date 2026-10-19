@@ -31,6 +31,7 @@ import type { FileRepository, StorageProvider } from '../files/file-service';
 import type { JobRepository } from '../jobs/job';
 import type { TtsProvider } from '../ai/tts/tts-provider';
 import { hashOf, type TtsClipCache } from '../ai/tts/clip-cache';
+import { createTtsClipBudget, ttsClipsPerMinFromEnv } from '../ai/tts/tts-clip-budget';
 import { resolveTtsVoice, TTS_VOICE_PRESET_SCHEMA } from '../ai/tts/resolve-voice';
 import type { SettingsRepository } from '../settings/settings';
 import { routeParam } from '../shared/route-params';
@@ -265,28 +266,37 @@ export function createVoiceRouter(
     }),
   );
 
-  // #1603 — dedicated per-USER clip limiter for POST /tts. Every role holds
+  // #1603 — dedicated per-USER clip budget for POST /tts. Every role holds
   // `ai:run`, and each clip bills the tenant's TTS key, so one account must
   // not be able to turn the route into a free-text TTS proxy under the much
   // looser global per-tenant /api limiter. A memo answer every 3 s is plenty.
-  const ttsLimitPerMin = Math.max(1, Number(process.env.VOICE_TTS_PER_MIN) || 20);
-  const ttsLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: ttsLimitPerMin,
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: (req) => {
-      const auth = (req as AuthenticatedRequest).auth;
-      return auth ? `${auth.tenantId}:${auth.userId}` : ipKeyGenerator(req.ip ?? '');
-    },
-    handler: (_req, res) => {
-      res.status(429).json({
-        error: 'RATE_LIMITED',
-        message: 'Too many spoken answers in a row. The answer is still on screen.',
-      });
-    },
+  //
+  // S3-2 — the budget is charged per clip actually synthesized, never per
+  // request: the batch route below draws up to three units from the same
+  // per-user budget, a cache hit costs nothing on either route, and a turn
+  // that does not fit in what is left is refused whole. express-rate-limit's
+  // middleware charges one hit per request, so the cap lives in
+  // ai/tts/tts-clip-budget.ts over the same store family instead.
+  const ttsClipBudget = createTtsClipBudget({
+    max: ttsClipsPerMinFromEnv(process.env),
     store: createRateLimitStore(process.env.REDIS_URL, 'voice-tts:'),
   });
+
+  /**
+   * Takes `units` clips out of the caller's budget. On refusal answers the
+   * #1603 429 (same body and `Retry-After`) and returns false; the caller
+   * then synthesizes nothing.
+   */
+  async function chargeTtsClips(req: AuthenticatedRequest, res: Response, units: number): Promise<boolean> {
+    const charge = await ttsClipBudget.charge(`${req.auth!.tenantId}:${req.auth!.userId}`, units);
+    if (charge.ok) return true;
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil(charge.retryAfterMs / 1000))));
+    res.status(429).json({
+      error: 'RATE_LIMITED',
+      message: 'Too many spoken answers in a row. The answer is still on screen.',
+    });
+    return false;
+  }
 
   /**
    * POST /tts — #1603: synthesize one spoken clip for the device.
@@ -304,13 +314,15 @@ export function createVoiceRouter(
    * the stored bytes, no provider call and no audit, since nothing was
    * billed. The response gains `clipHash` and `cached`; `{ audio,
    * contentType }` is unchanged for the mobile consumer.
+   *
+   * S3-2 — the per-user cap is charged after the cache lookup, one unit per
+   * clip synthesized, from the budget the batch route shares.
    */
   router.post(
     '/tts',
     requireAuth,
     requireTenant,
     requirePermission('ai:run'),
-    ttsLimiter,
     asyncRoute(async (req: Request, res: Response) => {
       // Validate first: a client bug is a 400 even in a keyless environment,
       // not a misleading "not configured".
@@ -339,6 +351,9 @@ export function createVoiceRouter(
         });
         return;
       }
+      // S3-2 — one unit for the one clip about to be billed; a hit above
+      // and a 400 before it cost nothing.
+      if (!(await chargeTtsClips(authReq, res, 1))) return;
       try {
         const result = await tts.synthesize({
           text,
