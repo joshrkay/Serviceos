@@ -122,7 +122,9 @@ describe('Postgres integration — demo call start (S6-3)', () => {
         await behaviour(req, res, body);
       });
     });
-    await new Promise<void>((r) => fake.listen(0, '127.0.0.1', r));
+    await new Promise<void>((r) => {
+      fake.listen(0, '127.0.0.1', r);
+    });
     fakeBase = `http://127.0.0.1:${(fake.address() as net.AddressInfo).port}/2010-04-01`;
 
     const dir = mkdtempSync(path.join(tmpdir(), 'demo-calls-tls-'));
@@ -134,13 +136,19 @@ describe('Postgres integration — demo call start (S6-3)', () => {
       tlsSeen += 1;
       s.end('{}');
     });
-    await new Promise<void>((r) => tls.listen(0, '127.0.0.1', r));
+    await new Promise<void>((r) => {
+      tls.listen(0, '127.0.0.1', r);
+    });
     tlsBase = `https://127.0.0.1:${(tls.address() as net.AddressInfo).port}/2010-04-01`;
 
     const probe = net.createServer();
-    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r));
+    await new Promise<void>((r) => {
+      probe.listen(0, '127.0.0.1', r);
+    });
     closedPortBase = `http://127.0.0.1:${(probe.address() as net.AddressInfo).port}/2010-04-01`;
-    await new Promise<void>((r) => probe.close(() => r()));
+    await new Promise<void>((r) => {
+      probe.close(() => r());
+    });
   });
 
   afterEach(async () => {
@@ -153,8 +161,12 @@ describe('Postgres integration — demo call start (S6-3)', () => {
   });
 
   afterAll(async () => {
-    await new Promise<void>((r) => fake.close(() => r()));
-    await new Promise<void>((r) => tls.close(() => r()));
+    await new Promise<void>((r) => {
+      fake.close(() => r());
+    });
+    await new Promise<void>((r) => {
+      tls.close(() => r());
+    });
   });
 
   const created: Behaviour = (_q, res) => {
