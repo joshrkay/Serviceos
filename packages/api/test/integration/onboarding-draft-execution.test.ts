@@ -500,13 +500,42 @@ describe('onboarding draft execution state (real DB)', () => {
       const res = await retry();
       expect(res.status).toBe(409);
       expect(JSON.stringify(res.body)).toContain('DRAFT_RETRY_UNSAFE');
-      // The refusal points only at what exists today: the inbox and Settings, never a reset.
-      expect(JSON.stringify(res.body)).toContain('Check your inbox, or finish it from Settings.');
-      expect(JSON.stringify(res.body)).not.toMatch(/reset/i);
+      // The refusal names the two ways out the shell offers: Start over (POST /draft/reset) or Settings.
+      expect(JSON.stringify(res.body)).toContain('Start over to set it up again, or finish it from Settings.');
       expect(await row(a)).toEqual(before);
       expect(await draftRow()).toEqual(draftBefore);
       expect((await row(a)).status).toBe('undone');
       expect(await auditCounts()).toEqual(auditBefore);
+    });
+
+    it('S4-5: execution_failed + undone is refused by retry (unchanged) and its way out is the reset: 200, editable; the failed proposal never executes after the window it would have had', async () => {
+      const [a, b] = await approvedDraft();
+      await failProposal(a);
+      await setStatus(b, 'undone');
+      expect((await status()).status.draft).toMatchObject({ execution: 'stopped', recovery: 'reset' });
+      const refused = await retry();
+      expect(refused.status).toBe(409);
+      expect(refused.body.message).toMatch(/^DRAFT_RETRY_UNSAFE: .*Start over to set it up again, or finish it from Settings\.$/);
+      const version: number = (await draftRow()).version;
+
+      const res = await request(app).post('/api/onboarding/draft/reset').send({ expectedVersion: version });
+
+      expect(res.status).toBe(200);
+      expect(res.body.draft).toMatchObject({ status: 'draft', proposalIds: [], version: version + 1 });
+      expect(await draftRow()).toMatchObject({ status: 'draft', version: version + 1, proposal_ids: [] });
+      // Nothing was re-queued: the failed half stays failed, the undone half undone.
+      expect((await row(a)).status).toBe('execution_failed');
+      expect((await row(b)).status).toBe('undone');
+      expect((await auditCounts())['onboarding.draft_reset']).toBe(1);
+      expect((await auditCounts())['proposal.retried'] ?? 0).toBe(0);
+
+      // Wait out the fresh window a re-queue would have opened: the worker still never sees it.
+      await pool.query(`UPDATE proposals SET approved_at = NOW() - interval '1 hour' WHERE tenant_id = $1 AND id = ANY($2::uuid[])`, [
+        tenant.tenantId,
+        [a, b],
+      ]);
+      expect((await proposalRepo.findReadyForExecution(0)).map((p) => p.id)).not.toContain(a);
+      expect((await row(a)).status).toBe('execution_failed');
     });
 
     // The defect this pins: a failed proposal next to one that can never run used

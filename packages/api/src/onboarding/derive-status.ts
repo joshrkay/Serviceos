@@ -148,10 +148,10 @@ export function retryBlockingStatuses(tracked: DraftProposalsFact): string[] {
  *   (`DRAFT_RETRY_UNSAFE`) and the shell must not offer it; it also never waits
  *   forever. The whole-draft undo cannot help either: it wants EVERY member
  *   `approved` inside its window, and this set has one that is not. The way
- *   out is the whole-draft reset (plan U9), which reverts what is still
- *   reversible and returns the draft to editing; `deriveDraftRecovery` says
- *   whether it can run (`'reset'`) or only Settings can finish the set
- *   (`'settings'`).
+ *   out is the whole-draft reset (plan U9, the shell's Start over), which
+ *   reverts what is still reversible and returns the draft to editing;
+ *   `deriveDraftRecovery` says whether it can run (`'reset'`) or only Settings
+ *   can finish the set (`'settings'`).
  * - `failed`: the set is whole (every listed proposal is approved/executing/
  *   executed/execution_failed) and at least one is `execution_failed`. POST
  *   /draft/retry re-queues exactly those rows, which completes the pair, so the
@@ -202,19 +202,48 @@ export function deriveDraftUndoable(
   return tracked.members.every((m) => isInUndoWindow(m, at));
 }
 
+/** Why POST /draft/reset must refuse a set (see `resetBlocker`). */
+export type DraftResetBlocker = 'applied' | 'executing' | 'window_closed';
+
+/**
+ * The whole-draft reset's acceptance rule, shared by the endpoint
+ * (draft/reset.ts, over the LOCKED set at its own clock, no margin) and the
+ * status hint below (`deriveDraftRecovery`, `DRAFT_HINT_MARGIN_MS` ahead), so
+ * the hint can never promise a Start over the endpoint refuses (the same
+ * pairing as `retryBlockingStatuses`). Most final blocker first:
+ *
+ * - `'applied'`: a listed proposal is `executed`; that work is live, and only
+ *   the inbox's undo of executed work or the Settings page reverses it.
+ * - `'executing'`: one is landing right now; the next read shows it `executed`
+ *   (then `'applied'`) or `execution_failed` (then not applied, and reset runs).
+ * - `'window_closed'`: an `approved` one is past its undo window at `atMs` (an
+ *   unstamped one counts as past); the worker is about to run it, and reset
+ *   never undoes past the window the inbox undo and the whole-draft undo enforce.
+ *
+ * `null` means reset accepts: every member is `approved` inside its window or
+ * not applied (`undone`, `rejected`, `expired`, `execution_failed`, a
+ * pre-approval `draft` / `ready_for_review`, or a listed id with no row).
+ */
+export function resetBlocker(tracked: DraftProposalsFact | undefined, atMs: number): DraftResetBlocker | null {
+  const members = tracked?.members ?? [];
+  if (members.some((m) => m.status === 'executed')) return 'applied';
+  if (members.some((m) => m.status === 'executing')) return 'executing';
+  if (members.some((m) => m.status === 'approved' && !isInUndoWindow(m, atMs))) return 'window_closed';
+  return null;
+}
+
 /**
  * Which way out the shell may offer for a set that will not finish on its own
- * (`execution` is `failed` or `stopped`), derived from the rules the whole-draft
- * reset applies so the shell never offers a Start over the endpoint refuses:
+ * (`execution` is `failed` or `stopped`): the whole-draft reset's own rule
+ * (`resetBlocker`), evaluated `DRAFT_HINT_MARGIN_MS` ahead of `now` so the hint
+ * expires a second before the endpoint's window does.
  *
- * - `'settings'` when any listed proposal is `executing` or `executed` (part of
- *   the setup is already live; reset refuses it), or any `approved` one is no
- *   longer inside its undo window (reset refuses that member as past its window,
- *   and the worker will run it on its own). The window is evaluated
- *   `DRAFT_HINT_MARGIN_MS` ahead of `now`, so the hint expires a second before
- *   the endpoint's own check does; an `approved` row with no stamp counts as past.
- * - `'reset'` otherwise: nothing ran, and every approved member can still be
- *   undone, so reset can return the draft to editing.
+ * - `'reset'`: nothing ran, and every approved member can still be undone, so
+ *   the shell offers Start over (POST /draft/reset returns the draft to editing).
+ * - `'settings'`: part of the setup is live or landing (`executed`,
+ *   `executing`), or an `approved` member is past its window and will run on its
+ *   own. Reset refuses that set, so the shell points at Settings and offers no
+ *   Start over.
  *
  * The same rule for `failed` and `stopped`: for `failed` it only decides whether
  * Start over is shown (Retry stays). `undefined` (absent on the wire) for every
@@ -226,11 +255,7 @@ function deriveDraftRecovery(
   now: Date,
 ): DraftRecovery | undefined {
   if (execution !== 'failed' && execution !== 'stopped') return undefined;
-  const at = now.getTime() + DRAFT_HINT_MARGIN_MS;
-  const members = tracked?.members ?? [];
-  const live = members.some((m) => m.status === 'executing' || m.status === 'executed');
-  const pastWindow = members.some((m) => m.status === 'approved' && !isInUndoWindow(m, at));
-  return live || pastWindow ? 'settings' : 'reset';
+  return resetBlocker(tracked, now.getTime() + DRAFT_HINT_MARGIN_MS) ? 'settings' : 'reset';
 }
 
 /**

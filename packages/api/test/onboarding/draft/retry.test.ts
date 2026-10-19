@@ -208,9 +208,9 @@ describe('retryFailedDraftProposals', () => {
       expect(message).toContain('DRAFT_RETRY_UNSAFE');
       // Owner-safe wording: says what is wrong in plain words and the way out.
       expect(message).toContain(phrase);
-      // Points only at what exists today (the inbox and Settings), never at a reset.
-      expect(message).toMatch(/Check your inbox, or finish it from Settings\./);
-      expect(message).not.toMatch(/reset/i);
+      // Names the two ways out the shell offers: Start over (POST /draft/reset, S4-5) or Settings.
+      expect(message).toMatch(/Start over to set it up again, or finish it from Settings\.$/);
+      expect(message).not.toMatch(/inbox/i);
       // Owner vocabulary: no internal terms, no vendor names, no AI jargon.
       expect(message).not.toMatch(/proposal|lifecycle|execution_failed|ready_for_review/i);
       expect(message).not.toMatch(/\b(ai|agents?|dashboard|verify|verification|provisioning|stripe|twilio)\b/i);

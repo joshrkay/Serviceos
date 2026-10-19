@@ -26,6 +26,13 @@
  *                                 (required { expectedVersion }; 409 DRAFT_NOT_APPROVED, then
  *                                 VERSION_CONFLICT, then DRAFT_UNDO_REFUSED / UNDO_WINDOW_CLOSED;
  *                                 200 { draft } editable again at version + 1)
+ *   POST   /reset                 "Start over": the locked way out of a set that can no longer finish as
+ *                                 one unit (split from the inbox, failed beside a terminal member,
+ *                                 lapsed); required { expectedVersion }; reverts approved members inside
+ *                                 their window, expires draft/ready_for_review leftovers as
+ *                                 superseded_by_reset, leaves the rest; 409 DRAFT_NOT_APPROVED, then
+ *                                 VERSION_CONFLICT, then DRAFT_RESET_REFUSED (details.reason applied |
+ *                                 executing) / UNDO_WINDOW_CLOSED; 200 { draft } editable at version + 1)
  *
  * Owner-only, like POST /api/onboarding/pack and the conversation lane: every
  * write here ends in config-change proposals against the tenant's settings.
@@ -49,6 +56,7 @@ import { ChoiceKeySchema, WritesNotAllowedError } from '../onboarding/choices/sc
 import {
   ApproveDraftBodySchema,
   CreateDraftInputSchema,
+  ResetDraftBodySchema,
   RetryDraftBodySchema,
   SetMetroBodySchema,
   SetOwnerPhoneBodySchema,
@@ -68,6 +76,7 @@ import {
 import { approveDraft } from '../onboarding/draft/approve';
 import { retryFailedDraftProposals } from '../onboarding/draft/retry';
 import { undoApprovedDraft } from '../onboarding/draft/undo';
+import { resetApprovedDraft } from '../onboarding/draft/reset';
 
 export interface OnboardingDraftRouterDeps {
   draftRepo: OnboardingDraftRepository;
@@ -79,7 +88,7 @@ export interface OnboardingDraftRouterDeps {
 
 /**
  * One mapping from repository errors to HTTP errors, shared by every draft
- * write (the field PUTs, approve, retry; undo and reset follow). The typed
+ * write (the field PUTs, approve, retry, undo, reset). The typed
  * errors are the ones `updateLocked` throws, in its order of checks.
  */
 function rethrowDraftError(err: unknown, tenantId: string): never {
@@ -371,6 +380,28 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
       let result;
       try {
         result = await undoApprovedDraft(
+          { draftRepo, proposalRepo, auditRepo },
+          tenantId,
+          { userId: req.auth!.userId, role: req.auth!.role as Role },
+          { expectedVersion: body.expectedVersion },
+        );
+      } catch (err) {
+        rethrowDraftError(err, tenantId);
+      }
+      res.json({ draft: result.draft });
+    }),
+  );
+
+  router.post(
+    '/reset',
+    ...guards,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      // Validated before anything is locked: a missing or malformed version is a 400.
+      const body = validate(ResetDraftBodySchema, req.body ?? {});
+      let result;
+      try {
+        result = await resetApprovedDraft(
           { draftRepo, proposalRepo, auditRepo },
           tenantId,
           { userId: req.auth!.userId, role: req.auth!.role as Role },

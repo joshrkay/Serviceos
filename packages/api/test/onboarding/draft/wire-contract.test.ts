@@ -20,6 +20,9 @@ import {
   OnboardingDraftResponseSchema,
   OnboardingDraftSchema,
   OnboardingStatusDraftSchema,
+  ONBOARDING_DRAFT_RESET_REASONS,
+  ResetOnboardingDraftBodySchema,
+  ResetOnboardingDraftResponseSchema,
   RetryOnboardingDraftBodySchema,
   RetryOnboardingDraftResponseSchema,
   SetOnboardingMetroBodySchema,
@@ -39,6 +42,8 @@ import {
   ApproveDraftBodySchema,
   CreateDraftInputSchema,
   DRAFT_REFUSAL_CODES,
+  DRAFT_RESET_REFUSAL_REASONS,
+  ResetDraftBodySchema,
   RetryDraftBodySchema,
   SetMetroBodySchema,
   StageChoiceBodySchema,
@@ -49,6 +54,7 @@ import { join } from 'node:path';
 import { approveDraft } from '../../../src/onboarding/draft/approve';
 import { undoApprovedDraft } from '../../../src/onboarding/draft/undo';
 import { retryFailedDraftProposals } from '../../../src/onboarding/draft/retry';
+import { resetApprovedDraft } from '../../../src/onboarding/draft/reset';
 import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 
@@ -342,6 +348,43 @@ describe('onboarding draft wire contract (api <-> shared)', () => {
     }
     expect(thrown.size).toBeGreaterThan(5);
     expect([...thrown].filter((c) => !(DRAFT_REFUSAL_CODES as readonly string[]).includes(c))).toEqual([]);
+  });
+
+  it('S4-5: accepts exactly the reset bodies the API accepts (the version is required; strict)', () => {
+    const cases: Array<[unknown, boolean]> = [
+      [{}, false],
+      [{ expectedVersion: 3 }, true],
+      [{ expectedVersion: 0 }, false],
+      [{ expectedVersion: -1 }, false],
+      [{ expectedVersion: 1.5 }, false],
+      [{ expectedVersion: '3' }, false],
+      [{ expectedVersion: 3, extra: 1 }, false],
+    ];
+    for (const [body, ok] of cases) {
+      const label = JSON.stringify(body);
+      expect(ResetOnboardingDraftBodySchema.safeParse(body).success, `shared reset ${label}`).toBe(ok);
+      expect(ResetDraftBodySchema.safeParse(body).success, `api reset ${label}`).toBe(ok);
+    }
+  });
+
+  it('S4-5: parses the real reset response, and keeps DRAFT_RESET_REFUSED and its reasons equal on both sides', async () => {
+    const { repo: draftRepo } = await buildDraft('plumbing', '(216) 555-0142');
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const owner = { userId: 'user-owner-1', role: 'owner' as const };
+    const deps = { draftRepo, proposalRepo, auditRepo };
+    const approved = await approveDraft(deps, TENANT_ID, owner);
+    await proposalRepo.update(TENANT_ID, approved.proposalIds[0], { status: 'undone' });
+
+    const result = await resetApprovedDraft(deps, TENANT_ID, owner, { expectedVersion: approved.draft.version });
+    // The route answers { draft } only.
+    const wire = overTheWire({ draft: result.draft });
+    expect(ResetOnboardingDraftResponseSchema.parse(wire)).toEqual(wire);
+    expect(ResetOnboardingDraftResponseSchema.safeParse({ ...(wire as object), revertedProposalIds: [] }).success).toBe(false);
+
+    expect(ONBOARDING_DRAFT_REFUSALS).toContain('DRAFT_RESET_REFUSED');
+    expect([...ONBOARDING_DRAFT_RESET_REASONS]).toEqual([...DRAFT_RESET_REFUSAL_REASONS]);
+    expect([...DRAFT_RESET_REFUSAL_REASONS]).toEqual(['applied', 'executing']);
   });
 
   it('keeps the shared choice-key and trade lists equal to the API registry', () => {

@@ -2,7 +2,7 @@
  * The approved draft's proposal set, read under lock — shared by every writer
  * that decides on the WHOLE set before it changes any of it: the whole-draft
  * undo (undo.ts), the retry's safety check and re-queue (retry.ts), and the
- * whole-draft reset (S4-5).
+ * whole-draft reset (reset.ts).
  *
  * The caller already holds the draft row lock (inside `updateLocked`'s
  * `compute`, or after `getForTenantForUpdate`), so the draft's `proposal_ids`

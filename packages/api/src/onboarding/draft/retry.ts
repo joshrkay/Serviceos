@@ -114,13 +114,16 @@ const BLOCKER_PHRASE: Record<string, string> = {
 
 /**
  * The owner-facing 409 for a set retry must not touch. The sentence is plain
- * words and the way out; the raw statuses ride in `details` for support and tests.
+ * words and the two ways out the shell offers: Start over (the whole-draft
+ * reset, POST /draft/reset, which accepts this set while nothing in it ran) or
+ * Settings (once part of it did). The raw statuses ride in `details` for
+ * support and tests.
  */
 function retryUnsafe(blockers: string[], statuses: string[], expected: number): ConflictError {
   const reasons = [...new Set(blockers.map((b) => BLOCKER_PHRASE[b] ?? 'is not in a state that can be retried'))];
   return new ConflictError(
     `DRAFT_RETRY_UNSAFE: Retrying could leave your setup half saved, because ${reasons.map((r) => `part of it ${r}`).join(' and ')}. ` +
-      'Check your inbox, or finish it from Settings.',
+      'Start over to set it up again, or finish it from Settings.',
     { statuses, expected },
   );
 }

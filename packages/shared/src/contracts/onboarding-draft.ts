@@ -362,6 +362,28 @@ export const UndoOnboardingDraftResponseSchema = z.object({ draft: OnboardingDra
 export type UndoOnboardingDraftResponse = z.infer<typeof UndoOnboardingDraftResponseSchema>;
 
 /**
+ * Body of POST /api/onboarding/draft/reset ("Start over"). `expectedVersion` is
+ * required: the approved draft's version the stopped or failed screen was
+ * rendered from (the status draft block's `version`).
+ */
+export const ResetOnboardingDraftBodySchema = z
+  .object({ expectedVersion: z.number().int().positive() })
+  .strict();
+export type ResetOnboardingDraftBody = z.infer<typeof ResetOnboardingDraftBodySchema>;
+
+/** Response of POST /api/onboarding/draft/reset: the draft, editable again, choices intact. */
+export const ResetOnboardingDraftResponseSchema = z.object({ draft: OnboardingDraftSchema }).strict();
+export type ResetOnboardingDraftResponse = z.infer<typeof ResetOnboardingDraftResponseSchema>;
+
+/**
+ * `details.reason` of a 409 DRAFT_RESET_REFUSED: `applied` (part of the setup is
+ * already saved; Settings finishes it) or `executing` (part of it is landing
+ * now; the next status read settles it). Pinned equal to the API list.
+ */
+export const ONBOARDING_DRAFT_RESET_REASONS = ['applied', 'executing'] as const;
+export type OnboardingDraftResetReason = (typeof ONBOARDING_DRAFT_RESET_REASONS)[number];
+
+/**
  * Every 409 code the draft routes answer with. The API's message is
  * `CODE: plain sentence`, so a client reads the code from the prefix. Pinned
  * equal to the API list by wire-contract.test.ts.
@@ -377,5 +399,6 @@ export const ONBOARDING_DRAFT_REFUSALS = [
   'DRAFT_RETRY_FAILED',
   'DRAFT_UNDO_REFUSED',
   'UNDO_WINDOW_CLOSED',
+  'DRAFT_RESET_REFUSED',
 ] as const;
 export type OnboardingDraftRefusal = (typeof ONBOARDING_DRAFT_REFUSALS)[number];

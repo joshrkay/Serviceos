@@ -97,6 +97,26 @@ export const UndoDraftBodySchema = z
   .strict();
 
 /**
+ * Body of POST /api/onboarding/draft/reset ("Start over"). `expectedVersion` is
+ * REQUIRED: the approved draft's `version` the stopped or failed screen was
+ * rendered from (the status draft block carries it). A tab that rendered an
+ * earlier approval, since replaced by a reset and a new approval, is refused
+ * (409 VERSION_CONFLICT), so a reset never reverts an approval its caller never saw.
+ */
+export const ResetDraftBodySchema = z
+  .object({
+    expectedVersion: z.number().int().positive(),
+  })
+  .strict();
+
+/**
+ * The machine `details.reason` of a 409 DRAFT_RESET_REFUSED: `applied` (a member
+ * is executed; Settings finishes it) or `executing` (a member is landing now).
+ * Pinned equal to the shared list by wire-contract.test.ts.
+ */
+export const DRAFT_RESET_REFUSAL_REASONS = ['applied', 'executing'] as const;
+
+/**
  * Body of POST /api/onboarding/draft/retry. `expectedVersion` is the approved
  * draft's `version` as the failed screen rendered it; a different value is 409
  * VERSION_CONFLICT under the draft lock, before the set is read. Optional until
@@ -125,6 +145,7 @@ export const DRAFT_REFUSAL_CODES = [
   'DRAFT_RETRY_FAILED',
   'DRAFT_UNDO_REFUSED',
   'UNDO_WINDOW_CLOSED',
+  'DRAFT_RESET_REFUSED',
 ] as const;
 
 /** Partial on purpose: an owner mid-way through has staged some keys, not all. */

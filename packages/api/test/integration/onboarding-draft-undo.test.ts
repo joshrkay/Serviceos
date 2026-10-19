@@ -17,6 +17,7 @@ import type { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { beginRequestTx, raceFirstThen } from './onboarding-draft-request-tx';
 import { createOnboardingDraftRouter } from '../../src/routes/onboarding-draft';
+import { createProposalsRouter } from '../../src/routes/proposals';
 import { PgOnboardingDraftRepository } from '../../src/onboarding/draft/repository';
 import { undoApprovedDraft } from '../../src/onboarding/draft/undo';
 import { PgRegionalPriceTierRepository } from '../../src/onboarding/choices/price-tiers';
@@ -67,6 +68,8 @@ describe('POST /draft/undo (real DB)', () => {
     });
     app.use('/api', withTenantTransaction(pool));
     app.use(BASE, createOnboardingDraftRouter({ draftRepo, tierRepo: new PgRegionalPriceTierRepository(pool), proposalRepo, auditRepo }));
+    // The inbox, for the split-pair case (one member undone from it).
+    app.use('/api/proposals', createProposalsRouter(proposalRepo, undefined, auditRepo));
   });
 
   beforeEach(async () => {
@@ -276,6 +279,32 @@ describe('POST /draft/undo (real DB)', () => {
     const own = await undo(v + 3);
     expect(own.status).toBe(200);
     expect(own.body.draft).toMatchObject({ status: 'draft', version: v + 4 });
+  });
+
+  it('the same when B reached the new pair through reset: A holds v, B splits the pair, resets, stages and approves at v + 3; A\'s undo and A\'s reset are both VERSION_CONFLICT', async () => {
+    const first = await approvedDraft();
+    const v = first.version;
+    // Tab B: the inbox undoes one half, then Start over, a change, and a new approval.
+    expect((await request(app).post(`/api/proposals/${first.ids[0]}/undo`).send({})).status).toBe(200);
+    expect((await request(app).post(`${BASE}/reset`).send({ expectedVersion: v })).status).toBe(200);
+    const staged = await request(app).put(`${BASE}/choices/greeting`).send({ choice: { option: 'b' }, version: v + 1 });
+    expect(staged.status).toBe(200);
+    const second = await approve();
+    expect(second.body.draft.version).toBe(v + 3);
+    const bIds: string[] = [...second.body.proposalIds].sort();
+    const draftBefore = await draftRow();
+    const bBefore = await proposalRows(bIds);
+
+    for (const path of ['undo', 'reset']) {
+      const stale = await request(app).post(`${BASE}/${path}`).send({ expectedVersion: v });
+      expect(stale.status, path).toBe(409);
+      expect(stale.body.message, path).toMatch(new RegExp(`^VERSION_CONFLICT: expected ${v}, found ${v + 3}`));
+    }
+    expect(await draftRow()).toEqual(draftBefore);
+    expect(await proposalRows(bIds)).toEqual(bBefore);
+    for (const p of bBefore) expect(p.status).toBe('approved');
+    expect(await auditCount('onboarding.draft_undone')).toBe(0);
+    expect(await auditCount('onboarding.draft_reset')).toBe(1);
   });
 
   it('the same tap twice: the second is DRAFT_NOT_APPROVED and writes nothing', async () => {
