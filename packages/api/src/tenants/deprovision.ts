@@ -7,10 +7,9 @@ import {
   releasePhoneNumber as realReleasePhoneNumber,
   closeSubaccount as realCloseSubaccount,
 } from '../integrations/twilio/provisioning';
+import { purgeTenantRows } from './purge-walk';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// Postgres identifier guard for the dynamically-discovered table names.
-const IDENT_REGEX = /^[a-z_][a-z0-9_]*$/;
 
 export type DeprovisionReason =
   | 'manual_admin'
@@ -228,22 +227,7 @@ export async function deprovisionTenant(
       }
     }
 
-    const tablesRes = await client.query<{ table_name: string }>(
-      `SELECT table_name FROM information_schema.columns
-        WHERE table_schema = 'public' AND column_name = 'tenant_id'
-        ORDER BY table_name`,
-    );
-
-    for (const { table_name } of tablesRes.rows) {
-      if (!IDENT_REGEX.test(table_name)) {
-        throw new Error(`Refusing to purge unsafe table name: ${table_name}`);
-      }
-      const res = await client.query(
-        `DELETE FROM "${table_name}" WHERE tenant_id = $1`,
-        [tenantId],
-      );
-      rowsDeletedByTable[table_name] = res.rowCount ?? 0;
-    }
+    Object.assign(rowsDeletedByTable, await purgeTenantRows(client, tenantId));
 
     const tenantRes = await client.query('DELETE FROM tenants WHERE id = $1', [tenantId]);
     rowsDeletedByTable['tenants'] = tenantRes.rowCount ?? 0;
