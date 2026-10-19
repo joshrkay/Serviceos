@@ -165,6 +165,7 @@ import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
 import { buildRecoveryContext } from '../../../sms/recovery/scheduler';
 import type { CustomerRepository } from '../../../customers/customer';
 import { normalizePhone } from '../../../customers/dedup';
+import { redactCardNumbers } from '../../privacy/pan-redact';
 import {
   confirmTurnSlotFillEvent,
   isAffirmation,
@@ -1394,7 +1395,10 @@ export class InAppVoiceAdapter {
   }
 
   async handleInput(sessionId: string, text: string): Promise<HandleInputResult> {
-    return this.deps.store.withSessionLock(sessionId, () => this._handleInputLocked(sessionId, text));
+    // PRIV-3 — a recited card number never reaches the transcript, the
+    // classifier, the FSM or a drafted proposal on this surface either.
+    const scrubbed = redactCardNumbers(text);
+    return this.deps.store.withSessionLock(sessionId, () => this._handleInputLocked(sessionId, scrubbed));
   }
 
   private async _handleInputLocked(sessionId: string, text: string): Promise<HandleInputResult> {
