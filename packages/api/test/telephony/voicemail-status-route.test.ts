@@ -660,7 +660,9 @@ describe('LCR-04 — a voicemail callback that arrives during a database outage'
     expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(0);
 
     // Still down at the first redelivery: kept, not dropped.
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => {
+      setTimeout(r, 60);
+    });
     expect(redelivery.size()).toBe(1);
 
     db.down = false;

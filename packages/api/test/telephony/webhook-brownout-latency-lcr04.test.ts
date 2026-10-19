@@ -83,7 +83,9 @@ function mount() {
   const phoneNumberRepo = {
     findByNumber: vi.fn(() =>
       repoState.exhausted
-        ? new Promise((_r, reject) => setTimeout(() => reject(new Error('timeout exceeded')), CHECKOUT_TIMEOUT_MS))
+        ? new Promise((_r, reject) => {
+            setTimeout(() => reject(new Error('timeout exceeded')), CHECKOUT_TIMEOUT_MS);
+          })
         : Promise.resolve({ tenantId: TENANT }),
     ),
   };
