@@ -488,14 +488,13 @@ export function createInvoiceRouter(
           });
           return;
         }
-        const result = await createInvoicePaymentLink(
-          req.auth!.tenantId,
-          routeParam(req, 'id'),
+        const result = await createInvoicePaymentLink(req.auth!.tenantId, routeParam(req, 'id'), {
           invoiceRepo,
-          paymentLinkProvider,
+          provider: paymentLinkProvider,
+          settingsRepo,
           connectAccountResolver,
           auditRepo,
-        );
+        });
         res.json(result);
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
@@ -690,6 +689,9 @@ export function createInvoiceRouter(
           metadata: {
             channels: result.channelsSent.map((c) => c.channel),
             dispatchIds: result.channelsSent.map((c) => c.dispatchId),
+            // S5a-1 (U8) — the payment policy applied at SEND time (the
+            // value then wins over whatever held when the invoice was issued).
+            paymentCollectionMode: result.paymentCollectionMode,
           },
         });
         // §6 Time-to-Cash. `sendInvoice` only stamps `sentAt`/`lastDispatchId`;

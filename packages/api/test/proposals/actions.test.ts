@@ -13,7 +13,7 @@ import {
   undoProposal,
 } from '../../src/proposals/actions';
 import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
-import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../../src/shared/errors';
+import { AppError, ConflictError, ForbiddenError, ValidationError, NotFoundError } from '../../src/shared/errors';
 import { InMemoryCorrectionLessonRepository } from '../../src/learning/corrections/correction-lesson';
 import { FakeConfigPorts } from '../../src/learning/corrections/lesson-applicator';
 import { extractCorrectionLessons } from '../../src/learning/corrections/correction-extractor';
@@ -1416,4 +1416,95 @@ describe('Track E — chain-set approval', () => {
     expect((await repo.findById(tenantId, customer.id))?.status).toBe('ready_for_review');
     expect((await repo.findById(tenantId, sendEstimate.id))?.status).toBe('draft');
   });
+});
+
+/**
+ * S4 (U9) — approveProposal writes CONDITIONALLY. It reads the row, checks the
+ * transition in memory, then writes; the onboarding whole-draft reset can
+ * expire a still-`draft` member in between. An unconditional write would flip
+ * that `expired` row back to `approved` (and the worker would run it), so the
+ * write only lands while the row is still in a status `approved` is reachable
+ * from (`draft`, `ready_for_review`).
+ */
+describe('S4 — approveProposal: conditional approve write', () => {
+  const tenantId = 'tenant-1';
+  const actorId = 'user-1';
+  const configInput: CreateProposalInput = {
+    tenantId,
+    proposalType: 'onboarding_tenant_settings',
+    payload: { businessName: 'Acme', verticalPacks: ['plumbing'] },
+    summary: 'Set up the shop',
+    createdBy: 'technician-7',
+  };
+
+  /** A repo where another transaction moves the row to `to` between approve's read and its write. */
+  class RacedRepo extends InMemoryProposalRepository {
+    constructor(private readonly racer: { to: Proposal['status'] }) {
+      super();
+    }
+    override async updateStatusIf(...args: Parameters<InMemoryProposalRepository['updateStatusIf']>) {
+      const [tid, id] = args;
+      await super.updateStatus(tid, id, this.racer.to);
+      return super.updateStatusIf(...args);
+    }
+  }
+
+  it.each(['expired', 'rejected', 'approved'] as const)(
+    'a row that moved to %s between the read and the write is refused with the lifecycle conflict and no approval is recorded',
+    async (movedTo) => {
+      const repo = new RacedRepo({ to: movedTo });
+      const auditRepo = new InMemoryAuditRepository();
+      const proposal = createProposal(configInput); // 'draft'
+      await repo.create(proposal);
+
+      const attempt = approveProposal(repo, tenantId, proposal.id, actorId, 'owner', auditRepo);
+      await expect(attempt).rejects.toThrow(ConflictError);
+      await expect(attempt).rejects.toThrow(`Cannot transition proposal from '${movedTo}' to 'approved'`);
+
+      const after = (await repo.findById(tenantId, proposal.id))!;
+      expect(after.status).toBe(movedTo);
+      expect(after.approvedAt).toBeUndefined();
+      expect(after.executedByRole).toBeUndefined();
+      expect(auditRepo.getAll().filter((e) => e.eventType === 'proposal.approved')).toHaveLength(0);
+    },
+  );
+
+  it('a row deleted between the read and the write is still NotFound', async () => {
+    class Vanishing extends InMemoryProposalRepository {
+      override async updateStatusIf() {
+        return null;
+      }
+      override async findById(tid: string, id: string) {
+        return this.reads++ === 0 ? super.findById(tid, id) : null;
+      }
+      reads = 0;
+    }
+    const repo = new Vanishing();
+    const proposal = createProposal(configInput);
+    await repo.create(proposal);
+    await expect(approveProposal(repo, tenantId, proposal.id, actorId, 'owner')).rejects.toThrow(NotFoundError);
+  });
+
+  it.each(['draft', 'ready_for_review'] as const)(
+    'from %s it writes through updateStatusIf and still stamps approvedAt, executedBy and executedByRole',
+    async (from) => {
+      const repo = new InMemoryProposalRepository();
+      const proposal = createProposal(configInput);
+      await repo.create(proposal);
+      if (from === 'ready_for_review') await repo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+      const conditional = vi.spyOn(repo, 'updateStatusIf');
+
+      const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+
+      expect(conditional).toHaveBeenCalledTimes(1);
+      const [, , fromStatuses, to, updates] = conditional.mock.calls[0];
+      expect(fromStatuses).toEqual(['draft', 'ready_for_review']);
+      expect(to).toBe('approved');
+      expect(updates).toMatchObject({ executedBy: actorId, executedByRole: 'owner' });
+      expect(updates?.approvedAt).toBeInstanceOf(Date);
+
+      expect(approved).toMatchObject({ status: 'approved', executedBy: actorId, executedByRole: 'owner', createdBy: 'technician-7' });
+      expect(approved.approvedAt).toBeInstanceOf(Date);
+    },
+  );
 });
