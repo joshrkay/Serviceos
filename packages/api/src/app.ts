@@ -4491,6 +4491,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
           ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
           AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+          NODE_ENV: process.env.NODE_ENV,
         }),
       }),
       // §10 onboarding voice gates — only wired when both pool and auditRepo
@@ -4591,6 +4592,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // filler clips and live TTS speak with one voice.
       ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
       AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+      NODE_ENV: process.env.NODE_ENV,
     });
     // P0 voice-output fail-fast: Twilio Media Streams requires raw PCM16
     // audio (mediastream-adapter.ts encodes it to mu-law itself via
@@ -6010,6 +6012,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
     ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
     AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+    NODE_ENV: process.env.NODE_ENV,
   });
   // S3-1 — one per-process clip cache for POST /tts (bounded by
   // VOICE_TTS_CLIP_CACHE_BYTES): the onboarding lines are static per trade
