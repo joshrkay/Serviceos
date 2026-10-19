@@ -1763,6 +1763,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // is not retained (no plaintext PII at rest).
       rawTranscriptEncryptionKey:
         process.env.TRANSCRIPT_ENCRYPTION_KEY ?? process.env.TENANT_ENCRYPTION_KEY,
+      // PRIV-3 — audits the card-number flag on a transcribed recording.
+      auditRepo,
     }
   );
 
@@ -4385,6 +4387,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           onPersisted: createRecordingTranscriptHook({
             store: voiceSessionStore,
             callTranscriptTurnRepo,
+            voiceRepo,
             auditRepo,
             ...(embeddingProvider ? { queue } : {}),
             logger: createLogger({

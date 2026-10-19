@@ -124,3 +124,30 @@ describe('scrubPii — preserves the original text on the result', () => {
     expect(result.scrubbed).not.toBe(original);
   });
 });
+
+describe('scrubPii — card numbers (PRIV-3)', () => {
+  it('redacts a spaced card number that the regex layer used to pass through', () => {
+    const result = scrubPii('caller: my card is 4111 1111 1111 1111 expires 09/27');
+    expect(result.scrubbed).toBe('caller: my card is [CARD_NUMBER] expires 09/27');
+    expect(result.redactions).toContainEqual(
+      expect.objectContaining({ kind: 'card_number', matched: '4111 1111 1111 1111' }),
+    );
+  });
+
+  it('redacts an unspaced card number whole, never half as a phone', () => {
+    const result = scrubPii('card 4111111111111111 thanks');
+    expect(result.scrubbed).toBe('card [CARD_NUMBER] thanks');
+    expect(result.hasResidualPii).toBe(false);
+  });
+
+  it('flags a grouped digit run that is not a valid card for review', () => {
+    const result = scrubPii('ref 4111 1111 1111 1112 please');
+    expect(result.hasResidualPii).toBe(true);
+    expect(result.residualSignals).toContain('grouped_digit_run');
+  });
+
+  it('does not flag an ordinary phone and street address once they are scrubbed', () => {
+    const result = scrubPii('Call 602-555-0199 about 4821 Bridgewater Road');
+    expect(result.residualSignals).not.toContain('grouped_digit_run');
+  });
+});
