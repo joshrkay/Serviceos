@@ -3332,6 +3332,15 @@ export class TwilioMediaStreamAdapter {
               break;
             }
           }
+          // LCR-01 — a stream the vendor closed before its final frame (a
+          // close frame or a dropped connection with no error message first)
+          // ends the loop cleanly. While this turn still owns the floor that
+          // is a stream failure, not a finished line: hand it to the same
+          // recovery as a thrown one. A barge-in or a newer turn took the
+          // floor and stays a clean end.
+          if (!sawFinalChunk && turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
+            throw new Error('TTS stream ended before its final frame');
+          }
           // Consent ordering — complete ONLY when the provider explicitly
           // signalled the end of the utterance AND real audio actually
           // streamed. A clean-but-premature close (no isFinal) or an

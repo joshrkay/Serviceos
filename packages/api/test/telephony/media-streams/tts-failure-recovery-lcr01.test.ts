@@ -105,6 +105,19 @@ function deadStream(): AsyncIterable<TtsStreamChunk> {
   };
 }
 
+/**
+ * A stream the vendor closed before its final frame (a 1011/1008 close frame
+ * or a TCP FIN with no error message first): the iterator just ends, with no
+ * throw and no `isFinal` chunk — after `chunks` frames of audio.
+ */
+function truncatedStream(chunks: number): () => AsyncIterable<TtsStreamChunk> {
+  return () => ({
+    async *[Symbol.asyncIterator]() {
+      for (let i = 0; i < chunks; i++) yield { pcm: Buffer.alloc(640), isFinal: false };
+    },
+  });
+}
+
 function liveStream(): AsyncIterable<TtsStreamChunk> {
   return {
     async *[Symbol.asyncIterator]() {
@@ -305,8 +318,9 @@ describe('LCR-01 — a turn later in the call', () => {
     synthesize: TtsProvider['synthesize'];
     speechTurn?: () => Promise<SideEffect[]>;
     maxCallDurationMs?: number;
+    stream?: () => AsyncIterable<TtsStreamChunk>;
   }) {
-    const synthesizeStream = vi.fn(() => deadStream());
+    const synthesizeStream = vi.fn(opts.stream ?? (() => deadStream()));
     const tts: TtsProvider = {
       synthesize: opts.synthesize,
       // Every reply's stream dies (the vendor's streaming endpoint is down).
@@ -459,6 +473,42 @@ describe('LCR-01 — a turn later in the call', () => {
     // is still live for the Gather leg to continue.
     expect(session.recordingDisclosed).toBe(true);
     expect(session.ended).not.toBe(true);
+  });
+
+  it('the vendor closes the stream before any audio and REST is down too → the circuit is voted and the call moves to Gather', async () => {
+    const synthesize = vi.fn(async (): Promise<TtsSynthesizeResult> => {
+      throw new Error('ElevenLabs 503');
+    });
+    const { ws, stt, circuit, restRedirect } = midCallSetup({ synthesize, stream: truncatedStream(0) });
+    await flush();
+    stt.emit({ type: 'final', isFinal: true, transcript: 'can I book for Tuesday', confidence: 0.95 });
+
+    await vi.waitFor(() => expect(ws.closed).toBe(true));
+    expect(synthesize).toHaveBeenCalledWith(expect.objectContaining({ outputFormat: 'pcm_16000' }));
+    expect(circuit.recordFailure).toHaveBeenCalledWith('tts_unavailable');
+    expect(restRedirect).toHaveBeenCalledWith({ callSid: 'CA-mid', accountSid: 'AC' });
+    expect(ws.closeReason).toBe('degraded_to_gather');
+  });
+
+  it('the vendor closes the stream part-way through a reply → the whole reply is re-spoken from buffered PCM', async () => {
+    const synthesize = elevenLabsShapedSynth();
+    const { ws, stt, circuit, restRedirect } = midCallSetup({ synthesize, stream: truncatedStream(2) });
+    await flush();
+    stt.emit({ type: 'final', isFinal: true, transcript: 'can I book for Tuesday', confidence: 0.95 });
+
+    await vi.waitFor(() =>
+      expect(synthesize).toHaveBeenCalledWith(
+        expect.objectContaining({ text: 'You are booked for Tuesday at nine.', outputFormat: 'pcm_16000' }),
+      ),
+    );
+    await flush();
+    await flush();
+    // Two streamed frames plus the two-frame recovery.
+    await vi.waitFor(() => expect(mediaFrames(ws).length).toBe(4));
+    expect(restRedirect).not.toHaveBeenCalled();
+    expect(circuit.recordFailure).not.toHaveBeenCalled();
+    expect(ws.closed).toBe(false);
+    ws.close();
   });
 
   it('stream fails but buffered PCM recovery plays → the turn is heard and the call stays on the stream', async () => {
