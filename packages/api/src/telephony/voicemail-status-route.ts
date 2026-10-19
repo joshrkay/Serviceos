@@ -82,7 +82,7 @@ const logger = createLogger({
 
 /**
  * Storage key for a voicemail recording. DELIBERATELY distinct from
- * `buildRecordingStorageKey` (`<tenant>/<callSid>.mp3`): the dial-result
+ * `buildRecordingStorageKey` (`<tenant>/<callSid>-<recordingSid>.mp3`): the dial-result
  * voicemail path runs on a call whose live leg may itself be recorded via
  * `<Start><Record>` → /recording, and both objects share one CallSid — a
  * shared key would have the voicemail bytes overwrite the call recording.

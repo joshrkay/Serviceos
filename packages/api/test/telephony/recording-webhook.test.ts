@@ -50,6 +50,7 @@ class FakeStorageProvider implements StorageProvider {
   public lastUploadBucket: string | null = null;
   public lastUploadContentType: string | null = null;
   public lastUploadSizeBytes: number | null = null;
+  public uploadKeys: string[] = [];
 
   async generateUploadUrl(
     bucket: string,
@@ -59,6 +60,7 @@ class FakeStorageProvider implements StorageProvider {
   ): Promise<string> {
     this.lastUploadBucket = bucket;
     this.lastUploadKey = key;
+    this.uploadKeys.push(key);
     this.lastUploadContentType = contentType;
     this.lastUploadSizeBytes = sizeBytes;
     return `https://s3.fake/${bucket}/${key}?sig=presigned`;
@@ -108,13 +110,16 @@ class FakePool {
       query: async (sql: string, params: unknown[] = []) => {
         this.queryLog.push(sql.trim().split('\n')[0]);
         if (/SELECT id FROM voice_recordings/i.test(sql)) {
+          // Same key as recordInboundCall: (tenant, call, recording URL).
           const tenantId = params[0] as string;
           const callSid = params[1] as string;
+          const recordingUrl = params[2] as string;
           const match = this.voiceRows.find(
             (r) =>
               r.tenant_id === tenantId &&
               r.call_sid === callSid &&
-              r.source === 'inbound_call',
+              r.source === 'inbound_call' &&
+              r.recording_url === recordingUrl,
           );
           return { rows: match ? [{ id: match.id }] : [] };
         }
@@ -279,7 +284,7 @@ describe('P8-014 record_call recording webhook', () => {
 
       // S3 PUT used the tenant-scoped key from buildRecordingStorageKey.
       expect(storage.lastUploadKey).toBe(
-        buildRecordingStorageKey(TENANT_ID, 'CA-rec-1'),
+        buildRecordingStorageKey(TENANT_ID, 'CA-rec-1', 'RE-happy'),
       );
       expect(storage.lastUploadBucket).toBe(STORAGE_BUCKET);
       expect(storage.lastUploadContentType).toBe('audio/mpeg');
@@ -305,7 +310,7 @@ describe('P8-014 record_call recording webhook', () => {
       expect(pool.fileRows).toHaveLength(1);
       expect(pool.fileRows[0].s3_bucket).toBe(STORAGE_BUCKET);
       expect(pool.fileRows[0].s3_key).toBe(
-        buildRecordingStorageKey(TENANT_ID, 'CA-rec-1'),
+        buildRecordingStorageKey(TENANT_ID, 'CA-rec-1', 'RE-happy'),
       );
     });
   });
@@ -679,7 +684,62 @@ describe('PRIV-2 — the Twilio copy is deleted once our storage and our row hol
 });
 
 describe('buildRecordingStorageKey', () => {
-  it('puts the tenant id first so prefix-scoped IAM works', () => {
-    expect(buildRecordingStorageKey('tenant-a', 'CA123')).toBe('tenant-a/CA123.mp3');
+  it('puts the tenant id first so prefix-scoped IAM works, and names the recording', () => {
+    expect(buildRecordingStorageKey('tenant-a', 'CA123', 'RE456')).toBe('tenant-a/CA123-RE456.mp3');
+  });
+});
+
+describe('PRIV-2 (review round 1) — two recordings of one call never share a stored object', () => {
+  // A Gather call arms <Start><Record> to /recording; a patch-owner-through
+  // that falls back to voicemail sends a SECOND recording of the same call to
+  // /recording. With one key per call, the second PUT overwrote the first,
+  // and deleting each Twilio copy after its PUT left the first recording
+  // nowhere at all.
+  it('stores each RecordingSid under its own key and deletes each Twilio copy only after its own PUT', async () => {
+    const order: string[] = [];
+    const storage = new FakeStorageProvider();
+    const pool = new FakePool();
+    const uploadObject = vi.fn(async (url: string) => {
+      order.push(`put ${new URL(url).pathname}`);
+    });
+    const twilioCopyRemover = vi.fn(async (input: { recordingUrl: string }) => {
+      order.push(`delete ${input.recordingUrl.split('/').pop()}`);
+      return true;
+    });
+    const { app } = buildHarness({
+      pool,
+      storage,
+      fetchRecording: async () => Buffer.from('mp3'),
+      uploadObject,
+      twilioCopyRemover,
+    });
+    const base = 'https://api.twilio.com/2010-04-01/Accounts/AC' + 'd'.repeat(32) + '/Recordings/';
+    const call = await signedRecordingRequest(app, {
+      CallSid: 'CA-rec-1',
+      RecordingSid: 'RE-call-leg',
+      RecordingUrl: `${base}RE-call-leg`,
+      RecordingDuration: '120',
+    });
+    const voicemail = await signedRecordingRequest(app, {
+      CallSid: 'CA-rec-1',
+      RecordingSid: 'RE-voicemail',
+      RecordingUrl: `${base}RE-voicemail`,
+      RecordingDuration: '30',
+    });
+
+    expect(call.status).toBe(200);
+    expect(voicemail.status).toBe(200);
+    expect(storage.uploadKeys).toEqual([
+      `${TENANT_ID}/CA-rec-1-RE-call-leg.mp3`,
+      `${TENANT_ID}/CA-rec-1-RE-voicemail.mp3`,
+    ]);
+    expect(pool.voiceRows).toHaveLength(2);
+    expect(pool.fileRows.map((f) => f.s3_key)).toEqual(storage.uploadKeys);
+    expect(order).toEqual([
+      `put /${STORAGE_BUCKET}/${TENANT_ID}/CA-rec-1-RE-call-leg.mp3`,
+      'delete RE-call-leg',
+      `put /${STORAGE_BUCKET}/${TENANT_ID}/CA-rec-1-RE-voicemail.mp3`,
+      'delete RE-voicemail',
+    ]);
   });
 });

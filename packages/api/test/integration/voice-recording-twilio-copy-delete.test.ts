@@ -225,6 +225,45 @@ describe('PRIV-2 — the Twilio copy of a call recording', () => {
     expect(await copyDeletedEvents(tenant.tenantId, id)).toHaveLength(1);
   });
 
+  it('two recordings of one call (live leg + patch-through voicemail, both to /recording) keep two stored objects', async () => {
+    // Review round 1: with one key per call the second PUT overwrote the
+    // first object while both Twilio copies were deleted — the first
+    // recording then existed nowhere.
+    const callSid = `CA${hex()}`;
+    const live = newRecording();
+    const voicemail = newRecording();
+    twilioAnswers.set(live.resource, [204]);
+    twilioAnswers.set(voicemail.resource, [204]);
+    const app = webhookApp(tenant, callSid);
+
+    for (const rec of [live, voicemail]) {
+      const res = await deliverRecording(app, {
+        CallSid: callSid,
+        RecordingSid: rec.recordingSid,
+        RecordingUrl: rec.recordingUrl,
+        RecordingDuration: '42',
+      });
+      expect(res.status).toBe(200);
+    }
+
+    const { rows } = await pool.query(
+      `SELECT vr.recording_url, vr.twilio_deleted_at, f.s3_key
+         FROM voice_recordings vr JOIN files f ON f.id = vr.file_id AND f.tenant_id = vr.tenant_id
+        WHERE vr.tenant_id = $1 AND vr.call_sid = $2
+        ORDER BY f.s3_key`,
+      [tenant.tenantId, callSid],
+    );
+    const byUrl = new Map(rows.map((r) => [String(r.recording_url), r]));
+    expect(rows).toHaveLength(2);
+    expect(byUrl.get(live.recordingUrl)?.s3_key).toBe(`${tenant.tenantId}/${callSid}-${live.recordingSid}.mp3`);
+    expect(byUrl.get(voicemail.recordingUrl)?.s3_key).toBe(
+      `${tenant.tenantId}/${callSid}-${voicemail.recordingSid}.mp3`,
+    );
+    for (const r of rows) expect(r.twilio_deleted_at).toBeInstanceOf(Date);
+    expect(deletesOf(live.resource)).toHaveLength(1);
+    expect(deletesOf(voicemail.resource)).toHaveLength(1);
+  });
+
   it('a delete that fails at ingest is recorded, and the sweep retries it after the grace window', async () => {
     const callSid = `CA${hex()}`;
     const rec = newRecording();

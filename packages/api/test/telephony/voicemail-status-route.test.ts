@@ -510,7 +510,7 @@ describe('U9 voicemail-status route', () => {
     expect(h.persistedEvents[0].inserted).toBe(true);
     // Distinct S3 objects too — the voicemail key never clobbers the call leg's.
     expect(h.storage.uploadKeys).toContain(buildVoicemailStorageKey(TENANT_ID, 'CA-vm-1'));
-    expect(h.storage.uploadKeys).toContain(`${TENANT_ID}/CA-vm-1.mp3`);
+    expect(h.storage.uploadKeys).toContain(`${TENANT_ID}/CA-vm-1-RE-live-1.mp3`);
   });
 
   it('cross-leg collision, voicemail FIRST: the later /recording callback still inserts the call-leg row', async () => {
