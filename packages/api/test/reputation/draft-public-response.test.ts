@@ -229,3 +229,22 @@ describe('P7-026 draft-public-response — abutting PII survives a single redact
     expect(out).not.toContain('foo@bar.com');
   });
 });
+
+/** PI-4 review round 1 — same narrowed rule as the private drafter. */
+describe('P7-026 draft-public-response — PI-4 rule wording', () => {
+  it('bans links and money promises without banning an invitation to make it right', async () => {
+    const { gateway, calls } = makeMockGateway('We are sorry.');
+    await draftPublicResponse(
+      {
+        review: makeReview({ rating: 2, commentText: 'The tech left mud on the carpet.' }),
+        classification: 'specific_complaint',
+        brandVoice: NEUTRAL_BRAND_VOICE,
+      },
+      { llmGateway: gateway },
+    );
+    const system = calls[0].messages.find((m) => m.role === 'system')!.content;
+    expect(system).not.toMatch(/never include[^.\n]*\boffers\b/i);
+    expect(system).toMatch(/never include web addresses or links/i);
+    expect(system).toMatch(/never promise discounts, coupons, refunds or promotions/i);
+  });
+});

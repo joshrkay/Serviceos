@@ -95,6 +95,21 @@ export interface TtsProvider {
    * isFinal=true so consumers can detect end-of-stream.
    */
   synthesizeStream?(input: TtsSynthesizeStreamInput): AsyncIterable<TtsStreamChunk>;
+  /**
+   * S3-1 — optional: the provider-specific `voice` for one of the tenant
+   * voice presets (`VOICE_PRESETS`, stored as a preset key in
+   * `tenant_settings.voice_id`). `POST /api/voice/tts` passes the answer as
+   * `voice` and keys its clip cache on it. Absent, or returning undefined,
+   * means the provider has no catalogue for the presets: it speaks its own
+   * default voice and clips are cached under one `'default'` voice.
+   */
+  voiceForPreset?(preset: TtsVoicePreset): string | undefined;
+}
+
+/** The fields of a tenant voice preset a provider may map to its own voice id. */
+export interface TtsVoicePreset {
+  id: string;
+  elevenLabsVoiceId: string;
 }
 
 /**
@@ -183,6 +198,11 @@ export class ElevenLabsTtsProvider implements TtsProvider {
     const pcm = input.outputFormat === 'pcm_16000';
     const res = await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}${pcm ? '?output_format=pcm_16000' : ''}`,
+    // S3-1 — a per-call voice (the tenant's resolved preset) wins over the
+    // constructor default; the streaming path keeps the constructor voice.
+    const voiceId = input.voice ?? this.voiceId;
+    const res = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
       {
         method: 'POST',
         headers: {
@@ -212,6 +232,11 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       contentType: pcm ? 'audio/pcm' : 'audio/mpeg',
       provider: 'elevenlabs',
     };
+  }
+
+  /** S3-1 — the presets are ElevenLabs voices, so the mapping is direct. */
+  voiceForPreset(preset: TtsVoicePreset): string {
+    return preset.elevenLabsVoiceId;
   }
 
   /**

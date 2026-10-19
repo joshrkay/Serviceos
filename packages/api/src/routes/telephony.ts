@@ -34,6 +34,7 @@ import {
   requireTwilioSignature,
   sessionBelongsToAnotherTenant,
   actingTenantMismatchesCredential,
+  getVerifiedTwilioTenantId,
   type TwilioAuthTokenGetter,
 } from '../telephony/twilio-signature';
 import {
@@ -57,6 +58,7 @@ import {
   type VoicemailStatusHandlerOptions,
   type VoicemailWebhookReceiptStore,
 } from '../telephony/voicemail-status-route';
+import type { VoicemailRedelivery } from '../telephony/voicemail-redelivery';
 import type { SettingsRepository } from '../settings/settings';
 import { resolveEscalationSettings } from '../settings/settings';
 import type { LeadRepository } from '../leads/lead';
@@ -164,6 +166,8 @@ export interface TelephonyRouterDeps {
   voicemail?: {
     webhookEventRepo?: VoicemailWebhookReceiptStore;
     options?: VoicemailStatusHandlerOptions;
+    /** LCR-04 — redelivers voicemail callbacks taken during a database outage. */
+    redelivery?: VoicemailRedelivery;
   };
   /**
    * P8-012 — when true, /voice returns a `<Connect><Stream/></Connect>`
@@ -352,6 +356,35 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     });
   }
 
+  /**
+   * LCR-04 — POST /api/telephony/voice/fallback, every number's
+   * `VoiceFallbackUrl`. Twilio fetches it when the primary /voice webhook (or
+   * an action URL) fails: a 5xx, a timeout, a credential-lookup 500 during a
+   * database brownout. It must therefore need NOTHING that can be down: no
+   * database, no tenant lookup and no signature check (a subaccount tenant's
+   * signing token lives in that same database). It is registered before every
+   * signature middleware in this router for that reason.
+   *
+   * Unsigned is safe here: the response is fixed voicemail TwiML with no side
+   * effect. The `<Record>` callback it names is /voicemail-status, which IS
+   * signature-verified, and its tenant comes from the dialled number carried
+   * on the callback URL — so the voicemail is attached once the database is
+   * back, and a forged request can only ever be handed a recording prompt.
+   */
+  router.post(
+    '/voice/fallback',
+    express.urlencoded({ extended: false }),
+    (req: Request, res: Response) => {
+      const body = (req.body ?? {}) as Record<string, string | undefined>;
+      logger.warn('telephony/voice-fallback: primary webhook failed — taking a voicemail', {
+        callSid: body.CallSid,
+      });
+      res.status(200).type('text/xml').send(
+        outageVoicemailTwiml(deps, { from: body.From ?? '', to: body.To ?? '', ...stirOf(body) }),
+      );
+    },
+  );
+
   // Recording webhook (P8-014) gets its own sub-router so its sig
   // middleware operates on a body parsed independently of the
   // /voice + /gather body parser. Mount it BEFORE the parser/middleware
@@ -383,6 +416,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           ...(deps.voicemail?.webhookEventRepo
             ? { webhookEventRepo: deps.voicemail.webhookEventRepo }
             : {}),
+          ...(deps.voicemail?.redelivery ? { redelivery: deps.voicemail.redelivery } : {}),
         },
         deps.voicemail?.options ?? {},
       ),
@@ -426,6 +460,16 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
   router.use(
     requireTwilioSignature(deps.authTokenGetter, {
       publicBaseUrl: deps.publicBaseUrl,
+      // LCR-04 — a live call's mid-call callbacks are verified against the
+      // credential of the tenant its in-process session belongs to (cached
+      // through a database brownout), not re-derived from the payload.
+      trustedTenantId: (req) => {
+        if (req.path !== '/gather' && req.path !== '/dial-result' && req.path !== '/callback-message') {
+          return undefined;
+        }
+        const sid = typeof req.query.sid === 'string' ? req.query.sid : '';
+        return sid ? sessionStoreFor(deps)?.get(sid)?.tenantId : undefined;
+      },
     })
   );
 
@@ -457,16 +501,19 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         req,
       });
     } catch (err) {
-      // Codex P1 (PR #384) — transient infra failures (DB outage during
-      // phone-number lookup) propagate as throws from
-      // resolveInboundTenantId in prod. Respond 5xx so Twilio retries
-      // the webhook; do NOT 200-decline (which would falsely tell the
-      // caller a real number is unassigned).
-      logger.error('telephony/voice: tenant lookup failed', {
+      // Codex P1 (PR #384) — a transient infra failure (DB outage during the
+      // phone-number lookup) must NOT 200-decline: that would falsely tell the
+      // caller a real number is unassigned. LCR-04 — nor may it 5xx: Twilio
+      // does not retry a 5xx voice webhook, it plays its generic error and
+      // drops the call. Take a voicemail instead; it needs no database.
+      logger.error('telephony/voice: tenant lookup failed — taking a voicemail', {
         callSid,
         error: err instanceof Error ? err.message : String(err),
       });
-      res.status(503).type('text/plain').send('Service temporarily unavailable');
+      res
+        .status(200)
+        .type('text/xml')
+        .send(outageVoicemailTwiml(deps, { from, to, ...stirOf(body) }));
       return;
     }
 
@@ -580,18 +627,16 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         callSid,
         error: err instanceof Error ? err.message : String(err),
       });
-      // Return TwiML that hangs up gracefully rather than 500ing — Twilio
-      // will retry 5xx, which would re-trigger the FSM with the same
-      // CallSid and produce duplicate sessions.
+      // Never a 5xx (Twilio would play its generic error and drop the call)
+      // and, LCR-04, never "try again later" + hang-up either: the caller
+      // leaves a voicemail, which reaches the tenant once the fault clears.
       res
         .status(200)
         .type('text/xml')
-        .send(
-          `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">We're experiencing technical difficulties. Please try again later.</Say><Hangup/></Response>`
-        );
+        .send(outageVoicemailTwiml(deps, { from, to, ...stirOf(body) }));
       // OBS — this handler never 5xxs by design (see comment above), so it's
-      // otherwise invisible to recordApiError. Fired after the graceful
-      // hangup TwiML is already queued; never alters the response.
+      // otherwise invisible to recordApiError. Fired after the voicemail
+      // TwiML is already queued; never alters the response.
       recordVoiceError({
         errorKind: 'inbound_handler_failed',
         channel: 'gather',
@@ -682,11 +727,12 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     try {
       tenantId = await resolveInboundTenantId({ to, from, callSid, deps, req });
     } catch (err) {
-      logger.error('telephony/gather-fallback: tenant lookup failed', {
+      // LCR-04 — a 5xx here drops the call; take a voicemail instead.
+      logger.error('telephony/gather-fallback: tenant lookup failed — taking a voicemail', {
         callSid,
         error: err instanceof Error ? err.message : String(err),
       });
-      res.status(503).type('text/plain').send('Service temporarily unavailable');
+      res.status(200).type('text/xml').send(outageVoicemailTwiml(deps, { from, to, ...stirOf(body) }));
       return;
     }
     if (!tenantId) {
@@ -703,11 +749,12 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       });
       res.status(200).type('text/xml').send(twiml);
     } catch (err) {
-      logger.error('telephony/gather-fallback: handleInbound failed', {
+      logger.error('telephony/gather-fallback: handleInbound failed — taking a voicemail', {
         callSid,
         error: err instanceof Error ? err.message : String(err),
       });
-      res.status(200).type('text/xml').send(technicalDifficultiesTwiml());
+      // LCR-04 — a voicemail, not "try again later" + hang-up.
+      res.status(200).type('text/xml').send(outageVoicemailTwiml(deps, { from, to, ...stirOf(body) }));
     }
   });
 
@@ -737,29 +784,42 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    // #1061 — same DID → tenant path as /voice (phoneNumberRepo, dev-only
-    // env fallback), never the legacy callback directly: that callback
-    // answered TWILIO_DEFAULT_TENANT_ID on a miss in every environment.
-    let tenantId: string | undefined;
-    try {
-      tenantId = await resolveInboundTenantId({
-        to: body.To ?? '',
-        from: body.From ?? '',
-        callSid,
-        deps,
-        req,
-      });
-    } catch (err) {
-      // Transient infra failure (e.g. DB outage during tenant lookup).
-      // Respond 503 so Twilio retries the webhook rather than the caller
-      // losing their turn. Mirrors the /voice route's transient handling.
-      logger.error('telephony/gather: tenant lookup failed', {
-        sessionId,
-        callSid,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      res.status(503).type('text/plain').send('Service temporarily unavailable');
-      return;
+    // LCR-04 — a live session whose tenant the signature already proved
+    // needs no lookup. Otherwise #1061 — same DID → tenant path as /voice
+    // (phoneNumberRepo, dev-only env fallback), never the legacy callback
+    // directly: that callback answered TWILIO_DEFAULT_TENANT_ID on a miss in
+    // every environment.
+    let tenantId: string | undefined = verifiedLiveSessionTenant(deps, req, sessionId);
+    if (!tenantId) {
+      try {
+        tenantId = await resolveInboundTenantId({
+          to: body.To ?? '',
+          from: body.From ?? '',
+          callSid,
+          deps,
+          req,
+        });
+      } catch (err) {
+        // LCR-04 — transient infra failure (e.g. DB outage during the tenant
+        // lookup). Twilio does not retry a 5xx action URL, so a 503 here dropped
+        // the call mid-conversation. The live session already knows its tenant:
+        // carry the turn on it (the cross-tenant guard below still runs against
+        // the verifying credential). With no live session, take a voicemail.
+        tenantId = sessionStoreFor(deps)?.get(sessionId)?.tenantId;
+        logger.error('telephony/gather: tenant lookup failed', {
+          sessionId,
+          callSid,
+          continuingOnSession: Boolean(tenantId),
+          error: err instanceof Error ? err.message : String(err),
+        });
+        if (!tenantId) {
+          res
+            .status(200)
+            .type('text/xml')
+            .send(outageVoicemailTwiml(deps, { from: body.From ?? '', to: body.To ?? '' }));
+          return;
+        }
+      }
     }
     if (!tenantId) {
       // Terminal miss. Return 200 + graceful hangup TwiML so the caller
@@ -795,17 +855,16 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       });
       res.status(200).type('text/xml').send(twiml);
     } catch (err) {
-      logger.error('telephony/gather: handleGather failed', {
+      logger.error('telephony/gather: handleGather failed — taking a voicemail', {
         sessionId,
         callSid,
         error: err instanceof Error ? err.message : String(err),
       });
+      // LCR-04 — a voicemail, not "try again later" + hang-up.
       res
         .status(200)
         .type('text/xml')
-        .send(
-          `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Polly.Joanna">We're experiencing technical difficulties. Please try again later.</Say><Hangup/></Response>`
-        );
+        .send(outageVoicemailTwiml(deps, { from: body.From ?? '', to: body.To ?? '' }));
     }
   });
 
@@ -842,26 +901,38 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    // #1061 — same DID → tenant path as /voice; see /gather.
-    let tenantId: string | undefined;
-    try {
-      tenantId = await resolveInboundTenantId({
-        to: body.To ?? '',
-        from: body.From ?? '',
-        callSid,
-        deps,
-        req,
-      });
-    } catch (err) {
-      // Transient infra failure — 503 so Twilio retries rather than
-      // dropping the dial leg. Mirrors /voice + /gather handling.
-      logger.error('telephony/dial-result: tenant lookup failed', {
-        sessionId,
-        callSid,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      res.status(503).type('text/plain').send('Service temporarily unavailable');
-      return;
+    // LCR-04 — a live session whose tenant the signature already proved needs
+    // no lookup; otherwise #1061 — same DID → tenant path as /voice; see /gather.
+    let tenantId: string | undefined = verifiedLiveSessionTenant(deps, req, sessionId);
+    if (!tenantId) {
+      try {
+        tenantId = await resolveInboundTenantId({
+          to: body.To ?? '',
+          from: body.From ?? '',
+          callSid,
+          deps,
+          req,
+        });
+      } catch (err) {
+        // LCR-04 — transient infra failure. Twilio does not retry a 5xx action
+        // URL, so a 503 dropped the dial leg. Carry on with the live session's
+        // tenant (the cross-tenant guard below still runs); with none, take a
+        // voicemail. Mirrors /gather.
+        tenantId = sessionStoreFor(deps)?.get(sessionId)?.tenantId;
+        logger.error('telephony/dial-result: tenant lookup failed', {
+          sessionId,
+          callSid,
+          continuingOnSession: Boolean(tenantId),
+          error: err instanceof Error ? err.message : String(err),
+        });
+        if (!tenantId) {
+          res
+            .status(200)
+            .type('text/xml')
+            .send(outageVoicemailTwiml(deps, { from: body.From ?? '', to: body.To ?? '' }));
+          return;
+        }
+      }
     }
     if (!tenantId) {
       // Terminal miss. 200 + graceful hangup TwiML instead of a raw 500
@@ -1129,11 +1200,16 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         req,
       });
     } catch (err) {
-      logger.error('telephony/callback-message: tenant lookup failed', {
+      // LCR-04 — Twilio does not retry a 5xx action URL; a 503 here hung up
+      // on a caller mid-message. Take the message as a voicemail instead.
+      logger.error('telephony/callback-message: tenant lookup failed — taking a voicemail', {
         sessionId,
         error: err instanceof Error ? err.message : String(err),
       });
-      res.status(503).type('text/plain').send('Service temporarily unavailable');
+      res
+        .status(200)
+        .type('text/xml')
+        .send(outageVoicemailTwiml(deps, { from: body.From ?? '', to: body.To ?? '' }));
       return;
     }
     // Validate the resolved tenant id is a well-formed UUID before any
@@ -1180,13 +1256,18 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       } catch (err) {
         // The callback is the whole point of this turn. If we can't persist it
         // (e.g. transient DB outage), DON'T finalize + tell the caller we'll
-        // ring back — that would silently drop the request. Return 503 so
-        // Twilio retries the webhook.
-        logger.error('telephony/callback-message: failed to schedule call_me_back', {
+        // ring back — that would silently drop the request. LCR-04 — and not
+        // a 503 either (Twilio does not retry it; the call just drops): the
+        // caller records the message as a voicemail, which reaches the tenant
+        // once the database is back.
+        logger.error('telephony/callback-message: failed to schedule call_me_back — taking a voicemail', {
           sessionId,
           error: err instanceof Error ? err.message : String(err),
         });
-        res.status(503).type('text/plain').send('Service temporarily unavailable');
+        res
+          .status(200)
+          .type('text/xml')
+          .send(outageVoicemailTwiml(deps, { from: body.From ?? '', to: body.To ?? '' }));
         return;
       }
       // Audit is best-effort — never block the ack on it.
@@ -1424,12 +1505,40 @@ function numberNotInServiceTwiml(): string {
   );
 }
 
+/** The STIR/SHAKEN verdict of a call webhook, when Twilio sent one (#1223). */
+function stirOf(body: Record<string, string | undefined>): { stirVerstat?: string } {
+  return body.StirVerstat ? { stirVerstat: body.StirVerstat } : {};
+}
+
+/**
+ * LCR-04 — the voicemail every webhook falls back to when the database (or
+ * anything else the turn needs) is down. Built from the request alone: the
+ * caller and the dialled number ride the recording callback URL (Twilio signs
+ * it), which is how /voicemail-status finds the tenant when no session exists.
+ * Same shape as the after-hours branch on /voice.
+ */
+function outageVoicemailTwiml(
+  deps: Pick<TelephonyRouterDeps, 'publicBaseUrl' | 'businessName'>,
+  call: { from: string; to: string; stirVerstat?: string },
+): string {
+  const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
+  return buildVoicemailTwiml({
+    shopName: deps.businessName ?? 'our team',
+    recordingStatusCallback: base
+      ? `${base}/api/telephony/voicemail-status`
+      : '/api/telephony/voicemail-status',
+    ...(call.from ? { callerPhone: call.from } : {}),
+    ...(call.to ? { dialedNumber: call.to } : {}),
+    ...(call.stirVerstat ? { stirVerstat: call.stirVerstat } : {}),
+  });
+}
+
 /**
  * Graceful "technical difficulties" TwiML used when a mid-call webhook
- * (/gather, /dial-result) can't resolve the tenant for a terminal reason.
- * Returned with HTTP 200 so the caller hears an apology + clean hangup
- * instead of dead air, and Twilio doesn't 5xx-retry-storm the webhook.
- * Matches the inline copy the /voice + /gather catch blocks already emit.
+ * (/gather, /dial-result) can't resolve the tenant for a TERMINAL reason (no
+ * tenant owns the number). Returned with HTTP 200 so the caller hears an
+ * apology + clean hangup instead of dead air. A transient failure never
+ * comes here: LCR-04 — it takes a voicemail (`outageVoicemailTwiml`).
  */
 function technicalDifficultiesTwiml(): string {
   return (
@@ -1456,6 +1565,22 @@ function sessionStoreFor(
   if (deps.voiceSessionStore) return deps.voiceSessionStore;
   const getDeps = (deps.adapter as Partial<TwilioGatherAdapter>).getDeps;
   return typeof getDeps === 'function' ? deps.adapter.getDeps().store : undefined;
+}
+
+/**
+ * LCR-04 — the tenant of a mid-call callback's live session, when the request
+ * was verified with that tenant's own credential (the shared middleware binds
+ * these callbacks to the session's tenant). The signature then already proves
+ * the tenant, so the route needs no DID lookup: under pool exhaustion that
+ * lookup waited out a database checkout before its outage path could answer,
+ * pushing a live turn past Twilio's ~15 s action timeout. Undefined (no
+ * session, or a credential that names no tenant or another one) keeps the
+ * DID lookup and the cross-tenant guard after it.
+ */
+function verifiedLiveSessionTenant(deps: TelephonyRouterDeps, req: Request, sessionId: string): string | undefined {
+  const session = sessionStoreFor(deps)?.get(sessionId);
+  if (!session) return undefined;
+  return getVerifiedTwilioTenantId(req) === session.tenantId ? session.tenantId : undefined;
 }
 
 /**
@@ -1495,8 +1620,8 @@ async function resolveInboundTenantId(opts: {
       }
     } catch (err) {
       // Codex P1 (PR #384) — distinguish "tenant not found" (terminal,
-      // 200 decline) from "DB outage" (transient, 5xx so Twilio
-      // retries). Previously the catch silently fell through to the
+      // 200 decline) from "DB outage" (transient — the caller must not be
+      // told the number is out of service). Previously the catch silently fell through to the
       // dev-fallback logic which then 200-declined in prod, turning
       // every transient DB blip into permanent "number not in service"
       // misroutes and suppressing Twilio's retry behavior.
@@ -1508,7 +1633,8 @@ async function resolveInboundTenantId(opts: {
       const sentry = deps.sentry ?? getSentryClient();
       sentry.captureMessage('telephony.tenant_lookup_error', 'error');
 
-      // In prod / staging, re-throw so the route returns 5xx. In dev,
+      // In prod / staging, re-throw so the route takes its outage path
+      // (LCR-04: a voicemail, or the live session's tenant). In dev,
       // continue to the legacy/env fallback so local development against
       // a broken Pg doesn't lock out test calls.
       const nodeEnv = deps.nodeEnv ?? process.env.NODE_ENV ?? 'development';
@@ -1611,10 +1737,12 @@ function isProdLikeEnv(nodeEnv: string): boolean {
  * same env rule as `resolveInboundTenantId`: `TWILIO_DEFAULT_TENANT_ID` is a
  * dev-only seam, answered with a loud WARN, and never outside dev.
  *
- * A lookup error answers `undefined` rather than throwing: the status-callback
- * fallbacks treat "no tenant" as a logged skip, and the session-scoped
- * handlers no longer call this directly (they use `resolveInboundTenantId`,
- * which surfaces a prod outage as a 503 so Twilio retries).
+ * LCR-04 — in production a lookup error THROWS rather than answering
+ * `undefined`: the status-callback fallbacks would otherwise treat a database
+ * outage as "no tenant", log a skip and 200 the callback, losing the
+ * recording. Thrown, they answer 500 and the callback is delivered again. In
+ * dev a lookup error stays failure-soft (the env seam below). The
+ * session-scoped handlers do not call this (they use `resolveInboundTenantId`).
  */
 export function createDidTenantResolver(opts: {
   phoneNumberRepo?: PhoneNumberRepository;
@@ -1632,6 +1760,12 @@ export function createDidTenantResolver(opts: {
           to: normalizedTo,
           error: err instanceof Error ? err.message : String(err),
         });
+        // LCR-04 — in production an outage is NOT a "no tenant" miss: the
+        // status-callback handlers would log a skip and 200 the callback,
+        // dropping the voicemail a caller left during the brownout. Rethrow
+        // so they answer 500 and the callback is delivered again. Dev keeps
+        // the failure-soft seam below.
+        if (isProdLikeEnv(opts.nodeEnv ?? process.env.NODE_ENV ?? 'development')) throw err;
       }
     }
     const nodeEnv = opts.nodeEnv ?? process.env.NODE_ENV ?? 'development';
