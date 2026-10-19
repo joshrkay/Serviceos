@@ -59,7 +59,7 @@ interface PublicInvoiceView {
    * renders), `collect_on_site` (the business collects in person) or
    * `unavailable` (the API could not read the policy and made the
    * fail-closed decision). Absent from an older API → treat as `pay_link`
-   * on the web only. The page behaviour lands in S5a-2.
+   * on the web only (S5a-2: `paymentModeOf`).
    */
   paymentCollectionMode?: 'pay_link' | 'collect_on_site' | 'unavailable';
   /**
@@ -153,6 +153,64 @@ async function createPaymentIntent(
     clientSecret: data.clientSecret,
     stripeAccountId: data.stripeAccountId ?? null,
   };
+}
+
+type PaymentModeView = NonNullable<PublicInvoiceView['paymentCollectionMode']>;
+
+/**
+ * S5a-2 (U8) — the mode this page obeys. The API already made the
+ * fail-closed decision (it sends `unavailable` when it cannot read the
+ * owner's choice), so a missing field can only mean an older API that
+ * predates the choice: today's behaviour, `pay_link`.
+ */
+function paymentModeOf(inv: PublicInvoiceView): PaymentModeView {
+  return inv.paymentCollectionMode ?? 'pay_link';
+}
+
+// ─── No online payment: in person, or not available right now ────────────
+
+// Shown in place of the card form when the business collects in person
+// (the owner picked "Collect on the spot") or when the API could not read
+// that choice. The sentence matches the note the invoice text and email
+// carry (notifications/i18n/en.ts `sms.invoice.collect_on_site`), so the
+// message and the page say the same thing.
+function NoOnlinePayment({ mode, businessName, businessPhone }: {
+  mode: Exclude<PaymentModeView, 'pay_link'>;
+  businessName: string;
+  businessPhone?: string;
+}) {
+  const inPerson = mode === 'collect_on_site';
+  const testId = inPerson ? 'pay-in-person' : 'pay-unavailable';
+  return (
+    <div
+      data-testid={testId}
+      role="status"
+      className="bg-white rounded-2xl border border-slate-200 px-5 py-5 mb-5"
+    >
+      {inPerson ? (
+        <p className="text-sm text-slate-700 break-words">
+          {businessName} collects payment in person. Settle up when the work is done.
+        </p>
+      ) : (
+        <p className="text-sm text-slate-700 break-words">
+          Online payment isn't available right now.{' '}
+          {businessPhone
+            ? <>Call {businessName} or try again in a moment.</>
+            : <>Please try again in a moment.</>}
+        </p>
+      )}
+      {businessPhone && (
+        <a
+          data-testid={`${testId}-call`}
+          href={`tel:${businessPhone}`}
+          className="mt-4 flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl bg-slate-100 px-4 text-sm text-slate-800 hover:bg-slate-200 transition-colors break-words"
+        >
+          <Phone size={14} className="shrink-0 text-slate-600" />
+          <span className="min-w-0">Call {businessName}</span>
+        </a>
+      )}
+    </div>
+  );
 }
 
 // ─── Success screen ────────────────────────────────────────────────────────
@@ -481,6 +539,9 @@ export function InvoicePaymentPage() {
   // while a redirect payment is still processing (no second payment).
   useEffect(() => {
     if (!invoice || !token) return;
+    // S5a-2 (U8) — no PaymentIntent unless the API said this invoice takes
+    // online payment (the route would refuse it with 409/503 anyway).
+    if (paymentModeOf(invoice) !== 'pay_link') return;
     if (invoice.isPaid || invoice.amountDueCents <= 0 || paymentSucceeded) return;
     if (returnOutcome === 'processing') return;
     if (stripeNotConfigured) return;
@@ -545,6 +606,7 @@ export function InvoicePaymentPage() {
   }
 
   const inv = invoice!;
+  const paymentMode = paymentModeOf(inv);
   const isOverdue = inv.dueDate ? new Date(inv.dueDate) < new Date() && !inv.isPaid : false;
   const visItems = showAll ? inv.lineItems : inv.lineItems.slice(0, 3);
 
@@ -766,9 +828,16 @@ export function InvoicePaymentPage() {
           </div>
         </div>
 
-        {/* Stripe Elements payment form */}
+        {/* Stripe Elements payment form — only when the API said this
+            invoice takes online payment (S5a-2, U8). */}
         {returnOutcome === 'processing' ? (
           <ProcessingNotice />
+        ) : paymentMode !== 'pay_link' ? (
+          <NoOnlinePayment
+            mode={paymentMode}
+            businessName={inv.businessName}
+            businessPhone={inv.businessPhone}
+          />
         ) : stripeNotConfigured ? (
           <div
             data-testid="stripe-not-configured"
@@ -803,14 +872,17 @@ export function InvoicePaymentPage() {
           </Elements>
         )}
 
-        {/* Trust signals */}
-        <div className="flex flex-col items-center gap-2 pb-8">
-          <div className="flex items-center gap-4 text-xs text-slate-400">
-            <span className="flex items-center gap-1"><Lock size={10} /> 256-bit SSL</span>
-            <span className="flex items-center gap-1"><Shield size={10} /> Powered by Stripe</span>
+        {/* Trust signals — they describe the card form, so they show only
+            where the card form can (S5a-2). */}
+        {paymentMode === 'pay_link' && (
+          <div className="flex flex-col items-center gap-2 pb-8">
+            <div className="flex items-center gap-4 text-xs text-slate-400">
+              <span className="flex items-center gap-1"><Lock size={10} /> 256-bit SSL</span>
+              <span className="flex items-center gap-1"><Shield size={10} /> Powered by Stripe</span>
+            </div>
+            <p className="text-xs text-slate-400">No account required · Your card data is never stored by us</p>
           </div>
-          <p className="text-xs text-slate-400">No account required · Your card data is never stored by us</p>
-        </div>
+        )}
       </div>
     </div>
   );
