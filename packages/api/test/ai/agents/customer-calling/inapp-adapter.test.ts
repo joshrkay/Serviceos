@@ -1103,6 +1103,33 @@ describe('InAppVoiceAdapter', () => {
       expect(result.ttsText).not.toMatch(/say that again/i);
     });
 
+    it('PRIV-3: a recited card number reaches neither the transcript, the classifier nor any drafted proposal', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'complaint',
+          confidence: 0.9,
+          extractedEntities: {},
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'I was double charged on my card 4111, 1111, 1111, 1111.');
+
+      const session = store.peek(sessionId)!;
+      expect(session.transcript).toContain('caller: I was double charged on my card [card number].');
+      const sent = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+      expect(sent.length).toBeGreaterThan(0);
+      expect(JSON.stringify(sent)).not.toContain('4111');
+      expect(JSON.stringify(session.transcript)).not.toContain('4111');
+      expect(JSON.stringify(await proposalRepo.findByTenant(TENANT))).not.toContain('4111');
+    });
+
     it('a classified negotiation reaches the FSM negotiation guard (holding line), not the generic reprompt', async () => {
       const gateway = scriptedGateway([
         JSON.stringify({
