@@ -191,8 +191,9 @@ import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitorin
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
 import { createDemoCallsRouter } from './demo/routes';
-import { loadDemoConfig } from './demo/config';
+import { isDemoCallsEnabled, loadDemoConfig } from './demo/config';
 import { createDemoLeaseResetter } from './demo/reset';
+import { scheduleDemoLeaseReaper } from './workers/demo-lease-reaper';
 import { recordSweepSuccess, sweepLastSuccessMs } from './monitoring/sweep-heartbeats';
 import { PgPlatformSloRepository } from './monitoring/pg-platform-slo';
 // #1602 — production call-quality grading (nightly sampler + owner surface).
@@ -2494,6 +2495,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     orphanedNumberSweep: 590031,
     // #1602 — nightly production call-quality grading sampler. DISTINCT key.
     voiceQualityGrading: 590032,
+    // U7 (S6-4) — demo lease reaper (expired leases, stale resets). DISTINCT key.
+    demoLeaseReaper: 590033,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -3236,7 +3239,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // Budget-crossing pages need their own operator seam: the SLO monitor's
   // exists only on worker replicas.
   // U7 (S6-4) — one resetter ends every lease: the start service's no-call
-  // path here.
+  // path here, and the reaper below (expired leases, stale resets).
   const demoLogger = createLogger({ service: 'demo-call', environment: process.env.NODE_ENV || 'development' });
   const demoConfig = loadDemoConfig(process.env, demoLogger);
   const demoAlert = createAlertOperator({
@@ -3268,6 +3271,18 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       logger: demoLogger,
     }),
   );
+  // The lease reaper: leader-gated, every 30 s, registered only on worker
+  // replicas with a database while the demo call is switched on.
+  scheduleDemoLeaseReaper({
+    shouldRunWorkers,
+    pool: pool ?? null,
+    resetter: demoResetter,
+    isEnabled: isDemoCallsEnabled,
+    lockKey: SWEEP_LOCK.demoLeaseReaper,
+    runAsLeader,
+    registerInterval,
+    logger: demoLogger,
+  });
 
   // Public lead intake — embedded marketing-page form posts here.
   // Tenant identified by UUID in the URL. The outer `/public` limiter
