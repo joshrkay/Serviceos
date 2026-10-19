@@ -14,7 +14,8 @@ import {
   clampCleanupPageSize,
 } from './invoice';
 import { LineItem } from '../shared/billing-engine';
-import { paymentModeLockKey } from './payment-collection-mode';
+import { PAYMENT_MODE_READ_SQL, paymentModeLockKey } from './payment-collection-mode';
+import { LIVE_PAYMENT_LINK_PREDICATE } from './payment-mode-change';
 import { mapLineItemRow, mapDocumentTotalsRow } from '../shared/document-row-mappers';
 import { INVOICE_LIST_SORT, type InvoiceSortField } from '@ai-service-os/shared';
 import { sqlOrderBy, customerNameViaJobSql } from '../shared/list-sort';
@@ -609,13 +610,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       let result: AttachPaymentLinkResult;
       try {
         await client.query('SELECT pg_advisory_xact_lock_shared(hashtext($1))', [paymentModeLockKey(tenantId)]);
-        const { rows: modeRows } = await client.query<{ mode: string }>(
-          `SELECT COALESCE(
-             (SELECT payment_collection_mode FROM tenant_settings WHERE tenant_id = $1),
-             'pay_link'
-           ) AS mode`,
-          [tenantId],
-        );
+        const { rows: modeRows } = await client.query<{ mode: string }>(PAYMENT_MODE_READ_SQL, [tenantId]);
         if (modeRows[0]?.mode !== 'pay_link') {
           result = { ok: false, reason: 'mode_not_pay_link' };
         } else {
@@ -690,8 +685,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       const { rows } = await client.query(
         `SELECT * FROM invoices
           WHERE tenant_id = $1
-            AND status IN ('open', 'partially_paid')
-            AND stripe_payment_link_id IS NOT NULL
+            AND ${LIVE_PAYMENT_LINK_PREDICATE}
             AND ($2::uuid IS NULL OR id > $2::uuid)
           ORDER BY id
           LIMIT $3`,

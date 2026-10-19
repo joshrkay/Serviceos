@@ -80,6 +80,17 @@ export function paymentModeLockKey(tenantId: string): string {
   return `payment_mode:${tenantId}`;
 }
 
+/**
+ * S5a-5 (U8) — the in-transaction mode read the guarded attach and the
+ * cleanup claim both run, as a statement of its own after the lock: a
+ * missing row and an unset key are both the D-039/D-040 default. One
+ * constant so the two reads cannot drift. `$1` is the tenant id.
+ */
+export const PAYMENT_MODE_READ_SQL = `SELECT COALESCE(
+             (SELECT payment_collection_mode FROM tenant_settings WHERE tenant_id = $1),
+             'pay_link'
+           ) AS mode`;
+
 export async function readPaymentCollectionMode(
   settingsRepo: SettingsRepository,
   tenantId: string,

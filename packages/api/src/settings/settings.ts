@@ -1,5 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { PoolClient } from 'pg';
+import type { Queue } from '../queues/queue';
+import { paymentModeChangeHook } from '../invoices/payment-mode-change';
 import { ValidationError } from '../shared/errors';
 
 import { isValidTimezone } from '../shared/timezone';
@@ -1285,11 +1287,21 @@ export function liveE1Script(
   return missingE1ReviewerKinds(settings).length === 0 ? script : null;
 }
 
+/**
+ * S5a-5 (U8) — pass the app queue and a write that names
+ * `paymentCollectionMode` enqueues the pay-link cleanup in its own
+ * transaction (`onPaymentCollectionModeChanged`). The hook is attached here,
+ * not by each route, so a caller only has to pass the queue.
+ */
+export interface UpdateSettingsPaymentModeOptions {
+  paymentModeQueue?: Queue;
+}
+
 export async function updateSettings(
   tenantId: string,
   input: UpdateSettingsInput,
   repository: SettingsRepository,
-  options?: ActiveVerticalPackValidationOptions & SettingsUpdateOptions
+  options?: ActiveVerticalPackValidationOptions & SettingsUpdateOptions & UpdateSettingsPaymentModeOptions
 ): Promise<TenantSettings | null> {
   // Sweep-2 S1: only touch `activeVerticalPacks` when the caller actually
   // provided a value. Unconditionally spreading a normalized `undefined`
@@ -1319,9 +1331,21 @@ export async function updateSettings(
   // see undefined because mapRow normalizes NULL → undefined.
   // Options are passed only when one is set, so a plain save keeps its
   // two-argument repository call.
+  const callerHook = options?.afterWrite;
+  const modeHook =
+    options?.paymentModeQueue && normalizedInput.paymentCollectionMode !== undefined
+      ? paymentModeChangeHook(options.paymentModeQueue)
+      : undefined;
+  const afterWrite: SettingsUpdateOptions['afterWrite'] =
+    callerHook && modeHook
+      ? async (ctx) => {
+          await callerHook(ctx);
+          await modeHook(ctx);
+        }
+      : (callerHook ?? modeHook);
   const repoOptions: SettingsUpdateOptions = {
     ...(options?.preserveVoiceApprovalPin ? { preserveVoiceApprovalPin: true } : {}),
-    ...(options?.afterWrite ? { afterWrite: options.afterWrite } : {}),
+    ...(afterWrite ? { afterWrite } : {}),
   };
   return repository.update(
     tenantId,

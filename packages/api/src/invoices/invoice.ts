@@ -1106,6 +1106,18 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
       .map((i) => ({ ...i, lineItems: [...i.lineItems] }));
   }
 
+  /**
+   * S5a-5 — the in-memory claimer's marker write (Pg writes it on the claim
+   * transaction's own client, so it is not an interface method). Applies only
+   * while the row still holds `linkId`.
+   */
+  markCleanupClaimed(tenantId: string, id: string, linkId: string, at: Date): boolean {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId || i.stripePaymentLinkId !== linkId) return false;
+    this.invoices.set(id, { ...i, cleanupClaimedAt: at });
+    return true;
+  }
+
   async releaseCleanupClaim(tenantId: string, id: string, linkId: string): Promise<boolean> {
     const i = this.invoices.get(id);
     if (!i || i.tenantId !== tenantId) return false;

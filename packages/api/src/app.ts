@@ -246,6 +246,11 @@ import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { PgTenantUsageRepository } from './admin/pg-tenant-usage';
 import { processMessage, type QueueMessage } from './queues/queue';
 import { createProvisionTwilioWorker } from './workers/provision-twilio';
+import { createDeactivatePaymentLinksWorker } from './workers/deactivate-payment-links';
+import {
+  createInMemoryPaymentLinkClaimer,
+  createPgPaymentLinkClaimer,
+} from './invoices/payment-mode-change';
 import { runOrphanedNumberSweep } from './workers/orphaned-number-sweep';
 import {
   createA2pRegistrationWorker,
@@ -355,7 +360,7 @@ import { PgCustomerLoader } from './reputation/match-customer';
 import { createCredentialResolver, getTenantTwilioCreds } from './integrations/credentials';
 import { checkOutboundConsent, type OutboundConsentContext } from './voice/outbound-consent';
 import { StripeDuesCollector, DuesInvoiceOps } from './agreements/dues-collector';
-import { issueInvoice } from './invoices/invoice';
+import { InMemoryInvoiceRepository, issueInvoice } from './invoices/invoice';
 import { recordPayment } from './invoices/payment';
 import { createAgreementsRouter } from './routes/agreements';
 import { createMaintenanceContractsRouter } from './routes/maintenance-contracts';
@@ -2115,6 +2120,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     paymentRepo,
     // P0-9 — record_payment execution kills a link its credit made stale.
     paymentLinkCleanup: { provider: paymentLinkProvider, connectAccountResolver },
+    // S5a-5 (U8) — onboarding_voice_policy enqueues the pay-link cleanup in
+    // its settings transaction when it switches to "Collect on the spot".
+    queue,
     invoiceDeliveryProvider,
     estimateDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
@@ -3060,6 +3068,33 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     feedbackSendWorker.type,
     feedbackSendWorker as import('./queues/queue').WorkerHandler<unknown>
   );
+
+  // S5a-5 (U8) — retire live pay links after a switch to "Collect on the
+  // spot". The job row is written in the settings transaction; this handler
+  // claims one link at a time under the per-tenant cleanup mutex and the
+  // payment-mode lock, then deactivates it at Stripe outside any lock.
+  // Registered unconditionally: Postgres claims with a pool, the in-memory
+  // claim over the in-memory invoice repository without one.
+  const paymentLinkClaimer = pool
+    ? createPgPaymentLinkClaimer(pool, queue)
+    : invoiceRepo instanceof InMemoryInvoiceRepository
+      ? createInMemoryPaymentLinkClaimer({ invoiceRepo, settingsRepo, queue })
+      : null;
+  if (paymentLinkClaimer) {
+    const deactivatePaymentLinksWorker = createDeactivatePaymentLinksWorker({
+      claimNext: paymentLinkClaimer,
+      invoiceRepo,
+      provider: paymentLinkProvider,
+      connectAccountResolver,
+      settingsRepo,
+      userRepo,
+      auditRepo,
+    });
+    workerRegistry.set(
+      deactivatePaymentLinksWorker.type,
+      deactivatePaymentLinksWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+  }
 
   if (pool) {
     const provisionTwilioWorker = createProvisionTwilioWorker({ pool });
@@ -5961,6 +5996,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       { dunningConfigRepo },
       // #1463 — backupSupervisorUserId must name an active tenant member.
       { userRepo },
+      // S5a-5 (U8) — a PUT that switches to "Collect on the spot" enqueues
+      // the pay-link cleanup in the request's own transaction.
+      { queue },
     ),
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
