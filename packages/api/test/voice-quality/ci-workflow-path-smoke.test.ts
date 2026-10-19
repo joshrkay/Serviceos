@@ -200,19 +200,20 @@ function jobBlock(src: string, id: string): string {
 describe('agent-path-smoke.yml — one path-smoke check run per pull request', () => {
   const read = (): string => fs.readFileSync(workflowPath, 'utf-8');
 
-  it('the duplicate-name skip-pass shim workflow is gone', () => {
+  // One test on purpose (OBS-3 review round 3): the shim-absence half alone
+  // also held on main, which never had a shim, so it did not guard the
+  // trigger. Together they pin the one shape that works — a single workflow
+  // that starts on every pull request and decides in its own `changes` job.
+  it('runs on every pull request as the only Agent Path Smoke workflow: no paths filter, no skip-pass shim', () => {
+    const on = /^on:\n((?: {2}[^\n]*\n|\n)+)/m.exec(read())![1];
+    expect(on).toMatch(/^ {2}pull_request:\s*$/m);
+    expect(on).not.toMatch(/paths(-ignore)?:/);
     expect(fs.existsSync(path.join(repoRoot, '.github/workflows/agent-path-smoke-skip.yml'))).toBe(false);
     for (const f of fs.readdirSync(path.join(repoRoot, '.github/workflows'))) {
       if (f === 'agent-path-smoke.yml') continue;
       const other = fs.readFileSync(path.join(repoRoot, '.github/workflows', f), 'utf-8');
       expect(/^name:\s*Agent Path Smoke\s*$/m.test(other), `${f} reuses the Agent Path Smoke name`).toBe(false);
     }
-  });
-
-  it('runs on every pull request: no paths or paths-ignore filter on the trigger', () => {
-    const on = /^on:\n((?: {2}[^\n]*\n|\n)+)/m.exec(read())![1];
-    expect(on).toMatch(/^ {2}pull_request:\s*$/m);
-    expect(on).not.toMatch(/paths(-ignore)?:/);
   });
 
   // OBS-3 review round 3 — the skip decision diffs the PR against the base it
