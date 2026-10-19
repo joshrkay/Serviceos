@@ -24,6 +24,7 @@ vi.mock('../../../src/analytics/posthog', () => ({
 import {
   TwilioMediaStreamAdapter,
   DEFAULT_SILENCE_REPROMPT_MS,
+  DEFAULT_HANDOFF_PLAYOUT_MAX_WAIT_MS,
   type WsLike,
 } from '../../../src/telephony/media-streams/mediastream-adapter';
 import { DEFAULT_MAX_CALL_DURATION_MS } from '../../../src/ai/voice-turn/shared/max-call-duration';
@@ -39,7 +40,8 @@ import type { TtsProvider, TtsSynthesizeInput, TtsSynthesizeResult } from '../..
 import {
   renderTtsText,
   SPEECH_TURN_FAILURE_REPROMPT_COPY,
-  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  HANDOFF_UNAVAILABLE_COPY,
+  SILENCE_CLOSING_COPY,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   MAX_CALL_DURATION_WRAP_UP_COPY,
   LANGUAGE_SWITCH_ACK,
@@ -2879,14 +2881,25 @@ describe('VOX-35c speechTurn-failure recovery', () => {
   });
 
   it('escalates + ends gracefully after two consecutive failures (no third apology loop)', async () => {
-    store.create('t', 'telephony', { callSid: 'CA-recover-2' });
+    // LCR-02 — the cap dispatches the FSM's system_failure. This fixture wires
+    // no escalation host and no REST redirector, so nothing can be parked or
+    // delivered: the caller hears that nobody could be reached (never the
+    // "connect you" promise), and the leg ends once that line has played.
+    const session = store.create('t', 'telephony', { callSid: 'CA-recover-2' });
     const ws = new FakeWs();
     const { provider, handle } = makeStreamingProvider();
     const { tts, texts } = makeCapturingTts();
     const speechTurn = vi.fn().mockRejectedValue(new Error('gateway down'));
     const finalizeOnClose = vi.fn();
     const adapter = new TwilioMediaStreamAdapter(
-      { store, streamingProvider: provider, speechTurn, ttsProvider: tts, finalizeOnClose },
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn,
+        ttsProvider: tts,
+        finalizeOnClose,
+        handoffPlayoutMaxWaitMs: 0,
+      },
       ws,
     );
     adapter.start();
@@ -2902,19 +2915,19 @@ describe('VOX-35c speechTurn-failure recovery', () => {
     await new Promise((r) => setImmediate(r));
     expect(ws.closed).toBe(false);
 
-    // Failure 2 (consecutive) → spoken hand-off line + graceful end.
+    // Failure 2 (consecutive) → the FSM escalation; nothing parked here.
     handle.emit({ type: 'final', isFinal: true, transcript: 'anyone there', confidence: 0.95 });
-    await new Promise((r) => setImmediate(r));
+    await vi.waitFor(() => expect(ws.closed).toBe(true));
 
     // Exactly two turns were attempted — no third apology loop.
     expect(speechTurn).toHaveBeenCalledTimes(2);
-    // The two spoken lines: apology, then the escalation hand-off.
+    expect(session.machine.currentState).toBe('escalating');
+    // The two spoken lines: apology, then the honest no-one-reached line.
     expect(texts).toEqual([
       renderTtsText(SPEECH_TURN_FAILURE_REPROMPT_COPY, {}, 'en'),
-      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+      renderTtsText(HANDOFF_UNAVAILABLE_COPY, {}, 'en'),
     ]);
     // Graceful end through the existing end_session close path.
-    expect(ws.closed).toBe(true);
     expect(finalizeOnClose).toHaveBeenCalledTimes(1);
     const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
     expect(reason).toBe('session_ended');
@@ -3061,6 +3074,10 @@ describe('A3 low acoustic STT confidence gate', () => {
   });
 
   it('two consecutive low-confidence finals hand off gracefully instead of looping', async () => {
+    // LCR-02 — no escalation host / REST redirector wired here (the parked
+    // <Dial> path is pinned in ladder-cap-handoff-lcr02.test.ts): the FSM
+    // escalates, nothing can be delivered, so the honest line plays and the
+    // leg ends. "Let me connect you" is never spoken ahead of a hang-up.
     store.create('t', 'telephony', { callSid: 'CA-lowconf-2' });
     const ws = new FakeWs();
     const { provider, handle } = makeStreamingProvider();
@@ -3068,7 +3085,14 @@ describe('A3 low acoustic STT confidence gate', () => {
     const speechTurn = vi.fn().mockResolvedValue([]);
     const finalizeOnClose = vi.fn();
     const adapter = new TwilioMediaStreamAdapter(
-      { store, streamingProvider: provider, speechTurn, ttsProvider: tts, finalizeOnClose },
+      {
+        store,
+        streamingProvider: provider,
+        speechTurn,
+        ttsProvider: tts,
+        finalizeOnClose,
+        handoffPlayoutMaxWaitMs: 0,
+      },
       ws,
     );
     adapter.start();
@@ -3084,17 +3108,16 @@ describe('A3 low acoustic STT confidence gate', () => {
     await new Promise((r) => setImmediate(r));
     expect(ws.closed).toBe(false);
 
-    // Low-confidence final 2 (consecutive) → spoken hand-off + graceful end.
+    // Low-confidence final 2 (consecutive) → the FSM escalation + graceful end.
     handle.emit({ type: 'final', isFinal: true, transcript: 'unh', confidence: 0.2 });
-    await new Promise((r) => setImmediate(r));
+    await vi.waitFor(() => expect(ws.closed).toBe(true));
 
     // speechTurn was never dispatched for either low-confidence turn.
     expect(speechTurn).not.toHaveBeenCalled();
     expect(texts).toEqual([
       renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
-      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+      renderTtsText(HANDOFF_UNAVAILABLE_COPY, {}, 'en'),
     ]);
-    expect(ws.closed).toBe(true);
     expect(finalizeOnClose).toHaveBeenCalledTimes(1);
     const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
     expect(reason).toBe('session_ended');
@@ -3441,9 +3464,12 @@ describe('T2-F05 caller-silence reprompt timer', () => {
     expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
   });
 
-  it('a second consecutive silence expiry escalates and ends the session (low_stt_confidence_max_retries)', async () => {
+  it('a second consecutive silence expiry closes with a call-us-back line and pages nobody (silence_max_retries)', async () => {
+    // LCR-02 — a silent line is never escalated: no voicemail can reach this
+    // fixture's call (no REST redirector), so the closing line plays and the
+    // leg ends. The voicemail path is pinned in ladder-cap-handoff-lcr02.test.ts.
     // Non-default timeout also pins the deps.silenceRepromptTimeoutMs seam.
-    const { adapter, ws, handle, texts, finalizeOnClose } = await setupSilenceCall('CA-sil-2', {
+    const { adapter, ws, handle, texts, finalizeOnClose, session } = await setupSilenceCall('CA-sil-2', {
       silenceRepromptTimeoutMs: 1_000,
     });
     await completeAgentTurn(adapter, ws, handle);
@@ -3461,21 +3487,24 @@ describe('T2-F05 caller-silence reprompt timer', () => {
     ws.inboundJson({ event: 'mark', streamSid: 'MZ', mark: { name: `silence-arm-${repromptTurn}` } });
     await flush();
 
-    // Expiry 2 → cap reached → spoken hand-off + graceful end.
+    // Expiry 2 → cap reached → closing line, played out, then the end.
     await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    await vi.advanceTimersByTimeAsync(DEFAULT_HANDOFF_PLAYOUT_MAX_WAIT_MS);
     await flush();
 
     expect(texts).toEqual([
       AGENT_LINE,
       renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
-      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+      renderTtsText(SILENCE_CLOSING_COPY, {}, 'en'),
     ]);
     expect(ws.closed).toBe(true);
+    expect(session.machine.currentState).not.toBe('escalating');
     expect(finalizeOnClose).toHaveBeenCalledTimes(1);
     const [, reason, sideEffects] = finalizeOnClose.mock.calls[0];
     expect(reason).toBe('session_ended');
     expect(sideEffects).toEqual([
-      { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
+      { type: 'end_session', payload: { reason: 'silence_max_retries' } },
     ]);
     expect(recordVoiceErrorMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -3553,16 +3582,20 @@ describe('T2-F05 caller-silence reprompt timer', () => {
     await flush();
     expect(texts).toEqual([AGENT_LINE, renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en')]);
 
-    // Then a mumbled final → streak 2 → hand-off, NOT another reprompt.
+    // Then a mumbled final → streak 2 → the capping strike is low
+    // confidence, so the FSM escalates (LCR-02); with nothing parked or
+    // deliverable here, the honest no-one-reached line plays, then the end.
     handle.emit({ type: 'final', isFinal: true, transcript: 'mmuh', confidence: 0.2 });
     await flush();
+    await flush();
+    await vi.advanceTimersByTimeAsync(DEFAULT_HANDOFF_PLAYOUT_MAX_WAIT_MS);
     await flush();
 
     expect(speechTurn).toHaveBeenCalledTimes(1); // only the initial confident turn
     expect(texts).toEqual([
       AGENT_LINE,
       renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'),
-      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
+      renderTtsText(HANDOFF_UNAVAILABLE_COPY, {}, 'en'),
     ]);
     expect(ws.closed).toBe(true);
     expect(finalizeOnClose).toHaveBeenCalledTimes(1);
