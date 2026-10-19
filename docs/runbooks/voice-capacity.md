@@ -110,9 +110,26 @@ above before opening self-serve.
 ## Scaling guidance
 
 - A single Railway instance handles up to the ceiling above.
-- Scale horizontally via `railway scale --service api --replicas N`.
-- Each instance is independent; Twilio's WebSocket load balancer distributes
-  new connections across replicas.
+- **Do not add replicas to a process that answers calls** (`PROCESS_ROLE`
+  `web`, `voice` or unset/`all`). A live call's state lives only in the memory
+  of the process that answered it, and the stream connect and every Gather
+  turn are separate requests that Railway may send to any replica: on a replica
+  without the call the stream is refused (403) or the call starts over. Redis
+  (`REDIS_URL`) shares counters and events, not calls, so it does not make a
+  second replica safe. Since LCR-05 the app refuses to boot in prod/staging
+  with `NUM_REPLICAS > 1` on those roles; only `PROCESS_ROLE=worker` may scale
+  out. Raise capacity with a larger instance until call state is shared across
+  replicas (or calls are pinned to one).
+- Deploys: on `SIGTERM` the old process first moves every live realtime call
+  to the Gather fallback (REST redirect to `/api/telephony/voice/gather-fallback`,
+  needs `PUBLIC_API_URL`), which the new deployment answers by starting the
+  call over: the caller hears the greeting and recording notice again and the
+  conversation so far is lost, but the call is not dropped. A Gather call's
+  next turn reaching the new deployment starts over the same way. Both are
+  logged as `deploy_induced_restart`; the old process records the hand-off as
+  a `voice.realtime.degraded_to_gather` audit event with reason
+  `deploy_shutdown`. A redirect that is refused or times out leaves the call on
+  the old process for the 25 s drain, as before.
 - Concurrent-call count per instance can be monitored via Sentry tag
   `path=voice` event counts (climbing tag volume signals approach to ceiling).
 
