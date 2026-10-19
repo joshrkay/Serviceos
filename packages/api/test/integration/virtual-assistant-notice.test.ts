@@ -210,6 +210,10 @@ describe('Postgres integration — virtual-assistant notice on every phone call 
     const deadline = Date.now() + 2000;
     while (!ws.closed && Date.now() < deadline) await sleep(10);
     expect(ws.closeReason).toBe('disclosure_init_failed');
+    // Precondition: the greeting that failed closed DID carry the notice, so
+    // the missing row is the fail-closed suppression, not an unwired notice.
+    const attempted = (tts.synthesize.mock.calls[0]?.[0] as { text?: string } | undefined)?.text ?? '';
+    expect(attempted).toContain(NOTICE);
     const rows = (await auditRepo.findByEntity(tenantA.tenantId, 'voice_session', sessionId)).filter(
       (e) => e.eventType === NOTICE_EVENT,
     );
