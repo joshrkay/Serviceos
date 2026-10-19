@@ -284,6 +284,7 @@ import { createVoicePersonaResolver } from './settings/voice-persona-resolver';
 // Postgres-backed repositories (production)
 import { PgAuditRepository } from './audit/pg-audit';
 import { ForwardingAuditRepository } from './audit/forwarding-audit-repository';
+import { createHiddenTenantCheck } from './demo/hidden-tenant';
 import { recordApiError } from './analytics/posthog';
 import { runCallMeBackSweep } from './workers/call-me-back-worker';
 import { createInflightSweeps } from './workers/inflight-sweeps';
@@ -1154,6 +1155,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // POSTHOG_API_KEY is set, and it can never break a mutation.
   const webhookAuditRepo = new ForwardingAuditRepository(
     pool ? new PgAuditRepository(pool) : new InMemoryAuditRepository(),
+    // U7: demo-pool and platform tenants never reach product analytics.
+    pool ? { isHiddenTenant: createHiddenTenantCheck(pool) } : {},
   );
   // Blocker 1 — durable idempotency store for the Stripe/Clerk dedup path
   // (handleWebhookEvent). Postgres-backed in real deploys; left undefined
