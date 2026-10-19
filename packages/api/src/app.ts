@@ -1631,6 +1631,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         customerRepo,
         settingsRepo,
         dispatchRepo,
+        // S5a-1 (U8) — audits `invoice.payment_mode_unavailable` when a
+        // send goes out fail-closed (no pay CTA) because the policy read failed.
+        auditRepo,
         publicBaseUrl,
       })
     : undefined;
@@ -3428,6 +3431,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/public-payments',
     createPublicPaymentsRouter({
       invoiceRepo,
+      // S5a-1 (U8) — the PaymentIntent mint honours payment_collection_mode.
+      settingsRepo,
+      auditRepo,
       stripeConfig: process.env.STRIPE_SECRET_KEY
         ? { apiKey: process.env.STRIPE_SECRET_KEY }
         : null,
