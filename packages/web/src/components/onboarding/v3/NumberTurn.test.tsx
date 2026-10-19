@@ -236,7 +236,7 @@ describe('NumberTurn through the shell, keyed on the failure code', () => {
   function stubShell(status: OnboardingStatusResponse, available: Record<string, Array<ReturnType<typeof cand>>> = {}) {
     world = { status, available };
     calls = [];
-    const routes: Record<string, (body: Record<string, unknown>) => Response> = {
+    const routes: Partial<Record<string, (body: Record<string, unknown>) => Response>> = {
       'GET /api/onboarding/status': () => json(200, world.status),
       'GET /api/onboarding/draft': () => json(200, { draft: approved }),
       'POST /api/onboarding/phone/available': (body) => json(200, { numbers: world.available[String(body.areaCode)] ?? [] }),
