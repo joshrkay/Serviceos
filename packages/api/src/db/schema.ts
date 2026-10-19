@@ -7770,6 +7770,23 @@ export const MIGRATIONS = {
       ON voice_recordings (twilio_delete_attempted_at NULLS FIRST, created_at)
       WHERE twilio_deleted_at IS NULL AND recording_url IS NOT NULL AND legal_hold = false;
   `,
+
+  // PRIV-1 — the retention sweep strips the prompt and reply content from an
+  // ai_runs row once it is past the tenant's recording_retention_days, and
+  // stamps `content_purged_at`. The row is kept (proposals, supervisor_reviews,
+  // document_revisions and estimate_provenance FK it; the spend report reads
+  // its model, tokens and cost). The partial index keeps the sweep's per-tenant
+  // (tenant_id, created_at) probe off the rows already purged, so its cost does
+  // not grow with history. RLS rides the existing ai_runs policy (migration
+  // 008). Additive and idempotent; nullable with no default, so the ALTER is
+  // metadata-only.
+  '316_ai_runs_content_purged_at': `
+    ALTER TABLE ai_runs
+      ADD COLUMN IF NOT EXISTS content_purged_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_ai_runs_content_purge_due
+      ON ai_runs (tenant_id, created_at)
+      WHERE content_purged_at IS NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

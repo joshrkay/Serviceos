@@ -3,6 +3,7 @@ import {
   runRecordingRetentionSweep,
   InMemoryRecordingRetentionRepository,
   RECORDING_RETENTION_SWEEP_BATCH,
+  AI_RUN_CONTENT_SWEEP_BATCH,
 } from '../../src/workers/recording-retention-worker';
 import { DevStorageProvider } from '../../src/files/storage-provider';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -20,11 +21,13 @@ const noopLogger = {
 const NO_TWILIO_COPIES = { twilioCopiesDeleted: 0, twilioCopiesFailed: 0 };
 /** PRIV-3 — sweeps with no card-number-flagged recordings report zero for that phase. */
 const NO_CARD_AUDIO = { cardNumberAudioPurged: 0, cardNumberAudioFailed: 0, ...NO_TWILIO_COPIES };
+/** PRIV-1 — sweeps with no ai_runs past the horizon report zero for that phase. */
+const NO_AI_RUNS = { aiRunContentPurged: 0, aiRunContentTenantsFailed: 0, ...NO_CARD_AUDIO };
 /** #1202 — sweeps with no unattached transcript turns report zero for that phase. */
 const NO_SESSIONS = {
   sessionTranscriptsPurged: 0,
   sessionTranscriptTenantsFailed: 0,
-  ...NO_CARD_AUDIO,
+  ...NO_AI_RUNS,
 };
 const NO_UNATTACHED = { unattachedTurnsPurged: 0, unattachedTurnTenantsFailed: 0, ...NO_SESSIONS };
 
@@ -522,6 +525,175 @@ describe('#1208 — voice_sessions.transcript phase', () => {
     expect(warn).toHaveBeenCalledWith(
       'recording-retention sweep: session-transcript audit write failed',
       { tenantId: 'tA', sessionId: 's-1', error: 'audit down' },
+    );
+  });
+});
+
+describe('PRIV-1 — ai_runs prompt and reply content phase', () => {
+  function aiRun(
+    id: string,
+    tenantId: string,
+    days: number,
+    opts: Partial<{ taskType: string; retentionDays: number }> = {},
+  ) {
+    return {
+      id,
+      tenantId,
+      taskType: opts.taskType ?? 'classify_intent',
+      createdAt: ageDays(days),
+      inputSnapshot: {
+        messages: [{ role: 'user', content: 'caller: Maria Lopez, 555-201-7788' }],
+        temperature: 0,
+        maxTokens: 200,
+      } as Record<string, unknown>,
+      outputSnapshot: {
+        content: '{"intentType":"book_appointment"}',
+        provider: 'openai',
+        providerPath: ['openai:gpt-4o-mini'],
+      } as Record<string, unknown> | null,
+      contentPurgedAt: null as Date | null,
+      retentionDays: opts.retentionDays ?? 30,
+    };
+  }
+  const storage = { deleteObject: vi.fn() } as unknown as StorageProvider;
+
+  it('strips content from runs past each tenant horizon, keeps the non-content keys, and writes one audit event per tenant batch', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([], [], [], [
+      aiRun('r-old', 'tA', 40),
+      aiRun('r-old-summary', 'tA', 35, { taskType: 'summarize_conversation' }),
+      aiRun('r-fresh', 'tA', 2),
+      aiRun('r-b', 'tB', 40, { retentionDays: 365 }),
+    ]);
+    const auditRepo = new InMemoryAuditRepository();
+    const result = await runRecordingRetentionSweep({ repo, storage, auditRepo, logger: noopLogger, now: () => NOW });
+
+    expect(result.aiRunContentPurged).toBe(2);
+    expect(result.aiRunContentTenantsFailed).toBe(0);
+    const byId = new Map(repo.aiRuns.map((r) => [r.id, r]));
+    expect(byId.get('r-old')).toMatchObject({
+      inputSnapshot: { temperature: 0, maxTokens: 200 },
+      outputSnapshot: { provider: 'openai', providerPath: ['openai:gpt-4o-mini'] },
+      contentPurgedAt: NOW,
+    });
+    expect(JSON.stringify(byId.get('r-old-summary'))).not.toContain('Maria Lopez');
+    expect(JSON.stringify(byId.get('r-fresh'))).toContain('Maria Lopez');
+    expect(JSON.stringify(byId.get('r-b'))).toContain('Maria Lopez');
+
+    const events = auditRepo.getAll().filter((e) => e.eventType === 'ai_run.content_purged');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ tenantId: 'tA', entityType: 'tenant', entityId: 'tA', actorRole: 'system' });
+    expect(events[0].metadata).toEqual({
+      reason: 'past_retention',
+      runsPurged: 2,
+      byTaskType: { classify_intent: 1, summarize_conversation: 1 },
+      oldestCreatedAt: ageDays(40).toISOString(),
+      newestCreatedAt: ageDays(35).toISOString(),
+    });
+  });
+
+  it('a purged run with no reply keeps output_snapshot null', async () => {
+    const run = { ...aiRun('r-pending', 'tA', 40), outputSnapshot: null };
+    const repo = new InMemoryRecordingRetentionRepository([], [], [], [run]);
+    await runRecordingRetentionSweep({ repo, storage, logger: noopLogger, now: () => NOW });
+    expect(repo.aiRuns[0]).toMatchObject({ outputSnapshot: null, contentPurgedAt: NOW });
+  });
+
+  it('bounds each tenant to the batch size per sweep, oldest first (default AI_RUN_CONTENT_SWEEP_BATCH)', async () => {
+    expect(AI_RUN_CONTENT_SWEEP_BATCH).toBe(500);
+    const repo = new InMemoryRecordingRetentionRepository([], [], [], [
+      aiRun('r-2', 'tA', 40),
+      aiRun('r-1', 'tA', 50),
+      aiRun('r-3', 'tA', 31),
+    ]);
+    const auditRepo = new InMemoryAuditRepository();
+    const first = await runRecordingRetentionSweep({
+      repo, storage, auditRepo, logger: noopLogger, now: () => NOW, aiRunContentBatchSize: 2,
+    });
+    expect(first.aiRunContentPurged).toBe(2);
+    expect(repo.aiRuns.filter((r) => r.contentPurgedAt).map((r) => r.id).sort()).toEqual(['r-1', 'r-2']);
+    const second = await runRecordingRetentionSweep({
+      repo, storage, auditRepo, logger: noopLogger, now: () => NOW, aiRunContentBatchSize: 2,
+    });
+    expect(second.aiRunContentPurged).toBe(1);
+    const third = await runRecordingRetentionSweep({
+      repo, storage, auditRepo, logger: noopLogger, now: () => NOW, aiRunContentBatchSize: 2,
+    });
+    expect(third.aiRunContentPurged).toBe(0);
+    expect(
+      auditRepo.getAll().filter((e) => e.eventType === 'ai_run.content_purged').map((e) => e.metadata?.runsPurged),
+    ).toEqual([2, 1]);
+  });
+
+  it('a tenant whose purge throws is counted and logged; the next tenant is still purged', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([], [], [], [
+      aiRun('r-doomed', 't-doomed', 60),
+      aiRun('r-ok', 't-ok', 40),
+    ]);
+    const real = repo.purgeAiRunContent.bind(repo);
+    repo.purgeAiRunContent = async (tenantId, now, limit) => {
+      if (tenantId === 't-doomed') throw new Error('update failed');
+      return real(tenantId, now, limit);
+    };
+    const warn = vi.fn();
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage,
+      logger: { ...(noopLogger as object), warn } as never,
+      now: () => NOW,
+    });
+    expect(result.aiRunContentTenantsFailed).toBe(1);
+    expect(result.aiRunContentPurged).toBe(1);
+    expect(warn).toHaveBeenCalledWith(
+      'recording-retention sweep: ai-run content purge failed for tenant',
+      { tenantId: 't-doomed', error: 'update failed' },
+    );
+    expect(repo.aiRuns.find((r) => r.id === 'r-ok')?.contentPurgedAt).toEqual(NOW);
+  });
+
+  it('a failed tenant selection is logged and returns zero; the later phases still run', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('rec-card', { createdAt: ageDays(1), pciDetected: true }),
+    ]);
+    repo.findTenantsWithDueAiRunContent = vi.fn(async () => {
+      throw new Error('pg down');
+    });
+    const error = vi.fn();
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage,
+      logger: { ...(noopLogger as object), error } as never,
+      now: () => NOW,
+    });
+    expect(result).toMatchObject({ aiRunContentPurged: 0, aiRunContentTenantsFailed: 0, cardNumberAudioPurged: 1 });
+    expect(error).toHaveBeenCalledWith(
+      'recording-retention sweep: ai-run content tenant selection failed',
+      { error: 'pg down' },
+    );
+  });
+
+  it('still runs when the recording selection fails', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([], [], [], [aiRun('r-old', 'tA', 40)]);
+    repo.findDue = vi.fn(async () => {
+      throw new Error('pg down');
+    });
+    const result = await runRecordingRetentionSweep({ repo, storage, logger: noopLogger, now: () => NOW });
+    expect(result.aiRunContentPurged).toBe(1);
+  });
+
+  it('a failed audit write after the purge is logged with the tenant and the count', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([], [], [], [aiRun('r-1', 'tA', 45)]);
+    const warn = vi.fn();
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage,
+      auditRepo: { create: vi.fn().mockRejectedValue(new Error('audit down')) } as never,
+      logger: { ...(noopLogger as object), warn } as never,
+      now: () => NOW,
+    });
+    expect(result.aiRunContentPurged).toBe(1);
+    expect(warn).toHaveBeenCalledWith(
+      'recording-retention sweep: ai-run content audit write failed',
+      { tenantId: 'tA', runsPurged: 1, error: 'audit down' },
     );
   });
 });
