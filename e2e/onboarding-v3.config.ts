@@ -8,6 +8,9 @@ import { defineConfig, devices } from '@playwright/test';
  * mocked: the draft is created, read, and approved through the real routes into
  * real tables.
  *
+ * Also runs invoice-payment-collect-on-site.spec.ts (S5a-2): the public invoice
+ * page and portal on a business that collects in person, on the same real stack.
+ *
  * Separate from playwright.config.ts on purpose: that config boots InMemory
  * pairs and has no v3 flag. Own ports, so it never adopts another lane's server.
  *
@@ -37,7 +40,11 @@ process.env.E2E_V3_API_URL = apiURL;
 
 export default defineConfig({
   testDir: './',
-  testMatch: ['onboarding-v3-ready-readback.spec.ts', 'onboarding-v3-undo-reset.spec.ts'],
+  testMatch: [
+    'onboarding-v3-ready-readback.spec.ts',
+    'onboarding-v3-undo-reset.spec.ts',
+    'invoice-payment-collect-on-site.spec.ts',
+  ],
   fullyParallel: false,
   workers: 1,
   retries: 0,
@@ -71,7 +78,11 @@ export default defineConfig({
         PORT: apiPort,
         LOG_LEVEL: 'warn',
         TELEPHONY_ENABLED: 'false',
-        EMAIL_ENABLED: 'false',
+        // On so an invoice send can complete (only a send mints the invoice's view
+        // token, which the S5a-2 spec opens). Nothing leaves the box: NODE_ENV=dev
+        // gets the in-memory delivery provider, which only records the dispatch
+        // (packages/api/src/notifications/delivery-provider-factory.ts).
+        EMAIL_ENABLED: 'true',
         // The same hermetic Stripe environment CI runs in (.github/workflows/onboarding-database.yml):
         // synthetic keys, so billing exists but no request ever reaches Stripe. No plan prices are
         // set (blanked, so a developer's own shell cannot change that), so the billing routes answer
@@ -83,8 +94,7 @@ export default defineConfig({
         STRIPE_PRICE_ID: '',
         DATABASE_URL: databaseUrl,
         E2E_V3_DATABASE_URL: databaseUrl,
-        // The e2e database is a local Postgres with no TLS (CI sets the same at job level); without it the pool
-        // asks for SSL, every query fails while /health still answers, and the specs fail with no clear cause.
+        // The local test Postgres speaks no SSL; the pool asks for it unless told not to (db/pool.ts).
         DB_SSL: process.env.DB_SSL ?? 'false',
       },
     },
