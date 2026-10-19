@@ -16,8 +16,14 @@ const noopLogger = {
   debug: () => undefined,
 } as never;
 
+/** PRIV-3 — sweeps with no card-number-flagged recordings report zero for that phase. */
+const NO_CARD_AUDIO = { cardNumberAudioPurged: 0, cardNumberAudioFailed: 0 };
 /** #1202 — sweeps with no unattached transcript turns report zero for that phase. */
-const NO_SESSIONS = { sessionTranscriptsPurged: 0, sessionTranscriptTenantsFailed: 0 };
+const NO_SESSIONS = {
+  sessionTranscriptsPurged: 0,
+  sessionTranscriptTenantsFailed: 0,
+  ...NO_CARD_AUDIO,
+};
 const NO_UNATTACHED = { unattachedTurnsPurged: 0, unattachedTurnTenantsFailed: 0, ...NO_SESSIONS };
 
 function ageDays(days: number): Date {
@@ -34,6 +40,8 @@ function row(
     purgedAt: Date | null;
     storageBucket: string | null;
     storageKey: string | null;
+    pciDetected: boolean;
+    audioPurgedAt: Date | null;
   }> = {},
 ) {
   return {
@@ -46,6 +54,8 @@ function row(
     retentionDays: opts.retentionDays ?? 365,
     legalHold: opts.legalHold ?? false,
     purgedAt: opts.purgedAt ?? null,
+    pciDetected: opts.pciDetected ?? false,
+    audioPurgedAt: opts.audioPurgedAt ?? null,
   };
 }
 
@@ -504,6 +514,147 @@ describe('#1208 — voice_sessions.transcript phase', () => {
     expect(warn).toHaveBeenCalledWith(
       'recording-retention sweep: session-transcript audit write failed',
       { tenantId: 'tA', sessionId: 's-1', error: 'audit down' },
+    );
+  });
+});
+
+describe('PRIV-3 — card-number audio purge', () => {
+  it('deletes the stored audio of a flagged recording promptly, stamps audio_purged_at and audits it; the row, its transcript and the horizon tombstone are untouched', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('flagged', { createdAt: ageDays(0), pciDetected: true }),
+      row('clean', { createdAt: ageDays(0) }),
+    ]);
+    const deleteObject = vi.fn(async () => undefined);
+    const storage = { deleteObject } as unknown as StorageProvider;
+    const auditRepo = new InMemoryAuditRepository();
+
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage,
+      auditRepo,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+
+    expect(result).toEqual({
+      due: 0,
+      purged: 0,
+      failed: 0,
+      ...NO_UNATTACHED,
+      cardNumberAudioPurged: 1,
+      cardNumberAudioFailed: 0,
+    });
+    expect(deleteObject).toHaveBeenCalledTimes(1);
+    expect(deleteObject).toHaveBeenCalledWith('bkt', 't1/flagged.mp3');
+    const flagged = repo.rows.find((r) => r.id === 'flagged');
+    expect(flagged?.audioPurgedAt).toEqual(NOW);
+    expect(flagged?.purgedAt).toBeNull();
+    expect(repo.derivedPurged).toEqual([]);
+    expect(repo.rows.find((r) => r.id === 'clean')?.audioPurgedAt).toBeNull();
+    const audit = auditRepo.getAll().find((e) => e.eventType === 'voice_recording.audio_purged');
+    expect(audit?.entityType).toBe('voice_recording');
+    expect(audit?.entityId).toBe('flagged');
+    expect(audit?.metadata).toEqual({
+      callSid: 'CA-flagged',
+      reason: 'card_number_detected',
+      hadStoredObject: true,
+      recordedAt: ageDays(0).toISOString(),
+    });
+  });
+
+  it('is idempotent: a second sweep deletes nothing and audits nothing', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('flagged', { createdAt: ageDays(0), pciDetected: true }),
+    ]);
+    const deleteObject = vi.fn(async () => undefined);
+    const storage = { deleteObject } as unknown as StorageProvider;
+    const auditRepo = new InMemoryAuditRepository();
+    const deps = { repo, storage, auditRepo, logger: noopLogger, now: () => NOW };
+
+    await runRecordingRetentionSweep(deps);
+    const second = await runRecordingRetentionSweep(deps);
+
+    expect(second.cardNumberAudioPurged).toBe(0);
+    expect(deleteObject).toHaveBeenCalledTimes(1);
+    expect(auditRepo.getAll().filter((e) => e.eventType === 'voice_recording.audio_purged')).toHaveLength(1);
+  });
+
+  it('legal_hold and already-tombstoned rows are exempt', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('held', { createdAt: ageDays(0), pciDetected: true, legalHold: true }),
+      row('tombstoned', { createdAt: ageDays(0), pciDetected: true, purgedAt: ageDays(1) }),
+    ]);
+    const deleteObject = vi.fn(async () => undefined);
+    const storage = { deleteObject } as unknown as StorageProvider;
+
+    const result = await runRecordingRetentionSweep({ repo, storage, logger: noopLogger, now: () => NOW });
+
+    expect(result.cardNumberAudioPurged).toBe(0);
+    expect(deleteObject).not.toHaveBeenCalled();
+    expect(repo.rows.every((r) => r.audioPurgedAt === null)).toBe(true);
+  });
+
+  it('a failed delete leaves the row flagged for the next sweep and does not stop the rest', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('bad', { createdAt: ageDays(1), pciDetected: true }),
+      row('good', { createdAt: ageDays(0), pciDetected: true }),
+    ]);
+    const deleteObject = vi.fn(async (_bucket: string, key: string) => {
+      if (key.includes('bad')) throw new Error('s3 down');
+    });
+    const storage = { deleteObject } as unknown as StorageProvider;
+    const warn = vi.fn();
+
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage,
+      logger: { ...noopLogger, warn } as never,
+      now: () => NOW,
+    });
+
+    expect(result.cardNumberAudioPurged).toBe(1);
+    expect(result.cardNumberAudioFailed).toBe(1);
+    expect(repo.rows.find((r) => r.id === 'bad')?.audioPurgedAt).toBeNull();
+    expect(repo.rows.find((r) => r.id === 'good')?.audioPurgedAt).toEqual(NOW);
+    expect(warn).toHaveBeenCalledWith(
+      'recording-retention sweep: card-number audio purge row failed',
+      expect.objectContaining({ tenantId: 't1', voiceRecordingId: 'bad', error: 's3 down' }),
+    );
+  });
+
+  it('a flagged recording with no stored object is stamped without a storage call', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('no-object', { createdAt: ageDays(0), pciDetected: true, storageBucket: null, storageKey: null }),
+    ]);
+    const deleteObject = vi.fn(async () => undefined);
+    const storage = { deleteObject } as unknown as StorageProvider;
+    const auditRepo = new InMemoryAuditRepository();
+
+    const result = await runRecordingRetentionSweep({ repo, storage, auditRepo, logger: noopLogger, now: () => NOW });
+
+    expect(result.cardNumberAudioPurged).toBe(1);
+    expect(deleteObject).not.toHaveBeenCalled();
+    const audit = auditRepo.getAll().find((e) => e.eventType === 'voice_recording.audio_purged');
+    expect((audit?.metadata as { hadStoredObject?: boolean }).hadStoredObject).toBe(false);
+  });
+
+  it('a failed selection is logged and returns zero for the phase (never throws)', async () => {
+    const repo = new InMemoryRecordingRetentionRepository([]);
+    vi.spyOn(repo, 'findCardNumberAudioDue').mockRejectedValue(new Error('db down'));
+    const error = vi.fn();
+
+    const result = await runRecordingRetentionSweep({
+      repo,
+      storage: new DevStorageProvider({ bucket: 'dev', publicUrlBase: 'http://localhost/dev' }),
+      logger: { ...noopLogger, error } as never,
+      now: () => NOW,
+    });
+
+    expect(result.cardNumberAudioPurged).toBe(0);
+    expect(result.cardNumberAudioFailed).toBe(0);
+    expect(error).toHaveBeenCalledWith(
+      'recording-retention sweep: card-number audio selection failed',
+      expect.objectContaining({ error: 'db down' }),
     );
   });
 });

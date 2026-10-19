@@ -612,6 +612,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['312_tenant_settings_payment_collection_mode', '81ef124ca22d0db44e0744a24c2c41680cd644e7b5bffd57ddaaabb85c8bbc9e'],
   ['313_onboarding_drafts_owner_phone', '56e08bca72775fcf3d39b5a00e87270a8a18f3ef64f7dbcaa91c8d90e4b65ca2'],
   ['317_demo_calls', '1f2e2793272ab397224a1feb5307f583c121d5c138d06ed7fb533d6c698045de'],
+  // PRIV-3 — voice_recordings.pci_detected + audio_purged_at (card number said on the call).
+  ['314_voice_recordings_card_number_detected', '648f2696cce7ed17700f8b2d3b826ce8eb61987af91f7cbeed58c82ce01b0ce3'],
 ];
 
 function hashMigration(value: string): string {

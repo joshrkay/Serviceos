@@ -7,39 +7,35 @@
  * concurrent approves each minted and approved a proposal pair.
  *
  * The scripted tests put two real request transactions on two pooled
- * connections (BEGIN + applyTenantContext + tenantContextStore, exactly what
- * withTenantTransaction does) and interleave them deterministically: the second
- * statement is awaited until pg_blocking_pids shows it parked on the first's row
- * lock, then the first commits. The HTTP tests drive the real router through the
- * real withTenantTransaction middleware.
+ * connections (onboarding-draft-request-tx.ts) and interleave them
+ * deterministically: the second statement is awaited until pg_blocking_pids
+ * shows it parked on the first's row lock, then the first commits. The HTTP
+ * tests drive the real router through the real withTenantTransaction middleware.
+ *
+ * Every field writer (choice PUT, timezone write, owner-phone PUT, ...) against
+ * approve, and writer against writer, is the DRAFT_WRITERS table in
+ * onboarding-draft-writers-vs-approve.test.ts; this file keeps approve against
+ * approve, the HTTP stale-version cases and the rollback case.
  */
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import express, { Request, Response, NextFunction } from 'express';
 import request from 'supertest';
 import type { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
-import { applyTenantContext } from '../../src/db/rls-runtime-role';
-import { tenantContextStore, withTenantTransaction } from '../../src/middleware/tenant-context';
+import { raceFirstThen } from './onboarding-draft-request-tx';
+import { withTenantTransaction } from '../../src/middleware/tenant-context';
 import { createOnboardingDraftRouter } from '../../src/routes/onboarding-draft';
 import {
   PgOnboardingDraftRepository,
   DraftVersionConflictError,
-  DraftAlreadyApprovedError,
   type OnboardingDraft,
 } from '../../src/onboarding/draft/repository';
-import { approveDraft, buildDraftProposals, type ApproveDraftDeps } from '../../src/onboarding/draft/approve';
+import { approveDraft, type ApproveDraftDeps } from '../../src/onboarding/draft/approve';
 import { assembleTypicalShop } from '../../src/onboarding/choices/assemble';
 import { PgRegionalPriceTierRepository } from '../../src/onboarding/choices/price-tiers';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
-
-interface RequestTx {
-  pid: number;
-  run<T>(fn: () => Promise<T>): Promise<T>;
-  commit(): Promise<void>;
-  rollback(): Promise<void>;
-}
 
 describe('onboarding approve concurrency (real DB)', () => {
   let pool: Pool;
@@ -68,41 +64,6 @@ describe('onboarding approve concurrency (real DB)', () => {
   afterAll(async () => {
     await closeSharedTestDb();
   });
-
-  async function beginRequestTx(tenantId: string): Promise<RequestTx> {
-    const client = await pool.connect();
-    const slot = { done: false };
-    await client.query('BEGIN');
-    await applyTenantContext(client, tenantId, { transactional: true });
-    const pid = (await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
-    const finish = async (sql: 'COMMIT' | 'ROLLBACK') => {
-      if (slot.done) return;
-      slot.done = true;
-      try {
-        await client.query(sql);
-      } finally {
-        client.release();
-      }
-    };
-    return {
-      pid,
-      run: (fn) => tenantContextStore.run({ client, tenantId }, fn),
-      commit: () => finish('COMMIT'),
-      rollback: () => finish('ROLLBACK'),
-    };
-  }
-
-  async function waitUntilBlocked(pid: number): Promise<void> {
-    const deadline = Date.now() + 5000;
-    for (;;) {
-      const r = await pool.query<{ blocked: boolean }>('SELECT cardinality(pg_blocking_pids($1)) > 0 AS blocked', [pid]);
-      if (r.rows[0].blocked) return;
-      if (Date.now() > deadline) throw new Error(`backend ${pid} never blocked on a row lock within 5s`);
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 10);
-      });
-    }
-  }
 
   async function seedDraft(): Promise<OnboardingDraft> {
     const assembled = await assembleTypicalShop(tierRepo, {
@@ -133,146 +94,14 @@ describe('onboarding approve concurrency (real DB)', () => {
       [tenantId],
     )).rows[0];
 
-  /**
-   * Run a draft writer in tx1 (uncommitted; PUT /choices by default), start `second` in tx2, wait for it
-   * to park on the lock, then commit tx1.
-   */
-  async function putFirstThen<T>(
-    version: number,
-    second: (tx2: RequestTx) => Promise<T>,
-    writer: (version: number) => Promise<unknown> = (v) => draftRepo.stageChoice(tenant.tenantId, 'greeting', { option: 'b' }, v),
-  ): Promise<PromiseSettledResult<T>> {
-    const tx1 = await beginRequestTx(tenant.tenantId);
-    const tx2 = await beginRequestTx(tenant.tenantId);
-    try {
-      await tx1.run(() => writer(version));
-      const pending = second(tx2);
-      const settled = pending.then(
-        (value): PromiseSettledResult<T> => ({ status: 'fulfilled', value }),
-        (reason): PromiseSettledResult<T> => ({ status: 'rejected', reason }),
-      );
-      await waitUntilBlocked(tx2.pid);
-      await tx1.commit();
-      const result = await settled;
-      if (result.status === 'fulfilled') await tx2.commit();
-      else await tx2.rollback();
-      return result;
-    } finally {
-      await tx1.rollback();
-      await tx2.rollback();
-    }
-  }
-
-  async function approveFirstThen<T>(
-    version: number,
-    second: (tx2: RequestTx) => Promise<T>,
-  ): Promise<{ first: Awaited<ReturnType<typeof approveDraft>>; second: PromiseSettledResult<T> }> {
-    const tx1 = await beginRequestTx(tenant.tenantId);
-    const tx2 = await beginRequestTx(tenant.tenantId);
-    try {
-      const first = await tx1.run(() => approveDraft(deps, tenant.tenantId, actor(), { expectedVersion: version }));
-      const pending = second(tx2);
-      const settled = pending.then(
-        (value): PromiseSettledResult<T> => ({ status: 'fulfilled', value }),
-        (reason): PromiseSettledResult<T> => ({ status: 'rejected', reason }),
-      );
-      await waitUntilBlocked(tx2.pid);
-      await tx1.commit();
-      const result = await settled;
-      if (result.status === 'fulfilled') await tx2.commit();
-      else await tx2.rollback();
-      return { first, second: result };
-    } finally {
-      await tx1.rollback();
-      await tx2.rollback();
-    }
-  }
-
   describe('scripted request transactions', () => {
-    it('PUT first, approve second with a stale expectedVersion: 409-class conflict, nothing minted, PUT kept', async () => {
-      const d = await seedDraft();
-      const result = await putFirstThen(d.version, (tx2) =>
-        tx2.run(() => approveDraft(deps, tenant.tenantId, actor(), { expectedVersion: d.version })),
-      );
-      expect(result.status).toBe('rejected');
-      const reason = (result as PromiseRejectedResult).reason;
-      expect(reason).toBeInstanceOf(DraftVersionConflictError);
-      expect(reason).toMatchObject({ expected: d.version, actual: d.version + 1 });
-      expect(await proposalCount()).toBe(0);
-      const raw = await rawDraft();
-      expect(raw.status).toBe('draft');
-      expect(raw.choices.greeting).toEqual({ option: 'b' });
-      expect(await approvedAuditCount()).toBe(0);
-    });
-
-    it('PUT first, approve second without expectedVersion: the PUT choice is IN the minted payload', async () => {
-      const d = await seedDraft();
-      const result = await putFirstThen(d.version, (tx2) => tx2.run(() => approveDraft(deps, tenant.tenantId, actor())));
-      expect(result.status).toBe('fulfilled');
-      const raw = await rawDraft();
-      expect(raw.status).toBe('approved');
-      expect(raw.choices.greeting).toEqual({ option: 'b' });
-      const committed = (await draftRepo.getForTenant(tenant.tenantId))!;
-      const expected = buildDraftProposals({ ...committed, status: 'draft' }, tenant.userId);
-      const rows = await pool.query<{ proposal_type: string; payload: unknown }>(
-        'SELECT proposal_type, payload FROM proposals WHERE id = ANY($1::uuid[])',
-        [raw.proposal_ids],
-      );
-      expect(rows.rows).toHaveLength(2);
-      const byType = Object.fromEntries(rows.rows.map((r) => [r.proposal_type, r.payload]));
-      expect(byType.onboarding_voice_policy).toEqual(expected.voicePolicy.payload);
-      expect(byType.onboarding_tenant_settings).toEqual(expected.tenantSettings.payload);
-      // The default greeting would differ from option b, so the PUT really is in the payload.
-      const defaults = buildDraftProposals({ ...committed, choices: {}, status: 'draft' }, tenant.userId);
-      expect(byType.onboarding_voice_policy).not.toEqual(defaults.voicePolicy.payload);
-    });
-
-    it('approve first, PUT second: the PUT gets DraftAlreadyApprovedError and payloads equal the committed choices (5 fresh tenants)', async () => {
-      for (let i = 0; i < 5; i++) {
-        tenant = await createTestTenant(pool);
-        const d = await seedDraft();
-        const { first, second } = await approveFirstThen(d.version, (tx2) =>
-          tx2.run(() => draftRepo.stageChoice(tenant.tenantId, 'greeting', { option: 'b' }, d.version)),
-        );
-        expect(first.approvedNow).toBe(true);
-        expect(second.status).toBe('rejected');
-        expect((second as PromiseRejectedResult).reason).toBeInstanceOf(DraftAlreadyApprovedError);
-
-        const committed = (await draftRepo.getForTenant(tenant.tenantId))!;
-        expect(committed.status).toBe('approved');
-        expect(committed.choices.greeting).toBeUndefined();
-        const expected = buildDraftProposals({ ...committed, status: 'draft' }, tenant.userId);
-        const rows = await pool.query<{ proposal_type: string; payload: unknown }>(
-          'SELECT proposal_type, payload FROM proposals WHERE id = ANY($1::uuid[])',
-          [committed.proposalIds],
-        );
-        expect(rows.rows).toHaveLength(2);
-        const byType = Object.fromEntries(rows.rows.map((r) => [r.proposal_type, r.payload]));
-        expect(byType.onboarding_voice_policy).toEqual(expected.voicePolicy.payload);
-        expect(byType.onboarding_tenant_settings).toEqual(expected.tenantSettings.payload);
-      }
-    });
-
-    it('PUT first, approve second, repeated on 5 fresh tenants: never a payload that differs from the committed choices', async () => {
-      for (let i = 0; i < 5; i++) {
-        tenant = await createTestTenant(pool);
-        const d = await seedDraft();
-        await putFirstThen(d.version, (tx2) => tx2.run(() => approveDraft(deps, tenant.tenantId, actor())));
-        const committed = (await draftRepo.getForTenant(tenant.tenantId))!;
-        const expected = buildDraftProposals({ ...committed, status: 'draft' }, tenant.userId);
-        const rows = await pool.query<{ proposal_type: string; payload: unknown }>(
-          'SELECT proposal_type, payload FROM proposals WHERE id = ANY($1::uuid[])',
-          [committed.proposalIds],
-        );
-        const byType = Object.fromEntries(rows.rows.map((r) => [r.proposal_type, r.payload]));
-        expect(byType.onboarding_voice_policy).toEqual(expected.voicePolicy.payload);
-      }
-    });
-
     it('approve vs approve: exactly one proposal pair, both callers get the same ids, one audit row', async () => {
       const d = await seedDraft();
-      const { first, second } = await approveFirstThen(d.version, (tx2) =>
-        tx2.run(() => approveDraft(deps, tenant.tenantId, actor(), { expectedVersion: d.version })),
+      const { first, second } = await raceFirstThen(
+        pool,
+        tenant.tenantId,
+        () => approveDraft(deps, tenant.tenantId, actor(), { expectedVersion: d.version }),
+        () => approveDraft(deps, tenant.tenantId, actor(), { expectedVersion: d.version }),
       );
       expect(first.approvedNow).toBe(true);
       expect(second.status).toBe('fulfilled');
@@ -294,8 +123,11 @@ describe('onboarding approve concurrency (real DB)', () => {
 
     it('approve vs approve with a stale expectedVersion: the loser gets DraftVersionConflictError, not the winner\'s ids', async () => {
       const d = await seedDraft();
-      const { first, second } = await approveFirstThen(d.version, (tx2) =>
-        tx2.run(() => approveDraft(deps, tenant.tenantId, actor(), { expectedVersion: d.version - 1 })),
+      const { first, second } = await raceFirstThen(
+        pool,
+        tenant.tenantId,
+        () => approveDraft(deps, tenant.tenantId, actor(), { expectedVersion: d.version }),
+        () => approveDraft(deps, tenant.tenantId, actor(), { expectedVersion: d.version - 1 }),
       );
       expect(first.approvedNow).toBe(true);
       expect(second.status).toBe('rejected');
@@ -303,100 +135,6 @@ describe('onboarding approve concurrency (real DB)', () => {
       expect((second as PromiseRejectedResult).reason).toBeInstanceOf(DraftVersionConflictError);
       expect(await proposalCount()).toBe(2);
       expect(await approvedAuditCount()).toBe(1);
-    });
-  });
-
-  /**
-   * Every draft writer takes the row lock first, so the executed payload equals the committed draft.
-   * PUT /choices is raced above; these are the writers added since: the browser timezone and the owner's cell.
-   */
-  describe.each([
-    {
-      name: 'timezone',
-      write: () => draftRepo.setClientTimezone(tenant.tenantId, 'America/Chicago'),
-      applied: (d: OnboardingDraft) => d.clientTimezone === 'America/Chicago',
-      inSettingsPayload: (p: Record<string, unknown>) => p.timezone === 'America/Chicago',
-    },
-    {
-      name: 'owner phone',
-      write: (version: number) => draftRepo.setOwnerPhone(tenant.tenantId, '+12165550142', version),
-      applied: (d: OnboardingDraft) => d.ownerPhone === '+12165550142',
-      inSettingsPayload: (p: Record<string, unknown>) => p.ownerPhone === '+12165550142',
-    },
-  ])('writer vs approve: $name', ({ write, applied, inSettingsPayload }) => {
-    const storedSettings = async (ids: string[]) => {
-      const rows = await pool.query<{ proposal_type: string; payload: Record<string, unknown> }>(
-        'SELECT proposal_type, payload FROM proposals WHERE id = ANY($1::uuid[])',
-        [ids],
-      );
-      return Object.fromEntries(rows.rows.map((r) => [r.proposal_type, r.payload]));
-    };
-
-    it('writer first, approve second (no expectedVersion): the write is IN the stored payload', async () => {
-      const d = await seedDraft();
-      expect(applied(d)).toBe(false);
-      const result = await putFirstThen(d.version, (tx2) => tx2.run(() => approveDraft(deps, tenant.tenantId, actor())), write);
-      expect(result.status).toBe('fulfilled');
-      const committed = (await draftRepo.getForTenant(tenant.tenantId))!;
-      expect(committed.status).toBe('approved');
-      expect(applied(committed)).toBe(true);
-      const stored = await storedSettings(committed.proposalIds);
-      expect(inSettingsPayload(stored.onboarding_tenant_settings)).toBe(true);
-      const expected = buildDraftProposals({ ...committed, status: 'draft' }, tenant.userId);
-      expect(stored.onboarding_tenant_settings).toEqual(expected.tenantSettings.payload);
-      expect(stored.onboarding_voice_policy).toEqual(expected.voicePolicy.payload);
-    });
-
-    it('approve first, writer second: DraftAlreadyApprovedError and the stored payload equals the committed draft (5 fresh tenants)', async () => {
-      for (let i = 0; i < 5; i++) {
-        tenant = await createTestTenant(pool);
-        const d = await seedDraft();
-        const { first, second } = await approveFirstThen(d.version, (tx2) => tx2.run(() => write(d.version)));
-        expect(first.approvedNow).toBe(true);
-        expect(second.status).toBe('rejected');
-        expect((second as PromiseRejectedResult).reason).toBeInstanceOf(DraftAlreadyApprovedError);
-
-        const committed = (await draftRepo.getForTenant(tenant.tenantId))!;
-        expect(applied(committed)).toBe(false);
-        const stored = await storedSettings(committed.proposalIds);
-        expect(inSettingsPayload(stored.onboarding_tenant_settings)).toBe(false);
-        const expected = buildDraftProposals({ ...committed, status: 'draft' }, tenant.userId);
-        expect(stored.onboarding_tenant_settings).toEqual(expected.tenantSettings.payload);
-        expect(await rawDraft().then((r) => r.version)).toBe(d.version + 1);
-      }
-    });
-  });
-
-  describe('writer vs writer', () => {
-    it('owner phone PUT vs choice PUT on the same version: one conflicts, the retry lands, version is up by two and neither field is lost', async () => {
-      const d = await seedDraft();
-      const result = await putFirstThen(
-        d.version,
-        (tx2) => tx2.run(() => draftRepo.stageChoice(tenant.tenantId, 'greeting', { option: 'b' }, d.version)),
-        (v) => draftRepo.setOwnerPhone(tenant.tenantId, '+12165550142', v),
-      );
-      expect(result.status).toBe('rejected');
-      expect((result as PromiseRejectedResult).reason).toBeInstanceOf(DraftVersionConflictError);
-
-      await draftRepo.stageChoice(tenant.tenantId, 'greeting', { option: 'b' }, d.version + 1);
-      const raw = await rawDraft();
-      expect(raw.version).toBe(d.version + 2);
-      expect(raw.choices.greeting).toEqual({ option: 'b' });
-      expect((await draftRepo.getForTenant(tenant.tenantId))!.ownerPhone).toBe('+12165550142');
-    });
-
-    it('timezone write (no version) racing a choice PUT: both land, version is up by two', async () => {
-      const d = await seedDraft();
-      const result = await putFirstThen(
-        d.version,
-        (tx2) => tx2.run(() => draftRepo.setClientTimezone(tenant.tenantId, 'America/Chicago')),
-        (v) => draftRepo.stageChoice(tenant.tenantId, 'greeting', { option: 'b' }, v),
-      );
-      expect(result.status).toBe('fulfilled');
-      const raw = await rawDraft();
-      expect(raw.version).toBe(d.version + 2);
-      expect(raw.choices.greeting).toEqual({ option: 'b' });
-      expect((await draftRepo.getForTenant(tenant.tenantId))!.clientTimezone).toBe('America/Chicago');
     });
   });
 
