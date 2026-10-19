@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import { ChoiceKeySchema, ChoiceWritesSchema, OptionKeySchema } from '../choices/schema';
 import { PriceTierSchema } from '../choices/price-tiers';
+import { NPA_METROS } from '../../compliance/us-geography';
 
 /** A picked option, or a free-speech override that supplies the writes directly. */
 export const StagedChoiceSchema = z.union([
@@ -45,6 +46,22 @@ export const StageChoiceBodySchema = z
 export const SetOwnerPhoneBodySchema = z
   .object({
     ownerPhone: z.string().min(1).max(40),
+    version: z.number().int().positive(),
+  })
+  .strict();
+
+/** The curated metro codes (the keys of NPA_METROS, the same keys regional_price_tiers uses). */
+const METRO_CODES = Object.keys(NPA_METROS) as [string, ...string[]];
+
+/**
+ * Body of PUT /api/onboarding/draft/metro: the owner says the city the shop
+ * was priced for is not theirs. `metro` is one of the curated codes; the name
+ * always comes from the table, never from the client. `version` is the draft
+ * version the Ready screen rendered, required like the other draft PUTs.
+ */
+export const SetMetroBodySchema = z
+  .object({
+    metro: z.enum(METRO_CODES),
     version: z.number().int().positive(),
   })
   .strict();
