@@ -23,6 +23,12 @@ import {
 } from './templates';
 import { DeliveryError } from './notification-errors';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
+import type { AuditRepository } from '../audit/audit';
+import {
+  auditPaymentModeUnavailable,
+  readPaymentCollectionMode,
+  type PaymentCollectionModeView,
+} from '../invoices/payment-collection-mode';
 
 export type SendChannel = 'sms' | 'email' | 'both' | 'auto';
 
@@ -159,6 +165,13 @@ export interface SendResult {
   invoiceId?: string;
   viewUrl: string;
   viewToken: string;
+  /**
+   * S5a-1 (U8) — invoice sends only: the payment policy applied AT SEND
+   * TIME (`pay_link` CTA, `collect_on_site` note, or `unavailable` when the
+   * read failed and the send went out fail-closed with no pay CTA). Routes
+   * record it on their `invoice.sent` audit event.
+   */
+  paymentCollectionMode?: PaymentCollectionModeView;
   channelsSent: Array<{
     channel: 'sms' | 'email';
     recipient: string;
@@ -176,6 +189,12 @@ export interface SendServiceDeps {
   customerRepo: CustomerRepository;
   settingsRepo: SettingsRepository;
   dispatchRepo: DispatchRepository;
+  /**
+   * S5a-1 (U8) — optional only for legacy harnesses: the invoice send audits
+   * `invoice.payment_mode_unavailable` (surface `send`) when the policy read
+   * fails and the message goes out without a pay CTA.
+   */
+  auditRepo?: AuditRepository;
   publicBaseUrl: string;
 }
 
@@ -418,10 +437,31 @@ export class SendService {
       throw new NotFoundError('Customer', job.customerId);
     }
 
-    const { businessName, tenantDefaultLanguage } = await this.resolveBusinessContext(input.tenantId);
+    // S5a-1 (U8) — ONE settings read decides both the business context and
+    // the payment policy the message renders. A read that throws is not an
+    // unset key: the send still goes out (fail OPEN on delivery) but with
+    // the view-only CTA and the in-person note (fail CLOSED on the link),
+    // and the occurrence is audited. It is never read as `pay_link`.
+    const modeRead = await readPaymentCollectionMode(this.deps.settingsRepo, input.tenantId);
+    let paymentCollectionMode: PaymentCollectionModeView;
+    let settingsRow: Awaited<ReturnType<SettingsRepository['findByTenant']>>;
+    if (modeRead.ok) {
+      paymentCollectionMode = modeRead.mode;
+      settingsRow = modeRead.settings;
+    } else {
+      paymentCollectionMode = 'unavailable';
+      settingsRow = null;
+      await auditPaymentModeUnavailable(this.deps.auditRepo, {
+        tenantId: input.tenantId,
+        invoiceId: invoice.id,
+        surface: 'send',
+        error: modeRead.error,
+      });
+    }
+    const businessName = settingsRow?.businessName ?? 'Your service team';
     const language = resolveCustomerLanguage({
       customerPreferredLanguage: customer.preferredLanguage,
-      tenantDefaultLanguage,
+      tenantDefaultLanguage: settingsRow?.defaultLanguage ?? null,
     });
     const viewToken = invoice.viewToken ?? generateViewToken();
     const viewTokenExpiresAt =
@@ -473,6 +513,7 @@ export class SendService {
                   dueDateIso: invoice.dueDate?.toISOString(),
                   customMessage: input.customMessage,
                   language,
+                  paymentCollectionMode,
                 })
               : this.renderInvoiceEmailMessage(target.recipient, {
                   customerName: customer.displayName,
@@ -483,6 +524,7 @@ export class SendService {
                   dueDateIso: invoice.dueDate?.toISOString(),
                   customMessage: input.customMessage,
                   language,
+                  paymentCollectionMode,
                 }),
         })
       )
@@ -529,6 +571,7 @@ export class SendService {
       viewUrl,
       viewToken,
       channelsSent: sent,
+      paymentCollectionMode,
     };
   }
 
