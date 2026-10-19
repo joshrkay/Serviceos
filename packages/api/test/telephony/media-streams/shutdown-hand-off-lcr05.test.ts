@@ -20,14 +20,16 @@
  *   - a Twilio `stop` that lands while the redirect is still in flight does
  *     not stamp an outcome either;
  *   - a hung redirect cannot hold shutdown past the hand-off bound;
+ *   - a call that is ending or being handed off is left to finish;
  *   - the server tracks every live leg and forgets it when it closes.
+ *
+ * runShutdown's own use of the registry (each live leg asked once, inside the
+ * drain window) is pinned behaviourally in test/app/shutdown-hand-off-lcr05.test.ts.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import http from 'http';
 import { AddressInfo } from 'net';
-import { readFileSync } from 'fs';
-import { resolve } from 'path';
 
 vi.mock('../../../src/analytics/posthog', () => ({
   recordVoiceError: () => {},
@@ -442,29 +444,5 @@ describe('LCR-05 — attachMediaStreamServer tracks live legs for the shutdown h
       await new Promise((r) => { setTimeout(r, 10); });
     }
     expect(liveCalls.size()).toBe(0);
-  });
-});
-
-describe('LCR-05 — runShutdown hands live realtime calls off before it drains (source-level)', () => {
-  // createApp() keeps the registry in its closure (no seam to inject a live
-  // leg), so — like the WS15 drain pins in test/app/graceful-shutdown.test.ts —
-  // the wiring is pinned on the source; the behaviour is pinned above.
-  const appSrc = readFileSync(resolve(__dirname, '../../../src/app.ts'), 'utf8');
-  const shutdown = appSrc.slice(appSrc.indexOf('const runShutdown = async'));
-
-  it('the hand-off runs inside the drain window, before the drain loop and the teardown', () => {
-    const deadline = shutdown.indexOf('const drainDeadline = ');
-    const handOff = shutdown.indexOf('liveRealtimeCalls.handOffAll(');
-    const loop = shutdown.indexOf('while (voiceSessionStore.liveCount() > 0');
-    const teardown = shutdown.indexOf('voiceSessionStore.dispose()');
-    expect(deadline).toBeGreaterThan(-1);
-    expect(handOff).toBeGreaterThan(deadline);
-    expect(loop).toBeGreaterThan(handOff);
-    expect(teardown).toBeGreaterThan(loop);
-  });
-
-  it('the same registry is the one the stream server fills', () => {
-    expect(appSrc).toMatch(/const liveRealtimeCalls = createLiveRealtimeCalls\(\)/);
-    expect(appSrc).toMatch(/attachMediaStreamServer\(\s*server,\s*\{[\s\S]*?liveCalls: liveRealtimeCalls,/);
   });
 });
