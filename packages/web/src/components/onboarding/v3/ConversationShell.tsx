@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { useAuth, useUser } from '@clerk/clerk-react';
-import type { CreateOnboardingDraftBody, OnboardingCoreChoiceKey, StagedOnboardingChoice } from '@ai-service-os/shared';
+import type { CreateOnboardingDraftBody, OnboardingCoreChoiceKey, OnboardingMetroCode, StagedOnboardingChoice } from '@ai-service-os/shared';
 import { useOnboardingDraft } from '../../../hooks/useOnboardingDraft';
 import { useOnboardingStatus } from '../../../hooks/useOnboardingStatus';
+import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
 import { UNDO_WINDOW_MS } from '../../../hooks/useUndoableApproval';
 import { trackFunnel, type AnalyticsEvent } from '../../../lib/analytics';
 import { isExplicitRerun } from '../../../utils/onboarding-rerun';
@@ -16,7 +17,16 @@ import { READBACK_PROGRESS, READY_PROGRESS, highestSeen, minutesLeft, turnProgre
 import { ReadbackCard } from './ReadbackCard';
 import { ReadyScreen } from './ReadyScreen';
 import { SpeakerLine, RivetHeading, TurnFrame } from './TurnFrame';
-import { answeredCount, coreTurns, landingTarget, makeItMineTarget, nextUnanswered, type CoreTurn, type TurnTarget } from './turns';
+import {
+  answeredCount,
+  coreTurns,
+  landingTarget,
+  makeItMineTarget,
+  nextUnanswered,
+  spokenLines,
+  type CoreTurn,
+  type TurnTarget,
+} from './turns';
 import { typedKind } from './typed-answer';
 
 type Screen = 'loading' | 'problem' | 'answer_as' | 'ready' | 'turn' | 'readback' | 'saved';
@@ -49,7 +59,9 @@ const placeFor = (target: TurnTarget): Place => (target.screen === 'turn' ? { sc
  * finished shop, the owner confirms it (or changes it), and the one tap on
  * "That's right" saves; the trial, the number and the test call follow in the
  * same frame (AfterApproval). Only an explicit re-run of setup opens the
- * sidebar shell.
+ * sidebar shell. Rivet speaks each screen's line in the tenant's voice
+ * (useRivetVoice): the taps that start the conversation unlock the audio, and
+ * the next turn's lines are fetched while the current one plays.
  */
 export function ConversationShell() {
   const [params] = useSearchParams();
@@ -66,18 +78,22 @@ function Conversation() {
   // What the owner last sent from the form. The form opens on it again whenever they come back to it
   // (the API refused the cell, or they chose to change their answers), so nothing typed is ever lost.
   const [answers, setAnswers] = useState<AnswerAsInput | null>(null);
-  const { draft, loading, error, cellProblem, notice, approving, stage, approve, reload } = useOnboardingDraft(createInput);
+  const { draft, loading, error, cellProblem, notice, approving, stage, changeMetro, approve, reload } = useOnboardingDraft(createInput);
   // The owner's own navigation; null until they move, then the draft decides where a returning owner opens.
   const [nav, setNav] = useState<Place | null>(null);
-  // What the owner last tried to save: the turn they answered, or "That's right". The hook's one error and
-  // notice belong to that screen only, so a failed answer never shows up later on the read-back, or the reverse.
-  const [attempt, setAttempt] = useState<OnboardingCoreChoiceKey | 'approve' | null>(null);
+  // What the owner last tried to save: the turn they answered, the city on Ready, or "That's right". The hook's
+  // one error and notice belong to that screen only, so a failed answer never shows up later on the read-back,
+  // or the reverse. A refused city change re-reads the draft, which may land on a turn instead of Ready: its
+  // notice goes wherever the owner lands, until they move on.
+  const [attempt, setAttempt] = useState<OnboardingCoreChoiceKey | 'approve' | 'metro' | null>(null);
   const [staging, setStaging] = useState(false);
+  const [changingMetro, setChangingMetro] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const tenantId = status.data?.tenantId ?? draft?.tenantId ?? null;
   const isComplete = status.data?.isComplete === true;
   const funnelContext = { tenantId, userId };
+  const voice = useRivetVoice({ funnel: funnelContext });
 
   // Once the shop is saved, the hand-off home belongs to AfterApproval (it can wait for one last tap).
   const savedShop = draft?.status === 'approved';
@@ -120,6 +136,25 @@ function Conversation() {
     trackFunnel('v3_turn_viewed', { tenantId, userId }, { choice_key: turnKey });
   }, [turnKey, tenantId, userId]);
 
+  // One turn ahead and no further: on Ready the first turn to answer, on a turn the next unanswered one.
+  const aheadKey =
+    !draft || editing
+      ? null
+      : screen === 'ready'
+        ? (() => {
+            const target = makeItMineTarget(draft);
+            return target.screen === 'turn' ? target.key : null;
+          })()
+        : turnKey
+          ? nextUnanswered(draft, turnKey)
+          : null;
+  const aheadTurn = aheadKey ? turns.find((t) => t.settingKey === aheadKey) : undefined;
+  const aheadLines = aheadTurn ? spokenLines(aheadTurn).join('\n') : '';
+  const { prefetch } = voice;
+  useEffect(() => {
+    if (aheadLines) prefetch(aheadLines.split('\n'));
+  }, [aheadLines, prefetch]);
+
   const highestProgress = useRef(0);
 
   const goTo = (next: Place) => {
@@ -129,12 +164,21 @@ function Conversation() {
 
   const startDraft = (input: AnswerAsInput) => {
     const ownerFirstName = user?.firstName?.trim().slice(0, 60);
+    // The submit is a tap: unlock the audio, so Rivet can say the opener when the shop is ready.
+    voice.unlock('start');
     setAnswers(input);
     setCreateInput({ ...input, ...(ownerFirstName ? { ownerFirstName } : {}) });
   };
 
   const makeItMine = () => {
+    // Inside the tap, before anything is awaited: iOS lets the element play later only if it played here.
+    voice.unlock('make_it_mine');
     if (draft) goTo(placeFor(makeItMineTarget(draft)));
+  };
+
+  const keepAsIs = () => {
+    voice.unlock('keep_as_is');
+    goTo({ screen: 'readback' });
   };
 
   const keepTheRest = () => {
@@ -166,6 +210,18 @@ function Conversation() {
     goTo(next ? { screen: 'turn', key: next, editing: false } : { screen: 'readback' });
   };
 
+  /** "Not Cleveland?": the server re-prices the whole shop for the city; Ready then shows the new one. */
+  const changeCity = async (metro: OnboardingMetroCode) => {
+    if (!draft || changingMetro) return;
+    const from = draft.metroCode;
+    setChangingMetro(true);
+    setAttempt('metro');
+    const changed = await changeMetro(metro).finally(() => setChangingMetro(false));
+    if (!changed) return;
+    setAttempt(null);
+    trackFunnel('v3_metro_changed', funnelContext, { from, to: changed.metroCode, shows_city: changed.assembled.showsCity });
+  };
+
   const approveReadback = async () => {
     setAttempt('approve');
     const res = await approve();
@@ -185,13 +241,15 @@ function Conversation() {
   // Past "That's right": the trial, the number and the test call, in the same frame.
   if (screen === 'saved') {
     return (
-      <AfterApproval
-        status={status}
-        saving={saving}
-        changeCount={draft?.proposalIds.length ?? 0}
-        packId={draft?.packId ?? null}
-        userId={userId}
-      />
+      <RivetVoiceContext.Provider value={voice}>
+        <AfterApproval
+          status={status}
+          saving={saving}
+          changeCount={draft?.proposalIds.length ?? 0}
+          packId={draft?.packId ?? null}
+          userId={userId}
+        />
+      </RivetVoiceContext.Provider>
     );
   }
   if (isComplete) return null;
@@ -204,7 +262,7 @@ function Conversation() {
       ? { ...(editing ? { label: 'Back', onSelect: () => goTo({ screen: 'readback' }) } : { label: 'Keep the rest as is', onSelect: keepTheRest }), busy: staging }
       : undefined;
 
-  return (
+  const body = (
     <TurnFrame minutesLeft={frame.minutesLeft} progress={highestProgress.current} statusLabel={frame.statusLabel} escape={escape}>
       {screen === 'loading' && (
         <div className="flex flex-1 items-center justify-center" role="status" aria-label="Getting your shop ready">
@@ -236,7 +294,16 @@ function Conversation() {
       )}
       {screen === 'answer_as' && <AnswerAsScreen onSubmit={startDraft} initial={answers ?? undefined} cellProblem={cellProblem} />}
       {screen === 'ready' && draft && (
-        <ReadyScreen draft={draft} onMakeItMine={makeItMine} onKeepAsIs={() => goTo({ screen: 'readback' })} />
+        <ReadyScreen draft={draft} onMakeItMine={makeItMine} onKeepAsIs={keepAsIs} />
+        <ReadyScreen
+          draft={draft}
+          onMakeItMine={makeItMine}
+          onKeepAsIs={() => goTo({ screen: 'readback' })}
+          onChangeMetro={(metro) => void changeCity(metro)}
+          changingMetro={changingMetro}
+          error={attempt === 'metro' ? error : null}
+          notice={attempt === 'metro' ? notice : null}
+        />
       )}
       {screen === 'turn' && draft && currentTurn && (
         <OptionPairTurn
@@ -246,7 +313,7 @@ function Conversation() {
           staged={draft.choices[currentTurn.settingKey] ?? (editing ? { option: currentTurn.mostShops } : undefined)}
           busy={staging}
           error={attempt === currentTurn.settingKey ? error : null}
-          notice={attempt === currentTurn.settingKey ? notice : null}
+          notice={attempt === currentTurn.settingKey || attempt === 'metro' ? notice : null}
           editing={editing}
           onPick={(option) => void answer(currentTurn, { option })}
           onTypeInstead={typedKind(currentTurn.settingKey) ? (override) => void answer(currentTurn, { override }) : undefined}
@@ -264,6 +331,8 @@ function Conversation() {
       )}
     </TurnFrame>
   );
+  // Every screen's SpeakerLine shows when Rivet is speaking, and each screen says its own line.
+  return <RivetVoiceContext.Provider value={voice}>{body}</RivetVoiceContext.Provider>;
 }
 
 /** The route guard sends a removed teammate here; Rivet tells them what happened and offers the one way out. */

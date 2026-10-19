@@ -55,6 +55,7 @@ export type AnalyticsEvent =
   // "Pick, don't build" onboarding (components/onboarding/v3). Each fires once
   // per mount via trackFunnel(); see FUNNEL.md "v3 (pick, don't build)".
   | 'v3_ready_viewed'
+  | 'v3_metro_changed'
   | 'v3_turn_viewed'
   | 'v3_choice_made'
   | 'v3_keep_rest'
@@ -66,6 +67,8 @@ export type AnalyticsEvent =
   | 'v3_number_viewed'
   | 'v3_number_ready'
   | 'v3_test_call_viewed'
+  | 'v3_first_heard'
+  | 'v3_tts_fallback'
   // In-app intent/view events (U6). Things the server-side audit stream can't
   // see because there's no row mutation — gestures, not state changes. IDs /
   // enums / counts / bools only, never message or query text.

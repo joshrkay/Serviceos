@@ -1,4 +1,6 @@
 import { forwardRef, type ReactNode } from 'react';
+import { Volume2 } from 'lucide-react';
+import { useRivetSpeaking } from '../../../hooks/useRivetVoice';
 import { cn } from '../../ui/utils';
 
 export interface TurnFrameProps {
@@ -76,12 +78,25 @@ export function TurnFrame({ minutesLeft, statusLabel, progress, escape, children
   );
 }
 
-/** Blue dot and "Rivet": who is speaking. */
+/**
+ * Blue dot and "Rivet": who is speaking. While Rivet's line is playing, a small
+ * sound mark and the word "Speaking" follow, in a polite live region so a
+ * screen reader hears it too (never the mark alone). Not a control.
+ */
 export function SpeakerLine() {
+  const speaking = useRivetSpeaking();
   return (
-    <div className="mt-7 flex items-center gap-2">
+    <div className="mt-7 flex min-w-0 flex-wrap items-center gap-2">
       <span aria-hidden="true" className="inline-block size-2.5 rounded-full bg-primary" />
       <span className="text-sm font-semibold text-primary">Rivet</span>
+      <span aria-live="polite" className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+        {speaking ? (
+          <>
+            <Volume2 aria-hidden="true" size={14} className="text-primary" />
+            <span>Speaking</span>
+          </>
+        ) : null}
+      </span>
     </div>
   );
 }

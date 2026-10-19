@@ -4,6 +4,7 @@
  *   POST /api/onboarding/draft                       -> { draft, created }
  *   GET  /api/onboarding/draft                       -> { draft }
  *   PUT  /api/onboarding/draft/choices/:settingKey   -> { draft }
+ *   PUT  /api/onboarding/draft/metro                 -> { draft }
  *   POST /api/onboarding/draft/approve               -> { draft, proposalIds, approvedNow }
  *   POST /api/onboarding/draft/retry                 -> { draft, retriedProposalIds }
  *
@@ -189,6 +190,77 @@ export const StageOnboardingChoiceBodySchema = z
   })
   .strict();
 export type StageOnboardingChoiceBody = z.infer<typeof StageOnboardingChoiceBodySchema>;
+
+/**
+ * The curated metros a shop can be priced for: the API's NPA_METROS table
+ * (packages/api/src/compliance/us-geography.ts), code and name, in its order.
+ * "Not Cleveland?" offers this list; PUT /draft/metro accepts only these codes.
+ * Pinned equal to the API table by wire-contract.test.ts.
+ */
+export const ONBOARDING_METROS = [
+  { code: 'NYC', name: 'New York' },
+  { code: 'LAX', name: 'Los Angeles' },
+  { code: 'CHI', name: 'Chicago' },
+  { code: 'DFW', name: 'Dallas-Fort Worth' },
+  { code: 'HOU', name: 'Houston' },
+  { code: 'DC', name: 'Washington' },
+  { code: 'MIA', name: 'Miami' },
+  { code: 'PHL', name: 'Philadelphia' },
+  { code: 'ATL', name: 'Atlanta' },
+  { code: 'PHX', name: 'Phoenix' },
+  { code: 'BOS', name: 'Boston' },
+  { code: 'SFO', name: 'San Francisco Bay Area' },
+  { code: 'RIV', name: 'Inland Empire' },
+  { code: 'DET', name: 'Detroit' },
+  { code: 'SEA', name: 'Seattle' },
+  { code: 'MSP', name: 'Minneapolis-St. Paul' },
+  { code: 'SAN', name: 'San Diego' },
+  { code: 'TPA', name: 'Tampa Bay' },
+  { code: 'DEN', name: 'Denver' },
+  { code: 'BAL', name: 'Baltimore' },
+  { code: 'STL', name: 'St. Louis' },
+  { code: 'ORL', name: 'Orlando' },
+  { code: 'CLT', name: 'Charlotte' },
+  { code: 'SAT', name: 'San Antonio' },
+  { code: 'PDX', name: 'Portland' },
+  { code: 'SAC', name: 'Sacramento' },
+  { code: 'PIT', name: 'Pittsburgh' },
+  { code: 'LAS', name: 'Las Vegas' },
+  { code: 'AUS', name: 'Austin' },
+  { code: 'CIN', name: 'Cincinnati' },
+  { code: 'KC', name: 'Kansas City' },
+  { code: 'CMH', name: 'Columbus' },
+  { code: 'IND', name: 'Indianapolis' },
+  { code: 'CLE', name: 'Cleveland' },
+  { code: 'BNA', name: 'Nashville' },
+  { code: 'SLC', name: 'Salt Lake City' },
+  { code: 'MKE', name: 'Milwaukee' },
+  { code: 'JAX', name: 'Jacksonville' },
+  { code: 'OKC', name: 'Oklahoma City' },
+  { code: 'RDU', name: 'Raleigh-Durham' },
+  { code: 'MEM', name: 'Memphis' },
+  { code: 'RIC', name: 'Richmond' },
+  { code: 'SDF', name: 'Louisville' },
+  { code: 'MSY', name: 'New Orleans' },
+  { code: 'BUF', name: 'Buffalo' },
+] as const;
+export type OnboardingMetro = (typeof ONBOARDING_METROS)[number];
+export type OnboardingMetroCode = OnboardingMetro['code'];
+
+const ONBOARDING_METRO_CODES = ONBOARDING_METROS.map((m) => m.code) as [OnboardingMetroCode, ...OnboardingMetroCode[]];
+
+/**
+ * Body of PUT /api/onboarding/draft/metro: re-price a draft with nothing staged
+ * for another curated metro. `version` is the draft version the Ready screen
+ * rendered. The API answers 409 DRAFT_METRO_LOCKED once any choice is staged.
+ */
+export const SetOnboardingMetroBodySchema = z
+  .object({
+    metro: z.enum(ONBOARDING_METRO_CODES),
+    version: z.number().int().positive(),
+  })
+  .strict();
+export type SetOnboardingMetroBody = z.infer<typeof SetOnboardingMetroBodySchema>;
 
 /** Response of GET and PUT. */
 export const OnboardingDraftResponseSchema = z.object({ draft: OnboardingDraftSchema }).strict();

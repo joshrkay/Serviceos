@@ -7923,6 +7923,73 @@ export const MIGRATIONS = {
     END
     $demo_revoke$;
   `,
+
+  // PRIV-3 — a caller recited a card number on this recording. The stored
+  // transcript only ever carries the `[card number]` marker
+  // (callerTranscriptText / sanitizeTranscript), but the audio still holds
+  // the digits. `pci_detected` is set by the recording webhook's transcript
+  // hook (or the transcription worker for a voicemail) when the marker is
+  // seen; the retention sweep then deletes the stored audio promptly, long
+  // before the tenant's horizon, and stamps `audio_purged_at`. The row, the
+  // scrubbed transcript and the horizon tombstone (`purged_at`) are kept.
+  // The partial index serves the sweep's due-query. RLS rides the existing
+  // voice_recordings policy (migration 007). Additive and idempotent.
+  '314_voice_recordings_card_number_detected': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS pci_detected BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS audio_purged_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_card_number_audio_due
+      ON voice_recordings (created_at)
+      WHERE pci_detected AND audio_purged_at IS NULL AND purged_at IS NULL AND legal_hold = false;
+  `,
+
+  // PRIV-2 — the Twilio-hosted copy of each inbound recording. The recording
+  // webhook and the voicemail route delete it once our storage and our row
+  // hold the audio, stamping `twilio_deleted_at`; the retention sweep retries
+  // every copy not yet confirmed gone (legacy rows, failed deletes) and stamps
+  // `twilio_delete_attempted_at` on a failure so it backs off instead of
+  // stalling the drain. `recording_url` is kept (the idempotency key in
+  // recordInboundCall). The partial index serves the sweep's retry query.
+  // RLS rides the existing voice_recordings policy (migration 007). Additive
+  // and idempotent.
+  '315_voice_recordings_twilio_copy_deleted': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS twilio_deleted_at TIMESTAMPTZ;
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS twilio_delete_attempted_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_twilio_copy_due
+      ON voice_recordings (twilio_delete_attempted_at NULLS FIRST, created_at)
+      WHERE twilio_deleted_at IS NULL AND recording_url IS NOT NULL AND legal_hold = false;
+  `,
+
+  // PRIV-1 — the retention sweep strips the prompt and reply content from an
+  // ai_runs row once it is past the tenant's recording_retention_days, and
+  // stamps `content_purged_at`. The row is kept (proposals, supervisor_reviews,
+  // document_revisions and estimate_provenance FK it; the spend report reads
+  // its model, tokens and cost). The partial index keeps the sweep's per-tenant
+  // (tenant_id, created_at) probe off the rows already purged, so its cost does
+  // not grow with history. RLS rides the existing ai_runs policy (migration
+  // 008). Additive and idempotent; nullable with no default, so the ALTER is
+  // metadata-only.
+  '316_ai_runs_content_purged_at': `
+    ALTER TABLE ai_runs
+      ADD COLUMN IF NOT EXISTS content_purged_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_ai_runs_content_purge_due
+      ON ai_runs (tenant_id, created_at)
+      WHERE content_purged_at IS NULL;
+  `,
+
+  // PRIV-1 (review round 2) — the ai_runs content purge honours legal hold:
+  // a run within a day of a same-tenant held recording is kept. This partial
+  // index serves that probe (tenant, time window over the few held rows), so
+  // the per-run NOT EXISTS stays an index lookup. RLS rides the existing
+  // voice_recordings policy (migration 007). Additive and idempotent.
+  '321_voice_recordings_legal_hold_index': `
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_legal_hold
+      ON voice_recordings (tenant_id, created_at)
+      WHERE legal_hold;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
