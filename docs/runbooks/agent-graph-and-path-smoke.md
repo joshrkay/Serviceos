@@ -99,6 +99,19 @@ npm run agent:path-smoke --workspace=packages/api -- --gate
   per PR (the old same-named skip-pass shim workflow is gone: on a mixed PR it
   reported green within seconds while the real run was still going). The
   `if:` fails closed: if `changes` fails or cannot diff, the real evals run.
+- **Drafting golden set (OBS-3):** the same job runs
+  `packages/api/scripts/drafting-golden-eval.ts --live --gate --baseline
+  packages/voice-eval/baselines/drafting-live.json` — 7 cases
+  (`src/ai/voice-quality/drafting-golden/cases.ts`) through the production
+  task code: `draft_estimate` against a fixed price book, brand-voice
+  extraction, and the Google-review public reply (one praise review, one
+  injection-shaped review). Safety checks fail the step on any case: an
+  uncatalogued price that could auto-approve, a catalog line off its catalog
+  price, a reply carrying a link or discount. Quality checks (named the
+  price-book work, mapped the brand-voice fields, signed the reply) feed the
+  baseline metrics. The baseline ships as a **placeholder**, which fails closed
+  (exit 4): record it once with the file's `recordCommand` (about 10 cents)
+  and commit it before making `path-smoke` required.
 - **Baseline drift:** the live steps exit 1 when the golden set changed or a
   metric fell past tolerance. Re-record with the baseline file's
   `recordCommand` (or `voice-eval-live.yml` with `record_baseline=true`) in

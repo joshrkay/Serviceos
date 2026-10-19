@@ -8,9 +8,12 @@ import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { loadIntentTestSplit, loadSlotTranscripts } from '../../../voice-eval/corpus';
 import { checkCostCap, sampleDeterministic } from '../../../voice-eval/live-support';
+import { readBaseline } from '../../../voice-eval/baseline';
+import { projectDraftingGoldenCents } from '../../src/ai/voice-quality/drafting-golden';
 import {
   MAX_CAP_OVER_PROJECTION,
   effectiveCapCents,
+  jobEnv,
   maxUtterances,
   stepBlock,
   workflowModel,
@@ -75,6 +78,7 @@ describe('agent-path-smoke.yml — real-LLM path smoke workflow', () => {
       'packages/api/src/digest/weekly-feedback.ts',
       'packages/api/src/config/ai-routing.ts',
       'packages/voice-eval/**',
+      'packages/api/scripts/drafting-golden-eval.ts',
       '.github/workflows/agent-path-smoke.yml',
     ]) {
       expect(paths, `paths must include ${required}`).toContain(required);
@@ -363,6 +367,51 @@ describe('agent-path-smoke.yml — live intent + slot evals against the recorded
     const msg = `cap ${cap}c vs projected ${cost.projectedCents?.toFixed(1)}c`;
     expect(cost.withinCap, msg).toBe(true);
     expect(cap, msg).toBeLessThanOrEqual(cost.projectedCents! * MAX_CAP_OVER_PROJECTION);
+  });
+});
+
+// OBS-3 review round 1 — the classifier evals said nothing about the
+// drafting prompts: a change to draft_estimate, brand voice or the review
+// reply prompt merged with no real-model result. The drafting golden set runs
+// in the same job, through the production task code, gated on its safety
+// checks and the recorded live baseline.
+describe('agent-path-smoke.yml — live drafting golden set (draft_estimate, brand voice, review reply)', () => {
+  const read = (): string => fs.readFileSync(workflowPath, 'utf-8');
+  const script = 'drafting-golden-eval.ts --live';
+
+  it('runs with --live --gate against the committed drafting-live.json baseline', () => {
+    const step = stepBlock(read(), script);
+    expect(step).toMatch(
+      /npx tsx packages\/api\/scripts\/drafting-golden-eval\.ts --live --gate --baseline packages\/voice-eval\/baselines\/drafting-live\.json/,
+    );
+    expect(step).not.toMatch(/--record-baseline/);
+  });
+
+  it('runs (and reports) even when an earlier eval failed, but only with deps and a key', () => {
+    const step = stepBlock(read(), script);
+    expect(step).toContain(
+      "if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.key.outcome == 'success' }}",
+    );
+  });
+
+  it('its cost cap fits the projection at the costliest model the workflow configures', () => {
+    const src = read();
+    const step = stepBlock(src, script);
+    const cap = effectiveCapCents(src, step);
+    const projected = projectDraftingGoldenCents(jobEnv(src).AI_COMPLEX_MODEL)!;
+    const msg = `cap ${cap}c vs projected ${projected.toFixed(1)}c`;
+    expect(projected, msg).toBeGreaterThan(0);
+    expect(projected, msg).toBeLessThanOrEqual(cap);
+    expect(cap, msg).toBeLessThanOrEqual(projected * MAX_CAP_OVER_PROJECTION);
+  });
+
+  it('the committed baseline is a live drafting baseline whose record command uses the same runner', () => {
+    const b = readBaseline(path.join(repoRoot, 'packages/voice-eval/baselines/drafting-live.json'));
+    expect(b.eval).toBe('drafting');
+    expect(b.mode).toBe('live');
+    expect(b.recordCommand).toMatch(
+      /drafting-golden-eval\.ts --live --record-baseline packages\/voice-eval\/baselines\/drafting-live\.json/,
+    );
   });
 });
 

@@ -24,8 +24,9 @@
 # skip-pass shim workflow) whose instant green could race a red real run.
 #
 # Cost: 11 classify calls capped at AGENT_PATH_SMOKE_COST_CAP_CENTS (default
-# $1), plus the two sampled evals, each capped per step by
-# VOICE_EVAL_COST_CAP_CENTS (about $1 per keyed run in total). Missing
+# $1), plus the two sampled evals and the 7-call drafting golden set, each
+# capped per step by VOICE_EVAL_COST_CAP_CENTS (about $1 per keyed run in
+# total). Missing
 # credentials fail as an explicit unmet prerequisite; they are never reported
 # as green execution evidence.
 name: Agent Path Smoke
@@ -116,6 +117,23 @@ jobs:
           set -o pipefail
           npx tsx packages/voice-eval/run-slot-eval.ts --live --gate --max-utterances 100 --baseline packages/voice-eval/baselines/slot-live.json \
             | tee -a agent-path-smoke-console.txt
+      # OBS-3 review round 1 — the steps above only exercise the classifier.
+      # The drafting golden set runs draft_estimate (catalog-grounded),
+      # brand voice and the Google-review reply through the production task
+      # code: --gate fails on any safety check (an uncatalogued price that
+      # could auto-approve, a catalog line off its catalog price, a reply
+      # carrying a link or discount), and --baseline compares the quality
+      # metrics with the recorded live baseline (a placeholder fails closed,
+      # exit 4 — record it with the baseline file's recordCommand).
+      - name: Live drafting golden set vs recorded live baseline (gated)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.key.outcome == 'success' }}
+        env:
+          VOICE_EVAL_COST_CAP_CENTS: '25'     # projection ~9.5c for 7 calls priced at gpt-4o
+          DRAFTING_GOLDEN_OUT: drafting-golden-report.json
+        run: |
+          set -o pipefail
+          npx tsx packages/api/scripts/drafting-golden-eval.ts --live --gate --baseline packages/voice-eval/baselines/drafting-live.json \
+            | tee -a agent-path-smoke-console.txt
       - name: Upload path-smoke report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -124,6 +142,7 @@ jobs:
           path: |
             agent-path-smoke-report.json
             agent-path-smoke-console.txt
+            drafting-golden-report.json
           retention-days: 90
           if-no-files-found: ignore
 
@@ -171,6 +190,7 @@ jobs:
             packages/api/src/config/ai-routing.ts
             packages/api/scripts/agent-path-smoke.ts
             packages/api/scripts/agent-graph-coverage.ts
+            packages/api/scripts/drafting-golden-eval.ts
             packages/voice-eval/**
             .github/workflows/agent-path-smoke.yml
         run: |
