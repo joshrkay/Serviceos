@@ -3,6 +3,8 @@
 // Master credentials (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN) are used only here
 // to create subaccounts — the runtime request path uses per-tenant creds.
 
+import { PROVISIONING_FAILURE_MESSAGES } from '../../onboarding/provisioning-failure';
+
 const TWILIO_BASE = 'https://api.twilio.com/2010-04-01';
 
 // US state → preferred area code for number search
@@ -45,7 +47,7 @@ async function twilioPost<T>(
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Twilio POST ${url} → ${res.status}: ${text}`);
+    throw new Error(PROVISIONING_FAILURE_MESSAGES.twilioHttp('POST', url, res.status, text));
   }
   return res.json() as Promise<T>;
 }
@@ -64,7 +66,7 @@ async function twilioGet<T>(
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Twilio GET ${url} → ${res.status}: ${text}`);
+    throw new Error(PROVISIONING_FAILURE_MESSAGES.twilioHttp('GET', url, res.status, text));
   }
   return res.json() as Promise<T>;
 }
@@ -85,7 +87,7 @@ async function twilioDelete(
   // 404 → already released; treat as success so deprovision is idempotent.
   if (!res.ok && res.status !== 404) {
     const text = await res.text();
-    throw new Error(`Twilio DELETE ${url} → ${res.status}: ${text}`);
+    throw new Error(PROVISIONING_FAILURE_MESSAGES.twilioHttp('DELETE', url, res.status, text));
   }
 }
 
@@ -162,12 +164,46 @@ export interface PurchasedNumber {
   phoneNumber: string;
 }
 
+/**
+ * LCR-04 — the path the API serves fixed voicemail TwiML from with no
+ * database, no tenant lookup and no signature check (routes/telephony.ts).
+ * Twilio fetches a number's `VoiceFallbackUrl` when the primary voice webhook
+ * fails (a 5xx, a timeout, a credential-lookup 500 during a database
+ * brownout); it does NOT retry the primary on a 5xx. Without the fallback the
+ * caller hears Twilio's generic error and the call drops.
+ */
+export const VOICE_FALLBACK_PATH = '/api/telephony/voice/fallback';
+
+/** The webhook URLs a purchased number is configured with. */
+export interface PhoneNumberWebhooks {
+  /** Primary voice webhook — TwiML for every inbound call. */
+  voiceUrl: string;
+  /** LCR-04 — fetched (POST) when `voiceUrl` fails; static voicemail TwiML. */
+  voiceFallbackUrl: string;
+  /** Voice-call lifecycle events for the number. */
+  statusCallbackUrl: string;
+}
+
+/**
+ * The ONE place the number's webhook URLs are derived from the voice base
+ * (the dedicated voice service's public URL when one exists, else the API's),
+ * so no purchase path can forget the fallback. See the URL → base mapping in
+ * workers/provision-twilio.ts.
+ */
+export function buildPhoneNumberWebhooks(voiceBaseUrl: string, tenantId: string): PhoneNumberWebhooks {
+  const base = voiceBaseUrl.replace(/\/+$/, '');
+  return {
+    voiceUrl: `${base}/api/telephony/voice`,
+    voiceFallbackUrl: `${base}${VOICE_FALLBACK_PATH}`,
+    statusCallbackUrl: `${base}/webhooks/twilio/status/${tenantId}`,
+  };
+}
+
 export async function purchasePhoneNumber(
   subaccountSid: string,
   authToken: string,
   region: string | null,
-  voiceUrl: string,
-  statusCallbackUrl: string,
+  webhooks: PhoneNumberWebhooks,
   // When the tradesperson picked a specific number, order exactly that one
   // and skip the search. Twilio rejects the purchase (throws) if the number
   // was taken between the picker listing it and this call.
@@ -189,7 +225,7 @@ export async function purchasePhoneNumber(
     // Fallback: any available US number
     if (!phoneToOrder) phoneToOrder = await firstAvailable();
     if (!phoneToOrder) {
-      throw new Error(`No available US phone numbers found for region ${region ?? 'any'}`);
+      throw new Error(PROVISIONING_FAILURE_MESSAGES.noInventory(region));
     }
   }
 
@@ -199,11 +235,60 @@ export async function purchasePhoneNumber(
     authToken,
     new URLSearchParams({
       PhoneNumber: phoneToOrder,
-      VoiceUrl: voiceUrl,
-      StatusCallback: statusCallbackUrl,
+      VoiceUrl: webhooks.voiceUrl,
+      VoiceFallbackUrl: webhooks.voiceFallbackUrl,
+      VoiceFallbackMethod: 'POST',
+      StatusCallback: webhooks.statusCallbackUrl,
     })
   );
   return { sid: purchased.sid, phoneNumber: purchased.phone_number };
+}
+
+/** A number's current voice webhook configuration, as Twilio holds it. */
+export interface PhoneNumberVoiceConfig {
+  voiceUrl: string | null;
+  voiceFallbackUrl: string | null;
+  voiceFallbackMethod: string | null;
+}
+
+// LCR-04 backfill — read one number's voice URLs so the backfill can skip a
+// number that already carries the fallback (idempotent re-runs).
+export async function getPhoneNumberWebhooks(
+  subaccountSid: string,
+  authToken: string,
+  phoneNumberSid: string
+): Promise<PhoneNumberVoiceConfig> {
+  const result = await twilioGet<{
+    voice_url?: string | null;
+    voice_fallback_url?: string | null;
+    voice_fallback_method?: string | null;
+  }>(
+    `${TWILIO_BASE}/Accounts/${subaccountSid}/IncomingPhoneNumbers/${phoneNumberSid}.json`,
+    subaccountSid,
+    authToken
+  );
+  return {
+    voiceUrl: result.voice_url ?? null,
+    voiceFallbackUrl: result.voice_fallback_url ?? null,
+    voiceFallbackMethod: result.voice_fallback_method ?? null,
+  };
+}
+
+// LCR-04 backfill — set ONLY the fallback on an existing number. VoiceUrl and
+// StatusCallback are deliberately not sent: a backfill must never repoint a
+// live number's primary webhook.
+export async function setPhoneNumberVoiceFallback(
+  subaccountSid: string,
+  authToken: string,
+  phoneNumberSid: string,
+  voiceFallbackUrl: string
+): Promise<void> {
+  await twilioPost(
+    `${TWILIO_BASE}/Accounts/${subaccountSid}/IncomingPhoneNumbers/${phoneNumberSid}.json`,
+    subaccountSid,
+    authToken,
+    new URLSearchParams({ VoiceFallbackUrl: voiceFallbackUrl, VoiceFallbackMethod: 'POST' })
+  );
 }
 
 export async function attachNumberToMessagingService(

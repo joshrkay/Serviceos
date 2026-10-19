@@ -18,6 +18,12 @@ export const en = {
   'sms.invoice.amount': 'Invoice {{number}}: {{total}}',
   'sms.invoice.due': 'Due {{date}}',
   'sms.invoice.cta': 'Pay online: {{url}}',
+  // S5a-1 (U8) — "Collect on the spot": the view-only CTA and the in-person
+  // note replace the pay CTA; also what goes out when the mode cannot be
+  // read (fail closed on the link, open on delivery).
+  'sms.invoice.cta_view': 'See your invoice: {{url}}',
+  'sms.invoice.collect_on_site':
+    '{{business}} collects payment in person. Settle up when the work is done.',
 
   // ── Appointment SMS ──────────────────────────────────────────────────
   'sms.appointment.confirm.line1':
@@ -84,6 +90,11 @@ export const en = {
   'email.invoice.number': 'Invoice number: {{number}}',
   'email.invoice.cta_text': 'Pay online here: {{url}}',
   'email.invoice.button': 'Pay Invoice Online',
+  // S5a-1 (U8) — collect-on-site variants (see the SMS keys above).
+  'email.invoice.cta_view_text': 'See your invoice here: {{url}}',
+  'email.invoice.button_view': 'View Invoice',
+  'email.invoice.collect_on_site':
+    '{{business}} collects payment in person. Settle up when the work is done.',
 
   // ── Transactional email subjects ─────────────────────────────────────
   'email.payment_receipt.subject': 'Payment received — {{business}}',

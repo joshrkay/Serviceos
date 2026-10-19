@@ -16,6 +16,7 @@ interface InvoiceOverrides {
   amountPaidCents?: number;
   amountDueCents?: number;
   payNowUrl?: string | null;
+  collectOnSite?: boolean;
 }
 
 function invoice(overrides: InvoiceOverrides = {}) {
@@ -33,6 +34,7 @@ function invoice(overrides: InvoiceOverrides = {}) {
       overrides.payNowUrl === undefined
         ? 'https://checkout.stripe.com/pay/plink_1'
         : overrides.payNowUrl,
+    collectOnSite: overrides.collectOnSite ?? false,
   };
 }
 
@@ -89,6 +91,66 @@ describe('Portal — PortalInvoiceList (P10-001)', () => {
     await waitFor(() => {
       expect(screen.getByText('$100.00 due')).toBeInTheDocument();
     });
+    expect(screen.queryByRole('link', { name: 'Pay now' })).not.toBeInTheDocument();
+  });
+
+  // S5a-2 (U8) — the business collects in person (or the API could not read
+  // its choice): the API sends payNowUrl: null + collectOnSite: true and the
+  // row says how to pay instead of offering a link.
+  it('collectOnSite: no Pay now link, a "Pay in person" label instead', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({ invoices: [invoice({ payNowUrl: null, collectOnSite: true })] }),
+      ),
+    );
+
+    render(<PortalInvoiceList token="tok-1" />);
+
+    const label = await screen.findByTestId('portal-invoice-pay-in-person');
+    expect(label.textContent).toBe('Pay in person');
+    expect(screen.queryByRole('link', { name: 'Pay now' })).not.toBeInTheDocument();
+    // Never an anchor without an href on this row.
+    expect(document.querySelectorAll('a:not([href])')).toHaveLength(0);
+    expect(screen.getByText('$100.00 due')).toBeInTheDocument();
+  });
+
+  it('collectOnSite on a settled invoice: Paid, and no in-person label', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          invoices: [
+            invoice({
+              status: 'paid',
+              amountPaidCents: 10000,
+              amountDueCents: 0,
+              payNowUrl: null,
+              collectOnSite: true,
+            }),
+          ],
+        }),
+      ),
+    );
+
+    render(<PortalInvoiceList token="tok-1" />);
+
+    await waitFor(() => expect(screen.getByText('Paid')).toBeInTheDocument());
+    expect(screen.queryByTestId('portal-invoice-pay-in-person')).not.toBeInTheDocument();
+  });
+
+  it('a pay-link row with no link yet shows neither the CTA nor the in-person label', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({ invoices: [invoice({ payNowUrl: null, collectOnSite: false })] }),
+      ),
+    );
+
+    render(<PortalInvoiceList token="tok-1" />);
+
+    await waitFor(() => expect(screen.getByText('$100.00 due')).toBeInTheDocument());
+    expect(screen.queryByTestId('portal-invoice-pay-in-person')).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Pay now' })).not.toBeInTheDocument();
   });
 

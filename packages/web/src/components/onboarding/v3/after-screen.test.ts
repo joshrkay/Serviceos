@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { OnboardingDraftExecution, OnboardingStatusResponse, OnboardingStep, OnboardingStepId } from '../../../types/onboarding';
-import { afterScreen, afterStage, phoneNumberOf, stepOf } from './after-screen';
+import { afterControls, afterRecovery, afterScreen, afterStage, latestUndoHint, phoneNumberOf, statusUndoHint, stepOf, type AfterControl, type AfterScreen } from './after-screen';
 
 function status(currentStep: OnboardingStepId | null, steps: OnboardingStep[] = []): OnboardingStatusResponse {
   return { steps, currentStep, isComplete: currentStep === null, voiceAgentLive: false, tenantId: 't', subscriptionStatus: null };
@@ -101,5 +101,79 @@ describe('afterStage', () => {
 
   it('is open once the call was heard', () => {
     expect(afterStage('test_call', false, true)).toBe('open');
+  });
+});
+
+describe('what the owner can do on each screen after approval', () => {
+  // [screen, saving, undoable, recovery, controls offered]
+  const table: Array<[AfterScreen, boolean, boolean, 'reset' | 'settings' | undefined, AfterControl[]]> = [
+    // The saving window: Undo only while the latest hint says the whole set can still be taken back.
+    ['wait', true, true, undefined, ['undo']],
+    ['wait', true, false, undefined, []],
+    ['trial', true, true, undefined, ['undo']],
+    // Failed: Try again always; Start over only while the reset can run.
+    ['save_failed', false, false, 'reset', ['retry', 'start_over', 'step_by_step']],
+    ['save_failed', false, false, 'settings', ['retry', 'step_by_step']],
+    ['save_failed', false, false, undefined, ['retry', 'step_by_step']],
+    // Stopped: never Try again. Start over, or the way to Settings, never both.
+    ['save_stopped', false, false, 'reset', ['start_over', 'step_by_step']],
+    ['save_stopped', false, false, 'settings', ['settings', 'step_by_step']],
+    // An API that predates the hint: only the step-by-step way out, as before.
+    ['save_stopped', false, false, undefined, ['step_by_step']],
+    // Undo is a saving-window control: a stale true hint on any later screen offers nothing.
+    ['wait', false, true, undefined, []],
+    ['save_failed', false, true, 'reset', ['retry', 'start_over', 'step_by_step']],
+  ];
+  for (const [screen, saving, undoable, recovery, controls] of table) {
+    it(`${screen}${saving ? ' while saving' : ''}, undoable ${undoable}, recovery ${recovery ?? 'none'}: ${controls.join(', ') || 'nothing'}`, () => {
+      expect(afterControls(screen, { saving, undoable, recovery })).toEqual(controls);
+    });
+  }
+});
+
+describe('the undo hint the screen holds', () => {
+  const approvedStatus = (version: number, undoable?: boolean): OnboardingStatusResponse => ({
+    ...status('identity'),
+    draft: { status: 'approved', choicesAnswered: 7, version, execution: 'pending', ...(undoable === undefined ? {} : { undoable }) },
+  });
+
+  it('reads a hint only from an approved draft block; an unset one on an approved draft means no Undo', () => {
+    expect(statusUndoHint(null)).toBeNull();
+    expect(statusUndoHint(status('identity'))).toBeNull();
+    expect(statusUndoHint({ ...status('identity'), draft: { status: 'draft', choicesAnswered: 7, version: 3 } })).toBeNull();
+    expect(statusUndoHint(approvedStatus(2, true))).toEqual({ version: 2, undoable: true });
+    expect(statusUndoHint(approvedStatus(2))).toEqual({ version: 2, undoable: false });
+  });
+
+  it('takes the newest: a poll for the same or a later approval replaces it, a poll from before it does not', () => {
+    const afterRetry = { version: 3, undoable: false };
+    expect(latestUndoHint(afterRetry, { version: 3, undoable: true })).toEqual({ version: 3, undoable: true });
+    expect(latestUndoHint(afterRetry, { version: 4, undoable: false })).toEqual({ version: 4, undoable: false });
+    expect(latestUndoHint(afterRetry, { version: 2, undoable: true })).toBe(afterRetry);
+    expect(latestUndoHint(afterRetry, null)).toBe(afterRetry);
+  });
+});
+
+describe('the way out the screen offers for a set that cannot finish as one', () => {
+  const stopped = (version: number, recovery?: 'reset' | 'settings'): OnboardingStatusResponse => ({
+    ...status('identity'),
+    draft: { status: 'approved', choicesAnswered: 7, version, execution: 'stopped', ...(recovery ? { recovery } : {}) },
+  });
+
+  it('follows the status, unless Start over was already refused for this approval because part of it went through', () => {
+    expect(afterRecovery(stopped(2, 'reset'), null)).toBe('reset');
+    expect(afterRecovery(stopped(2, 'settings'), null)).toBe('settings');
+    expect(afterRecovery(stopped(2), null)).toBeUndefined();
+    expect(afterRecovery(null, null)).toBeUndefined();
+    // A refusal for this version is final for it, whatever a cached status still says.
+    expect(afterRecovery(stopped(2, 'reset'), 2)).toBe('settings');
+    // Another window started over and approved again since: that approval is judged afresh.
+    expect(afterRecovery(stopped(4, 'reset'), 2)).toBe('reset');
+  });
+
+  it('holds the wait screen instead of a failed or stopped one while part of the set is being saved', () => {
+    expect(afterScreen(stopped(2, 'reset'), { holdWait: true })).toBe('wait');
+    expect(afterScreen({ ...stopped(2, 'reset'), currentStep: 'billing' }, { holdWait: true })).toBe('trial');
+    expect(afterScreen(stopped(2, 'reset'), { holdWait: false })).toBe('save_stopped');
   });
 });
