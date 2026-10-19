@@ -153,7 +153,11 @@ describe('LCR-03 — Deepgram provider: one final per caller sentence', () => {
 
   it("flushes on Deepgram's empty speech_final endpoint frame", async () => {
     const { session, socket, events } = await openRealSession();
-    socket.send(results('the water heater is leaking', { is_final: true, speech_final: false }));
+    // The sentence arrives as two finalized segments, so only joining them
+    // on the empty endpoint frame yields one turn (a per-segment final would
+    // split it into 'the water heater' and 'is leaking').
+    socket.send(results('the water heater', { is_final: true, speech_final: false }));
+    socket.send(results('is leaking', { is_final: true, speech_final: false }));
     socket.send(results('', { is_final: true, speech_final: true }));
     await drain(socket, events);
 
