@@ -907,3 +907,50 @@ describe('ai_spend_window — the shipped default is reachable at current scale'
     expect(evaluateWindowSpend(loopRows.slice(0, 1), defaults)!.breached).toBe(false);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OBS-4 review round 1 — a per-tenant page may only claim the platform-wide
+// rate is fine when the platform rule actually judged that task and found
+// it under threshold.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('runFailureRateMonitor — per-tenant page states what the platform rule saw', () => {
+  const run = async (getTaskRunCounts: FailureRateMonitorDeps['getTaskRunCounts']) => {
+    const alert = vi.fn().mockResolvedValue(undefined);
+    await runFailureRateMonitor({
+      getTaskRunCounts,
+      getTenantTaskRunCounts: vi
+        .fn()
+        .mockResolvedValue([tenantCounts({ tenantId: TENANT_A, total: 15, completed: 0, failed: 15 })]),
+      getProposalExecutionCounts: vi.fn().mockResolvedValue(healthyProposals),
+      alert,
+      thresholds,
+      logger: noopLogger,
+    });
+    const page = alert.mock.calls.find(([a]) => a.rule === `ai_task_failure_rate:classify_intent:${TENANT_A}`);
+    expect(page).toBeDefined();
+    return page![0] as { summary: string; details: Record<string, string | number> };
+  };
+
+  it('one tenant is ALL of a low-volume task (15/15 failed, under the platform floor): never claims the platform is fine', async () => {
+    const page = await run(
+      vi.fn().mockResolvedValue([counts({ taskType: 'classify_intent', total: 15, completed: 0, failed: 15 })]),
+    );
+    expect(page.summary).not.toMatch(/platform-wide rate for this task is below threshold/);
+    expect(page.summary).toMatch(/platform-wide rate not judged/);
+    expect(page.details.platformRate).toBe('not judged');
+  });
+
+  it('the platform read failed: never claims the platform is fine', async () => {
+    const page = await run(vi.fn().mockRejectedValue(new Error('pg down')));
+    expect(page.summary).not.toMatch(/below threshold/);
+    expect(page.summary).toMatch(/platform-wide rate not judged/);
+  });
+
+  it('the platform rule judged the task and it was under threshold: says so, with the rate', async () => {
+    const page = await run(
+      vi.fn().mockResolvedValue([counts({ taskType: 'classify_intent', total: 75, completed: 60, failed: 15 })]),
+    );
+    expect(page.summary).toMatch(/platform-wide rate for this task is 20\.0%, below threshold/);
+    expect(page.details.platformRate).toBe(0.2);
+  });
+});

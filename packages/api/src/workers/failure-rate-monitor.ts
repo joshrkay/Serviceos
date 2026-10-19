@@ -241,7 +241,9 @@ export function evaluateTaskFailureRate(
 /**
  * Rule 4 (OBS-4) — non-completion rate for ONE tenant's ONE task type. Same
  * arithmetic as rule 1 behind the tenant floor; the rule key carries the
- * tenant so the alertOperator cooldown is per tenant AND task.
+ * tenant so the alertOperator cooldown is per tenant AND task. The summary
+ * says nothing about the platform-wide rate: only the tick knows whether
+ * rule 1 judged this task (see withPlatformContext).
  */
 export function evaluateTenantTaskFailureRate(
   counts: TenantTaskRunCounts,
@@ -261,8 +263,7 @@ export function evaluateTenantTaskFailureRate(
     summary:
       `ai task '${counts.taskType}' non-completion ${(rate * 100).toFixed(1)}% for ONE tenant ` +
       `${counts.tenantId} (${unsuccessful}/${counts.total} runs, ${shape}) over last ` +
-      `${thresholds.windowMin}min (threshold ${(thresholds.rateMax * 100).toFixed(0)}%) — ` +
-      `platform-wide rate for this task is below threshold`,
+      `${thresholds.windowMin}min (threshold ${(thresholds.rateMax * 100).toFixed(0)}%)`,
     details: {
       tenantId: counts.tenantId,
       taskType: counts.taskType,
@@ -274,6 +275,37 @@ export function evaluateTenantTaskFailureRate(
       windowMin: thresholds.windowMin,
     },
     severity: 'critical',
+  };
+}
+
+/**
+ * Says on a per-tenant page what rule 1 saw for the same task. Only an
+ * evaluated, unbreached platform finding may be described as below
+ * threshold; when rule 1 returned nothing (under the platform floor — e.g.
+ * this tenant is the task's only traffic) or its read failed, the platform
+ * rate was never judged and the page must not imply it is healthy (review
+ * round 1). A platform finding that breached never reaches here: its
+ * per-tenant pages are subsumed.
+ */
+function withPlatformContext(
+  tenantFinding: FailureFinding,
+  platformFinding: FailureFinding | undefined,
+): FailureFinding {
+  if (platformFinding && !platformFinding.breached) {
+    return {
+      ...tenantFinding,
+      summary:
+        `${tenantFinding.summary} — platform-wide rate for this task is ` +
+        `${(platformFinding.value * 100).toFixed(1)}%, below threshold`,
+      details: { ...tenantFinding.details, platformRate: platformFinding.value },
+    };
+  }
+  return {
+    ...tenantFinding,
+    summary:
+      `${tenantFinding.summary} — platform-wide rate not judged ` +
+      `(below the platform floor or read failed)`,
+    details: { ...tenantFinding.details, platformRate: 'not judged' },
   };
 }
 
@@ -596,6 +628,11 @@ export async function runFailureRateMonitor(
       .filter((f) => f.breached && isTaskRule(f) && !isTenantRule(f))
       .sort((a, b) => b.value - a.value);
     const platformBreachedTasks = new Set(taskBreaches.map((f) => String(f.details.taskType)));
+    const platformByTask = new Map(
+      findings
+        .filter((f) => isTaskRule(f) && !isTenantRule(f))
+        .map((f) => [String(f.details.taskType), f] as const),
+    );
     const subsumedByPlatform: string[] = [];
     const tenantBreaches = findings
       .filter((f) => f.breached && isTenantRule(f))
@@ -604,6 +641,7 @@ export async function runFailureRateMonitor(
         subsumedByPlatform.push(f.rule);
         return false;
       })
+      .map((f) => withPlatformContext(f, platformByTask.get(String(f.details.taskType))))
       .sort((a, b) => b.value - a.value);
     const otherBreaches = findings.filter((f) => f.breached && !isTaskRule(f));
 

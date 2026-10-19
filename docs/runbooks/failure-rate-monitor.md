@@ -162,8 +162,13 @@ GROUP BY 1, 2 ORDER BY 3 DESC;
 strings. If another task type is also breaching at higher volume, that one is
 probably the cause and this one is collateral; fix the noisy one first.
 
-**`ai_task_failure_rate:<task>:<tenant_id>`** — one tenant, not the platform.
-Check `error_message` for that tenant's runs first: quota / token-budget
+**`ai_task_failure_rate:<task>:<tenant_id>`** — one tenant is failing. Read the
+end of the summary (and `details.platformRate`) before deciding the rest of the
+platform is fine: "below threshold" means the platform rule judged this task
+and it is healthy for everyone else; "not judged" means the task had too few
+runs platform-wide to judge (often this tenant is its only traffic) or the
+platform read failed — the task may be broken for every tenant, so run the
+platform query above too. Then check `error_message` for that tenant's runs: quota / token-budget
 strings mean the tenant has outgrown the standard classify bucket (every
 tenant currently gets `classifier_standard` — concurrency 2 — because nothing
 sets `tenantTier`); anything else is specific to that tenant's data or
