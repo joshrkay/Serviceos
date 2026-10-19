@@ -121,7 +121,18 @@ describe('v3 mobile layout contract', () => {
   }
 
   it('the "Speaking" mark adds no control and wraps with the speaker name at 320px', () => {
-    const speaking: RivetVoice = { unlock: vi.fn(), speak: vi.fn(), prefetch: vi.fn(), stop: vi.fn(), speaking: true };
+    const speaking: RivetVoice = {
+      unlock: vi.fn(),
+      speak: vi.fn(),
+      prefetch: vi.fn(),
+      stop: vi.fn(),
+      speaking: true,
+      openMic: vi.fn(),
+      input: 'off',
+      stream: null,
+      keytermsOff: false,
+      noteInput: vi.fn(),
+    };
     const { container } = render(
       <RivetVoiceContext.Provider value={speaking}>
         <TurnFrame minutesLeft={5} progress={0.5}>

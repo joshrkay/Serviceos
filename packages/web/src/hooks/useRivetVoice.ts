@@ -1,6 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import type { OnboardingOptionKey } from '@ai-service-os/shared';
 import { trackFunnel, type FunnelContext } from '../lib/analytics';
+import { matchOption, type MatchableOptions } from '../lib/option-matcher';
 import { apiFetch } from '../utils/api-fetch';
+import { dictationSupported, useDeepgramDictation } from './useDeepgramDictation';
 import { useTTS } from './useTTS';
 
 /**
@@ -23,11 +26,27 @@ import { useTTS } from './useTTS';
  * degrades the rest of that turn and records `v3_tts_fallback` once for it.
  * Nothing here blocks a turn: the cards and Next render whatever happens.
  *
- * The listening half (mic, barge-in, first/second) is S3-5.
+ * S3-5 — Rivet listens. The microphone is asked for once, inside the "Make it
+ * mine" tap after the audio is unlocked (or inside a tap on the mic, for an
+ * owner who came back to a turn), and kept for the whole pass, so there is one
+ * permission prompt. Each turn opens its own Deepgram socket with a fresh 30 s
+ * token (`useRivetListening`) and closes it when the turn goes, so no socket
+ * outlives its token. A refused microphone, a browser that cannot listen, or
+ * no transcription on the server (503) leaves every turn to the cards, with no
+ * banner. `v3_voice_input` records which, once per mount.
  */
 
 export type RivetVoiceGesture = 'start' | 'make_it_mine' | 'keep_as_is';
-export type TtsFallbackReason = 'rate_limited' | 'not_configured' | 'tts_failed' | 'network' | 'playback' | 'autoplay';
+type TtsFallbackReason = 'rate_limited' | 'not_configured' | 'tts_failed' | 'network' | 'playback' | 'autoplay';
+
+/**
+ * Whether Rivet can hear the owner this pass: `off` (not asked yet), `asking` (the
+ * browser is asking), `on` (the microphone is held), or one of the three ways it
+ * cannot: the owner said no, the browser cannot, or the server has no transcription.
+ */
+export type VoiceInputState = 'off' | 'asking' | 'on' | 'denied' | 'unsupported' | 'unavailable';
+type VoiceInputEvent = 'denied' | 'unsupported' | 'unavailable' | 'keyterms_off';
+const CANNOT_LISTEN: ReadonlySet<VoiceInputState> = new Set(['denied', 'unsupported', 'unavailable']);
 
 export interface SpeakOptions {
   /** The turn this line belongs to: a choice key, or 'ready' / 'readback' / 'trial' / 'number'. */
@@ -47,6 +66,15 @@ export interface RivetVoice {
   stop: () => void;
   /** Rivet is speaking right now (a server clip or speechSynthesis). */
   speaking: boolean;
+  /** Call inside a tap, after `unlock`: ask for the microphone once, for the whole pass. */
+  openMic: () => void;
+  input: VoiceInputState;
+  /** The microphone, while it is held. */
+  stream: MediaStream | null;
+  /** Deepgram refused the option-label boost once this pass: open sockets without it. */
+  keytermsOff: boolean;
+  /** For the turn listening: transcription is not set up here, or the boost was refused. */
+  noteInput: (event: 'unavailable' | 'keyterms_off') => void;
 }
 
 interface Clip {
@@ -162,6 +190,14 @@ export function useRivetVoice(opts: { funnel: FunnelContext }): RivetVoice {
 
   const committed = useRef<{ at: number; gesture: RivetVoiceGesture } | null>(null);
   const firstHeardSent = useRef(false);
+
+  const [input, setInput] = useState<VoiceInputState>('off');
+  const inputRef = useRef<VoiceInputState>('off');
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [keytermsOff, setKeytermsOff] = useState(false);
+  const inputEventsSent = useRef(new Set<VoiceInputEvent>());
+  const mounted = useRef(true);
 
   const hashes = () => (hashIndex.current ??= readHashIndex());
 
@@ -350,8 +386,87 @@ export function useRivetVoice(opts: { funnel: FunnelContext }): RivetVoice {
     halt();
   }, [halt]);
 
+  const recordInput = useCallback((event: VoiceInputEvent) => {
+    if (inputEventsSent.current.has(event)) return;
+    inputEventsSent.current.add(event);
+    trackFunnel('v3_voice_input', funnelRef.current, { state: event });
+  }, []);
+
+  const moveInput = useCallback(
+    (next: VoiceInputState) => {
+      inputRef.current = next;
+      setInput(next);
+      if (next === 'denied' || next === 'unsupported' || next === 'unavailable') recordInput(next);
+    },
+    [recordInput],
+  );
+
+  const letGoOfMic = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    setStream(null);
+  }, []);
+
+  const openMic = useCallback(() => {
+    if (inputRef.current !== 'off') return;
+    if (!dictationSupported()) {
+      moveInput('unsupported');
+      return;
+    }
+    moveInput('asking');
+    let asked: Promise<MediaStream>;
+    try {
+      // Called inside the tap, so the browser ties its prompt to the owner's gesture.
+      asked = navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    } catch (err) {
+      asked = Promise.reject(err instanceof Error ? err : new Error(String(err)));
+    }
+    asked.then(
+      (held) => {
+        if (!mounted.current) {
+          held.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        streamRef.current = held;
+        setStream(held);
+        moveInput('on');
+      },
+      (err: unknown) => {
+        if (!mounted.current) return;
+        const refused = err instanceof DOMException && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
+        moveInput(refused ? 'denied' : 'unavailable');
+      },
+    );
+  }, [moveInput]);
+
+  const noteInput = useCallback(
+    (event: 'unavailable' | 'keyterms_off') => {
+      if (event === 'keyterms_off') {
+        setKeytermsOff(true);
+        recordInput('keyterms_off');
+        return;
+      }
+      if (CANNOT_LISTEN.has(inputRef.current)) return;
+      letGoOfMic();
+      moveInput('unavailable');
+    },
+    [letGoOfMic, moveInput, recordInput],
+  );
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    };
+  }, []);
+
   const speaking = audioPlaying || ttsSpeaking;
-  return useMemo(() => ({ unlock, speak, prefetch: fetchBatch, stop, speaking }), [unlock, speak, fetchBatch, stop, speaking]);
+  return useMemo(
+    () => ({ unlock, speak, prefetch: fetchBatch, stop, speaking, openMic, input, stream, keytermsOff, noteInput }),
+    [unlock, speak, fetchBatch, stop, speaking, openMic, input, stream, keytermsOff, noteInput],
+  );
 }
 
 /** The shell's voice, for the screens it renders. Null outside the v3 shell: those screens stay silent. */
@@ -360,6 +475,16 @@ export const RivetVoiceContext = createContext<RivetVoice | null>(null);
 /** Rivet is speaking (for the "Speaking" mark). False outside the shell. */
 export function useRivetSpeaking(): boolean {
   return useContext(RivetVoiceContext)?.speaking ?? false;
+}
+
+/**
+ * Rivet can hear the owner on this screen: inside the shell, on a browser that can listen, and
+ * nothing has ruled it out this pass (a refused microphone, no transcription on the server).
+ * Copy that tells the owner to say something reads this, so it never promises what cannot happen.
+ */
+export function useRivetCanListen(): boolean {
+  const voice = useContext(RivetVoiceContext);
+  return voice !== null && dictationSupported() && !CANNOT_LISTEN.has(voice.input);
 }
 
 /**
@@ -376,4 +501,165 @@ export function useRivetLine(turn: string, text: string | null | undefined, with
     void speak(text, { turn, with: linesKey ? linesKey.split('\n') : undefined });
     return stop;
   }, [speak, stop, turn, text, linesKey]);
+}
+
+/** Deepgram's trailing silence that ends an utterance (the spec's 1.2 s). */
+const UTTERANCE_END_MS = 1200;
+/** Quiet this long once Rivet is done, and the turn stops listening ("Take your time"). */
+const QUIET_MS = 6000;
+
+export interface RivetListening {
+  /** The mic belongs on this turn: the shell can listen, and nothing has ruled it out. */
+  available: boolean;
+  /** The turn's socket is open and the owner's words are being heard. */
+  listening: boolean;
+  /** What is being heard right now (the interim words), for the transcript card. */
+  partial: string;
+  /** The owner was quiet for 6 s after Rivet finished: the turn stopped listening. Once per turn. */
+  quiet: boolean;
+  /** The mic tap: stop listening, or listen again (asking for the microphone if it never was). */
+  toggle: () => void;
+}
+
+export interface RivetListeningOptions {
+  /** The turn listening (a choice key). */
+  turn: string;
+  /** The turn's two options as rendered: matched against, and sent to Deepgram as keyterms. */
+  options: MatchableOptions;
+  /** False while the owner is typing or an answer is being saved: the socket is closed. */
+  enabled: boolean;
+  /** A spoken answer named one of the two cards. */
+  onMatch: (key: OnboardingOptionKey, transcript: string) => void;
+  /** A spoken answer matched neither card: no guess, the owner taps or says it again. */
+  onNoMatch: (transcript: string) => void;
+}
+
+/**
+ * One turn listening, on the shell's microphone: a Deepgram socket opened when the
+ * turn is up (fresh token, English, the two labels plus "first"/"second" boosted) and
+ * closed when it goes. The owner talking over Rivet stops him at once (barge-in, the
+ * useConversationVoice rule). Each finished utterance is matched to a card on the
+ * client (`matchOption`) before any server call. A socket that drops mid-turn is
+ * reopened once with a new token on the same microphone; a socket refused at open
+ * with the boost is reopened once without it, and the boost stays off for the pass.
+ */
+export function useRivetListening(voice: RivetVoice | null, opts: RivetListeningOptions): RivetListening {
+  const { turn, options, enabled } = opts;
+  const voiceRef = useRef(voice);
+  voiceRef.current = voice;
+  const onMatchRef = useRef(opts.onMatch);
+  const onNoMatchRef = useRef(opts.onNoMatch);
+  onMatchRef.current = opts.onMatch;
+  onNoMatchRef.current = opts.onNoMatch;
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
+
+  const supported = dictationSupported();
+  const input = voice?.input ?? 'off';
+  const available = voice !== null && supported && !CANNOT_LISTEN.has(input);
+
+  // The owner wants this turn heard: on by default once the mic is being held or asked for.
+  const [wanted, setWanted] = useState(input === 'on' || input === 'asking');
+  const [attempt, setAttempt] = useState(0);
+  const [quiet, setQuiet] = useState(false);
+  // Bumped on every word heard: restarts the quiet clock.
+  const [heardWords, setHeardWords] = useState(0);
+  const reopened = useRef(false);
+  const keytermsTried = useRef(false);
+  const starting = useRef(false);
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
+
+  // The mic was asked for while this turn was up (a mic tap on a returning owner's turn).
+  useEffect(() => {
+    if (input === 'asking') setWanted(true);
+  }, [input]);
+
+  const keyterms = voice?.keytermsOff ? undefined : [options[0].label, options[1].label, 'first', 'second'];
+
+  const dictation = useDeepgramDictation({
+    stream: voice?.stream ?? undefined,
+    language: 'en',
+    keyterms,
+    utteranceEndMs: UTTERANCE_END_MS,
+    onPartial: (text) => {
+      if (!text.trim()) return;
+      // Barge-in: the owner talking over Rivet stops him (audio element and speechSynthesis).
+      voiceRef.current?.stop();
+      setHeardWords((n) => n + 1);
+    },
+    onUtteranceEnd: (text) => {
+      if (!enabledRef.current) return;
+      setHeardWords((n) => n + 1);
+      const match = matchOption(text, optionsRef.current);
+      if (match) onMatchRef.current(match.key, text);
+      else onNoMatchRef.current(text);
+    },
+    onClose: ({ opened }) => {
+      const v = voiceRef.current;
+      if (!opened && keytermsTried.current && v && !v.keytermsOff) {
+        // Refused at open with the boost on: the plan tier may not have it. Once more, without.
+        v.noteInput('keyterms_off');
+        setAttempt((n) => n + 1);
+        return;
+      }
+      if (!reopened.current) {
+        reopened.current = true;
+        setAttempt((n) => n + 1);
+        return;
+      }
+      setWanted(false);
+    },
+  });
+  const { stop: stopDictation, isRecording } = dictation;
+  // The latest start, read by the effect below: it runs on `live` and `attempt` only, never because
+  // the dictation hook re-created its callback.
+  const startRef = useRef(dictation.start);
+  startRef.current = dictation.start;
+
+  const live = available && enabled && wanted && input === 'on' && voice.stream !== null;
+  useEffect(() => {
+    if (!live || starting.current) return;
+    starting.current = true;
+    keytermsTried.current = !voiceRef.current?.keytermsOff;
+    void startRef
+      .current()
+      .then((outcome) => {
+        if (outcome === 'unavailable') voiceRef.current?.noteInput('unavailable');
+        else if (outcome !== 'connecting') setWanted(false);
+      })
+      .finally(() => {
+        starting.current = false;
+      });
+  }, [live, attempt]);
+
+  useEffect(() => {
+    if (!live) stopDictation();
+  }, [live, stopDictation]);
+
+  // Quiet: 6 s with no words once Rivet has finished, then the turn stops listening.
+  const speaking = voice?.speaking ?? false;
+  useEffect(() => {
+    if (!isRecording || speaking) return;
+    const timer = setTimeout(() => {
+      setQuiet(true);
+      setWanted(false);
+    }, QUIET_MS);
+    return () => clearTimeout(timer);
+  }, [isRecording, speaking, heardWords, turn]);
+
+  const toggle = useCallback(() => {
+    const v = voiceRef.current;
+    if (!v || !dictationSupported() || CANNOT_LISTEN.has(v.input)) return;
+    if (live || isRecording) {
+      setWanted(false);
+      return;
+    }
+    reopened.current = false;
+    if (v.input === 'off') v.openMic();
+    setWanted(true);
+    setAttempt((n) => n + 1);
+  }, [live, isRecording]);
+
+  return { available, listening: isRecording && live, partial: live ? dictation.partial : '', quiet, toggle };
 }

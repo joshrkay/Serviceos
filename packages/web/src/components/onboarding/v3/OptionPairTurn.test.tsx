@@ -1,8 +1,9 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { AssembledOnboardingChoice, OnboardingCoreChoiceKey, StagedOnboardingChoice } from '@ai-service-os/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
+import { expectAllTapTargets, expectTapTarget } from '../../../test-utils/tap-target';
 import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
 import { plumbingCleDraft } from './__fixtures__';
 import { OptionPairTurn, type OptionPairTurnProps } from './OptionPairTurn';
@@ -453,16 +454,275 @@ describe('OptionPairTurn', () => {
       expect(next()).toBeEnabled();
     });
 
-    it('tells the owner on the greeting that tapping one plays it, and never yet to say first or second', () => {
+    it('outside the shell nothing listens, so the greeting keeps only the hearing half of its line', () => {
       setup('greeting');
       expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
       expect(screen.queryByText(/say .?first|say .?second/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Answer out loud' })).not.toBeInTheDocument();
     });
 
     it('stays silent outside the shell: no voice, no request', () => {
       setup('booking_posture', { onTypeInstead: undefined });
       expect(batches).toEqual([]);
       expect(played).toEqual([]);
+    });
+  });
+
+  describe('Rivet listens (inside the shell, S3-5)', () => {
+    // The microphone and Deepgram's socket are the browser/vendor boundary (faked as in
+    // useDeepgramDictation.test.ts); the voice hook, the matcher and the turn are real, and
+    // the API is stubbed at fetch.
+    class FakeWebSocket {
+      static OPEN = 1;
+      static instances: FakeWebSocket[] = [];
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((e: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor(readonly url: string) {
+        FakeWebSocket.instances.push(this);
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+      }
+    }
+    class FakeMediaRecorder {
+      state = 'inactive';
+      ondataavailable: unknown = null;
+      start() {
+        this.state = 'recording';
+      }
+      stop() {
+        this.state = 'inactive';
+      }
+    }
+    let micAnswer: 'granted' | 'denied';
+    let tokenStatus: number;
+    const socket = () => FakeWebSocket.instances.at(-1)!;
+    const open = () => act(() => {
+      socket().readyState = 1;
+      socket().onopen?.();
+    });
+    const hear = (transcript: string) =>
+      act(() => {
+        socket().onmessage?.({ data: JSON.stringify({ is_final: true, speech_final: true, channel: { alternatives: [{ transcript }] } }) });
+      });
+    const interim = (transcript: string) =>
+      act(() => {
+        socket().onmessage?.({ data: JSON.stringify({ is_final: false, channel: { alternatives: [{ transcript }] } }) });
+      });
+    const flush = () =>
+      act(async () => {
+        for (let i = 0; i < 10; i += 1) await Promise.resolve();
+      });
+
+    beforeEach(() => {
+      FakeWebSocket.instances = [];
+      micAnswer = 'granted';
+      tokenStatus = 200;
+      vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket);
+      vi.stubGlobal('MediaRecorder', FakeMediaRecorder as unknown as typeof MediaRecorder);
+      vi.stubGlobal('navigator', {
+        ...navigator,
+        mediaDevices: {
+          getUserMedia: vi.fn(async () => {
+            if (micAnswer === 'denied') throw new DOMException('Permission denied', 'NotAllowedError');
+            return { getTracks: () => [{ stop: vi.fn() }] };
+          }),
+        },
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL) => {
+          const path = String(input);
+          const reply = (status: number, body: unknown) =>
+            Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
+          if (path.startsWith('/api/voice/stream-token')) {
+            return tokenStatus === 200
+              ? reply(200, { token: 'dg-temp', expiresIn: 30, model: 'nova-3' })
+              : reply(tokenStatus, { error: 'NOT_CONFIGURED', message: 'Live transcription is not configured' });
+          }
+          if (path.startsWith('/api/voice/tts')) return reply(501, { error: 'NOT_CONFIGURED', message: 'Speech synthesis is not configured' });
+          throw new Error(`unexpected request ${path}`);
+        }),
+      );
+      vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve());
+      vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      cleanup();
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    });
+
+    /** The shell's voice: "Make it mine" unlocks the audio and asks for the microphone, then the turn opens. */
+    function Shell({ children }: { children: ReactNode }) {
+      const voice = useRivetVoice({ funnel: { tenantId: 't', userId: 'u' } });
+      const [started, setStarted] = useState(false);
+      return (
+        <RivetVoiceContext.Provider value={voice}>
+          {started ? (
+            children
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                voice.unlock('make_it_mine');
+                voice.openMic();
+                setStarted(true);
+              }}
+            >
+              Make it mine
+            </button>
+          )}
+        </RivetVoiceContext.Provider>
+      );
+    }
+
+    async function openTurn(key: OnboardingCoreChoiceKey, props: Partial<OptionPairTurnProps> = {}) {
+      const onPick = vi.fn();
+      const utils = render(
+        <Shell>
+          <OptionPairTurn choice={choiceFor(key)} busy={false} error={null} notice={null} editing={false} onPick={onPick} {...props} />
+        </Shell>,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Make it mine' }));
+      await flush();
+      return { onPick, ...utils };
+    }
+    const mic = () => screen.queryByRole('button', { name: 'Answer out loud' });
+    const transcript = () => screen.getByTestId('rivet-transcript');
+
+    it('puts the mic on the turn only when Rivet can listen', async () => {
+      await openTurn('booking_posture');
+      expect(mic()).toBeInTheDocument();
+      open();
+      expect(mic()).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByText('Listening')).toBeInTheDocument();
+      cleanup();
+
+      micAnswer = 'denied';
+      await openTurn('booking_posture');
+      expect(mic()).not.toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getAllByRole('radio')).toHaveLength(2);
+      cleanup();
+
+      tokenStatus = 503;
+      await openTurn('booking_posture');
+      expect(mic()).not.toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+
+    it('says the whole greeting line when it can listen, and drops the listening half when it cannot', async () => {
+      await openTurn('greeting');
+      expect(screen.getByText('Tap one to hear it. Say "first" or "second" to pick.')).toBeInTheDocument();
+      cleanup();
+      micAnswer = 'denied';
+      await openTurn('greeting');
+      expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
+      expect(screen.queryByText(/say .?first/i)).not.toBeInTheDocument();
+    });
+
+    it('a spoken answer selects the card, shows what was heard under it, and answers at once', async () => {
+      const { onPick } = await openTurn('booking_posture');
+      open();
+      interim('hold');
+      expect(transcript()).toHaveTextContent('hold');
+      hear('hold it');
+      const hold = screen.getByRole('radio', { name: 'Hold it for me' });
+      expect(hold).toHaveAttribute('aria-checked', 'true');
+      expect(within(hold).getByText('Heard: “hold it”')).toBeInTheDocument();
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenCalledWith('b', 'voice');
+    });
+
+    it('a miss says what it heard and how to answer; the second miss adds an example; nothing is picked', async () => {
+      const { onPick } = await openTurn('booking_posture');
+      open();
+      hear('banana');
+      expect(transcript()).toHaveTextContent('I heard “banana”. Tap one, or say first or second.');
+      expect(transcript()).not.toHaveTextContent('For example');
+      hear('something else');
+      expect(transcript()).toHaveTextContent('I heard “something else”. Tap one, or say first or second. For example, say “first”.');
+      expect(onPick).not.toHaveBeenCalled();
+      expect(screen.getAllByRole('radio').every((r) => r.getAttribute('aria-checked') === 'false')).toBe(true);
+      expect(transcript()).toHaveAttribute('role', 'status');
+      expect(transcript()).toHaveAttribute('aria-live', 'polite');
+    });
+
+    it('after 6 s of quiet says "Take your time" once, stops listening, and never says it twice', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      await openTurn('booking_posture');
+      open();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_900);
+      });
+      expect(screen.queryByText("Take your time. Tap the mic when you're ready.")).not.toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+      expect(screen.getByText("Take your time. Tap the mic when you're ready.")).toBeInTheDocument();
+      expect(mic()).toHaveAttribute('aria-pressed', 'false');
+
+      // The mic tap listens again; another quiet spell stops it without saying the line again.
+      fireEvent.click(mic()!);
+      await flush();
+      open();
+      expect(mic()).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.queryByText("Take your time. Tap the mic when you're ready.")).not.toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_100);
+      });
+      expect(mic()).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.queryAllByText("Take your time. Tap the mic when you're ready.")).toHaveLength(0);
+    });
+
+    it('stops listening while the owner types, and while an answer is being saved', async () => {
+      const onTypeInstead = vi.fn();
+      await openTurn('greeting', { onTypeInstead });
+      open();
+      const first = socket();
+      fireEvent.click(screen.getByRole('button', { name: 'Type instead' }));
+      expect(first.readyState).toBe(3);
+      expect(mic()).not.toBeInTheDocument();
+      cleanup();
+
+      const onPick = vi.fn();
+      const turnWith = (busy: boolean) => (
+        <Shell>
+          <OptionPairTurn choice={choiceFor('booking_posture')} busy={busy} error={null} notice={null} editing={false} onPick={onPick} />
+        </Shell>
+      );
+      const { rerender } = render(turnWith(false));
+      fireEvent.click(screen.getByRole('button', { name: 'Make it mine' }));
+      await flush();
+      open();
+      const second = socket();
+      rerender(turnWith(true));
+      expect(second.readyState).toBe(3);
+      expect(mic()).toBeDisabled();
+    });
+
+    it('class contract at 320px: the mic is a 44px-plus target, every control is, and nothing is wider than the screen', async () => {
+      const { container } = await openTurn('greeting', { onTypeInstead: vi.fn() });
+      open();
+      hear('banana');
+      expectTapTarget(mic()!, 'the mic');
+      expect(mic()!.className).toMatch(/(^|\s)min-h-11(\s|$)/);
+      expectAllTapTargets(container, 'a listening turn');
+      const widths: number[] = [];
+      for (const el of Array.from(container.querySelectorAll('*'))) {
+        for (const m of (el.getAttribute('class') ?? '').matchAll(/(?:^|\s)(?:min-|max-)?w-\[(\d+)px\]/g)) widths.push(Number(m[1]));
+      }
+      expect(widths.filter((w) => w > 320)).toEqual([]);
+      expect(transcript().className).toMatch(/break-words/);
+      // The halo pulses only for owners who have not asked for less motion.
+      const halo = mic()!.querySelector('[data-halo]');
+      expect(halo?.getAttribute('class')).toMatch(/motion-reduce:animate-none/);
     });
   });
 });
