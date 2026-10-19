@@ -25,6 +25,17 @@ import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { MIGRATIONS, getMigrationSQL } from '../../src/db/schema';
 import { DEMO_PLATFORM_TENANT_ID } from '../../src/demo/platform-tenant';
 import { applyTenantContext, clearTenantContext } from '../../src/db/rls-runtime-role';
+import {
+  DEMO_TRADES,
+  buildDemoFixtureDeps,
+  seedDemoTenantFromFixture,
+  type DemoTrade,
+} from '../../src/demo/fixture';
+import { seedDemoTenantPool, demoPoolOwnerId } from '../../src/demo/seed-pool';
+import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import { PgCatalogItemRepository } from '../../src/catalog/pg-catalog-item';
+import { PgEstimateTemplateRepository } from '../../src/templates/pg-estimate-template';
+import { PgPackActivationRepository } from '../../src/settings/pg-pack-activation';
 
 const PLATFORM_TABLES = [
   'demo_calls',
@@ -178,19 +189,21 @@ describe('Postgres integration — demo tenants and the platform tenant are excl
     it('the partial unique indexes hold one open lease per tenant, per visitor, and one CallSid', async () => {
       const t = await createTestTenant(pool);
       const u = await createTestTenant(pool);
+      // Unique per run: the external test database persists between runs.
+      const run = crypto.randomUUID().slice(0, 8);
       const open = (tenantId: string, hash: string, sid: string | null) =>
         pool.query(
           `INSERT INTO demo_tenant_leases (tenant_id, visitor_phone_hash, call_sid, expires_at)
            VALUES ($1, $2, $3, now() + interval '1 minute')`,
           [tenantId, hash, sid],
         );
-      await open(t.tenantId, 'hash-a', 'CA1');
-      await expect(open(t.tenantId, 'hash-b', null)).rejects.toMatchObject({ code: '23505' });
-      await expect(open(u.tenantId, 'hash-a', null)).rejects.toMatchObject({ code: '23505' });
-      await expect(open(u.tenantId, 'hash-c', 'CA1')).rejects.toMatchObject({ code: '23505' });
+      await open(t.tenantId, `hash-a-${run}`, `CA1${run}`);
+      await expect(open(t.tenantId, `hash-b-${run}`, null)).rejects.toMatchObject({ code: '23505' });
+      await expect(open(u.tenantId, `hash-a-${run}`, null)).rejects.toMatchObject({ code: '23505' });
+      await expect(open(u.tenantId, `hash-c-${run}`, `CA1${run}`)).rejects.toMatchObject({ code: '23505' });
       // A released lease frees the tenant and the visitor.
       await pool.query(`UPDATE demo_tenant_leases SET released_at = now(), state = 'released' WHERE tenant_id = $1`, [t.tenantId]);
-      await open(t.tenantId, 'hash-a', null);
+      await open(t.tenantId, `hash-a-${run}`, null);
       await expect(
         pool.query(`UPDATE demo_tenant_leases SET state = 'bogus' WHERE tenant_id = $1`, [t.tenantId]),
       ).rejects.toMatchObject({ code: '23514' });
@@ -203,19 +216,127 @@ describe('Postgres integration — demo tenants and the platform tenant are excl
       expect(rowCount).toBe(1);
     });
 
+    it('no demo or platform tenant holds a users row after the corpus replays (249 backfills one per tenant)', async () => {
+      // 249_backfill_owner_memberships replays on every boot and inserts an
+      // owner users row for EVERY tenant whose owner_id has none, which would
+      // hand each demo tenant and the platform tenant a sign-in-shaped owner
+      // (and put them on every surface that reads users). 314 runs after 249
+      // in the same corpus statement and removes exactly those rows.
+      const demoId = crypto.randomUUID();
+      await pool.query(
+        `INSERT INTO tenants (id, owner_id, owner_email, name, demo, demo_trade)
+         VALUES ($1, $2, $3, 'Demo replay probe', true, 'plumbing')`,
+        [demoId, `demo:probe:${demoId}`, `demo-probe-${demoId}@invalid.rivet.local`],
+      );
+      const control = await createTestTenant(pool);
+      await pool.query(getMigrationSQL());
+      const { rows } = await pool.query<{ tenant_id: string }>(
+        `SELECT tenant_id FROM users WHERE tenant_id = ANY($1)`,
+        [[demoId, DEMO_PLATFORM_TENANT_ID, control.tenantId]],
+      );
+      // The ordinary tenant keeps its owner; the hidden two have none.
+      expect(rows.map((r) => r.tenant_id)).toEqual([control.tenantId]);
+    });
+
     it('D1: the platform tenant can own a leads row (the demo visitor record)', async () => {
       const leadId = crypto.randomUUID();
+      // One open lead per phone per tenant (idx_leads_phone_unique_open): a fresh number per run.
+      const phone = `+1555${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}`;
       await withTenantClient(pool, DEMO_PLATFORM_TENANT_ID, (client) =>
         client.query(
           `INSERT INTO leads (id, tenant_id, company_name, primary_phone, source, source_detail, stage, created_by)
-           VALUES ($1, $2, 'Demo Plumbing', '+15555550100', 'other', 'demo_call', 'new', 'system:demo')`,
-          [leadId, DEMO_PLATFORM_TENANT_ID],
+           VALUES ($1, $2, 'Demo Plumbing', $3, 'other', 'demo_call', 'new', 'system:demo')`,
+          [leadId, DEMO_PLATFORM_TENANT_ID, phone],
         ),
       );
       const { rows } = await withTenantClient(pool, DEMO_PLATFORM_TENANT_ID, (client) =>
         client.query(`SELECT tenant_id FROM leads WHERE id = $1`, [leadId]),
       );
       expect(rows[0].tenant_id).toBe(DEMO_PLATFORM_TENANT_ID);
+    });
+  });
+
+  describe('demo-tenant pool seed', () => {
+    const PER_TRADE = 2;
+
+    it('seed is idempotent: run twice yields exactly PER_TRADE × 4 tenants equal to the fixture', async () => {
+      const ownerIds = DEMO_TRADES.flatMap((trade) =>
+        Array.from({ length: PER_TRADE }, (_, i) => demoPoolOwnerId(trade, i + 1)),
+      );
+      // The pool's owner ids are fixed by design, so on a persistent external
+      // database an earlier run may already have seeded some slots: the first
+      // run creates exactly the missing ones, the second creates none.
+      const before = await pool.query(`SELECT 1 FROM tenants WHERE owner_id = ANY($1)`, [ownerIds]);
+      const first = await seedDemoTenantPool(pool, { perTrade: PER_TRADE, log: () => undefined });
+      const second = await seedDemoTenantPool(pool, { perTrade: PER_TRADE, log: () => undefined });
+      expect(first.created).toBe(PER_TRADE * DEMO_TRADES.length - (before.rowCount ?? 0));
+      expect(second.created).toBe(0);
+      expect([...second.tenantIds].sort()).toEqual([...first.tenantIds].sort());
+      expect(first.tenantIds).toHaveLength(PER_TRADE * DEMO_TRADES.length);
+
+      const { rows } = await pool.query<{ id: string; demo: boolean; platform: boolean; demo_trade: string; name: string }>(
+        `SELECT id, demo, platform, demo_trade, name FROM tenants WHERE owner_id = ANY($1)`,
+        [ownerIds],
+      );
+      expect(rows).toHaveLength(ownerIds.length);
+      for (const r of rows) {
+        expect(r.demo).toBe(true);
+        expect(r.platform).toBe(false);
+        expect(DEMO_TRADES).toContain(r.demo_trade);
+      }
+      // Demo tenants have no users rows: no owner can ever sign in to one.
+      const users = await pool.query(`SELECT 1 FROM users WHERE tenant_id = ANY($1)`, [rows.map((r) => r.id)]);
+      expect(users.rowCount).toBe(0);
+      // The seed is audited on the demo tenant itself (the trail survives a reset).
+      const audit = await withTenantClient(pool, rows[0].id, (c) =>
+        c.query(`SELECT actor_id FROM audit_events WHERE tenant_id = $1 AND event_type = 'demo.tenant_seeded'`, [rows[0].id]),
+      );
+      expect(audit.rows).toHaveLength(1);
+      expect(audit.rows[0].actor_id).toBe('system:demo-seed');
+
+      // Settings, catalog and templates equal seedDemoTenantFromFixture's own
+      // output on a fresh tenant of the same trade.
+      const settingsRepo = new PgSettingsRepository(pool);
+      const catalogRepo = new PgCatalogItemRepository(pool);
+      const templateRepo = new PgEstimateTemplateRepository(pool);
+      const packRepo = new PgPackActivationRepository(pool);
+      const deps = buildDemoFixtureDeps(pool);
+      const shape = async (tenantId: string) => {
+        const s = await settingsRepo.findByTenant(tenantId);
+        const items = await catalogRepo.listByTenant(tenantId);
+        const templates = await templateRepo.findByTenant(tenantId);
+        const packs = await packRepo.findByTenant(tenantId);
+        return {
+          timezone: s?.timezone,
+          voiceId: s?.voiceId,
+          packs: packs.map((p) => p.packId).sort(),
+          activePacks: s?.activeVerticalPacks,
+          items: items.map((i) => [i.name, i.unitPriceCents]).sort(),
+          templates: templates.map((t) => t.name).sort(),
+        };
+      };
+      for (const trade of DEMO_TRADES) {
+        const pooled = rows.find((r) => r.demo_trade === trade)!;
+        const fresh = await createTestTenant(pool);
+        await pool.query(`DELETE FROM users WHERE tenant_id = $1`, [fresh.tenantId]);
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          await seedDemoTenantFromFixture(client, { tenantId: fresh.tenantId, trade: trade as DemoTrade, slot: 9 }, deps);
+          await client.query('COMMIT');
+        } finally {
+          await clearTenantContext(client);
+          client.release();
+        }
+        const a = await shape(pooled.id);
+        const b = await shape(fresh.tenantId);
+        expect(a.items.length, `${trade} catalog seeded`).toBeGreaterThan(0);
+        expect(a.templates.length, `${trade} templates seeded`).toBeGreaterThan(0);
+        expect(a.timezone).toBe('America/New_York');
+        expect(a.packs).toEqual([trade]);
+        expect(a.voiceId).toBeTruthy();
+        expect(a).toEqual(b);
+      }
     });
   });
 });

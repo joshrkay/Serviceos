@@ -7892,6 +7892,26 @@ export const MIGRATIONS = {
     COMMENT ON TABLE signup_handoffs IS
       'Platform table (U7): the signup handoff token ledger. tenant_id is NULL until a signup binds it and only names that tenant; RLS-exempt on purpose, read before any tenant context exists.';
 
+    -- 249_backfill_owner_memberships replays every boot, BEFORE this, and
+    -- inserts an owner users row for every tenant without one: demo and
+    -- platform tenants included. They must have none (no owner can sign in
+    -- to one, and every surface that reads users would see it), so remove
+    -- exactly those rows here, in the same corpus statement, so no committed
+    -- state ever holds one. Guarded so it can never block a deploy.
+    DO $demo_owner_rows$
+    BEGIN
+      DELETE FROM users u
+       USING tenants t
+       WHERE u.tenant_id = t.id
+         AND (t.demo = true OR t.platform = true);
+    EXCEPTION
+      WHEN foreign_key_violation THEN
+        RAISE NOTICE 'a demo or platform tenant users row is still referenced; left in place';
+      WHEN insufficient_privilege OR undefined_object THEN
+        RAISE NOTICE 'cannot remove demo or platform tenant users rows here; skipping';
+    END
+    $demo_owner_rows$;
+
     DO $demo_revoke$
     BEGIN
       REVOKE ALL ON demo_tenant_leases, demo_inflight_jobs, signup_handoffs FROM rls_app_runtime;
