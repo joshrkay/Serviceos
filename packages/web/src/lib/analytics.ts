@@ -72,6 +72,7 @@ export type AnalyticsEvent =
   | 'v3_test_call_viewed'
   | 'v3_first_heard'
   | 'v3_tts_fallback'
+  | 'v3_voice_input'
   // In-app intent/view events (U6). Things the server-side audit stream can't
   // see because there's no row mutation — gestures, not state changes. IDs /
   // enums / counts / bools only, never message or query text.
@@ -149,10 +150,27 @@ async function loadPosthog(): Promise<PostHogLike | null> {
 }
 
 /**
+ * S3-6 — dev builds only (stripped from production): a page that defines
+ * `window.__v3Events` gets every v3 funnel event pushed onto it, so the
+ * real-stack e2e lane, which has no analytics key, can read what the funnel
+ * would have recorded. Never throws.
+ */
+function recordForDevSink(event: AnalyticsEvent, props?: Props): void {
+  if (!import.meta.env.DEV || !event.startsWith('v3_') || typeof window === 'undefined') return;
+  try {
+    const sink = (window as unknown as { __v3Events?: Array<{ event: string; props: Props }> }).__v3Events;
+    if (Array.isArray(sink)) sink.push({ event, props: { ...props } });
+  } catch {
+    /* never let a test hook surface */
+  }
+}
+
+/**
  * Fire-and-forget event. Safe to call before PostHog has loaded — the
  * call queues until init resolves, then drains. Never throws.
  */
 export function track(event: AnalyticsEvent, props?: Props): void {
+  recordForDevSink(event, props);
   void loadPosthog().then((ph) => {
     if (!ph) return;
     try {
