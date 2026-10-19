@@ -59,6 +59,19 @@
  * selection, bounded per-tenant batches and per-tenant failure isolation
  * follow the #1202 unattached-turn phase exactly.
  *
+ * PRIV-3 — card number said on the recording. The stored transcript only
+ * carries the `[card number]` marker, but the audio still holds the digits.
+ * A recording flagged `pci_detected` (migration 314, set by the recording
+ * webhook's transcript hook or the transcription worker) has its stored
+ * audio deleted on the next sweep, whatever its age, and `audio_purged_at`
+ * stamped; one `voice_recording.audio_purged` audit event per recording.
+ * The row, its scrubbed transcript, summary and embeddings stay until the
+ * horizon purge, which still tombstones it later (its S3 delete of the gone
+ * object is a no-op). Legal hold exempts it, as everywhere. A failed delete
+ * leaves the row due for the next sweep; the rest continue.
+ *   - The Twilio-hosted copy of the call recording is not deleted here: no
+ *     Twilio deleter exists yet (PRIV-2 adds it on this phase).
+ *
  * Pattern: cross-tenant batch drain like dropped-call-worker — per-row
  * failures are logged and left unpurged for the next sweep; the table query
  * is the queue. app.ts drives the cadence behind `runAsLeader`
@@ -84,6 +97,9 @@ export const SESSION_TRANSCRIPT_SWEEP_TENANT_LIMIT = 100;
 
 /** #1208 — voice_sessions transcripts cleared per tenant per sweep. */
 export const SESSION_TRANSCRIPT_SWEEP_BATCH = 500;
+
+/** PRIV-3 — flagged recordings whose audio is deleted per sweep. */
+const CARD_NUMBER_AUDIO_SWEEP_BATCH = 50;
 
 /** A purgeable recording (joined with its files row for the object key). */
 export interface PurgeableRecording {
@@ -167,6 +183,17 @@ export interface RecordingRetentionRepository {
     now: Date,
     limit: number,
   ): Promise<PurgedSessionTranscript[]>;
+  /**
+   * PRIV-3 — cross-tenant: recordings flagged `pci_detected` whose audio is
+   * not yet deleted, neither tombstoned nor on legal hold, oldest first.
+   * No horizon: a flagged recording is due at once.
+   */
+  findCardNumberAudioDue(limit: number): Promise<PurgeableRecording[]>;
+  /**
+   * PRIV-3 — stamp `audio_purged_at` after the stored audio is deleted.
+   * Idempotent (`audio_purged_at IS NULL` guard).
+   */
+  markAudioPurged(tenantId: string, id: string, purgedAt: Date): Promise<void>;
 }
 
 export class PgRecordingRetentionRepository
@@ -204,6 +231,45 @@ export class PgRecordingRetentionRepository
         storageKey: (row.s3_key as string | null) ?? null,
         createdAt: new Date(row.created_at as string),
       }));
+    });
+  }
+
+  async findCardNumberAudioDue(limit: number): Promise<PurgeableRecording[]> {
+    // Same cross-tenant convention as findDue; served by the migration-314
+    // partial index idx_voice_recordings_card_number_audio_due.
+    return this.withCrossTenantSweep(async (client) => {
+      const { rows } = await client.query(
+        `SELECT vr.id, vr.tenant_id, vr.call_sid,
+                f.s3_bucket, f.s3_key, vr.created_at
+           FROM voice_recordings vr
+           LEFT JOIN files f ON f.id = vr.file_id
+          WHERE vr.pci_detected
+            AND vr.audio_purged_at IS NULL
+            AND vr.purged_at IS NULL
+            AND vr.legal_hold = false
+          ORDER BY vr.created_at ASC
+          LIMIT $1`,
+        [limit],
+      );
+      return rows.map((row) => ({
+        id: String(row.id),
+        tenantId: String(row.tenant_id),
+        callSid: (row.call_sid as string | null) ?? null,
+        storageBucket: (row.s3_bucket as string | null) ?? null,
+        storageKey: (row.s3_key as string | null) ?? null,
+        createdAt: new Date(row.created_at as string),
+      }));
+    });
+  }
+
+  async markAudioPurged(tenantId: string, id: string, purgedAt: Date): Promise<void> {
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `UPDATE voice_recordings
+            SET audio_purged_at = $3, updated_at = now()
+          WHERE tenant_id = $1 AND id = $2 AND audio_purged_at IS NULL`,
+        [tenantId, id, purgedAt],
+      );
     });
   }
 
@@ -464,6 +530,9 @@ export class InMemoryRecordingRetentionRepository
         legalHold?: boolean;
         purgedAt?: Date | null;
         retentionDays: number;
+        /** PRIV-3 — migration 314. */
+        pciDetected?: boolean;
+        audioPurgedAt?: Date | null;
       }
     > = [],
     /** #1202 — call_transcript_turns rows with no recording. */
@@ -580,6 +649,26 @@ export class InMemoryRecordingRetentionRepository
     const row = this.rows.find((r) => r.tenantId === tenantId && r.id === id);
     if (row && !row.purgedAt) row.purgedAt = purgedAt;
   }
+
+  async findCardNumberAudioDue(limit: number): Promise<PurgeableRecording[]> {
+    return this.rows
+      .filter((r) => r.pciDetected && !r.audioPurgedAt && !r.purgedAt && !r.legalHold)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .slice(0, limit)
+      .map(({ id, tenantId, callSid, storageBucket, storageKey, createdAt }) => ({
+        id,
+        tenantId,
+        callSid,
+        storageBucket,
+        storageKey,
+        createdAt,
+      }));
+  }
+
+  async markAudioPurged(tenantId: string, id: string, purgedAt: Date): Promise<void> {
+    const row = this.rows.find((r) => r.tenantId === tenantId && r.id === id);
+    if (row && !row.audioPurgedAt) row.audioPurgedAt = purgedAt;
+  }
 }
 
 export interface RecordingRetentionWorkerDeps {
@@ -592,6 +681,8 @@ export interface RecordingRetentionWorkerDeps {
   unattachedTurnBatchSize?: number;
   /** #1208 — voice_sessions transcripts cleared per tenant per sweep. */
   sessionTranscriptBatchSize?: number;
+  /** PRIV-3 — flagged recordings whose audio is deleted per sweep. */
+  cardNumberAudioBatchSize?: number;
   now?: () => Date;
 }
 
@@ -607,6 +698,10 @@ export interface RecordingRetentionSweepResult {
   sessionTranscriptsPurged: number;
   /** #1208 — tenants whose session-transcript clear failed (retried next sweep). */
   sessionTranscriptTenantsFailed: number;
+  /** PRIV-3 — recordings whose audio was deleted because a card number was said. */
+  cardNumberAudioPurged: number;
+  /** PRIV-3 — flagged recordings whose audio delete failed (retried next sweep). */
+  cardNumberAudioFailed: number;
 }
 
 /**
@@ -754,6 +849,75 @@ async function purgeSessionTranscripts(
 }
 
 /**
+ * PRIV-3 — the card-number audio phase: delete the stored audio of every
+ * flagged recording now, stamp `audio_purged_at`, audit. Per-row failures
+ * are logged and retried next sweep. Never throws.
+ */
+async function purgeCardNumberAudio(
+  deps: RecordingRetentionWorkerDeps,
+  now: () => Date,
+): Promise<Pick<RecordingRetentionSweepResult, 'cardNumberAudioPurged' | 'cardNumberAudioFailed'>> {
+  let due: PurgeableRecording[];
+  try {
+    due = await deps.repo.findCardNumberAudioDue(
+      deps.cardNumberAudioBatchSize ?? CARD_NUMBER_AUDIO_SWEEP_BATCH,
+    );
+  } catch (err) {
+    deps.logger.error('recording-retention sweep: card-number audio selection failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { cardNumberAudioPurged: 0, cardNumberAudioFailed: 0 };
+  }
+
+  let cardNumberAudioPurged = 0;
+  let cardNumberAudioFailed = 0;
+  for (const row of due) {
+    const hadStoredObject = Boolean(row.storageBucket && row.storageKey);
+    try {
+      if (row.storageBucket && row.storageKey) {
+        await deps.storage.deleteObject(row.storageBucket, row.storageKey);
+      }
+      await deps.repo.markAudioPurged(row.tenantId, row.id, now());
+    } catch (err) {
+      cardNumberAudioFailed++;
+      deps.logger.warn('recording-retention sweep: card-number audio purge row failed', {
+        tenantId: row.tenantId,
+        voiceRecordingId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    cardNumberAudioPurged++;
+    if (!deps.auditRepo) continue;
+    try {
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId: row.tenantId,
+          actorId: 'recording-retention-worker',
+          actorRole: 'system',
+          eventType: 'voice_recording.audio_purged',
+          entityType: 'voice_recording',
+          entityId: row.id,
+          metadata: {
+            callSid: row.callSid,
+            reason: 'card_number_detected',
+            hadStoredObject,
+            recordedAt: row.createdAt.toISOString(),
+          },
+        }),
+      );
+    } catch (err) {
+      deps.logger.warn('recording-retention sweep: card-number audio audit write failed', {
+        tenantId: row.tenantId,
+        voiceRecordingId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return { cardNumberAudioPurged, cardNumberAudioFailed };
+}
+
+/**
  * One drain sweep. Per-row failures (S3 delete, tombstone) are logged and
  * the row stays unpurged for the next sweep. Never throws.
  */
@@ -773,7 +937,8 @@ export async function runRecordingRetentionSweep(
     // #1202 — a separate selection; a failed recording query doesn't skip it.
     const unattached = await purgeUnattachedTranscriptTurns(deps, now);
     const sessions = await purgeSessionTranscripts(deps, now);
-    return { due: 0, purged: 0, failed: 0, ...unattached, ...sessions };
+    const cardAudio = await purgeCardNumberAudio(deps, now);
+    return { due: 0, purged: 0, failed: 0, ...unattached, ...sessions, ...cardAudio };
   }
 
   let purged = 0;
@@ -833,6 +998,9 @@ export async function runRecordingRetentionSweep(
   const unattached = await purgeUnattachedTranscriptTurns(deps, now);
   // #1208 — the session-row copy of the transcript, with or without a recording.
   const sessions = await purgeSessionTranscripts(deps, now);
+  // PRIV-3 — flagged recordings, whatever their age. After the horizon drain,
+  // so a row due for both is tombstoned there and skipped here.
+  const cardAudio = await purgeCardNumberAudio(deps, now);
 
   deps.logger.info('recording-retention sweep completed', {
     due: due.length,
@@ -840,6 +1008,7 @@ export async function runRecordingRetentionSweep(
     failed,
     ...unattached,
     ...sessions,
+    ...cardAudio,
   });
-  return { due: due.length, purged, failed, ...unattached, ...sessions };
+  return { due: due.length, purged, failed, ...unattached, ...sessions, ...cardAudio };
 }

@@ -7,8 +7,10 @@ import {
   createDraft,
   getDraft,
   retryDraft,
+  setMetro,
   stageChoice,
 } from './onboardingDraftApi';
+import columbusJson from '../components/onboarding/v3/__fixtures__/draft.plumbing-cmh.json';
 
 const draft = OnboardingDraftSchema.parse(draftJson);
 
@@ -66,6 +68,20 @@ describe('onboardingDraftApi', () => {
     const err = await stageChoice(apiFetch, 'greeting', { option: 'a' }, 1).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(OnboardingDraftApiError);
     expect(err).toMatchObject({ status: 409, versionConflict: true });
+  });
+
+  it('setMetro PUTs the metro code with the version the Ready screen rendered and returns the re-priced draft', async () => {
+    apiFetch.mockResolvedValueOnce(json(200, { draft: columbusJson }));
+    const next = await setMetro(apiFetch, 'CMH', 1);
+    expect(next).toMatchObject({ metroCode: 'CMH', metroName: 'Columbus', version: 2 });
+    expect(apiFetch).toHaveBeenCalledWith('/api/onboarding/draft/metro', { method: 'PUT', body: JSON.stringify({ metro: 'CMH', version: 1 }) });
+  });
+
+  it('setMetro carries DRAFT_METRO_LOCKED and VERSION_CONFLICT apart', async () => {
+    apiFetch.mockResolvedValueOnce(json(409, { error: 'CONFLICT', message: 'DRAFT_METRO_LOCKED: a choice is already staged, so the city can no longer change here' }));
+    await expect(setMetro(apiFetch, 'CMH', 1)).rejects.toMatchObject({ status: 409, versionConflict: false, metroLocked: true });
+    apiFetch.mockResolvedValueOnce(json(409, { error: 'CONFLICT', message: 'VERSION_CONFLICT: expected 1, found 2; re-read the draft' }));
+    await expect(setMetro(apiFetch, 'CMH', 1)).rejects.toMatchObject({ status: 409, versionConflict: true, metroLocked: false });
   });
 
   it('approveDraft POSTs /approve and returns both proposal ids', async () => {
