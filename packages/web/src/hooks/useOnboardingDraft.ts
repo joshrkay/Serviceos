@@ -99,7 +99,8 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
           next = (await createDraft(apiFetch, { ...input, clientTimezone: input.clientTimezone ?? browserTimezoneOrUndefined() })).draft;
         } else if (next) {
           // Best effort here: approve tries again before it sends, so a failure now is not a dead end.
-          next = await recordTimezone(apiFetch, next, input?.clientTimezone).catch(() => next);
+          const loaded = next;
+          next = await recordTimezone(apiFetch, loaded, input?.clientTimezone).catch(() => loaded);
         }
         if (!isStale()) commit(next);
       } catch (err) {
