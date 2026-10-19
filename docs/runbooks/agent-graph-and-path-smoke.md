@@ -78,29 +78,27 @@ npm run agent:path-smoke --workspace=packages/api -- --gate
 - **PR + daily:** `.github/workflows/agent-path-smoke.yml` runs the real-LLM
   smoke and the live intent + slot evals against the recorded live baselines
   with the production provider config (`secrets.OPENAI_API_KEY`); a missing
-  key fails the job, it never skips. The `pull_request` trigger is
-  path-filtered to every file that defines a system prompt or routes a model
-  (`packages/api/src/ai/**`, `reputation/**`, `verticals/**` (the trade
-  sections of the caller system prompt), `workers/transcription.ts`,
-  `workers/supervisor-review-worker.ts`, `workers/verify-ai.ts`,
-  `proposals/edit-interpreter.ts`, `routes/assistant.ts`,
-  `digest/weekly-feedback.ts`, `config/ai-routing.ts`, `packages/voice-eval/**`
-  and the two workflow files). Add a new prompt-defining file to that list
-  AND to the `paths-ignore` list in `agent-path-smoke-skip.yml`;
-  `test/voice-quality/ci-workflow-path-smoke.test.ts` fails when the two
-  lists differ, and when a file under `packages/api/src` defines a system
-  prompt or calls the model outside the list (wiring-only files such as
-  `app.ts` are listed in that test with the reason).
-- **Skip-pass shim:** `.github/workflows/agent-path-smoke-skip.yml` reports
-  the same `path-smoke` check green on PRs that touch none of those files, so
-  the check can be a required status check under branch protection without
-  stalling unrelated PRs (GitHub's documented pattern for a required,
-  path-filtered check). A PR that touches a prompt file AND any other file
-  runs both workflows, and the shim reports green first. After making
-  `path-smoke` required, open one such PR and confirm the merge box keeps
-  waiting until the real run finishes; if it does not, replace the pair with
-  one always-on workflow whose job skips its steps when no listed file
-  changed.
+  key fails the job, it never skips. The workflow runs on **every** pull
+  request; its `changes` job diffs the PR (the checked-out merge commit
+  against its base parent) against the `PATH_SMOKE_PATHS` list — every file
+  that defines a system prompt or routes a model (`packages/api/src/ai/**`,
+  `reputation/**`, `verticals/**` (the trade sections of the caller system
+  prompt), `workers/transcription.ts`, `workers/supervisor-review-worker.ts`,
+  `workers/verify-ai.ts`, `proposals/edit-interpreter.ts`,
+  `routes/assistant.ts`, `digest/weekly-feedback.ts`, `config/ai-routing.ts`,
+  `packages/voice-eval/**` and the workflow file itself). Add a new
+  prompt-defining file to that list; `test/voice-quality/ci-workflow-path-smoke.test.ts`
+  fails when a file under `packages/api/src` defines a system prompt or calls
+  the model outside it (wiring-only files such as `app.ts` are listed in that
+  test with the reason), and executes the `changes` step against a real
+  merge commit.
+- **One check run per PR:** when no listed file changed, `path-smoke` is
+  skipped by its job-level `if:`, and GitHub reports a job skipped by a
+  conditional as success — so `path-smoke` can be a required status check
+  without stalling unrelated PRs. There is exactly one `path-smoke` check run
+  per PR (the old same-named skip-pass shim workflow is gone: on a mixed PR it
+  reported green within seconds while the real run was still going). The
+  `if:` fails closed: if `changes` fails or cannot diff, the real evals run.
 - **Baseline drift:** the live steps exit 1 when the golden set changed or a
   metric fell past tolerance. Re-record with the baseline file's
   `recordCommand` (or `voice-eval-live.yml` with `record_baseline=true`) in

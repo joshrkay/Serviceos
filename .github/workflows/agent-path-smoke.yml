@@ -13,10 +13,15 @@
 # the same job also runs the live intent + slot evals against the recorded
 # live baselines (packages/voice-eval/baselines/*-live.json, the bar
 # voice-eval-live.yml measures weekly): a prompt or routing change meets
-# that bar BEFORE merge. The PR trigger covers every prompt-defining or
-# model-routing file, and agent-path-smoke-skip.yml reports the same check
-# green on PRs that touch none of them, so branch protection can require
-# `path-smoke` without stalling unrelated PRs.
+# that bar BEFORE merge.
+#
+# ONE check run per pull request (OBS-3 review round 1). The workflow runs
+# on every pull request; the `changes` job diffs the PR against the one
+# PATH_SMOKE_PATHS list, and `path-smoke` is skipped by its job-level `if:`
+# when no listed file changed. GitHub reports a job skipped by a conditional
+# as success, so branch protection can require `path-smoke` without stalling
+# unrelated PRs, and there is no second same-named check run (the old
+# skip-pass shim workflow) whose instant green could race a red real run.
 #
 # Cost: 11 classify calls capped at AGENT_PATH_SMOKE_COST_CAP_CENTS (default
 # $1), plus the two sampled evals, each capped per step by
@@ -26,34 +31,10 @@
 name: Agent Path Smoke
 
 on:
+  # Every pull request — the `changes` job below decides whether the real
+  # evals run. Never add a paths filter here: a required check that never
+  # starts leaves the PR waiting forever.
   pull_request:
-    paths:
-      # Every file that defines a system prompt or routes a model (grep of
-      # system prompts and gateway.complete call sites), not only src/ai/**:
-      # OBS-3 — reputation/, the vertical sections of the caller prompt, the
-      # transcription corrector and the tier map used to reach main with no
-      # real-model eval. app.ts and voice/quality/grade-voice-session.ts
-      # only WIRE the gateway (the prompt text they pass lives in the files
-      # below) and app.ts changes on most PRs, so they are left out on
-      # purpose. Keep this list identical to the paths-ignore list in
-      # agent-path-smoke-skip.yml. ci-workflow-path-smoke.test.ts pins both,
-      # and fails when a file under packages/api/src defines a prompt or
-      # calls the model outside this list.
-      - 'packages/api/src/ai/**'
-      - 'packages/api/src/reputation/**'
-      - 'packages/api/src/verticals/**'
-      - 'packages/api/src/workers/transcription.ts'
-      - 'packages/api/src/workers/supervisor-review-worker.ts'
-      - 'packages/api/src/workers/verify-ai.ts'
-      - 'packages/api/src/proposals/edit-interpreter.ts'
-      - 'packages/api/src/routes/assistant.ts'
-      - 'packages/api/src/digest/weekly-feedback.ts'
-      - 'packages/api/src/config/ai-routing.ts'
-      - 'packages/api/scripts/agent-path-smoke.ts'
-      - 'packages/api/scripts/agent-graph-coverage.ts'
-      - 'packages/voice-eval/**'
-      - '.github/workflows/agent-path-smoke.yml'
-      - '.github/workflows/agent-path-smoke-skip.yml'
   workflow_dispatch:
   schedule:
     # Daily 06:30 UTC — offset from voice-eval-live Monday job
@@ -64,6 +45,11 @@ permissions:
 
 jobs:
   path-smoke:
+    needs: changes
+    # Fail closed: when `changes` failed or was skipped its output is empty,
+    # which is not 'false', so the real evals still run. Skipped (reported as
+    # success) ONLY when the diff positively found no listed file.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.match != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -140,3 +126,77 @@ jobs:
             agent-path-smoke-console.txt
           retention-days: 90
           if-no-files-found: ignore
+
+  # Decides whether this pull request runs the real-model evals. Defined
+  # after path-smoke so path-smoke's job-level env stays the first in the
+  # file (the contract tests read it). No secrets, no install: it must pass
+  # on a fork PR.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      match: ${{ steps.diff.outputs.match }}
+    steps:
+      # A pull_request run checks out the merge commit: parent 1 is the base
+      # tip and parent 2 the PR head, so depth 2 is enough to diff the PR.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 2
+      # PATH_SMOKE_PATHS — every file that defines a system prompt or routes
+      # a model (grep of system prompts and gateway.complete call sites), not
+      # only src/ai/**: OBS-3 — reputation/, the vertical sections of the
+      # caller prompt, the transcription corrector and the tier map used to
+      # reach main with no real-model eval. app.ts and
+      # voice/quality/grade-voice-session.ts only WIRE the gateway (the
+      # prompt text they pass lives in the files below) and app.ts changes on
+      # most PRs, so they are left out on purpose.
+      # ci-workflow-path-smoke.test.ts pins this list, fails when a file
+      # under packages/api/src defines a prompt or calls the model outside
+      # it, and executes this step against a real merge commit. One glob per
+      # line: `dir/**` or an exact path.
+      - name: Did this pull request change a prompt or model-routing file
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PATH_SMOKE_PATHS: |
+            packages/api/src/ai/**
+            packages/api/src/reputation/**
+            packages/api/src/verticals/**
+            packages/api/src/workers/transcription.ts
+            packages/api/src/workers/supervisor-review-worker.ts
+            packages/api/src/workers/verify-ai.ts
+            packages/api/src/proposals/edit-interpreter.ts
+            packages/api/src/routes/assistant.ts
+            packages/api/src/digest/weekly-feedback.ts
+            packages/api/src/config/ai-routing.ts
+            packages/api/scripts/agent-path-smoke.ts
+            packages/api/scripts/agent-graph-coverage.ts
+            packages/voice-eval/**
+            .github/workflows/agent-path-smoke.yml
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "match=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fail closed: if the merge commit's parents are not there to diff,
+          # run the real evals rather than guess.
+          if ! git rev-parse -q --verify 'HEAD^2' > /dev/null \
+            || ! changed=$(git diff --name-only --no-renames 'HEAD^1' HEAD); then
+            echo "::warning::Could not list this pull request's changed files; running the real-model evals."
+            echo "match=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          match=false
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            while IFS= read -r pattern; do
+              [ -n "$pattern" ] || continue
+              # Unquoted on purpose: `dir/**` must glob-match nested paths.
+              # shellcheck disable=SC2053
+              if [[ "$file" == $pattern ]]; then
+                echo "changed: $file (matches $pattern)"
+                match=true
+              fi
+            done <<< "$PATH_SMOKE_PATHS"
+          done <<< "$changed"
+          echo "match=$match" >> "$GITHUB_OUTPUT"

@@ -3,7 +3,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import { loadIntentTestSplit, loadSlotTranscripts } from '../../../voice-eval/corpus';
 import { checkCostCap, sampleDeterministic } from '../../../voice-eval/live-support';
 import {
@@ -16,7 +18,6 @@ import {
 
 const repoRoot = path.resolve(__dirname, '../../../..');
 const workflowPath = path.join(repoRoot, '.github/workflows/agent-path-smoke.yml');
-const shimPath = path.join(repoRoot, '.github/workflows/agent-path-smoke-skip.yml');
 const apiPackageJsonPath = path.resolve(__dirname, '../../package.json');
 const prChecksPath = path.join(repoRoot, '.github/workflows/pr-checks.yml');
 
@@ -61,7 +62,7 @@ describe('agent-path-smoke.yml — real-LLM path smoke workflow', () => {
   // file that defines a system prompt or routes a model (grep of system
   // prompts and gateway.complete call sites) must start the real workflow.
   it('starts on every prompt-defining or model-routing file, not only src/ai/**', () => {
-    const paths = yamlList(fs.readFileSync(workflowPath, 'utf-8'), 'paths');
+    const paths = pathSmokePaths(fs.readFileSync(workflowPath, 'utf-8'));
     for (const required of [
       'packages/api/src/ai/**',
       'packages/api/src/reputation/**',
@@ -94,11 +95,11 @@ describe('agent-path-smoke.yml — real-LLM path smoke workflow', () => {
       // Runs the graders in ai/voice-quality/graders/* (under ai/**).
       'packages/api/src/voice/quality/grade-voice-session.ts': 'wires the gateway; prompts live in listed files',
     };
-    const paths = yamlList(fs.readFileSync(workflowPath, 'utf-8'), 'paths');
+    const paths = pathSmokePaths(fs.readFileSync(workflowPath, 'utf-8'));
     const uncovered = promptDefiningFiles(path.join(repoRoot, 'packages/api/src')).filter(
       (file) => !paths.some((glob) => globCovers(glob, file)) && !(file in wiringOnly),
     );
-    expect(uncovered, 'add these to agent-path-smoke.yml paths and the shim paths-ignore').toEqual([]);
+    expect(uncovered, 'add these to PATH_SMOKE_PATHS in agent-path-smoke.yml').toEqual([]);
     // An exemption for a file that no longer calls the model is stale.
     const defining = new Set(promptDefiningFiles(path.join(repoRoot, 'packages/api/src')));
     for (const file of Object.keys(wiringOnly)) expect(defining.has(file), `stale exemption ${file}`).toBe(true);
@@ -152,48 +153,149 @@ function globCovers(glob: string, file: string): boolean {
 }
 
 /**
- * The quoted entries of the YAML list under `key:` (e.g. `paths:` or
- * `paths-ignore:`), read until the list dedents; comment lines inside the
- * list are skipped. Both workflows are written with one `- '...'` entry per
- * line, so no YAML parser is needed.
+ * The globs in the `changes` job's PATH_SMOKE_PATHS literal block — the ONE
+ * list that decides whether a pull request runs the real-model evals. One
+ * glob per line, read until the block dedents.
  */
-function yamlList(src: string, key: string): string[] {
-  const m = new RegExp(String.raw`^( *)${key}:\n((?:\1 +(?:#[^\n]*|- '[^']*')\n)+)`, 'm').exec(src);
-  expect(m, `${key}: list not found`).not.toBeNull();
-  return [...m![2].matchAll(/- '([^']*)'/g)].map((x) => x[1]);
+function pathSmokePaths(src: string): string[] {
+  const m = /^( *)PATH_SMOKE_PATHS: \|\n((?:\1 {2}[^\n]+\n)+)/m.exec(src);
+  expect(m, 'PATH_SMOKE_PATHS: | block not found').not.toBeNull();
+  return m![2].split('\n').map((l) => l.trim()).filter(Boolean);
 }
 
-// OBS-3 — the real-model smoke is the only PR check that calls the
-// production model, and it is path-filtered. Branch protection can only
-// require a check that reports on EVERY PR, so a sibling workflow with the
-// same name and job id passes instantly on the PRs the filter skips
-// (GitHub's documented pattern for a required, path-filtered check).
-describe('agent-path-smoke-skip.yml — skip-pass shim for the required check', () => {
-  it('reports the same check context (workflow name + job id) as the real workflow', () => {
-    expect(fs.existsSync(shimPath)).toBe(true);
-    const real = fs.readFileSync(workflowPath, 'utf-8');
-    const shim = fs.readFileSync(shimPath, 'utf-8');
-    const name = /^name:\s*(.+)$/m.exec(real)![1];
-    expect(/^name:\s*(.+)$/m.exec(shim)![1]).toBe(name);
-    expect(shim).toMatch(/^ {2}path-smoke:$/m);
-    // The job id is the check context; a `name:` on the job would rename it.
-    expect(shim).not.toMatch(/^ {4}name:/m);
-    // The real job must not carry a display name either, or the two diverge.
-    expect(real).not.toMatch(/^ {4}name:/m);
+/** The `run: |` script of the step whose `id:` is `id`, de-indented. */
+function stepScript(src: string, id: string): string {
+  const at = src.indexOf(`id: ${id}\n`);
+  expect(at, `step id ${id} not found`).toBeGreaterThan(-1);
+  const m = /\n( *)run: \|\n((?:\1 {2}[^\n]*\n|\n)+)/.exec(src.slice(at));
+  expect(m, `step ${id} has no run: | script`).not.toBeNull();
+  const indent = m![1].length + 2;
+  return m![2]
+    .split('\n')
+    .map((l) => l.slice(indent))
+    .join('\n');
+}
+
+/** The text of top-level job `id` (from its header to the next job or EOF). */
+function jobBlock(src: string, id: string): string {
+  const at = src.search(new RegExp(`^ {2}${id}:$`, 'm'));
+  expect(at, `job ${id} not found`).toBeGreaterThan(-1);
+  const rest = src.slice(at + 1);
+  const next = rest.search(/^ {2}[a-z][a-z0-9-]*:$/m);
+  return next === -1 ? rest : rest.slice(0, next);
+}
+
+// OBS-3 review round 1 — the old skip-pass shim was a SECOND workflow
+// reporting a `path-smoke` check run on the complement of the paths. Every
+// real prompt PR also touches a test file, so both workflows ran, the shim's
+// instant green raced the real eval, and which one branch protection honoured
+// was undocumented. Now ONE workflow runs on every pull request; a `changes`
+// job decides, and `path-smoke` is skipped by a job-level conditional when no
+// listed file changed — GitHub's documented "skipped job reports success"
+// behaviour — so there is exactly one `path-smoke` check run per PR.
+describe('agent-path-smoke.yml — one path-smoke check run per pull request', () => {
+  const read = (): string => fs.readFileSync(workflowPath, 'utf-8');
+
+  it('the duplicate-name skip-pass shim workflow is gone', () => {
+    expect(fs.existsSync(path.join(repoRoot, '.github/workflows/agent-path-smoke-skip.yml'))).toBe(false);
+    for (const f of fs.readdirSync(path.join(repoRoot, '.github/workflows'))) {
+      if (f === 'agent-path-smoke.yml') continue;
+      const other = fs.readFileSync(path.join(repoRoot, '.github/workflows', f), 'utf-8');
+      expect(/^name:\s*Agent Path Smoke\s*$/m.test(other), `${f} reuses the Agent Path Smoke name`).toBe(false);
+    }
   });
 
-  it('ignores exactly the paths the real workflow filters on, so the two can never both skip', () => {
-    const real = fs.readFileSync(workflowPath, 'utf-8');
-    const shim = fs.readFileSync(shimPath, 'utf-8');
-    expect(shim).toMatch(/^on:\n {2}pull_request:\n {4}paths-ignore:/m);
-    expect(yamlList(shim, 'paths-ignore')).toEqual(yamlList(real, 'paths'));
+  it('runs on every pull request: no paths or paths-ignore filter on the trigger', () => {
+    const on = /^on:\n((?: {2}[^\n]*\n|\n)+)/m.exec(read())![1];
+    expect(on).toMatch(/^ {2}pull_request:\s*$/m);
+    expect(on).not.toMatch(/paths(-ignore)?:/);
   });
 
-  it('does nothing but pass: no model call, no secret, no install', () => {
-    const shim = fs.readFileSync(shimPath, 'utf-8');
-    expect(shim).not.toMatch(/secrets\./);
-    expect(shim).not.toMatch(/npm ci|agent:path-smoke|--live/);
-    expect(shim).toMatch(/permissions:\n {2}contents: read/);
+  it('path-smoke needs the changes job and is skipped only when it says no listed file changed', () => {
+    const job = jobBlock(read(), 'path-smoke');
+    expect(job).toMatch(/^ {4}needs: changes$/m);
+    // Fail closed: a failed or skipped `changes` job leaves the output empty,
+    // and empty is not 'false', so the real evals still run.
+    expect(job).toContain(
+      "if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.match != 'false') }}",
+    );
+    // The job id is the check context; a display name would rename it.
+    expect(job).not.toMatch(/^ {4}name:/m);
+  });
+
+  it('the changes job exports match from its diff step and fetches the merge commit\'s parents', () => {
+    const job = jobBlock(read(), 'changes');
+    expect(job).toContain('match: ${{ steps.diff.outputs.match }}');
+    expect(job).toMatch(/fetch-depth: 2/);
+    expect(job).not.toMatch(/secrets\./);
+  });
+
+  describe('the changes step, executed against a real pull-request merge commit', () => {
+    function repoWithPr(changedOnPr: string[]): string {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'path-smoke-changes-'));
+      const git = (...args: string[]) =>
+        execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd: dir, stdio: 'pipe' });
+      git('init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(dir, 'README.md'), 'base\n');
+      git('add', '.');
+      git('commit', '-q', '-m', 'base');
+      git('checkout', '-q', '-b', 'pr');
+      for (const f of changedOnPr) {
+        fs.mkdirSync(path.join(dir, path.dirname(f)), { recursive: true });
+        fs.writeFileSync(path.join(dir, f), 'changed\n');
+      }
+      git('add', '.');
+      git('commit', '-q', '-m', 'pr');
+      git('checkout', '-q', 'main');
+      // What actions/checkout gives a pull_request run: the merge commit,
+      // parent 1 = base tip, parent 2 = PR head.
+      git('merge', '-q', '--no-ff', '-m', 'merge', 'pr');
+      return dir;
+    }
+
+    function runChanges(cwd: string, eventName = 'pull_request'): string {
+      const src = read();
+      const out = path.join(cwd, 'gh-output');
+      fs.writeFileSync(out, '');
+      execFileSync('bash', ['-e', '-c', stepScript(src, 'diff')], {
+        cwd,
+        stdio: 'pipe',
+        env: {
+          ...process.env,
+          EVENT_NAME: eventName,
+          PATH_SMOKE_PATHS: pathSmokePaths(src).join('\n') + '\n',
+          GITHUB_OUTPUT: out,
+        },
+      });
+      return fs.readFileSync(out, 'utf-8');
+    }
+
+    it('a prompt edit plus its test (the normal mixed PR) runs the real evals', () => {
+      const dir = repoWithPr([
+        'packages/api/src/reputation/draft-public-response.ts',
+        'packages/api/test/reputation/draft-public-response.test.ts',
+      ]);
+      expect(runChanges(dir)).toBe('match=true\n');
+    });
+
+    it('an exact-file entry matches (workers/transcription.ts)', () => {
+      expect(runChanges(repoWithPr(['packages/api/src/workers/transcription.ts']))).toBe('match=true\n');
+    });
+
+    it('a PR touching no listed file skips them', () => {
+      const dir = repoWithPr(['packages/web/src/App.tsx', 'packages/api/src/routes/invoices.ts']);
+      expect(runChanges(dir)).toBe('match=false\n');
+    });
+
+    it('fails closed: when the merge commit is not there to diff, the evals run', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'path-smoke-changes-'));
+      execFileSync('git', ['init', '-q'], { cwd: dir });
+      expect(runChanges(dir)).toBe('match=true\n');
+    });
+
+    it('schedule and manual runs always run the evals', () => {
+      expect(runChanges(repoWithPr(['packages/web/src/App.tsx']), 'schedule')).toBe('match=true\n');
+    });
   });
 });
 
