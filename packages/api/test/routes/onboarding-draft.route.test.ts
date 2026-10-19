@@ -12,6 +12,7 @@ import type { AuthenticatedRequest } from '../../src/auth/clerk';
 const TENANT_ID = '00000000-0000-0000-0000-0000000000a1';
 const USER_ID = 'user-owner-1';
 const CLE = { standard: { tripFeeCents: 8900, hourlyRateCents: 15000 }, premium: { tripFeeCents: 12900, hourlyRateCents: 18500 } };
+const CMH = { standard: { tripFeeCents: 7900, hourlyRateCents: 13500 }, premium: { tripFeeCents: 10900, hourlyRateCents: 16500 } };
 
 function buildApp(role: 'owner' | 'dispatcher' = 'owner', draftRepo: InMemoryOnboardingDraftRepository = new InMemoryOnboardingDraftRepository()) {
   const proposalRepo = new InMemoryProposalRepository();
@@ -26,7 +27,7 @@ function buildApp(role: 'owner' | 'dispatcher' = 'owner', draftRepo: InMemoryOnb
     '/api/onboarding/draft',
     createOnboardingDraftRouter({
       draftRepo,
-      tierRepo: new InMemoryRegionalPriceTierRepository({ 'plumbing|CLE': CLE }),
+      tierRepo: new InMemoryRegionalPriceTierRepository({ 'plumbing|CLE': CLE, 'plumbing|CMH': CMH }),
       proposalRepo,
       auditRepo,
     }),
@@ -305,6 +306,125 @@ describe('onboarding draft routes', () => {
     expect((await request(app).post('/api/onboarding/draft').send(CREATE)).status).toBe(403);
     expect((await request(app).put('/api/onboarding/draft/choices/greeting').send({ choice: { option: 'a' }, version: 1 })).status).toBe(403);
     expect((await request(app).post('/api/onboarding/draft/approve').send({})).status).toBe(403);
+    expect((await request(app).put('/api/onboarding/draft/metro').send({ metro: 'CMH', version: 1 })).status).toBe(403);
+  });
+});
+
+describe('PUT /metro', () => {
+  const errText = (res: { body: unknown }) => JSON.stringify(res.body);
+  const PATH = '/api/onboarding/draft/metro';
+  let ctx: ReturnType<typeof buildApp>;
+  beforeEach(() => {
+    ctx = buildApp();
+  });
+
+  async function create() {
+    const res = await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+    expect(res.status).toBe(201);
+    return res.body.draft as { version: number; metroCode: string };
+  }
+  const metroAudits = async () => (await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 50 })).filter((a) => a.eventType === 'onboarding.metro_changed');
+  const stored = async () => ctx.draftRepo.getForTenant(TENANT_ID);
+  const priceOptions = (d: { assembled: { choices: Array<{ settingKey: string; options: Array<{ label: string; prices?: unknown }> }> } }) =>
+    d.assembled.choices.find((c) => c.settingKey === 'trip_fee_and_rate')!.options;
+
+  it('re-prices an unstaged draft for the new metro: code, name and the whole shop in one bump, and one onboarding.metro_changed row', async () => {
+    const d = await create();
+    const res = await request(ctx.app).put(PATH).send({ metro: 'CMH', version: d.version });
+    expect(res.status, errText(res)).toBe(200);
+    const next = res.body.draft;
+    expect(next).toMatchObject({ metroCode: 'CMH', metroName: 'Columbus', version: d.version + 1, choices: {} });
+    expect(next.assembled).toMatchObject({ metroCode: 'CMH', metroName: 'Columbus', showsCity: true, priceSource: 'metro', metroCandidates: [] });
+    expect(priceOptions(next).map((o) => o.prices)).toEqual([CMH.standard, CMH.premium]);
+    expect(priceOptions(next).map((o) => o.label)).toEqual(['$79 to come out, then $135 an hour', '$109 to come out, then $165 an hour']);
+    expect(JSON.stringify(next.assembled)).not.toMatch(/Cleveland/);
+    expect((await request(ctx.app).get('/api/onboarding/draft')).body.draft).toEqual(next);
+
+    const audits = await metroAudits();
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ entityType: 'onboarding_draft', entityId: next.id, actorId: USER_ID, metadata: { from: 'CLE', to: 'CMH', version: d.version + 1 } });
+
+    // The approval that follows carries the Columbus city and prices.
+    const approved = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: next.version });
+    expect(approved.status).toBe(200);
+    const settings = (await ctx.proposalRepo.findByTenant(TENANT_ID)).find((p) => p.proposalType === 'onboarding_tenant_settings')!;
+    expect(settings.payload).toMatchObject({ city: 'Columbus', tripFeeCents: CMH.standard.tripFeeCents, hourlyRateCents: CMH.standard.hourlyRateCents });
+  });
+
+  it('an approved draft is 409 DRAFT_APPROVED; nothing changes and no audit row', async () => {
+    const d = await create();
+    const approved = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: d.version });
+    const before = await stored();
+    for (const version of [approved.body.draft.version, approved.body.draft.version + 3]) {
+      const res = await request(ctx.app).put(PATH).send({ metro: 'CMH', version });
+      expect(res.status).toBe(409);
+      expect(errText(res)).toMatch(/DRAFT_APPROVED/);
+    }
+    expect(await stored()).toEqual(before);
+    expect(await metroAudits()).toHaveLength(0);
+  });
+
+  it.each([
+    ["option 'a'", { option: 'a' }],
+    ["option 'b'", { option: 'b' }],
+    ['an override', { override: { label: 'Walsh, go ahead', writes: { voiceGreeting: 'Walsh, go ahead' } } }],
+  ])('with %s staged is 409 DRAFT_METRO_LOCKED, at the current version and at a stale one; nothing changes and no audit row', async (_n, choice) => {
+    const d = await create();
+    const staged = await request(ctx.app).put('/api/onboarding/draft/choices/greeting').send({ choice, version: d.version });
+    expect(staged.status).toBe(200);
+    const before = await stored();
+    for (const version of [staged.body.draft.version, d.version]) {
+      const res = await request(ctx.app).put(PATH).send({ metro: 'CMH', version });
+      expect(res.status).toBe(409);
+      expect(errText(res)).toMatch(/DRAFT_METRO_LOCKED/);
+      expect(errText(res)).not.toMatch(/VERSION_CONFLICT/);
+    }
+    expect(await stored()).toEqual(before);
+    expect(await metroAudits()).toHaveLength(0);
+  });
+
+  it('unstaged with a stale version is 409 VERSION_CONFLICT naming both; nothing written', async () => {
+    const d = await create();
+    const before = await stored();
+    const res = await request(ctx.app).put(PATH).send({ metro: 'CMH', version: d.version + 1 });
+    expect(res.status).toBe(409);
+    expect(errText(res)).toMatch(new RegExp(`VERSION_CONFLICT: expected ${d.version + 1}, found ${d.version}`));
+    expect(await stored()).toEqual(before);
+    expect(await metroAudits()).toHaveLength(0);
+  });
+
+  it.each([
+    ['an unknown code', { metro: 'ZZZ', version: 1 }, 'metro'],
+    ['a lowercase code', { metro: 'cmh', version: 1 }, 'metro'],
+    ['a city name', { metro: 'Columbus', version: 1 }, 'metro'],
+    ['no metro', { version: 1 }, 'metro'],
+    ['no version', { metro: 'CMH' }, 'version'],
+    ['a zero version', { metro: 'CMH', version: 0 }, 'version'],
+    ['an extra field', { metro: 'CMH', version: 1, name: 'Columbus' }, ''],
+  ])('%s is 400 naming the field, with nothing written and no audit row', async (_n, body, field) => {
+    await create();
+    const before = await stored();
+    const res = await request(ctx.app).put(PATH).send(body);
+    expect(res.status).toBe(400);
+    const paths = (res.body.details?.issues ?? []).map((i: { path: string }) => i.path);
+    if (field) expect(paths).toContain(field);
+    expect(await stored()).toEqual(before);
+    expect(await metroAudits()).toHaveLength(0);
+  });
+
+  it('a known code with no tier row is 200 on the pack-default prices with the city dropped from the copy', async () => {
+    const d = await create();
+    const res = await request(ctx.app).put(PATH).send({ metro: 'BUF', version: d.version });
+    expect(res.status).toBe(200);
+    expect(res.body.draft).toMatchObject({ metroCode: 'BUF', metroName: 'Buffalo' });
+    expect(res.body.draft.assembled).toMatchObject({ metroCode: 'BUF', showsCity: false, priceSource: 'pack_default' });
+    expect(JSON.stringify(res.body.draft.assembled.choices)).not.toMatch(/Buffalo/);
+    expect((await metroAudits())[0].metadata).toEqual({ from: 'CLE', to: 'BUF', version: d.version + 1 });
+  });
+
+  it('without a draft is 404', async () => {
+    const res = await request(ctx.app).put(PATH).send({ metro: 'CMH', version: 1 });
+    expect(res.status).toBe(404);
   });
 });
 
