@@ -102,4 +102,18 @@ describe('callerTranscriptText', () => {
     );
     expect(callerTranscriptText({}, '4821 Bridgewater Road')).toBe('4821 Bridgewater Road');
   });
+
+  // PRIV-3 — a card recited on a call must never reach a stored turn.
+  it('replaces a recited card number with a marker, outside any approval dialogue', () => {
+    expect(
+      callerTranscriptText({}, 'can I just pay now, my card is 4111 1111 1111 1111 expires 09/27'),
+    ).toBe('can I just pay now, my card is [card number] expires 09/27');
+    expect(callerTranscriptText(undefined, 'it is 5555-5555-5555-4444')).toBe('it is [card number]');
+  });
+
+  it('leaves a phone number in a caller turn alone', () => {
+    expect(callerTranscriptText({}, 'call me back on 602 555 0199')).toBe(
+      'call me back on 602 555 0199',
+    );
+  });
 });

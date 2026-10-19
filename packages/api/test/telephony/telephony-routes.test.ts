@@ -301,13 +301,16 @@ describe('tenant-resolution failure degrades gracefully (not HTTP 500)', () => {
     expect(res.text).toContain('<Hangup');
   });
 
-  it('gather: 503 (Twilio retries) when tenant lookup throws (transient)', async () => {
+  // LCR-04 — Twilio does not retry a 5xx action URL (the old 503 dropped the
+  // call). With no live session to carry the turn, the caller leaves a voicemail.
+  it('gather: 200 + voicemail TwiML (not a 503 Twilio never retries) when tenant lookup throws and no session is live', async () => {
     const app = buildAppWithResolver(() => undefined, {
       phoneNumberRepo: throwingRepo(),
       nodeEnv: 'production',
     });
     const res = await signedPost(app, '/api/telephony/gather?sid=sess-x', GATHER_PARAMS);
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Record');
   });
 
   it('dial-result: 200 + graceful hangup TwiML when tenant cannot be resolved (terminal)', async () => {
@@ -319,13 +322,16 @@ describe('tenant-resolution failure degrades gracefully (not HTTP 500)', () => {
     expect(res.text).toContain('<Hangup');
   });
 
-  it('dial-result: 503 (Twilio retries) when tenant lookup throws (transient)', async () => {
+  // LCR-04 — Twilio does not retry a 5xx action URL (the old 503 dropped the
+  // call). With no live session to carry the turn, the caller leaves a voicemail.
+  it('dial-result: 200 + voicemail TwiML (not a 503 Twilio never retries) when tenant lookup throws and no session is live', async () => {
     const app = buildAppWithResolver(() => undefined, {
       phoneNumberRepo: throwingRepo(),
       nodeEnv: 'production',
     });
     const res = await signedPost(app, '/api/telephony/dial-result?sid=sess-x', DIAL_PARAMS);
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Record');
   });
 });
 
@@ -783,7 +789,7 @@ describe('POST /api/telephony/recording (P8-014 record_call)', () => {
       .send(params);
 
     expect(res.status).toBe(200);
-    expect(uploadedKey).toBe(`${TENANT_UUID}/CA-route-rec.mp3`);
+    expect(uploadedKey).toBe(`${TENANT_UUID}/CA-route-rec-RE-route.mp3`);
   });
 
   it('returns 403 for an unsigned recording webhook delivery', async () => {

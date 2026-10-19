@@ -9,16 +9,29 @@
 import {
   ApproveOnboardingDraftResponseSchema,
   CreateOnboardingDraftResponseSchema,
+  ONBOARDING_DRAFT_REFUSALS,
+  ONBOARDING_DRAFT_RESET_REASONS,
   OnboardingDraftResponseSchema,
+  ResetOnboardingDraftResponseSchema,
   RetryOnboardingDraftResponseSchema,
+  UndoOnboardingDraftResponseSchema,
   type ApproveOnboardingDraftBody,
   type ApproveOnboardingDraftResponse,
   type CreateOnboardingDraftBody,
   type CreateOnboardingDraftResponse,
   type OnboardingChoiceKey,
   type OnboardingDraft,
+  type OnboardingDraftRefusal,
+  type OnboardingDraftResetReason,
+  type OnboardingMetroCode,
+  type ResetOnboardingDraftBody,
+  type ResetOnboardingDraftResponse,
+  type RetryOnboardingDraftBody,
   type RetryOnboardingDraftResponse,
+  type SetOnboardingMetroBody,
   type StagedOnboardingChoice,
+  type UndoOnboardingDraftBody,
+  type UndoOnboardingDraftResponse,
 } from '@ai-service-os/shared';
 import type { ApiFetch } from './apiClient';
 
@@ -30,20 +43,40 @@ interface DraftFieldIssue {
   message: string;
 }
 
-/** A failed draft call. `versionConflict` means another writer changed the draft first. */
+/** The 409 code of a refusal, read from the `CODE: sentence` message; null for anything else. */
+function refusalOf(status: number, message: string): OnboardingDraftRefusal | null {
+  if (status !== 409) return null;
+  const prefix = message.split(':', 1)[0];
+  return (ONBOARDING_DRAFT_REFUSALS as readonly string[]).includes(prefix) ? (prefix as OnboardingDraftRefusal) : null;
+}
+
+/**
+ * A failed draft call. `refusal` names a 409 the draft routes answer on purpose (the message prefix:
+ * DRAFT_METRO_LOCKED, for one, means a choice is staged, so the city can no longer change);
+ * `versionConflict` means another writer changed the draft first; `resetReason` is why Start over was refused.
+ */
 export class OnboardingDraftApiError extends Error {
   readonly status: number;
   readonly code: string;
+  readonly refusal: OnboardingDraftRefusal | null;
   readonly versionConflict: boolean;
+  /** `details.reason` of a DRAFT_RESET_REFUSED: part of the setup is `applied`, or `executing` right now. */
+  readonly resetReason: OnboardingDraftResetReason | null;
   /** Per-field reasons from a 400; empty for every other failure. */
   readonly issues: readonly DraftFieldIssue[];
 
-  constructor(status: number, code: string, message: string, issues: readonly DraftFieldIssue[] = []) {
+  constructor(status: number, code: string, message: string, issues: readonly DraftFieldIssue[] = [], details?: unknown) {
     super(message);
     this.name = 'OnboardingDraftApiError';
     this.status = status;
     this.code = code;
-    this.versionConflict = status === 409 && message.startsWith('VERSION_CONFLICT');
+    this.refusal = refusalOf(status, message);
+    this.versionConflict = this.refusal === 'VERSION_CONFLICT';
+    const reason = (details as { reason?: unknown } | null | undefined)?.reason;
+    this.resetReason =
+      this.refusal === 'DRAFT_RESET_REFUSED' && (ONBOARDING_DRAFT_RESET_REASONS as readonly unknown[]).includes(reason)
+        ? (reason as OnboardingDraftResetReason)
+        : null;
     this.issues = issues;
   }
 
@@ -66,15 +99,17 @@ async function failure(res: Response): Promise<OnboardingDraftApiError> {
   let code = 'HTTP_ERROR';
   let message = `HTTP ${res.status}`;
   let issues: DraftFieldIssue[] = [];
+  let details: unknown;
   try {
     const body = (await res.json()) as { error?: unknown; message?: unknown; details?: unknown };
     if (typeof body.error === 'string') code = body.error;
     if (typeof body.message === 'string') message = body.message;
     issues = readIssues(body.details);
+    details = body.details;
   } catch {
     // Non-JSON error body: keep the status-only message.
   }
-  return new OnboardingDraftApiError(res.status, code, message, issues);
+  return new OnboardingDraftApiError(res.status, code, message, issues, details);
 }
 
 async function parse<T>(res: Response, schema: { safeParse(v: unknown): { success: true; data: T } | { success: false } }): Promise<T> {
@@ -116,6 +151,18 @@ export async function stageChoice(
 }
 
 /**
+ * "Not Cleveland?": re-price a draft with nothing staged for another curated city. `version` is the one
+ * the Ready screen rendered; a stale one rejects with `versionConflict`, and a draft that has a staged
+ * choice by now rejects with the refusal DRAFT_METRO_LOCKED.
+ */
+export async function setMetro(apiFetch: ApiFetch, metro: OnboardingMetroCode, version: number): Promise<OnboardingDraft> {
+  const body: SetOnboardingMetroBody = { metro, version };
+  const res = await apiFetch(`${DRAFT_PATH}/metro`, { method: 'PUT', body: JSON.stringify(body) });
+  if (!res.ok) throw await failure(res);
+  return (await parse(res, OnboardingDraftResponseSchema)).draft;
+}
+
+/**
  * "That's right": the API mints and approves two proposals; a repeat call is an idempotent read.
  * `expectedVersion` is the draft version the read-back on screen was rendered from: the API answers
  * 409 VERSION_CONFLICT when the draft has changed since (a stale tab), and an API that predates the
@@ -129,11 +176,29 @@ export async function approveDraft(apiFetch: ApiFetch, expectedVersion?: number)
 }
 
 /**
- * After a save failed: re-queue the changes that did not go through. Owner only, no body. Any 409
- * (nothing failed any more, not approved, not safe to retry) means the status moved on: re-read it.
+ * "Try again" after a save failed: re-queue the changes that did not go through. `expectedVersion` is the
+ * approved draft's version the failed screen holds; the response's draft is one version on, and `undoable`
+ * says whether the whole set can still be taken back (false after a partial retry).
  */
-export async function retryDraft(apiFetch: ApiFetch): Promise<RetryOnboardingDraftResponse> {
-  const res = await apiFetch(`${DRAFT_PATH}/retry`, { method: 'POST' });
+export async function retryDraft(apiFetch: ApiFetch, expectedVersion: number): Promise<RetryOnboardingDraftResponse> {
+  const body: RetryOnboardingDraftBody = { expectedVersion };
+  const res = await apiFetch(`${DRAFT_PATH}/retry`, { method: 'POST', body: JSON.stringify(body) });
   if (!res.ok) throw await failure(res);
   return parse(res, RetryOnboardingDraftResponseSchema);
+}
+
+/** "Undo" on the saving screen: take back the whole approval or nothing. The draft comes back editable. */
+export async function undoDraft(apiFetch: ApiFetch, expectedVersion: number): Promise<UndoOnboardingDraftResponse> {
+  const body: UndoOnboardingDraftBody = { expectedVersion };
+  const res = await apiFetch(`${DRAFT_PATH}/undo`, { method: 'POST', body: JSON.stringify(body) });
+  if (!res.ok) throw await failure(res);
+  return parse(res, UndoOnboardingDraftResponseSchema);
+}
+
+/** "Start over": return an approval that can no longer finish as one to an editable draft, answers intact. */
+export async function resetDraft(apiFetch: ApiFetch, expectedVersion: number): Promise<ResetOnboardingDraftResponse> {
+  const body: ResetOnboardingDraftBody = { expectedVersion };
+  const res = await apiFetch(`${DRAFT_PATH}/reset`, { method: 'POST', body: JSON.stringify(body) });
+  if (!res.ok) throw await failure(res);
+  return parse(res, ResetOnboardingDraftResponseSchema);
 }

@@ -64,6 +64,8 @@ const ELIGIBLE_SQL = `
   SELECT id AS tenant_id, owner_email, past_due_grace_until
     FROM tenants
    WHERE subscription_status = 'past_due'
+     AND demo = false
+     AND platform = false
      AND past_due_grace_until IS NOT NULL
      AND past_due_grace_until > $1
      AND past_due_grace_until <= $2

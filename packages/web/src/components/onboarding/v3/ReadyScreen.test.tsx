@@ -1,14 +1,19 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
+import { ONBOARDING_METROS } from '@ai-service-os/shared';
+import { expectAllTapTargets } from '../../../test-utils/tap-target';
 import { plumbingCleDraft, withDraft } from './__fixtures__';
-import { ReadyScreen } from './ReadyScreen';
+import { ReadyScreen, type ReadyScreenProps } from './ReadyScreen';
 
-function setup(draft = plumbingCleDraft) {
+function setup(draft = plumbingCleDraft, over: Partial<ReadyScreenProps> = {}) {
   const onMakeItMine = vi.fn();
   const onKeepAsIs = vi.fn();
-  render(<ReadyScreen draft={draft} onMakeItMine={onMakeItMine} onKeepAsIs={onKeepAsIs} />);
-  return { onMakeItMine, onKeepAsIs };
+  const onChangeMetro = vi.fn();
+  const view = render(
+    <ReadyScreen draft={draft} onMakeItMine={onMakeItMine} onKeepAsIs={onKeepAsIs} onChangeMetro={onChangeMetro} changingMetro={false} notice={null} error={null} {...over} />,
+  );
+  return { onMakeItMine, onKeepAsIs, onChangeMetro, container: view.container };
 }
 
 describe('ReadyScreen', () => {
@@ -20,12 +25,12 @@ describe('ReadyScreen', () => {
     ).toBeInTheDocument();
   });
 
-  it('only promises what this screen can do: tap, not speech', () => {
-    // Voice in and out is a later slice. Until it is wired, the copy must not
+  it('only promises what the shell can do: Rivet speaks (S3-3), but nothing listens yet', () => {
+    // Hearing is wired; listening is S3-5. Until the mic is, the copy must not
     // tell the owner to say "first" or "second", or that they can say "neither".
     setup();
     expect(screen.getByText(/Tap the one that sounds right\. Nothing is saved until you say so\./)).toBeInTheDocument();
-    expect(screen.queryByText(/say .?first|say .?second|say .?neither|tap to hear/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/say .?first|say .?second|say .?neither/i)).not.toBeInTheDocument();
   });
 
   it('shows the finished shop from the assembled draft, with Most shops marks', () => {
@@ -65,5 +70,74 @@ describe('ReadyScreen', () => {
     expect(onMakeItMine).toHaveBeenCalledTimes(1);
     await userEvent.click(screen.getByRole('button', { name: 'Looks right as is, skip the choices' }));
     expect(onKeepAsIs).toHaveBeenCalledTimes(1);
+  });
+
+  describe('"Not Cleveland?"', () => {
+    it('names the city it priced for and offers to change it, in plain words', async () => {
+      const { onChangeMetro, container } = setup();
+      const change = screen.getByRole('button', { name: 'Not Cleveland?' });
+      expectAllTapTargets(container, 'Ready');
+      await userEvent.click(change);
+
+      // The list of cities Rivet has prices for, searchable, with the current one left out.
+      const search = screen.getByRole('searchbox', { name: 'Your city' });
+      const cities = screen.getByRole('list', { name: 'Cities' });
+      const names = within(cities).getAllByRole('button').map((b) => b.textContent);
+      expect(names).toHaveLength(ONBOARDING_METROS.length - 1);
+      expect(names).not.toContain('Cleveland');
+      expect(names).toContain('Columbus');
+      expectAllTapTargets(container, 'Ready with the city list open');
+
+      await userEvent.type(search, 'colu');
+      expect(within(cities).getAllByRole('button').map((b) => b.textContent)).toEqual(['Columbus']);
+      await userEvent.click(within(cities).getByRole('button', { name: 'Columbus' }));
+      expect(onChangeMetro).toHaveBeenCalledTimes(1);
+      expect(onChangeMetro).toHaveBeenCalledWith('CMH');
+      // Picked: the list closes.
+      expect(screen.queryByRole('searchbox', { name: 'Your city' })).not.toBeInTheDocument();
+    });
+
+    it('says so when no city matches, and the owner can close the list unchanged', async () => {
+      const { onChangeMetro } = setup();
+      await userEvent.click(screen.getByRole('button', { name: 'Not Cleveland?' }));
+      await userEvent.type(screen.getByRole('searchbox', { name: 'Your city' }), 'Reykjavik');
+      expect(screen.getByText("I don't have prices for that city yet. Pick the closest one.")).toBeInTheDocument();
+      expect(screen.queryByRole('list', { name: 'Cities' })).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Keep Cleveland' }));
+      expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Not Cleveland?' })).toBeInTheDocument();
+      expect(onChangeMetro).not.toHaveBeenCalled();
+    });
+
+    it('reads "Set my city" when the prices are not a city\'s (and closes as "Never mind")', async () => {
+      setup(withDraft({ assembled: { ...plumbingCleDraft.assembled, showsCity: false, priceSource: 'national' } }));
+      expect(screen.queryByRole('button', { name: /^Not / })).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Set my city' }));
+      expect(screen.getByRole('searchbox', { name: 'Your city' })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Never mind' }));
+      expect(screen.getByRole('button', { name: 'Set my city' })).toBeInTheDocument();
+    });
+
+    it.each([
+      ['a core choice', { greeting: { option: 'b' as const } }],
+      ['an override', { trip_fee_and_rate: { override: { label: '$95, then $140 an hour', writes: {}, prices: { tripFeeCents: 9500, hourlyRateCents: 14000 } } } }],
+      ['the established-shop question', { existing_number: { option: 'a' as const } }],
+    ])('is not offered once anything is staged (%s): the server refuses it then', (_n, choices) => {
+      setup(withDraft({ choices }));
+      expect(screen.queryByRole('button', { name: /Not Cleveland|Set my city/ })).not.toBeInTheDocument();
+    });
+
+    it('while the change is saving, every control waits', async () => {
+      setup(plumbingCleDraft, { changingMetro: true });
+      for (const name of ['Not Cleveland?', 'Make it mine, 7 choices', 'Looks right as is, skip the choices']) {
+        expect(screen.getByRole('button', { name })).toBeDisabled();
+      }
+    });
+
+    it('shows the refresh notice and a save problem as one line each', () => {
+      setup(plumbingCleDraft, { notice: 'Your answers changed somewhere else, so I refreshed them.', error: "That didn't go through. Try again." });
+      expect(screen.getByRole('status')).toHaveTextContent('Your answers changed somewhere else, so I refreshed them.');
+      expect(screen.getByRole('alert')).toHaveTextContent("That didn't go through. Try again.");
+    });
   });
 });

@@ -54,6 +54,16 @@ interface CacheEntry {
  *    lightweight model tier with `maxTokens: 2048`; 100 short terms keeps
  *    the glossary preamble a small, predictable fraction of that budget
  *    and leaves headroom for the transcript itself.
+ *  - Only NAME-SHAPED terms leave the provider (`isNameShaped`). Customer
+ *    display names are written by anyone on the internet through the
+ *    public booking form before anyone approves the booking (PI-1), so a
+ *    term is kept only when it looks like a name or a catalog noun: at
+ *    most `MAX_TERM_CHARS` characters and `MAX_TERM_WORDS` words, drawn
+ *    from letters, digits, apostrophes, periods, ampersands, slashes,
+ *    hyphens and spaces. No colon, quote, newline, bracket or other
+ *    punctuation — the characters an instruction needs. The rule applies
+ *    to every source: catalog and user names can be written through
+ *    voice/AI paths too.
  *  - Any repo failure is caught per-source and swallowed — correction is
  *    a quality upgrade, never a gate, so `termsForTenant` NEVER throws.
  *    A failing source just contributes no terms; the terms already
@@ -189,11 +199,28 @@ export class TenantGlossaryProvider implements TranscriptionGlossaryProvider {
   }
 }
 
-/** Trims, drops empties, keeps first-seen order. */
+/** PI-1 — longest term that still reads as a name or a catalog noun. */
+const MAX_TERM_CHARS = 40;
+/** PI-1 — most whitespace-separated words a glossary term may carry. */
+const MAX_TERM_WORDS = 4;
+/**
+ * PI-1 — the characters a name or a catalog noun is made of: letters, digits,
+ * apostrophes (O'Brien), periods (St. Jude), ampersands (A&B), slashes
+ * (3/4in), hyphens and spaces. Everything an instruction needs to read as
+ * one — colons, quotes, newlines, brackets, commas, semicolons — is out.
+ */
+const NAME_SHAPED_TERM = /^[\p{L}\p{N}][\p{L}\p{N}'’.&/\- ]*$/u;
+
+/** Whether a trimmed term may enter the glossary. */
+function isNameShaped(term: string): boolean {
+  if (term.length === 0 || term.length > MAX_TERM_CHARS) return false;
+  if (!NAME_SHAPED_TERM.test(term)) return false;
+  return term.split(/\s+/).length <= MAX_TERM_WORDS;
+}
+
+/** Trims, keeps only name-shaped terms (PI-1), keeps first-seen order. */
 function cleanTerms(raw: Array<string | undefined | null>): string[] {
-  return raw
-    .map((term) => (term ?? '').trim())
-    .filter((term) => term.length > 0);
+  return raw.map((term) => (term ?? '').trim()).filter(isNameShaped);
 }
 
 /** Dedupes case-insensitively while preserving first-seen casing and order. */

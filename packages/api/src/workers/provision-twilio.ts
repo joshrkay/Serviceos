@@ -8,6 +8,7 @@ import {
   createTwilioSubaccountWithCreds,
   createMessagingService,
   purchasePhoneNumber,
+  buildPhoneNumberWebhooks,
   attachNumberToMessagingService,
   listSubaccountPhoneNumbers,
   releasePhoneNumber,
@@ -163,6 +164,8 @@ export function createProvisionTwilioWorker(deps: {
       // URL → base mapping (see docs/deployment.md "Optional third service"):
       // - VoiceUrl (/api/telephony/voice — TwiML; the live call rides this
       //   service and its <Stream> targets this service's WS) → voiceBaseUrl
+      // - VoiceFallbackUrl (/api/telephony/voice/fallback — LCR-04, static
+      //   voicemail TwiML Twilio fetches when VoiceUrl fails) → voiceBaseUrl
       // - IncomingPhoneNumber StatusCallback (/webhooks/twilio/status/:tenantId
       //   — voice-CALL lifecycle events for this number) → voiceBaseUrl, so
       //   all Twilio call traffic for the number stays on one domain
@@ -415,11 +418,11 @@ export function createProvisionTwilioWorker(deps: {
                 // /api/telephony/voice handler which resolves tenant from
                 // the inbound `to` number. The /webhooks/twilio/* routes only
                 // 200-ack and don't emit TwiML, so they'd break call handling.
-                // Both voice-call surfaces use voiceBaseUrl (WS14 — the
-                // dedicated voice service's domain when VOICE_PUBLIC_URL is
-                // set; baseUrl otherwise). See the mapping comment above.
-                `${voiceBaseUrl}/api/telephony/voice`,
-                `${voiceBaseUrl}/webhooks/twilio/status/${tenantId}`,
+                // All three voice-call surfaces (VoiceUrl, LCR-04's
+                // VoiceFallbackUrl, StatusCallback) use voiceBaseUrl (WS14 —
+                // the dedicated voice service's domain when VOICE_PUBLIC_URL
+                // is set; baseUrl otherwise). See the mapping comment above.
+                buildPhoneNumberWebhooks(voiceBaseUrl, tenantId),
                 preferredNumber
               );
             } catch (purchaseErr) {

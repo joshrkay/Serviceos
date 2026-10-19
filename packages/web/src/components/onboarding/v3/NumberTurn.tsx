@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useState } from 'react';
+import { useRivetLine } from '../../../hooks/useRivetVoice';
 import { useApiClient } from '../../../lib/apiClient';
 import { formatPhone } from '../../phone/NumberPicker';
 import { Button, Input } from '../../ui';
@@ -42,6 +44,9 @@ type Pick =
 const PRIMARY = 'h-14 whitespace-normal rounded-2xl text-[17px] font-semibold';
 const SECONDARY = 'mt-2.5 h-14 whitespace-normal rounded-2xl text-[17px] font-semibold';
 const AREA_CODE = /^\d{3}$/;
+const NUMBER_READY = "Here's your number.";
+const NUMBER_FAILED = "I couldn't get your number yet.";
+const NUMBER_ASK = "Let's get your number.";
 
 /**
  * The owner's number. The trial pays for it, so it is asked for only now. Rivet
@@ -68,6 +73,8 @@ export function NumberTurn({ step, onChanged }: NumberTurnProps) {
   const [claiming, setClaiming] = useState(false);
   // Every number the owner took this visit: a new search never offers one of them again.
   const tried = useRef<Set<string>>(new Set());
+  // Rivet says the heading the owner is looking at; the wait for a number is not a line of its own.
+  useRivetLine('number', view.kind === 'getting' ? null : view.kind === 'ready' ? NUMBER_READY : view.kind === 'error' ? NUMBER_FAILED : NUMBER_ASK);
 
   /** "Get my number" and "Try again" are the same request: the API picks a local number near the business. */
   const askForNumber = async () => {
@@ -211,8 +218,8 @@ export function NumberTurn({ step, onChanged }: NumberTurnProps) {
     return (
       <>
         <SpeakerLine />
-        <RivetHeading>{pick.taken ? TAKEN_OFFER : `Here's one in ${pick.areaCode}.`}</RivetHeading>
-        <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">Nothing is bought until you say it works.</p>
+        <RivetHeading>{NUMBER_READY}</RivetHeading>
+        <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">I&apos;m finishing the last details, then you can call it.</p>
         <div className="mt-5 rounded-2xl border border-border bg-card p-4 text-center">
           <p className="break-words font-display text-[30px] font-semibold leading-[1.1] tracking-[-0.02em]">
             {formatPhone(pick.candidate.phoneNumber)}
@@ -289,7 +296,7 @@ export function NumberTurn({ step, onChanged }: NumberTurnProps) {
   return (
     <>
       <SpeakerLine />
-      <RivetHeading>{failed ? "I couldn't get your number yet." : "Let's get your number."}</RivetHeading>
+      <RivetHeading>{failed ? NUMBER_FAILED : NUMBER_ASK}</RivetHeading>
       <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">
         {failed ? view.message : "I'll pick a local one near your business."}
       </p>
