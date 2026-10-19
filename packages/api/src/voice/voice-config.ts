@@ -5,6 +5,7 @@ import type { VapiClient } from '../integrations/vapi/client';
 import {
   resolveVoicePreset,
   autoGenerateGreeting,
+  vapiFirstMessage,
 } from '../integrations/vapi/assistant-config';
 
 /**
@@ -72,7 +73,7 @@ export async function saveVoiceConfig(
   if (deps.vapiClient && settings?.vapi_assistant_id) {
     try {
       await deps.vapiClient.updateAssistant(settings.vapi_assistant_id, {
-        firstMessage: greeting,
+        firstMessage: vapiFirstMessage(greeting, settings.business_name ?? ''),
         voiceId: preset.elevenLabsVoiceId,
       });
       assistantUpdated = true;

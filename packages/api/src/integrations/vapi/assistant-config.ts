@@ -6,6 +6,7 @@
  * overridden by the operator; both the chosen voice and greeting are
  * persisted onto the tenant's Vapi assistant and mirrored to tenant_settings.
  */
+import { buildAiDisclosureText } from '../../ai/skills/disclose-ai-identity';
 
 export interface VoicePreset {
   /** Stable key stored in tenant_settings.voice_id. */
@@ -49,6 +50,19 @@ export function autoGenerateGreeting(businessName: string, services: string[] = 
   return `Thanks for calling ${name}.${svc} How can I help you today?`;
 }
 
+/**
+ * PRIV-4 — the first message a Vapi-routed caller hears. A number imported
+ * into Vapi never reaches `/api/telephony/voice`, so `buildTelephonyGreeting`
+ * (which carries the virtual-assistant notice on the phone path) never runs;
+ * the notice rides on `firstMessage` instead, mirroring that function's
+ * custom-greeting branch: the tenant's words first, then the notice. The
+ * stored `voice_greeting` stays notice-free, because the phone path appends
+ * its own.
+ */
+export function vapiFirstMessage(greeting: string, businessName: string): string {
+  return `${greeting.trim()} ${buildAiDisclosureText({ businessName })}`;
+}
+
 export interface VapiAssistantConfig {
   name: string;
   firstMessage: string;
@@ -79,7 +93,7 @@ export function buildAssistantConfig(input: {
       : autoGenerateGreeting(input.businessName, input.services ?? []);
   return {
     name: `${(input.businessName || 'ServiceOS').trim()} AI Receptionist`,
-    firstMessage,
+    firstMessage: vapiFirstMessage(firstMessage, input.businessName),
     voiceId: preset.elevenLabsVoiceId,
     ...(input.serverUrl ? { serverUrl: input.serverUrl } : {}),
     ...(input.serverUrlSecret ? { serverUrlSecret: input.serverUrlSecret } : {}),

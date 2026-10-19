@@ -38,17 +38,24 @@ describe('saveVoiceConfig', () => {
     // tenant_settings updated with the preset id + greeting
     expect(updates[0].params).toEqual(['adam', res.greeting, 't1']);
     // assistant updated with the elevenlabs voice id for the preset
+    // PRIV-4 — the Vapi first message carries the virtual-assistant notice;
+    // the stored greeting does not (the phone path appends its own).
     expect(vapiClient.updateAssistant).toHaveBeenCalledWith('asst_1', {
-      firstMessage: res.greeting,
+      firstMessage: `${res.greeting} Just so you know, I'm a virtual assistant, not a live person.`,
       voiceId: resolveVoicePreset('adam').elevenLabsVoiceId,
     });
   });
 
-  it('honors an explicit greeting override', async () => {
-    const { pool } = makePool({ vapi_assistant_id: 'asst_1' });
+  it('honors an explicit greeting override, and the Vapi first message adds the notice after it', async () => {
+    const { pool, updates } = makePool({ vapi_assistant_id: 'asst_1' });
     const vapiClient = { createAssistant: vi.fn(), updateAssistant: vi.fn(async () => undefined), linkPhoneNumber: vi.fn(), deletePhoneNumber: vi.fn() };
     const res = await saveVoiceConfig({ pool, auditRepo, vapiClient }, { tenantId: 't1', actorId: 'u1', voiceId: 'rachel', greeting: 'Hi, Acme here!' });
     expect(res.greeting).toBe('Hi, Acme here!');
+    expect(updates[0].params).toEqual(['rachel', 'Hi, Acme here!', 't1']);
+    expect(vapiClient.updateAssistant).toHaveBeenCalledWith('asst_1', {
+      firstMessage: "Hi, Acme here! Just so you know, I'm a virtual assistant, not a live person.",
+      voiceId: resolveVoicePreset('rachel').elevenLabsVoiceId,
+    });
   });
 
   it('persists the preference even when no Vapi assistant exists yet (no push)', async () => {
