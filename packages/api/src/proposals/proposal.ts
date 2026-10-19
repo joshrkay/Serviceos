@@ -958,6 +958,16 @@ export interface ProposalRepository {
    */
   createMany(proposals: Proposal[]): Promise<Proposal[]>;
   findById(tenantId: string, id: string): Promise<Proposal | null>;
+  /**
+   * The locking read of a proposal SET (onboarding/draft/locked-set.ts): this
+   * tenant's rows among `ids`, ordered by id, each `SELECT ... FOR UPDATE` until
+   * the request transaction ends. A missing or foreign id is simply absent from
+   * the result. The fixed order means two callers locking the same set cannot
+   * deadlock. Only meaningful inside the /api request transaction: the Pg
+   * implementation refuses to run outside one (a lock taken on a throwaway
+   * connection is released at once). In memory it is a plain ordered read.
+   */
+  findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]>;
   findByTenant(tenantId: string): Promise<Proposal[]>;
   findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]>;
   /**
@@ -1436,6 +1446,15 @@ export class InMemoryProposalRepository implements ProposalRepository {
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
     return { ...proposal };
+  }
+
+  /** Plain ordered read: in-memory callers are single-threaded, so there is nothing to lock. */
+  async findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]> {
+    return [...new Set(ids)]
+      .sort()
+      .map((id) => this.proposals.get(id))
+      .filter((p): p is Proposal => !!p && p.tenantId === tenantId)
+      .map((p) => ({ ...p }));
   }
 
   async findByTenant(tenantId: string): Promise<Proposal[]> {

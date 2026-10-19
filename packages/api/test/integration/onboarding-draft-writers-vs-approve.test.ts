@@ -142,8 +142,13 @@ export const DRAFT_WRITERS: DraftWriterRow[] = [
   },
 ];
 
-/** Mutating routes that are not draft field writers: approve is the other side of the race, retry bumps an approved draft. */
-const NOT_FIELD_WRITERS = ['POST /approve', 'POST /retry'];
+/**
+ * Mutating routes that are not draft field writers: approve is the other side of
+ * the race; retry bumps and undo (S4-4) reverts an APPROVED draft, so neither can
+ * land inside approve's draft-status window (their own races are in
+ * onboarding-draft-execution.test.ts and onboarding-draft-undo.test.ts).
+ */
+const NOT_FIELD_WRITERS = ['POST /approve', 'POST /retry', 'POST /undo'];
 
 describe('every router write path has a DRAFT_WRITERS row', () => {
   it('lists each mutating route as a writer row or as a known non-writer', () => {

@@ -22,7 +22,10 @@ import { createOnboardingDraftRouter } from '../../src/routes/onboarding-draft';
 import { PgOnboardingDraftRepository } from '../../src/onboarding/draft/repository';
 import { PgRegionalPriceTierRepository } from '../../src/onboarding/choices/price-tiers';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
-import { approveProposal } from '../../src/proposals/actions';
+import { approveProposal, undoProposal } from '../../src/proposals/actions';
+import { retryFailedDraftProposals } from '../../src/onboarding/draft/retry';
+import { undoApprovedDraft } from '../../src/onboarding/draft/undo';
+import { raceFirstThen } from './onboarding-draft-request-tx';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { loadOnboardingFacts } from '../../src/onboarding/load-facts';
@@ -679,6 +682,260 @@ describe('onboarding draft execution state (real DB)', () => {
       tenant = theirTenant;
       expect(await row(theirs[0])).toEqual(theirsBefore);
       expect(await auditCounts()).toEqual(theirAuditBefore);
+    });
+
+    // ─── S4-4: retry's expectedVersion, undoable, and its races with undo ──
+
+    describe('S4: expectedVersion, undoable and the locked set read', () => {
+      const retryAt = (body?: object) => {
+        const r = request(app).post('/api/onboarding/draft/retry');
+        return body === undefined ? r.send() : r.send(body);
+      };
+      const undo = (expectedVersion: number) => request(app).post('/api/onboarding/draft/undo').send({ expectedVersion });
+      const draftRepo = () => new PgOnboardingDraftRepository(pool);
+      const owner = () => ({ userId: tenant.userId, role: 'owner' as const });
+      const retryIn = (expectedVersion?: number) => () =>
+        retryFailedDraftProposals({ draftRepo: draftRepo(), proposalRepo, auditRepo: new PgAuditRepository(pool) }, tenant.tenantId, owner(), { expectedVersion });
+      const undoIn = (expectedVersion: number) => () =>
+        undoApprovedDraft({ draftRepo: draftRepo(), proposalRepo, auditRepo: new PgAuditRepository(pool) }, tenant.tenantId, owner(), { expectedVersion });
+      async function statusAt(now: Date) {
+        return deriveOnboardingStatus(await loadOnboardingFacts({ pool, settingsRepo }, tenant.tenantId), now).draft;
+      }
+      async function approvedAt(id: string): Promise<Date> {
+        return (await row(id)).approved_at as Date;
+      }
+
+      it.each([['with { expectedVersion: v }', true], ['with no body (as #1694 shipped)', false]])(
+        'retry %s bumps to v + 1; the response, the row and the status block agree',
+        async (_label, sendVersion) => {
+          const ids = await approvedDraft();
+          await failProposal(ids[0]);
+          const v = (await draftRow()).version;
+          const res = sendVersion ? await retryAt({ expectedVersion: v }) : await retryAt();
+          expect(res.status).toBe(200);
+          expect(res.body.draft.version).toBe(v + 1);
+          expect((await draftRow()).version).toBe(v + 1);
+          expect((await status()).status.draft?.version).toBe(v + 1);
+          const audit = await pool.query(`SELECT metadata FROM audit_events WHERE tenant_id = $1 AND event_type = 'onboarding.draft_retry'`, [tenant.tenantId]);
+          expect(audit.rows[0].metadata).toMatchObject({ draftVersionBefore: v, draftVersionAfter: v + 1 });
+
+          // A second failure and a second retry move it by exactly one more.
+          await failProposal(ids[0]);
+          const again = sendVersion ? await retryAt({ expectedVersion: v + 1 }) : await retryAt();
+          expect(again.body.draft.version).toBe(v + 2);
+        },
+      );
+
+      it('a refused retry bumps nothing, whichever guard answers (table), and two guards at once answer the first', async () => {
+        const cases: Array<{ name: string; arrange: (ids: string[], v: number) => Promise<object | undefined>; code: RegExp }> = [
+          {
+            name: 'DRAFT_NOT_APPROVED',
+            arrange: async (_ids, v) => {
+              await pool.query(`UPDATE onboarding_drafts SET status = 'draft' WHERE tenant_id = $1`, [tenant.tenantId]);
+              return { expectedVersion: v + 9 };
+            },
+            code: /^DRAFT_NOT_APPROVED/,
+          },
+          { name: 'VERSION_CONFLICT', arrange: async (ids, v) => (await failProposal(ids[0]), { expectedVersion: v - 1 }), code: /^VERSION_CONFLICT/ },
+          {
+            name: 'DRAFT_RETRY_UNSAFE',
+            arrange: async (ids, v) => (await failProposal(ids[0]), await setStatus(ids[1], 'undone'), { expectedVersion: v }),
+            code: /^DRAFT_RETRY_UNSAFE/,
+          },
+          {
+            name: 'DRAFT_RETRY_NOTHING_FAILED',
+            arrange: async (ids, v) => (await setStatus(ids[1], 'executed'), { expectedVersion: v }),
+            code: /^DRAFT_RETRY_NOTHING_FAILED/,
+          },
+          {
+            name: 'stale version AND unsafe set -> VERSION_CONFLICT',
+            arrange: async (ids, v) => (await failProposal(ids[0]), await setStatus(ids[1], 'undone'), { expectedVersion: v + 3 }),
+            code: /^VERSION_CONFLICT/,
+          },
+        ];
+        for (const c of cases) {
+          tenant = await createTestTenant(pool);
+          const ids = await approvedDraft();
+          const body = await c.arrange(ids, (await draftRow()).version);
+          const draftBefore = await draftRow();
+          const proposalsBefore = await Promise.all(ids.map(row));
+          const res = await retryAt(body);
+          expect(res.status, c.name).toBe(409);
+          expect(res.body.message, c.name).toMatch(c.code);
+          expect(await draftRow(), c.name).toEqual(draftBefore);
+          expect(await Promise.all(ids.map(row)), c.name).toEqual(proposalsBefore);
+          const audit = await auditCounts();
+          expect(audit['onboarding.draft_retry'] ?? 0, c.name).toBe(0);
+          expect(audit['proposal.retried'] ?? 0, c.name).toBe(0);
+        }
+      });
+
+      it('two retries at one version, 5 tenants: one 200, the loser waited and is VERSION_CONFLICT naming v and v + 1', async () => {
+        for (let i = 0; i < 5; i++) {
+          tenant = await createTestTenant(pool);
+          const [a] = await approvedDraft();
+          await failProposal(a);
+          const v = (await draftRow()).version;
+          const { first, second } = await raceFirstThen(pool, tenant.tenantId, retryIn(v), retryIn(v));
+          expect(first.draft.version, `round ${i}`).toBe(v + 1);
+          expect(second.status, `round ${i}`).toBe('rejected');
+          expect((second as PromiseRejectedResult).reason, `round ${i}`).toMatchObject({ name: 'DraftVersionConflictError', expected: v, actual: v + 1 });
+          expect((await draftRow()).version).toBe(v + 1);
+          expect((await auditCounts())['proposal.retried']).toBe(1);
+        }
+      });
+
+      it('a stale tab: A renders approval at v, B retries with v (v + 1), A undoes with v -> VERSION_CONFLICT naming v and v + 1; nothing changes; v + 1 then undoes to v + 2', async () => {
+        const ids = await approvedDraft();
+        const v = (await draftRow()).version;
+        for (const id of ids) await failProposal(id);
+        const b = await retryAt({ expectedVersion: v });
+        expect(b.status).toBe(200);
+        expect(b.body.undoable).toBe(true);
+        const draftBefore = await draftRow();
+        const proposalsBefore = await Promise.all(ids.map(row));
+        const settingsBefore = (await pool.query(`SELECT * FROM tenant_settings WHERE tenant_id = $1`, [tenant.tenantId])).rows;
+
+        const a = await undo(v);
+        expect(a.status).toBe(409);
+        expect(a.body.message).toMatch(new RegExp(`^VERSION_CONFLICT: expected ${v}, found ${v + 1}`));
+        expect(await draftRow()).toEqual(draftBefore);
+        expect(await Promise.all(ids.map(row))).toEqual(proposalsBefore);
+        expect((await auditCounts())['onboarding.draft_undone'] ?? 0).toBe(0);
+        expect((await pool.query(`SELECT * FROM tenant_settings WHERE tenant_id = $1`, [tenant.tenantId])).rows).toEqual(settingsBefore);
+
+        const fresh = await undo(v + 1);
+        expect(fresh.status).toBe(200);
+        expect(fresh.body.draft).toMatchObject({ status: 'draft', version: v + 2 });
+        for (const id of ids) expect((await row(id)).status).toBe('undone');
+      });
+
+      it('retry vs a stale undo, both orders, 5 tenants: never an undo of a retry its sender did not hold', async () => {
+        for (let i = 0; i < 5; i++) {
+          // Retry first (holding the lock), A's undo at v waits, then is VERSION_CONFLICT.
+          tenant = await createTestTenant(pool);
+          let ids = await approvedDraft();
+          let v = (await draftRow()).version;
+          for (const id of ids) await failProposal(id);
+          const r1 = await raceFirstThen(pool, tenant.tenantId, retryIn(v), undoIn(v));
+          expect(r1.first.draft.version).toBe(v + 1);
+          expect(r1.second.status).toBe('rejected');
+          expect((r1.second as PromiseRejectedResult).reason).toMatchObject({ name: 'DraftVersionConflictError', expected: v, actual: v + 1 });
+          expect(await draftRow()).toMatchObject({ status: 'approved', version: v + 1 });
+          for (const id of ids) expect((await row(id)).status).toBe('approved');
+
+          // Undo first: it reads execution_failed members and refuses; the retry then succeeds.
+          tenant = await createTestTenant(pool);
+          ids = await approvedDraft();
+          v = (await draftRow()).version;
+          for (const id of ids) await failProposal(id);
+          const refused = await undo(v);
+          expect(refused.status).toBe(409);
+          expect(refused.body.message).toMatch(/^DRAFT_UNDO_REFUSED: /);
+          expect([...refused.body.details.statuses]).toEqual(['execution_failed', 'execution_failed']);
+          const retried = await retryAt({ expectedVersion: v });
+          expect(retried.status).toBe(200);
+          expect((await draftRow()).version).toBe(v + 1);
+          expect((await auditCounts())['onboarding.draft_undone'] ?? 0).toBe(0);
+        }
+      });
+
+      describe('undo eligibility after a retry (fixed approved_at)', () => {
+        it.each(['approved', 'executing', 'executed'])(
+          '(a)/(e) partial retry beside a sibling %s: undoable false in the response and the status; the sibling row untouched',
+          async (sibling) => {
+            const [a, b] = await approvedDraft();
+            await failProposal(a);
+            // The sibling's first window is long over (the worker is behind, or ran it).
+            await pool.query(`UPDATE proposals SET approved_at = NOW() - interval '30 seconds' WHERE tenant_id = $1 AND id = $2`, [tenant.tenantId, b]);
+            if (sibling !== 'approved') await setStatus(b, sibling);
+            const siblingBefore = await row(b);
+            const v = (await draftRow()).version;
+
+            const res = await retryAt({ expectedVersion: v });
+
+            expect(res.status).toBe(200);
+            expect(res.body.undoable).toBe(false);
+            expect(await row(b)).toEqual(siblingBefore);
+            expect((await row(a)).status).toBe('approved');
+            const at = await approvedAt(a);
+            expect((await statusAt(new Date(at.getTime() + 500)))?.undoable).toBe(false);
+            expect(res.body.draft.version).toBe(v + 1);
+          },
+        );
+
+        it('(b)-(d) full-set retry: undoable true until 4.0 s; a stale hint is still refused once the window closes or a member is claimed', async () => {
+          let ids = await approvedDraft();
+          for (const id of ids) await failProposal(id);
+          const res = await retryAt({ expectedVersion: (await draftRow()).version });
+          expect(res.body.undoable).toBe(true);
+          const at = Math.max(...(await Promise.all(ids.map(approvedAt))).map((d) => d.getTime()));
+          expect((await statusAt(new Date(at + 500)))?.undoable).toBe(true);
+          expect((await statusAt(new Date(at + 3900)))?.undoable).toBe(true);
+          // (c) the hint expires a second early, on the next read, with nothing else asked.
+          expect((await statusAt(new Date(at + 4000)))?.undoable).toBe(false);
+
+          // (b) an undo with the retry response's version inside the new window takes both back.
+          const undone = await undo(res.body.draft.version);
+          expect(undone.status).toBe(200);
+          for (const id of ids) expect((await row(id)).status).toBe('undone');
+          expect((await draftRow()).status).toBe('draft');
+
+          // (d) the shell held undoable: true, but the window closed before the tap.
+          tenant = await createTestTenant(pool);
+          ids = await approvedDraft();
+          for (const id of ids) await failProposal(id);
+          const held = await retryAt({ expectedVersion: (await draftRow()).version });
+          expect(held.body.undoable).toBe(true);
+          await pool.query(`UPDATE proposals SET approved_at = NOW() - interval '6 seconds' WHERE tenant_id = $1 AND id = ANY($2::uuid[])`, [tenant.tenantId, ids]);
+          let before = { draft: await draftRow(), proposals: await Promise.all(ids.map(row)) };
+          const late = await undo(held.body.draft.version);
+          expect(late.status).toBe(409);
+          expect(late.body.message).toMatch(/^UNDO_WINDOW_CLOSED: /);
+          expect({ draft: await draftRow(), proposals: await Promise.all(ids.map(row)) }).toEqual(before);
+
+          // (d) and a worker claimed a member before the tap.
+          tenant = await createTestTenant(pool);
+          ids = await approvedDraft();
+          for (const id of ids) await failProposal(id);
+          const held2 = await retryAt({ expectedVersion: (await draftRow()).version });
+          await proposalRepo.claimForExecution(ids[0], 'execution-worker');
+          before = { draft: await draftRow(), proposals: await Promise.all(ids.map(row)) };
+          const claimed = await undo(held2.body.draft.version);
+          expect(claimed.status).toBe(409);
+          expect(claimed.body.message).toMatch(/^DRAFT_UNDO_REFUSED: /);
+          expect(claimed.body.details.statuses).toContain('executing');
+          expect({ draft: await draftRow(), proposals: await Promise.all(ids.map(row)) }).toEqual(before);
+          expect((await auditCounts())['onboarding.draft_undone'] ?? 0).toBe(0);
+        });
+      });
+
+      it('an inbox undo of the approved sibling vs retry, both orders, 5 tenants: never a retry that passed its check on a stale read', async () => {
+        const inboxUndo = (id: string) => () =>
+          undoProposal(proposalRepo, tenant.tenantId, id, tenant.userId, 'owner', new PgAuditRepository(pool));
+        for (let i = 0; i < 5; i++) {
+          // Retry first: it re-queues; the inbox undo waited on the sibling's row lock, then lands on a plain split pair.
+          tenant = await createTestTenant(pool);
+          let [a, b] = await approvedDraft();
+          await failProposal(a);
+          const r1 = await raceFirstThen(pool, tenant.tenantId, retryIn(), inboxUndo(b));
+          expect(r1.first.retriedProposalIds, `round ${i}`).toEqual([a]);
+          expect(r1.second.status, `round ${i}`).toBe('fulfilled');
+          expect([(await row(a)).status, (await row(b)).status]).toEqual(['approved', 'undone']);
+          expect((await status()).status.draft?.execution).toBe('stopped');
+
+          // Inbox undo first: the retry waits on the sibling's lock, reads `undone`, and is UNSAFE.
+          tenant = await createTestTenant(pool);
+          [a, b] = await approvedDraft();
+          await failProposal(a);
+          const v = (await draftRow()).version;
+          const r2 = await raceFirstThen(pool, tenant.tenantId, inboxUndo(b), retryIn());
+          expect(r2.second.status, `round ${i}`).toBe('rejected');
+          expect(String((r2.second as PromiseRejectedResult).reason?.message), `round ${i}`).toMatch(/^DRAFT_RETRY_UNSAFE/);
+          expect([(await row(a)).status, (await row(b)).status]).toEqual(['execution_failed', 'undone']);
+          expect((await draftRow()).version).toBe(v);
+        }
+      });
     });
   });
 

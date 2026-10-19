@@ -191,7 +191,7 @@ export function deriveDraftExecution(
  * (absent on the wire) while the draft is still being edited; `false` for an
  * approved draft with nothing listed or a listed proposal whose row is gone.
  */
-function deriveDraftUndoable(
+export function deriveDraftUndoable(
   draftStatus: 'draft' | 'approved',
   tracked: DraftProposalsFact | undefined,
   now: Date,

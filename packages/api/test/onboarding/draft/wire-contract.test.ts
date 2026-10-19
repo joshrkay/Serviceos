@@ -14,14 +14,18 @@ import {
   ONBOARDING_CORE_CHOICE_KEYS,
   ONBOARDING_DRAFT_EXECUTION_STATES,
   ONBOARDING_DRAFT_RECOVERY,
+  ONBOARDING_DRAFT_REFUSALS,
   ONBOARDING_METROS,
   ONBOARDING_REGISTRY_TRADES,
   OnboardingDraftResponseSchema,
   OnboardingDraftSchema,
   OnboardingStatusDraftSchema,
+  RetryOnboardingDraftBodySchema,
   RetryOnboardingDraftResponseSchema,
   SetOnboardingMetroBodySchema,
   StageOnboardingChoiceBodySchema,
+  UndoOnboardingDraftBodySchema,
+  UndoOnboardingDraftResponseSchema,
 } from '@ai-service-os/shared';
 import { DRAFT_EXECUTION_STATES, DRAFT_RECOVERY_HINTS, OnboardingStatusResponseSchema } from '../../../src/onboarding/contracts';
 import { deriveOnboardingStatus, type DraftProposalMember, type OnboardingFacts } from '../../../src/onboarding/derive-status';
@@ -31,7 +35,22 @@ import { ALL_CHOICE_KEYS, CHOICE_KEYS } from '../../../src/onboarding/choices/sc
 import { REGISTRY_TRADES } from '../../../src/onboarding/choices/registry';
 import { NPA_METROS, metroForPhone } from '../../../src/compliance/us-geography';
 import { InMemoryOnboardingDraftRepository } from '../../../src/onboarding/draft/repository';
-import { ApproveDraftBodySchema, CreateDraftInputSchema, SetMetroBodySchema, StageChoiceBodySchema } from '../../../src/onboarding/draft/contracts';
+import {
+  ApproveDraftBodySchema,
+  CreateDraftInputSchema,
+  DRAFT_REFUSAL_CODES,
+  RetryDraftBodySchema,
+  SetMetroBodySchema,
+  StageChoiceBodySchema,
+  UndoDraftBodySchema,
+} from '../../../src/onboarding/draft/contracts';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { approveDraft } from '../../../src/onboarding/draft/approve';
+import { undoApprovedDraft } from '../../../src/onboarding/draft/undo';
+import { retryFailedDraftProposals } from '../../../src/onboarding/draft/retry';
+import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { InMemoryAuditRepository } from '../../../src/audit/audit';
 
 const TENANT_ID = '00000000-0000-0000-0000-0000000000a1';
 const CLE = { standard: { tripFeeCents: 8900, hourlyRateCents: 15000 }, premium: { tripFeeCents: 12900, hourlyRateCents: 18500 } };
@@ -262,6 +281,67 @@ describe('onboarding draft wire contract (api <-> shared)', () => {
       expect(OnboardingStatusDraftSchema.safeParse(bad).success).toBe(false);
       expect(OnboardingStatusResponseSchema.safeParse({ ...status, draft: bad }).success).toBe(false);
     }
+  });
+
+  it('S4: accepts exactly the undo and retry bodies the API accepts (undo requires the version, retry may omit it; both strict)', () => {
+    const cases: Array<[unknown, boolean, boolean]> = [
+      // body, undo ok, retry ok
+      [{}, false, true],
+      [{ expectedVersion: 3 }, true, true],
+      [{ expectedVersion: 0 }, false, false],
+      [{ expectedVersion: -1 }, false, false],
+      [{ expectedVersion: 1.5 }, false, false],
+      [{ expectedVersion: '3' }, false, false],
+      [{ expectedVersion: 3, extra: 1 }, false, false],
+    ];
+    for (const [body, undoOk, retryOk] of cases) {
+      const label = JSON.stringify(body);
+      expect(UndoOnboardingDraftBodySchema.safeParse(body).success, `shared undo ${label}`).toBe(undoOk);
+      expect(UndoDraftBodySchema.safeParse(body).success, `api undo ${label}`).toBe(undoOk);
+      expect(RetryOnboardingDraftBodySchema.safeParse(body).success, `shared retry ${label}`).toBe(retryOk);
+      expect(RetryDraftBodySchema.safeParse(body).success, `api retry ${label}`).toBe(retryOk);
+    }
+  });
+
+  it('S4: parses the real undo response and the real retry response, with and without undoable', async () => {
+    const { repo: draftRepo } = await buildDraft('plumbing', '(216) 555-0142');
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const owner = { userId: 'user-owner-1', role: 'owner' as const };
+    const deps = { draftRepo, proposalRepo, auditRepo };
+
+    const first = await approveDraft(deps, TENANT_ID, owner);
+    const undone = await undoApprovedDraft(deps, TENANT_ID, owner, { expectedVersion: first.draft.version });
+    // The route answers { draft } only.
+    const undoWire = overTheWire({ draft: undone.draft });
+    expect(UndoOnboardingDraftResponseSchema.parse(undoWire)).toEqual(undoWire);
+    expect(UndoOnboardingDraftResponseSchema.safeParse({ ...(undoWire as object), undoneProposalIds: [] }).success).toBe(false);
+
+    const second = await approveDraft(deps, TENANT_ID, owner);
+    for (const id of second.proposalIds) await proposalRepo.update(TENANT_ID, id, { status: 'execution_failed' });
+    const retried = overTheWire(await retryFailedDraftProposals(deps, TENANT_ID, owner)) as Record<string, unknown>;
+    expect(retried).toHaveProperty('undoable', true);
+    expect(RetryOnboardingDraftResponseSchema.parse(retried)).toEqual(retried);
+    // An API that predates the field (S1b) still parses; a wrong type does not.
+    const { undoable: _u, ...s1b } = retried;
+    expect(RetryOnboardingDraftResponseSchema.parse(s1b)).toEqual(s1b);
+    expect(RetryOnboardingDraftResponseSchema.safeParse({ ...retried, undoable: 'yes' }).success).toBe(false);
+  });
+
+  it('S4: keeps the refusal codes equal on both sides, and every CODE: the draft sources throw is in the list', () => {
+    expect([...ONBOARDING_DRAFT_REFUSALS]).toEqual([...DRAFT_REFUSAL_CODES]);
+    for (const code of ['DRAFT_UNDO_REFUSED', 'UNDO_WINDOW_CLOSED', 'DRAFT_NOT_APPROVED', 'VERSION_CONFLICT']) {
+      expect(ONBOARDING_DRAFT_REFUSALS).toContain(code);
+    }
+    const src = join(__dirname, '../../../src');
+    const draftDir = join(src, 'onboarding/draft');
+    const files = [join(src, 'routes/onboarding-draft.ts'), ...readdirSync(draftDir).filter((f) => f.endsWith('.ts')).map((f) => join(draftDir, f))];
+    const thrown = new Set<string>();
+    for (const file of files) {
+      for (const m of readFileSync(file, 'utf8').matchAll(/ConflictError\(\s*[`'"]([A-Z_]+):/g)) thrown.add(m[1]);
+    }
+    expect(thrown.size).toBeGreaterThan(5);
+    expect([...thrown].filter((c) => !(DRAFT_REFUSAL_CODES as readonly string[]).includes(c))).toEqual([]);
   });
 
   it('keeps the shared choice-key and trade lists equal to the API registry', () => {
