@@ -169,6 +169,35 @@ export const ONBOARDING_DRAFT_EXECUTION_STATES = ['pending', 'executing', 'execu
 export const OnboardingDraftExecutionSchema = z.enum(ONBOARDING_DRAFT_EXECUTION_STATES);
 export type OnboardingDraftExecution = z.infer<typeof OnboardingDraftExecutionSchema>;
 
+/**
+ * The way out the shell may offer for a `failed` or `stopped` set (derived,
+ * never stored): `reset` while the whole-draft reset (Start over) can run,
+ * `settings` once only Settings can finish the setup. Pinned equal to the API
+ * list by wire-contract.test.ts.
+ */
+export const ONBOARDING_DRAFT_RECOVERY = ['reset', 'settings'] as const;
+export const OnboardingDraftRecoverySchema = z.enum(ONBOARDING_DRAFT_RECOVERY);
+export type OnboardingDraftRecovery = z.infer<typeof OnboardingDraftRecoverySchema>;
+
+/**
+ * The `draft` block of GET /api/onboarding/status: the pre-approval draft's
+ * progress and, once approved, what is derived from its proposals. Every
+ * derived field is optional so a payload from an API that predates it parses.
+ * Not strict, like the API's own status schema.
+ */
+export const OnboardingStatusDraftSchema = z.object({
+  status: OnboardingDraftStatusSchema,
+  choicesAnswered: z.number().int().min(0),
+  version: z.number().int().positive(),
+  /** null while the draft is still being edited (or has nothing to track). */
+  execution: OnboardingDraftExecutionSchema.nullable().optional(),
+  /** Whether the whole-draft undo can still take back every listed proposal; a hint, never a guard. Absent while editing. */
+  undoable: z.boolean().optional(),
+  /** Present only while `execution` is `failed` or `stopped`. */
+  recovery: OnboardingDraftRecoverySchema.optional(),
+});
+export type OnboardingStatusDraft = z.infer<typeof OnboardingStatusDraftSchema>;
+
 /** Body of POST /api/onboarding/draft. */
 export const CreateOnboardingDraftBodySchema = z
   .object({

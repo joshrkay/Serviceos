@@ -1,6 +1,8 @@
 import type { PhoneLineState } from './phone-line';
+import { isInUndoWindow } from '../proposals/lifecycle';
 import type {
   DraftExecution,
+  DraftRecovery,
   OnboardingStatusResponse,
   OnboardingStepId,
   OnboardingStepStatus,
@@ -75,14 +77,31 @@ export interface OnboardingFacts {
   } | null;
 }
 
+/** One listed proposal that still exists: its status and, once approved, when its undo window opened. */
+export interface DraftProposalMember {
+  status: string;
+  /** proposals.approved_at; null when never stamped (an approved row with no stamp is outside its window). */
+  approvedAt: Date | null;
+}
+
 /**
- * The approved draft's proposals, as read: how many ids the draft lists and the
- * status of each one that still exists (a missing row is `expected - statuses.length`).
+ * The approved draft's proposals, as read: how many ids the draft lists and one
+ * member per listed proposal that still exists (a missing row is
+ * `expected - members.length`). The status read (load-facts.ts) and the retry's
+ * locked read (draft/retry.ts) build the same shape.
  */
 export interface DraftProposalsFact {
   expected: number;
-  statuses: string[];
+  members: DraftProposalMember[];
 }
+
+/**
+ * How far ahead of the status read's clock the undo window is evaluated for the
+ * hints below. A hint read at `now` is acted on a round trip later; evaluating
+ * the window one second early means `undoable: true` and `recovery: 'reset'`
+ * never promise a window the endpoint has already closed.
+ */
+const DRAFT_HINT_MARGIN_MS = 1000;
 
 /**
  * The only statuses a member of the approved set may hold while POST /draft/retry
@@ -108,9 +127,9 @@ export const MISSING_PROPOSAL = 'missing';
  * retry the endpoint refuses (or the reverse).
  */
 export function retryBlockingStatuses(tracked: DraftProposalsFact): string[] {
-  const missing = Math.max(0, tracked.expected - tracked.statuses.length);
+  const missing = Math.max(0, tracked.expected - tracked.members.length);
   return [
-    ...tracked.statuses.filter((s) => !RETRY_SAFE_STATUSES.has(s)),
+    ...tracked.members.map((m) => m.status).filter((s) => !RETRY_SAFE_STATUSES.has(s)),
     ...Array<string>(missing).fill(MISSING_PROPOSAL),
   ];
 }
@@ -127,7 +146,12 @@ export function retryBlockingStatuses(tracked: DraftProposalsFact): string[] {
  *   half the approved configuration live ("executed + undone") with Settings as
  *   the only way back. Retry therefore refuses such a set
  *   (`DRAFT_RETRY_UNSAFE`) and the shell must not offer it; it also never waits
- *   forever. The whole-draft undo (plan U9, S4) is the way out.
+ *   forever. The whole-draft undo cannot help either: it wants EVERY member
+ *   `approved` inside its window, and this set has one that is not. The way
+ *   out is the whole-draft reset (plan U9), which reverts what is still
+ *   reversible and returns the draft to editing; `deriveDraftRecovery` says
+ *   whether it can run (`'reset'`) or only Settings can finish the set
+ *   (`'settings'`).
  * - `failed`: the set is whole (every listed proposal is approved/executing/
  *   executed/execution_failed) and at least one is `execution_failed`. POST
  *   /draft/retry re-queues exactly those rows, which completes the pair, so the
@@ -147,12 +171,66 @@ export function deriveDraftExecution(
 ): DraftExecution | null {
   if (draftStatus !== 'approved') return null;
   if (!tracked || tracked.expected <= 0) return null;
-  const { statuses } = tracked;
+  const statuses = tracked.members.map((m) => m.status);
   if (retryBlockingStatuses(tracked).length > 0) return 'stopped';
   if (statuses.some((s) => s === 'execution_failed')) return 'failed';
   if (statuses.every((s) => s === 'executed')) return 'executed';
   if (statuses.some((s) => s === 'executing' || s === 'executed')) return 'executing';
   return 'pending';
+}
+
+/**
+ * Whether the whole-draft undo can still take back EVERY listed proposal: the
+ * draft is approved, every listed proposal still exists, and each is `approved`
+ * inside its undo window (`isInUndoWindow`, the undo endpoint's own predicate),
+ * evaluated `DRAFT_HINT_MARGIN_MS` ahead of `now`. After a partial retry only the
+ * retried member has a fresh window, so this is false and the shell offers no
+ * Undo the endpoint would refuse.
+ *
+ * A hint, never a guard: the undo endpoint keeps its locked check. `undefined`
+ * (absent on the wire) while the draft is still being edited; `false` for an
+ * approved draft with nothing listed or a listed proposal whose row is gone.
+ */
+function deriveDraftUndoable(
+  draftStatus: 'draft' | 'approved',
+  tracked: DraftProposalsFact | undefined,
+  now: Date,
+): boolean | undefined {
+  if (draftStatus !== 'approved') return undefined;
+  if (!tracked || tracked.expected <= 0 || tracked.members.length < tracked.expected) return false;
+  const at = now.getTime() + DRAFT_HINT_MARGIN_MS;
+  return tracked.members.every((m) => isInUndoWindow(m, at));
+}
+
+/**
+ * Which way out the shell may offer for a set that will not finish on its own
+ * (`execution` is `failed` or `stopped`), derived from the rules the whole-draft
+ * reset applies so the shell never offers a Start over the endpoint refuses:
+ *
+ * - `'settings'` when any listed proposal is `executing` or `executed` (part of
+ *   the setup is already live; reset refuses it), or any `approved` one is no
+ *   longer inside its undo window (reset refuses that member as past its window,
+ *   and the worker will run it on its own). The window is evaluated
+ *   `DRAFT_HINT_MARGIN_MS` ahead of `now`, so the hint expires a second before
+ *   the endpoint's own check does; an `approved` row with no stamp counts as past.
+ * - `'reset'` otherwise: nothing ran, and every approved member can still be
+ *   undone, so reset can return the draft to editing.
+ *
+ * The same rule for `failed` and `stopped`: for `failed` it only decides whether
+ * Start over is shown (Retry stays). `undefined` (absent on the wire) for every
+ * other execution state, including a draft still being edited.
+ */
+function deriveDraftRecovery(
+  execution: DraftExecution | null,
+  tracked: DraftProposalsFact | undefined,
+  now: Date,
+): DraftRecovery | undefined {
+  if (execution !== 'failed' && execution !== 'stopped') return undefined;
+  const at = now.getTime() + DRAFT_HINT_MARGIN_MS;
+  const members = tracked?.members ?? [];
+  const live = members.some((m) => m.status === 'executing' || m.status === 'executed');
+  const pastWindow = members.some((m) => m.status === 'approved' && !isInUndoWindow(m, at));
+  return live || pastWindow ? 'settings' : 'reset';
 }
 
 /**
@@ -184,7 +262,12 @@ const isTestCallDone = (f: OnboardingFacts): boolean => f.inboundCallCount > 0;
 const isTestCallSkipped = (f: OnboardingFacts): boolean =>
   f.testCallSkippedAt !== null && f.inboundCallCount === 0;
 
-export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResponse {
+/**
+ * `now` is the status read's clock. It is injected (and defaults to this
+ * instant) so the undo-window hints on the draft block stay a pure function of
+ * the facts and the clock.
+ */
+export function deriveOnboardingStatus(f: OnboardingFacts, now: Date = new Date()): OnboardingStatusResponse {
   const done: Record<OnboardingStepId, boolean> = {
     signup:    f.tenantExists,
     identity:  isIdentityDone(f.identity),
@@ -262,12 +345,23 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
       : {}),
     ...(f.activatedAt ? { activatedAt: f.activatedAt.toISOString() } : {}),
     ...(f.tenantCreatedAt ? { accountCreatedAt: f.tenantCreatedAt.toISOString() } : {}),
-    ...(f.draft ? { draft: toDraftStatus(f.draft) } : {}),
+    ...(f.draft ? { draft: toDraftStatus(f.draft, now) } : {}),
   };
 }
 
-/** The status response's draft block: the raw proposal statuses never leave the server. */
-function toDraftStatus(draft: NonNullable<OnboardingFacts['draft']>): NonNullable<OnboardingStatusResponse['draft']> {
+/**
+ * The status response's draft block: the raw proposal statuses and approval
+ * stamps never leave the server, only what is derived from them.
+ */
+function toDraftStatus(draft: NonNullable<OnboardingFacts['draft']>, now: Date): NonNullable<OnboardingStatusResponse['draft']> {
   const { proposals, ...rest } = draft;
-  return { ...rest, execution: deriveDraftExecution(draft.status, proposals) };
+  const execution = deriveDraftExecution(draft.status, proposals);
+  const undoable = deriveDraftUndoable(draft.status, proposals, now);
+  const recovery = deriveDraftRecovery(execution, proposals, now);
+  return {
+    ...rest,
+    execution,
+    ...(undoable === undefined ? {} : { undoable }),
+    ...(recovery === undefined ? {} : { recovery }),
+  };
 }

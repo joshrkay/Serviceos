@@ -22,6 +22,7 @@ import { createOnboardingDraftRouter } from '../../src/routes/onboarding-draft';
 import { PgOnboardingDraftRepository } from '../../src/onboarding/draft/repository';
 import { PgRegionalPriceTierRepository } from '../../src/onboarding/choices/price-tiers';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
+import { approveProposal } from '../../src/proposals/actions';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { loadOnboardingFacts } from '../../src/onboarding/load-facts';
@@ -224,6 +225,117 @@ describe('onboarding draft execution state (real DB)', () => {
         foreign.rows[0].id,
       ]);
       expect((await status()).status.draft?.execution).toBe('stopped');
+    });
+  });
+
+  describe('S4: the undoable and recovery hints, approved_at and the approver stamp', () => {
+    async function ageApproval(ids: string[], seconds: number): Promise<void> {
+      await pool.query(
+        `UPDATE proposals SET approved_at = NOW() - make_interval(secs => $3) WHERE tenant_id = $1 AND id = ANY($2::uuid[])`,
+        [tenant.tenantId, ids, seconds],
+      );
+    }
+
+    it('loadOnboardingFacts carries each listed member with proposals.approved_at as a Date', async () => {
+      const ids = await approvedDraft();
+      const { facts } = await status();
+      const members = facts.draft?.proposals?.members ?? [];
+      expect(facts.draft?.proposals?.expected).toBe(2);
+      expect(members).toHaveLength(2);
+      const stored = await pool.query<{ approved_at: Date }>(
+        `SELECT approved_at FROM proposals WHERE tenant_id = $1 AND id = ANY($2::uuid[]) ORDER BY approved_at`,
+        [tenant.tenantId, ids],
+      );
+      for (const m of members) {
+        expect(m.status).toBe('approved');
+        expect(m.approvedAt).toBeInstanceOf(Date);
+        expect(stored.rows.map((r) => r.approved_at.getTime())).toContain(m.approvedAt!.getTime());
+      }
+    });
+
+    it('a fresh approval reads undoable with no recovery; six seconds later it is no longer undoable', async () => {
+      const ids = await approvedDraft();
+      let s = (await status()).status;
+      expect(s.draft).toMatchObject({ status: 'approved', execution: 'pending', undoable: true });
+      expect(s.draft).not.toHaveProperty('recovery');
+      expect(s.steps).toHaveLength(7);
+
+      await ageApproval(ids, 6);
+      s = (await status()).status;
+      expect(s.draft).toMatchObject({ execution: 'pending', undoable: false });
+      expect(s.draft).not.toHaveProperty('recovery');
+    });
+
+    it('undone + approved is stopped with recovery reset inside the window and settings past it', async () => {
+      const [a, b] = await approvedDraft();
+      await setStatus(a, 'undone');
+      let s = (await status()).status;
+      expect(s.draft).toMatchObject({ execution: 'stopped', recovery: 'reset', undoable: false });
+
+      await ageApproval([b], 6);
+      s = (await status()).status;
+      expect(s.draft).toMatchObject({ execution: 'stopped', recovery: 'settings', undoable: false });
+    });
+
+    it('a failed member beside an executed one is settings; beside an undone one is reset', async () => {
+      const [a, b] = await approvedDraft();
+      await setStatus(a, 'execution_failed');
+      await setStatus(b, 'executed');
+      expect((await status()).status.draft).toMatchObject({ execution: 'failed', recovery: 'settings' });
+      await setStatus(b, 'undone');
+      expect((await status()).status.draft).toMatchObject({ execution: 'stopped', recovery: 'reset' });
+    });
+
+    it('approve through the real router persists the approver: executed_by and executed_by_role on both rows', async () => {
+      const ids = await approvedDraft();
+      const r = await pool.query<{ executed_by: string; executed_by_role: string; approved_at: Date | null }>(
+        `SELECT executed_by, executed_by_role, approved_at FROM proposals WHERE tenant_id = $1 AND id = ANY($2::uuid[])`,
+        [tenant.tenantId, ids],
+      );
+      expect(r.rows).toHaveLength(2);
+      for (const row of r.rows) {
+        expect(row.executed_by).toBe(tenant.userId);
+        expect(row.executed_by_role).toBe('owner');
+        expect(row.approved_at).toBeInstanceOf(Date);
+      }
+    });
+
+    it('the conditional approve write: a draft member a reset expired after the read is refused and stays expired', async () => {
+      const inserted = await pool.query<{ id: string }>(
+        `INSERT INTO proposals (id, tenant_id, proposal_type, status, payload, summary, created_by)
+         VALUES (gen_random_uuid(), $1, 'onboarding_tenant_settings', 'draft', $2::jsonb, 'x', $3) RETURNING id`,
+        [tenant.tenantId, JSON.stringify({ businessName: 'Walsh Plumbing', verticalPacks: ['plumbing'] }), tenant.userId],
+      );
+      const id = inserted.rows[0].id;
+      /** Another transaction (the reset) commits `expired` between approve's read and its write. */
+      class ResetRacesApprove extends PgProposalRepository {
+        override async updateStatusIf(...args: Parameters<PgProposalRepository['updateStatusIf']>) {
+          await pool.query(`UPDATE proposals SET status = 'expired' WHERE tenant_id = $1 AND id = $2`, [args[0], args[1]]);
+          return super.updateStatusIf(...args);
+        }
+      }
+      const auditRepo = new PgAuditRepository(pool);
+
+      await expect(
+        approveProposal(new ResetRacesApprove(pool), tenant.tenantId, id, tenant.userId, 'owner', auditRepo, 'ui'),
+      ).rejects.toThrow("Cannot transition proposal from 'expired' to 'approved'");
+
+      const after = await pool.query(`SELECT status, approved_at, executed_by, executed_by_role FROM proposals WHERE id = $1`, [id]);
+      expect(after.rows[0]).toEqual({ status: 'expired', approved_at: null, executed_by: null, executed_by_role: null });
+      const approvals = await pool.query(
+        `SELECT 1 FROM audit_events WHERE tenant_id = $1 AND event_type = 'proposal.approved' AND entity_id = $2`,
+        [tenant.tenantId, id],
+      );
+      expect(approvals.rows).toHaveLength(0);
+
+      // Without the race the same row approves and carries the approver's role.
+      const fresh = await pool.query<{ id: string }>(
+        `INSERT INTO proposals (id, tenant_id, proposal_type, status, payload, summary, created_by)
+         VALUES (gen_random_uuid(), $1, 'onboarding_tenant_settings', 'draft', $2::jsonb, 'x', $3) RETURNING id`,
+        [tenant.tenantId, JSON.stringify({ businessName: 'Walsh Plumbing', verticalPacks: ['plumbing'] }), 'technician-7'],
+      );
+      const ok = await approveProposal(proposalRepo, tenant.tenantId, fresh.rows[0].id, tenant.userId, 'owner', auditRepo, 'ui');
+      expect(ok).toMatchObject({ status: 'approved', executedBy: tenant.userId, executedByRole: 'owner' });
     });
   });
 

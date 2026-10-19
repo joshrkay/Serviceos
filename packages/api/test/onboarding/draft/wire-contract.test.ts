@@ -13,15 +13,18 @@ import {
   ONBOARDING_CHOICE_KEYS,
   ONBOARDING_CORE_CHOICE_KEYS,
   ONBOARDING_DRAFT_EXECUTION_STATES,
+  ONBOARDING_DRAFT_RECOVERY,
   ONBOARDING_METROS,
   ONBOARDING_REGISTRY_TRADES,
   OnboardingDraftResponseSchema,
   OnboardingDraftSchema,
+  OnboardingStatusDraftSchema,
   RetryOnboardingDraftResponseSchema,
   SetOnboardingMetroBodySchema,
   StageOnboardingChoiceBodySchema,
 } from '@ai-service-os/shared';
-import { DRAFT_EXECUTION_STATES } from '../../../src/onboarding/contracts';
+import { DRAFT_EXECUTION_STATES, DRAFT_RECOVERY_HINTS, OnboardingStatusResponseSchema } from '../../../src/onboarding/contracts';
+import { deriveOnboardingStatus, type DraftProposalMember, type OnboardingFacts } from '../../../src/onboarding/derive-status';
 import { assembleTypicalShop } from '../../../src/onboarding/choices/assemble';
 import { InMemoryRegionalPriceTierRepository } from '../../../src/onboarding/choices/price-tiers';
 import { ALL_CHOICE_KEYS, CHOICE_KEYS } from '../../../src/onboarding/choices/schema';
@@ -203,6 +206,62 @@ describe('onboarding draft wire contract (api <-> shared)', () => {
   it('keeps the execution states equal to the API list', () => {
     expect([...ONBOARDING_DRAFT_EXECUTION_STATES]).toEqual(['pending', 'executing', 'executed', 'failed', 'stopped']);
     expect([...ONBOARDING_DRAFT_EXECUTION_STATES]).toEqual([...DRAFT_EXECUTION_STATES]);
+  });
+
+  it('keeps the recovery hints equal to the API list', () => {
+    expect([...ONBOARDING_DRAFT_RECOVERY]).toEqual(['reset', 'settings']);
+    expect([...ONBOARDING_DRAFT_RECOVERY]).toEqual([...DRAFT_RECOVERY_HINTS]);
+  });
+
+  it('parses the status draft block the API derives, with and without undoable and recovery, on both sides', () => {
+    const T0 = new Date('2026-10-19T12:00:00.000Z');
+    const facts = (draft: OnboardingFacts['draft']): OnboardingFacts => ({
+      tenantId: TENANT_ID,
+      tenantExists: true,
+      identity: { businessName: null, businessHours: null, jobBufferMinutes: null, hourlyRateCents: null, timezone: null },
+      packActivated: false,
+      twilioStatus: null,
+      subscription: { stripeSubscriptionId: null, status: null },
+      inboundCallCount: 0,
+      testCallSkippedAt: null,
+      voiceAgentLiveAt: null,
+      activatedAt: null,
+      aiConfigPresent: false,
+      aiVerificationStatus: null,
+      aiVerificationSkippedAt: null,
+      draft,
+    });
+    const approved = (members: DraftProposalMember[]) =>
+      facts({ status: 'approved', choicesAnswered: 7, version: 3, proposals: { expected: 2, members } });
+    const now = new Date(T0.getTime() + 1000);
+    const blocks = [
+      // Editing: neither hint.
+      facts({ status: 'draft', choicesAnswered: 3, version: 4 }),
+      // Fresh approval: undoable, no recovery.
+      approved([{ status: 'approved', approvedAt: T0 }, { status: 'approved', approvedAt: T0 }]),
+      // A stopped set: both hints.
+      approved([{ status: 'undone', approvedAt: T0 }, { status: 'approved', approvedAt: T0 }]),
+    ].map((f) => overTheWire(deriveOnboardingStatus(f, now).draft));
+
+    expect(blocks[0]).not.toHaveProperty('undoable');
+    expect(blocks[1]).toMatchObject({ undoable: true });
+    expect(blocks[2]).toMatchObject({ undoable: false, recovery: 'reset' });
+    for (const block of blocks) {
+      expect(OnboardingStatusDraftSchema.parse(block)).toEqual(block);
+    }
+
+    // An API that predates the hints (S1b) still parses on both sides.
+    const s1b = { status: 'approved', choicesAnswered: 7, version: 2, execution: 'pending' };
+    expect(OnboardingStatusDraftSchema.parse(s1b)).toEqual(s1b);
+    const status = overTheWire(deriveOnboardingStatus(approved([]), now)) as Record<string, unknown>;
+    expect(OnboardingStatusResponseSchema.parse({ ...status, draft: s1b }).draft).toEqual(s1b);
+    expect(OnboardingStatusResponseSchema.parse(status).draft).toEqual(status.draft);
+
+    // Both sides refuse the same unknown values.
+    for (const bad of [{ ...s1b, recovery: 'inbox' }, { ...s1b, undoable: 'yes' }]) {
+      expect(OnboardingStatusDraftSchema.safeParse(bad).success).toBe(false);
+      expect(OnboardingStatusResponseSchema.safeParse({ ...status, draft: bad }).success).toBe(false);
+    }
   });
 
   it('keeps the shared choice-key and trade lists equal to the API registry', () => {

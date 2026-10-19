@@ -477,6 +477,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -494,6 +495,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       if (updates?.approvedAt !== undefined)        { setClauses.push(`approved_at = $${p++}`);      params.push(updates.approvedAt); }
       if (updates?.executedAt !== undefined)        { setClauses.push(`executed_at = $${p++}`);      params.push(updates.executedAt); }
       if (updates?.executedBy !== undefined)        { setClauses.push(`executed_by = $${p++}`);      params.push(updates.executedBy); }
+      if (updates?.executedByRole !== undefined)    { setClauses.push(`executed_by_role = $${p++}`); params.push(updates.executedByRole); }
       if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
       if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
       if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p}`);         params.push(updates.undoneBy); }

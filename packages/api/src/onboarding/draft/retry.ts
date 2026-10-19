@@ -40,11 +40,15 @@
  * is gone, re-queueing just the failed one would, after its fresh undo window,
  * execute it ALONE: half the approved configuration live, the other half dead,
  * and Settings the only way back. That set answers 409 DRAFT_RETRY_UNSAFE and
- * nothing is changed (the owner finishes it from the inbox or Settings). The status
- * says the same: such a draft derives `execution: 'stopped'` even when a sibling
- * failed (derive-status.ts, same `retryBlockingStatuses` check), so the shell
- * never offers a Retry that cannot work. `failed + executed` and
- * `failed + approved` stay retryable: the retry completes the pair.
+ * nothing is changed. The status says the same: such a draft derives
+ * `execution: 'stopped'` even when a sibling failed (derive-status.ts, same
+ * `retryBlockingStatuses` check), so the shell never offers a Retry that cannot
+ * work. The way out of that set is the whole-draft reset (plan U9), not the
+ * whole-draft undo, which refuses it (undo wants every member `approved` inside
+ * its window); the status's derived `recovery` says whether the reset can still
+ * run (`'reset'`) or only Settings can finish the set (`'settings'`, once a
+ * member executed or an approved one is past its window). `failed + executed`
+ * and `failed + approved` stay retryable: the retry completes the pair.
  */
 import type { AuditRepository } from '../../audit/audit';
 import { createAuditEvent } from '../../audit/audit';
@@ -132,7 +136,10 @@ export async function retryFailedDraftProposals(
   // sets whether or not anything failed. NOTHING_FAILED is left for the benign
   // sets (everything approved/executing/executed), e.g. the loser of a race
   // between two retries. Nothing has been written when either one throws.
-  const blockers = retryBlockingStatuses({ expected: draft.proposalIds.length, statuses });
+  const blockers = retryBlockingStatuses({
+    expected: draft.proposalIds.length,
+    members: found.map((p) => ({ status: p.status, approvedAt: p.approvedAt ?? null })),
+  });
   if (blockers.length > 0) throw retryUnsafe(blockers, statuses, draft.proposalIds.length);
 
   const failed = found.filter((p) => p.status === 'execution_failed');
