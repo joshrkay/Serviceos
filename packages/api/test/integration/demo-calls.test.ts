@@ -42,6 +42,9 @@ import { CALLS_REQUEST_TIMEOUT_MS, PRE_LIVE_WINDOW_S, demoLeaseStep } from '../.
 import { runStartTransaction } from '../../src/demo/start-transaction';
 import { DEMO_PLATFORM_TENANT_ID } from '../../src/demo/platform-tenant';
 import { setPlatformTenantContext } from '../../src/demo/platform-audit';
+import { createDemoLeaseResetter } from '../../src/demo/reset';
+import { DevStorageProvider } from '../../src/files/storage-provider';
+import { createPoolSlotTenant } from './demo-pool-tenant';
 
 const SECRET = 'demo-calls-integration-secret';
 const ACCOUNT_SID = 'ACdemotest';
@@ -91,14 +94,19 @@ describe('Postgres integration — demo call start (S6-3)', () => {
 
   beforeAll(async () => {
     pool = await getSharedTestDb();
+    // Pool-slot-shaped (S6-4): a no-call lease now ends through the reset,
+    // whose re-seed names the business from the slot in the owner id. The
+    // start call leases ANY free plumbing tenant, and a reused local
+    // database can still hold plumbing demo tenants left by earlier versions
+    // of these files (`demo-calls-test:<uuid>`, `demo:probe:<uuid>` owner
+    // ids) that no reset can re-seed: take those out of the pool. A fresh
+    // database has none.
+    await pool.query(
+      `UPDATE tenants SET demo_trade = NULL
+        WHERE demo AND demo_trade = 'plumbing' AND owner_id !~ '^demo:plumbing:[0-9]+$'`,
+    );
     for (let i = 0; i < 3; i += 1) {
-      const id = randomUUID();
-      await pool.query(
-        `INSERT INTO tenants (id, owner_id, owner_email, name, demo, demo_trade)
-         VALUES ($1, $2, 'demo-calls-test@invalid.rivet.local', 'Demo calls test', true, 'plumbing')`,
-        [id, `demo-calls-test:${id}`],
-      );
-      tenantIds.push(id);
+      tenantIds.push((await createPoolSlotTenant(pool)).tenantId);
     }
 
     fake = http.createServer((req, res) => {
@@ -175,6 +183,13 @@ describe('Postgres integration — demo call start (S6-3)', () => {
         leaseTokenSecret: SECRET,
         publicApiUrl: PUBLIC_API,
         alert: async () => undefined,
+        resetter: createDemoLeaseResetter({
+          pool,
+          settings: { resetBatchRows: 1000, resetDrainSeconds: 1 },
+          alert: async () => undefined,
+          storage: new DevStorageProvider({ bucket: 'demo-bucket', publicUrlBase: 'http://localhost/storage-dev' }),
+          heartbeatMs: 3_600_000,
+        }),
         apiBaseUrl: fakeBase,
         now: () => at,
         ...overrides,
@@ -404,6 +419,19 @@ describe('Postgres integration — demo call start (S6-3)', () => {
         allowanceReturned: true,
       });
       expect(events.filter((e) => e.event_type === 'demo_call_budget_released')).toHaveLength(1);
+
+      // S6-4: the lease ended through resetAndRelease (`no_call`), which
+      // re-seeded the tenant from the fixture before releasing it.
+      const leaseEvents = await pool.query<{ event_type: string; metadata: Record<string, unknown> }>(
+        `SELECT event_type, metadata FROM audit_events WHERE tenant_id = $1 AND entity_id = $2 ORDER BY created_at`,
+        [DEMO_PLATFORM_TENANT_ID, call.lease_id],
+      );
+      expect(leaseEvents.rows.map((e) => e.event_type)).toEqual(['demo_lease_reset_started', 'demo_lease_released']);
+      expect(leaseEvents.rows[0].metadata).toMatchObject({ source: 'no_call' });
+      const seeded = await pool.query(`SELECT 1 FROM tenant_settings WHERE tenant_id = (SELECT tenant_id FROM demo_tenant_leases WHERE id = $1)`, [
+        call.lease_id,
+      ]);
+      expect(seeded.rowCount).toBe(1);
 
       // A replayed release returns nothing a second time.
       const client = await pool.connect();

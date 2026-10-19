@@ -192,6 +192,7 @@ import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitorin
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
 import { createDemoCallsRouter } from './demo/routes';
 import { loadDemoConfig } from './demo/config';
+import { createDemoLeaseResetter } from './demo/reset';
 import { recordSweepSuccess, sweepLastSuccessMs } from './monitoring/sweep-heartbeats';
 import { PgPlatformSloRepository } from './monitoring/pg-platform-slo';
 // #1602 — production call-quality grading (nightly sampler + owner surface).
@@ -3234,21 +3235,36 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // (DEMO_CALLS_ENABLED) is read per request, the DEMO_* numbers once here.
   // Budget-crossing pages need their own operator seam: the SLO monitor's
   // exists only on worker replicas.
+  // U7 (S6-4) — one resetter ends every lease: the start service's no-call
+  // path here.
   const demoLogger = createLogger({ service: 'demo-call', environment: process.env.NODE_ENV || 'development' });
+  const demoConfig = loadDemoConfig(process.env, demoLogger);
+  const demoAlert = createAlertOperator({
+    sentry: sentryClient,
+    delivery: messageDelivery,
+    alertSmsTo: config.ALERT_SMS_TO,
+    cooldownMs: config.SLO_ALERT_COOLDOWN_MIN * 60 * 1000,
+    logger: demoLogger,
+  });
+  const demoResetter =
+    pool && demoConfig.open
+      ? createDemoLeaseResetter({
+          pool,
+          settings: demoConfig.settings,
+          alert: demoAlert,
+          storage: storageProvider,
+          logger: demoLogger,
+        })
+      : null;
   app.use(
     '/public/demo',
     createDemoCallsRouter({
       pool: pool ?? null,
-      config: loadDemoConfig(process.env, demoLogger),
+      config: demoConfig,
       leaseTokenSecret: demoLeaseTokenSecret,
       publicApiUrl: process.env.PUBLIC_API_URL,
-      alert: createAlertOperator({
-        sentry: sentryClient,
-        delivery: messageDelivery,
-        alertSmsTo: config.ALERT_SMS_TO,
-        cooldownMs: config.SLO_ALERT_COOLDOWN_MIN * 60 * 1000,
-        logger: demoLogger,
-      }),
+      alert: demoAlert,
+      resetter: demoResetter,
       logger: demoLogger,
     }),
   );
