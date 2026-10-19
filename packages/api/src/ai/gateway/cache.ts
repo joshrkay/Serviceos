@@ -5,6 +5,7 @@ import { redactMessagesForSnapshot, messagesContainImage } from './gateway';
 import type { AiRunRepository } from '../ai-run';
 import { createAiRun } from '../ai-run';
 import type { LLMTraceExporter } from './trace-exporter';
+import { runOutsideRequestTransaction } from '../../middleware/tenant-context';
 import {
   gatewayCacheHitsTotal,
   gatewayCacheMissesTotal,
@@ -135,7 +136,10 @@ export class CachingGatewayWrapper {
 
         // Write AiRun row for cache hit so audit is never blind (best-effort).
         // Fire-and-forget: the function has internal try/catch so a void call is safe.
-        void this.writeAiRunForCacheHit(request, cached.response);
+        // Detached from the request's tenant context (TI-01): the caller can
+        // answer before the updateStatus half is issued, and by then the
+        // request client may be back in the pool.
+        void runOutsideRequestTransaction(() => this.writeAiRunForCacheHit(request, cached.response));
         // U10 — the hit never reaches gateway.complete (and so never its
         // trace hook), so the wrapper exports it itself. Same gap, same fix.
         this.exportTraceForCacheHit(request, cached.response);

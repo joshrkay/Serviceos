@@ -6107,9 +6107,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         // partly-completed form wizard) is not asked for it again on the
         // gated tenant-settings card. Never a source of a guessed zone.
         settingsRepo,
-        // Review finding #4 — session-scoped advisory lock so two browser
-        // tabs racing the same persisted sessionId can't clobber each
-        // other's turn (see OnboardingConversationDeps.pool doc).
+        // Review finding #4 / TI-02 — each turn commits in one short
+        // transaction, only if no other tab advanced the session meanwhile
+        // (see OnboardingConversationDeps.pool doc).
         pool: pool ?? undefined,
       }),
     }),

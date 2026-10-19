@@ -19,7 +19,7 @@
  */
 import type { PoolClient } from 'pg';
 import { applyTenantContext } from '../db/rls-runtime-role';
-import { tenantContextStore } from '../middleware/tenant-context';
+import { tenantContextStore, type TenantContext } from '../middleware/tenant-context';
 import {
   AuditEventInput,
   AuditRepository,
@@ -46,13 +46,19 @@ export async function runInTenantTransaction<T>(
   if (!client) {
     return fn();
   }
+  // TI-01 — closed before COMMIT/ROLLBACK: the owner keeps using `client`
+  // after this returns (e.g. the lock provider's unlock), so a spawn inside
+  // `fn` that outlives it must open its own transaction, not reuse this one.
+  const ctx: TenantContext = { client, tenantId };
   await client.query('BEGIN');
   try {
     await applyTenantContext(client, tenantId, { transactional: true });
-    const result = await tenantContextStore.run({ client, tenantId }, fn);
+    const result = await tenantContextStore.run(ctx, fn);
+    ctx.closed = true;
     await client.query('COMMIT');
     return result;
   } catch (err) {
+    ctx.closed = true;
     try {
       await client.query('ROLLBACK');
     } catch {
