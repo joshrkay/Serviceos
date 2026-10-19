@@ -1006,6 +1006,33 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
       }
     }
 
+    // OVAS-03 — the same EXISTENCE rule for a drafted jobId, plus OWNERSHIP:
+    // a present jobId is written straight onto the estimate as its container
+    // and decides who receives it on send (estimates carry no customer). So
+    // it must name a job IN THIS TENANT (estimates.job_id has no tenant-
+    // composite FK, so Postgres would accept a foreign tenant's job), and that
+    // job must be the drafted customer's. Skipped when the repo isn't wired,
+    // matching this handler's existing degradation (the registry wires it).
+    if (jobId && this.jobRepo) {
+      const job = await this.jobRepo.findById(context.tenantId, jobId);
+      if (!job) {
+        return {
+          success: false,
+          error:
+            `Estimate draft references job '${jobId}', which does not exist in this tenant — ` +
+            `link a real job before approving`,
+        };
+      }
+      if (customerId && job.customerId !== customerId) {
+        return {
+          success: false,
+          error:
+            `Estimate draft names job '${jobId}', which belongs to a different customer than ` +
+            `the draft's — pick that customer's job (or the right customer) before approving`,
+        };
+      }
+    }
+
     try {
       // Estimates require a job container (estimate.ts validateEstimateInput).
       // A drafted payload without one gets a job opened for the customer.

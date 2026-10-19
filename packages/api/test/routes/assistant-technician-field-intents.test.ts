@@ -26,7 +26,7 @@
  */
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { createAssistantRouter } from '../../src/routes/assistant';
 import {
   requirePermission,
@@ -37,6 +37,13 @@ import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { getPermissions, hasPermission } from '../../src/auth/rbac';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { InMemoryCatalogItemRepository, createCatalogItem } from '../../src/catalog/catalog-item';
+import { InMemoryJobRepository } from '../../src/jobs/job';
+import type { EntityResolver } from '../../src/ai/resolution/entity-resolver';
+import {
+  setSupervisorPresenceLoader,
+  _resetSupervisorPresenceCache,
+} from '../../src/ai/supervisor-presence';
 
 const TEST_TENANT = '22222222-2222-4222-8222-222222222222';
 const TEST_USER = 'user-technician-field';
@@ -184,11 +191,12 @@ describe('technician × assistant — field write intents dispatch to proposals'
   }
 
   it('create_appointment drafts for a technician instead of auto-executing', async () => {
-    // create_appointment is the one wired intent that carries
-    // sourceTrustTier:'autonomous' and is capture-class, so decideInitialStatus
-    // can return 'approved' — and the execution layer performs NO permission
-    // check of its own. Without the guard, `ai:run` would have become a back
-    // door around `appointments:create`, which technicians deliberately lack.
+    // create_appointment is one of SEVEN autonomous, capture-class drafting
+    // types (proposals/caller-approval-gate.ts AUTO_APPROVE_DIRECT_PERMISSION),
+    // so decideInitialStatus can return 'approved' — and the execution layer
+    // performs NO permission check of its own. Without the gate, `ai:run`
+    // would have become a back door around `appointments:create`, which
+    // technicians deliberately lack.
     const proposalRepo = new InMemoryProposalRepository();
     const app = buildApp(
       scriptedGateway([
@@ -260,5 +268,153 @@ describe('technician × assistant — the gate still fails closed', () => {
     // Granted → allowed, on the DB role alone.
     const allowed = await request(app).get('/chat');
     expect(allowed.status).toBe(200);
+  });
+});
+
+// OVAS-02 — the chat route used to downgrade only create_appointment /
+// create_booking. Every other autonomous drafting type (draft_estimate,
+// draft_invoice, update_estimate, update_invoice) was persisted 'approved' for
+// a technician and executed on their say-so.
+describe('OVAS-02 — a supervised, confident chat draft never self-executes for a role that lacks the direct permission', () => {
+  const CUSTOMER_ID = '44444444-4444-4444-8444-444444444444';
+  const JOB_ID = '55555555-5555-4555-8555-555555555555';
+
+  beforeEach(() => {
+    setSupervisorPresenceLoader(async () => true);
+  });
+  afterEach(() => {
+    _resetSupervisorPresenceCache();
+  });
+
+  function gatewayByTask(replies: Record<string, string>): LLMGateway {
+    return {
+      complete: vi.fn(
+        async (req: { taskType?: string }) =>
+          ({
+            content: replies[req.taskType ?? ''] ?? '{}',
+            model: 'mock',
+            provider: 'mock',
+            tokenUsage: { input: 1, output: 1, total: 2 },
+            latencyMs: 1,
+          }) satisfies LLMResponse,
+      ),
+    } as unknown as LLMGateway;
+  }
+
+  const resolver = {
+    resolve: vi.fn(async (input: { kind: string }) =>
+      input.kind === 'customer'
+        ? { kind: 'resolved', candidate: { id: CUSTOMER_ID, kind: 'customer', label: 'Miller', score: 0.99 } }
+        : input.kind === 'job'
+          ? { kind: 'resolved', candidate: { id: JOB_ID, kind: 'job', label: 'Miller job', score: 0.99 } }
+          : { kind: 'not_found' },
+    ),
+  } as unknown as EntityResolver;
+
+  async function chatAs(
+    role: 'owner' | 'dispatcher' | 'technician',
+    replies: Record<string, string>,
+    utterance: string,
+  ) {
+    const proposalRepo = new InMemoryProposalRepository();
+    const catalogRepo = new InMemoryCatalogItemRepository();
+    await catalogRepo.create(
+      createCatalogItem({
+        tenantId: TEST_TENANT,
+        name: 'Capacitor Replacement',
+        category: 'labor',
+        unit: 'each',
+        unitPriceCents: 18900,
+      }),
+    );
+    const jobRepo = new InMemoryJobRepository();
+    await jobRepo.create({
+      id: JOB_ID,
+      tenantId: TEST_TENANT,
+      customerId: CUSTOMER_ID,
+      locationId: 'loc-1',
+      jobNumber: 'JOB-1',
+      summary: 'AC not cooling',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: TEST_USER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER,
+        sessionId: 'sess-ovas02',
+        tenantId: TEST_TENANT,
+        role,
+      };
+      next();
+    });
+    app.use(
+      '/api/assistant',
+      createAssistantRouter({
+        gateway: gatewayByTask(replies),
+        proposalRepo,
+        catalogRepo,
+        jobRepo,
+        entityResolver: resolver,
+      }),
+    );
+    const res = await request(app)
+      .post('/api/assistant/chat')
+      .send({ messages: [{ role: 'user', content: utterance }] });
+    expect(res.status).toBe(200);
+    const stored = await proposalRepo.findByTenant(TEST_TENANT);
+    expect(stored).toHaveLength(1);
+    return stored[0];
+  }
+
+  const estimateReplies = {
+    classify_intent: classifierReply('draft_estimate', {
+      customerName: 'Miller',
+      lineItemDescriptions: ['Capacitor Replacement'],
+    }),
+    draft_estimate: JSON.stringify({
+      lineItems: [{ description: 'Capacitor Replacement', quantity: 1, unitPrice: 18900 }],
+      confidence_score: 0.99,
+    }),
+  };
+  const ESTIMATE_UTTERANCE = 'Quote Miller a capacitor replacement';
+
+  it('draft_estimate: the owner keeps the auto-approval (no behavior change)', async () => {
+    const stored = await chatAs('owner', estimateReplies, ESTIMATE_UTTERANCE);
+    expect(stored.proposalType).toBe('draft_estimate');
+    expect(stored.status).toBe('approved');
+  });
+
+  it('draft_estimate: a dispatcher (holds estimates:create) keeps the auto-approval', async () => {
+    const stored = await chatAs('dispatcher', estimateReplies, ESTIMATE_UTTERANCE);
+    expect(stored.status).toBe('approved');
+  });
+
+  it('draft_estimate: a technician gets the draft, held for a permission holder', async () => {
+    const stored = await chatAs('technician', estimateReplies, ESTIMATE_UTTERANCE);
+    expect(stored.proposalType).toBe('draft_estimate');
+    expect(stored.status).not.toBe('approved');
+    expect(stored.approvedAt).toBeUndefined();
+  });
+
+  it('update_job: a technician holds jobs:update, so their own job edit still auto-approves', async () => {
+    const stored = await chatAs(
+      'technician',
+      {
+        classify_intent: classifierReply('update_job', { jobReference: 'the Miller job', status: 'completed' }),
+        update_job: JSON.stringify({
+          jobReference: 'the Miller job',
+          status: 'completed',
+          confidence_score: 0.99,
+        }),
+      },
+      'Mark the Miller job completed',
+    );
+    expect(stored.proposalType).toBe('update_job');
+    expect(stored.status).toBe('approved');
   });
 });

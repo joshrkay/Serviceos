@@ -5,7 +5,13 @@
  * Reads cached state only — no active probing on the public listing route.
  *
  * Response shape:
- *   { providers: [{ name, available, breakerState, lastError?, lastSuccessAt? }] }
+ *   { providers: [{ name, available, breakerState, lastErrorCode?, lastSuccessAt? }] }
+ *
+ * GATEWAY-07: this listing is public (mounted before auth), so it carries a
+ * stable `lastErrorCode` (rate_limited | timeout | transient | permanent),
+ * never the provider's raw error text — OpenAI's 429 message names the
+ * organization id and live quota use. The raw text is only on the
+ * METRICS_TOKEN-gated /ai/completion route.
  *
  * U4 — GET /api/health/ai/completion (METRICS_TOKEN / same gate as /metrics)
  * runs a cheap classify_intent completion so ops can see real provider
@@ -13,6 +19,7 @@
  */
 import { Router, Request, Response } from 'express';
 import { CircuitBreakerRegistry, type BreakerKeyParts } from '../ai/gateway/breaker';
+import type { ErrorClass } from '../ai/gateway/retry';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { probeAiCompletion } from '../ai/gateway/readiness';
 import { checkMetricsAuth } from '../bootstrap/metrics-auth';
@@ -21,7 +28,8 @@ export interface ProviderHealthEntry {
   name: string;
   available: boolean;
   breakerState: 'closed' | 'open' | 'half-open';
-  lastError?: string;
+  /** Stable class of the last breaker-counted failure — never raw provider text. */
+  lastErrorCode?: ErrorClass;
   lastSuccessAt?: string;
 }
 
@@ -91,8 +99,8 @@ export function createAiHealthRouter(
           breakerState: state.breakerState,
         };
 
-        if (state.lastError !== undefined) {
-          entry.lastError = state.lastError;
+        if (state.lastErrorCode !== undefined) {
+          entry.lastErrorCode = state.lastErrorCode;
         }
 
         if (state.lastSuccessAt !== undefined) {
@@ -120,9 +128,9 @@ export function createAiHealthRouter(
 
           const entry: ProviderHealthEntry = { name: p.name, available, breakerState };
 
-          const lastError = cell.getLastError();
-          if (lastError !== undefined) {
-            entry.lastError = lastError;
+          const lastErrorCode = cell.getLastErrorCode();
+          if (lastErrorCode !== undefined) {
+            entry.lastErrorCode = lastErrorCode;
           }
 
           const lastSuccessAt = cell.getLastSuccessAt();

@@ -17,9 +17,16 @@
  * `OnboardingConversationOrchestrator` instances (simulating two tabs / two
  * server-side request handlers), sharing the SAME `PgOnboardingSessionRepository`
  * and the SAME tenant + sessionId, firing `turn()` concurrently — and proves
- * the fix (a session-scoped Postgres advisory lock, `deps.pool`) actually
- * serializes them: no lost transcript/turnCount on a mid-conversation race,
- * and exactly ONE proposal batch on the terminal-turn race.
+ * the fix (`deps.pool`: each turn's writes commit in one short tenant
+ * transaction behind a transaction-scoped advisory lock, only if the session
+ * is still the version the turn read; the loser re-runs from the winner's
+ * state) resolves them: no lost transcript/turnCount on a mid-conversation
+ * race, and exactly ONE proposal batch on the terminal-turn race.
+ *
+ * TI-02 — and it does so holding nothing across the extractor LLM calls: the
+ * guard it replaced held a SESSION-scoped `pg_advisory_lock` on a main-pool
+ * connection for the whole turn (PgBouncer-unsafe, and one pinned connection
+ * per concurrent turn).
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { Pool } from 'pg';
@@ -40,20 +47,18 @@ import type { LLMGateway, LLMRequest, LLMResponse } from '../../src/ai/gateway/g
  * reliably, in the original version of this test — see the test's own
  * comment below).
  *
- * Wraps a real `findById` with a bounded rendezvous: the Nth concurrent
- * caller to reach this exact point releases every waiting caller
- * (including itself) to proceed together, so if two `turn()` calls are NOT
- * serialized upstream, both are guaranteed to read the identical pre-turn
- * row before either has written anything — the precise interleaving that
- * makes the lost-update bug deterministic instead of a matter of luck.
- *
- * If the calls ARE serialized upstream (the fix: `withSessionLock` holds a
- * Postgres advisory lock for the whole turn), the second caller's
- * `findById` is never invoked until the first turn's lock releases, so no
- * second arrival ever shows up here — the first caller's wait simply times
- * out after `windowMs` and it proceeds alone, exactly as an unraced turn
- * would. No hang either way; the fixed path just pays one bounded, short
- * wait per test run.
+ * Wraps a real `findById` with a bounded rendezvous AFTER the read: the Nth
+ * concurrent caller to have finished reading releases every waiting caller
+ * (including itself) to proceed together, so both `turn()` calls are
+ * guaranteed to HOLD the identical pre-turn row before either has written
+ * anything — the precise interleaving that makes the lost-update bug
+ * deterministic instead of a matter of luck. (Rendezvousing before the read
+ * is not enough: the caller that has to open a fresh pool connection can
+ * finish reading after the other has already committed.) The fix does not prevent that
+ * interleaving (nothing is locked while a turn computes); its commit-time
+ * re-read under the transaction-scoped lock must catch it. Later reads (the
+ * commit's re-read, the loser's retry) pass straight through the opened
+ * gate. A bounded `windowMs` keeps any path from hanging.
  */
 class RendezvousOnceSessionRepo implements OnboardingSessionRepository {
   private arrived = 0;
@@ -84,12 +89,13 @@ class RendezvousOnceSessionRepo implements OnboardingSessionRepository {
   }
 
   async findById(tenantId: string, id: string): Promise<OnboardingSession | null> {
+    const row = await this.inner.findById(tenantId, id);
     this.arrived += 1;
     if (this.arrived >= this.expectedArrivals) {
       this.release();
     }
     await this.gate;
-    return this.inner.findById(tenantId, id);
+    return row;
   }
 }
 
@@ -163,7 +169,7 @@ describe('Postgres integration — concurrent onboarding conversation turns (rev
   function orchestrator(): OnboardingConversationOrchestrator {
     // Two "tabs" each get their OWN orchestrator instance (as two server
     // request handlers would), sharing the same real-Postgres session repo
-    // and the same `pool` so the advisory lock is genuinely shared.
+    // and the same `pool` so the commit-time advisory lock is genuinely shared.
     return new OnboardingConversationOrchestrator({
       gateway: scriptedGateway(SCRIPTS),
       sessionRepo,
@@ -174,16 +180,16 @@ describe('Postgres integration — concurrent onboarding conversation turns (rev
   }
 
   it('two concurrent MID-conversation turns for the same session do not lose data (turnCount advances by 2, both utterances survive) — rendezvous-FORCED interleaving, mutation-proven', async () => {
-    // Mutation-tested (worktree, not this tree): reverting the `turn()`
-    // lock branch to `if (false && ...)` makes this test fail
-    // deterministically — `turnCount` stuck at 1 and only one of the two
+    // Mutation-tested (worktree, not this tree): disabling the commit-time
+    // version check in `commitTurn` (`if (false) throw …`) makes this test
+    // fail deterministically — `turnCount` stuck at 1 and only one of the two
     // user texts present — because `RendezvousOnceSessionRepo` below GUARANTEES
-    // both `findById` calls observe the identical pre-turn row before
-    // either write happens, rather than relying on Node's scheduler to
-    // interleave two near-instant in-memory-gateway calls closely enough
-    // (an earlier version of this test used plain `Promise.all` with no
-    // forced rendezvous and did NOT reliably fail under that same
-    // mutation — this replaces that unproven version).
+    // both turns hold the identical pre-turn row before either write happens,
+    // rather than relying on Node's scheduler to interleave two near-instant
+    // in-memory-gateway calls closely enough (an earlier version of this test
+    // used plain `Promise.all` with no forced rendezvous and did NOT reliably
+    // fail under the equivalent mutation — this replaces that unproven
+    // version).
     const opened = await orchestrator().turn({ tenantId: tenant.tenantId, userId: tenant.userId });
     const sessionId = opened.sessionId;
 
@@ -199,9 +205,10 @@ describe('Postgres integration — concurrent onboarding conversation turns (rev
     }
 
     // Two "tabs" both answer the opening business-profile question at the
-    // same instant. Without the lock, both read turnCount=0 / empty
-    // transcript, both compute turnCount=1, and the second UPDATE clobbers
-    // the first's transcript turn entirely.
+    // same instant. Both read turnCount=0 / empty transcript and both compute
+    // turnCount=1; without the commit-time check the second UPDATE clobbers
+    // the first's transcript turn entirely. With it, the second re-runs on
+    // top of the first.
     const [r1, r2] = await Promise.all([
       racingOrchestrator().turn({
         tenantId: tenant.tenantId,
@@ -235,6 +242,42 @@ describe('Postgres integration — concurrent onboarding conversation turns (rev
     expect(userTexts).toHaveLength(2);
   });
 
+  it('TI-02 — a turn holds no pooled connection across its extractor LLM call', async () => {
+    // Sequential, so any connection checked out at gateway time is the turn's
+    // own. The replaced guard held its session-lock connection right here.
+    const checkedOutAtLlmTime: number[] = [];
+    const scripted = scriptedGateway(SCRIPTS);
+    const orch = new OnboardingConversationOrchestrator({
+      gateway: {
+        complete: async (req: LLMRequest) => {
+          checkedOutAtLlmTime.push(pool.totalCount - pool.idleCount);
+          return scripted.complete(req);
+        },
+      } as unknown as LLMGateway,
+      sessionRepo,
+      proposalRepo,
+      auditRepo,
+      pool,
+    });
+    const opened = await orch.turn({ tenantId: tenant.tenantId, userId: tenant.userId });
+
+    const r = await orch.turn({
+      tenantId: tenant.tenantId,
+      userId: tenant.userId,
+      sessionId: opened.sessionId,
+      userMessage: 'We run Concurrent Turns HVAC in Mesa AZ',
+    });
+
+    expect(r.turnCount).toBe(1);
+    expect(checkedOutAtLlmTime.length).toBeGreaterThan(0);
+    expect(checkedOutAtLlmTime.every((n) => n === 0)).toBe(true);
+    // The turn's audit row and session update committed together.
+    const persisted = await sessionRepo.findById(tenant.tenantId, opened.sessionId);
+    expect(persisted!.turnCount).toBe(1);
+    const audits = await auditRepo.findByEntity(tenant.tenantId, 'onboarding_session', opened.sessionId);
+    expect(audits.some((a) => a.eventType === 'agent.onboarding.extractor_called')).toBe(true);
+  });
+
   it('two concurrent TERMINAL turns for the same session produce exactly ONE proposal batch, not two', async () => {
     const orch = orchestrator();
     const opened = await orch.turn({ tenantId: tenant.tenantId, userId: tenant.userId });
@@ -255,7 +298,7 @@ describe('Postgres integration — concurrent onboarding conversation turns (rev
     expect(last.completed).toBe(false);
 
     // Two "tabs" both confirm at the same instant — the exact terminal-turn
-    // race from the finding: without the lock both would run
+    // race from the finding: without the commit-time check both would run
     // emitProposalBatches and each persist its own full, independently
     // random-ID'd batch of onboarding_* proposals.
     const [c1, c2] = await Promise.all([

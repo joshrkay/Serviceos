@@ -7,6 +7,11 @@ import { assertValidProposalPayload } from '../proposals/contracts';
 import { INTENT_TO_PROPOSAL_TYPE } from '../proposals/voice-intent-map';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
+import {
+  AUTO_APPROVE_DIRECT_PERMISSION,
+  holdIfCallerCannotApprove,
+} from '../proposals/caller-approval-gate';
+import type { Mode } from '../proposals/auto-approve';
 import { getSupervisorReviewGate } from '../ai/supervisor/review-gate';
 import {
   AUTONOMOUS_LANE_PROPOSAL_TYPES,
@@ -73,7 +78,7 @@ import {
   EntityResolver,
 } from '../ai/resolution/entity-resolver';
 import { resolveVoiceEntityReferences } from '../ai/agents/customer-calling/entity-resolution';
-import { TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
+import { TaskHandler, TaskContext, TaskResult, withClassifierRun } from '../ai/tasks/task-handlers';
 import type { StandingInstruction } from '../instructions/standing-instructions';
 import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
 // B5 — the "core" intent taxonomy's task handlers are now built by the
@@ -486,6 +491,24 @@ export interface VoiceActionRouterDeps {
    * Optional: absent → no stamping (pre-U3 behavior; tests unaffected).
    */
   voiceRepo?: Pick<VoiceRepository, 'findById' | 'recordAnswer'>;
+  /**
+   * OVAS-02 — DB-authoritative role of the memo creator
+   * (voice_recordings.created_by, a Clerk subject), through the same
+   * membership loader the request path authorizes with (app.ts wires
+   * `resolveVoiceMemberRole`). An auto-approved proposal is held for review
+   * unless that role holds the type's direct permission
+   * (proposals/caller-approval-gate.ts). FAIL-CLOSED: absent, null or a
+   * throw → held, never self-executing.
+   */
+  resolveMemberRole?: (tenantId: string, userId: string) => Promise<string | null>;
+  /**
+   * OVAS-04 — the memo creator's `users.current_mode`, threaded as the
+   * proposal's supervisorMode so the per-mode thresholds and the tenant's
+   * per-mode override apply to memos exactly as they do to chat (which reads
+   * req.auth.mode). Absent / null / a throw → no mode; the resolver then
+   * applies the strictest defined override (never the bare legacy 0.9).
+   */
+  resolveMemberMode?: (tenantId: string, userId: string) => Promise<Mode | null>;
   /**
    * U3 — lookup-skill execution deps for E-lane answers (per-skill adapter
    * in workers/voice-lookup-answer.ts). Absent → lookup intents keep the
@@ -1805,6 +1828,15 @@ async function processSegment(
     classification.intentType,
   );
 
+  // OVAS-02 / OVAS-04 — the memo creator, read once: its mode sets the
+  // auto-approve threshold below, its role gates an auto-approval after.
+  // Only an auto-approvable type ever needs either.
+  const memoCreator = memoCreatorResolver(deps, tenantId, recordingId, log);
+  const supervisorMode =
+    AUTO_APPROVE_DIRECT_PERMISSION[handler.taskType] !== undefined
+      ? await memoCreator.mode()
+      : undefined;
+
   const context: TaskContext = {
     tenantId,
     userId,
@@ -1882,9 +1914,13 @@ async function processSegment(
     // `voice-hold:<recordingId>` so a concurrent redelivery can't double-book.
     ...(params.applyDedup && recordingId ? { recordingId } : {}),
     ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+    ...(supervisorMode ? { supervisorMode } : {}),
   };
 
-  const { proposal } = await handler.handle(context);
+  const { proposal: drafted } = await handler.handle(context);
+  // OBS-2 — the drafting run is the proposal's aiRunId; keep the classifier
+  // run that routed this segment reachable too.
+  const proposal = withClassifierRun(drafted, classification.aiRunId);
   // P8 — references that matched nothing are stamped on sourceContext so
   // the review UI prompts "pick from the list or create new" instead of
   // the operator discovering a dangling name at execution time.
@@ -1942,6 +1978,10 @@ async function processSegment(
   // past an unsupervised tenant. No-op in the normal case (the handler already
   // computed 'ready_for_review').
   //
+  // OVAS-02 — then the memo creator's role: an auto-approval may never grant
+  // the requester more than their role could do directly (the chat route's
+  // gate, shared). The D-015 lane keeps its own gate set.
+  //
   // U9 — the untrusted-source guard runs LAST so a voicemail-sourced
   // proposal can never leave here 'approved', including through the
   // autonomous-lane exception holdIfUnsupervised deliberately preserves.
@@ -1951,7 +1991,13 @@ async function processSegment(
   // an execution failure.
   const held = await holdForExecutability(
     tenantId,
-    holdIfUntrustedSource(holdIfUnsupervised(annotated, supervisorPresent), params.sourceChannel),
+    holdIfUntrustedSource(
+      await holdIfMemoCreatorCannotApprove(
+        holdIfUnsupervised(annotated, supervisorPresent),
+        memoCreator,
+      ),
+      params.sourceChannel,
+    ),
     deps.approvalReferenceChecks,
   );
   return {
@@ -1986,6 +2032,92 @@ export function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolea
     return proposal;
   }
   return { ...proposal, status: 'ready_for_review', approvedAt: undefined };
+}
+
+/**
+ * OVAS-02 — the memo creator, resolved lazily and at most once per segment:
+ * voice_recordings.created_by (the queue job's userId can be 'system', and is
+ * not what authorizes), then its DB-authoritative role. Every failure —
+ * no recording, no voiceRepo, no resolver, a lookup error — resolves to "no
+ * role", which the gate treats as "cannot approve".
+ */
+interface MemoCreator {
+  role(): Promise<string | null>;
+  /** OVAS-04 — users.current_mode; undefined when unresolvable. */
+  mode(): Promise<Mode | undefined>;
+}
+
+function memoCreatorResolver(
+  deps: Pick<VoiceActionRouterDeps, 'voiceRepo' | 'resolveMemberRole' | 'resolveMemberMode'>,
+  tenantId: string,
+  recordingId: string | undefined,
+  log: Logger,
+): MemoCreator {
+  let creatorId: Promise<string | undefined> | undefined;
+  const id = (): Promise<string | undefined> =>
+    (creatorId ??= (async () => {
+      if (!recordingId || !deps.voiceRepo) return undefined;
+      try {
+        const recording = await deps.voiceRepo.findById(tenantId, recordingId);
+        return recording?.createdBy || undefined;
+      } catch (err) {
+        log.warn('voice-action-router: memo creator lookup failed — auto-approval held', {
+          recordingId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return undefined;
+      }
+    })());
+  return {
+    async role() {
+      const userId = await id();
+      if (!userId || !deps.resolveMemberRole) return null;
+      try {
+        return await deps.resolveMemberRole(tenantId, userId);
+      } catch (err) {
+        log.warn('voice-action-router: memo creator role lookup failed — auto-approval held', {
+          recordingId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return null;
+      }
+    },
+    async mode() {
+      const userId = await id();
+      if (!userId || !deps.resolveMemberMode) return undefined;
+      try {
+        return (await deps.resolveMemberMode(tenantId, userId)) ?? undefined;
+      } catch (err) {
+        log.warn('voice-action-router: memo creator mode lookup failed — strictest tenant rule applies', {
+          recordingId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return undefined;
+      }
+    },
+  };
+}
+
+/**
+ * OVAS-02 — hold an auto-approved memo proposal unless the memo creator's
+ * role holds the type's direct permission (holdIfCallerCannotApprove). The
+ * role is only looked up when something was actually auto-approved.
+ *
+ * The D-015 autonomous booking lane is exempt, exactly as holdIfUnsupervised
+ * exempts it: a lane-eligible booking has no requesting member (it is an
+ * inbound caller's), carries its own gate set, and a blanket "no member role
+ * → hold" rule would silently disable it.
+ */
+async function holdIfMemoCreatorCannotApprove(
+  proposal: Proposal,
+  memoCreator: MemoCreator,
+): Promise<Proposal> {
+  if (proposal.status !== 'approved') return proposal;
+  const lane = autonomousLaneEvaluationFor(proposal);
+  if (lane?.eligible && AUTONOMOUS_LANE_PROPOSAL_TYPES.includes(proposal.proposalType)) {
+    return proposal;
+  }
+  return holdIfCallerCannotApprove(proposal, await memoCreator.role());
 }
 
 /**

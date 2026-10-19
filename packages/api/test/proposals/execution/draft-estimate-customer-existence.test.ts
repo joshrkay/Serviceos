@@ -208,3 +208,105 @@ describe('DraftEstimateExecutionHandler — tenant-scoped customer existence che
     expect(result.error).not.toMatch(/does not exist in this tenant/i);
   });
 });
+
+// OVAS-03 — the drafted jobId was passed straight to createEstimate: never
+// loaded, never matched to the customer. A fabricated uuid failed on the FK
+// after the approval tap; an echoed job of ANOTHER customer filed the estimate
+// under that customer (estimates carry no customer — the job decides who
+// receives it); and estimates.job_id has no tenant-composite FK, so a foreign
+// tenant's job uuid was accepted by Postgres.
+describe('DraftEstimateExecutionHandler — tenant-scoped job existence + customer match', () => {
+  let customerRepo: InMemoryCustomerRepository;
+  let jobRepo: InMemoryJobRepository;
+  let estimateRepo: InMemoryEstimateRepository;
+  let handler: DraftEstimateExecutionHandler;
+  let customerId: string;
+  let otherCustomerId: string;
+
+  async function seedJob(tenantId: string, ownerId: string): Promise<string> {
+    const id = crypto.randomUUID();
+    await jobRepo.create({
+      id,
+      tenantId,
+      customerId: ownerId,
+      locationId: 'loc-1',
+      jobNumber: `JOB-${id.slice(0, 4)}`,
+      summary: 'AC repair',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: EXECUTOR,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    return id;
+  }
+
+  beforeEach(async () => {
+    customerRepo = new InMemoryCustomerRepository();
+    jobRepo = new InMemoryJobRepository();
+    estimateRepo = new InMemoryEstimateRepository();
+    customerId = (
+      await createCustomer({ tenantId: TENANT, firstName: 'Khan', lastName: 'A', createdBy: EXECUTOR }, customerRepo)
+    ).id;
+    otherCustomerId = (
+      await createCustomer({ tenantId: TENANT, firstName: 'Lee', lastName: 'B', createdBy: EXECUTOR }, customerRepo)
+    ).id;
+    handler = new DraftEstimateExecutionHandler(
+      estimateRepo,
+      new InMemorySettingsRepository(),
+      jobRepo,
+      new InMemoryLocationRepository(),
+      new InMemoryAuditRepository(),
+      customerRepo,
+    );
+  });
+
+  it('refuses a jobId that names no job (the RFC example uuid) and writes nothing', async () => {
+    const result = await handler.execute(
+      makeProposal({ customerId, jobId: RFC_EXAMPLE_UUID, lineItems: LINE_ITEMS }),
+      CONTEXT,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(RFC_EXAMPLE_UUID);
+    expect(result.error).toMatch(/does not exist in this tenant/i);
+    expect(await estimateRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  it("refuses ANOTHER tenant's job uuid", async () => {
+    const foreignJob = await seedJob(OTHER_TENANT, customerId);
+    const result = await handler.execute(
+      makeProposal({ customerId, jobId: foreignJob, lineItems: LINE_ITEMS }),
+      CONTEXT,
+    );
+    expect(result.success).toBe(false);
+    expect(await estimateRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  it("refuses a real job that belongs to a DIFFERENT customer than the draft's", async () => {
+    const leesJob = await seedJob(TENANT, otherCustomerId);
+    const result = await handler.execute(
+      makeProposal({ customerId, jobId: leesJob, lineItems: LINE_ITEMS }),
+      CONTEXT,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/different customer/i);
+    expect(await estimateRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  it('the customer\'s own job executes onto that job', async () => {
+    const khansJob = await seedJob(TENANT, customerId);
+    const result = await handler.execute(
+      makeProposal({ customerId, jobId: khansJob, lineItems: LINE_ITEMS }),
+      CONTEXT,
+    );
+    expect(result.success).toBe(true);
+    const [estimate] = await estimateRepo.findByTenant(TENANT);
+    expect(estimate.jobId).toBe(khansJob);
+  });
+
+  it('a jobId with no customerId on the draft only needs the job to exist', async () => {
+    const khansJob = await seedJob(TENANT, customerId);
+    const result = await handler.execute(makeProposal({ jobId: khansJob, lineItems: LINE_ITEMS }), CONTEXT);
+    expect(result.success).toBe(true);
+  });
+});

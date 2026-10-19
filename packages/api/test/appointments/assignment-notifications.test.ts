@@ -17,6 +17,8 @@ import type { Job } from '../../src/jobs/job';
 import type { Customer } from '../../src/customers/customer';
 import type { User } from '../../src/users/user';
 import type { ServiceLocation } from '../../src/locations/location';
+import type { PoolClient } from 'pg';
+import { tenantContextStore } from '../../src/middleware/tenant-context';
 
 const TENANT = 'tenant-1';
 const APPT_ID = 'appt-1';
@@ -499,6 +501,35 @@ describe('technician assignment SMS — tenant toggle and churn window (#1033)',
     await t.svc.notifyChange(change('assigned', OTHER_TECH));
     await vi.advanceTimersByTimeAsync(60_000);
     expect(t.sent.map((s) => s.to).sort()).toEqual([OTHER_MOBILE, TECH_MOBILE].sort());
+  });
+
+  it('TI-01 — the windowed SMS flush re-reads outside the request that queued it', async () => {
+    // Real timers on purpose: a real setTimeout callback inherits the
+    // AsyncLocalStorage entry of the request that armed it, and fires after
+    // that request has committed and released its pg client.
+    const sms = capturingSms();
+    const seen: unknown[] = [];
+    const svc = new TechnicianAssignmentNotifier({
+      appointmentRepo: { findById: async () => makeAppointment() },
+      jobRepo: { findById: async () => makeJob() },
+      customerRepo: { findById: async () => makeCustomer() },
+      userRepo: {
+        findById: async () => {
+          seen.push(tenantContextStore.getStore());
+          return makeUser();
+        },
+      },
+      locationRepo: { findById: async () => makeLocation() },
+      notifier: capturingNotifier().notifier,
+      smsSender: sms.smsSender,
+      smsChurnWindowMs: 5,
+    });
+    const requestCtx = { client: {} as PoolClient, tenantId: TENANT };
+
+    await tenantContextStore.run(requestCtx, () => svc.notifyChange(change('assigned')));
+    await vi.waitFor(() => expect(sms.sent).toHaveLength(1));
+
+    expect(seen).toEqual([requestCtx, undefined]);
   });
 
   it('turning the toggle OFF during the window suppresses the pending SMS', async () => {

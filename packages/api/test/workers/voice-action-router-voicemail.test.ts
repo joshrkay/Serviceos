@@ -188,6 +188,22 @@ describe('voice-action-router — voicemail-sourced transcripts (U9)', () => {
       gateway: bookingGateway(),
       proposalRepo,
       tenantSchedulingResolver: TZ_RESOLVER,
+      // OVAS-02 — an auto-approval needs a memo creator whose role may
+      // approve it: a stamped in-app memo recorded by the owner.
+      voiceRepo: {
+        findById: async (tenantId: string, id: string) =>
+          ({
+            id,
+            tenantId,
+            source: 'inapp_voice',
+            transcriptMetadata: { provenance: 'operator' },
+            createdBy: 'clerk-owner',
+            status: 'completed',
+          }) as never,
+        recordAnswer: async () => null,
+      },
+      resolveMemberRole: async (_tenantId: string, userId: string) =>
+        userId === 'clerk-owner' ? 'owner' : null,
     });
     await worker.handle(
       msg({

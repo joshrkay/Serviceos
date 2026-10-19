@@ -10,9 +10,10 @@
  * leaked.
  *
  * Threading the per-request client into PgBaseRepository.withTenant()
- * happens via an AsyncLocalStorage. Repos call getStore() and prefer the
- * stored client; if absent (e.g. background workers, public routes) they
- * fall back to opening a connection from the pool.
+ * happens via an AsyncLocalStorage. Repos call currentTenantContext() and
+ * prefer the stored client; if absent (e.g. background workers, public routes,
+ * or work that outlived the request — TI-01) they fall back to opening a
+ * connection from the pool.
  *
  * Critical correctness rules:
  *  - The SET LOCAL inside the transaction is required. A plain `SET`
@@ -51,6 +52,17 @@ const tenantContextLogger = createLogger({
 export interface TenantContext {
   client: PoolClient;
   tenantId: string;
+  /**
+   * TI-01 — set by the owner the moment it starts settling the transaction
+   * (before COMMIT/ROLLBACK is enqueued). AsyncLocalStorage keeps handing this
+   * entry to anything spawned inside the scope (a `void` background write, a
+   * route still running after it responded), but from then on `client` is not
+   * theirs: a statement queued now runs after the COMMIT on a bare connection,
+   * or — once released, since pg-pool reuses idle clients LIFO — inside the
+   * next checkout's transaction, often another tenant's. Readers go through
+   * `currentTenantContext()`, which treats a closed entry as absent.
+   */
+  closed?: boolean;
 }
 
 /**
@@ -130,7 +142,8 @@ export interface WithTenantTransactionOptions {
  * Module-level AsyncLocalStorage. The middleware sets the value via
  * `als.run(...)` so every async hop inside `next()` sees the same store
  * entry. Consumers (PgBaseRepository.withTenant) read it with
- * `tenantContextStore.getStore()`.
+ * `currentTenantContext()` — never a raw `getStore()`, which would reuse a
+ * client whose transaction has already settled (TI-01).
  */
 export const tenantContextStore = new AsyncLocalStorage<TenantContext>();
 
@@ -202,6 +215,27 @@ const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
   // 13 judge calls in-request, and the sampling pass is kicked off detached
   // (outside tenantContextStore) — neither may hold a request transaction.
   { method: 'POST', re: /\/voice\/quality\/grade$/ },
+  // TI-02 — anchored at both ends (the `/api` mount prefix optional, as it is
+  // stripped from req.path) so no other router can inherit the bypass by
+  // sharing a suffix.
+  //
+  // In-app voice: a turn holds classify, drafting, entity resolution and TTS
+  // synthesis (seconds each); start speaks a greeting; end kicks off the
+  // summary. The entity resolver also takes its OWN pooled connection, so
+  // inside a request transaction every turn held two — ~DB_MAX_CONNECTIONS
+  // overlapping turns deadlocked on checkout and 500'd every tenant's /api.
+  // Every write the adapter makes is a repo call with an explicit tenantId,
+  // the contract the telephony voice path already runs under.
+  { method: 'POST', re: /^(?:\/api)?\/voice\/sessions$/ },
+  { method: 'POST', re: /^(?:\/api)?\/voice\/sessions\/[^/]+\/input$/ },
+  { method: 'DELETE', re: /^(?:\/api)?\/voice\/sessions\/[^/]+$/ },
+  // AI drafts awaited in-request: a suggested reply (reads + one draft call,
+  // no writes), an estimate suggestion (one draft proposal row), and an
+  // onboarding conversation turn (extractor calls; its writes commit together
+  // in the orchestrator's own short transaction).
+  { method: 'POST', re: /^(?:\/api)?\/conversations\/[^/]+\/suggest-reply$/ },
+  { method: 'POST', re: /^(?:\/api)?\/estimates\/suggest$/ },
+  { method: 'POST', re: /^(?:\/api)?\/onboarding\/conversation\/turn$/ },
 ];
 
 function isLlmLongCallRoute(req: { method: string; path: string }): boolean {
@@ -297,6 +331,11 @@ export function withTenantTransaction(pool: Pool, opts: WithTenantTransactionOpt
       return;
     }
 
+    // TI-01 — the one store entry this request publishes. Closed (below) the
+    // moment the transaction starts settling, so nothing that outlives the
+    // request can reuse `client` after it stops being ours.
+    const ctx: TenantContext = { client, tenantId };
+
     let released = false;
     const releaseOnce = () => {
       if (released) return;
@@ -353,7 +392,10 @@ export function withTenantTransaction(pool: Pool, opts: WithTenantTransactionOpt
         [String(REQUEST_STATEMENT_TIMEOUT_MS), String(REQUEST_IDLE_TX_TIMEOUT_MS)],
       );
     } catch (err) {
-      // BEGIN or SET failed — roll back (best effort) and release.
+      // BEGIN or SET failed — roll back (best effort) and release. The entry
+      // was never published (the store is entered only after this block), but
+      // close it anyway so that stays true if the order ever changes.
+      ctx.closed = true;
       try {
         await client.query('ROLLBACK');
       } catch {
@@ -380,6 +422,10 @@ export function withTenantTransaction(pool: Pool, opts: WithTenantTransactionOpt
     const cleanup = async (commit: boolean): Promise<boolean> => {
       if (cleanedUp || released) return false;
       cleanedUp = true;
+      // TI-01 — close BEFORE enqueuing COMMIT/ROLLBACK, not at release: a
+      // statement queued behind the COMMIT would run outside the transaction,
+      // as the connection principal with no tenant GUC.
+      ctx.closed = true;
       let committed = false;
       if (connectionLost) {
         // #1090 — the server already ended this transaction (rolling it back)
@@ -528,7 +574,7 @@ export function withTenantTransaction(pool: Pool, opts: WithTenantTransactionOpt
     // Run the rest of the request inside the AsyncLocalStorage scope so
     // every downstream `withTenant` call observes the request-scoped
     // client.
-    tenantContextStore.run({ client, tenantId }, () => {
+    tenantContextStore.run(ctx, () => {
       next();
     });
   };
@@ -547,10 +593,15 @@ export function withTenantTransaction(pool: Pool, opts: WithTenantTransactionOpt
  *
  * Outside a request transaction (SSE stream routes, background workers, tests —
  * no tenant-context store) there is nothing to wait for, so the effect runs
- * immediately, preserving behavior for those callers.
+ * immediately, preserving behavior for those callers. The same holds once the
+ * request transaction has started settling (TI-01): a hook parked after the
+ * hooks are read would never fire, and work still running after the response
+ * self-commits its writes on its own connection. So register effects BEFORE
+ * responding (every caller does) — one registered after `res.end` runs at once,
+ * possibly before the request's COMMIT has landed.
  */
 export function runAfterCommit(res: Response, effect: () => void): void {
-  if (!tenantContextStore.getStore()) {
+  if (!currentTenantContext()) {
     effect();
     return;
   }
@@ -559,11 +610,15 @@ export function runAfterCommit(res: Response, effect: () => void): void {
 }
 
 /**
- * Test-only helper: synchronously read the current store. Production
- * code should call this through PgBaseRepository.withTenant.
+ * The tenant context whose transaction is still OPEN, or undefined — the only
+ * way to read the store (repositories reach it through
+ * PgBaseRepository.withTenant). A closed entry reads as absent (TI-01): its
+ * client is settling or already back in the pool, so callers take the same
+ * fresh-connection path they take outside any request.
  */
 export function currentTenantContext(): TenantContext | undefined {
-  return tenantContextStore.getStore();
+  const ctx = tenantContextStore.getStore();
+  return ctx && !ctx.closed ? ctx : undefined;
 }
 
 /**
@@ -584,11 +639,17 @@ export function currentTenantContext(): TenantContext | undefined {
  * (pair a failure path with an explicit compensating write and
  * `res.locals.forceCommit` when responding >=400). Outside a request
  * transaction this is a no-op (standalone repo calls already
- * self-commit).
+ * self-commit). Once the request transaction has settled it throws (TI-01):
+ * the client is no longer the request's, and the writes it was asked to make
+ * durable already committed or rolled back with the response — the caller
+ * must not go on to the irreversible step as if the reservation held.
  */
 export async function commitRequestTransactionAndBegin(): Promise<void> {
-  const ctx = tenantContextStore.getStore();
-  if (!ctx) return;
+  if (!tenantContextStore.getStore()) return;
+  const ctx = currentTenantContext();
+  if (!ctx) {
+    throw new Error('The request transaction has already settled; nothing left to commit');
+  }
   const { client, tenantId } = ctx;
   await client.query('COMMIT');
   await client.query('BEGIN');
@@ -604,9 +665,13 @@ export async function commitRequestTransactionAndBegin(): Promise<void> {
  * inside it check out a fresh pool connection and self-commit, even when the
  * caller is mid-request. For compensation writes that must not depend on the
  * request client — e.g. after `commitRequestTransactionAndBegin` fails
- * post-COMMIT and the request client may be unusable. Note the pool-size
- * caveat: at DB_MAX_CONNECTIONS=1 (dev) a fresh checkout can wait on the
- * request client — reserve this for rare failure paths, never routine flow.
+ * post-COMMIT and the request client may be unusable. And for background
+ * work the request does not await — a `void` spawn or a timer that outlives
+ * the response (TI-01) — so it never inherits a client that will be back in
+ * the pool by the time it runs. Note the pool-size caveat: at
+ * DB_MAX_CONNECTIONS=1 (dev) a fresh checkout can wait on the request client,
+ * so a request must never AWAIT this on its routine path — only on rare
+ * failure paths; an un-awaited spawn simply waits for the release.
  */
 export async function runOutsideRequestTransaction<T>(fn: () => Promise<T>): Promise<T> {
   return tenantContextStore.exit(fn);
@@ -621,12 +686,13 @@ let requestSavepointSeq = 0;
  * intends to catch and skip past — then rolls back only `fn` and leaves the
  * surrounding transaction usable, instead of aborting the whole request
  * transaction (which would silently roll back unrelated writes at COMMIT).
- * Outside a request transaction (background workers, in-memory tests) there is
+ * Outside a request transaction (background workers, in-memory tests) — or
+ * once it has settled (TI-01), when `fn`'s repo calls open their own — there is
  * no shared client to poison, so `fn` runs directly. The original error is
  * always re-thrown for the caller to inspect.
  */
 export async function withRequestSavepoint<T>(fn: () => Promise<T>): Promise<T> {
-  const ctx = tenantContextStore.getStore();
+  const ctx = currentTenantContext();
   if (!ctx) return fn();
   const { client } = ctx;
   const name = `sp_req_${(requestSavepointSeq += 1)}`;

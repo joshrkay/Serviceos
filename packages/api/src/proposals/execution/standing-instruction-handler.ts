@@ -64,7 +64,9 @@ export class CreateStandingInstructionExecutionHandler implements ExecutionHandl
           scope: scopeResult.data,
           source: 'proposal',
           createdBy: context.executedBy,
-          actorRole: 'system',
+          // PI-2 — create_standing_instruction is config-writing, so approval
+          // stamps the approver's id and role; the audit names them.
+          actorRole: context.executedByRole ?? 'system',
         },
         this.repo,
         this.auditRepo,

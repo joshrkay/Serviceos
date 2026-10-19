@@ -279,3 +279,76 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
     });
   });
 });
+
+describe('GATEWAY-04 — dated snapshot ids resolve to the LONGEST matching family', () => {
+  const MINI = { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 };
+  const FOUR_O = { inputCentsPerMillionTokens: 250, outputCentsPerMillionTokens: 1000 };
+
+  afterEach(() => {
+    delete process.env[ENV_KEY];
+    vi.resetModules();
+  });
+
+  it.each([
+    ['gpt-4o listed first', { 'gpt-4o': FOUR_O, 'gpt-4o-mini': MINI }],
+    ['gpt-4o-mini listed first', { 'gpt-4o-mini': MINI, 'gpt-4o': FOUR_O }],
+  ])('%s: OpenAI-echoed dated ids price at their own family', async (_label, table) => {
+    process.env[ENV_KEY] = JSON.stringify(table);
+    const { resolveModelPricing, computeCostMicroCents } = await freshModule();
+    // OpenAI echoes the dated snapshot in completion.model — that is what the
+    // gateway prices. First-prefix-wins billed mini at 4o rates (16.7x).
+    expect(resolveModelPricing('gpt-4o-mini-2024-07-18')).toEqual(MINI);
+    expect(resolveModelPricing('gpt-4o-2024-08-06')).toEqual(FOUR_O);
+    expect(resolveModelPricing('openai/gpt-4o-mini-2024-07-18')).toEqual(MINI);
+    expect(computeCostMicroCents('gpt-4o-mini-2024-07-18', { input: 1_000, output: 100 })).toBe(
+      1_000 * 15 + 100 * 60,
+    );
+  });
+
+  it('the gateway records mini rates on the response AND the ai_runs row', async () => {
+    process.env[ENV_KEY] = JSON.stringify({ 'gpt-4o': FOUR_O, 'gpt-4o-mini': MINI });
+    vi.resetModules();
+    const { LLMGateway } = await import('../../../src/ai/gateway/gateway');
+    const { InMemoryAiRunRepository } = await import('../../../src/ai/ai-run');
+    const aiRunRepo = new InMemoryAiRunRepository();
+    const provider = {
+      name: 'api.openai.com',
+      isAvailable: async () => true,
+      complete: async () => ({
+        content: 'ok',
+        model: 'gpt-4o-mini-2024-07-18',
+        provider: 'api.openai.com',
+        tokenUsage: { input: 1_000, output: 100, total: 1_100 },
+        latencyMs: 1,
+      }),
+    };
+    const gateway = new LLMGateway(
+      { defaultProvider: provider.name },
+      new Map([[provider.name, provider]]),
+      undefined,
+      aiRunRepo,
+    );
+    const res = await gateway.complete({
+      taskType: 'summarize_conversation',
+      tenantId: 'tenant-price',
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const expected = 1_000 * 15 + 100 * 60;
+    expect(res.costMicroCents).toBe(expected);
+    const [run] = await aiRunRepo.findByTaskType('tenant-price', 'summarize_conversation');
+    expect(run.costMicroCents).toBe(expected);
+    expect(run.model).toBe('gpt-4o-mini-2024-07-18');
+  });
+
+  it('findUnpricedModels names configured models that would record a null cost', async () => {
+    const { findUnpricedModels } = await freshModule();
+    expect(findUnpricedModels(['gpt-4o-mini', 'claude-haiku-4-5-20251001', 'gpt-4o'])).toEqual([
+      'gpt-4o-mini',
+      'gpt-4o',
+    ]);
+    process.env[ENV_KEY] = JSON.stringify({ 'gpt-4o-mini': MINI, 'gpt-4o': FOUR_O });
+    const reloaded = await freshModule();
+    expect(reloaded.findUnpricedModels(['gpt-4o-mini', 'gpt-4o'])).toEqual([]);
+  });
+});

@@ -12,12 +12,14 @@
  * emission).
  */
 import { v4 as uuidv4 } from 'uuid';
-import type { Pool, PoolClient } from 'pg';
+import type { Pool } from 'pg';
 import { LLMGateway } from '../gateway/gateway';
 import {
+  AuditEvent,
   AuditRepository,
   createAuditEvent,
 } from '../../audit/audit';
+import { PgTenantTransactionRunner } from '../../db/tenant-transaction';
 import {
   OnboardingSessionRepository,
   type OnboardingSession,
@@ -52,6 +54,30 @@ import type {
 
 const SYSTEM_ACTOR = 'system:onboarding_conversation';
 
+/**
+ * TI-02 — how many times one request re-runs a turn whose session another
+ * request advanced first (see `commitTurn`). A tab race resolves on the first
+ * retry; this only bounds pathological contention.
+ */
+const MAX_TURN_ATTEMPTS = 3;
+
+/** Thrown inside `commitTurn` when the session is no longer the version the turn read. */
+class SessionAdvancedError extends Error {
+  constructor() {
+    super('onboarding session advanced while the turn was computing');
+  }
+}
+
+/**
+ * The writes one turn's side effects asked for, held back until `commitTurn`
+ * so a turn that loses the race leaves nothing behind.
+ */
+interface DeferredTurnWrites {
+  audits: AuditEvent[];
+  /** Context to build the proposal batch from, when the FSM emitted one. */
+  proposalBatchFrom?: OnboardingContext;
+}
+
 export interface OnboardingConversationDeps {
   gateway: LLMGateway;
   sessionRepo: OnboardingSessionRepository;
@@ -74,27 +100,28 @@ export interface OnboardingConversationDeps {
    * `sessionId` out of localStorage and POST a turn concurrently.
    * `OnboardingSessionRepository.update` is an unconditional
    * read-then-write with no version/CAS column (db/onboarding-session-
-   * repository.ts) and nothing upstream serializes two `turn()` calls for
-   * the same session, so two concurrent requests both read the SAME
+   * repository.ts), so two concurrent requests both read the SAME
    * pre-turn state, both independently advance the FSM from it, and the
    * second `update()` silently clobbers the first's transcript +
    * extractions — worse on the TERMINAL turn, where both calls run
    * `emitProposalBatches` and persist two full, independently-random-ID'd
    * proposal batches (duplicate onboarding cards, duplicate templates).
    *
-   * When supplied, `turn()` wraps its entire read → FSM-advance → write
-   * critical section in a SESSION-scoped Postgres advisory lock (same
-   * `pg_advisory_lock`/`hashtextextended` instrument as
-   * `activate-pack-with-seed.ts`'s `lockPool` — composes with, does not
-   * duplicate, that fix) so a second concurrent request for the same
-   * (tenant, session) BLOCKS until the first commits, then reads the
-   * FIRST request's already-advanced state — never the stale pre-turn
-   * one. On the terminal turn this makes the second request's `turn()`
-   * hit step 2's "terminal sessions short-circuit" and return the
-   * EXISTING proposal batch instead of emitting a duplicate one.
+   * When supplied, every turn's writes (its audit rows, its proposal batch,
+   * the session update) commit together in ONE short tenant transaction
+   * that first takes a transaction-scoped advisory lock on the session and
+   * re-reads it: if another request advanced the session after this turn
+   * read it, nothing is written and the turn runs again from the newer
+   * state (see `commitTurn`). The second tab's turn therefore lands on top
+   * of the first's — and on the terminal turn hits step 2's "terminal
+   * sessions short-circuit" and returns the EXISTING proposal batch.
    *
-   * Optional: absent (dev/test without a DB) preserves the pre-fix
-   * behavior exactly — no lock, no serialization.
+   * TI-02 — nothing is held across the extractor LLM calls: the connection
+   * is checked out only for the commit. (The guard this replaces held a
+   * SESSION-scoped `pg_advisory_lock` on a main-pool connection for the whole
+   * turn, and its lock/unlock pair could land on different PgBouncer
+   * backends.) Optional: absent (dev/test without a DB) writes directly, with
+   * no transaction and no conflict check.
    */
   pool?: Pool;
 }
@@ -138,58 +165,58 @@ export class OnboardingConversationOrchestrator {
   constructor(private readonly deps: OnboardingConversationDeps) {}
 
   /**
-   * Review finding #4 — public entry point. Only a request naming an
-   * EXISTING `sessionId` can race another request for the same session (a
-   * brand-new session's id is unknown to anyone else at creation time, so
-   * there is nothing to serialize against yet). When `deps.pool` is wired,
-   * take the session-scoped advisory lock around the whole turn; otherwise
-   * (or for a new session) run `turnLocked` directly, exactly as before.
+   * Public entry point. A turn that lost the commit race to another request
+   * for the same session (review finding #4, see `deps.pool`) re-runs from
+   * the state that request committed; after MAX_TURN_ATTEMPTS it gives up
+   * with `ONBOARDING_SESSION_CONFLICT` rather than overwrite it.
    */
   async turn(req: TurnRequest): Promise<TurnResponse> {
-    if (req.sessionId && this.deps.pool) {
-      return this.withSessionLock(req.tenantId, req.sessionId, this.deps.pool, () =>
-        this.turnLocked(req),
-      );
-    }
-    return this.turnLocked(req);
-  }
-
-  /**
-   * Acquire a SESSION-scoped (tenant, sessionId) Postgres advisory lock on a
-   * dedicated connection for the duration of `fn`, then release it. Uses the
-   * BLOCKING form (`pg_advisory_lock`, not a try-lock): unlike the pack-seed
-   * fallback lock (a background executor, where failing fast and reporting
-   * `PACK_ACTIVATION_IN_PROGRESS` is correct), this guards an interactive
-   * HTTP request — the right behavior for a second tab's concurrent turn is
-   * to wait the brief moment for the first turn to commit and then proceed
-   * against the now-current state, not to error out. Safe against a dead
-   * connection holding the lock forever: the lock is session-scoped, so if
-   * release fails the connection is destroyed (`client.release(true)`)
-   * rather than returned to the pool, and Postgres frees every advisory lock
-   * held by a session when that session's connection closes.
-   */
-  private async withSessionLock<T>(
-    tenantId: string,
-    sessionId: string,
-    pool: Pool,
-    fn: () => Promise<T>,
-  ): Promise<T> {
-    const client: PoolClient = await pool.connect();
-    const key = `onboarding_session:${tenantId}:${sessionId}`;
-    try {
-      await client.query('SELECT pg_advisory_lock(hashtextextended($1::text, 0))', [key]);
-      return await fn();
-    } finally {
+    for (let attempt = 1; ; attempt += 1) {
       try {
-        await client.query('SELECT pg_advisory_unlock(hashtextextended($1::text, 0))', [key]);
-        client.release();
-      } catch {
-        client.release(true);
+        return await this.attemptTurn(req);
+      } catch (err) {
+        if (!(err instanceof SessionAdvancedError)) throw err;
+        if (attempt >= MAX_TURN_ATTEMPTS) throw new Error('ONBOARDING_SESSION_CONFLICT');
       }
     }
   }
 
-  private async turnLocked(req: TurnRequest): Promise<TurnResponse> {
+  /**
+   * Commit one turn's writes against the session version it read. With a
+   * pool: one tenant transaction — `pg_advisory_xact_lock` on the session,
+   * re-read, and write only if the session is still the version `read` was;
+   * otherwise throw `SessionAdvancedError` (rolling back) so `turn()` retries.
+   * Transaction-scoped, so it holds a connection only for these few
+   * statements and stays on one backend under PgBouncer transaction pooling.
+   * Repositories inside `write` join this transaction through the tenant
+   * context, so the audit rows, the proposal batch and the session update
+   * commit or roll back together.
+   */
+  private async commitTurn<T>(
+    tenantId: string,
+    read: OnboardingSession,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    if (!this.deps.pool) return write();
+    return new PgTenantTransactionRunner(this.deps.pool).run(tenantId, async (scope) => {
+      await scope.lock(`onboarding_session:${read.id}`);
+      const current = await this.deps.sessionRepo.findById(tenantId, read.id);
+      // Every committed turn appends to the transcript and bumps turnCount,
+      // so an unchanged (turnCount, transcript length, state) means no other
+      // turn committed since `read`.
+      if (
+        !current ||
+        current.turnCount !== read.turnCount ||
+        current.transcriptTurns.length !== read.transcriptTurns.length ||
+        current.fsmState !== read.fsmState
+      ) {
+        throw new SessionAdvancedError();
+      }
+      return write();
+    });
+  }
+
+  private async attemptTurn(req: TurnRequest): Promise<TurnResponse> {
     const now = this.deps.now ?? (() => new Date());
 
     // 1. Load or create session.
@@ -254,9 +281,10 @@ export class OnboardingConversationOrchestrator {
     );
 
     // 5. Execute side effects. `call_extractor` produces a follow-on
-    //    `extraction_result` event that re-enters `transition` once.
+    //    `extraction_result` event that re-enters `transition` once. Writes
+    //    are deferred to step 6 so they commit with the session update.
     const assistantUtterances: string[] = [];
-    const emittedProposalIds: string[] = [];
+    const deferred: DeferredTurnWrites = { audits: [] };
     for (const effect of sideEffects) {
       const after = await this.executeSideEffect(
         effect,
@@ -264,8 +292,7 @@ export class OnboardingConversationOrchestrator {
         nextState,
         updatedContext,
         assistantUtterances,
-        emittedProposalIds,
-        now,
+        deferred,
       );
       if (after) {
         nextState = after.nextState;
@@ -274,7 +301,7 @@ export class OnboardingConversationOrchestrator {
       }
     }
 
-    // 6. Persist updated session.
+    // 6. Persist: audit rows, proposal batch and session update in one commit.
     const assistantText = assistantUtterances.join('\n') || updatedContext.pendingClarifications[0] || '…';
     const assistantTurn: TranscriptTurn = {
       role: 'assistant',
@@ -285,15 +312,24 @@ export class OnboardingConversationOrchestrator {
     const transcriptWithAssistant = [...updatedContext.transcript, assistantTurn];
 
     const completed = nextState === 'completed' || nextState === 'capped';
-    const updated = await this.deps.sessionRepo.update(req.tenantId, session.id, {
-      fsmState: nextState,
-      transcriptTurns: transcriptWithAssistant,
-      pendingClarifications: updatedContext.pendingClarifications,
-      clarificationCountByState: updatedContext.clarificationCountByState,
-      extractions: updatedContext.extractions,
-      turnCount: updatedContext.turnCount,
-      proposalBatchIds: [...session.proposalBatchIds, ...emittedProposalIds],
-      ...(completed ? { completedAt: now() } : {}),
+    const { emittedProposalIds, updated } = await this.commitTurn(req.tenantId, session, async () => {
+      for (const event of deferred.audits) {
+        await this.deps.auditRepo.create(event);
+      }
+      const ids = deferred.proposalBatchFrom
+        ? await this.emitProposalBatches(req, deferred.proposalBatchFrom)
+        : [];
+      const row = await this.deps.sessionRepo.update(req.tenantId, session.id, {
+        fsmState: nextState,
+        transcriptTurns: transcriptWithAssistant,
+        pendingClarifications: updatedContext.pendingClarifications,
+        clarificationCountByState: updatedContext.clarificationCountByState,
+        extractions: updatedContext.extractions,
+        turnCount: updatedContext.turnCount,
+        proposalBatchIds: [...session.proposalBatchIds, ...ids],
+        ...(completed ? { completedAt: now() } : {}),
+      });
+      return { emittedProposalIds: ids, updated: row };
     });
 
     return {
@@ -314,8 +350,7 @@ export class OnboardingConversationOrchestrator {
     currentState: OnboardingState,
     currentContext: OnboardingContext,
     assistantUtterances: string[],
-    emittedProposalIds: string[],
-    now: () => Date,
+    deferred: DeferredTurnWrites,
   ): Promise<{
     nextState: OnboardingState;
     updatedContext: OnboardingContext;
@@ -327,7 +362,7 @@ export class OnboardingConversationOrchestrator {
         return null;
       }
       case 'audit_log': {
-        await this.deps.auditRepo.create(
+        deferred.audits.push(
           createAuditEvent({
             tenantId: req.tenantId,
             actorId: req.userId,
@@ -354,8 +389,7 @@ export class OnboardingConversationOrchestrator {
         );
       }
       case 'emit_proposal_batches': {
-        const ids = await this.emitProposalBatches(req, currentContext);
-        emittedProposalIds.push(...ids);
+        deferred.proposalBatchFrom = currentContext;
         return null;
       }
     }

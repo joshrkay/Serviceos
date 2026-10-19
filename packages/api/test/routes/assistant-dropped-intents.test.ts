@@ -1466,7 +1466,7 @@ describe('Task 15 — update_catalog_item resolves against the wired catalogRepo
 // (`generateAssistantReply`'s `proposalHandlers` lookup). The chain path
 // (a "…, then …" turn) is a SEPARATE code path with its own `intent:` /
 // `customerId:` threading, its own registry-key lookup, AND behavior the
-// single path doesn't have: `downgradeIfCallerLacksDirectPermission`, the
+// single path doesn't have: `holdIfCallerCannotApprove` (shared with it), the
 // `chainCards.length >= 1 → ready_for_review` demotion for dependent steps,
 // and `carried` entity propagation. One turn exercises BOTH new context
 // fields (log_mileage needs `intent`; send_customer_message needs

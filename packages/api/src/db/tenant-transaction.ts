@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import type { Pool, PoolClient } from 'pg';
-import { tenantContextStore } from '../middleware/tenant-context';
+import { tenantContextStore, type TenantContext } from '../middleware/tenant-context';
 import { applyTenantContext } from './rls-runtime-role';
 
 /**
@@ -98,6 +98,9 @@ export class PgTenantTransactionRunner implements TenantTransactionRunner {
 
   async run<T>(tenantId: string, fn: (scope: TransactionScope) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
+    // TI-01 — closed before COMMIT/ROLLBACK, so a spawn inside `fn` that
+    // outlives it opens its own transaction instead of reusing this client.
+    const ctx: TenantContext = { client, tenantId };
     try {
       await client.query('BEGIN');
       await applyTenantContext(client, tenantId, { transactional: true });
@@ -125,10 +128,12 @@ export class PgTenantTransactionRunner implements TenantTransactionRunner {
         },
       };
 
-      const result = await tenantContextStore.run({ client, tenantId }, () => fn(scope));
+      const result = await tenantContextStore.run(ctx, () => fn(scope));
+      ctx.closed = true;
       await client.query('COMMIT');
       return result;
     } catch (err) {
+      ctx.closed = true;
       try {
         await client.query('ROLLBACK');
       } catch {

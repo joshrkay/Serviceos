@@ -10,6 +10,8 @@ import type { LLMProvider, LLMRequest, LLMGatewayConfig } from '../../src/ai/gat
 import { StubProvider } from '../../src/ai/gateway/providers';
 import { InMemoryAiRunRepository } from '../../src/ai/ai-run';
 import { metricsRegistry } from '../../src/monitoring/metrics';
+import { tenantContextStore } from '../../src/middleware/tenant-context';
+import type { PoolClient } from 'pg';
 
 function makeRequest(overrides: Partial<LLMRequest> = {}): LLMRequest {
   return {
@@ -542,5 +544,44 @@ describe('P2-031 — Response caching for deterministic AI tasks', () => {
     const cachedRun = runs.find((r) => r.outputSnapshot?.cached === true);
     expect(cachedRun).toBeDefined();
     expect(cachedRun!.status).toBe('completed');
+  });
+});
+
+describe('TI-01 — the cache-hit ai_run write is detached from the request', () => {
+  it("does not reuse the request's tenant context for its create + updateStatus pair", async () => {
+    // Fire-and-forget: the request can answer with the cached response
+    // before the second write (updateStatus) is issued, by which time the
+    // request client may be another tenant's.
+    const stub = new StubProvider('stub');
+    stub.setResponse({ content: 'Cached result' });
+    const aiRunRepo = new InMemoryAiRunRepository();
+    const wrapper = new CachingGatewayWrapper(
+      makeGateway(stub),
+      new InMemoryCacheStore(),
+      makeCacheConfig(),
+      'tenant-1',
+      aiRunRepo,
+    );
+    await wrapper.complete(makeRequest()); // miss — populates the cache
+
+    const seen: unknown[] = [];
+    const create = aiRunRepo.create.bind(aiRunRepo);
+    vi.spyOn(aiRunRepo, 'create').mockImplementation(async (run) => {
+      seen.push(tenantContextStore.getStore());
+      return create(run);
+    });
+    const updateStatus = aiRunRepo.updateStatus.bind(aiRunRepo);
+    vi.spyOn(aiRunRepo, 'updateStatus').mockImplementation(async (...args) => {
+      seen.push(tenantContextStore.getStore());
+      return updateStatus(...args);
+    });
+
+    const hit = await tenantContextStore.run({ client: {} as PoolClient, tenantId: 'tenant-1' }, () =>
+      wrapper.complete(makeRequest()),
+    );
+
+    expect(hit.cached).toBe(true);
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+    expect(seen).toEqual([undefined, undefined]);
   });
 });

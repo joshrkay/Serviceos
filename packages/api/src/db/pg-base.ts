@@ -1,6 +1,6 @@
 import { Pool, PoolClient } from 'pg';
 import { applyTenantContext, applyCrossTenantRole, clearTenantContext } from './rls-runtime-role';
-import { tenantContextStore } from '../middleware/tenant-context';
+import { currentTenantContext } from '../middleware/tenant-context';
 import { assertAmbientSessionLeaseHeld } from './session-lease';
 
 /**
@@ -58,14 +58,16 @@ export class PgBaseRepository {
    * but the repo would call pool.connect() and wait for client B
    * which can't be acquired until A releases.
    *
-   * Outside the request scope (workers, public flows, tests), we
+   * Outside the request scope (workers, public flows, tests) — and for
+   * work that outlives it, once its transaction has started settling
+   * (TI-01: `currentTenantContext()` reads a closed entry as absent) — we
    * still do the full BEGIN/COMMIT/ROLLBACK on a fresh connection.
    */
   protected async withTenantTransaction<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
     // #1125 — inside work protected by a session advisory lock (a leader-gated
     // sweep tick, a proposal execution), refuse once that lock is gone.
     assertAmbientSessionLeaseHeld();
-    const ctx = tenantContextStore.getStore();
+    const ctx = currentTenantContext();
     if (ctx && ctx.tenantId === tenantId) {
       return fn(ctx.client);
     }

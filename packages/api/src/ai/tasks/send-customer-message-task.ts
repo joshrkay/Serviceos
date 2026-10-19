@@ -59,6 +59,7 @@
  */
 import { createProposal } from '../../proposals/proposal';
 import type { TaskHandler, TaskContext, TaskResult } from './task-handlers';
+import { draftingRunLink, draftingRunMetadata } from './task-handlers';
 import type { LLMGateway } from '../gateway/gateway';
 import { SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH } from '../../proposals/contracts/send-customer-message';
 import { entitiesFrom, inputFor, untrustedTaskTextForPrompt } from './task-input';
@@ -92,14 +93,21 @@ export class SendCustomerMessageTaskHandler implements TaskHandler {
 
     const spoken =
       typeof ee.customerMessageBody === 'string' ? ee.customerMessageBody.trim() : '';
+    let authoringRun: { aiRunId?: string } | undefined;
     if (spoken.length > 0) {
-      payload.body = await this.resolveBody(spoken, context);
+      const resolved = await this.resolveBody(spoken, context);
+      payload.body = resolved.body;
+      authoringRun = resolved.authoringRun;
     } else {
       missing.push('body');
     }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal({
+        ...inputFor(context, this.taskType, payload, missing),
+        // OBS-2 — linked only when the model's rewrite became the body.
+        ...draftingRunLink(authoringRun),
+      }),
       taskType: this.taskType,
     };
   }
@@ -110,20 +118,25 @@ export class SendCustomerMessageTaskHandler implements TaskHandler {
    * above). Never fabricates, never blocks, never drafts a body the
    * contract will reject on length.
    */
-  private async resolveBody(spoken: string, context: TaskContext): Promise<string> {
-    const rewritten = await this.rewrite(spoken, context);
+  private async resolveBody(
+    spoken: string,
+    context: TaskContext,
+  ): Promise<{ body: string; authoringRun?: { aiRunId?: string } }> {
+    const rewrite = await this.rewrite(spoken, context);
+    const rewritten = rewrite?.text;
     // Rule 1 — an over-cap rewrite is discarded in favor of the spoken
     // text rather than kept (even truncated): the operator never reviewed
     // the rewrite's tail, only spoke the original.
-    const chosen =
-      rewritten !== undefined && rewritten.length <= SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH
-        ? rewritten
-        : spoken;
+    const useRewrite =
+      rewritten !== undefined && rewritten.length <= SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH;
+    const chosen = useRewrite ? rewritten : spoken;
     // Rule 2 — whichever text was chosen still gets a hard clamp: this is
     // what catches a long spoken transcript with no rewrite involved.
-    return chosen.length > SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH
-      ? `${chosen.slice(0, TRUNCATED_BODY_LENGTH)}…`
-      : chosen;
+    const body =
+      chosen.length > SEND_CUSTOMER_MESSAGE_BODY_MAX_LENGTH
+        ? `${chosen.slice(0, TRUNCATED_BODY_LENGTH)}…`
+        : chosen;
+    return { body, ...(useRewrite ? { authoringRun: rewrite } : {}) };
   }
 
   /**
@@ -133,7 +146,10 @@ export class SendCustomerMessageTaskHandler implements TaskHandler {
    * cleanup — `resolveBody` above is the only caller and treats
    * `undefined` as "fall back to the spoken text."
    */
-  private async rewrite(spoken: string, context: TaskContext): Promise<string | undefined> {
+  private async rewrite(
+    spoken: string,
+    context: TaskContext,
+  ): Promise<{ text: string; aiRunId?: string } | undefined> {
     if (!this.gateway) return undefined;
     const tenantId = context.tenantId;
     try {
@@ -151,11 +167,13 @@ export class SendCustomerMessageTaskHandler implements TaskHandler {
         ],
         temperature: 0.3,
         responseFormat: 'text',
+        // OBS-2 — ai_runs.correlation_id → this conversation.
+        ...draftingRunMetadata(context),
       });
       // Strip stray wrapping quotes/whitespace a model sometimes adds
       // (mirrors SuggestReplyTask).
       const cleaned = response.content.trim().replace(/^"(.*)"$/s, '$1').trim();
-      return cleaned.length > 0 ? cleaned : undefined;
+      return cleaned.length > 0 ? { text: cleaned, aiRunId: response.aiRunId } : undefined;
     } catch {
       // Degrade — never fabricate, never block the draft on an LLM outage.
       return undefined;
