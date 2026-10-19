@@ -127,7 +127,8 @@ async function attachSubmissionToLead(
   existing: Lead,
   input: CreateLeadInput,
   leadRepo: LeadRepository,
-  auditRepo?: AuditRepository
+  auditRepo: AuditRepository | undefined,
+  opts: CaptureLeadOptions
 ): Promise<LeadCaptureResult> {
   const now = new Date();
   const reopening = existing.stage === 'lost';
@@ -170,7 +171,7 @@ async function attachSubmissionToLead(
   }
 
   // A revived lead is new work for the owner; a repeat on an open lead is not.
-  if (reopening) await notifyOwnerLeadCaptured(existing.tenantId, updated);
+  if (reopening && opts.notifyOwner !== false) await notifyOwnerLeadCaptured(existing.tenantId, updated);
 
   return { lead: updated, outcome: reopening ? 'reopened' : 'attached' };
 }
@@ -187,6 +188,15 @@ export async function createLead(
   return (await captureLead(input, leadRepo, auditRepo)).lead;
 }
 
+export interface CaptureLeadOptions {
+  /**
+   * `false` skips the owner `lead_captured` push. For a lead on a tenant
+   * with no owner to tell: the hidden platform tenant's demo-visitor leads
+   * (U7, S6-2), which are marketing records only.
+   */
+  notifyOwner?: boolean;
+}
+
 /**
  * Create a lead, deduplicating on phone (#1406 D1): a submission whose phone
  * already belongs to an unconverted lead is attached to (or, when lost,
@@ -195,7 +205,8 @@ export async function createLead(
 export async function captureLead(
   input: CreateLeadInput,
   leadRepo: LeadRepository,
-  auditRepo?: AuditRepository
+  auditRepo?: AuditRepository,
+  opts: CaptureLeadOptions = {}
 ): Promise<LeadCaptureResult> {
   if (!input.tenantId) throw new ValidationError('tenantId is required');
   if (!input.firstName && !input.companyName) {
@@ -238,7 +249,7 @@ export async function captureLead(
 
   const phoneKey = input.primaryPhone ? normalizePhone(input.primaryPhone) : '';
   const blocking = await findUnconvertedLeadByPhone(leadRepo, input.tenantId, phoneKey);
-  if (blocking) return attachSubmissionToLead(blocking, input, leadRepo, auditRepo);
+  if (blocking) return attachSubmissionToLead(blocking, input, leadRepo, auditRepo, opts);
 
   let created: Lead;
   try {
@@ -247,7 +258,7 @@ export async function captureLead(
     // Lost the race to a concurrent submission with the same phone.
     if (isUniqueViolation(err) && phoneKey) {
       const winner = await findUnconvertedLeadByPhone(leadRepo, input.tenantId, phoneKey);
-      if (winner) return attachSubmissionToLead(winner, input, leadRepo, auditRepo);
+      if (winner) return attachSubmissionToLead(winner, input, leadRepo, auditRepo, opts);
     }
     throw err;
   }
@@ -268,7 +279,7 @@ export async function captureLead(
 
   // U6 — owner `lead_captured` push (best-effort; suppressed for
   // phone-originated leads, which fire `incoming_call` instead).
-  await notifyOwnerLeadCaptured(input.tenantId, created);
+  if (opts.notifyOwner !== false) await notifyOwnerLeadCaptured(input.tenantId, created);
 
   return { lead: created, outcome: 'created' };
 }

@@ -20,9 +20,11 @@
  *      enqueue the transcription worker. This leg is AT-LEAST-ONCE, not
  *      at-most-once: its receipt ('twilio_voicemail_transcription') is
  *      recorded only AFTER the whole pipeline (including the enqueue hook)
- *      succeeded, and a failure answers 500 so Twilio retries — one S3 or
- *      queue blip can no longer permanently downgrade the voicemail to
- *      notify-only (mirrors recording-webhook.ts's 500-for-retry). The
+ *      succeeded, and a failure is delivered again (LCR-04: Twilio does not
+ *      redeliver a 5xx recording callback, so the route queues the signed
+ *      request on its redelivery queue, see voicemail-redelivery.ts) — one
+ *      S3 or queue blip can no longer permanently downgrade the voicemail to
+ *      notify-only. The
  *      retry is safe end-to-end: the lead leg is receipt-guarded,
  *      `recordInboundCall` dedupes the row on (tenant_id, call_sid,
  *      recording_url), and the enqueue uses a stable queue idempotency key
@@ -57,8 +59,11 @@ import {
   requireTwilioSignature,
   sessionBelongsToAnotherTenant,
   actingTenantMismatchesCredential,
+  signedTwilioWebhookOf,
+  type SignedTwilioWebhook,
   type TwilioAuthTokenGetter,
 } from './twilio-signature';
+import { REDELIVERY_HEADER, type VoicemailRedelivery } from './voicemail-redelivery';
 import {
   fetchRecordingBytes,
   uploadToS3,
@@ -112,7 +117,7 @@ export interface VoicemailWebhookReceiptStore {
  *
  * ERROR CONTRACT (U9 review fix): hook errors PROPAGATE. When the receipt
  * store is wired, a hook failure fails the transcription leg → the route
- * answers 500 → Twilio retries → the leg re-runs (its success receipt was
+ * queues the callback for redelivery (LCR-04) → the leg re-runs (its success receipt was
  * never recorded). The hook must therefore be idempotent — the app-layer
  * enqueue is (stable queue idempotency key + router-side recordingId
  * dedup).
@@ -188,6 +193,13 @@ export interface VoicemailStatusRouterDeps {
   /** U9 transcription leg — Twilio creds for the signed RecordingUrl fetch. */
   twilioAccountSid?: string;
   twilioAuthToken?: string;
+  /**
+   * LCR-04 — Twilio never redelivers a recording callback that answered 5xx.
+   * When wired, a callback this process cannot take yet (the credential or
+   * tenant lookup failed, a receipt/storage step failed) is queued for
+   * redelivery and answered 200; see voicemail-redelivery.ts.
+   */
+  redelivery?: VoicemailRedelivery;
 }
 
 /** First string value of a possibly-array express query param. */
@@ -208,17 +220,46 @@ export function createVoicemailStatusRouter(
   // urlencoded; without this parser req.body is empty and every callback
   // no-ops (silent voicemail-lead loss), and without the signature check the
   // endpoint would accept forged JSON leads.
-  router.use(express.urlencoded({ extended: false }));
-  router.use(
+  //
+  // LCR-04 — both are scoped to THIS route. The sub-router is mounted with no
+  // path, so a router-level `use` ran the signature check (and its credential
+  // lookup) on every telephony request — /gather and /voice paid it once here,
+  // once in the recording sub-router and once in the shared middleware, each
+  // waiting out a database checkout during a brownout.
+  /**
+   * LCR-04 — answer a callback this process cannot take yet. Twilio does not
+   * redeliver a 5xx, so with a redelivery queue the exact signed request is
+   * queued (and redelivered until acknowledged) and Twilio gets a 200. A
+   * redelivery that fails again answers 5xx: its queue retries it.
+   */
+  const deferOrFail = (
+    req: Request,
+    res: Response,
+    message: string,
+    signed: SignedTwilioWebhook | undefined = signedTwilioWebhookOf(req, deps.publicBaseUrl),
+  ): void => {
+    if (deps.redelivery && !req.header(REDELIVERY_HEADER) && signed && deps.redelivery.defer(signed)) {
+      res.status(200).type('text/plain').send('OK');
+      return;
+    }
+    res.status(500).type('text/plain').send(message);
+  };
+
+  const parseAndVerify = [
+    express.urlencoded({ extended: false }),
     requireTwilioSignature(deps.authTokenGetter, {
       publicBaseUrl: deps.publicBaseUrl,
+      // The dialled number's credential cannot be looked up (database down,
+      // nothing cached) — exactly when a voicemail taken through the outage
+      // fallback reports in.
+      onCredentialUnavailable: (req, res, signed) => deferOrFail(req, res, 'credential lookup unavailable', signed),
     }),
-  );
+  ];
 
   const fetchRecording = options.fetchRecording ?? fetchRecordingBytes;
   const uploadObject = options.uploadObject ?? uploadToS3;
 
-  router.post('/voicemail-status', async (req: Request, res: Response) => {
+  router.post('/voicemail-status', ...parseAndVerify, async (req: Request, res: Response) => {
     const body = req.body as Record<string, string | undefined>;
     const callSid = body.CallSid ?? '';
     const recordingSid = body.RecordingSid ?? '';
@@ -265,10 +306,16 @@ export function createVoicemailStatusRouter(
       try {
         tenantId = await Promise.resolve(deps.resolveTenantIdFallback({ to, from }));
       } catch (err) {
-        logger.warn('voicemail-status: tenant fallback lookup failed', {
+        // LCR-04 — a database outage, not a miss. Nothing has been written
+        // yet (the lead leg is below), so the callback is delivered again
+        // once the database is back rather than 200-dropping a voicemail that
+        // was left during the outage.
+        logger.warn('voicemail-status: tenant fallback lookup failed — queueing for redelivery', {
           callSid,
           error: err instanceof Error ? err.message : String(err),
         });
+        deferOrFail(req, res, 'tenant lookup unavailable');
+        return;
       }
       if (tenantId) {
         logger.info('voicemail-status: tenant resolved via fallback (no in-process session)', {
@@ -311,8 +358,8 @@ export function createVoicemailStatusRouter(
     //     succeeded, so a transient failure stays retryable instead of
     //     permanently downgrading the voicemail to notify-only.
     //
-    // A receipt-store failure returns 500 so Twilio retries later rather
-    // than us proceeding unguarded.
+    // A receipt-store failure is delivered again later (LCR-04 redelivery
+    // queue) rather than us proceeding unguarded.
     const receiptKey = `${tenantId}:${recordingSid}`;
     let createLeadThisDelivery = true;
     if (deps.webhookEventRepo) {
@@ -331,7 +378,7 @@ export function createVoicemailStatusRouter(
           recordingSid,
           error: err instanceof Error ? err.message : String(err),
         });
-        res.status(500).type('text/plain').send('Voicemail processing failed');
+        deferOrFail(req, res, 'Voicemail processing failed');
         return;
       }
       if (!createLeadThisDelivery) {
@@ -395,8 +442,8 @@ export function createVoicemailStatusRouter(
 
     // ── Leg 2 (U9): persist recording + hand off to transcription ───────
     // AT-LEAST-ONCE (review fix): the success receipt below is recorded
-    // only after the whole pipeline lands, and a failure answers 500 so
-    // Twilio retries — the lead above is receipt-guarded, the row insert
+    // only after the whole pipeline lands, and a failure is delivered again
+    // (LCR-04 redelivery queue) — the lead above is receipt-guarded, the row insert
     // and the enqueue are idempotent, so the retry is safe end-to-end.
     // Without a receipt store (legacy/dev shape) failures stay 200
     // failure-soft: a retry there WOULD duplicate the lead.
@@ -433,7 +480,7 @@ export function createVoicemailStatusRouter(
           recordingSid,
           error: err instanceof Error ? err.message : String(err),
         });
-        res.status(500).type('text/plain').send('Voicemail processing failed');
+        deferOrFail(req, res, 'Voicemail processing failed');
         return;
       }
       if (alreadyTranscribed) {
@@ -529,7 +576,7 @@ export function createVoicemailStatusRouter(
 
       // 4. Hand off to the app layer for the transcription enqueue.
       //    Hook errors PROPAGATE (see VoicemailPersistedEvent doc): with a
-      //    receipt store they fail this leg → 500 → Twilio retry; the
+      //    receipt store they fail this leg → redelivery; the
       //    enqueue is idempotent so a retried hand-off is safe.
       if (options.onVoicemailPersisted) {
         const audioUrl = await deps.storage!.generateDownloadUrl(
@@ -578,9 +625,9 @@ export function createVoicemailStatusRouter(
         error: scrubAuthToken(err, deps.twilioAuthToken),
       });
       if (deps.webhookEventRepo) {
-        // Lead leg is receipt-guarded, so a Twilio retry can't duplicate
-        // it — answer 500 to get the retry (recording-webhook precedent).
-        res.status(500).type('text/plain').send('Voicemail transcription failed');
+        // Lead leg is receipt-guarded, so a redelivery can't duplicate it —
+        // deliver again until the transcription leg completes.
+        deferOrFail(req, res, 'Voicemail transcription failed');
         return;
       }
       // Legacy shape (no receipt store): keep the historical failure-soft

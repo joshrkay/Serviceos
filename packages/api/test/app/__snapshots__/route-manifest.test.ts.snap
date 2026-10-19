@@ -114,6 +114,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /dial-result
          └─ POST /gather
          └─ POST /voice
+         └─ POST /voice/fallback
          └─ POST /voice/gather-fallback
 043  authenticated use    /api/calls    [router: router]
          └─ POST /bridge

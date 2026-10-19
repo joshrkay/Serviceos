@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { InMemoryLeadRepository } from '../../src/leads/lead';
-import { createLead, isPhoneOriginatedLeadSource } from '../../src/leads/lead-service';
+import { captureLead, createLead, isPhoneOriginatedLeadSource } from '../../src/leads/lead-service';
 import { findOrCreateLeadByPhone } from '../../src/ai/skills/find-or-create-lead';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { OwnerNotificationService } from '../../src/notifications/owner-notification-service';
@@ -119,5 +119,25 @@ describe('lead_captured owner push (U6)', () => {
     );
     expect(lead.id).toBeTruthy();
     expect(provider.sent).toHaveLength(0);
+  });
+
+  it('captureLead with notifyOwner: false records the lead and pushes nothing, on create and on a reopen (S6-2 demo visitor lead on the hidden platform tenant)', async () => {
+    const created = await captureLead(
+      { tenantId: TENANT, companyName: 'Demo visitor', primaryPhone: '+15125550100', source: 'other', sourceDetail: 'demo_call', createdBy: 'system:demo-call' },
+      leadRepo,
+      auditRepo,
+      { notifyOwner: false },
+    );
+    expect(created.outcome).toBe('created');
+    await leadRepo.update(TENANT, created.lead.id, { stage: 'lost', lostReason: 'test' });
+    const reopened = await captureLead(
+      { tenantId: TENANT, companyName: 'Demo visitor', primaryPhone: '+15125550100', source: 'other', sourceDetail: 'demo_call', createdBy: 'system:demo-call' },
+      leadRepo,
+      auditRepo,
+      { notifyOwner: false },
+    );
+    expect(reopened).toMatchObject({ outcome: 'reopened', lead: { id: created.lead.id } });
+    expect(provider.sent).toHaveLength(0);
+    expect(auditRepo.getAll().map((e) => e.eventType)).toEqual(['lead.created', 'lead.reopened']);
   });
 });
