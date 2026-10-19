@@ -4,8 +4,13 @@ import type {
   CreateOnboardingDraftBody,
   OnboardingChoiceKey,
   OnboardingDraft,
+  OnboardingDraftRefusal,
+  OnboardingDraftResetReason,
   OnboardingMetroCode,
+  ResetOnboardingDraftResponse,
+  RetryOnboardingDraftResponse,
   StagedOnboardingChoice,
+  UndoOnboardingDraftResponse,
 } from '@ai-service-os/shared';
 import { useApiClient } from '../lib/apiClient';
 import {
@@ -13,16 +18,39 @@ import {
   approveDraft,
   createDraft,
   getDraft,
+  resetDraft,
+  retryDraft,
   setMetro,
   stageChoice,
+  undoDraft,
 } from '../lib/onboardingDraftApi';
 import { browserTimezoneOrUndefined } from './useOnboardingConversation';
+import { invalidateOnboardingStatusCache } from './useOnboardingStatus';
 
 const LOAD_ERROR = "I couldn't load your setup. Check your connection and try again.";
 const SAVE_ERROR = "That didn't go through. Try again.";
 /** After a re-read that changed what is on screen. Alone when the control the owner tapped may be gone. */
 const REFRESHED_NOTICE = 'Your answers changed somewhere else, so I refreshed them.';
 const CONFLICT_NOTICE = `${REFRESHED_NOTICE} Tap again.`;
+/** Approval is refused without a zone, and only a recorded one lifts that. */
+const TIMEZONE_ERROR = "I couldn't save your time zone. Check your connection and tap again.";
+/** After an undo, retry or start over found the approval changed by another window. */
+const ANOTHER_WINDOW_NOTICE = 'This changed in another window.';
+
+/** The three things the owner can do to an approval that is saving, failed, or stopped. */
+export type DraftRecoveryAction = 'undo' | 'retry' | 'reset';
+
+/**
+ * How an undo, retry or start over ended. `moved`: the approval on screen is no longer the current one
+ * (VERSION_CONFLICT or DRAFT_NOT_APPROVED); the draft was re-read and `notice` says so. `refused`: the API
+ * refused on purpose (the window closed, part of it is saved or saving, retrying is not safe); the screen
+ * decides what to show. `failed`: the request did not go through (`status` null when nothing came back).
+ */
+export type DraftRecoveryOutcome<T> =
+  | { kind: 'done'; response: T }
+  | { kind: 'moved' }
+  | { kind: 'refused'; refusal: OnboardingDraftRefusal; resetReason: OnboardingDraftResetReason | null }
+  | { kind: 'failed'; status: number | null };
 
 export interface UseOnboardingDraftResult {
   draft: OnboardingDraft | null;
@@ -50,6 +78,16 @@ export interface UseOnboardingDraftResult {
   changeMetro: (metro: OnboardingMetroCode) => Promise<OnboardingDraft | null>;
   /** The approve response, or null when it did not go through. */
   approve: () => Promise<ApproveOnboardingDraftResponse | null>;
+  /**
+   * After approval. Each posts the newest version known: the hook's own draft, or `seenVersion` when a status
+   * poll has seen a later one (another window retried). Each commits the draft it gets back, so the next call
+   * carries it. A second tap while one is in flight gets the same answer and sends nothing.
+   */
+  undo: (seenVersion?: number) => Promise<DraftRecoveryOutcome<UndoOnboardingDraftResponse>>;
+  retry: (seenVersion?: number) => Promise<DraftRecoveryOutcome<RetryOnboardingDraftResponse>>;
+  reset: (seenVersion?: number) => Promise<DraftRecoveryOutcome<ResetOnboardingDraftResponse>>;
+  /** Which of the three is in flight. */
+  recovering: DraftRecoveryAction | null;
   reload: () => Promise<void>;
 }
 
@@ -74,7 +112,9 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
   const [cellProblem, setCellProblem] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [approving, setApproving] = useState(false);
+  const [recovering, setRecovering] = useState<DraftRecoveryAction | null>(null);
 
+  const inFlight = useRef<Partial<Record<DraftRecoveryAction, Promise<DraftRecoveryOutcome<unknown>>>>>({});
   const draftRef = useRef<OnboardingDraft | null>(null);
   const queueRef = useRef<Promise<unknown>>(Promise.resolve());
   const createKey = createInput ? JSON.stringify(createInput) : null;
@@ -212,7 +252,7 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
             try {
               commit(await recordTimezone(apiFetch, held, input?.clientTimezone));
             } catch {
-              setError(SAVE_ERROR);
+              setError(TIMEZONE_ERROR);
               return null;
             }
           }
@@ -233,6 +273,8 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
               if (err.versionConflict) setNotice(CONFLICT_NOTICE);
               else setError(SAVE_ERROR);
             }
+          } else if (err instanceof OnboardingDraftApiError && err.status === 400 && err.message.startsWith('TIMEZONE_REQUIRED')) {
+            setError(TIMEZONE_ERROR);
           } else {
             setError(SAVE_ERROR);
           }
@@ -244,7 +286,80 @@ export function useOnboardingDraft(createInput: CreateOnboardingDraftBody | null
     [apiFetch, commit, refresh, serially, input],
   );
 
-  return { draft, version: draft?.version ?? null, loading, error, cellProblem, notice, approving, stage, changeMetro, approve, reload };
+  /**
+   * One undo, retry or start over. The version is read when the call runs (after any queued write), and is
+   * the newer of the hook's draft and what the screen saw on a status poll. Never repeated by itself.
+   */
+  const recover = useCallback(
+    <T extends { draft: OnboardingDraft }>(
+      action: DraftRecoveryAction,
+      send: (version: number) => Promise<T>,
+      seenVersion: number | undefined,
+    ): Promise<DraftRecoveryOutcome<T>> => {
+      const pending = inFlight.current[action];
+      if (pending) return pending as Promise<DraftRecoveryOutcome<T>>;
+      const run = serially(async (): Promise<DraftRecoveryOutcome<T>> => {
+        setError(null);
+        setNotice(null);
+        setRecovering(action);
+        try {
+          const version = Math.max(draftRef.current?.version ?? 0, seenVersion ?? 0);
+          const response = await send(version);
+          commit(response.draft);
+          return { kind: 'done', response };
+        } catch (err) {
+          if (!(err instanceof OnboardingDraftApiError)) return { kind: 'failed', status: null };
+          if (err.refusal === 'VERSION_CONFLICT' || err.refusal === 'DRAFT_NOT_APPROVED') {
+            // Another window undid, retried or started over first. Show what is current, from both reads.
+            invalidateOnboardingStatusCache();
+            if (!(await refresh())) return { kind: 'failed', status: null };
+            setNotice(ANOTHER_WINDOW_NOTICE);
+            return { kind: 'moved' };
+          }
+          if (err.refusal) return { kind: 'refused', refusal: err.refusal, resetReason: err.resetReason };
+          return { kind: 'failed', status: err.status };
+        } finally {
+          setRecovering(null);
+        }
+      }).finally(() => {
+        delete inFlight.current[action];
+      });
+      inFlight.current[action] = run as Promise<DraftRecoveryOutcome<unknown>>;
+      return run;
+    },
+    [commit, refresh, serially],
+  );
+
+  const undo = useCallback(
+    (seenVersion?: number) => recover('undo', (version) => undoDraft(apiFetch, version), seenVersion),
+    [apiFetch, recover],
+  );
+  const retry = useCallback(
+    (seenVersion?: number) => recover('retry', (version) => retryDraft(apiFetch, version), seenVersion),
+    [apiFetch, recover],
+  );
+  const reset = useCallback(
+    (seenVersion?: number) => recover('reset', (version) => resetDraft(apiFetch, version), seenVersion),
+    [apiFetch, recover],
+  );
+
+  return {
+    draft,
+    version: draft?.version ?? null,
+    loading,
+    error,
+    cellProblem,
+    notice,
+    approving,
+    stage,
+    changeMetro,
+    approve,
+    undo,
+    retry,
+    reset,
+    recovering,
+    reload,
+  };
 }
 
 

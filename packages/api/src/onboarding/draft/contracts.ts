@@ -83,6 +83,71 @@ export const ApproveDraftBodySchema = z
   })
   .strict();
 
+/**
+ * Body of POST /api/onboarding/draft/undo. `expectedVersion` is REQUIRED: the
+ * approved draft's `version` as the saving screen rendered it (the approve
+ * response's `draft.version`, the retry response's after a Retry, or the status
+ * draft block's after a reload). It binds the tap to the approval attempt that
+ * screen showed, so a stale tab cannot undo a newer approval (409 VERSION_CONFLICT).
+ */
+export const UndoDraftBodySchema = z
+  .object({
+    expectedVersion: z.number().int().positive(),
+  })
+  .strict();
+
+/**
+ * Body of POST /api/onboarding/draft/reset ("Start over"). `expectedVersion` is
+ * REQUIRED: the approved draft's `version` the stopped or failed screen was
+ * rendered from (the status draft block carries it). A tab that rendered an
+ * earlier approval, since replaced by a reset and a new approval, is refused
+ * (409 VERSION_CONFLICT), so a reset never reverts an approval its caller never saw.
+ */
+export const ResetDraftBodySchema = z
+  .object({
+    expectedVersion: z.number().int().positive(),
+  })
+  .strict();
+
+/**
+ * The machine `details.reason` of a 409 DRAFT_RESET_REFUSED: `applied` (a member
+ * is executed; Settings finishes it) or `executing` (a member is landing now).
+ * Pinned equal to the shared list by wire-contract.test.ts.
+ */
+export const DRAFT_RESET_REFUSAL_REASONS = ['applied', 'executing'] as const;
+
+/**
+ * Body of POST /api/onboarding/draft/retry. `expectedVersion` is the approved
+ * draft's `version` as the failed screen rendered it; a different value is 409
+ * VERSION_CONFLICT under the draft lock, before the set is read. Optional until
+ * every client sends it (S4-10); no body keeps the bodyless behaviour.
+ */
+export const RetryDraftBodySchema = z
+  .object({
+    expectedVersion: z.number().int().positive().optional(),
+  })
+  .strict();
+
+/**
+ * Every 409 code the draft routes answer with. Each refusal's message is
+ * `CODE: plain sentence` (the web reads the code from the prefix; raw statuses
+ * ride in `details` only). Pinned equal to the shared list and to the codes the
+ * draft sources actually throw by wire-contract.test.ts.
+ */
+export const DRAFT_REFUSAL_CODES = [
+  'VERSION_CONFLICT',
+  'DRAFT_APPROVED',
+  'DRAFT_NOT_APPROVED',
+  'DRAFT_METRO_LOCKED',
+  'DRAFT_APPROVAL_FAILED',
+  'DRAFT_RETRY_UNSAFE',
+  'DRAFT_RETRY_NOTHING_FAILED',
+  'DRAFT_RETRY_FAILED',
+  'DRAFT_UNDO_REFUSED',
+  'UNDO_WINDOW_CLOSED',
+  'DRAFT_RESET_REFUSED',
+] as const;
+
 /** Partial on purpose: an owner mid-way through has staged some keys, not all. */
 export const ChoicesRecordSchema = z.partialRecord(ChoiceKeySchema, StagedChoiceSchema);
 export type ChoicesRecord = z.infer<typeof ChoicesRecordSchema>;

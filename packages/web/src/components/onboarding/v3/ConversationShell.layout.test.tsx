@@ -278,16 +278,31 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
     return { data, isLoading: false, error: null, accessRevoked: false, refetch: vi.fn(() => Promise.resolve()) };
   }
 
-  function after(data: OnboardingStatusResponse | null, saving = false) {
+  /** What the hook's undo, retry and start over answer here: they did not go through (the screens' error line). */
+  const notThrough = () => Promise.resolve({ kind: 'failed' as const, status: 409 });
+
+  function after(data: OnboardingStatusResponse | null, saving = false, notice: string | null = null) {
     return (
       <MemoryRouter>
-        <AfterApproval status={result(data)} saving={saving} changeCount={2} packId="plumbing" userId="user-1" />
+        <AfterApproval
+          status={result(data)}
+          saving={saving}
+          changeCount={2}
+          draftVersion={2}
+          onUndo={notThrough}
+          onRetry={notThrough}
+          onReset={notThrough}
+          recovering={null}
+          notice={notice}
+          packId="plumbing"
+          userId="user-1"
+        />
       </MemoryRouter>
     );
   }
 
-  const savedAs = (execution: 'failed' | 'stopped') =>
-    statusAt('identity', {}, { draft: { status: 'approved', choicesAnswered: 7, version: 2, execution } });
+  const savedAs = (execution: 'failed' | 'stopped', recovery?: 'reset' | 'settings') =>
+    statusAt('identity', {}, { draft: { status: 'approved', choicesAnswered: 7, version: 2, execution, ...(recovery ? { recovery } : {}) } });
   const claiming = statusAt('phone', { phone: { status: 'current', metadata: { lineState: 'claiming', pendingNumber: '+12165550199' } } });
   const asking = statusAt('phone', { phone: { status: 'current', metadata: { lineState: 'awaiting_pick' } } });
   const holding = statusAt('phone', { phone: { status: 'current', metadata: { phoneNumber: NUMBER } } });
@@ -296,11 +311,14 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
   const voiceFailed = statusAt('ai_check', { ...phoneDone, ai_check: { status: 'error', blockers: ['ai_verification_failed'] } });
 
   const screens: Array<[string, OnboardingStatusResponse | null, { saving?: boolean; ready?: () => Promise<unknown> }]> = [
-    ['Saving your choices', statusAt('identity'), { saving: true }],
+    ['Saving your choices, with Undo', statusAt('identity'), { saving: true }],
     ['Getting your shop ready', statusAt('identity'), {}],
     ['Before the first status arrives', null, {}],
     ['Save failed: Try again', savedAs('failed'), {}],
+    ['Save failed: Try again and Start over', savedAs('failed', 'reset'), {}],
     ['Save stopped: step by step', savedAs('stopped'), {}],
+    ['Save stopped: Start over', savedAs('stopped', 'reset'), {}],
+    ['Save stopped: Finish in Settings', savedAs('stopped', 'settings'), {}],
     ['Trial: the plans', statusAt('billing'), { ready: () => screen.findByRole('radiogroup') }],
     ['Trial: the plans cannot be shown', statusAt('billing'), { ready: () => screen.findByRole('alert') }],
     ['Number: getting it', claiming, {}],
@@ -325,16 +343,37 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
     });
   }
 
-  it('Save failed: a failed retry adds one line under the buttons, not a wider page, and both buttons wrap at 320px', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(json(409, { error: 'CONFLICT', message: 'DRAFT_RETRY_UNSAFE' }))));
-    const { container } = render(after(savedAs('failed')));
+  it('Save failed: a failed retry adds one line under the buttons, not a wider page, and every button wraps at 320px', async () => {
+    const { container } = render(after(savedAs('failed', 'reset')));
     await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await screen.findByRole('alert');
     expectAllTapTargets(container, 'save failed after a failed retry');
     expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
-    for (const name of ['Try again', 'Go through setup step by step']) {
+    for (const name of ['Try again', 'Start over', 'Go through setup step by step']) {
       expect(screen.getByRole('button', { name }).className, name).toMatch(/whitespace-normal/);
     }
+  });
+
+  it('Saving: Undo is a full-width 44px target, and a failed undo adds one line, not a wider page', async () => {
+    const { container } = render(after(statusAt('identity'), true));
+    const undo = screen.getByRole('button', { name: 'Undo' });
+    expect(undo.className).toMatch(/w-full/);
+    expect(undo.className).toMatch(/whitespace-normal/);
+    await userEvent.click(undo);
+    await screen.findByRole('alert');
+    expectAllTapTargets(container, 'saving after a failed undo');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+  });
+
+  it('Save stopped: the Settings link is a full-width 44px target that wraps, beside the notice line', () => {
+    const { container } = render(after(savedAs('stopped', 'settings'), false, 'This changed in another window.'));
+    const link = screen.getByRole('link', { name: 'Finish in Settings' });
+    expectTapTarget(link, 'Finish in Settings');
+    expect(link.className).toMatch(/w-full/);
+    expect(link.className).toMatch(/whitespace-normal/);
+    expect(screen.getByText('This changed in another window.')).toBeInTheDocument();
+    expectAllTapTargets(container, 'stopped with Settings and a notice');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
   });
 
   it('Test call: "I\'ll test later" is a 44px target in the header, and a failed skip adds one line, not a wider page', async () => {
