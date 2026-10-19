@@ -7962,6 +7962,34 @@ export const MIGRATIONS = {
       ON voice_recordings (twilio_delete_attempted_at NULLS FIRST, created_at)
       WHERE twilio_deleted_at IS NULL AND recording_url IS NOT NULL AND legal_hold = false;
   `,
+
+  // PRIV-1 — the retention sweep strips the prompt and reply content from an
+  // ai_runs row once it is past the tenant's recording_retention_days, and
+  // stamps `content_purged_at`. The row is kept (proposals, supervisor_reviews,
+  // document_revisions and estimate_provenance FK it; the spend report reads
+  // its model, tokens and cost). The partial index keeps the sweep's per-tenant
+  // (tenant_id, created_at) probe off the rows already purged, so its cost does
+  // not grow with history. RLS rides the existing ai_runs policy (migration
+  // 008). Additive and idempotent; nullable with no default, so the ALTER is
+  // metadata-only.
+  '316_ai_runs_content_purged_at': `
+    ALTER TABLE ai_runs
+      ADD COLUMN IF NOT EXISTS content_purged_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_ai_runs_content_purge_due
+      ON ai_runs (tenant_id, created_at)
+      WHERE content_purged_at IS NULL;
+  `,
+
+  // PRIV-1 (review round 2) — the ai_runs content purge honours legal hold:
+  // a run within a day of a same-tenant held recording is kept. This partial
+  // index serves that probe (tenant, time window over the few held rows), so
+  // the per-run NOT EXISTS stays an index lookup. RLS rides the existing
+  // voice_recordings policy (migration 007). Additive and idempotent.
+  '321_voice_recordings_legal_hold_index': `
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_legal_hold
+      ON voice_recordings (tenant_id, created_at)
+      WHERE legal_hold;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
