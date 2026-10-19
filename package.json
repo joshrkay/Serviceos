@@ -100,14 +100,14 @@
     "loadtest:mixed:selfcheck": "tsx loadtest/mixed-1000-selfcheck.ts"
   },
   "devDependencies": {
-    "@clerk/testing": "^2.2.44",
+    "@clerk/testing": "^2.2.46",
     "@eslint/js": "^10.0.1",
-    "@playwright/test": "^1.64.0",
+    "@playwright/test": "^1.64.1",
     "@testcontainers/postgresql": "^11.13.0",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/react": "^16.3.3",
     "@types/pg": "^8.23.1",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^4.1.12",
     "eslint": "^10.12.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^16.5.0",
@@ -115,7 +115,7 @@
     "testcontainers": "^11.13.0",
     "tsx": "^4.23.15",
     "typescript": "^5.4.0",
-    "typescript-eslint": "^8.71.1",
+    "typescript-eslint": "^8.71.2",
     "vitest": "^4.1.10"
   },
   "overrides": {
