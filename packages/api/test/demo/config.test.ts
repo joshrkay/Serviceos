@@ -73,3 +73,106 @@ describe('demo config — the seed script refusal', () => {
     expect(demoSeedRefusalReason()).toBeNull();
   });
 });
+
+describe('demo config — loadDemoConfig (S6-2: read once at boot, a bad value closes only the module)', () => {
+  const errors: string[] = [];
+  const logger = {
+    error: (msg: string) => {
+      errors.push(msg);
+    },
+  };
+  afterEach(() => {
+    errors.length = 0;
+  });
+
+  it('uses the plan defaults when nothing is set, frozen', async () => {
+    const { loadDemoConfig } = await import('../../src/demo/config');
+    const config = loadDemoConfig({}, logger);
+    expect(config).toEqual({
+      open: true,
+      settings: {
+        callsDailyCap: 50,
+        costDailyCapCents: 2500,
+        callEstCostCents: 50,
+        poolPerTrade: 3,
+        statusTokenTtlHours: 24,
+        resetBatchRows: 1000,
+        resetDrainSeconds: 90,
+      },
+    });
+    if (!config.open) throw new Error('unreachable');
+    expect(Object.isFrozen(config.settings)).toBe(true);
+    expect(Object.isFrozen(config)).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
+  it('reads every value', async () => {
+    const { loadDemoConfig } = await import('../../src/demo/config');
+    const config = loadDemoConfig(
+      {
+        DEMO_CALLS_DAILY_CAP: '7',
+        DEMO_COST_DAILY_CAP_CENTS: '175',
+        DEMO_CALL_EST_COST_CENTS: ' 25 ',
+        DEMO_POOL_PER_TRADE: '2',
+        DEMO_STATUS_TOKEN_TTL_HOURS: '12',
+        DEMO_RESET_BATCH_ROWS: '500',
+        DEMO_RESET_DRAIN_SECONDS: '30',
+      },
+      logger,
+    );
+    expect(config).toEqual({
+      open: true,
+      settings: {
+        callsDailyCap: 7,
+        costDailyCapCents: 175,
+        callEstCostCents: 25,
+        poolPerTrade: 2,
+        statusTokenTtlHours: 12,
+        resetBatchRows: 500,
+        resetDrainSeconds: 30,
+      },
+    });
+  });
+
+  it.each([
+    ['DEMO_CALLS_DAILY_CAP', 'fifty'],
+    ['DEMO_CALLS_DAILY_CAP', '0'],
+    ['DEMO_CALLS_DAILY_CAP', '-3'],
+    ['DEMO_COST_DAILY_CAP_CENTS', '25.00'],
+    ['DEMO_COST_DAILY_CAP_CENTS', ''],
+    ['DEMO_CALL_EST_COST_CENTS', '0'],
+    ['DEMO_CALL_EST_COST_CENTS', '1e2'],
+    ['DEMO_POOL_PER_TRADE', '0'],
+    ['DEMO_STATUS_TOKEN_TTL_HOURS', '-24'],
+    ['DEMO_RESET_BATCH_ROWS', 'lots'],
+    ['DEMO_RESET_DRAIN_SECONDS', '0'],
+    ['DEMO_CALLS_DAILY_CAP', '2147483648'],
+  ])('%s=%j closes the module with one error log, naming the variable', async (name, value) => {
+    const { loadDemoConfig } = await import('../../src/demo/config');
+    const config = loadDemoConfig({ [name]: value }, logger);
+    expect(config.open).toBe(false);
+    if (config.open) throw new Error('unreachable');
+    expect(config.reason).toContain(name);
+    expect(errors).toHaveLength(1);
+  });
+
+  it('a per-call estimate above the cost cap closes the module rather than guessing', async () => {
+    const { loadDemoConfig } = await import('../../src/demo/config');
+    const config = loadDemoConfig({ DEMO_COST_DAILY_CAP_CENTS: '40', DEMO_CALL_EST_COST_CENTS: '50' }, logger);
+    expect(config).toEqual({
+      open: false,
+      reason: expect.stringMatching(/DEMO_CALL_EST_COST_CENTS.*DEMO_COST_DAILY_CAP_CENTS/),
+    });
+    expect(errors).toHaveLength(1);
+  });
+
+  it('an estimate equal to the cost cap is allowed (one call fits)', async () => {
+    const { loadDemoConfig } = await import('../../src/demo/config');
+    expect(loadDemoConfig({ DEMO_COST_DAILY_CAP_CENTS: '50', DEMO_CALL_EST_COST_CENTS: '50' }, logger).open).toBe(true);
+  });
+
+  it('does not read the kill switch: DEMO_CALLS_ENABLED stays a per-request read', async () => {
+    const { loadDemoConfig } = await import('../../src/demo/config');
+    expect(loadDemoConfig({ DEMO_CALLS_ENABLED: 'false' }, logger).open).toBe(true);
+  });
+});
