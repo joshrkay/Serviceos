@@ -36,6 +36,7 @@
  */
 
 import { maskPhone } from '../../telephony/twilio-call-control';
+import { redactCardNumbers } from '../privacy/pan-redact';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -47,7 +48,8 @@ export type RedactionKind =
   | 'known_phone'
   | 'known_email'
   | 'known_name'
-  | 'known_address';
+  | 'known_address'
+  | 'card_number';
 
 export interface Redaction {
   kind: RedactionKind;
@@ -191,6 +193,17 @@ function replaceRegex(
 const DIGIT_RUN_REGEX = /[0-9]{7,}/g;
 
 /**
+ * PRIV-3 — digit groups joined by spaces, dashes, commas or periods (the
+ * card scrubber's group separator) adding up to 12+ digits
+ * ("4111 1111 1111 1112", a non-Luhn card-shaped run the card pass left in
+ * place). DIGIT_RUN_REGEX only sees unbroken runs, so grouped digits used to
+ * pass the gate. Phones are already placeholders by the time this runs.
+ */
+const GROUPED_DIGIT_RUN_REGEX =
+  /(?<![0-9])\d{2,}(?:(?:[ \t]*[,.-][ \t]*|[ \t]+)\d{2,}){2,}(?![0-9])/g;
+const MIN_GROUPED_RESIDUAL_DIGITS = 12;
+
+/**
  * Detects strings that look like 4+ all-caps tokens, which often
  * indicate full names dictated to the agent ("MY NAME IS JOHN ANDREW
  * SMITH") that the entity-based pass missed because the customer
@@ -215,6 +228,11 @@ function detectResidualPii(scrubbed: string): string[] {
 
   if (testRegex(DIGIT_RUN_REGEX, placeholderless)) {
     signals.push('digit_run_ge_7');
+  }
+  GROUPED_DIGIT_RUN_REGEX.lastIndex = 0;
+  const grouped = placeholderless.match(GROUPED_DIGIT_RUN_REGEX) ?? [];
+  if (grouped.some((run) => run.replace(/\D/g, '').length >= MIN_GROUPED_RESIDUAL_DIGITS)) {
+    signals.push('grouped_digit_run');
   }
   if (testRegex(ALL_CAPS_NAME_REGEX, placeholderless)) {
     signals.push('all_caps_name_run');
@@ -270,6 +288,17 @@ export function scrubPii(text: string, opts: ScrubOptions = {}): ScrubResult {
   }
 
   // ── Layer 2: regex sweep ───────────────────────────────────────────────────
+  // PRIV-3 — card numbers first (Luhn-validated, ai/privacy/pan-redact.ts):
+  // the phone pattern would otherwise take ten digits of an unspaced card.
+  working = redactCardNumbers(working, '[CARD_NUMBER]', (matched, offset) => {
+    redactions.push({
+      kind: 'card_number',
+      matched,
+      placeholder: '[CARD_NUMBER]',
+      start: offset,
+      end: offset + matched.length,
+    });
+  });
   // Order matters: address before phone, since address contains a digit
   // prefix that could otherwise be partially matched as a phone.
   working = replaceRegex(working, ADDRESS_REGEX, '[ADDRESS]', 'address', redactions);

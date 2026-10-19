@@ -156,6 +156,7 @@ import type { LocationRepository } from '../locations/location';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import type { OneTapFallbackDeps } from '../ai/tasks/proposal-approval-task';
 import { TenantGlossaryProvider } from '../voice/tenant-glossary-provider';
+import { redactCardNumbers } from '../ai/privacy/pan-redact';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -2024,6 +2025,10 @@ export class TwilioGatherAdapter {
     speechResult: string;
     tenantId: string;
   }): Promise<SideEffect[]> {
+    // PRIV-3 — a recited card number is scrubbed where the caller's words
+    // enter the turn, so the FSM events, task handlers and the proposals they
+    // persist never see the digits (not only the stored transcript turn).
+    opts = { ...opts, speechResult: redactCardNumbers(opts.speechResult) };
     const session = this.deps.store.get(opts.sessionId);
     if (!session) {
       logger.warn('processCallerUtterance: unknown session', { sessionId: opts.sessionId });
@@ -2263,10 +2268,14 @@ export class TwilioGatherAdapter {
     confidence: number | undefined;
     tenantId: string;
   }): Promise<string> {
+    // PRIV-3 — Twilio's speech result has no upstream card redaction, so a
+    // recited card number is scrubbed here, before classification, the FSM
+    // and every task handler (see processCallerUtterance).
+    const scrubbed = { ...opts, speechResult: redactCardNumbers(opts.speechResult) };
     // Per-session lock: Twilio retries (or duplicate webhook deliveries)
     // for the same sessionId could otherwise interleave FSM dispatch +
     // transcript writes. Same primitive as the in-app adapter.
-    return this.deps.store.withSessionLock(opts.sessionId, () => this._handleGatherLocked(opts));
+    return this.deps.store.withSessionLock(opts.sessionId, () => this._handleGatherLocked(scrubbed));
   }
 
   private async _handleGatherLocked(opts: {

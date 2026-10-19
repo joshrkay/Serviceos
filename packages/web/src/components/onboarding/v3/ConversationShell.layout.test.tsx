@@ -47,6 +47,21 @@ function turn(key: OnboardingCoreChoiceKey, over: { staged?: StagedOnboardingCho
   );
 }
 
+/** The Ready screen as the shell renders it, with the lines that can appear above its buttons. */
+function ready(draft = plumbingCleDraft) {
+  return (
+    <ReadyScreen
+      draft={draft}
+      onMakeItMine={vi.fn()}
+      onKeepAsIs={vi.fn()}
+      onChangeMetro={vi.fn()}
+      changingMetro={false}
+      error="That didn't go through. Try again."
+      notice="Your answers changed somewhere else, so I refreshed them."
+    />
+  );
+}
+
 /** Every `w-[Npx]` / `min-w-[Npx]` under the root, as numbers. */
 function fixedWidths(root: Element): number[] {
   const found: number[] = [];
@@ -59,7 +74,7 @@ function fixedWidths(root: Element): number[] {
 
 describe('v3 mobile layout contract', () => {
   const screens: Array<[string, () => React.ReactElement]> = [
-    ['Ready', () => <ReadyScreen draft={plumbingCleDraft} onMakeItMine={vi.fn()} onKeepAsIs={vi.fn()} />],
+    ['Ready', () => ready()],
     [
       'Read-back',
       () => <ReadbackCard draft={plumbingCleDraft} approving={false} error={null} notice={null} onApprove={vi.fn()} onEdit={vi.fn()} />,
@@ -103,6 +118,22 @@ describe('v3 mobile layout contract', () => {
       expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
     });
   }
+
+  it('Ready with the city list open: every city, the search and the close are 44px targets that wrap, nothing wider than 320px', async () => {
+    const { container } = render(<TurnFrame minutesLeft={6} progress={0.15} statusLabel="Nothing saved yet">{ready()}</TurnFrame>);
+    await userEvent.click(screen.getByRole('button', { name: 'Not Cleveland?' }));
+    expectAllTapTargets(container, 'Ready with the city list open');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+    const cities = screen.getByRole('list', { name: 'Cities' });
+    // The list scrolls inside the screen rather than growing it, and long names wrap.
+    expect(cities.className).toMatch(/max-h-\S+/);
+    expect(cities.className).toContain('overflow-y-auto');
+    for (const button of Array.from(cities.querySelectorAll('button'))) {
+      expect(button.className).toContain('whitespace-normal');
+      expect(button.className).toContain('w-full');
+    }
+    expect(screen.getByRole('button', { name: 'San Francisco Bay Area' })).toBeInTheDocument();
+  });
 
   it('the cell field and what is said under it wrap at 320px, for the why, a wrong number and a refusal alike', () => {
     for (const props of [
@@ -170,7 +201,7 @@ describe('v3 mobile layout contract', () => {
     });
     const { getAllByText } = render(
       <TurnFrame minutesLeft={5} progress={0.5}>
-        <ReadyScreen draft={draft} onMakeItMine={vi.fn()} onKeepAsIs={vi.fn()} />
+        {ready(draft)}
         <ReadbackCard draft={draft} approving={false} error={null} notice={null} onApprove={vi.fn()} onEdit={vi.fn()} />
       </TurnFrame>,
     );

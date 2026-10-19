@@ -10,6 +10,9 @@ import {
 } from '../ai/untrusted-content';
 import { encrypt } from '../integrations/crypto';
 import { isOwnerLineAttested } from '../telephony/stir-attestation';
+import { containsCardNumber, redactCardNumbers } from '../ai/privacy/pan-redact';
+import type { AuditRepository } from '../audit/audit';
+import { flagCardNumberRecording } from '../voice/card-number-recording';
 
 /**
  * U9 (voicemail → action) — marks a transcription job as voicemail-sourced.
@@ -181,6 +184,9 @@ export const TRANSCRIPT_SANITIZATION_VERSION = 'v1';
 /**
  * Removes control characters, normalizes whitespace/newlines, and trims
  * transcript text so downstream prompts receive a stable canonical string.
+ * PRIV-3 — also replaces any recited card number with `[card number]`, so
+ * neither the stored transcript, the correction prompt nor the retained raw
+ * copy carries one.
  */
 export function sanitizeTranscript(raw: string): string {
   // eslint-disable-next-line no-control-regex
@@ -191,7 +197,7 @@ export function sanitizeTranscript(raw: string): string {
     .map((line) => line.replace(/[\t ]+/g, ' ').trim())
     .filter((line) => line.length > 0)
     .join('\n');
-  return collapsed.trim();
+  return redactCardNumbers(collapsed.trim());
 }
 
 /**
@@ -237,6 +243,11 @@ export interface CreateTranscriptionWorkerOptions {
    * recoverable via retry on their own queue.
    */
   onTranscribed?: (event: TranscriptionCompletionEvent, logger: Logger) => Promise<void> | void;
+  /**
+   * PRIV-3 — audits the `pci_detected` flag set when a transcript carried a
+   * card number. The flag itself is written either way.
+   */
+  auditRepo?: Pick<AuditRepository, 'create'>;
   /**
    * Optional LLM gateway. When supplied, the worker runs a
    * `transcription_correction` pass after Whisper returns: the raw
@@ -518,6 +529,16 @@ export function createTranscriptionWorker(
           recordingId,
           correctionApplied: correctionMetadata.correctionApplied ?? false,
         });
+
+        // PRIV-3 — sanitizeTranscript replaced a recited card number in the
+        // stored text; the audio still holds it, so flag the recording for
+        // the retention sweep's prompt audio delete. Failure-soft.
+        if (containsCardNumber(sanitizedProviderTranscript) || containsCardNumber(sanitizedTranscript)) {
+          await flagCardNumberRecording(
+            { voiceRepo: voiceRepository, auditRepo: options.auditRepo, logger },
+            { tenantId, voiceRecordingId: recordingId, actorId: 'transcription-worker', source: 'recording_transcript' },
+          );
+        }
 
         if (options.onTranscribed && sanitizedTranscript) {
           try {
