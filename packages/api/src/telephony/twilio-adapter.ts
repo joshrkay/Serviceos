@@ -42,6 +42,7 @@ import { isCustomerDuplicateLoader } from '../customers/dedup';
 import type { EstimateRepository } from '../estimates/estimate';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
+import { buildAiDisclosureText, discloseAiIdentity } from '../ai/skills/disclose-ai-identity';
 import { t, type Language } from '../ai/i18n/i18n';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
@@ -503,21 +504,26 @@ export interface TwilioAdapterDeps {
 /**
  * Build the full telephony greeting.
  *
- * `disclosureText` (recording notice) is always appended after the
- * greeting when present — it is a compliance requirement that cannot
- * be opted out.
+ * Two notices ride in every branch, in this order, and neither can be opted
+ * out:
+ *   - `assistantNotice` (PRIV-4) — the caller is talking to a virtual
+ *     assistant, not a person. Placed straight after the opener / the
+ *     tenant's own greeting, so a persona name ("This is Sarah.") is never
+ *     left standing as a human introduction. Defaults to the built-in copy
+ *     (`buildAiDisclosureText`) when the caller passes none; a caller passes
+ *     the per-tenant wording through `discloseAiIdentity`.
+ *   - `disclosureText` — the recording notice, after the assistant notice.
  *
  * Branch priority:
  *   1. Custom greeting (`persona.greeting` set):
- *        Returns `${persona.greeting} ${disclosureText}` (trimmed).
- *        The tenant owns the entire opening line — NO CTA is appended.
- *        The result is returned as-is so the tenant's chosen wording
- *        is preserved verbatim.
+ *        `${persona.greeting} ${assistantNotice} ${disclosureText}` (trimmed).
+ *        The tenant's own words stay verbatim and first — NO CTA is
+ *        appended, and this branch is not localized.
  *   2. Agent name only (`persona.agentName` set, no custom greeting):
- *        `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
+ *        `Thank you for calling ${name}. This is ${agentName}. ${assistantNotice} ${disclosure} How can I help you today?`
  *        A CTA is appended if the assembled string does not already end with `?`.
  *   3. Neither:
- *        `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ *        `Thank you for calling ${name}. ${assistantNotice} ${disclosure} How can I help you today?`
  *        A CTA is appended if the assembled string does not already end with `?`.
  *
  * `${name}` in branches 2/3 (#1156) is `persona.businessName` — the
@@ -533,26 +539,31 @@ export function buildTelephonyGreeting(
   businessName: string,
   disclosureText: string,
   persona?: VoicePersona | null,
-  language: Language = 'en'
+  language: Language = 'en',
+  assistantNotice?: string,
 ): string {
-  const disclosure = disclosureText.trim();
+  const resolvedBusinessName = persona?.businessName || businessName;
+  const notices = [
+    (assistantNotice ?? '').trim() ||
+      buildAiDisclosureText({ businessName: resolvedBusinessName, language }),
+    disclosureText.trim(),
+  ]
+    .filter(Boolean)
+    .join(' ');
 
-  // Branch 1 — tenant owns the entire opening line. Return without CTA
-  // append. The custom greeting is used verbatim (the tenant authored it
-  // in their own language), so we do NOT localize this branch.
+  // Branch 1 — the tenant's own opening line, verbatim, then the notices. No
+  // CTA append; not localized (the tenant authored it in their own language).
   if (persona?.greeting) {
-    const greeting = persona.greeting.trim();
-    return disclosure ? `${greeting} ${disclosure}`.trim() : greeting;
+    return `${persona.greeting.trim()} ${notices}`.trim();
   }
 
   // Branch 2 / 3 — assemble a localized default greeting, then ensure it
   // ends with a CTA (the ES CTA already ends with '?'). #1156: the
   // tenant's own resolved business name wins over the env-wide fallback.
-  const resolvedBusinessName = persona?.businessName || businessName;
   const opener = persona?.agentName
     ? t('greeting.opener_named', language, { business: resolvedBusinessName, agent: persona.agentName })
     : t('greeting.opener_default', language, { business: resolvedBusinessName });
-  const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
+  const assembled = `${opener} ${notices}`.trim();
   return assembled.endsWith('?') ? assembled : `${assembled} ${t('greeting.cta', language)}`;
 }
 
@@ -1277,16 +1288,6 @@ export class TwilioGatherAdapter {
       ...(from ? { callerPhone: from } : {}),
       voiceSessionId: session.id,
     });
-    // C5 — the ledger write is DEFERRED, not skipped. Generating the copy is
-    // not evidence the caller heard it, so the thunk is parked here and each
-    // transport commits at its own point of evidence (see
-    // {@link commitRecordingConsent}). Overwrites any prior entry for this
-    // session — a re-bootstrap supersedes an uncommitted thunk. Swept first so
-    // the never-committed paths (transfer short-circuit, fail-closed hang-ups)
-    // cannot accumulate closures across calls.
-    this.sweepPendingConsentCommits();
-    this.pendingConsentCommit.set(session.id, disclosure.commitConsentLedger);
-
     // 2. Identify caller by phone number.
     // WS16c (divergence #3, CONVERGED) — identify-guard parity: BOTH transports
     // now require `pool && from`. Previously Gather ran identifyCaller even on a
@@ -1341,12 +1342,38 @@ export class TwilioGatherAdapter {
         persona = undefined;
       }
     }
+    // PRIV-4 — the virtual-assistant notice, spoken on EVERY call in the same
+    // greeting turn as the recording notice (never gated on caller state).
+    const assistantNotice = discloseAiIdentity({
+      tenantId: opts.tenantId,
+      businessName: persona?.businessName || this.deps.businessName,
+      language,
+      ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+      voiceSessionId: session.id,
+      actorId: this.deps.systemActorId ?? 'system:inbound-call',
+      channel: session.channel,
+    });
     const baseGreeting = buildTelephonyGreeting(
       this.deps.businessName,
       disclosure.disclosureText,
       persona,
       language,
+      assistantNotice.disclosureText,
     );
+    // C5 — the ledger writes are DEFERRED, not skipped. Generating the copy is
+    // not evidence the caller heard it, so ONE thunk covering both notices
+    // (they ride in the same greeting turn) is parked here and each transport
+    // commits it at its own point of evidence (see
+    // {@link commitRecordingConsent}). Overwrites any prior entry for this
+    // session — a re-bootstrap supersedes an uncommitted thunk. Swept first so
+    // the never-committed paths (transfer short-circuit, fail-closed hang-ups)
+    // cannot accumulate closures across calls. Both inner thunks are
+    // idempotent and never reject.
+    this.sweepPendingConsentCommits();
+    this.pendingConsentCommit.set(session.id, async () => {
+      await disclosure.commitConsentLedger();
+      await assistantNotice.commitDisclosureLedger();
+    });
     // #1223 — an approver caller-ID that was not A-attested runs as a caller;
     // say so, so a genuine owner on a partially-attested route knows why owner
     // actions are unavailable and where to take them.
