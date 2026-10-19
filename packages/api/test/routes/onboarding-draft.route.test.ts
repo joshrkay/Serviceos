@@ -12,6 +12,7 @@ import type { AuthenticatedRequest } from '../../src/auth/clerk';
 const TENANT_ID = '00000000-0000-0000-0000-0000000000a1';
 const USER_ID = 'user-owner-1';
 const CLE = { standard: { tripFeeCents: 8900, hourlyRateCents: 15000 }, premium: { tripFeeCents: 12900, hourlyRateCents: 18500 } };
+const CMH = { standard: { tripFeeCents: 7900, hourlyRateCents: 13500 }, premium: { tripFeeCents: 10900, hourlyRateCents: 16500 } };
 
 function buildApp(role: 'owner' | 'dispatcher' = 'owner', draftRepo: InMemoryOnboardingDraftRepository = new InMemoryOnboardingDraftRepository()) {
   const proposalRepo = new InMemoryProposalRepository();
@@ -26,7 +27,7 @@ function buildApp(role: 'owner' | 'dispatcher' = 'owner', draftRepo: InMemoryOnb
     '/api/onboarding/draft',
     createOnboardingDraftRouter({
       draftRepo,
-      tierRepo: new InMemoryRegionalPriceTierRepository({ 'plumbing|CLE': CLE }),
+      tierRepo: new InMemoryRegionalPriceTierRepository({ 'plumbing|CLE': CLE, 'plumbing|CMH': CMH }),
       proposalRepo,
       auditRepo,
     }),
@@ -305,6 +306,125 @@ describe('onboarding draft routes', () => {
     expect((await request(app).post('/api/onboarding/draft').send(CREATE)).status).toBe(403);
     expect((await request(app).put('/api/onboarding/draft/choices/greeting').send({ choice: { option: 'a' }, version: 1 })).status).toBe(403);
     expect((await request(app).post('/api/onboarding/draft/approve').send({})).status).toBe(403);
+    expect((await request(app).put('/api/onboarding/draft/metro').send({ metro: 'CMH', version: 1 })).status).toBe(403);
+  });
+});
+
+describe('PUT /metro', () => {
+  const errText = (res: { body: unknown }) => JSON.stringify(res.body);
+  const PATH = '/api/onboarding/draft/metro';
+  let ctx: ReturnType<typeof buildApp>;
+  beforeEach(() => {
+    ctx = buildApp();
+  });
+
+  async function create() {
+    const res = await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+    expect(res.status).toBe(201);
+    return res.body.draft as { version: number; metroCode: string };
+  }
+  const metroAudits = async () => (await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 50 })).filter((a) => a.eventType === 'onboarding.metro_changed');
+  const stored = async () => ctx.draftRepo.getForTenant(TENANT_ID);
+  const priceOptions = (d: { assembled: { choices: Array<{ settingKey: string; options: Array<{ label: string; prices?: unknown }> }> } }) =>
+    d.assembled.choices.find((c) => c.settingKey === 'trip_fee_and_rate')!.options;
+
+  it('re-prices an unstaged draft for the new metro: code, name and the whole shop in one bump, and one onboarding.metro_changed row', async () => {
+    const d = await create();
+    const res = await request(ctx.app).put(PATH).send({ metro: 'CMH', version: d.version });
+    expect(res.status, errText(res)).toBe(200);
+    const next = res.body.draft;
+    expect(next).toMatchObject({ metroCode: 'CMH', metroName: 'Columbus', version: d.version + 1, choices: {} });
+    expect(next.assembled).toMatchObject({ metroCode: 'CMH', metroName: 'Columbus', showsCity: true, priceSource: 'metro', metroCandidates: [] });
+    expect(priceOptions(next).map((o) => o.prices)).toEqual([CMH.standard, CMH.premium]);
+    expect(priceOptions(next).map((o) => o.label)).toEqual(['$79 to come out, then $135 an hour', '$109 to come out, then $165 an hour']);
+    expect(JSON.stringify(next.assembled)).not.toMatch(/Cleveland/);
+    expect((await request(ctx.app).get('/api/onboarding/draft')).body.draft).toEqual(next);
+
+    const audits = await metroAudits();
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ entityType: 'onboarding_draft', entityId: next.id, actorId: USER_ID, metadata: { from: 'CLE', to: 'CMH', version: d.version + 1 } });
+
+    // The approval that follows carries the Columbus city and prices.
+    const approved = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: next.version });
+    expect(approved.status).toBe(200);
+    const settings = (await ctx.proposalRepo.findByTenant(TENANT_ID)).find((p) => p.proposalType === 'onboarding_tenant_settings')!;
+    expect(settings.payload).toMatchObject({ city: 'Columbus', tripFeeCents: CMH.standard.tripFeeCents, hourlyRateCents: CMH.standard.hourlyRateCents });
+  });
+
+  it('an approved draft is 409 DRAFT_APPROVED; nothing changes and no audit row', async () => {
+    const d = await create();
+    const approved = await request(ctx.app).post('/api/onboarding/draft/approve').send({ expectedVersion: d.version });
+    const before = await stored();
+    for (const version of [approved.body.draft.version, approved.body.draft.version + 3]) {
+      const res = await request(ctx.app).put(PATH).send({ metro: 'CMH', version });
+      expect(res.status).toBe(409);
+      expect(errText(res)).toMatch(/DRAFT_APPROVED/);
+    }
+    expect(await stored()).toEqual(before);
+    expect(await metroAudits()).toHaveLength(0);
+  });
+
+  it.each([
+    ["option 'a'", { option: 'a' }],
+    ["option 'b'", { option: 'b' }],
+    ['an override', { override: { label: 'Walsh, go ahead', writes: { voiceGreeting: 'Walsh, go ahead' } } }],
+  ])('with %s staged is 409 DRAFT_METRO_LOCKED, at the current version and at a stale one; nothing changes and no audit row', async (_n, choice) => {
+    const d = await create();
+    const staged = await request(ctx.app).put('/api/onboarding/draft/choices/greeting').send({ choice, version: d.version });
+    expect(staged.status).toBe(200);
+    const before = await stored();
+    for (const version of [staged.body.draft.version, d.version]) {
+      const res = await request(ctx.app).put(PATH).send({ metro: 'CMH', version });
+      expect(res.status).toBe(409);
+      expect(errText(res)).toMatch(/DRAFT_METRO_LOCKED/);
+      expect(errText(res)).not.toMatch(/VERSION_CONFLICT/);
+    }
+    expect(await stored()).toEqual(before);
+    expect(await metroAudits()).toHaveLength(0);
+  });
+
+  it('unstaged with a stale version is 409 VERSION_CONFLICT naming both; nothing written', async () => {
+    const d = await create();
+    const before = await stored();
+    const res = await request(ctx.app).put(PATH).send({ metro: 'CMH', version: d.version + 1 });
+    expect(res.status).toBe(409);
+    expect(errText(res)).toMatch(new RegExp(`VERSION_CONFLICT: expected ${d.version + 1}, found ${d.version}`));
+    expect(await stored()).toEqual(before);
+    expect(await metroAudits()).toHaveLength(0);
+  });
+
+  it.each([
+    ['an unknown code', { metro: 'ZZZ', version: 1 }, 'metro'],
+    ['a lowercase code', { metro: 'cmh', version: 1 }, 'metro'],
+    ['a city name', { metro: 'Columbus', version: 1 }, 'metro'],
+    ['no metro', { version: 1 }, 'metro'],
+    ['no version', { metro: 'CMH' }, 'version'],
+    ['a zero version', { metro: 'CMH', version: 0 }, 'version'],
+    ['an extra field', { metro: 'CMH', version: 1, name: 'Columbus' }, ''],
+  ])('%s is 400 naming the field, with nothing written and no audit row', async (_n, body, field) => {
+    await create();
+    const before = await stored();
+    const res = await request(ctx.app).put(PATH).send(body);
+    expect(res.status).toBe(400);
+    const paths = (res.body.details?.issues ?? []).map((i: { path: string }) => i.path);
+    if (field) expect(paths).toContain(field);
+    expect(await stored()).toEqual(before);
+    expect(await metroAudits()).toHaveLength(0);
+  });
+
+  it('a known code with no tier row is 200 on the pack-default prices with the city dropped from the copy', async () => {
+    const d = await create();
+    const res = await request(ctx.app).put(PATH).send({ metro: 'BUF', version: d.version });
+    expect(res.status).toBe(200);
+    expect(res.body.draft).toMatchObject({ metroCode: 'BUF', metroName: 'Buffalo' });
+    expect(res.body.draft.assembled).toMatchObject({ metroCode: 'BUF', showsCity: false, priceSource: 'pack_default' });
+    expect(JSON.stringify(res.body.draft.assembled.choices)).not.toMatch(/Buffalo/);
+    expect((await metroAudits())[0].metadata).toEqual({ from: 'CLE', to: 'BUF', version: d.version + 1 });
+  });
+
+  it('without a draft is 404', async () => {
+    const res = await request(ctx.app).put(PATH).send({ metro: 'CMH', version: 1 });
+    expect(res.status).toBe(404);
   });
 });
 
@@ -426,5 +546,269 @@ describe('POST /retry', () => {
   it('is owner-only', async () => {
     const { app } = buildApp('dispatcher');
     expect((await request(app).post('/api/onboarding/draft/retry').send()).status).toBe(403);
+  });
+
+  describe('S4: { expectedVersion } and undoable', () => {
+    const post = (body?: object) => {
+      const r = request(ctx.app).post('/api/onboarding/draft/retry');
+      return body === undefined ? r.send() : r.send(body);
+    };
+
+    it('the bodyless POST keeps the #1694 behaviour: 200, the version moves by one, and undoable rides beside the draft', async () => {
+      const [a, b] = await approved();
+      await fail(a);
+      // The worker is behind: the sibling is still approved, past its window.
+      await ctx.proposalRepo.update(TENANT_ID, b, { approvedAt: new Date(Date.now() - 6000) });
+      const v = (await ctx.draftRepo.getForTenant(TENANT_ID))!.version;
+      const res = await post();
+      expect(res.status).toBe(200);
+      expect(Object.keys(res.body).sort()).toEqual(['draft', 'retriedProposalIds', 'undoable']);
+      expect(res.body.draft.version).toBe(v + 1);
+      // Partial retry: the sibling's window is the original approval's, so the whole set is not undoable.
+      expect(res.body.undoable).toBe(false);
+    });
+
+    it('a full-set retry answers undoable: true; {} is the same as no body', async () => {
+      const ids = await approved();
+      for (const id of ids) await fail(id);
+      const res = await post({});
+      expect(res.status).toBe(200);
+      expect(res.body.undoable).toBe(true);
+    });
+
+    it('the failed screen\'s version re-queues; a stale one is 409 VERSION_CONFLICT naming both, with nothing re-queued', async () => {
+      const [a] = await approved();
+      await fail(a);
+      const v = (await ctx.draftRepo.getForTenant(TENANT_ID))!.version;
+
+      const stale = await post({ expectedVersion: v - 1 });
+      expect(stale.status).toBe(409);
+      expect(stale.body.message).toBe(`VERSION_CONFLICT: expected ${v - 1}, found ${v}; re-read the draft`);
+      expect((await ctx.proposalRepo.findById(TENANT_ID, a))?.status).toBe('execution_failed');
+      expect((await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 100 })).filter((e) => e.eventType === 'proposal.retried')).toHaveLength(0);
+
+      const ok = await post({ expectedVersion: v });
+      expect(ok.status).toBe(200);
+      expect(ok.body.draft.version).toBe(v + 1);
+      // Two retries at one version: the loser is refused by the version the winner moved.
+      const loser = await post({ expectedVersion: v });
+      expect(loser.status).toBe(409);
+      expect(loser.body.message).toMatch(new RegExp(`^VERSION_CONFLICT: expected ${v}, found ${v + 1}`));
+    });
+
+    it('guard order: DRAFT_NOT_APPROVED before VERSION_CONFLICT before DRAFT_RETRY_UNSAFE', async () => {
+      await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+      expect(errText(await post({ expectedVersion: 99 }))).toMatch(/DRAFT_NOT_APPROVED/);
+
+      const [a, b] = [...(await request(ctx.app).post('/api/onboarding/draft/approve').send({})).body.proposalIds].sort();
+      await fail(a);
+      await ctx.proposalRepo.update(TENANT_ID, b, { status: 'undone' });
+      const v = (await ctx.draftRepo.getForTenant(TENANT_ID))!.version;
+      expect(errText(await post({ expectedVersion: v + 5 }))).toMatch(/VERSION_CONFLICT/);
+      expect(errText(await post({ expectedVersion: v }))).toMatch(/DRAFT_RETRY_UNSAFE/);
+    });
+
+    it.each([[{ expectedVersion: 'x' }], [{ expectedVersion: 1.5 }], [{ expectedVersion: 0 }], [{ expectedVersion: -2 }], [{ bogus: 1 }]])(
+      'rejects %j with 400 and re-queues nothing',
+      async (body) => {
+        const [a] = await approved();
+        await fail(a);
+        const before = await ctx.draftRepo.getForTenant(TENANT_ID);
+        const res = await post(body);
+        expect(res.status).toBe(400);
+        expect(await ctx.draftRepo.getForTenant(TENANT_ID)).toEqual(before);
+        expect((await ctx.proposalRepo.findById(TENANT_ID, a))?.status).toBe('execution_failed');
+      },
+    );
+  });
+});
+
+describe('POST /undo', () => {
+  const errText = (res: { body: unknown }) => JSON.stringify(res.body);
+  let ctx: ReturnType<typeof buildApp>;
+  const undo = (body?: unknown) => {
+    const r = request(ctx.app).post('/api/onboarding/draft/undo');
+    return body === undefined ? r.send() : r.send(body as object);
+  };
+
+  beforeEach(() => {
+    ctx = buildApp();
+  });
+
+  /** Approve and return the approve response's draft.version, which the saving screen holds. */
+  async function approved(): Promise<{ ids: string[]; version: number }> {
+    await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+    const res = await request(ctx.app).post('/api/onboarding/draft/approve').send({});
+    return { ids: [...res.body.proposalIds].sort(), version: res.body.draft.version };
+  }
+
+  it('inside the window with the approve response version: 200 { draft } back in editing, both proposals undone', async () => {
+    const { ids, version } = await approved();
+    const res = await undo({ expectedVersion: version });
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body)).toEqual(['draft']);
+    expect(res.body.draft).toMatchObject({ status: 'draft', proposalIds: [], approvedAt: null, version: version + 1 });
+    for (const id of ids) expect((await ctx.proposalRepo.findById(TENANT_ID, id))?.status).toBe('undone');
+    const audit = await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 100 });
+    expect(audit.filter((e) => e.eventType === 'onboarding.draft_undone')).toHaveLength(1);
+    // The owner can edit and approve again.
+    const restage = await request(ctx.app).put('/api/onboarding/draft/choices/greeting').send({ choice: { option: 'b' }, version: version + 1 });
+    expect(restage.status).toBe(200);
+  });
+
+  it.each([[undefined], [{}], [{ expectedVersion: 'x' }], [{ expectedVersion: 1.5 }], [{ expectedVersion: 0 }], [{ expectedVersion: -1 }], [{ bogus: 1 }]])(
+    'rejects %j with 400 naming expectedVersion, and nothing is written',
+    async (body) => {
+      const { ids } = await approved();
+      const before = await ctx.draftRepo.getForTenant(TENANT_ID);
+      const res = await undo(body);
+      expect(res.status).toBe(400);
+      expect((res.body.details.issues as { path: string }[]).map((i) => i.path)).toContain('expectedVersion');
+      expect(await ctx.draftRepo.getForTenant(TENANT_ID)).toEqual(before);
+      for (const id of ids) expect((await ctx.proposalRepo.findById(TENANT_ID, id))?.status).toBe('approved');
+    },
+  );
+
+  it('an extra key beside a valid version is 400 too', async () => {
+    const { version } = await approved();
+    expect((await undo({ expectedVersion: version, bogus: 1 })).status).toBe(400);
+  });
+
+  it('a stale or ahead version is 409 VERSION_CONFLICT naming both; nothing changes', async () => {
+    const { ids, version } = await approved();
+    const before = await ctx.draftRepo.getForTenant(TENANT_ID);
+    for (const sent of [version - 1, version + 2]) {
+      const res = await undo({ expectedVersion: sent });
+      expect(res.status).toBe(409);
+      expect(res.body.message).toBe(`VERSION_CONFLICT: expected ${sent}, found ${version}; re-read the draft`);
+    }
+    expect(await ctx.draftRepo.getForTenant(TENANT_ID)).toEqual(before);
+    for (const id of ids) expect((await ctx.proposalRepo.findById(TENANT_ID, id))?.status).toBe('approved');
+  });
+
+  it('the same tap twice: the second is 409 DRAFT_NOT_APPROVED', async () => {
+    const { version } = await approved();
+    expect((await undo({ expectedVersion: version })).status).toBe(200);
+    const again = await undo({ expectedVersion: version });
+    expect(again.status).toBe(409);
+    expect(again.body.message).toMatch(/^DRAFT_NOT_APPROVED: /);
+  });
+
+  it('a member already applying is 409 DRAFT_UNDO_REFUSED with the statuses in details; a closed window is 409 UNDO_WINDOW_CLOSED', async () => {
+    const { ids, version } = await approved();
+    await ctx.proposalRepo.update(TENANT_ID, ids[0], { status: 'executing' });
+    const refused = await undo({ expectedVersion: version });
+    expect(refused.status).toBe(409);
+    expect(refused.body.message).toMatch(/^DRAFT_UNDO_REFUSED: /);
+    expect(refused.body.details.statuses).toEqual(expect.arrayContaining(['executing', 'approved']));
+
+    await ctx.proposalRepo.update(TENANT_ID, ids[0], { status: 'approved', approvedAt: new Date(Date.now() - 60_000) });
+    const closed = await undo({ expectedVersion: version });
+    expect(closed.status).toBe(409);
+    expect(closed.body.message).toMatch(/^UNDO_WINDOW_CLOSED: /);
+    expect((await ctx.draftRepo.getForTenant(TENANT_ID))?.status).toBe('approved');
+  });
+
+  it('no draft is a 404, and the route is owner-only', async () => {
+    expect((await undo({ expectedVersion: 1 })).status).toBe(404);
+    const { app } = buildApp('dispatcher');
+    expect((await request(app).post('/api/onboarding/draft/undo').send({ expectedVersion: 1 })).status).toBe(403);
+    expect(errText(await request(app).post('/api/onboarding/draft/undo').send({ expectedVersion: 1 }))).not.toMatch(/DRAFT_/);
+  });
+});
+
+describe('POST /reset', () => {
+  const errText = (res: { body: unknown }) => JSON.stringify(res.body);
+  let ctx: ReturnType<typeof buildApp>;
+  const reset = (body?: unknown) => {
+    const r = request(ctx.app).post('/api/onboarding/draft/reset');
+    return body === undefined ? r.send() : r.send(body as object);
+  };
+
+  beforeEach(() => {
+    ctx = buildApp();
+  });
+
+  /** Approve, then split the pair as the inbox would (one member undone). */
+  async function split(): Promise<{ ids: string[]; version: number }> {
+    await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
+    const res = await request(ctx.app).post('/api/onboarding/draft/approve').send({});
+    const ids = [...res.body.proposalIds].sort();
+    await ctx.proposalRepo.update(TENANT_ID, ids[0], { status: 'undone' });
+    return { ids, version: res.body.draft.version };
+  }
+
+  it('an inbox-split pair: 200 { draft } back in editing at version + 1, the other member undone, audited once', async () => {
+    const { ids, version } = await split();
+    const res = await reset({ expectedVersion: version });
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body)).toEqual(['draft']);
+    expect(res.body.draft).toMatchObject({ status: 'draft', proposalIds: [], approvedAt: null, version: version + 1 });
+    for (const id of ids) expect((await ctx.proposalRepo.findById(TENANT_ID, id))?.status).toBe('undone');
+    const audit = await ctx.auditRepo.findRecentByTenant(TENANT_ID, { limit: 100 });
+    expect(audit.filter((e) => e.eventType === 'onboarding.draft_reset')).toHaveLength(1);
+    const restage = await request(ctx.app).put('/api/onboarding/draft/choices/greeting').send({ choice: { option: 'b' }, version: version + 1 });
+    expect(restage.status).toBe(200);
+  });
+
+  it.each([[undefined], [{}], [{ expectedVersion: 'x' }], [{ expectedVersion: 1.5 }], [{ expectedVersion: 0 }], [{ expectedVersion: -1 }], [{ bogus: 1 }]])(
+    'rejects %j with 400 naming expectedVersion, and nothing is written',
+    async (body) => {
+      const { ids } = await split();
+      const before = await ctx.draftRepo.getForTenant(TENANT_ID);
+      const res = await reset(body);
+      expect(res.status).toBe(400);
+      expect((res.body.details.issues as { path: string }[]).map((i) => i.path)).toContain('expectedVersion');
+      expect(await ctx.draftRepo.getForTenant(TENANT_ID)).toEqual(before);
+      expect((await ctx.proposalRepo.findById(TENANT_ID, ids[1]))?.status).toBe('approved');
+    },
+  );
+
+  it('an extra key beside a valid version is 400 too', async () => {
+    const { version } = await split();
+    expect((await reset({ expectedVersion: version, bogus: 1 })).status).toBe(400);
+  });
+
+  it('the five refusals: each a 409 with its code prefix (and reason and statuses where the set decided), nothing written', async () => {
+    const { ids, version } = await split();
+    const before = await ctx.draftRepo.getForTenant(TENANT_ID);
+
+    const stale = await reset({ expectedVersion: version - 1 });
+    expect(stale.status).toBe(409);
+    expect(stale.body.message).toBe(`VERSION_CONFLICT: expected ${version - 1}, found ${version}; re-read the draft`);
+
+    await ctx.proposalRepo.update(TENANT_ID, ids[1], { status: 'executed' });
+    const applied = await reset({ expectedVersion: version });
+    expect(applied.status).toBe(409);
+    expect(applied.body.message).toMatch(/^DRAFT_RESET_REFUSED: /);
+    expect(applied.body.details).toEqual({ reason: 'applied', statuses: ['undone', 'executed'], expected: 2 });
+
+    await ctx.proposalRepo.update(TENANT_ID, ids[1], { status: 'executing' });
+    const executing = await reset({ expectedVersion: version });
+    expect(executing.status).toBe(409);
+    expect(executing.body.message).toMatch(/^DRAFT_RESET_REFUSED: /);
+    expect(executing.body.details).toMatchObject({ reason: 'executing', statuses: ['undone', 'executing'] });
+
+    await ctx.proposalRepo.update(TENANT_ID, ids[1], { status: 'approved', approvedAt: new Date(Date.now() - 60_000) });
+    const closed = await reset({ expectedVersion: version });
+    expect(closed.status).toBe(409);
+    expect(closed.body.message).toMatch(/^UNDO_WINDOW_CLOSED: /);
+    expect(closed.body.details).toMatchObject({ statuses: ['undone', 'approved'] });
+    expect(await ctx.draftRepo.getForTenant(TENANT_ID)).toEqual(before);
+    for (const r of [applied, executing, closed]) expect(errText(r)).not.toMatch(/proposal/i);
+
+    await ctx.proposalRepo.update(TENANT_ID, ids[1], { approvedAt: new Date() });
+    expect((await reset({ expectedVersion: version })).status).toBe(200);
+    const again = await reset({ expectedVersion: version + 1 });
+    expect(again.status).toBe(409);
+    expect(again.body.message).toMatch(/^DRAFT_NOT_APPROVED: /);
+  });
+
+  it('no draft is a 404, and the route is owner-only', async () => {
+    expect((await reset({ expectedVersion: 1 })).status).toBe(404);
+    const { app } = buildApp('dispatcher');
+    const res = await request(app).post('/api/onboarding/draft/reset').send({ expectedVersion: 1 });
+    expect(res.status).toBe(403);
+    expect(errText(res)).not.toMatch(/DRAFT_/);
   });
 });

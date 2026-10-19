@@ -20,7 +20,8 @@ import { AnswerAsScreen } from './AnswerAsScreen';
 import { OptionPairTurn } from './OptionPairTurn';
 import { ReadbackCard } from './ReadbackCard';
 import { ReadyScreen } from './ReadyScreen';
-import { TurnFrame } from './TurnFrame';
+import { SpeakerLine, TurnFrame } from './TurnFrame';
+import { RivetVoiceContext, type RivetVoice } from '../../../hooks/useRivetVoice';
 
 const LONG_NAME = 'WalshAndSonsPlumbingHeatingAndCoolingOfGreaterClevelandOhio';
 const REFUSED_CELL = 'That does not look like a US cell number. Include the 10-digit area code, for example (216) 555-0100.';
@@ -47,6 +48,21 @@ function turn(key: OnboardingCoreChoiceKey, over: { staged?: StagedOnboardingCho
   );
 }
 
+/** The Ready screen as the shell renders it, with the lines that can appear above its buttons. */
+function ready(draft = plumbingCleDraft) {
+  return (
+    <ReadyScreen
+      draft={draft}
+      onMakeItMine={vi.fn()}
+      onKeepAsIs={vi.fn()}
+      onChangeMetro={vi.fn()}
+      changingMetro={false}
+      error="That didn't go through. Try again."
+      notice="Your answers changed somewhere else, so I refreshed them."
+    />
+  );
+}
+
 /** Every `w-[Npx]` / `min-w-[Npx]` under the root, as numbers. */
 function fixedWidths(root: Element): number[] {
   const found: number[] = [];
@@ -59,7 +75,7 @@ function fixedWidths(root: Element): number[] {
 
 describe('v3 mobile layout contract', () => {
   const screens: Array<[string, () => React.ReactElement]> = [
-    ['Ready', () => <ReadyScreen draft={plumbingCleDraft} onMakeItMine={vi.fn()} onKeepAsIs={vi.fn()} />],
+    ['Ready', () => ready()],
     [
       'Read-back',
       () => <ReadbackCard draft={plumbingCleDraft} approving={false} error={null} notice={null} onApprove={vi.fn()} onEdit={vi.fn()} />,
@@ -103,6 +119,39 @@ describe('v3 mobile layout contract', () => {
       expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
     });
   }
+
+  it('the "Speaking" mark adds no control and wraps with the speaker name at 320px', () => {
+    const speaking: RivetVoice = { unlock: vi.fn(), speak: vi.fn(), prefetch: vi.fn(), stop: vi.fn(), speaking: true };
+    const { container } = render(
+      <RivetVoiceContext.Provider value={speaking}>
+        <TurnFrame minutesLeft={5} progress={0.5}>
+          <SpeakerLine />
+        </TurnFrame>
+      </RivetVoiceContext.Provider>,
+    );
+    const mark = screen.getByText('Speaking');
+    // Announced in words, politely: never the sound mark alone.
+    expect(mark.closest('[aria-live="polite"]')).not.toBeNull();
+    expect(container.querySelectorAll('button, [role="button"], a, input')).toHaveLength(0);
+    const line = mark.closest('[aria-live]')!.parentElement!;
+    expect(line.className).toMatch(/\bflex-wrap\b/);
+    expect(line.className).toMatch(/\bmin-w-0\b/);
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+  it('Ready with the city list open: every city, the search and the close are 44px targets that wrap, nothing wider than 320px', async () => {
+    const { container } = render(<TurnFrame minutesLeft={6} progress={0.15} statusLabel="Nothing saved yet">{ready()}</TurnFrame>);
+    await userEvent.click(screen.getByRole('button', { name: 'Not Cleveland?' }));
+    expectAllTapTargets(container, 'Ready with the city list open');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+    const cities = screen.getByRole('list', { name: 'Cities' });
+    // The list scrolls inside the screen rather than growing it, and long names wrap.
+    expect(cities.className).toMatch(/max-h-\S+/);
+    expect(cities.className).toContain('overflow-y-auto');
+    for (const button of Array.from(cities.querySelectorAll('button'))) {
+      expect(button.className).toContain('whitespace-normal');
+      expect(button.className).toContain('w-full');
+    }
+    expect(screen.getByRole('button', { name: 'San Francisco Bay Area' })).toBeInTheDocument();
+  });
 
   it('the cell field and what is said under it wrap at 320px, for the why, a wrong number and a refusal alike', () => {
     for (const props of [
@@ -170,7 +219,7 @@ describe('v3 mobile layout contract', () => {
     });
     const { getAllByText } = render(
       <TurnFrame minutesLeft={5} progress={0.5}>
-        <ReadyScreen draft={draft} onMakeItMine={vi.fn()} onKeepAsIs={vi.fn()} />
+        {ready(draft)}
         <ReadbackCard draft={draft} approving={false} error={null} notice={null} onApprove={vi.fn()} onEdit={vi.fn()} />
       </TurnFrame>,
     );
@@ -229,16 +278,31 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
     return { data, isLoading: false, error: null, accessRevoked: false, refetch: vi.fn(() => Promise.resolve()) };
   }
 
-  function after(data: OnboardingStatusResponse | null, saving = false) {
+  /** What the hook's undo, retry and start over answer here: they did not go through (the screens' error line). */
+  const notThrough = () => Promise.resolve({ kind: 'failed' as const, status: 409 });
+
+  function after(data: OnboardingStatusResponse | null, saving = false, notice: string | null = null) {
     return (
       <MemoryRouter>
-        <AfterApproval status={result(data)} saving={saving} changeCount={2} packId="plumbing" userId="user-1" />
+        <AfterApproval
+          status={result(data)}
+          saving={saving}
+          changeCount={2}
+          draftVersion={2}
+          onUndo={notThrough}
+          onRetry={notThrough}
+          onReset={notThrough}
+          recovering={null}
+          notice={notice}
+          packId="plumbing"
+          userId="user-1"
+        />
       </MemoryRouter>
     );
   }
 
-  const savedAs = (execution: 'failed' | 'stopped') =>
-    statusAt('identity', {}, { draft: { status: 'approved', choicesAnswered: 7, version: 2, execution } });
+  const savedAs = (execution: 'failed' | 'stopped', recovery?: 'reset' | 'settings') =>
+    statusAt('identity', {}, { draft: { status: 'approved', choicesAnswered: 7, version: 2, execution, ...(recovery ? { recovery } : {}) } });
   const claiming = statusAt('phone', { phone: { status: 'current', metadata: { lineState: 'claiming', pendingNumber: '+12165550199' } } });
   const asking = statusAt('phone', { phone: { status: 'current', metadata: { lineState: 'awaiting_pick' } } });
   const holding = statusAt('phone', { phone: { status: 'current', metadata: { phoneNumber: NUMBER } } });
@@ -249,11 +313,14 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
   const voiceFailed = statusAt('ai_check', { ...phoneDone, ai_check: { status: 'error', blockers: ['ai_verification_failed'] } });
 
   const screens: Array<[string, OnboardingStatusResponse | null, { saving?: boolean; ready?: () => Promise<unknown> }]> = [
-    ['Saving your choices', statusAt('identity'), { saving: true }],
+    ['Saving your choices, with Undo', statusAt('identity'), { saving: true }],
     ['Getting your shop ready', statusAt('identity'), {}],
     ['Before the first status arrives', null, {}],
     ['Save failed: Try again', savedAs('failed'), {}],
+    ['Save failed: Try again and Start over', savedAs('failed', 'reset'), {}],
     ['Save stopped: step by step', savedAs('stopped'), {}],
+    ['Save stopped: Start over', savedAs('stopped', 'reset'), {}],
+    ['Save stopped: Finish in Settings', savedAs('stopped', 'settings'), {}],
     ['Trial: the plans', statusAt('billing'), { ready: () => screen.findByRole('radiogroup') }],
     ['Trial: the plans cannot be shown', statusAt('billing'), { ready: () => screen.findByRole('alert') }],
     ['Number: getting it', claiming, {}],
@@ -281,16 +348,37 @@ describe('v3 mobile layout contract after "That\'s right"', () => {
     });
   }
 
-  it('Save failed: a failed retry adds one line under the buttons, not a wider page, and both buttons wrap at 320px', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(json(409, { error: 'CONFLICT', message: 'DRAFT_RETRY_UNSAFE' }))));
-    const { container } = render(after(savedAs('failed')));
+  it('Save failed: a failed retry adds one line under the buttons, not a wider page, and every button wraps at 320px', async () => {
+    const { container } = render(after(savedAs('failed', 'reset')));
     await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await screen.findByRole('alert');
     expectAllTapTargets(container, 'save failed after a failed retry');
     expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
-    for (const name of ['Try again', 'Go through setup step by step']) {
+    for (const name of ['Try again', 'Start over', 'Go through setup step by step']) {
       expect(screen.getByRole('button', { name }).className, name).toMatch(/whitespace-normal/);
     }
+  });
+
+  it('Saving: Undo is a full-width 44px target, and a failed undo adds one line, not a wider page', async () => {
+    const { container } = render(after(statusAt('identity'), true));
+    const undo = screen.getByRole('button', { name: 'Undo' });
+    expect(undo.className).toMatch(/w-full/);
+    expect(undo.className).toMatch(/whitespace-normal/);
+    await userEvent.click(undo);
+    await screen.findByRole('alert');
+    expectAllTapTargets(container, 'saving after a failed undo');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+  });
+
+  it('Save stopped: the Settings link is a full-width 44px target that wraps, beside the notice line', () => {
+    const { container } = render(after(savedAs('stopped', 'settings'), false, 'This changed in another window.'));
+    const link = screen.getByRole('link', { name: 'Finish in Settings' });
+    expectTapTarget(link, 'Finish in Settings');
+    expect(link.className).toMatch(/w-full/);
+    expect(link.className).toMatch(/whitespace-normal/);
+    expect(screen.getByText('This changed in another window.')).toBeInTheDocument();
+    expectAllTapTargets(container, 'stopped with Settings and a notice');
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
   });
 
   it('Test call: "I\'ll test later" is a 44px target in the header, and a failed skip adds one line, not a wider page', async () => {

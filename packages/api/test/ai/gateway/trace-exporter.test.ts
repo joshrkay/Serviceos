@@ -309,3 +309,21 @@ describe('redactTextForExport (#1205)', () => {
     expect(redactTextForExport('Email x@y.io4155552671foo@bar.com')).toBe('Email [email][email]');
   });
 });
+
+describe('redactTextForExport — card numbers (PRIV-3)', () => {
+  it('replaces a spaced card number the audit probe saw come back unchanged', () => {
+    expect(
+      redactTextForExport('caller: my card is 4111 1111 1111 1111 expiration oh nine twenty seven cvv 123'),
+    ).toBe('caller: my card is [card number] expiration oh nine twenty seven cvv 123');
+  });
+
+  it('no longer leaks the first five digits of an unspaced card number', () => {
+    const out = redactTextForExport('card 4111111111111111 please');
+    expect(out).toBe('card [card number] please');
+    expect(out).not.toContain('41111');
+  });
+
+  it('still redacts phone numbers as before', () => {
+    expect(redactTextForExport('call 602-555-0199')).toBe('call [phone]');
+  });
+});

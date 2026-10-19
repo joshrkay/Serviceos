@@ -54,6 +54,17 @@ export class DraftNotApprovedError extends Error {
     this.name = 'DraftNotApprovedError';
   }
 }
+/**
+ * The metro cannot change once any choice is staged: a staged 'a' or 'b' names
+ * an option as the owner saw it priced, and the cents behind it live in
+ * `assembled`, so re-pricing under it would change the number they agreed to.
+ */
+export class DraftMetroLockedError extends Error {
+  constructor() {
+    super('onboarding draft metro is locked: a choice is already staged');
+    this.name = 'DraftMetroLockedError';
+  }
+}
 
 export interface OnboardingDraft {
   id: string;
@@ -112,6 +123,23 @@ export interface UpdateLockedOptions {
   precondition?: (row: OnboardingDraft) => void;
 }
 
+/** Builds the assembled shop for a new metro from the locked draft row (U1's assembleTypicalShop). */
+export type AssembleForMetro = (row: OnboardingDraft) => Promise<AssembledShop>;
+
+/** The precondition of `setMetro`: nothing staged, under any key. */
+function assertMetroUnlocked(row: OnboardingDraft): void {
+  if (Object.keys(row.choices).length > 0) throw new DraftMetroLockedError();
+}
+
+/** The patch `setMetro` writes: the new shop whole, with the code and name it was built for. */
+async function metroPatch(row: OnboardingDraft, metroCode: string, assemble: AssembleForMetro): Promise<DraftPatch> {
+  const assembled = await assemble(row);
+  if (assembled.metroCode !== metroCode) {
+    throw new Error(`setMetro: assembled shop is for ${String(assembled.metroCode)}, not ${metroCode}`);
+  }
+  return { metroCode: assembled.metroCode, metroName: assembled.metroName, assembled };
+}
+
 export interface OnboardingDraftRepository {
   getForTenant(tenantId: string): Promise<OnboardingDraft | null>;
   /**
@@ -151,6 +179,16 @@ export interface OnboardingDraftRepository {
    * order, so an approved draft always answers DraftAlreadyApprovedError.
    */
   setOwnerPhone(tenantId: string, ownerPhone: string, expectedVersion: number): Promise<OnboardingDraft>;
+  /**
+   * Re-prices the draft for another metro. Refused once approved
+   * (DraftAlreadyApprovedError), then once ANY choice is staged
+   * (DraftMetroLockedError, checked before the version because a fresh version
+   * cannot make it succeed), then on a stale version (DraftVersionConflictError).
+   * `assemble` builds the shop for the new metro from the LOCKED row; its result
+   * is stored whole, with its metro code and name, in the one version bump, so
+   * the city and the prices an approval copies always belong to one metro.
+   */
+  setMetro(tenantId: string, metroCode: string, expectedVersion: number, assemble: AssembleForMetro): Promise<OnboardingDraft>;
   /**
    * Marks approved and records the proposal ids, only if the draft is still
    * `draft` at `expectedVersion` (the version read under the lock). Throws
@@ -342,6 +380,12 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
     return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion }, () => ({ ownerPhone: phone }));
   }
 
+  async setMetro(tenantId: string, metroCode: string, expectedVersion: number, assemble: AssembleForMetro): Promise<OnboardingDraft> {
+    return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion, precondition: assertMetroUnlocked }, (row) =>
+      metroPatch(row, metroCode, assemble),
+    );
+  }
+
   async markApproved(tenantId: string, proposalIds: string[], expectedVersion: number): Promise<OnboardingDraft> {
     return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion }, () => ({
       status: 'approved',
@@ -423,6 +467,12 @@ export class InMemoryOnboardingDraftRepository implements OnboardingDraftReposit
   async setOwnerPhone(tenantId: string, ownerPhone: string, expectedVersion: number): Promise<OnboardingDraft> {
     const phone = OwnerPhoneE164Schema.parse(ownerPhone);
     return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion }, () => ({ ownerPhone: phone }));
+  }
+
+  async setMetro(tenantId: string, metroCode: string, expectedVersion: number, assemble: AssembleForMetro): Promise<OnboardingDraft> {
+    return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion, precondition: assertMetroUnlocked }, (row) =>
+      metroPatch(row, metroCode, assemble),
+    );
   }
 
   async markApproved(tenantId: string, proposalIds: string[], expectedVersion: number): Promise<OnboardingDraft> {

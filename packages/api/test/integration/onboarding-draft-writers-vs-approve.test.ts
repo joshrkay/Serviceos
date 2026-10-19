@@ -42,7 +42,11 @@ import {
 } from '../../src/onboarding/draft/repository';
 import { approveDraft, buildDraftProposals, resolveChoices, type ApproveDraftDeps } from '../../src/onboarding/draft/approve';
 import { assembleTypicalShop } from '../../src/onboarding/choices/assemble';
-import { InMemoryRegionalPriceTierRepository, PgRegionalPriceTierRepository } from '../../src/onboarding/choices/price-tiers';
+import {
+  InMemoryRegionalPriceTierRepository,
+  PgRegionalPriceTierRepository,
+  type RegionalPriceTierRepository,
+} from '../../src/onboarding/choices/price-tiers';
 import { bookingHoursFromPreset, type BookingHoursPreset } from '../../src/proposals/contracts/onboarding';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { PgProposalRepository } from '../../src/proposals/pg-proposal';
@@ -65,14 +69,15 @@ import type { AuthenticatedRequest } from '../../src/auth/clerk';
 const BASE = '/api/onboarding/draft';
 const CREATE = { packId: 'plumbing', businessName: 'Walsh Plumbing', ownerFirstName: 'Jenna', clientTimezone: 'America/New_York' };
 const CLE = { standard: { tripFeeCents: 8900, hourlyRateCents: 15000 }, premium: { tripFeeCents: 12900, hourlyRateCents: 18500 } };
+const CMH = { standard: { tripFeeCents: 7900, hourlyRateCents: 13500 }, premium: { tripFeeCents: 10900, hourlyRateCents: 16500 } };
 
 /** One row per draft writer the router exposes. */
 export interface DraftWriterRow {
   name: string;
   /** The router path this writer is reached by; the completeness test matches it against the router. */
   route: { method: 'PUT' | 'POST'; path: string };
-  /** The repository call the route makes, run inside a scripted request transaction. */
-  write: (repo: OnboardingDraftRepository, tenantId: string, version: number) => Promise<OnboardingDraft>;
+  /** The repository call the route makes, run inside a scripted request transaction (with the real tier table). */
+  write: (repo: OnboardingDraftRepository, tenantId: string, version: number, tierRepo: RegionalPriceTierRepository) => Promise<OnboardingDraft>;
   /** The same write over HTTP, through the real router and request transaction. */
   http: (app: express.Express, version: number) => request.Test;
   /** True when the draft carries the value this writer sets. */
@@ -115,10 +120,36 @@ export const DRAFT_WRITERS: DraftWriterRow[] = [
     inPayloads: (settings) => settings.ownerPhone === '+12165550142',
     httpAfterApproval: { status: 409, code: /DRAFT_APPROVED/ },
   },
+  {
+    name: 'PUT /draft/metro',
+    route: { method: 'PUT', path: '/metro' },
+    // What the route does: the Columbus shop built from the locked row, stored whole.
+    write: (repo, tenantId, v, tierRepo) =>
+      repo.setMetro(tenantId, 'CMH', v, (row) =>
+        assembleTypicalShop(tierRepo, {
+          packId: row.packId,
+          businessName: row.businessName,
+          ownerFirstName: row.ownerFirstName ?? undefined,
+          metro: { kind: 'metro', metroCode: 'CMH', name: 'Columbus' },
+        }),
+      ),
+    http: (app, v) => request(app).put(`${BASE}/metro`).send({ metro: 'CMH', version: v }),
+    applied: (d) => d.metroCode === 'CMH' && d.metroName === 'Columbus' && d.assembled.metroCode === 'CMH' && d.assembled.metroName === 'Columbus',
+    // The settings proposal carries the Columbus city and the Columbus standard tier (the default price option).
+    inPayloads: (settings) =>
+      settings.city === 'Columbus' && settings.tripFeeCents === CMH.standard.tripFeeCents && settings.hourlyRateCents === CMH.standard.hourlyRateCents,
+    httpAfterApproval: { status: 409, code: /DRAFT_APPROVED/ },
+  },
 ];
 
-/** Mutating routes that are not draft field writers: approve is the other side of the race, retry bumps an approved draft. */
-const NOT_FIELD_WRITERS = ['POST /approve', 'POST /retry'];
+/**
+ * Mutating routes that are not draft field writers: approve is the other side of
+ * the race; retry bumps, and undo (S4-4) and reset (S4-5) revert, an APPROVED
+ * draft, so none of them can land inside approve's draft-status window (their
+ * own races are in onboarding-draft-execution.test.ts, onboarding-draft-undo.test.ts
+ * and onboarding-draft-reset.test.ts).
+ */
+const NOT_FIELD_WRITERS = ['POST /approve', 'POST /retry', 'POST /undo', 'POST /reset'];
 
 describe('every router write path has a DRAFT_WRITERS row', () => {
   it('lists each mutating route as a writer row or as a known non-writer', () => {
@@ -161,6 +192,7 @@ describe('onboarding draft writers vs approve (real DB)', () => {
     settingsRepo = new PgSettingsRepository(pool);
     tierRepo = new PgRegionalPriceTierRepository(pool);
     await tierRepo.upsert('plumbing', 'CLE', CLE, 'test');
+    await tierRepo.upsert('plumbing', 'CMH', CMH, 'test');
     deps = { draftRepo, proposalRepo, auditRepo };
 
     app = express();
@@ -178,7 +210,7 @@ describe('onboarding draft writers vs approve (real DB)', () => {
   });
 
   afterAll(async () => {
-    await pool.query(`DELETE FROM regional_price_tiers WHERE trade = 'plumbing' AND metro_code = 'CLE' AND source = 'test'`);
+    await pool.query(`DELETE FROM regional_price_tiers WHERE trade = 'plumbing' AND metro_code IN ('CLE', 'CMH') AND source = 'test'`);
     await closeSharedTestDb();
   });
 
@@ -339,7 +371,7 @@ describe('onboarding draft writers vs approve (real DB)', () => {
         const { second } = await raceFirstThen(
           pool,
           tenant.tenantId,
-          () => write(draftRepo, tenant.tenantId, d.version),
+          () => write(draftRepo, tenant.tenantId, d.version, tierRepo),
           () => approveDraft(deps, tenant.tenantId, actor(), { expectedVersion: d.version }),
         );
         expect(second.status).toBe('rejected');
@@ -355,14 +387,14 @@ describe('onboarding draft writers vs approve (real DB)', () => {
       }
     });
 
-    it('(a) write first, approve with no version: mints from the row with the value IN the payload (5 fresh tenants)', async () => {
+    it('(a) write first, approve with no version: mints from the row with the value IN the payload, and the executed settings equal that row (5 fresh tenants)', async () => {
       for (let i = 0; i < 5; i++) {
         tenant = await createTestTenant(pool);
         const d = await seedDraft();
         const { second } = await raceFirstThen(
           pool,
           tenant.tenantId,
-          () => write(draftRepo, tenant.tenantId, d.version),
+          () => write(draftRepo, tenant.tenantId, d.version, tierRepo),
           () => approveDraft(deps, tenant.tenantId, actor()),
         );
         expect(second.status).toBe('fulfilled');
@@ -371,6 +403,9 @@ describe('onboarding draft writers vs approve (real DB)', () => {
         expect(committed.version).toBe(d.version + 2);
         const stored = await expectPayloadsEqualCommitted(committed);
         expect(inPayloads(stored.settings, stored.voicePolicy)).toBe(true);
+        // And what executes is that row: the real handlers write the written value into the settings.
+        await executeCommitted(committed);
+        await expectExecutedFactsEqualCommitted(committed);
       }
     });
 
@@ -382,7 +417,7 @@ describe('onboarding draft writers vs approve (real DB)', () => {
           pool,
           tenant.tenantId,
           () => approveDraft(deps, tenant.tenantId, actor(), { expectedVersion: d.version }),
-          () => write(draftRepo, tenant.tenantId, d.version),
+          () => write(draftRepo, tenant.tenantId, d.version, tierRepo),
         );
         expect(first.approvedNow).toBe(true);
         expect(second.status).toBe('rejected');

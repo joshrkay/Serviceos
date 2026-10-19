@@ -84,6 +84,20 @@ const WRITERS: WriterCase[] = [
     applied: (d) => d.ownerPhone === '+12165550142',
   },
   {
+    name: 'setMetro',
+    requires: 'draft',
+    takesVersion: true,
+    write: (repo, v) =>
+      repo.setMetro(TENANT, 'CMH', v, (row) =>
+        assembleTypicalShop(new InMemoryRegionalPriceTierRepository(), {
+          packId: row.packId,
+          businessName: row.businessName,
+          metro: { kind: 'metro', metroCode: 'CMH', name: 'Columbus' },
+        }),
+      ),
+    applied: (d) => d.metroCode === 'CMH' && d.metroName === 'Columbus' && d.assembled.metroCode === 'CMH',
+  },
+  {
     name: 'markApproved',
     requires: 'draft',
     takesVersion: true,

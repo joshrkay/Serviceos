@@ -4,6 +4,7 @@
  *   POST /api/onboarding/draft                       -> { draft, created }
  *   GET  /api/onboarding/draft                       -> { draft }
  *   PUT  /api/onboarding/draft/choices/:settingKey   -> { draft }
+ *   PUT  /api/onboarding/draft/metro                 -> { draft }
  *   POST /api/onboarding/draft/approve               -> { draft, proposalIds, approvedNow }
  *   POST /api/onboarding/draft/retry                 -> { draft, retriedProposalIds }
  *
@@ -168,6 +169,35 @@ export const ONBOARDING_DRAFT_EXECUTION_STATES = ['pending', 'executing', 'execu
 export const OnboardingDraftExecutionSchema = z.enum(ONBOARDING_DRAFT_EXECUTION_STATES);
 export type OnboardingDraftExecution = z.infer<typeof OnboardingDraftExecutionSchema>;
 
+/**
+ * The way out the shell may offer for a `failed` or `stopped` set (derived,
+ * never stored): `reset` while the whole-draft reset (Start over) can run,
+ * `settings` once only Settings can finish the setup. Pinned equal to the API
+ * list by wire-contract.test.ts.
+ */
+export const ONBOARDING_DRAFT_RECOVERY = ['reset', 'settings'] as const;
+export const OnboardingDraftRecoverySchema = z.enum(ONBOARDING_DRAFT_RECOVERY);
+export type OnboardingDraftRecovery = z.infer<typeof OnboardingDraftRecoverySchema>;
+
+/**
+ * The `draft` block of GET /api/onboarding/status: the pre-approval draft's
+ * progress and, once approved, what is derived from its proposals. Every
+ * derived field is optional so a payload from an API that predates it parses.
+ * Not strict, like the API's own status schema.
+ */
+export const OnboardingStatusDraftSchema = z.object({
+  status: OnboardingDraftStatusSchema,
+  choicesAnswered: z.number().int().min(0),
+  version: z.number().int().positive(),
+  /** null while the draft is still being edited (or has nothing to track). */
+  execution: OnboardingDraftExecutionSchema.nullable().optional(),
+  /** Whether the whole-draft undo can still take back every listed proposal; a hint, never a guard. Absent while editing. */
+  undoable: z.boolean().optional(),
+  /** Present only while `execution` is `failed` or `stopped`. */
+  recovery: OnboardingDraftRecoverySchema.optional(),
+});
+export type OnboardingStatusDraft = z.infer<typeof OnboardingStatusDraftSchema>;
+
 /** Body of POST /api/onboarding/draft. */
 export const CreateOnboardingDraftBodySchema = z
   .object({
@@ -189,6 +219,77 @@ export const StageOnboardingChoiceBodySchema = z
   })
   .strict();
 export type StageOnboardingChoiceBody = z.infer<typeof StageOnboardingChoiceBodySchema>;
+
+/**
+ * The curated metros a shop can be priced for: the API's NPA_METROS table
+ * (packages/api/src/compliance/us-geography.ts), code and name, in its order.
+ * "Not Cleveland?" offers this list; PUT /draft/metro accepts only these codes.
+ * Pinned equal to the API table by wire-contract.test.ts.
+ */
+export const ONBOARDING_METROS = [
+  { code: 'NYC', name: 'New York' },
+  { code: 'LAX', name: 'Los Angeles' },
+  { code: 'CHI', name: 'Chicago' },
+  { code: 'DFW', name: 'Dallas-Fort Worth' },
+  { code: 'HOU', name: 'Houston' },
+  { code: 'DC', name: 'Washington' },
+  { code: 'MIA', name: 'Miami' },
+  { code: 'PHL', name: 'Philadelphia' },
+  { code: 'ATL', name: 'Atlanta' },
+  { code: 'PHX', name: 'Phoenix' },
+  { code: 'BOS', name: 'Boston' },
+  { code: 'SFO', name: 'San Francisco Bay Area' },
+  { code: 'RIV', name: 'Inland Empire' },
+  { code: 'DET', name: 'Detroit' },
+  { code: 'SEA', name: 'Seattle' },
+  { code: 'MSP', name: 'Minneapolis-St. Paul' },
+  { code: 'SAN', name: 'San Diego' },
+  { code: 'TPA', name: 'Tampa Bay' },
+  { code: 'DEN', name: 'Denver' },
+  { code: 'BAL', name: 'Baltimore' },
+  { code: 'STL', name: 'St. Louis' },
+  { code: 'ORL', name: 'Orlando' },
+  { code: 'CLT', name: 'Charlotte' },
+  { code: 'SAT', name: 'San Antonio' },
+  { code: 'PDX', name: 'Portland' },
+  { code: 'SAC', name: 'Sacramento' },
+  { code: 'PIT', name: 'Pittsburgh' },
+  { code: 'LAS', name: 'Las Vegas' },
+  { code: 'AUS', name: 'Austin' },
+  { code: 'CIN', name: 'Cincinnati' },
+  { code: 'KC', name: 'Kansas City' },
+  { code: 'CMH', name: 'Columbus' },
+  { code: 'IND', name: 'Indianapolis' },
+  { code: 'CLE', name: 'Cleveland' },
+  { code: 'BNA', name: 'Nashville' },
+  { code: 'SLC', name: 'Salt Lake City' },
+  { code: 'MKE', name: 'Milwaukee' },
+  { code: 'JAX', name: 'Jacksonville' },
+  { code: 'OKC', name: 'Oklahoma City' },
+  { code: 'RDU', name: 'Raleigh-Durham' },
+  { code: 'MEM', name: 'Memphis' },
+  { code: 'RIC', name: 'Richmond' },
+  { code: 'SDF', name: 'Louisville' },
+  { code: 'MSY', name: 'New Orleans' },
+  { code: 'BUF', name: 'Buffalo' },
+] as const;
+export type OnboardingMetro = (typeof ONBOARDING_METROS)[number];
+export type OnboardingMetroCode = OnboardingMetro['code'];
+
+const ONBOARDING_METRO_CODES = ONBOARDING_METROS.map((m) => m.code) as [OnboardingMetroCode, ...OnboardingMetroCode[]];
+
+/**
+ * Body of PUT /api/onboarding/draft/metro: re-price a draft with nothing staged
+ * for another curated metro. `version` is the draft version the Ready screen
+ * rendered. The API answers 409 DRAFT_METRO_LOCKED once any choice is staged.
+ */
+export const SetOnboardingMetroBodySchema = z
+  .object({
+    metro: z.enum(ONBOARDING_METRO_CODES),
+    version: z.number().int().positive(),
+  })
+  .strict();
+export type SetOnboardingMetroBody = z.infer<typeof SetOnboardingMetroBodySchema>;
 
 /** Response of GET and PUT. */
 export const OnboardingDraftResponseSchema = z.object({ draft: OnboardingDraftSchema }).strict();
@@ -221,11 +322,83 @@ export const ApproveOnboardingDraftBodySchema = z
   .strict();
 export type ApproveOnboardingDraftBody = z.infer<typeof ApproveOnboardingDraftBodySchema>;
 
-/** Response of POST /api/onboarding/draft/retry: the proposals that were re-queued. */
+/**
+ * Response of POST /api/onboarding/draft/retry: the draft at its new version and
+ * the proposals that were re-queued. `undoable` says whether Undo can take back
+ * the set as the retry left it (false after a partial retry); optional so a
+ * response from an API that predates it parses.
+ */
 export const RetryOnboardingDraftResponseSchema = z
   .object({
     draft: OnboardingDraftSchema,
     retriedProposalIds: z.array(z.string()),
+    undoable: z.boolean().optional(),
   })
   .strict();
 export type RetryOnboardingDraftResponse = z.infer<typeof RetryOnboardingDraftResponseSchema>;
+
+/**
+ * Body of POST /api/onboarding/draft/retry. `expectedVersion` is the approved
+ * draft's version as the failed screen rendered it (the API answers 409
+ * VERSION_CONFLICT when the draft has moved on). Optional for now.
+ */
+export const RetryOnboardingDraftBodySchema = z
+  .object({ expectedVersion: z.number().int().positive().optional() })
+  .strict();
+export type RetryOnboardingDraftBody = z.infer<typeof RetryOnboardingDraftBodySchema>;
+
+/**
+ * Body of POST /api/onboarding/draft/undo. `expectedVersion` is required: the
+ * approved draft's version as the saving screen rendered it (the approve or
+ * retry response's `draft.version`, or the status draft block's after a reload).
+ */
+export const UndoOnboardingDraftBodySchema = z
+  .object({ expectedVersion: z.number().int().positive() })
+  .strict();
+export type UndoOnboardingDraftBody = z.infer<typeof UndoOnboardingDraftBodySchema>;
+
+/** Response of POST /api/onboarding/draft/undo: the draft, editable again. */
+export const UndoOnboardingDraftResponseSchema = z.object({ draft: OnboardingDraftSchema }).strict();
+export type UndoOnboardingDraftResponse = z.infer<typeof UndoOnboardingDraftResponseSchema>;
+
+/**
+ * Body of POST /api/onboarding/draft/reset ("Start over"). `expectedVersion` is
+ * required: the approved draft's version the stopped or failed screen was
+ * rendered from (the status draft block's `version`).
+ */
+export const ResetOnboardingDraftBodySchema = z
+  .object({ expectedVersion: z.number().int().positive() })
+  .strict();
+export type ResetOnboardingDraftBody = z.infer<typeof ResetOnboardingDraftBodySchema>;
+
+/** Response of POST /api/onboarding/draft/reset: the draft, editable again, choices intact. */
+export const ResetOnboardingDraftResponseSchema = z.object({ draft: OnboardingDraftSchema }).strict();
+export type ResetOnboardingDraftResponse = z.infer<typeof ResetOnboardingDraftResponseSchema>;
+
+/**
+ * `details.reason` of a 409 DRAFT_RESET_REFUSED: `applied` (part of the setup is
+ * already saved; Settings finishes it) or `executing` (part of it is landing
+ * now; the next status read settles it). Pinned equal to the API list.
+ */
+export const ONBOARDING_DRAFT_RESET_REASONS = ['applied', 'executing'] as const;
+export type OnboardingDraftResetReason = (typeof ONBOARDING_DRAFT_RESET_REASONS)[number];
+
+/**
+ * Every 409 code the draft routes answer with. The API's message is
+ * `CODE: plain sentence`, so a client reads the code from the prefix. Pinned
+ * equal to the API list by wire-contract.test.ts.
+ */
+export const ONBOARDING_DRAFT_REFUSALS = [
+  'VERSION_CONFLICT',
+  'DRAFT_APPROVED',
+  'DRAFT_NOT_APPROVED',
+  'DRAFT_METRO_LOCKED',
+  'DRAFT_APPROVAL_FAILED',
+  'DRAFT_RETRY_UNSAFE',
+  'DRAFT_RETRY_NOTHING_FAILED',
+  'DRAFT_RETRY_FAILED',
+  'DRAFT_UNDO_REFUSED',
+  'UNDO_WINDOW_CLOSED',
+  'DRAFT_RESET_REFUSED',
+] as const;
+export type OnboardingDraftRefusal = (typeof ONBOARDING_DRAFT_REFUSALS)[number];

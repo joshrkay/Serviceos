@@ -169,6 +169,14 @@ export type SubscriptionStatusValue = z.infer<typeof SubscriptionStatusSchema>;
 export const DRAFT_EXECUTION_STATES = ['pending', 'executing', 'executed', 'failed', 'stopped'] as const;
 export type DraftExecution = (typeof DRAFT_EXECUTION_STATES)[number];
 
+/**
+ * The way out the shell may offer for a `failed` or `stopped` set (derived,
+ * never stored; `deriveDraftRecovery` in derive-status.ts): `reset` while the
+ * whole-draft reset can run, `settings` once only Settings can finish it.
+ */
+export const DRAFT_RECOVERY_HINTS = ['reset', 'settings'] as const;
+export type DraftRecovery = (typeof DRAFT_RECOVERY_HINTS)[number];
+
 export const OnboardingStatusResponseSchema = z.object({
   steps: z.array(OnboardingStepSchema).length(7),
   currentStep: OnboardingStepIdSchema.nullable(),
@@ -194,6 +202,10 @@ export const OnboardingStatusResponseSchema = z.object({
       version: z.number().int().positive(),
       /** Additive: null while the draft is still being edited (or has nothing to track). */
       execution: z.enum(DRAFT_EXECUTION_STATES).nullable().optional(),
+      /** Additive: whether the whole-draft undo can still take back every listed proposal. Absent while editing. */
+      undoable: z.boolean().optional(),
+      /** Additive: present only while `execution` is `failed` or `stopped`. */
+      recovery: z.enum(DRAFT_RECOVERY_HINTS).optional(),
     })
     .optional(),
 });

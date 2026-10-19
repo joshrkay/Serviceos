@@ -18,7 +18,7 @@ export function greetingEntry(): ChoiceEntry {
   return {
     settingKey: 'greeting',
     question: 'How should I answer your phone?',
-    supportLine: 'Pick the one that sounds right.',
+    supportLine: 'Tap one to hear it.',
     options: [
       {
         key: 'a',
