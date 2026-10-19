@@ -47,7 +47,7 @@
 | `ONE_TAP_APPROVE_SECRET` | One-tap approve links (digest "APPROVE"/"Invoice it", unsupervised queue_and_sms) are **silently omitted** in prod/staging — digests still send, but without action links. No boot failure, no warning. Generate: `openssl rand -hex 32` |
 | `TRANSCRIPT_ENCRYPTION_KEY` | Falls back to `TENANT_ENCRYPTION_KEY`; if neither set, raw transcripts not retained |
 | `TENANT_ENCRYPTION_KEY` | Fallback for transcript encryption |
-| `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` | LLM trace export (U10, `packages/api/src/ai/gateway/trace-exporter.ts`) is a no-op — zero network calls; gateway completions stay visible only via `ai_runs` + Prometheus. Both required or neither. Companions: `LANGFUSE_BASE_URL` (default `https://cloud.langfuse.com`; set for self-hosted) and `LANGFUSE_CAPTURE_CONTENT=true` to also export prompts/replies (off by default — voice traces carry caller transcripts — and redacted when on) |
+| `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` | LLM trace export (U10, `packages/api/src/ai/gateway/trace-exporter.ts`) is a no-op — zero network calls; gateway completions stay visible only via `ai_runs` + Prometheus. Both required or neither. Companions: `LANGFUSE_BASE_URL` (default `https://cloud.langfuse.com`; set for self-hosted) and `LANGFUSE_CAPTURE_CONTENT=true` to also export prompts/replies (off by default — voice traces carry caller transcripts — and redacted when on). PRIV-6: prod/staging refuse to boot with capture on against Langfuse Cloud (any `*.langfuse.com` host) unless `LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED=true` records a processing agreement covering it; a self-hosted base URL needs no acknowledgement |
 
 ## SLO monitoring / operator alerting (WS15 — all optional, safe defaults)
 
