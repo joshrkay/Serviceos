@@ -30,5 +30,3 @@ export const TTS_BATCH_BODY_SCHEMA = z.object({
     }),
   voice: TTS_VOICE_PRESET_SCHEMA.optional(),
 });
-
-export type TtsBatchBody = z.infer<typeof TTS_BATCH_BODY_SCHEMA>;
