@@ -399,7 +399,7 @@ describe('S5a-4 — the afterWrite hook on SettingsRepository.update (in-memory 
   it('a payment-mode write moves updatedAt even when the patch does not stamp it (Pg parity)', async () => {
     const repo = await seeded();
     const stamped = (await repo.findByTenant('tenant-hook'))!.updatedAt;
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => { setTimeout(r, 5); });
     const after = await repo.update('tenant-hook', { paymentCollectionMode: 'collect_on_site' });
     expect(after!.updatedAt.getTime()).toBeGreaterThan(stamped.getTime());
     const untouched = await repo.update('tenant-hook', { businessName: 'Hook Co 2' });
