@@ -156,7 +156,7 @@ describe('S5a-4 — the onboarding policy write and the payment-mode lock (real 
   it('a payment_collection_mode payload takes the exclusive payment-mode lock before touching tenant_settings, and moves updated_at', async () => {
     expect((await execute({ voiceGreeting: 'Hello there' })).success).toBe(true);
     const before = await updatedAt();
-    await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => { setTimeout(r, 20); });
 
     const from = log.length;
     expect((await execute({ paymentCollectionMode: 'collect_on_site' })).success).toBe(true);
@@ -174,7 +174,7 @@ describe('S5a-4 — the onboarding policy write and the payment-mode lock (real 
   it('a payload without the key takes no lock and leaves updated_at unchanged', async () => {
     expect((await execute({ paymentCollectionMode: 'pay_link' })).success).toBe(true);
     const before = await updatedAt();
-    await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => { setTimeout(r, 20); });
 
     const from = log.length;
     expect((await execute({ voiceGreeting: 'Walsh Plumbing, how can I help?' })).success).toBe(true);

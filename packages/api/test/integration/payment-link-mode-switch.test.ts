@@ -190,7 +190,7 @@ class SpyPool {
       const hit = this.log.slice(since).reverse().find((s) => re.test(s.text));
       if (hit) return hit;
       if (Date.now() > deadline) throw new Error(`statement ${re} never ran`);
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => { setTimeout(r, 5); });
     }
   }
 
@@ -202,8 +202,8 @@ class SpyPool {
 function latch(): { wait: () => Promise<void>; release: () => void; reached: Promise<void> } {
   let release!: () => void;
   let markReached!: () => void;
-  const gate = new Promise<void>((r) => (release = r));
-  const reached = new Promise<void>((r) => (markReached = r));
+  const gate = new Promise<void>((r) => { release = r; });
+  const reached = new Promise<void>((r) => { markReached = r; });
   return {
     wait: async () => {
       markReached();
@@ -236,7 +236,7 @@ describe('Postgres integration — attach-time revalidation under the payment-mo
       );
       if (rows[0]?.wait_event_type === 'Lock') return;
       if (Date.now() > deadline) throw new Error(`backend ${pid} never waited on a lock`);
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => { setTimeout(r, 5); });
     }
   }
 
@@ -745,7 +745,7 @@ describe('Postgres integration — attach-time revalidation under the payment-mo
     });
     const outcome = await Promise.race([
       switched.then(() => 'committed'),
-      new Promise((r) => setTimeout(() => r('blocked'), 5_000)),
+      new Promise((r) => { setTimeout(() => r('blocked'), 5_000); }),
     ]);
     expect(outcome).toBe('committed');
     expect(await storedMode(t.tenantId)).toBe('collect_on_site');
@@ -1465,7 +1465,7 @@ describe('Postgres integration — attach-time revalidation under the payment-mo
         }
         const outcome = await Promise.race([
           switchTo(t.tenantId, 'pay_link').then(() => 'committed'),
-          new Promise((r) => setTimeout(() => r('blocked'), 5_000)),
+          new Promise((r) => { setTimeout(() => r('blocked'), 5_000); }),
         ]);
         expect(outcome).toBe('committed');
         const dLink = link(`D${i}_${crypto.randomUUID().slice(0, 6)}`);
