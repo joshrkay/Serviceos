@@ -6989,6 +6989,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // #1405 — the card's "which accepted estimate?" pick re-drafts the
       // invoice's lines, discount and tax from the picked estimate.
       estimateRepo,
+      // A1 — resolve-entity runs outside the request transaction; its writes
+      // commit together in one short transaction after the re-draft's LLM call.
+      pool ? new PgTenantTransactionRunner(pool) : undefined,
     ),
   );
   if (entityAliasRepo) {

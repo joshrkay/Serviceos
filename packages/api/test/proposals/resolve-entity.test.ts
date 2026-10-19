@@ -15,6 +15,8 @@ import type { TaskHandler, TaskContext } from '../../src/ai/tasks/task-handlers'
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import { ForbiddenError, NotFoundError, ValidationError } from '../../src/shared/errors';
+import type { TenantTransactionRunner } from '../../src/db/tenant-transaction';
+import type { EntityAliasCandidateCapture } from '../../src/learning/entity-aliases/candidate-service';
 
 const TENANT = 't-resolve-entity';
 const PROPOSAL = 'p-resolve-entity';
@@ -1144,5 +1146,257 @@ describe('B2 — resolveProposalEntity on a typed money proposal (gate + candida
 
     expect(result.status).toBe('ready_for_review');
     expect((result.payload as Record<string, unknown>).invoiceId).toBe(INV_A);
+  });
+});
+
+// ── A1 — writes commit together, in a transaction opened AFTER the LLM call ─
+//
+// POST /api/proposals/:id/resolve-entity runs outside the request transaction
+// (an LLM_LONG_CALL_ROUTE: the re-draft awaits the drafting handler's LLM
+// call). Each path's writes therefore go through ONE run of the injected
+// TenantTransactionRunner — and the handler (the LLM call) runs before it,
+// never inside it. The alias capture is failure-soft, so it runs after the
+// commit: inside the transaction a failed statement would poison the
+// resolution's writes, and before it an alias review would exist for a pick
+// whose writes rolled back.
+describe('A1 — resolveProposalEntity commits each path in one short transaction', () => {
+  const CUST_A = '11111111-1111-4111-8111-111111111111';
+  const CUST_B = '22222222-2222-4222-8222-222222222222';
+  const JOB_A = '33333333-3333-4333-8333-333333333333';
+  const JOB_B = '44444444-4444-4444-8444-444444444444';
+  const TENANT_UUID = '55555555-5555-4555-8555-555555555555';
+
+  let repo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let events: string[];
+  let active: boolean;
+  let runner: TenantTransactionRunner;
+
+  beforeEach(() => {
+    repo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+    events = [];
+    active = false;
+    runner = {
+      async run(tenantId, fn) {
+        events.push(`BEGIN ${tenantId}`);
+        active = true;
+        try {
+          const result = await fn({ lock: async () => undefined, savepoint: (work) => work() });
+          events.push('COMMIT');
+          return result;
+        } catch (err) {
+          events.push('ROLLBACK');
+          throw err;
+        } finally {
+          active = false;
+        }
+      },
+    };
+    // Every write records whether it ran inside the runner's transaction.
+    for (const [name, target] of [
+      ['update', repo],
+      ['updateStatus', repo],
+      ['create', auditRepo],
+    ] as const) {
+      const original = (target as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[name].bind(target);
+      vi.spyOn(target as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>, name).mockImplementation(
+        async (...args: unknown[]) => {
+          events.push(`${name}${active ? ' (in tx)' : ' (NO TX)'}`);
+          return original(...args);
+        },
+      );
+    }
+  });
+
+  function clarification(sourceContext: Record<string, unknown> = {}): Proposal {
+    return {
+      id: PROPOSAL,
+      tenantId: TENANT_UUID,
+      proposalType: 'voice_clarification',
+      status: 'draft',
+      summary: 'Which customer? "Bob" matched 2 records',
+      createdBy: OWNER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      payload: {
+        transcript: 'invoice Bob for the water heater',
+        reason: 'ambiguous_entity',
+        entityReference: 'Bob',
+        entityCandidates: [
+          { id: CUST_A, label: 'Bob Smith', score: 0.82 },
+          { id: CUST_B, label: 'Bob Jones', score: 0.81 },
+        ],
+      },
+      sourceContext: {
+        source: 'voice',
+        transcript: 'invoice Bob for the water heater',
+        entityKind: 'customer',
+        entityReference: 'Bob',
+        entityCandidates: [
+          { id: CUST_A, kind: 'customer', label: 'Bob Smith', score: 0.82 },
+          { id: CUST_B, kind: 'customer', label: 'Bob Jones', score: 0.81 },
+        ],
+        ...sourceContext,
+      },
+    } as Proposal;
+  }
+
+  const ORIGINAL_INTENT = {
+    originalIntent: { intentType: 'create_invoice', extractedEntities: { customerName: 'Bob' } },
+  };
+
+  /** A re-draft handler standing in for the LLM call: records whether a transaction was open. */
+  function draftingHandler(): TaskHandler {
+    return {
+      taskType: 'draft_invoice',
+      handle: vi.fn(async (ctx: TaskContext) => {
+        events.push(`LLM${active ? ' (in tx)' : ' (no tx)'}`);
+        return {
+          taskType: 'draft_invoice',
+          proposal: createProposal({
+            tenantId: ctx.tenantId,
+            proposalType: 'draft_invoice',
+            payload: {
+              customerId: CUST_B,
+              lineItems: [{ description: 'Water heater service', quantity: 1, unitPriceCents: 45000 }],
+            },
+            summary: 'Invoice Bob Jones',
+            createdBy: ctx.userId,
+          }),
+        };
+      }),
+    };
+  }
+
+  const capture = (): EntityAliasCandidateCapture => ({
+    capture: vi.fn(async () => {
+      events.push(`capture${active ? ' (in tx)' : ' (after commit)'}`);
+      return [];
+    }),
+  });
+
+  const resolve = (deps: Partial<Parameters<typeof resolveProposalEntity>[1]> = {}) =>
+    resolveProposalEntity(
+      { tenantId: TENANT_UUID, proposalId: PROPOSAL, candidateId: CUST_B, actorId: OWNER, actorRole: 'owner' },
+      { proposalRepo: repo, auditRepo, transactionRunner: runner, ...deps },
+    );
+
+  it('re-draft: the LLM call runs with no transaction open; every write after it lands in ONE transaction', async () => {
+    await repo.create(clarification(ORIGINAL_INTENT));
+    const handler = draftingHandler();
+
+    const result = await resolve({
+      redraftHandlerFactory: () => handler,
+      entityAliasCandidateCapture: capture(),
+    });
+
+    expect(result.proposalType).toBe('draft_invoice');
+    expect(result.status).toBe('ready_for_review');
+    expect(events).toEqual([
+      'LLM (no tx)',
+      `BEGIN ${TENANT_UUID}`,
+      'update (in tx)',
+      'updateStatus (in tx)',
+      'create (in tx)',
+      'COMMIT',
+      'capture (after commit)',
+    ]);
+  });
+
+  it('re-draft: a failure in the second post-LLM write rolls the transaction back and skips the audit and capture', async () => {
+    await repo.create(clarification(ORIGINAL_INTENT));
+    vi.mocked(repo.updateStatus).mockImplementationOnce(async () => {
+      events.push('updateStatus (in tx) -> fails');
+      throw new Error('injected status-write failure');
+    });
+    const aliasCapture = capture();
+
+    await expect(
+      resolve({ redraftHandlerFactory: () => draftingHandler(), entityAliasCandidateCapture: aliasCapture }),
+    ).rejects.toThrow('injected status-write failure');
+
+    expect(events).toEqual([
+      'LLM (no tx)',
+      `BEGIN ${TENANT_UUID}`,
+      'update (in tx)',
+      'updateStatus (in tx) -> fails',
+      'ROLLBACK',
+    ]);
+    expect(aliasCapture.capture).not.toHaveBeenCalled();
+  });
+
+  it('annotate-only: the payload patch, the promotion and the audit commit together, capture after', async () => {
+    await repo.create(clarification());
+
+    const result = await resolve({ entityAliasCandidateCapture: capture() });
+
+    expect((result.payload as Record<string, unknown>).customerId).toBe(CUST_B);
+    expect(result.status).toBe('ready_for_review');
+    expect(events).toEqual([
+      `BEGIN ${TENANT_UUID}`,
+      'update (in tx)',
+      'updateStatus (in tx)',
+      'create (in tx)',
+      'COMMIT',
+      'capture (after commit)',
+    ]);
+  });
+
+  it('next ambiguity: the advance and its audit commit together, and the alias capture moves after the commit', async () => {
+    await repo.create(
+      clarification({
+        ...ORIGINAL_INTENT,
+        pendingEntityAmbiguities: [
+          {
+            entityKind: 'job',
+            reference: 'Rodriguez job',
+            candidates: [
+              { id: JOB_A, kind: 'job', label: 'Rodriguez — kitchen', score: 0.8 },
+              { id: JOB_B, kind: 'job', label: 'Rodriguez — bath', score: 0.79 },
+            ],
+          },
+        ],
+      }),
+    );
+    const handler = draftingHandler();
+
+    const result = await resolve({
+      redraftHandlerFactory: () => handler,
+      entityAliasCandidateCapture: capture(),
+    });
+
+    expect(result.proposalType).toBe('voice_clarification');
+    expect(handler.handle).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      `BEGIN ${TENANT_UUID}`,
+      'update (in tx)',
+      'create (in tx)',
+      'COMMIT',
+      'capture (after commit)',
+    ]);
+  });
+
+  it('next ambiguity: a failed advance write leaves no alias review behind for the unapplied pick', async () => {
+    await repo.create(
+      clarification({
+        pendingEntityAmbiguities: [
+          {
+            entityKind: 'job',
+            reference: 'Rodriguez job',
+            candidates: [{ id: JOB_A, kind: 'job', label: 'Rodriguez — kitchen', score: 0.8 }],
+          },
+        ],
+      }),
+    );
+    vi.mocked(auditRepo.create).mockImplementationOnce(async () => {
+      throw new Error('injected audit failure');
+    });
+    const aliasCapture = capture();
+
+    await expect(resolve({ entityAliasCandidateCapture: aliasCapture })).rejects.toThrow('injected audit failure');
+
+    expect(events.at(-1)).toBe('ROLLBACK');
+    expect(aliasCapture.capture).not.toHaveBeenCalled();
   });
 });

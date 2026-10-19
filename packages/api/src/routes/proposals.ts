@@ -38,6 +38,7 @@ import { createSchedulingProposal } from '../proposals/create-scheduling';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import type { CorrectionRepository } from '../proposals/corrections/correction';
 import type { EstimateRepository } from '../estimates/estimate';
+import type { TenantTransactionRunner } from '../db/tenant-transaction';
 import { routeParam } from '../shared/route-params';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
@@ -108,6 +109,9 @@ export function createProposalsRouter(
   // #1405 — the card's "which accepted estimate?" pick re-drafts the invoice
   // from the picked estimate. Absent → the pick fills the id only.
   estimateRepo?: Pick<EstimateRepository, 'findById'>,
+  // A1 — POST /:id/resolve-entity holds no request transaction (it awaits the
+  // re-draft's LLM call), so its writes commit together through this runner.
+  transactionRunner?: TenantTransactionRunner,
 ): Router {
   const router = Router();
 
@@ -418,6 +422,7 @@ export function createProposalsRouter(
           ...(auditRepo ? { auditRepo } : {}),
           ...(redraftHandlerFactory ? { redraftHandlerFactory } : {}),
           ...(entityAliasCandidateCapture ? { entityAliasCandidateCapture } : {}),
+          ...(transactionRunner ? { transactionRunner } : {}),
         },
       );
       res.json(result);

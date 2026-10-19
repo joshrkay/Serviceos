@@ -584,6 +584,8 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/conversations/3f1c9a52-0000-4000-8000-000000000002/suggest-reply'],
       ['post', '/api/estimates/suggest'],
       ['post', '/api/onboarding/conversation/turn'],
+      // A1 — the "which Bob?" pick re-drafts through the task handler's LLM call.
+      ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
     ] as const)('%s %s holds no request transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
@@ -603,9 +605,16 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/estimates/3f1c9a52-0000-4000-8000-000000000003/send'],
       ['post', '/api/estimates/suggest/extra'],
       ['post', '/api/onboarding/pack'],
+      // A1 — approval and the other proposal mutations keep the request
+      // transaction (approve's row lock is held to commit).
+      ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/approve'],
+      ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-line'],
+      ['get', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
+      ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/extra'],
       // A nested router sharing the suffix does not inherit the bypass.
       ['post', '/api/admin/voice/sessions'],
       ['post', '/api/leads/estimates/suggest'],
+      ['post', '/api/admin/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
     ] as const)('%s %s still opens the transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen.connects).toBe(1);

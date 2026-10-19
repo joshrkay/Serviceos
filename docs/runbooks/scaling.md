@@ -93,6 +93,15 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   > held the request connection across classify/draft/TTS, and the in-app
   > resolver and onboarding lock took a second one inside it). Pinned by
   > `test/routes/llm-long-call-routes.route.test.ts`.
+  >
+  > ✅ **Fixed (A1) — `POST /proposals/:id/resolve-entity`.** The "which Bob?"
+  > pick re-runs the drafting handler's LLM call, so it is on the bypass too;
+  > its post-LLM writes (re-draft, promotion, audit row) commit together in one
+  > short `PgTenantTransactionRunner` transaction opened after the call. Pinned
+  > by `test/integration/resolve-entity-outside-request-transaction.test.ts`.
+  > A route that bypasses the request transaction and makes more than one
+  > write needs its own transaction for them — the bypass alone drops their
+  > atomicity.
 - Direct pool: `DB_DIRECT_MAX_CONNECTIONS` small (default 10) — only lock holders
   + the LISTEN client use it.
 - Postgres ceiling = PgBouncer `default_pool_size` (server side), independent of

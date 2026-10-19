@@ -36,6 +36,11 @@
  *  - Audited: every resolution emits `proposal.entity_resolved` (and records the
  *    type transition).
  *  - Tenant-scoped: every read/write goes through the tenant-scoped repo.
+ *  - Atomic, and never across the LLM call (A1): the route runs outside the
+ *    request transaction (LLM_LONG_CALL_ROUTES — the re-draft awaits the
+ *    drafting handler's LLM call), so each path's writes commit together in
+ *    ONE run of `deps.transactionRunner`, opened only after the re-draft
+ *    returns. The failure-soft alias capture runs after that commit.
  *
  * P8/U-multi (multi-ambiguity chain): a single utterance can carry MORE than
  * one ambiguous reference ("invoice Bob for the Rodriguez job" where both
@@ -65,6 +70,7 @@ import { entitiesForProposal } from '../workers/voice-action-router';
 import type { RedraftHandlerFactory } from './redraft-handler-factory';
 import { clearSatisfiedMissingFields } from './missing-fields';
 import type { EntityAliasCandidateCapture } from '../learning/entity-aliases/candidate-service';
+import { InMemoryTransactionRunner, type TenantTransactionRunner } from '../db/tenant-transaction';
 
 interface EntityCandidate {
   id: string;
@@ -100,6 +106,18 @@ export interface ResolveEntityDeps {
    * if capture throws.
    */
   entityAliasCandidateCapture?: EntityAliasCandidateCapture;
+  /**
+   * A1 — commits each path's writes (proposal patch, status promotion, audit
+   * row) as one unit. The route holds no request transaction, so without it
+   * a failed second write would leave the first one committed. Production:
+   * PgTenantTransactionRunner on the app pool. Absent (in-memory repos) →
+   * the writes run directly.
+   */
+  transactionRunner?: TenantTransactionRunner;
+}
+
+function transactionRunnerOf(deps: ResolveEntityDeps): TenantTransactionRunner {
+  return deps.transactionRunner ?? new InMemoryTransactionRunner();
 }
 
 /** The structured original-intent context the producer stamps for re-draft. */
@@ -383,13 +401,6 @@ export async function resolveProposalEntity(
   const pending = readPendingAmbiguities(sourceContext);
   if (pending.length > 0) {
     const [next, ...rest] = pending;
-    await captureEntityPickerAlias(deps, {
-      tenantId,
-      actorId,
-      actorRole,
-      groundingProposal: proposal,
-      selectedEntityId: candidateId,
-    });
     return advanceToNextAmbiguity({
       tenantId,
       proposalId,
@@ -496,41 +507,43 @@ export async function resolveProposalEntity(
     }
   }
 
-  await deps.proposalRepo.update(tenantId, proposalId, {
-    payload: nextPayload,
-    sourceContext: nextSourceContext,
-    targetEntityId: chosen.id,
-    ...(entityKind ? { targetEntityType: entityKind } : {}),
-  });
-
   // Surface for approval — but NEVER approve/execute it (D-004). Only a draft
   // is promoted, and only once nothing is left gated; a proposal already in
   // ready_for_review stays there.
   const stillGated = remainingMissingFields !== undefined && remainingMissingFields.length > 0;
-  let movedToReview = false;
-  if (proposal.status === 'draft' && !stillGated) {
-    await deps.proposalRepo.updateStatus(tenantId, proposalId, 'ready_for_review', {});
-    movedToReview = true;
-  }
+  const movedToReview = proposal.status === 'draft' && !stillGated;
 
-  if (deps.auditRepo) {
-    await deps.auditRepo.create(
-      createAuditEvent({
-        tenantId,
-        actorId,
-        actorRole,
-        eventType: 'proposal.entity_resolved',
-        entityType: 'proposal',
-        entityId: proposalId,
-        metadata: {
-          candidateId,
-          ...(entityKind ? { entityKind } : {}),
-          field,
-          movedToReview,
-        },
-      }),
-    );
-  }
+  await transactionRunnerOf(deps).run(tenantId, async () => {
+    await deps.proposalRepo.update(tenantId, proposalId, {
+      payload: nextPayload,
+      sourceContext: nextSourceContext,
+      targetEntityId: chosen.id,
+      ...(entityKind ? { targetEntityType: entityKind } : {}),
+    });
+
+    if (movedToReview) {
+      await deps.proposalRepo.updateStatus(tenantId, proposalId, 'ready_for_review', {});
+    }
+
+    if (deps.auditRepo) {
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId,
+          actorRole,
+          eventType: 'proposal.entity_resolved',
+          entityType: 'proposal',
+          entityId: proposalId,
+          metadata: {
+            candidateId,
+            ...(entityKind ? { entityKind } : {}),
+            field,
+            movedToReview,
+          },
+        }),
+      );
+    }
+  });
 
   await captureEntityPickerAlias(deps, {
     tenantId,
@@ -706,47 +719,52 @@ async function redraftResolvedProposal(args: {
   // for review, never further). This is the resolution-time analogue of
   // holdIfUnsupervised — but stronger: it ignores the handler's status entirely
   // so a re-draft can never slip past the human gate.
-  await deps.proposalRepo.update(tenantId, proposalId, {
-    proposalType: drafted.proposalType,
-    payload: drafted.payload,
-    summary: drafted.summary,
-    ...(drafted.explanation !== undefined ? { explanation: drafted.explanation } : {}),
-    ...(drafted.confidenceScore !== undefined ? { confidenceScore: drafted.confidenceScore } : {}),
-    sourceContext: nextSourceContext,
-    targetEntityId: chosen.id,
-    ...(entityKind ? { targetEntityType: entityKind } : {}),
-    // chainId is preserved implicitly — `update` only patches the listed fields,
-    // so a clarification that was a chain member keeps its chainId column and
-    // its sourceContext.chainId/chainIndex edges (copied above) untouched.
-  });
-  await deps.proposalRepo.updateStatus(tenantId, proposalId, 'ready_for_review', {});
+  //
+  // A1 — the LLM call is over; these three writes commit together, so a failed
+  // status write or audit row never leaves a re-drafted payload behind.
+  await transactionRunnerOf(deps).run(tenantId, async () => {
+    await deps.proposalRepo.update(tenantId, proposalId, {
+      proposalType: drafted.proposalType,
+      payload: drafted.payload,
+      summary: drafted.summary,
+      ...(drafted.explanation !== undefined ? { explanation: drafted.explanation } : {}),
+      ...(drafted.confidenceScore !== undefined ? { confidenceScore: drafted.confidenceScore } : {}),
+      sourceContext: nextSourceContext,
+      targetEntityId: chosen.id,
+      ...(entityKind ? { targetEntityType: entityKind } : {}),
+      // chainId is preserved implicitly — `update` only patches the listed fields,
+      // so a clarification that was a chain member keeps its chainId column and
+      // its sourceContext.chainId/chainIndex edges (copied above) untouched.
+    });
+    await deps.proposalRepo.updateStatus(tenantId, proposalId, 'ready_for_review', {});
 
-  if (deps.auditRepo) {
-    await deps.auditRepo.create(
-      createAuditEvent({
-        tenantId,
-        actorId,
-        actorRole,
-        eventType: 'proposal.entity_resolved',
-        entityType: 'proposal',
-        entityId: proposalId,
-        metadata: {
-          candidateId,
-          ...(entityKind ? { entityKind } : {}),
-          field,
-          // Record the type transition so the audit trail shows the
-          // clarification became an executable action.
-          fromProposalType: proposal.proposalType,
-          toProposalType: drafted.proposalType,
-          intentType: originalIntent.intentType,
-          movedToReview: true,
-          // P8/U-multi trace: how many entity references this utterance's
-          // chain resolved in total (1 for the common single-ambiguity case).
-          resolvedCount: resolvedEntities.length,
-        },
-      }),
-    );
-  }
+    if (deps.auditRepo) {
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId,
+          actorRole,
+          eventType: 'proposal.entity_resolved',
+          entityType: 'proposal',
+          entityId: proposalId,
+          metadata: {
+            candidateId,
+            ...(entityKind ? { entityKind } : {}),
+            field,
+            // Record the type transition so the audit trail shows the
+            // clarification became an executable action.
+            fromProposalType: proposal.proposalType,
+            toProposalType: drafted.proposalType,
+            intentType: originalIntent.intentType,
+            movedToReview: true,
+            // P8/U-multi trace: how many entity references this utterance's
+            // chain resolved in total (1 for the common single-ambiguity case).
+            resolvedCount: resolvedEntities.length,
+          },
+        }),
+      );
+    }
+  });
 
   await captureEntityPickerAlias(deps, {
     tenantId,
@@ -880,46 +898,58 @@ async function advanceToNextAmbiguity(args: {
   nextSourceContext.resolvedEntities = resolvedEntities;
   nextSourceContext.resolvedEntity = resolvedEntities[resolvedEntities.length - 1];
 
-  await deps.proposalRepo.update(tenantId, proposalId, {
-    payload: nextPayload,
-    summary,
-    explanation,
-    sourceContext: nextSourceContext,
-    // Best-effort deep-link target for THIS pick — the redraft overwrites it
-    // with whichever entity is resolved last, same as the single-ambiguity
-    // path always did.
-    targetEntityId: chosen.id,
-    ...(entityKind ? { targetEntityType: entityKind } : {}),
-  });
-  // Deliberately no status transition: this proposal is not resolved, it's
-  // still awaiting an operator pick — exactly the state a freshly emitted
-  // voice_clarification starts in (emitClarification never sets
-  // sourceTrustTier, so it always lands in 'draft'). Promoting to
-  // 'ready_for_review' here would misrepresent an open question as an
-  // approvable action.
+  await transactionRunnerOf(deps).run(tenantId, async () => {
+    await deps.proposalRepo.update(tenantId, proposalId, {
+      payload: nextPayload,
+      summary,
+      explanation,
+      sourceContext: nextSourceContext,
+      // Best-effort deep-link target for THIS pick — the redraft overwrites it
+      // with whichever entity is resolved last, same as the single-ambiguity
+      // path always did.
+      targetEntityId: chosen.id,
+      ...(entityKind ? { targetEntityType: entityKind } : {}),
+    });
+    // Deliberately no status transition: this proposal is not resolved, it's
+    // still awaiting an operator pick — exactly the state a freshly emitted
+    // voice_clarification starts in (emitClarification never sets
+    // sourceTrustTier, so it always lands in 'draft'). Promoting to
+    // 'ready_for_review' here would misrepresent an open question as an
+    // approvable action.
 
-  if (deps.auditRepo) {
-    await deps.auditRepo.create(
-      createAuditEvent({
-        tenantId,
-        actorId,
-        actorRole,
-        eventType: 'proposal.entity_resolved',
-        entityType: 'proposal',
-        entityId: proposalId,
-        metadata: {
-          candidateId,
-          ...(entityKind ? { entityKind } : {}),
-          field,
-          movedToReview: false,
-          // Trace which ambiguity this chain advanced to and how many are
-          // still queued behind it.
-          nextEntityKind: next.entityKind,
-          remainingAmbiguities: rest.length,
-        },
-      }),
-    );
-  }
+    if (deps.auditRepo) {
+      await deps.auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId,
+          actorRole,
+          eventType: 'proposal.entity_resolved',
+          entityType: 'proposal',
+          entityId: proposalId,
+          metadata: {
+            candidateId,
+            ...(entityKind ? { entityKind } : {}),
+            field,
+            movedToReview: false,
+            // Trace which ambiguity this chain advanced to and how many are
+            // still queued behind it.
+            nextEntityKind: next.entityKind,
+            remainingAmbiguities: rest.length,
+          },
+        }),
+      );
+    }
+  });
+
+  // After the commit, like the other two paths — an alias review must never
+  // exist for a pick whose writes rolled back.
+  await captureEntityPickerAlias(deps, {
+    tenantId,
+    actorId,
+    actorRole,
+    groundingProposal: proposal,
+    selectedEntityId: candidateId,
+  });
 
   const fresh = await deps.proposalRepo.findById(tenantId, proposalId);
   return fresh ?? proposal;
