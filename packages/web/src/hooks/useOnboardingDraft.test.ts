@@ -6,6 +6,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import draftJson from '../components/onboarding/v3/__fixtures__/draft.plumbing-cle.json';
+import columbusJson from '../components/onboarding/v3/__fixtures__/draft.plumbing-cmh.json';
 import { useOnboardingDraft } from './useOnboardingDraft';
 
 const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -388,6 +389,107 @@ describe('useOnboardingDraft', () => {
     expect(result.current.draft?.status).toBe('approved');
     expect(result.current.error).toBeNull();
     expect(result.current.notice).toBeNull();
+  });
+
+  describe('changeMetro', () => {
+    it('PUTs /metro with the version it holds and adopts the re-priced draft', async () => {
+      stubFetch([json(200, { draft: draftJson }), json(200, { draft: columbusJson })]);
+      const { result } = renderHook(() => useOnboardingDraft(null));
+      await waitFor(() => expect(result.current.draft).not.toBeNull());
+
+      let saved: unknown = null;
+      await act(async () => {
+        saved = await result.current.changeMetro('CMH');
+      });
+      expect(saved).toEqual(columbusJson);
+      expect(calls[1]).toMatchObject({ method: 'PUT', path: '/api/onboarding/draft/metro', body: { metro: 'CMH', version: 1 } });
+      expect(result.current.draft).toMatchObject({ metroCode: 'CMH', metroName: 'Columbus', version: 2 });
+      expect(result.current.notice).toBeNull();
+      expect(result.current.error).toBeNull();
+    });
+
+    it.each([
+      ['DRAFT_METRO_LOCKED (a choice was staged in another window)', 'DRAFT_METRO_LOCKED: a choice is already staged, so the city can no longer change here', withDraft({ version: 2, choices: { greeting: { option: 'b' } } })],
+      ['VERSION_CONFLICT', 'VERSION_CONFLICT: expected 1, found 2; re-read the draft', withDraft({ version: 2, clientTimezone: 'America/Chicago' })],
+    ])('on a 409 %s re-reads once, says it refreshed, and never repeats the call', async (_n, message, current) => {
+      stubFetch([json(200, { draft: draftJson }), json(409, { error: 'CONFLICT', message }), json(200, { draft: current })]);
+      const { result } = renderHook(() => useOnboardingDraft(null));
+      await waitFor(() => expect(result.current.draft).not.toBeNull());
+
+      let saved: unknown = 'unset';
+      await act(async () => {
+        saved = await result.current.changeMetro('CMH');
+      });
+      expect(saved).toBeNull();
+      expect(calls.map((c) => `${c.method} ${c.path}`).slice(1)).toEqual(['PUT /api/onboarding/draft/metro', 'GET /api/onboarding/draft']);
+      expect(result.current.draft).toEqual(current);
+      expect(result.current.notice).toBe('Your answers changed somewhere else, so I refreshed them.');
+      expect(result.current.error).toBeNull();
+    });
+
+    it('a 409 whose re-read says the draft was approved elsewhere shows nothing: the shell moves on', async () => {
+      const approved = withDraft({ version: 2, status: 'approved', proposalIds: ['p1', 'p2'], approvedAt: '2026-10-18T10:05:00.000Z' });
+      stubFetch([json(200, { draft: draftJson }), json(409, { error: 'CONFLICT', message: 'DRAFT_APPROVED: the draft is already approved' }), json(200, { draft: approved })]);
+      const { result } = renderHook(() => useOnboardingDraft(null));
+      await waitFor(() => expect(result.current.draft).not.toBeNull());
+      await act(async () => {
+        await result.current.changeMetro('CMH');
+      });
+      expect(result.current.draft?.status).toBe('approved');
+      expect(result.current.notice).toBeNull();
+      expect(result.current.error).toBeNull();
+    });
+
+    it('any other failure is a plain save error and the draft stays as it was', async () => {
+      stubFetch([json(200, { draft: draftJson }), json(500, { error: 'INTERNAL', message: 'boom' })]);
+      const { result } = renderHook(() => useOnboardingDraft(null));
+      await waitFor(() => expect(result.current.draft).not.toBeNull());
+      await act(async () => {
+        await result.current.changeMetro('CMH');
+      });
+      expect(calls).toHaveLength(2);
+      expect(result.current.draft?.metroCode).toBe('CLE');
+      expect(result.current.error).toBe("That didn't go through. Try again.");
+    });
+  });
+
+  describe('the timezone backfill before approval', () => {
+    it('retries a backfill that failed on load before approving, so approval is not refused for a missing zone', async () => {
+      const zoneless = withDraft({ clientTimezone: null });
+      const zoned = withDraft({ clientTimezone: BROWSER_TZ, version: 2 });
+      stubFetch([
+        json(200, { draft: zoneless }),
+        new Error('network down'),
+        json(200, { draft: zoned, created: false }),
+        json(200, { draft: { ...zoned, status: 'approved', version: 3, proposalIds: ['p1', 'p2'] }, proposalIds: ['p1', 'p2'], approvedNow: true }),
+      ]);
+      const { result } = renderHook(() => useOnboardingDraft(null));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.draft?.clientTimezone).toBeNull();
+
+      await act(async () => {
+        await result.current.approve();
+      });
+      expect(calls.map((c) => `${c.method} ${c.path}`).slice(2)).toEqual(['POST /api/onboarding/draft', 'POST /api/onboarding/draft/approve']);
+      expect(calls[2].body).toMatchObject({ packId: 'plumbing', businessName: 'Walsh Plumbing', clientTimezone: BROWSER_TZ });
+      // The approve carries the version the backfill returned.
+      expect(calls[3].body).toEqual({ expectedVersion: 2 });
+      expect(result.current.draft?.status).toBe('approved');
+      expect(result.current.error).toBeNull();
+    });
+
+    it('when the retry fails too, says so in plain words and does not send an approve the API would refuse', async () => {
+      stubFetch([json(200, { draft: withDraft({ clientTimezone: null }) }), new Error('network down'), new Error('still down')]);
+      const { result } = renderHook(() => useOnboardingDraft(null));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      let res: unknown = 'unset';
+      await act(async () => {
+        res = await result.current.approve();
+      });
+      expect(res).toBeNull();
+      expect(calls.map((c) => `${c.method} ${c.path}`).slice(2)).toEqual(['POST /api/onboarding/draft']);
+      expect(result.current.error).toBe("That didn't go through. Try again.");
+    });
   });
 
   it('keeps a draft that has gained ownerPhone parseable, and one that predates the field', async () => {
