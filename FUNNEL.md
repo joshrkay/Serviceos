@@ -57,17 +57,23 @@ four required fields; `tenant_id` comes from the onboarding status (or the draft
 | Event | Where it fires | Trigger | Extra props |
 |---|---|---|---|
 | `v3_ready_viewed` | `ConversationShell.tsx` | the owner first sees the finished shop ("<Business> is already set up"); once per mount | `trade`, `metro` |
+| `v3_metro_changed` | `ConversationShell.tsx` | "Not Cleveland?" on Ready: the owner picked another city and the server re-priced the shop for it (a refused change, because a choice was staged or the draft moved on in another window, does not fire) | `from`, `to` (metro codes), `shows_city` (bool: false when the new city has no prices of its own and the shop uses the national ones) |
 | `v3_turn_viewed` | `ConversationShell.tsx` | one of the seven choice turns first appears; once per choice per mount, so reopening a turn from the read-back does not fire it again | `choice_key` |
 | `v3_choice_made` | `ConversationShell.tsx` | an answer was saved to the draft (the stage call succeeded; a failed or conflicted save does not fire). Fires again when the owner changes an answer from the read-back | `choice_key`, `answer_mode` (`tap` \| `type`), `option` (`a` \| `b` \| `override`), `is_most_shops` (bool) |
 | `v3_keep_rest` | `ConversationShell.tsx` | the owner taps "Keep the rest as is" in a turn's header and skips to the read-back with the typical answers | `answered_count` (0-7) |
 | `v3_readback_viewed` | `ConversationShell.tsx` | the owner first sees the read-back list; once per mount | `trade`, `metro` |
 | `v3_readback_edit` | `ConversationShell.tsx` | the owner taps a read-back row to change that choice | `choice_key` |
 | `v3_approved` | `ConversationShell.tsx` | "That's right" succeeded and this call saved the draft (a repeat tap on an already-saved draft does not fire) | `proposal_count` (2), `trade` |
+| `v3_undo` | `ConversationShell.tsx` (raised by `AfterApproval.tsx`) | "Undo" in the saving window took back the whole approval and the read-back is back, answers kept (a refused or failed undo does not fire) | `proposal_count` (2) |
+| `v3_retry` | `ConversationShell.tsx` (raised by `AfterApproval.tsx`) | "Try again" on "Something didn't save." re-queued the changes that failed (a refused or failed retry does not fire) | `retried_count` (1-2), `undoable` (bool: true when the whole set was retried and a fresh undo window opened) |
+| `v3_reset` | `ConversationShell.tsx` (raised by `AfterApproval.tsx`) | "Start over" returned an approval that could no longer finish as one to the read-back, answers kept (a refused or failed start over does not fire) | none |
 | `v3_trial_viewed` | `AfterApproval.tsx` | the trial turn ("start your free trial") first appears, after the saved choices have gone live; once per mount | none |
 | `v3_trial_started` | `AfterApproval.tsx` (raised by `TrialTurn.tsx`) | the owner taps "Start my free trial", before the payment page is requested, so an attempt that then failed still counts. The server's `plan_selected` counts the checkouts that were actually created | `plan` (`starter` \| `growth`) |
 | `v3_number_viewed` | `AfterApproval.tsx` | the number turn first appears (getting it, asking for it, or showing it); once per mount | none |
 | `v3_number_ready` | `AfterApproval.tsx` | the owner's number is known while they are on the number turn; once per mount. A visit that picks up later in the flow never saw the wait and does not fire it | none |
 | `v3_test_call_viewed` | `AfterApproval.tsx` | the test-call turn ("Now you call me.") first appears; the voice getting ready before it is not counted; once per mount | none |
+| `v3_first_heard` | `hooks/useRivetVoice.ts` (mounted by `ConversationShell.tsx`) | the first of Rivet's lines is heard after the owner taps "Make it mine" or "Looks right as is": the server clip's `playing` event, or the browser voice starting when the clip fell back. Once per mount; a line heard before that tap (the Ready opener) is not counted | `ms_since_make_it_mine` (integer ms from the tap, >= 0; time to first heard), `source` (`server` \| `speech_synthesis`), `gesture` (`make_it_mine` \| `keep_as_is`) |
+| `v3_tts_fallback` | `hooks/useRivetVoice.ts` | a line could not be spoken in the tenant's voice and Rivet fell back: the voice route answered 429, 501 or 502, the request failed, the clip would not play, or the browser refused to play it. Once per turn per mount; the rest of that turn stays on the fallback | `reason` (`rate_limited` \| `not_configured` \| `tts_failed` \| `network` \| `playback` \| `autoplay`), `mode` (`speech_synthesis` \| `silent`: the browser voice, or no voice at all and the heading on screen), `turn` (the choice key, or `ready` \| `readback` \| `trial` \| `number`) |
 
 `choice_key` is one of the seven core setting keys (`greeting`, `trip_fee_and_rate`,
 `booking_posture`, `payment_collection_mode`, `booking_hours`, `emergency_target`,
@@ -90,11 +96,13 @@ button, once per visit; the success is the step being seen to flip to `done`, ne
 by a visit that finds it already done), so the series stays comparable across both shells.
 `v3_number_viewed` to `v3_number_ready` is how long the owner waited for a number;
 `v3_trial_viewed` with no `v3_trial_started` is a trial the owner did not want to start.
-Between `v3_approved` and `v3_trial_viewed` the owner may see "Something didn't save." (a saved
-change failed; Try again re-queues it) or "One of your changes was undone." (it can only be
-finished step by step). Both are screens, not events: a `v3_approved` that never reaches
-`v3_trial_viewed` is the drop-off to read them from, and the step-by-step way out shows up in
-the sidebar shell's `onboarding_step_viewed` series.
+Between `v3_approved` and `v3_trial_viewed` the owner may tap Undo in the five-second saving
+window (`v3_undo`, then a second `v3_approved` when they confirm again), or see "Something didn't
+save." (a saved change failed; Try again re-queues it, `v3_retry`), "Part of your setup was taken
+back." (Start over returns to the read-back, `v3_reset`) or "Part of your setup already went
+through." (finished in Settings). The screens are not events: a `v3_approved` that never reaches
+`v3_trial_viewed` with no `v3_undo`/`v3_reset` after it is the drop-off to read them from, and the
+step-by-step way out shows up in the sidebar shell's `onboarding_step_viewed` series.
 
 ### Generic per-step events (drive abandonment)
 

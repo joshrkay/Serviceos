@@ -242,3 +242,34 @@ describe('P7-026 draft-private-followup — abutting PII survives a single redac
     expect(out).not.toContain('foo@bar.com');
   });
 });
+
+/**
+ * PI-4 review round 1 — the injection rule bans links and money promises,
+ * NOT the make-it-right next steps the specific_complaint guidance asks for.
+ * A blanket "never include ... offers" outranked the guidance's "offer a
+ * callback or return visit" and could drop the point of the message.
+ */
+describe('P7-026 draft-private-followup — PI-4 rule keeps make-it-right next steps', () => {
+  it('a specific_complaint system prompt bans links and discounts but allows a callback or return visit', async () => {
+    const { gateway, calls } = makeMockGateway('Hi Alice, we are sorry.');
+    await draftPrivateFollowUp(
+      {
+        review: makeReview({ rating: 2, commentText: 'The tech left mud on the carpet.' }),
+        classification: 'specific_complaint',
+        brandVoice: NEUTRAL_BRAND_VOICE,
+        matchedCustomer: makeMatched(),
+        channel: 'email',
+      },
+      { llmGateway: gateway },
+    );
+    const system = calls[0].messages.find((m) => m.role === 'system')!.content;
+    const user = calls[0].messages.find((m) => m.role === 'user')!.content;
+    // The guidance still asks for the next steps…
+    expect(user).toMatch(/a callback, a return visit/);
+    // …and nothing in the system prompt forbids "offers" outright.
+    expect(system).not.toMatch(/never include[^.\n]*\boffers\b/i);
+    expect(system).toMatch(/never include web addresses or links/i);
+    expect(system).toMatch(/never promise discounts, coupons, refunds or promotions/i);
+    expect(system).toMatch(/offering a callback or return visit[^.\n]*is fine/i);
+  });
+});
