@@ -46,6 +46,7 @@ const REFUSED_CELL = 'That does not look like a US cell number. Include the 10-d
 interface Server {
   draft: OnboardingDraft | null;
   status: object;
+  streamToken?: number;
   /** Forced outcomes for the next staged choices, in order; after that the stub behaves. */
   stageFaults?: StageFault[];
   /** Forced outcomes for the next creates of the draft, in order; after that the stub behaves. */
@@ -66,7 +67,7 @@ interface Server {
 interface Request {
   method: string;
   path: string;
-  body: { choice?: unknown; version?: number; metro?: string; items?: string[]; text?: string } | undefined;
+  body: { choice?: unknown; version?: number; items?: string[]; text?: string; metro?: string } | undefined;
 }
 
 const TTS_ERRORS = {

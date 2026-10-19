@@ -1,6 +1,4 @@
-import type { OnboardingDraft } from '@ai-service-os/shared';
 import { useRivetCanListen, useRivetLine } from '../../../hooks/useRivetVoice';
-import { Button } from '../../ui';
 import { useState } from 'react';
 import { ONBOARDING_METROS, type OnboardingDraft, type OnboardingMetroCode } from '@ai-service-os/shared';
 import { useRivetLine } from '../../../hooks/useRivetVoice';

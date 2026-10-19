@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { useState } from 'react';
 import { useRivetLine } from '../../../hooks/useRivetVoice';
 import { useApiClient } from '../../../lib/apiClient';
 import { formatPhone } from '../../phone/NumberPicker';
