@@ -161,7 +161,10 @@ class ResetStepError extends Error {
   }
 }
 
-const sleepReal = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const sleepReal = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 /**
  * The drain's predicate: work that could still write for the tenant. Every

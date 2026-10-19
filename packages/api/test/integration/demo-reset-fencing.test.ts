@@ -63,7 +63,9 @@ class RecordingStorage extends DevStorageProvider {
 
 function deferred<T = void>() {
   let resolve!: (v: T) => void;
-  const promise = new Promise<T>((r) => (resolve = r));
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
   return { promise, resolve };
 }
 
@@ -506,7 +508,9 @@ describe('Postgres integration — demo tenant reset and release (S6-4)', () => 
     await pool.query(`UPDATE demo_tenant_leases SET reset_heartbeat_at = now() - interval '30 seconds' WHERE id = $1`, [lease.id]);
     const aged = await pool.query<{ age: number }>(`SELECT extract(epoch FROM now() - reset_heartbeat_at)::float AS age FROM demo_tenant_leases WHERE id = $1`, [lease.id]);
     expect(aged.rows[0].age).toBeGreaterThanOrEqual(29);
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => {
+      setTimeout(r, 250);
+    });
     const renewed = await pool.query<{ age: number }>(`SELECT extract(epoch FROM now() - reset_heartbeat_at)::float AS age FROM demo_tenant_leases WHERE id = $1`, [lease.id]);
     expect(renewed.rows[0].age).toBeLessThan(5);
     expect(await takeOverStaleReset(pool, lease.id)).toBeNull();
@@ -604,7 +608,9 @@ describe('Postgres integration — demo tenant reset and release (S6-4)', () => 
       settled = true;
       return t;
     });
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => {
+      setTimeout(r, 400);
+    });
     expect(settled).toBe(false);
     const waiting = await pool.query(
       `SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%reset_token = gen_random_uuid()%'`,

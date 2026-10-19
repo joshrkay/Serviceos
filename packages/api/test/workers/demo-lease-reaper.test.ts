@@ -39,7 +39,9 @@ function harness(overrides: Partial<DemoLeaseReaperSchedule> = {}) {
     lockKey: LOCK,
     runAsLeader: async (key, work) => {
       leaderRuns.push(key);
-      await new Promise<void>((r) => (release = r));
+      await new Promise<void>((r) => {
+        release = r;
+      });
       await work();
     },
     registerInterval: (h) => h,
@@ -79,7 +81,9 @@ describe('scheduleDemoLeaseReaper', () => {
     tick();
     expect(h.leaderRuns).toEqual([LOCK]);
     h.finish();
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => {
+      setTimeout(r, 0);
+    });
     // Both sweeps read their leases (expired, then stale resets).
     expect(h.queries.some((q) => /state = 'active' AND expires_at <= now\(\)/.test(q))).toBe(true);
     expect(h.queries.some((q) => /state = 'resetting' AND reset_heartbeat_at/.test(q))).toBe(true);
