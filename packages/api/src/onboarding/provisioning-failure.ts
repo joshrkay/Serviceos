@@ -96,12 +96,13 @@ const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\
  * The whole-message pattern of one builder: call it with a placeholder per
  * argument and let each placeholder match any text. Anchored at both ends, so
  * a builder's text embedded in another message (the conflict text quotes a
- * Twilio DELETE failure) is not that builder's text.
+ * Twilio DELETE failure) is not that builder's text. The placeholder is
+ * wrapped in a private-use character (U+E000), which no recorded text holds.
  */
 function patternOf(build: (...args: never[]) => string): RegExp {
-  const slots = Array.from({ length: build.length }, (_, i) => `\u0000${i}\u0000`);
+  const slots = Array.from({ length: build.length }, (_, i) => `\uE000${i}\uE000`);
   const sample = (build as (...args: string[]) => string)(...slots);
-  const literalParts = sample.split(/\u0000\d+\u0000/);
+  const literalParts = sample.split(/\uE000\d+\uE000/);
   return new RegExp(`^${literalParts.map(escapeRegExp).join('[\\s\\S]*?')}$`);
 }
 
