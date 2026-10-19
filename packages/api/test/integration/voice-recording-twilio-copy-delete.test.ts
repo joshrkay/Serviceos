@@ -225,6 +225,45 @@ describe('PRIV-2 — the Twilio copy of a call recording', () => {
     expect(await copyDeletedEvents(tenant.tenantId, id)).toHaveLength(1);
   });
 
+  it('two recordings of one call (live leg + patch-through voicemail, both to /recording) keep two stored objects', async () => {
+    // Review round 1: with one key per call the second PUT overwrote the
+    // first object while both Twilio copies were deleted — the first
+    // recording then existed nowhere.
+    const callSid = `CA${hex()}`;
+    const live = newRecording();
+    const voicemail = newRecording();
+    twilioAnswers.set(live.resource, [204]);
+    twilioAnswers.set(voicemail.resource, [204]);
+    const app = webhookApp(tenant, callSid);
+
+    for (const rec of [live, voicemail]) {
+      const res = await deliverRecording(app, {
+        CallSid: callSid,
+        RecordingSid: rec.recordingSid,
+        RecordingUrl: rec.recordingUrl,
+        RecordingDuration: '42',
+      });
+      expect(res.status).toBe(200);
+    }
+
+    const { rows } = await pool.query(
+      `SELECT vr.recording_url, vr.twilio_deleted_at, f.s3_key
+         FROM voice_recordings vr JOIN files f ON f.id = vr.file_id AND f.tenant_id = vr.tenant_id
+        WHERE vr.tenant_id = $1 AND vr.call_sid = $2
+        ORDER BY f.s3_key`,
+      [tenant.tenantId, callSid],
+    );
+    const byUrl = new Map(rows.map((r) => [String(r.recording_url), r]));
+    expect(rows).toHaveLength(2);
+    expect(byUrl.get(live.recordingUrl)?.s3_key).toBe(`${tenant.tenantId}/${callSid}-${live.recordingSid}.mp3`);
+    expect(byUrl.get(voicemail.recordingUrl)?.s3_key).toBe(
+      `${tenant.tenantId}/${callSid}-${voicemail.recordingSid}.mp3`,
+    );
+    for (const r of rows) expect(r.twilio_deleted_at).toBeInstanceOf(Date);
+    expect(deletesOf(live.resource)).toHaveLength(1);
+    expect(deletesOf(voicemail.resource)).toHaveLength(1);
+  });
+
   it('a delete that fails at ingest is recorded, and the sweep retries it after the grace window', async () => {
     const callSid = `CA${hex()}`;
     const rec = newRecording();
@@ -381,6 +420,59 @@ describe('PRIV-2 — the Twilio copy of a call recording', () => {
     expect((await recordingRow(tenant.tenantId, control.voiceRecordingId)).twilio_deleted_at).toBeInstanceOf(Date);
     expect(deletesOf(held.rec.resource)).toHaveLength(0);
     expect((await recordingRow(tenant.tenantId, held.voiceRecordingId)).twilio_deleted_at).toBeNull();
+  });
+
+  // PRIV-2, review round 2 — before per-recording keys, two /recording
+  // deliveries on one call were both stored at `<tenant>/<callSid>.mp3`: the
+  // second PUT overwrote the first, so for these legacy rows the first
+  // recording's ONLY copy is at Twilio. The retry phase must leave both alone
+  // until the horizon (or a card-number) purge deliberately deletes the audio.
+  it('legacy recordings of one call that share a stored object keep their Twilio copies until a purge; a lone one of the same age loses it', async () => {
+    async function seedLegacy(callSid: string, storageKey: string) {
+      const rec = newRecording();
+      twilioAnswers.set(rec.resource, [204]);
+      const { voiceRecordingId } = await recordInboundCall(pool, {
+        tenantId: tenant.tenantId,
+        callSid,
+        recordingUrl: rec.recordingUrl,
+        durationSeconds: 30,
+        storageBucket: BUCKET,
+        storageKey,
+        sizeBytes: 1024,
+      });
+      // SQL fixture: recorded 30 days ago, before PRIV-2 (time passing).
+      await pool.query(
+        `UPDATE voice_recordings SET created_at = now() - interval '30 days'
+          WHERE tenant_id = $1 AND id = $2`,
+        [tenant.tenantId, voiceRecordingId],
+      );
+      return { rec, voiceRecordingId };
+    }
+    const sharedCall = `CA${hex()}`;
+    const sharedKey = `${tenant.tenantId}/${sharedCall}.mp3`;
+    const first = await seedLegacy(sharedCall, sharedKey);
+    const second = await seedLegacy(sharedCall, sharedKey);
+    const loneCall = `CA${hex()}`;
+    const lone = await seedLegacy(loneCall, `${tenant.tenantId}/${loneCall}.mp3`);
+
+    await sweep();
+
+    // Positive control: the same sweep deletes a lone legacy copy of the same age.
+    expect(deletesOf(lone.rec.resource)).toHaveLength(1);
+    expect(deletesOf(first.rec.resource)).toHaveLength(0);
+    expect(deletesOf(second.rec.resource)).toHaveLength(0);
+    expect((await recordingRow(tenant.tenantId, first.voiceRecordingId)).twilio_deleted_at).toBeNull();
+    expect((await recordingRow(tenant.tenantId, second.voiceRecordingId)).twilio_deleted_at).toBeNull();
+
+    // Once a purge has deliberately deleted a row's audio (here the horizon
+    // tombstone), its Twilio copy is fair game for the retry phase.
+    await pool.query(
+      `UPDATE voice_recordings SET purged_at = now() WHERE tenant_id = $1 AND id = $2`,
+      [tenant.tenantId, first.voiceRecordingId],
+    );
+    await sweep();
+    expect(deletesOf(first.rec.resource)).toHaveLength(1);
+    expect(deletesOf(second.rec.resource)).toHaveLength(0);
   });
 
   it('the stamp is tenant-scoped: another tenant cannot mark this recording\'s copy deleted', async () => {

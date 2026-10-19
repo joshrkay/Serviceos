@@ -374,7 +374,7 @@ describe('U9 voicemail-status route', () => {
 
     // S3 upload used the voicemail-specific key (never the call-recording
     // key, which the live leg's <Start><Record> owns on the same CallSid).
-    const key = buildVoicemailStorageKey(TENANT_ID, 'CA-vm-1');
+    const key = buildVoicemailStorageKey(TENANT_ID, 'CA-vm-1', 'RE-vm-1');
     expect(key).toContain('-voicemail');
     expect(h.storage.uploadKeys).toEqual([key]);
     expect(h.storage.lastUploadBucket).toBe(STORAGE_BUCKET);
@@ -509,8 +509,8 @@ describe('U9 voicemail-status route', () => {
     expect(h.persistedEvents).toHaveLength(1);
     expect(h.persistedEvents[0].inserted).toBe(true);
     // Distinct S3 objects too — the voicemail key never clobbers the call leg's.
-    expect(h.storage.uploadKeys).toContain(buildVoicemailStorageKey(TENANT_ID, 'CA-vm-1'));
-    expect(h.storage.uploadKeys).toContain(`${TENANT_ID}/CA-vm-1.mp3`);
+    expect(h.storage.uploadKeys).toContain(buildVoicemailStorageKey(TENANT_ID, 'CA-vm-1', 'RE-vm-1'));
+    expect(h.storage.uploadKeys).toContain(`${TENANT_ID}/CA-vm-1-RE-live-1.mp3`);
   });
 
   it('cross-leg collision, voicemail FIRST: the later /recording callback still inserts the call-leg row', async () => {
@@ -691,5 +691,50 @@ describe('PRIV-2 — the voicemail\'s Twilio copy is deleted only after the whol
     expect(twilioCopyRemover).toHaveBeenCalledWith(
       expect.objectContaining({ voiceRecordingId: h.pool.voiceRows[0].id, recordingUrl: FINAL_PARAMS.RecordingUrl }),
     );
+  });
+});
+
+// PRIV-2, review round 2 — the voicemail <Record> has no action, so Twilio
+// re-requests the after-hours TwiML and the caller can leave a SECOND message
+// on the same CallSid. With one storage key per call the second PUT
+// overwrote the first message's audio, and deleting each Twilio copy then
+// destroyed message 1 everywhere. Each recording gets its own key.
+describe('PRIV-2 (review round 2) — two voicemails on one call keep both messages', () => {
+  it('stores each RecordingSid under its own key, and puts each before deleting its Twilio copy', async () => {
+    const order: string[] = [];
+    const uploadObject = vi.fn(async (url: string) => {
+      order.push(`put ${new URL(url).pathname}`);
+    });
+    const twilioCopyRemover = vi.fn(async (args: { recordingUrl: string }) => {
+      order.push(`delete ${args.recordingUrl.split('/').pop()}`);
+      return true;
+    });
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1', uploadObject, twilioCopyRemover });
+
+    const first = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    const second = await signedVoicemailRequest(
+      h.app,
+      {
+        ...FINAL_PARAMS,
+        RecordingSid: 'RE-vm-2',
+        RecordingUrl: 'https://api.twilio.com/2010-04-01/Recordings/RE-vm-2',
+      },
+      CALLER_QUERY,
+    );
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(h.storage.uploadKeys).toEqual([
+      `${TENANT_ID}/CA-vm-1-RE-vm-1-voicemail.mp3`,
+      `${TENANT_ID}/CA-vm-1-RE-vm-2-voicemail.mp3`,
+    ]);
+    expect(h.pool.voiceRows).toHaveLength(2);
+    expect(h.pool.fileRows.map((f) => f.s3_key)).toEqual(h.storage.uploadKeys);
+    expect(order).toEqual([
+      `put /${STORAGE_BUCKET}/${TENANT_ID}/CA-vm-1-RE-vm-1-voicemail.mp3`,
+      'delete RE-vm-1',
+      `put /${STORAGE_BUCKET}/${TENANT_ID}/CA-vm-1-RE-vm-2-voicemail.mp3`,
+      'delete RE-vm-2',
+    ]);
   });
 });

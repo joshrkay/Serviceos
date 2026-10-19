@@ -300,6 +300,12 @@ export interface RecordingRetentionRepository extends TwilioCopyStateStore {
    * gone (tombstoned ones included), created before `now - grace`, not on
    * legal hold, and not attempted since `now - backoff`; never-attempted
    * rows first, then oldest first.
+   *
+   * Excluded while its audio has not been purged: a row whose stored object
+   * is shared with another recording of the same call. Before per-recording
+   * storage keys, a call's second recording overwrote the first at one key,
+   * so the first recording's only copy is at Twilio; it waits for the
+   * horizon (or card-number) purge, which deletes the audio deliberately.
    */
   findTwilioCopiesDue(now: Date, limit: number): Promise<TwilioCopyDue[]>;
 }
@@ -376,6 +382,7 @@ export class PgRecordingRetentionRepository
       const { rows } = await client.query(
         `SELECT vr.id, vr.tenant_id, vr.call_sid, vr.recording_url, vr.created_at
            FROM voice_recordings vr
+           LEFT JOIN files f ON f.id = vr.file_id
           WHERE vr.twilio_deleted_at IS NULL
             AND vr.recording_url IS NOT NULL
             AND vr.legal_hold = false
@@ -383,6 +390,19 @@ export class PgRecordingRetentionRepository
             AND (vr.twilio_delete_attempted_at IS NULL
                  OR vr.twilio_delete_attempted_at <
                     $1::timestamptz - make_interval(secs => $3::double precision / 1000))
+            -- A legacy per-call storage key shared with another recording of
+            -- the call: Twilio may hold this recording's only copy.
+            AND (vr.purged_at IS NOT NULL
+                 OR vr.audio_purged_at IS NOT NULL
+                 OR NOT EXISTS (
+                   SELECT 1
+                     FROM voice_recordings vr2
+                     JOIN files f2 ON f2.id = vr2.file_id
+                    WHERE vr2.tenant_id = vr.tenant_id
+                      AND vr2.call_sid = vr.call_sid
+                      AND vr2.id <> vr.id
+                      AND f2.s3_bucket = f.s3_bucket
+                      AND f2.s3_key = f.s3_key))
           ORDER BY vr.twilio_delete_attempted_at ASC NULLS FIRST, vr.created_at ASC
           LIMIT $4`,
         [now, TWILIO_COPY_RETRY_GRACE_MS, TWILIO_COPY_RETRY_BACKOFF_MS, limit],
@@ -955,7 +975,8 @@ export class InMemoryRecordingRetentionRepository
           !r.legalHold &&
           r.createdAt.getTime() < t - TWILIO_COPY_RETRY_GRACE_MS &&
           (!r.twilioDeleteAttemptedAt ||
-            r.twilioDeleteAttemptedAt.getTime() < t - TWILIO_COPY_RETRY_BACKOFF_MS),
+            r.twilioDeleteAttemptedAt.getTime() < t - TWILIO_COPY_RETRY_BACKOFF_MS) &&
+          (Boolean(r.purgedAt) || Boolean(r.audioPurgedAt) || !this.sharesStoredObject(r)),
       )
       .sort(
         (a, b) =>
@@ -971,6 +992,19 @@ export class InMemoryRecordingRetentionRepository
         recordingUrl: r.recordingUrl!,
         createdAt: r.createdAt,
       }));
+  }
+
+  /** Another recording of the same call is stored at this row's key (legacy per-call keys). */
+  private sharesStoredObject(r: (typeof this.rows)[number]): boolean {
+    if (!r.callSid || !r.storageBucket || !r.storageKey) return false;
+    return this.rows.some(
+      (o) =>
+        o.id !== r.id &&
+        o.tenantId === r.tenantId &&
+        o.callSid === r.callSid &&
+        o.storageBucket === r.storageBucket &&
+        o.storageKey === r.storageKey,
+    );
   }
 
   async markTwilioCopyDeleted(tenantId: string, id: string, deletedAt: Date): Promise<boolean> {

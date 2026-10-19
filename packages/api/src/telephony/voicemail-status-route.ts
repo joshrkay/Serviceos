@@ -82,13 +82,19 @@ const logger = createLogger({
 
 /**
  * Storage key for a voicemail recording. DELIBERATELY distinct from
- * `buildRecordingStorageKey` (`<tenant>/<callSid>.mp3`): the dial-result
+ * `buildRecordingStorageKey` (`<tenant>/<callSid>-<recordingSid>.mp3`): the dial-result
  * voicemail path runs on a call whose live leg may itself be recorded via
  * `<Start><Record>` → /recording, and both objects share one CallSid — a
  * shared key would have the voicemail bytes overwrite the call recording.
+ *
+ * Per RECORDING, not per call (PRIV-2, review round 2): the voicemail
+ * `<Record>` has no action, so Twilio re-requests the after-hours TwiML and a
+ * caller can leave a second message on the same CallSid. A per-call key had
+ * the second PUT overwrite the first message, and once each Twilio copy is
+ * deleted after storage, message 1 existed nowhere.
  */
-export function buildVoicemailStorageKey(tenantId: string, callSid: string): string {
-  return `${tenantId}/${callSid}-voicemail.mp3`;
+export function buildVoicemailStorageKey(tenantId: string, callSid: string, recordingSid: string): string {
+  return `${tenantId}/${callSid}-${recordingSid}-voicemail.mp3`;
 }
 
 /**
@@ -465,7 +471,7 @@ export function createVoicemailStatusRouter(
       const durationRaw = body.RecordingDuration ?? '0';
       const parsedDuration = Number.parseInt(durationRaw, 10);
       const durationSeconds = Number.isFinite(parsedDuration) ? parsedDuration : 0;
-      const storageKey = buildVoicemailStorageKey(tenantId, callSid);
+      const storageKey = buildVoicemailStorageKey(tenantId, callSid, recordingSid);
       const contentType = 'audio/mpeg';
 
       // 1. Authenticated fetch of the recording bytes from Twilio — the

@@ -783,7 +783,7 @@ describe('POST /api/telephony/recording (P8-014 record_call)', () => {
       .send(params);
 
     expect(res.status).toBe(200);
-    expect(uploadedKey).toBe(`${TENANT_UUID}/CA-route-rec.mp3`);
+    expect(uploadedKey).toBe(`${TENANT_UUID}/CA-route-rec-RE-route.mp3`);
   });
 
   it('returns 403 for an unsigned recording webhook delivery', async () => {

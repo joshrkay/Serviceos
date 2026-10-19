@@ -39,6 +39,7 @@ function row(
   id: string,
   opts: Partial<{
     tenantId: string;
+    callSid: string;
     createdAt: Date;
     retentionDays: number;
     legalHold: boolean;
@@ -55,7 +56,7 @@ function row(
   return {
     id,
     tenantId: opts.tenantId ?? 't1',
-    callSid: `CA-${id}`,
+    callSid: opts.callSid ?? `CA-${id}`,
     storageBucket: opts.storageBucket === undefined ? 'bkt' : opts.storageBucket,
     storageKey: opts.storageKey === undefined ? `t1/${id}.mp3` : opts.storageKey,
     createdAt: opts.createdAt ?? ageDays(400),
@@ -984,6 +985,50 @@ describe('PRIV-2 — the Twilio-hosted copy of each recording', () => {
       ['legacy-tombstoned', 'retry'],
       ['failed-ingest', 'retry'],
     ]);
+  });
+
+  // Review round 2 — before per-recording keys, two recordings of one call
+  // were stored at one key and the second PUT overwrote the first; the first
+  // recording's only copy is at Twilio. The retry phase leaves such rows
+  // alone until a purge deliberately deletes their audio.
+  it('the retry phase keeps the Twilio copies of legacy rows of one call that share a stored object until a purge', async () => {
+    const shared = { callSid: 'CA-shared', storageKey: 't1/CA-shared.mp3', createdAt: ageDays(30) };
+    const repo = new InMemoryRecordingRetentionRepository([
+      row('shared-a', { ...shared, recordingUrl: twilioUrl('1') }),
+      row('shared-b', { ...shared, recordingUrl: twilioUrl('2') }),
+      row('shared-tombstoned', {
+        ...shared,
+        storageKey: 't1/CA-shared-2.mp3',
+        callSid: 'CA-shared-2',
+        purgedAt: ageDays(1),
+        recordingUrl: twilioUrl('3'),
+      }),
+      row('shared-tombstoned-twin', {
+        ...shared,
+        storageKey: 't1/CA-shared-2.mp3',
+        callSid: 'CA-shared-2',
+        recordingUrl: twilioUrl('4'),
+      }),
+      // Positive control: a lone legacy row of the same age.
+      row('lone', { createdAt: ageDays(30), recordingUrl: twilioUrl('5') }),
+    ]);
+    const twilioRecordingDeleter = deleterThat();
+
+    await runRecordingRetentionSweep({
+      repo,
+      storage: { deleteObject: vi.fn(async () => undefined) } as unknown as StorageProvider,
+      twilioRecordingDeleter,
+      logger: noopLogger,
+      now: () => NOW,
+    });
+
+    expect(twilioRecordingDeleter.deleteRecording.mock.calls.map((c) => c[0]).sort()).toEqual(
+      [twilioUrl('3'), twilioUrl('5')].sort(),
+    );
+    const byId = (id: string) => repo.rows.find((r) => r.id === id)!;
+    for (const id of ['shared-a', 'shared-b', 'shared-tombstoned-twin']) {
+      expect(byId(id).twilioDeletedAt).toBeNull();
+    }
   });
 
   it('a re-run is idempotent: no second delete, no second audit', async () => {
