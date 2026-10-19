@@ -70,14 +70,17 @@ function harness(opts: { session?: VoiceSession; queue?: boolean } = {}) {
   const repo = new InMemoryCallTranscriptTurnRepository();
   const auditRepo = new InMemoryAuditRepository();
   const send = vi.fn(async () => 'msg-1');
+  // PRIV-3 — the recording flag for a call whose transcript carries a card number.
+  const markCardNumberDetected = vi.fn(async () => undefined);
   const hook = createRecordingTranscriptHook({
     store,
     callTranscriptTurnRepo: repo,
+    voiceRepo: { markCardNumberDetected },
     auditRepo,
     ...(opts.queue === false ? {} : { queue: { send } }),
     logger,
   });
-  return { hook, store, repo, auditRepo, send };
+  return { hook, store, repo, auditRepo, send, markCardNumberDetected };
 }
 
 async function seedLeg(
@@ -376,5 +379,62 @@ describe('createRecordingTranscriptHook (U8)', () => {
     const { hook, send } = harness({ session: fakeSession({ transcript: ['agent: hi'] }) });
     send.mockRejectedValueOnce(new Error('queue down'));
     await expect(hook(event())).resolves.toBeUndefined();
+  });
+
+  // PRIV-3 — a card number recited on the call reached the transcript as the
+  // `[card number]` marker (callerTranscriptText). The audio still holds the
+  // digits, so the recording is flagged for the prompt audio purge.
+  it('PRIV-3: flags the recording when a persisted caller turn carries the card-number marker', async () => {
+    const { hook, repo, markCardNumberDetected } = harness();
+    await seedLeg(repo, SESSION_1, [
+      ['agent', 'you owe $120'],
+      ['caller', 'can I just pay now, my card is [card number] expires 09/27'],
+    ]);
+
+    await hook(event());
+
+    expect(markCardNumberDetected).toHaveBeenCalledTimes(1);
+    expect(markCardNumberDetected).toHaveBeenCalledWith(TENANT, RECORDING_1);
+  });
+
+  it('PRIV-3: flags the recording from the in-memory session when nothing was persisted', async () => {
+    const session = fakeSession({ transcript: ['agent: hi', 'caller: it is [card number]'] });
+    const { hook, markCardNumberDetected } = harness({ session });
+
+    await hook(event());
+
+    expect(markCardNumberDetected).toHaveBeenCalledWith(TENANT, RECORDING_1);
+  });
+
+  it('PRIV-3: a call with no card number is never flagged', async () => {
+    const { hook, repo, markCardNumberDetected } = harness();
+    await seedLeg(repo, SESSION_1, [
+      ['agent', 'hi'],
+      ['caller', 'call me back on 602 555 0199, the gate code is 4821'],
+    ]);
+
+    await hook(event());
+
+    expect(markCardNumberDetected).not.toHaveBeenCalled();
+  });
+
+  it('PRIV-3: a failing flag write is logged and never blocks the ingestion enqueue', async () => {
+    const { hook, repo, send, markCardNumberDetected } = harness();
+    markCardNumberDetected.mockRejectedValueOnce(new Error('db down'));
+    const errorLog = vi.spyOn(logger, 'error');
+    await seedLeg(repo, SESSION_1, [['caller', 'my card is [card number]']]);
+
+    await expect(hook(event())).resolves.toBeUndefined();
+
+    // The flag write was attempted (and failed) ...
+    expect(markCardNumberDetected).toHaveBeenCalledTimes(1);
+    // ... the failure is logged so the missed flag is visible ...
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining('flag write failed'),
+      expect.objectContaining({ tenantId: TENANT, voiceRecordingId: RECORDING_1, error: 'db down' }),
+    );
+    // ... and the ingestion enqueue still ran.
+    expect(send).toHaveBeenCalledTimes(1);
+    errorLog.mockRestore();
   });
 });

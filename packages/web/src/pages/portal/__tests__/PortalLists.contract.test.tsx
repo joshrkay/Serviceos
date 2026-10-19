@@ -1,5 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react';
-import { describe, it, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PortalInvoiceList } from '../PortalInvoiceList';
 import { PortalEstimateList } from '../PortalEstimateList';
 import { PortalAgreementList } from '../PortalAgreementList';
@@ -24,10 +24,17 @@ describe('Portal list pages — no-raw-palette class contract', () => {
         id: 'inv-1', invoiceNumber: 'INV-2000', status: 'open', totalCents: 10000,
         amountPaidCents: 0, amountDueCents: 10000, issuedAt: ISO, dueDate: null,
         createdAt: ISO, payNowUrl: 'https://checkout.stripe.com/pay/plink_1',
+        collectOnSite: false,
+      }, {
+        // S5a-2 — the "Pay in person" label is held to the same contract.
+        id: 'inv-2', invoiceNumber: 'INV-2001', status: 'open', totalCents: 5000,
+        amountPaidCents: 0, amountDueCents: 5000, issuedAt: ISO, dueDate: null,
+        createdAt: ISO, payNowUrl: null, collectOnSite: true,
       }],
     });
     const { container } = render(<PortalInvoiceList token="tok-1" />);
     await waitFor(() => screen.getByText('INV-2000'));
+    expect(screen.getByText('Pay in person')).toBeInTheDocument();
     expectNoRawPalette(container.innerHTML);
   });
 

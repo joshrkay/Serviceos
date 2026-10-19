@@ -7731,6 +7731,26 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS owner_phone TEXT
         CHECK (owner_phone IS NULL OR owner_phone ~ '^[+][1-9][0-9]{7,14}$');
   `,
+
+  // PRIV-3 — a caller recited a card number on this recording. The stored
+  // transcript only ever carries the `[card number]` marker
+  // (callerTranscriptText / sanitizeTranscript), but the audio still holds
+  // the digits. `pci_detected` is set by the recording webhook's transcript
+  // hook (or the transcription worker for a voicemail) when the marker is
+  // seen; the retention sweep then deletes the stored audio promptly, long
+  // before the tenant's horizon, and stamps `audio_purged_at`. The row, the
+  // scrubbed transcript and the horizon tombstone (`purged_at`) are kept.
+  // The partial index serves the sweep's due-query. RLS rides the existing
+  // voice_recordings policy (migration 007). Additive and idempotent.
+  '314_voice_recordings_card_number_detected': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS pci_detected BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS audio_purged_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_card_number_audio_due
+      ON voice_recordings (created_at)
+      WHERE pci_detected AND audio_purged_at IS NULL AND purged_at IS NULL AND legal_hold = false;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
