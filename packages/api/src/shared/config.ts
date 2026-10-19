@@ -643,6 +643,27 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     );
   }
 
+  // LCR-05 — a live call's session lives in the memory of the process that
+  // answered it (VoiceSessionStore is a per-process Map; Redis only mirrors its
+  // events). With more than one replica the media-stream upgrade and every
+  // /gather turn are separate requests the load balancer may hand to a replica
+  // without that session: the stream upgrade is refused (403) and a Gather
+  // turn starts the call over. So REDIS_URL alone must not unlock a scale-out
+  // of any process that answers calls: every role but worker mounts the
+  // telephony routes and the stream upgrade (app.ts), whatever
+  // TELEPHONY_ENABLED says (that flag only stops outbound SMS). Unset
+  // PROCESS_ROLE is 'all'.
+  const processRole = env.PROCESS_ROLE ?? 'all';
+  if (Number.isFinite(numReplicas) && numReplicas > 1 && processRole !== 'worker') {
+    missing.push(
+      `NUM_REPLICAS=${numReplicas} on PROCESS_ROLE=${processRole} is not supported: this ` +
+        'process answers phone calls, and a call stays in the memory of the replica that ' +
+        'took it, so a second replica drops calls at the stream connect or on the next ' +
+        'turn. Run one replica of every process that answers calls (only PROCESS_ROLE=worker ' +
+        'may scale out) until call state is shared across replicas'
+    );
+  }
+
   // T4-F06 — TENANT_ENCRYPTION_KEY/TRANSCRIPT_ENCRYPTION_KEY are load-bearing
   // for tenant credential (integrations/credentials.ts, calendar-integration.ts,
   // accounting/token-crypto.ts, workers/provision-twilio.ts) and transcript-at-

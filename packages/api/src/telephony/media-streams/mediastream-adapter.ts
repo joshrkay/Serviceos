@@ -717,6 +717,14 @@ interface RuntimeState {
    */
   turnRealAudioComplete: boolean;
   /**
+   * LCR-01 — the CURRENT turn's stream failed and the buffered recovery could
+   * not produce playable audio either (it threw, stalled on every attempt, or
+   * returned nothing playable), so the caller heard at most a filler. Reset
+   * per turn by `emitSideEffects`, which then moves the call to Gather (Twilio
+   * `<Say>` does not depend on this voice vendor) instead of leaving it mute.
+   */
+  turnTtsUnavailable: boolean;
+  /**
    * Consent ordering — real (non-filler) PCM bytes enqueued for the CURRENT
    * turn. Reset per turn by `emitSideEffects` and snapshotted into
    * {@link disclosureAudioBytes} for the disclosure turn, so the lost-ack
@@ -887,6 +895,17 @@ interface RuntimeState {
    * phone. The Gather path owns finalization from this point.
    */
   degradedToGather: boolean;
+  /**
+   * LCR-05 — the close that arrived while a degrade redirect was still in
+   * flight. Twilio ends the stream (`stop` / socket close) as soon as it applies
+   * the redirect, usually before the REST response lands; settling that close
+   * at once would stamp a terminal outcome on a call that is continuing on the
+   * Gather leg. It is held here and settled once the redirect result is known
+   * (accepted → no outcome stamp; refused → the ordinary close). Same shape as
+   * the hand-off `delivering` deferral.
+   */
+  degradeInFlight: boolean;
+  degradeDeferredCloseReason: string | null;
   /**
    * UB-C1 — set once the first FINAL transcript has been through the
    * one-shot language-detection trigger, so utterance #2+ can only
@@ -1167,6 +1186,7 @@ export class TwilioMediaStreamAdapter {
       earlyFillerTurnId: null,
       earlyFillerFirstAudioObserved: false,
       turnRealAudioComplete: false,
+      turnTtsUnavailable: false,
       turnAudioBytes: 0,
       disclosureAudioBytes: 0,
       awaitingDisclosureTurn: false,
@@ -1193,6 +1213,8 @@ export class TwilioMediaStreamAdapter {
       languageSwitchCount: 0,
       deepgramGeneration: 0,
       degradedToGather: false,
+      degradeInFlight: false,
+      degradeDeferredCloseReason: null,
       firstFinalLanguageChecked: false,
       circuitRecorded: false,
       consecutiveSpeechTurnFailures: 0,
@@ -1536,10 +1558,11 @@ export class TwilioMediaStreamAdapter {
             // stream died part-way or closed prematurely without a final chunk,
             // recovery fell back to a generic filler clip or dead air, or the
             // buffered synth returned non-PCM. A partial notice is not a
-            // disclosure — FAIL CLOSED (hang up), mirroring the
-            // initializeSession-threw branch below. `disclosureValidated` stays
-            // false, so no mark acked during the async audit/close below can
-            // open capture behind us.
+            // disclosure — FAIL CLOSED (never capture; move the call to Gather,
+            // which reads the notice, or hang up when that is refused),
+            // mirroring the initializeSession-threw branch below.
+            // `disclosureValidated` stays false, so no mark acked during the
+            // async audit/redirect/close below can open capture behind us.
             await this.failDisclosureClosed(callSid, session, 'disclosure_incomplete_playback');
             return;
           }
@@ -1592,15 +1615,16 @@ export class TwilioMediaStreamAdapter {
         // time (handleClose) and only on a clean/caller-driven end reason; a
         // transport-failure close votes failure instead.
       } catch (err) {
-        logger.warn('mediastream: initializeSession threw — hanging up (undisclosed)', {
+        logger.warn('mediastream: initializeSession threw — leaving the stream (undisclosed)', {
           error: err instanceof Error ? err.message : String(err),
           callSid,
         });
         // DISCLOSURE_INIT_FAILED — the caller was never given the recording-
         // consent disclosure and the session is unledgered. Capturing/recording
-        // an undisclosed caller is a compliance violation, so we HANG UP rather
-        // than continue (captureEnabled stays false so handleMedia drops any
-        // frames).
+        // an undisclosed caller is a compliance violation, so this leg never
+        // captures (captureEnabled stays false so handleMedia drops any
+        // frames): the call moves to Gather, which reads the notice first, or
+        // is hung up when that redirect is refused (LCR-01).
         await this.failDisclosureClosed(callSid, session, 'disclosure_init_threw', err);
         return;
       }
@@ -1634,13 +1658,21 @@ export class TwilioMediaStreamAdapter {
   }
 
   /**
-   * DISCLOSURE_INIT_FAILED — hang up an undisclosed leg. Recording/capturing a
-   * caller who never heard the recording notice is a compliance violation, so
-   * `captureEnabled` stays false (handleMedia drops frames) and the WS is
-   * closed 1011. WS3 — still trip the realtime health circuit and emit the
-   * alertable audit event so repeated disclosure failures are countable and
-   * steer subsequent calls to Gather. Shared by the init-threw and the
+   * DISCLOSURE_INIT_FAILED — never capture an undisclosed leg. Recording/
+   * capturing a caller who never heard the recording notice is a compliance
+   * violation, so `captureEnabled` stays false (handleMedia drops frames).
+   * WS3 — trip the realtime health circuit and emit the alertable audit event
+   * so repeated disclosure failures are countable and steer subsequent calls
+   * to Gather. Shared by the init-threw and the
    * disclosure-TTS-produced-no-playback paths.
+   *
+   * LCR-01 — then move THIS call to Gather rather than hang up, exactly like
+   * the Deepgram-open failure. Establishment latched `recordingDisclosed` when
+   * it queued the greeting, but the caller never heard it in full, so the
+   * latch is cleared first: the gather-fallback TwiML then speaks the notice
+   * in its own `<Say>` before `<Gather>` listens. Only when the redirect is
+   * refused (or no redirector is wired) is the leg closed 1011, which ends
+   * the call as before.
    */
   private async failDisclosureClosed(
     callSid: string,
@@ -1657,11 +1689,15 @@ export class TwilioMediaStreamAdapter {
         : {}),
     });
     this.recordCircuitOutcomeOnce('failure', 'disclosure_init_failed');
+    // Cleared before the first await so nothing reads the stale latch while
+    // the audit write is in flight.
+    session.recordingDisclosed = false;
     await this.emitRealtimeResilienceAudit('voice.disclosure.init_failed', {
       callSid,
       tenantId: session.tenantId,
       reason: 'disclosure_init_failed',
     });
+    if (await this.attemptDegradeToGather('disclosure_init_failed')) return;
     this.closeWs(1011, 'disclosure_init_failed');
   }
 
@@ -1789,6 +1825,7 @@ export class TwilioMediaStreamAdapter {
       this.deps.setPendingTransferTwiml(session.id, undeliveredHandoff);
     }
     let redirected = false;
+    this.state.degradeInFlight = true;
     try {
       redirected =
         (await restRedirect({
@@ -1797,7 +1834,15 @@ export class TwilioMediaStreamAdapter {
         })) === true;
     } catch {
       redirected = false;
+    } finally {
+      this.state.degradeInFlight = false;
     }
+    // LCR-05 — set before anything else awaits: a close from here on must see
+    // the call as continuing on Gather, not as ended.
+    if (redirected) this.state.degradedToGather = true;
+    const closedDuringRedirect = this.state.degradeDeferredCloseReason;
+    this.state.degradeDeferredCloseReason = null;
+    if (closedDuringRedirect !== null) this.settleCloseOutcome(closedDuringRedirect);
     if (!redirected) {
       if (claimedHandoff) {
         // The degrade failed but the call is still on the stream: give the
@@ -1819,9 +1864,9 @@ export class TwilioMediaStreamAdapter {
       });
     }
     // The session stays LIVE — the caller continues on the Gather leg, which
-    // owns finalization from here. handleClose reads this flag and skips
-    // finalizeOnClose (a terminal outcome stamped now would be mid-call).
-    this.state.degradedToGather = true;
+    // owns finalization from here. handleClose reads `degradedToGather` (set
+    // above, as soon as the redirect was accepted) and skips finalizeOnClose
+    // (a terminal outcome stamped now would be mid-call).
     this.closeWs(1000, 'degraded_to_gather');
     // OBS — fire-and-forget after the degrade has actually happened; never
     // alters the redirect/close behavior above.
@@ -1831,6 +1876,101 @@ export class TwilioMediaStreamAdapter {
       callSid,
       tenantId: this.state.tenantId,
     });
+    return true;
+  }
+
+  /**
+   * LCR-01 — a turn's stream AND its buffered recovery both failed: the voice
+   * vendor is down for this call, and every further reply would be filler or
+   * silence. Vote the realtime circuit (so new calls go to Gather while it is
+   * open), then move THIS call to Gather, whose `<Say>` does not depend on the
+   * vendor. Returns `true` when the redirect was accepted.
+   *
+   * Stands down (returns `false`, behaviour unchanged) when:
+   *   - the disclosure turn is open — `failDisclosureClosed` owns that case and
+   *     clears the `recordingDisclosed` latch before ITS redirect; degrading
+   *     here would land on Gather with the latch still set and skip the notice;
+   *   - the conversation is already ending (this batch ends the session, the
+   *     FSM terminated, an E1 close is pending, the session ended, or the
+   *     max-duration wrap-up started): there is nothing to continue on Gather,
+   *     and its repair prompt would reopen a finished call.
+   */
+  private async degradeAfterTtsUnavailable(
+    sideEffects: ReadonlyArray<SideEffect>,
+  ): Promise<boolean> {
+    if (this.state.awaitingDisclosureTurn) return false;
+    const session = this.state.session;
+    const callSid = this.state.callSid;
+    if (!session || !callSid || this.state.closed) return false;
+    this.recordCircuitOutcomeOnce('failure', 'tts_unavailable');
+    if (
+      sideEffects.some((fx) => fx.type === 'end_session') ||
+      session.ended ||
+      this.lifeSafetyPending(session) ||
+      this.state.maxCallDurationWrapUp !== 'idle'
+    ) {
+      return false;
+    }
+    logger.warn('mediastream: TTS unavailable for this turn — moving the call to Gather', {
+      callSid,
+      tenantId: session.tenantId,
+    });
+    await this.emitRealtimeResilienceAudit('voice.realtime.session_failed', {
+      callSid,
+      tenantId: session.tenantId,
+      reason: 'tts_unavailable',
+    });
+    return this.attemptDegradeToGather('tts_unavailable');
+  }
+
+  /**
+   * LCR-05 — shutdown hand-off (see live-realtime-calls.ts). This process is
+   * going away and the call's session lives only in its memory, so the call is
+   * moved to the Gather fallback through the same degrade as any terminal
+   * realtime failure; that request reaches the next process, which starts the
+   * call over as a fresh disclosed session.
+   *
+   * On an accepted redirect this leg's session is marked ended WITHOUT a
+   * terminal outcome: the call continues elsewhere (no outcome stamp, no
+   * dropped-call text), and an ended session stops counting as live, so the
+   * shutdown drain does not wait out its window and raise the abandonment
+   * alarm for a call that was handed over. The `degraded_to_gather` audit
+   * event (reason `deploy_shutdown`) records the hand-off. A refused or
+   * timed-out redirect leaves the session live (the drain waits for it as
+   * before). Never throws.
+   *
+   * Stands down (returns `false`; the drain waits for the leg, which ends on
+   * its own within the bounded playout wait) when the call is already ending
+   * or being handed off — the new process knows neither, so a redirect would
+   * restart it with a fresh greeting:
+   *   - a hand-off is pending or in flight (`handoff` not 'none', or a
+   *     transfer is held): its `<Dial>` lives in this process's memory, and
+   *     once delivered the call no longer depends on this process;
+   *   - the conversation is ending: an `end_session` awaiting playout (a
+   *     goodbye, the 911 script), the FSM terminated or an E1 latched or
+   *     still running, the session ended, or the max-duration wrap-up began.
+   */
+  async handOffForShutdown(): Promise<boolean> {
+    if (this.state.closed || !this.state.callSid) return false;
+    const session = this.state.session;
+    if (
+      this.state.handoff !== 'none' ||
+      this.state.handoffTwiml !== null ||
+      this.state.pendingFinalizeEffects.length > 0 ||
+      this.state.e1TurnsInFlight > 0 ||
+      this.state.maxCallDurationWrapUp !== 'idle' ||
+      (session !== null && (session.ended || this.lifeSafetyPending(session)))
+    ) {
+      return false;
+    }
+    let handedOff: boolean;
+    try {
+      handedOff = await this.attemptDegradeToGather('deploy_shutdown');
+    } catch {
+      handedOff = false;
+    }
+    if (!handedOff) return false;
+    if (this.state.session) this.state.session.ended = true;
     return true;
   }
 
@@ -2727,6 +2867,9 @@ export class TwilioMediaStreamAdapter {
     // pause inside the reply, not a wait: no filler there ("…due May 20th.
     // One moment. Anything else…").
     let replyStarted = false;
+    // LCR-01 — set once a dead turn moved this call to Gather: the rest of the
+    // batch's lines would only be sent to a closing stream.
+    let movedToGather = false;
     for (const fx of sideEffects) {
       if (fx.type === 'emit_quality_event' && this.state.session) {
         const eventType = String((fx.payload as { eventType?: string }).eventType ?? '');
@@ -2755,6 +2898,7 @@ export class TwilioMediaStreamAdapter {
         continue;
       }
       if (fx.type !== 'tts_play') continue;
+      if (movedToGather) continue;
       const rawText = typeof fx.payload.text === 'string' ? fx.payload.text : '';
       if (!rawText) continue;
       // UB-C2 — render template keys + the fixed-sentence es catalog with
@@ -2791,6 +2935,7 @@ export class TwilioMediaStreamAdapter {
       if (holdBargeIn) this.state.bargeInHoldFromTurnId = turnId;
       // Consent ordering — scope the completion flag + byte count to THIS turn.
       this.state.turnRealAudioComplete = false;
+      this.state.turnTtsUnavailable = false;
       this.state.turnAudioBytes = 0;
       try {
         // runTurnWithFiller returns the final turnId — it may have been
@@ -2819,6 +2964,9 @@ export class TwilioMediaStreamAdapter {
         // post-runTurnWithFiller value, which a preempted filler may have
         // bumped) so the mark handler can recognise that ack and only that one.
         this.state.disclosureTurnId = turnId;
+      }
+      if (this.state.turnTtsUnavailable && (await this.degradeAfterTtsUnavailable(sideEffects))) {
+        movedToGather = true;
       }
     }
     // PR #975 F3 — this turn's TTS has finished streaming. If the max-duration
@@ -3184,6 +3332,15 @@ export class TwilioMediaStreamAdapter {
               break;
             }
           }
+          // LCR-01 — a stream the vendor closed before its final frame (a
+          // close frame or a dropped connection with no error message first)
+          // ends the loop cleanly. While this turn still owns the floor that
+          // is a stream failure, not a finished line: hand it to the same
+          // recovery as a thrown one. A barge-in or a newer turn took the
+          // floor and stays a clean end.
+          if (!sawFinalChunk && turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
+            throw new Error('TTS stream ended before its final frame');
+          }
           // Consent ordering — complete ONLY when the provider explicitly
           // signalled the end of the utterance AND real audio actually
           // streamed. A clean-but-premature close (no isFinal) or an
@@ -3215,7 +3372,8 @@ export class TwilioMediaStreamAdapter {
           if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
             if (fillerTimer) clearTimeout(fillerTimer);
             cancelActiveFiller();
-            await this.recoverTurnAfterStreamFailure(ttsProvider, text, lang, turnId);
+            const recovered = await this.recoverTurnAfterStreamFailure(ttsProvider, text, lang, turnId);
+            if (!recovered) this.state.turnTtsUnavailable = true;
             // OBS — fired after the recovery attempt (buffered synth /
             // filler / dead-air-avoided) has already run; never alters it.
             recordVoiceError({
@@ -3274,24 +3432,6 @@ export class TwilioMediaStreamAdapter {
   }
 
   /**
-   * VOX-35b — recover a voice turn whose streaming TTS failed mid-flight
-   * (WS error, or a VOX-33 inactivity stall). Preference order, all bounded:
-   *
-   *  1. Buffered REST `synthesize()` — but ONLY stream it when the result is
-   *     raw PCM (same guard the non-streaming branch uses). ElevenLabs REST
-   *     returns mp3, which streamPcmAsMedia would emit as inaudible static —
-   *     worse than silence — so a non-PCM result is dropped, not played.
-   *  2. A short filler/apology clip from the cache, so the caller hears an
-   *     acknowledgement rather than dead air while the turn ends cleanly.
-   *
-   * If neither is available we still return normally: the throw is now
-   * caught, so `agentSpeaking` resets in the caller's finally and the call
-   * proceeds to listen again — never the 30-minute idle hang.
-   *
-   * All writes are re-guarded on turn ownership because `synthesize()` can
-   * take time and the caller may barge in during the fallback.
-   */
-  /**
    * #1331 — buffered `synthesize()` with a per-attempt deadline and ONE fast
    * retry. Each attempt gets its own AbortSignal (providers that honor it
    * cancel the stalled request); the race against the timer bounds the wait
@@ -3315,7 +3455,13 @@ export class TwilioMediaStreamAdapter {
           reject(err);
         }, attemptMs);
       });
-      const synth = ttsProvider.synthesize({ ...input, signal: controller.signal });
+      // LCR-01 — the media path plays raw PCM only, so every buffered synth
+      // here asks for it (ElevenLabs REST otherwise answers with mp3).
+      const synth = ttsProvider.synthesize({
+        ...input,
+        outputFormat: 'pcm_16000',
+        signal: controller.signal,
+      });
       try {
         return await Promise.race([synth, timedOut]);
       } catch (err) {
@@ -3335,12 +3481,37 @@ export class TwilioMediaStreamAdapter {
     throw lastErr ?? new Error('TTS synth abandoned: call closed');
   }
 
+  /**
+   * VOX-35b — recover a voice turn whose streaming TTS failed mid-flight
+   * (WS error, or a VOX-33 inactivity stall). Preference order, all bounded:
+   *
+   *  1. Buffered REST `synthesize()`, asked for raw PCM (LCR-01; see
+   *     synthesizeBounded) — and ONLY streamed when the result really is raw
+   *     PCM (same guard the non-streaming branch uses). A provider that
+   *     ignores the request returns compressed audio, which streamPcmAsMedia
+   *     would emit as inaudible static — worse than silence — so a non-PCM
+   *     result is dropped, not played.
+   *  2. A short filler/apology clip from the cache, so the caller hears an
+   *     acknowledgement rather than dead air while the turn ends cleanly.
+   *
+   * If neither is available we still return normally (with `false`): the
+   * throw is now caught, so `agentSpeaking` resets in the caller's finally —
+   * never the 30-minute idle hang.
+   *
+   * All writes are re-guarded on turn ownership because `synthesize()` can
+   * take time and the caller may barge in during the fallback.
+   *
+   * Returns `true` when the buffered synth produced playable PCM (played, or
+   * dropped only because the caller barged in), `false` when it failed or
+   * returned nothing playable — the vendor is down for this turn, and the
+   * caller (`emitSideEffects`) moves the call to Gather (LCR-01).
+   */
   private async recoverTurnAfterStreamFailure(
     ttsProvider: TtsProvider,
     text: string,
     lang: SessionLanguage,
     turnId: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     let result: Awaited<ReturnType<TtsProvider['synthesize']>> | null = null;
     try {
       result = await this.synthesizeBounded(ttsProvider, {
@@ -3355,24 +3526,30 @@ export class TwilioMediaStreamAdapter {
       });
     }
 
+    const playable =
+      result !== null && isRawPcmContentType(result.contentType) && result.audio.length > 0;
     if (
       result &&
-      isRawPcmContentType(result.contentType) &&
+      playable &&
       turnId === this.state.outboundTurnId &&
       this.state.agentSpeaking
     ) {
       await this.streamPcmAsMedia(result.audio, turnId);
       // Consent ordering — recovery re-synthesized and streamed the WHOLE
       // turn text, so the caller heard the complete real TTS (after a hiccup).
-      // A zero-length buffer emits no media frames, so it is silence rather
-      // than a played turn. The filler fallback below never sets this at all.
-      if (result.audio.length > 0) this.state.turnRealAudioComplete = true;
+      // A zero-length buffer is not `playable` (it emits no media frames, so
+      // it is silence rather than a played turn). The filler fallback below
+      // never sets this at all.
+      this.state.turnRealAudioComplete = true;
       // T2-F05 — recovery still played a full agent turn, so a silent caller
       // after it must still get the bounded reprompt (handleMessage ignores
       // the per-chunk turn-* marks for arming).
       this.armSilenceOnTurnEnd(turnId);
-      return;
+      return true;
     }
+    // The caller barged in while the recovery synthesized: the vendor works,
+    // this turn simply lost the floor.
+    if (playable) return true;
     if (result && !isRawPcmContentType(result.contentType)) {
       logger.warn(
         'mediastream: buffered TTS fallback returned non-PCM audio, cannot stream — trying filler',
@@ -3396,13 +3573,14 @@ export class TwilioMediaStreamAdapter {
         // T2-F05 — the apology filler is the last thing the caller hears on
         // this turn; arm so their silence after it still reprompts/escalates.
         this.armSilenceOnTurnEnd(turnId);
-        return;
+        return false;
       }
     }
 
     logger.warn('mediastream: TTS turn ended without audio after stream failure', {
       callSid: this.state.callSid,
     });
+    return false;
   }
 
   /**
@@ -4295,6 +4473,9 @@ export class TwilioMediaStreamAdapter {
     // caller hang-up that would pre-empt /dial-result's 'transferred'.
     if (this.state.handoff === 'delivering') {
       this.state.handoffDeferredCloseReason = reason;
+    } else if (this.state.degradeInFlight) {
+      // LCR-05 — settled by attemptDegradeToGather once the redirect result is in.
+      this.state.degradeDeferredCloseReason = reason;
     } else {
       // Twilio ending the stream after a delivered hand-off is the hand-off
       // taking effect, not the caller hanging up.

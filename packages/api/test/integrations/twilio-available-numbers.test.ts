@@ -2,7 +2,17 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   searchAvailableNumbers,
   purchasePhoneNumber,
+  buildPhoneNumberWebhooks,
+  getPhoneNumberWebhooks,
+  setPhoneNumberVoiceFallback,
+  VOICE_FALLBACK_PATH,
 } from '../../src/integrations/twilio/provisioning';
+
+const WEBHOOKS = {
+  voiceUrl: 'https://example.com/voice',
+  voiceFallbackUrl: 'https://example.com/voice/fallback',
+  statusCallbackUrl: 'https://example.com/status',
+};
 
 type MockResponse = { ok?: boolean; status?: number; body: unknown };
 
@@ -91,13 +101,7 @@ describe('purchasePhoneNumber (reuses searchAvailableNumbers)', () => {
       { body: { sid: 'PN123', phone_number: '+12145550001' } },
     );
 
-    const purchased = await purchasePhoneNumber(
-      'ACsub',
-      'token',
-      'TX',
-      'https://example.com/voice',
-      'https://example.com/status',
-    );
+    const purchased = await purchasePhoneNumber('ACsub', 'token', 'TX', WEBHOOKS);
 
     expect(purchased).toEqual({ sid: 'PN123', phoneNumber: '+12145550001' });
     expect(String(fetchFn.mock.calls[0][0])).toContain('AreaCode=214');
@@ -114,14 +118,7 @@ describe('purchasePhoneNumber with a preferred (claimed) number', () => {
       { body: { sid: 'PN999', phone_number: '+15125559999' } },
     );
 
-    const purchased = await purchasePhoneNumber(
-      'ACsub',
-      'token',
-      null,
-      'https://example.com/voice',
-      'https://example.com/status',
-      '+15125559999',
-    );
+    const purchased = await purchasePhoneNumber('ACsub', 'token', null, WEBHOOKS, '+15125559999');
 
     expect(purchased).toEqual({ sid: 'PN999', phoneNumber: '+15125559999' });
     expect(fetchFn).toHaveBeenCalledTimes(1);
@@ -133,7 +130,67 @@ describe('purchasePhoneNumber with a preferred (claimed) number', () => {
   it('propagates a purchase failure when the chosen number was taken', async () => {
     mockFetch({ ok: false, status: 400, body: { message: 'unavailable' } });
     await expect(
-      purchasePhoneNumber('ACsub', 'token', null, 'v', 's', '+15125559999'),
+      purchasePhoneNumber('ACsub', 'token', null, WEBHOOKS, '+15125559999'),
     ).rejects.toThrow(/400/);
+  });
+});
+
+/**
+ * LCR-04 — Twilio does not retry a 5xx voice webhook: with no
+ * `VoiceFallbackUrl` on the number, a failed /voice (or a credential-lookup
+ * 500 during a database brownout) plays Twilio's generic error and drops the
+ * call. Every purchase now carries the fallback, pointed at the static
+ * voicemail route, and the backfill helpers below bring existing numbers up.
+ */
+describe('VoiceFallbackUrl at purchase (LCR-04)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('buildPhoneNumberWebhooks derives the three URLs from one voice base', () => {
+    expect(buildPhoneNumberWebhooks('https://voice.example.com/', 'tenant-1')).toEqual({
+      voiceUrl: 'https://voice.example.com/api/telephony/voice',
+      voiceFallbackUrl: `https://voice.example.com${VOICE_FALLBACK_PATH}`,
+      statusCallbackUrl: 'https://voice.example.com/webhooks/twilio/status/tenant-1',
+    });
+    expect(VOICE_FALLBACK_PATH).toBe('/api/telephony/voice/fallback');
+  });
+
+  it('the purchase sends VoiceFallbackUrl with VoiceFallbackMethod=POST next to VoiceUrl', async () => {
+    const fetchFn = mockFetch({ body: { sid: 'PN1', phone_number: '+15125550001' } });
+    await purchasePhoneNumber('ACsub', 'token', null, WEBHOOKS, '+15125550001');
+    const [, init] = fetchFn.mock.calls[0];
+    const params = new URLSearchParams(String((init as RequestInit).body));
+    expect(params.get('VoiceUrl')).toBe('https://example.com/voice');
+    expect(params.get('VoiceFallbackUrl')).toBe('https://example.com/voice/fallback');
+    expect(params.get('VoiceFallbackMethod')).toBe('POST');
+    expect(params.get('StatusCallback')).toBe('https://example.com/status');
+  });
+
+  it('getPhoneNumberWebhooks reads the number\'s current voice URLs', async () => {
+    const fetchFn = mockFetch({
+      body: {
+        sid: 'PN1',
+        voice_url: 'https://example.com/voice',
+        voice_fallback_url: null,
+        voice_fallback_method: 'POST',
+      },
+    });
+    const got = await getPhoneNumberWebhooks('ACsub', 'token', 'PN1');
+    expect(got).toEqual({ voiceUrl: 'https://example.com/voice', voiceFallbackUrl: null, voiceFallbackMethod: 'POST' });
+    expect(String(fetchFn.mock.calls[0][0])).toBe(
+      'https://api.twilio.com/2010-04-01/Accounts/ACsub/IncomingPhoneNumbers/PN1.json',
+    );
+  });
+
+  it('setPhoneNumberVoiceFallback posts VoiceFallbackUrl + VoiceFallbackMethod=POST to the number', async () => {
+    const fetchFn = mockFetch({ body: { sid: 'PN1' } });
+    await setPhoneNumberVoiceFallback('ACsub', 'token', 'PN1', 'https://example.com/voice/fallback');
+    const [url, init] = fetchFn.mock.calls[0];
+    expect(String(url)).toBe('https://api.twilio.com/2010-04-01/Accounts/ACsub/IncomingPhoneNumbers/PN1.json');
+    expect((init as RequestInit).method).toBe('POST');
+    const params = new URLSearchParams(String((init as RequestInit).body));
+    expect(params.get('VoiceFallbackUrl')).toBe('https://example.com/voice/fallback');
+    expect(params.get('VoiceFallbackMethod')).toBe('POST');
+    // Only the fallback is touched: a backfill must not rewrite VoiceUrl.
+    expect(params.has('VoiceUrl')).toBe(false);
   });
 });

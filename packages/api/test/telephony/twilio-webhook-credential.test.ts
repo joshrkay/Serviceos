@@ -407,3 +407,135 @@ describe('createSubaccountCredentialView (#1084)', () => {
     });
   });
 });
+
+/**
+ * LCR-04 — the signature layer must survive a short database brownout. Every
+ * telephony webhook is signature-checked first, and the check looks the
+ * credential up in tenant_integrations; a throw there answered 500 before any
+ * route ran, so no route-level voicemail could help. The resolver now keeps the
+ * last successful lookup per key and uses it ONLY when the lookup throws.
+ */
+describe('createTwilioWebhookCredentialResolver — brownout cache (LCR-04)', () => {
+  /** A pool whose lookups succeed until `down` is set. */
+  function flakyPool() {
+    const state = { down: false };
+    const { pool: inner } = stubPool(ROWS);
+    const pool = {
+      connect: async () => {
+        if (state.down) throw new Error('timeout exceeded when trying to connect');
+        return (inner as unknown as { connect: () => Promise<unknown> }).connect();
+      },
+    } as unknown as Pool;
+    return { pool, state };
+  }
+
+  it('a DID verified before the outage keeps verifying with the same tenant credential while the lookup throws', async () => {
+    const { pool, state } = flakyPool();
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });
+    expect(await resolve({ accountSid: B_SUBACCOUNT, to: B_DID })).toMatchObject({ outcome: 'verify', authToken: B_TOKEN });
+
+    state.down = true;
+    expect(await resolve({ accountSid: B_SUBACCOUNT, to: B_DID })).toEqual({
+      outcome: 'verify',
+      authToken: B_TOKEN,
+      path: 'tenant_integration',
+      tenantId: B_TENANT,
+    });
+    // The binding still holds on cached data: a foreign AccountSid is refused.
+    expect(await resolve({ accountSid: A_SUBACCOUNT, to: B_DID })).toMatchObject({ outcome: 'refuse' });
+  });
+
+  it('the cache is a fallback only: a successful lookup always wins over a cached row', async () => {
+    const rows = [...ROWS];
+    const { pool } = stubPool(rows);
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });
+    await resolve({ to: B_DID });
+    rows[1] = tenantRow(B_TENANT, B_SUBACCOUNT, 'rotated-token');
+    expect(await resolve({ to: B_DID })).toMatchObject({ authToken: 'rotated-token' });
+  });
+
+  it('a DID never seen before the outage still fails closed', async () => {
+    const { pool, state } = flakyPool();
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });
+    await resolve({ to: A_DID });
+    state.down = true;
+    expect(await resolve({ to: B_DID })).toMatchObject({ outcome: 'misconfigured', reason: 'credential_lookup_failed' });
+  });
+
+  it('a cached entry older than the TTL is not used', async () => {
+    let now = 1_000_000;
+    const { pool, state } = flakyPool();
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv, now: () => now, cacheTtlMs: 60_000 });
+    await resolve({ to: B_DID });
+    state.down = true;
+    now += 60_001;
+    expect(await resolve({ to: B_DID })).toMatchObject({ outcome: 'misconfigured', reason: 'credential_lookup_failed' });
+  });
+
+  it('a DID lookup also primes the tenant key, so a live call\'s first mid-call callback survives the outage', async () => {
+    // /voice resolves by DID; the call's /gather and /dial-result resolve by
+    // the session's tenant. A brownout between the two must not fail closed.
+    const { pool, state } = flakyPool();
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });
+    await resolve({ accountSid: B_SUBACCOUNT, to: B_DID });
+    state.down = true;
+    expect(await resolve({ tenantId: B_TENANT, accountSid: B_SUBACCOUNT })).toEqual({
+      outcome: 'verify',
+      authToken: B_TOKEN,
+      path: 'tenant_integration',
+      tenantId: B_TENANT,
+    });
+  });
+
+  /**
+   * Pool exhaustion: a checkout WAITS (until connectionTimeoutMillis) rather
+   * than throwing, so a cache read only on the throw came seconds too late.
+   */
+  function exhaustiblePool(checkoutTimeoutMs: number) {
+    const state = { exhausted: false };
+    const { pool: inner } = stubPool(ROWS);
+    const pool = {
+      connect: () => {
+        if (!state.exhausted) return (inner as unknown as { connect: () => Promise<unknown> }).connect();
+        return new Promise((_resolve, reject) => {
+          setTimeout(() => reject(new Error('timeout exceeded when trying to connect')), checkoutTimeoutMs);
+        });
+      },
+    } as unknown as Pool;
+    return { pool, state };
+  }
+
+  it('a lookup still waiting for a connection is answered from the cache within the lookup bound', async () => {
+    const { pool, state } = exhaustiblePool(2_000);
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv, lookupTimeoutMs: 50 });
+    await resolve({ accountSid: B_SUBACCOUNT, to: B_DID });
+    state.exhausted = true;
+    const started = Date.now();
+    expect(await resolve({ accountSid: B_SUBACCOUNT, to: B_DID })).toEqual({
+      outcome: 'verify',
+      authToken: B_TOKEN,
+      path: 'tenant_integration',
+      tenantId: B_TENANT,
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('with nothing cached, a waiting lookup is awaited and still fails closed when it times out', async () => {
+    const { pool, state } = exhaustiblePool(150);
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv, lookupTimeoutMs: 20 });
+    state.exhausted = true;
+    const started = Date.now();
+    expect(await resolve({ to: B_DID })).toMatchObject({ outcome: 'misconfigured', reason: 'credential_lookup_failed' });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(140);
+  });
+
+  it('covers the tenant-keyed (session) and subaccount-keyed lookups too', async () => {
+    const { pool, state } = flakyPool();
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });
+    await resolve({ tenantId: A_TENANT, accountSid: A_SUBACCOUNT });
+    await resolve({ accountSid: B_SUBACCOUNT });
+    state.down = true;
+    expect(await resolve({ tenantId: A_TENANT, accountSid: A_SUBACCOUNT })).toMatchObject({ outcome: 'verify', authToken: A_TOKEN });
+    expect(await resolve({ accountSid: B_SUBACCOUNT })).toMatchObject({ outcome: 'verify', authToken: B_TOKEN, path: 'subaccount_lookup' });
+  });
+});
