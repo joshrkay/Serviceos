@@ -14,9 +14,10 @@
  * maintenance. It is the runtime complement to the static schema.test.ts guard
  * and to the fixture-based RV-003 leak suite (tenant-isolation.leak.test.ts).
  *
- * The two documented, backstopped exemptions (oauth_states,
- * platform_deprovision_log — see schema.ts migrations 218/219) are asserted to
- * be EXACTLY those two, so the exemption set can never silently grow at runtime.
+ * The documented, backstopped exemptions (oauth_states,
+ * platform_deprovision_log — see schema.ts migrations 218/219 — and the three
+ * U7 demo-call platform tables of migration 314) are asserted to be EXACTLY
+ * those, so the exemption set can never silently grow at runtime.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { Pool } from 'pg';
@@ -28,6 +29,13 @@ import { getSharedTestDb, closeSharedTestDb } from './shared';
 const RLS_EXEMPT_TABLES = new Set<string>([
   'oauth_states',
   'platform_deprovision_log',
+  // U7 demo call (migration 314): tenant_id only names the demo tenant a
+  // lease, a running job or a signup handoff holds; the reaper, the reset
+  // and the queue front door read them with no tenant context. The runtime
+  // role is revoked on them (219 and 314's own guarded REVOKE).
+  'demo_tenant_leases',
+  'demo_inflight_jobs',
+  'signup_handoffs',
 ]);
 
 interface TableRls {
@@ -72,7 +80,7 @@ describe('RLS FORCE — runtime catalog property (every tenant_id table)', () =>
     expect(tenantTables.length).toBeGreaterThan(80);
   });
 
-  it('every tenant_id table (except the two documented exemptions) has RLS ENABLED and FORCED at runtime', () => {
+  it('every tenant_id table (except the documented exemptions) has RLS ENABLED and FORCED at runtime', () => {
     const offenders = tenantTables
       .filter((t) => !RLS_EXEMPT_TABLES.has(t.table))
       .filter((t) => !t.rowsecurity || !t.forced)
@@ -86,12 +94,12 @@ describe('RLS FORCE — runtime catalog property (every tenant_id table)', () =>
     ).toEqual([]);
   });
 
-  it('the runtime exemption set is EXACTLY the two documented tables (never silently grows)', () => {
+  it('the runtime exemption set is EXACTLY the documented tables (never silently grows)', () => {
     const runtimeExempt = tenantTables
       .filter((t) => !t.forced)
       .map((t) => t.table)
       .sort();
-    // Any tenant_id table that is not forced at runtime must be one of the two
+    // Any tenant_id table that is not forced at runtime must be one of the
     // known, documented exemptions — nothing else.
     expect(runtimeExempt).toEqual([...RLS_EXEMPT_TABLES].sort());
   });
