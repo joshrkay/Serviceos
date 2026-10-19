@@ -1871,9 +1871,31 @@ export class TwilioMediaStreamAdapter {
    * event (reason `deploy_shutdown`) records the hand-off. A refused or
    * timed-out redirect leaves the session live (the drain waits for it as
    * before). Never throws.
+   *
+   * Stands down (returns `false`; the drain waits for the leg, which ends on
+   * its own within the bounded playout wait) when the call is already ending
+   * or being handed off — the new process knows neither, so a redirect would
+   * restart it with a fresh greeting:
+   *   - a hand-off is pending or in flight (`handoff` not 'none', or a
+   *     transfer is held): its `<Dial>` lives in this process's memory, and
+   *     once delivered the call no longer depends on this process;
+   *   - the conversation is ending: an `end_session` awaiting playout (a
+   *     goodbye, the 911 script), the FSM terminated or an E1 latched or
+   *     still running, the session ended, or the max-duration wrap-up began.
    */
   async handOffForShutdown(): Promise<boolean> {
     if (this.state.closed || !this.state.callSid) return false;
+    const session = this.state.session;
+    if (
+      this.state.handoff !== 'none' ||
+      this.state.handoffTwiml !== null ||
+      this.state.pendingFinalizeEffects.length > 0 ||
+      this.state.e1TurnsInFlight > 0 ||
+      this.state.maxCallDurationWrapUp !== 'idle' ||
+      (session !== null && (session.ended || this.lifeSafetyPending(session)))
+    ) {
+      return false;
+    }
     let handedOff: boolean;
     try {
       handedOff = await this.attemptDegradeToGather('deploy_shutdown');

@@ -43,7 +43,10 @@ import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice
 import type {
   StreamingSession,
   StreamingTranscriptionProvider,
+  StreamingTranscriptCallback,
 } from '../../../src/voice/transcription-providers';
+import type { VoiceSession } from '../../../src/ai/agents/customer-calling/voice-session-store';
+import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 
 class FakeWs implements WsLike {
@@ -233,6 +236,158 @@ describe('LCR-05 — handOffAll moves every live realtime call to the Gather fal
   it('with no live realtime calls it does nothing', async () => {
     const liveCalls = createLiveRealtimeCalls();
     expect(await liveCalls.handOffAll({ timeoutMs: 50 })).toEqual({ attempted: 0, handedOff: 0 });
+  });
+});
+
+/**
+ * A live leg that runs one caller turn: `speechTurn` decides what the agent
+ * says, the TTS plays it (Twilio never acks the marks here, so the line is
+ * still "playing" for `handoffPlayoutMaxWaitMs`), and an optional parked
+ * transfer is handed off after the line, as the FSM's escalation does.
+ */
+async function turnLeg(
+  liveCalls: ReturnType<typeof createLiveRealtimeCalls>,
+  callSid: string,
+  opts: {
+    speechTurn: (args: { session: VoiceSession }) => Promise<SideEffect[]> | SideEffect[];
+    parkedTransfer?: string;
+  },
+) {
+  const session = store.create('tenant-lcr05', 'telephony', { callSid });
+  session.recordingDisclosed = true;
+  const ws = new FakeWs();
+  let emit: StreamingTranscriptCallback | null = null;
+  const sttSession: StreamingSession = { send: vi.fn(), finish: vi.fn(), destroy: vi.fn() };
+  const streamingProvider: StreamingTranscriptionProvider = {
+    openSession: vi.fn((cb: StreamingTranscriptCallback) => {
+      emit = cb;
+      return Promise.resolve(sttSession);
+    }),
+  };
+  const synthesize = vi.fn(async () => ({
+    audio: Buffer.alloc(640 * 30),
+    contentType: 'audio/pcm',
+    provider: 'test',
+  }));
+  const restRedirect = vi.fn(
+    async (_args: { callSid: string; accountSid?: string; twiml?: string }): Promise<boolean> => true,
+  );
+  // The turn parks the transfer (as the FSM's notify_oncall does), not the call's start.
+  let parked: string | undefined;
+  const finalizeOnClose = vi.fn();
+  const adapter = new TwilioMediaStreamAdapter(
+    {
+      store,
+      streamingProvider,
+      ttsProvider: { synthesize },
+      speechTurn: async ({ session: s }) => {
+        const effects = await opts.speechTurn({ session: s });
+        if (opts.parkedTransfer) parked = opts.parkedTransfer;
+        return effects;
+      },
+      initializeSession: async () => [],
+      finalizeOnClose,
+      restRedirect,
+      auditRepo,
+      handoffPlayoutMaxWaitMs: 300,
+      takePendingTransferTwiml: () => {
+        const t = parked;
+        parked = undefined;
+        return t;
+      },
+      setPendingTransferTwiml: (_id: string, twiml: string) => {
+        parked = twiml;
+      },
+    },
+    ws,
+  );
+  adapter.start();
+  const forget = liveCalls.add(adapter);
+  ws.on('close', forget);
+  ws.inboundJson(START_FRAME(callSid, `MZ-${callSid}`));
+  await vi.waitFor(() => expect(emit).not.toBeNull());
+  const say = (transcript: string) =>
+    emit!({ type: 'final', isFinal: true, transcript, confidence: 0.95 });
+  // A bare redirect (no inline TwiML) is the move to the Gather fallback.
+  const gatherRedirects = () => restRedirect.mock.calls.filter((c) => c[0].twiml === undefined);
+  return { session, ws, say, synthesize, restRedirect, gatherRedirects, finalizeOnClose };
+}
+
+describe('LCR-05 — a call that is ending or being handed off is left to finish, not restarted', () => {
+  const DIAL = '<Response><Dial><Number>+15125550101</Number></Dial></Response>';
+
+  it('a hand-off waiting for "let me connect you" to play: no redirect; its <Dial> is delivered after the line', async () => {
+    const liveCalls = createLiveRealtimeCalls();
+    const leg = await turnLeg(liveCalls, 'CA-handoff', {
+      speechTurn: () => [{ type: 'tts_play', payload: { text: 'Let me connect you with a team member.' } }],
+      parkedTransfer: DIAL,
+    });
+    leg.say('can I talk to a person');
+    await vi.waitFor(() => expect(leg.synthesize).toHaveBeenCalled());
+    await flush();
+
+    const result = await liveCalls.handOffAll({ timeoutMs: 1_000 });
+
+    expect(result).toEqual({ attempted: 1, handedOff: 0 });
+    expect(leg.gatherRedirects()).toHaveLength(0);
+    // The drain window lets the hand-off deliver its transfer over REST.
+    await vi.waitFor(() => expect(leg.restRedirect).toHaveBeenCalledTimes(1));
+    expect(leg.restRedirect.mock.calls[0][0].twiml).toBe(DIAL);
+  });
+
+  it('an E1 911 script still playing: no redirect, and the leg closes stamped life_safety_e1', async () => {
+    const liveCalls = createLiveRealtimeCalls();
+    const e1: SideEffect[] = [
+      { type: 'tts_play', payload: { text: 'Please hang up and call 911 right away.' } },
+      { type: 'end_session', payload: { reason: 'life_safety_e1' } },
+    ];
+    const leg = await turnLeg(liveCalls, 'CA-e1', { speechTurn: () => e1 });
+    leg.say('I smell gas in the basement');
+    await vi.waitFor(() => expect(leg.synthesize).toHaveBeenCalled());
+    await flush();
+
+    const result = await liveCalls.handOffAll({ timeoutMs: 1_000 });
+
+    expect(result).toEqual({ attempted: 1, handedOff: 0 });
+    await vi.waitFor(() => expect(leg.ws.closed).toBe(true));
+    expect(leg.restRedirect).not.toHaveBeenCalled();
+    expect(leg.finalizeOnClose).toHaveBeenCalledTimes(1);
+    expect(leg.finalizeOnClose.mock.calls[0][2]).toEqual(
+      expect.arrayContaining([expect.objectContaining({ payload: { reason: 'life_safety_e1' } })]),
+    );
+  });
+
+  it('a goodbye still playing (end_session pending): no redirect, the call ends as it was going to', async () => {
+    const liveCalls = createLiveRealtimeCalls();
+    const leg = await turnLeg(liveCalls, 'CA-bye', {
+      speechTurn: () => [
+        { type: 'tts_play', payload: { text: 'Thanks for calling, goodbye.' } },
+        { type: 'end_session', payload: { reason: 'closed' } },
+      ],
+    });
+    leg.say('that is all, thanks');
+    await vi.waitFor(() => expect(leg.synthesize).toHaveBeenCalled());
+    await flush();
+
+    expect(await liveCalls.handOffAll({ timeoutMs: 1_000 })).toEqual({ attempted: 1, handedOff: 0 });
+    await vi.waitFor(() => expect(leg.ws.closed).toBe(true));
+    expect(leg.restRedirect).not.toHaveBeenCalled();
+    expect(leg.finalizeOnClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('the FSM already terminated (a farewell): no redirect', async () => {
+    const liveCalls = createLiveRealtimeCalls();
+    const leg = await turnLeg(liveCalls, 'CA-farewell', {
+      speechTurn: ({ session }) => session.machine.dispatch({ type: 'caller_farewell' }),
+    });
+    leg.say('goodbye');
+    await vi.waitFor(() => expect(leg.session.machine.currentState).toBe('terminated'));
+    await flush();
+
+    expect(await liveCalls.handOffAll({ timeoutMs: 1_000 })).toEqual({ attempted: 1, handedOff: 0 });
+    await vi.waitFor(() => expect(leg.ws.closed).toBe(true));
+    expect(leg.restRedirect).not.toHaveBeenCalled();
+    expect(leg.finalizeOnClose).toHaveBeenCalledTimes(1);
   });
 });
 
