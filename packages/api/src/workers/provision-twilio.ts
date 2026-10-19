@@ -19,6 +19,7 @@ import { usStateFromAddress } from '../telephony/address-state';
 import { buildAssistantConfig } from '../integrations/vapi/assistant-config';
 import { isBillingLiveStatus } from '../billing/tenant-billing-state';
 import { changeTenantNumber } from './change-twilio-number';
+import { PROVISIONING_FAILURE_MESSAGES } from '../onboarding/provisioning-failure';
 
 // Status values match migration 071_widen_tenant_integrations_status:
 // 't0_requested' = provisioning in flight; 'full_readiness' = fully active.
@@ -211,14 +212,14 @@ export function createProvisionTwilioWorker(deps: {
           );
           return;
         }
-        throw new Error('TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN must be set');
+        throw new Error(PROVISIONING_FAILURE_MESSAGES.twilioCredentialsUnset());
       }
       if (!encKey) {
         if (!isTwilioDeploymentEnv(process.env.NODE_ENV)) {
           logger.info('Twilio provisioning skipped — TENANT_ENCRYPTION_KEY not set', { tenantId });
           return;
         }
-        throw new Error('TENANT_ENCRYPTION_KEY must be set');
+        throw new Error(PROVISIONING_FAILURE_MESSAGES.encryptionKeyUnset());
       }
 
       // Trial-checkout gating: a Twilio number is real, recurring money, so
@@ -437,7 +438,7 @@ export function createProvisionTwilioWorker(deps: {
               const permanentlyUnavailable =
                 !!preferredNumber && status >= 400 && status < 500 && status !== 429;
               if (permanentlyUnavailable) {
-                const msg = `Selected number ${preferredNumber} is no longer available — please choose another`;
+                const msg = PROVISIONING_FAILURE_MESSAGES.selectedNumberUnavailable(preferredNumber);
                 logger.warn('Preferred number unavailable at purchase', { tenantId, error: errMsg });
                 try {
                   await tenantQuery(
@@ -477,10 +478,7 @@ export function createProvisionTwilioWorker(deps: {
           // near the top of this handler is intentionally NOT affected: it
           // writes its stub (with `stub: true`) before this code runs.
           if (phoneE164 && isTwilioTestNumber(phoneE164)) {
-            const msg =
-              `Refusing to persist Twilio test number ${phoneE164} as the tenant line — ` +
-              'the configured Twilio credentials appear to be TEST credentials; ' +
-              'fix TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN and re-run provisioning';
+            const msg = PROVISIONING_FAILURE_MESSAGES.testCredentials(phoneE164);
             logger.error('Twilio returned a magic test number during real provisioning', {
               tenantId,
               phoneE164,
@@ -549,19 +547,14 @@ export function createProvisionTwilioWorker(deps: {
               });
             }
 
-            const conflict =
-              `Phone number ${phoneE164} is already assigned to another tenant — ` +
-              'a DID can serve only one tenant (inbound routing resolves the tenant ' +
-              'from the number).';
             const msg = released
-              ? `${conflict} The number just purchased for this tenant has been released, ` +
-                'so nothing is being billed for it. Release the number from the other ' +
-                'tenant, or provision this tenant on a different number, then re-run ' +
-                'provisioning.'
-              : `${conflict} Releasing the number just purchased for this tenant FAILED ` +
-                `(${releaseError}) — release ${phoneNumberSid} from subaccount ` +
-                `${subaccountSid} by hand, or the next provisioning run will recover it ` +
-                'and hit this same conflict.';
+              ? PROVISIONING_FAILURE_MESSAGES.didAlreadyClaimedReleased(phoneE164)
+              : PROVISIONING_FAILURE_MESSAGES.didAlreadyClaimedNotReleased(
+                  phoneE164,
+                  String(releaseError),
+                  String(phoneNumberSid),
+                  subaccountSid,
+                );
 
             await tenantQuery(
               pool,

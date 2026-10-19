@@ -9,6 +9,10 @@ import { createLogger } from '../../src/logging/logger';
 import { QueueMessage } from '../../src/queues/queue';
 import type { VapiClient } from '../../src/integrations/vapi/client';
 import type { VapiAssistantConfig } from '../../src/integrations/vapi/assistant-config';
+import {
+  PROVISIONING_FAILURE_MESSAGES,
+  classifyProvisioningFailure,
+} from '../../src/onboarding/provisioning-failure';
 
 const TENANT = '11111111-1111-1111-1111-111111111111';
 // 64-char hex = 32 bytes, the format TENANT_ENCRYPTION_KEY requires.
@@ -875,5 +879,126 @@ describe('provision-twilio worker — #1563 number bought only on pick', () => {
     expect(
       calls.some((c) => JSON.stringify(c.params).includes('+12145550111')),
     ).toBe(true);
+  });
+});
+
+/**
+ * S5b-1 — what the worker records in `last_error` is exactly a builder's text
+ * (onboarding/provisioning-failure.ts), so the onboarding status can turn it
+ * into the right failure code. One case per recorded failure the number turn
+ * keys on.
+ */
+describe('provision-twilio worker — recorded failures classify to a status failure code', () => {
+  const restore: Array<[string, string | undefined]> = [];
+  function setEnv(k: string, v: string | undefined): void {
+    restore.push([k, process.env[k]]);
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    while (restore.length) {
+      const [k, v] = restore.pop()!;
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+  function configureTwilio(): void {
+    setEnv('TWILIO_ACCOUNT_SID', 'ACmaster');
+    setEnv('TWILIO_AUTH_TOKEN', 'mastertoken');
+    setEnv('TENANT_ENCRYPTION_KEY', KEY);
+    setEnv('VAPI_API_KEY', undefined);
+  }
+  /** The `last_error` value of the worker's `status = 'failed'` write. */
+  function recordedLastError(calls: Call[]): string {
+    const failed = calls.filter((c) => /status = 'failed'/i.test(c.sql));
+    expect(failed).toHaveLength(1);
+    return failed[0].params[0] as string;
+  }
+  const SETUP = [
+    { body: { sid: 'ACsub', auth_token: 'subtoken' } }, // create subaccount
+    { body: { sid: 'MG123' } }, // messaging service
+    { body: { incoming_phone_numbers: [] } }, // list owned (none)
+  ];
+
+  it('a claimed number taken before purchase → the unavailable-number text → area_code_unavailable', async () => {
+    configureTwilio();
+    mockFetch(...SETUP, { ok: false, status: 400, body: { message: 'Number not available' } });
+    const { pool, calls } = makePool();
+    await createProvisionTwilioWorker({ pool }).handle(
+      buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550123' }),
+      logger,
+    );
+    const text = recordedLastError(calls);
+    expect(text).toBe(PROVISIONING_FAILURE_MESSAGES.selectedNumberUnavailable('+15125550123'));
+    expect(classifyProvisioningFailure(text)).toBe('area_code_unavailable');
+  });
+
+  it('nothing left to buy on "Pick one for me" → the no-inventory text → area_code_unavailable', async () => {
+    configureTwilio();
+    mockFetch(...SETUP, { body: { available_phone_numbers: [] } }); // any-US search: empty
+    const { pool, calls } = makePool();
+    await expect(
+      createProvisionTwilioWorker({ pool }).handle(
+        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', autoPick: true }),
+        logger,
+      ),
+    ).rejects.toThrow();
+    const text = recordedLastError(calls);
+    expect(text).toBe(PROVISIONING_FAILURE_MESSAGES.noInventory(null));
+    expect(classifyProvisioningFailure(text)).toBe('area_code_unavailable');
+  });
+
+  it('a Twilio magic number back from purchase → the test-credentials text → credentials_missing', async () => {
+    configureTwilio();
+    mockFetch(
+      ...SETUP,
+      { body: { available_phone_numbers: [{ phone_number: '+15005550006' }] } },
+      { body: { sid: 'PN500', phone_number: '+15005550006' } },
+    );
+    const { pool, calls } = makePool();
+    await createProvisionTwilioWorker({ pool }).handle(
+      buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', autoPick: true }),
+      logger,
+    );
+    const text = recordedLastError(calls);
+    expect(text).toBe(PROVISIONING_FAILURE_MESSAGES.testCredentials('+15005550006'));
+    expect(classifyProvisioningFailure(text)).toBe('credentials_missing');
+  });
+
+  it('a Twilio 5xx the queue retries → the HTTP text → provider_error', async () => {
+    configureTwilio();
+    mockFetch(...SETUP, { ok: false, status: 503, body: { message: 'service unavailable' } });
+    const { pool, calls } = makePool();
+    await expect(
+      createProvisionTwilioWorker({ pool }).handle(
+        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550123' }),
+        logger,
+      ),
+    ).rejects.toThrow();
+    const text = recordedLastError(calls);
+    expect(text).toBe(
+      PROVISIONING_FAILURE_MESSAGES.twilioHttp(
+        'POST',
+        'https://api.twilio.com/2010-04-01/Accounts/ACsub/IncomingPhoneNumbers.json',
+        503,
+        JSON.stringify({ message: 'service unavailable' }),
+      ),
+    );
+    expect(classifyProvisioningFailure(text)).toBe('provider_error');
+  });
+
+  it('unset platform credentials in a deployment env are thrown before any row write (never recorded)', async () => {
+    setEnv('NODE_ENV', 'production');
+    setEnv('TWILIO_ACCOUNT_SID', undefined);
+    setEnv('TWILIO_AUTH_TOKEN', undefined);
+    const { pool, calls } = makePool();
+    await expect(
+      createProvisionTwilioWorker({ pool }).handle(
+        buildMessage({ tenantId: TENANT, region: null, baseUrl: 'https://api.test', autoPick: true }),
+        logger,
+      ),
+    ).rejects.toThrow(PROVISIONING_FAILURE_MESSAGES.twilioCredentialsUnset());
+    expect(calls.filter((c) => /last_error = \$1/i.test(c.sql))).toHaveLength(0);
   });
 });
