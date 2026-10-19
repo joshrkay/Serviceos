@@ -218,8 +218,8 @@ export function NumberTurn({ step, onChanged }: NumberTurnProps) {
     return (
       <>
         <SpeakerLine />
-        <RivetHeading>{NUMBER_READY}</RivetHeading>
-        <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">I&apos;m finishing the last details, then you can call it.</p>
+        <RivetHeading>{pick.taken ? TAKEN_OFFER : `Here's one in ${pick.areaCode}.`}</RivetHeading>
+        <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">Nothing is bought until you say it works.</p>
         <div className="mt-5 rounded-2xl border border-border bg-card p-4 text-center">
           <p className="break-words font-display text-[30px] font-semibold leading-[1.1] tracking-[-0.02em]">
             {formatPhone(pick.candidate.phoneNumber)}
