@@ -35,12 +35,20 @@ export interface TtsSynthesizeInput {
    * attempt before retrying). Providers combine it with their own timeout.
    */
   signal?: AbortSignal;
+  /**
+   * LCR-01 — ask for raw PCM16 LE @ 16 kHz mono instead of the provider's
+   * compressed default. The media-streams adapter can only play raw PCM, so
+   * its buffered synth (the recovery after a failed stream) always asks for
+   * it. A provider that cannot honour it returns its default; `contentType`
+   * on the result always says what came back.
+   */
+  outputFormat?: 'pcm_16000';
 }
 
 export interface TtsSynthesizeResult {
   /** Raw audio bytes. Caller decides whether to persist to S3. */
   audio: Buffer;
-  /** MIME type — 'audio/mpeg' for OpenAI tts-1. */
+  /** MIME type — 'audio/mpeg' by default, 'audio/pcm' when raw PCM was asked for and honoured. */
   contentType: string;
   /** Provider identifier for observability. */
   provider: string;
@@ -169,14 +177,18 @@ export class ElevenLabsTtsProvider implements TtsProvider {
     // English falls back to the constructor default (turbo).
     const modelId =
       input.language === 'es' ? 'eleven_multilingual_v2' : this.modelId;
+    // LCR-01 — raw PCM uses the same `output_format=pcm_16000` pin as the
+    // probe and the stream, so the media path can play the buffered result.
+    // Every other caller keeps the mp3 default.
+    const pcm = input.outputFormat === 'pcm_16000';
     const res = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`,
+      `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}${pcm ? '?output_format=pcm_16000' : ''}`,
       {
         method: 'POST',
         headers: {
           'xi-api-key': this.apiKey,
           'Content-Type': 'application/json',
-          Accept: 'audio/mpeg',
+          ...(pcm ? {} : { Accept: 'audio/mpeg' }),
         },
         body: JSON.stringify({
           text: speakableText(input.text, input.language),
@@ -197,7 +209,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
     const buffer = Buffer.from(await res.arrayBuffer());
     return {
       audio: buffer,
-      contentType: 'audio/mpeg',
+      contentType: pcm ? 'audio/pcm' : 'audio/mpeg',
       provider: 'elevenlabs',
     };
   }
@@ -285,7 +297,7 @@ export function createTtsProvider(env: {
  * emitting raw PCM (`synthesizeStream`). `mediastream-adapter.ts` feeds
  * `synthesize()`'s buffered result straight into `streamPcmAsMedia`, which
  * assumes raw PCM16 and does no decoding — a provider that only implements
- * `synthesize()` returns compressed audio (mp3 for OpenAI/ElevenLabs),
+ * `synthesize()` returns compressed audio (mp3 for OpenAI),
  * which streams out as inaudible static with no error surfaced anywhere.
  *
  * Call this once at boot, right after resolving the shared TTS provider,
