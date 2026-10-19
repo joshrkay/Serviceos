@@ -66,7 +66,13 @@ export function createAdminTenantsRouter(deps: AdminTenantsRouterDeps): Router {
           return;
         }
 
-        const exists = await pool.query('SELECT id FROM tenants WHERE id = $1', [tenantId]);
+        // A demo-pool or platform tenant (U7) is not an owner's tenant: it is
+        // reset by the demo lease, never deprovisioned by hand, and answers
+        // exactly like a tenant that does not exist.
+        const exists = await pool.query(
+          'SELECT id FROM tenants WHERE id = $1 AND demo = false AND platform = false',
+          [tenantId],
+        );
         if (exists.rowCount === 0) {
           res.status(404).json({ error: 'TENANT_NOT_FOUND', message: 'No such tenant' });
           return;

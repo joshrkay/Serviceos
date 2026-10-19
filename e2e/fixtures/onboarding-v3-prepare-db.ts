@@ -1,8 +1,10 @@
 /**
  * Prepares the real Postgres that e2e/onboarding-v3.config.ts boots the API
  * against: creates the database when missing, applies every migration (the same
- * path journeys use, via setupTestDb), and seeds the one Cleveland plumbing
- * price tier the spec asserts on. Idempotent; safe to re-run against a used DB.
+ * path journeys use, via setupTestDb), and seeds the two plumbing price tiers
+ * the spec asserts on: Cleveland (where the owner's area code places them) and
+ * Columbus (the city "Not Cleveland?" changes to). Idempotent; safe to re-run
+ * against a used DB.
  *
  *   npx tsx e2e/fixtures/onboarding-v3-prepare-db.ts
  *
@@ -36,16 +38,27 @@ async function ensureDatabase(url: string): Promise<void> {
   }
 }
 
-async function seedTier(url: string): Promise<void> {
+/** What most Columbus plumbers charge in the fixture: $79 to come out, then $135 an hour. */
+const COLUMBUS_PLUMBING_TIER = {
+  standard: { tripFeeCents: 7900, hourlyRateCents: 13500 },
+  premium: { tripFeeCents: 10900, hourlyRateCents: 16500 },
+};
+
+async function seedTiers(url: string): Promise<void> {
   const client = new Client({ connectionString: url });
   await client.connect();
   try {
-    await client.query(
-      `INSERT INTO regional_price_tiers (trade, metro_code, tier, source, updated_at)
-       VALUES ('plumbing', 'CLE', $1::jsonb, 'e2e fixture', NOW())
-       ON CONFLICT (trade, metro_code) DO UPDATE SET tier = EXCLUDED.tier, source = EXCLUDED.source, updated_at = NOW()`,
-      [JSON.stringify(CLEVELAND_PLUMBING_TIER)],
-    );
+    for (const [metroCode, tier] of [
+      ['CLE', CLEVELAND_PLUMBING_TIER],
+      ['CMH', COLUMBUS_PLUMBING_TIER],
+    ] as const) {
+      await client.query(
+        `INSERT INTO regional_price_tiers (trade, metro_code, tier, source, updated_at)
+         VALUES ('plumbing', $1, $2::jsonb, 'e2e fixture', NOW())
+         ON CONFLICT (trade, metro_code) DO UPDATE SET tier = EXCLUDED.tier, source = EXCLUDED.source, updated_at = NOW()`,
+        [metroCode, JSON.stringify(tier)],
+      );
+    }
   } finally {
     await client.end();
   }
@@ -64,7 +77,7 @@ async function main(): Promise<void> {
     if (previous === undefined) delete process.env.DATABASE_URL;
     else process.env.DATABASE_URL = previous;
   }
-  await seedTier(url);
+  await seedTiers(url);
   console.log('[onboarding-v3] database ready');
 }
 

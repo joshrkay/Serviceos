@@ -57,6 +57,7 @@ four required fields; `tenant_id` comes from the onboarding status (or the draft
 | Event | Where it fires | Trigger | Extra props |
 |---|---|---|---|
 | `v3_ready_viewed` | `ConversationShell.tsx` | the owner first sees the finished shop ("<Business> is already set up"); once per mount | `trade`, `metro` |
+| `v3_metro_changed` | `ConversationShell.tsx` | "Not Cleveland?" on Ready: the owner picked another city and the server re-priced the shop for it (a refused change, because a choice was staged or the draft moved on in another window, does not fire) | `from`, `to` (metro codes), `shows_city` (bool: false when the new city has no prices of its own and the shop uses the national ones) |
 | `v3_turn_viewed` | `ConversationShell.tsx` | one of the seven choice turns first appears; once per choice per mount, so reopening a turn from the read-back does not fire it again | `choice_key` |
 | `v3_choice_made` | `ConversationShell.tsx` | an answer was saved to the draft (the stage call succeeded; a failed or conflicted save does not fire). Fires again when the owner changes an answer from the read-back | `choice_key`, `answer_mode` (`tap` \| `type`), `option` (`a` \| `b` \| `override`), `is_most_shops` (bool) |
 | `v3_keep_rest` | `ConversationShell.tsx` | the owner taps "Keep the rest as is" in a turn's header and skips to the read-back with the typical answers | `answered_count` (0-7) |
