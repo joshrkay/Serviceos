@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ONBOARDING_METROS, type OnboardingDraft, type OnboardingMetroCode } from '@ai-service-os/shared';
+import { useRivetLine } from '../../../hooks/useRivetVoice';
 import { Button, Input } from '../../ui';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
 import { CHOICE_COUNT, readyRows, typicalShopPhrase } from './summarize';

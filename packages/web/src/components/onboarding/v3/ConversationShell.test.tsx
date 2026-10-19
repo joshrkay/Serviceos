@@ -66,7 +66,7 @@ interface Server {
 interface Request {
   method: string;
   path: string;
-  body: { choice?: unknown; version?: number; items?: string[]; text?: string } | undefined;
+  body: { choice?: unknown; version?: number; metro?: string; items?: string[]; text?: string } | undefined;
 }
 
 const TTS_ERRORS = {
@@ -86,7 +86,6 @@ function ttsAnswer(path: string, method: string, body: Request['body']): Respons
   if (mode !== 'ok') return json(mode, TTS_ERRORS[mode]);
   if (path === '/api/voice/tts/batch') return json(200, { clips: body!.items!.map((text, i) => ({ text, ...clipFor(text, i) })) });
   return json(200, clipFor(body!.text!, 0));
-  body: { choice?: unknown; version?: number; metro?: string } | undefined;
 }
 
 let server: Server;

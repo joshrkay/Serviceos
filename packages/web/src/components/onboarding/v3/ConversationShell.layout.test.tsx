@@ -137,6 +137,8 @@ describe('v3 mobile layout contract', () => {
     expect(line.className).toMatch(/\bflex-wrap\b/);
     expect(line.className).toMatch(/\bmin-w-0\b/);
     expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
+  });
+
   it('Ready with the city list open: every city, the search and the close are 44px targets that wrap, nothing wider than 320px', async () => {
     const { container } = render(<TurnFrame minutesLeft={6} progress={0.15} statusLabel="Nothing saved yet">{ready()}</TurnFrame>);
     await userEvent.click(screen.getByRole('button', { name: 'Not Cleveland?' }));

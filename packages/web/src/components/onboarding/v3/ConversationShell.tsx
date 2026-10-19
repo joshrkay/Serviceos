@@ -294,11 +294,10 @@ function Conversation() {
       )}
       {screen === 'answer_as' && <AnswerAsScreen onSubmit={startDraft} initial={answers ?? undefined} cellProblem={cellProblem} />}
       {screen === 'ready' && draft && (
-        <ReadyScreen draft={draft} onMakeItMine={makeItMine} onKeepAsIs={keepAsIs} />
         <ReadyScreen
           draft={draft}
           onMakeItMine={makeItMine}
-          onKeepAsIs={() => goTo({ screen: 'readback' })}
+          onKeepAsIs={keepAsIs}
           onChangeMetro={(metro) => void changeCity(metro)}
           changingMetro={changingMetro}
           error={attempt === 'metro' ? error : null}
