@@ -670,7 +670,10 @@ describe('ConversationShell', () => {
 
     it('shows "Heard" under the card it picked while the answer is being saved', async () => {
       let release!: () => void;
-      stubNetwork({ draft: draftJson, status: statusBody(), stageGate: new Promise<void>((r) => (release = r)) });
+      const stageGate = new Promise<void>((r) => {
+        release = r;
+      });
+      stubNetwork({ draft: draftJson, status: statusBody(), stageGate });
       renderShell();
       await makeItMine();
       await onTurn(0);
