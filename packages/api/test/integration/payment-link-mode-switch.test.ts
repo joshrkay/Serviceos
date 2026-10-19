@@ -991,6 +991,10 @@ describe('Postgres integration — attach-time revalidation under the payment-mo
 
     beforeAll(async () => {
       queue = new PgQueue(pool);
+      // PgQueue creates `_queue_messages` lazily, and the first legs read it
+      // before anything is enqueued: bootstrap it so the block also passes on
+      // a fresh database where no earlier file has used the queue.
+      await queue.depth();
       claimSpy = new SpyPool();
     });
 
