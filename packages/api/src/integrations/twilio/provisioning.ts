@@ -3,6 +3,8 @@
 // Master credentials (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN) are used only here
 // to create subaccounts — the runtime request path uses per-tenant creds.
 
+import { PROVISIONING_FAILURE_MESSAGES } from '../../onboarding/provisioning-failure';
+
 const TWILIO_BASE = 'https://api.twilio.com/2010-04-01';
 
 // US state → preferred area code for number search
@@ -45,7 +47,7 @@ async function twilioPost<T>(
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Twilio POST ${url} → ${res.status}: ${text}`);
+    throw new Error(PROVISIONING_FAILURE_MESSAGES.twilioHttp('POST', url, res.status, text));
   }
   return res.json() as Promise<T>;
 }
@@ -64,7 +66,7 @@ async function twilioGet<T>(
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Twilio GET ${url} → ${res.status}: ${text}`);
+    throw new Error(PROVISIONING_FAILURE_MESSAGES.twilioHttp('GET', url, res.status, text));
   }
   return res.json() as Promise<T>;
 }
@@ -85,7 +87,7 @@ async function twilioDelete(
   // 404 → already released; treat as success so deprovision is idempotent.
   if (!res.ok && res.status !== 404) {
     const text = await res.text();
-    throw new Error(`Twilio DELETE ${url} → ${res.status}: ${text}`);
+    throw new Error(PROVISIONING_FAILURE_MESSAGES.twilioHttp('DELETE', url, res.status, text));
   }
 }
 
@@ -189,7 +191,7 @@ export async function purchasePhoneNumber(
     // Fallback: any available US number
     if (!phoneToOrder) phoneToOrder = await firstAvailable();
     if (!phoneToOrder) {
-      throw new Error(`No available US phone numbers found for region ${region ?? 'any'}`);
+      throw new Error(PROVISIONING_FAILURE_MESSAGES.noInventory(region));
     }
   }
 
