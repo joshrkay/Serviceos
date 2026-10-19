@@ -215,6 +215,23 @@ describe('agent-path-smoke.yml — one path-smoke check run per pull request', (
     expect(on).not.toMatch(/paths(-ignore)?:/);
   });
 
+  // OBS-3 review round 3 — the skip decision diffs the PR against the base it
+  // had when the run started, and the check attaches to the head SHA. The
+  // default pull_request types (opened, synchronize, reopened) do not include
+  // a base-branch change (`edited`), so a stacked PR that skipped against its
+  // parent branch kept that green after being retargeted to main and merged
+  // the parent's prompt edit with no real-model eval. `edited` must re-run
+  // the diff against the new base — unfiltered: a skip on a title edit would
+  // post a fresh skip-as-success over an earlier red.
+  it('re-runs when the pull request is edited, so a base-branch change is diffed against the new base', () => {
+    const on = /^on:\n((?: {2}[^\n]*\n|\n)+)/m.exec(read())![1];
+    const types = /^ {2}pull_request:\s*\n {4}types:\s*\[([^\]]*)\]/m.exec(on);
+    expect(types, 'pull_request must list its activity types').not.toBeNull();
+    expect(new Set(types![1].split(',').map((t) => t.trim()))).toEqual(
+      new Set(['opened', 'synchronize', 'reopened', 'edited']),
+    );
+  });
+
   it('path-smoke needs the changes job and is skipped only when it says no listed file changed', () => {
     const job = jobBlock(read(), 'path-smoke');
     expect(job).toMatch(/^ {4}needs: changes$/m);

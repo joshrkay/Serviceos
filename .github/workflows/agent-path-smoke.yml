@@ -35,7 +35,14 @@ on:
   # Every pull request — the `changes` job below decides whether the real
   # evals run. Never add a paths filter here: a required check that never
   # starts leaves the PR waiting forever.
+  # `edited` (OBS-3 review round 3): a base-branch change is an edit, and
+  # the default types (opened, synchronize, reopened) would keep a skip
+  # decided against the OLD base — a stacked PR retargeted to main would
+  # carry its parent's prompt edit in under a stale green. Not filtered to
+  # base changes: a skip on a title edit would post a fresh green over an
+  # earlier red, so a title edit on a prompt PR re-runs the evals (~$1).
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
   schedule:
     # Daily 06:30 UTC — offset from voice-eval-live Monday job
