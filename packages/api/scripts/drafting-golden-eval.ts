@@ -1,9 +1,9 @@
 #!/usr/bin/env npx tsx
 /**
  * drafting-golden-eval.ts — cost-capped real-model eval of the drafting
- * prompts the classifier evals never touch (OBS-3 review round 1):
- * draft_estimate (catalog-grounded), update_brand_voice and the Google-review
- * public reply.
+ * prompts the classifier evals never touch (OBS-3 review rounds 1-2):
+ * draft_estimate (catalog-grounded), update_brand_voice, the Google-review
+ * public reply and the brand_voice_v1 composer that drafts customer SMS.
  *
  *   npx tsx packages/api/scripts/drafting-golden-eval.ts --live --gate \
  *     --baseline packages/voice-eval/baselines/drafting-live.json
@@ -17,7 +17,8 @@
  *
  * With --gate the run fails when ANY safety check fails (an uncatalogued
  * price that could auto-approve, a catalog line off its catalog price, a
- * reply carrying a link or discount), whatever the baseline says. --baseline
+ * reply or composed SMS carrying a link or discount, an SMS that took its
+ * signoff from the caller context), whatever the baseline says. --baseline
  * then compares the quality metrics with the recorded live baseline
  * (packages/voice-eval/baseline.ts — fails closed on a placeholder).
  *
@@ -47,10 +48,11 @@ import { loadConfig } from '../src/shared/config';
 import { applyBaselineGate, fingerprintGoldenSet, parseBaselineArgs } from '../../voice-eval/baseline';
 
 /**
- * Noise band for the recorded drafting baseline. Seven cases, so one model
- * flip on one quality check moves a per-task metric by up to a third of a
- * case; 0.2 absorbs a single flip and still fails a prompt that breaks a
- * whole task. Owner-tunable in the baseline file (re-recording keeps it).
+ * Noise band for the recorded drafting baseline, compared per metric. For
+ * the composer task (three cases, two quality checks each) one model flip
+ * moves quality.brand_voice_v1 by a sixth, so 0.2 absorbs a single flip and
+ * still fails a prompt that breaks the whole task; tasks with fewer checks
+ * per case swing further on one flip. Owner-tunable in the baseline file (re-recording keeps it).
  */
 const DRAFTING_LIVE_TOLERANCE = 0.2;
 const DEFAULT_CAP_CENTS = 50;
@@ -95,7 +97,7 @@ async function main(): Promise<number> {
   const projected = projectDraftingGoldenCents(pricedModel);
   const cap = capCents();
   console.log('\n✍️  Drafting golden eval — REAL model');
-  console.log(`   cases:          ${DRAFTING_GOLDEN_CASES.length} (draft_estimate, brand voice, review reply)`);
+  console.log(`   cases:          ${DRAFTING_GOLDEN_CASES.length} (draft_estimate, brand voice, review reply, composer SMS)`);
   if (projected === null) {
     console.error(`❌ ABORT: no known price for model ${pricedModel} — cannot enforce the cost cap. Exit 3.`);
     return 3;

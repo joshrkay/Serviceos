@@ -9,7 +9,7 @@ import { execFileSync } from 'child_process';
 import { loadIntentTestSplit, loadSlotTranscripts } from '../../../voice-eval/corpus';
 import { checkCostCap, sampleDeterministic } from '../../../voice-eval/live-support';
 import { readBaseline } from '../../../voice-eval/baseline';
-import { projectDraftingGoldenCents } from '../../src/ai/voice-quality/drafting-golden';
+import { DRAFTING_GOLDEN_CASES, projectDraftingGoldenCents } from '../../src/ai/voice-quality/drafting-golden';
 import {
   MAX_CAP_OVER_PROJECTION,
   effectiveCapCents,
@@ -392,6 +392,21 @@ describe('agent-path-smoke.yml — live drafting golden set (draft_estimate, bra
     expect(step).toContain(
       "if: ${{ !cancelled() && steps.install.outcome == 'success' && steps.key.outcome == 'success' }}",
     );
+  });
+
+  // OBS-3 review round 2 — the brand_voice_v1 composer writes the customer
+  // SMS (tech reschedule, dropped-call recovery) and the digest narrative;
+  // update_brand_voice only turns a spoken instruction into config. Both
+  // must be in the set this step runs, or a composer prompt edit merges green.
+  it('the golden set this step runs calls every drafting task, including the brand_voice_v1 composer', () => {
+    expect(new Set(DRAFTING_GOLDEN_CASES.map((c) => c.task))).toEqual(
+      new Set(['draft_estimate', 'update_brand_voice', 'review_public_response', 'brand_voice_v1']),
+    );
+    const composerIntents = new Set(
+      DRAFTING_GOLDEN_CASES.flatMap((c) => (c.task === 'brand_voice_v1' ? [c.intent] : [])),
+    );
+    expect(composerIntents).toEqual(new Set(['dropped_call_recovery_sms', 'tech_reschedule_customer_sms']));
+    expect(DRAFTING_GOLDEN_CASES.some((c) => c.task === 'brand_voice_v1' && (c.injected ?? []).length > 0)).toBe(true);
   });
 
   it('its cost cap fits the projection at the costliest model the workflow configures', () => {
