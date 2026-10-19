@@ -123,7 +123,7 @@ function elevenLabsShapedSynth() {
   );
 }
 
-const flush = () => new Promise((r) => setImmediate(r));
+const flush = () => new Promise<void>((r) => { setImmediate(r); });
 const startFrame = (callSid: string) => ({
   event: 'start' as const,
   streamSid: `MZ-${callSid}`,

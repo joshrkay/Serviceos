@@ -1689,12 +1689,14 @@ export class TwilioMediaStreamAdapter {
         : {}),
     });
     this.recordCircuitOutcomeOnce('failure', 'disclosure_init_failed');
+    // Cleared before the first await so nothing reads the stale latch while
+    // the audit write is in flight.
+    session.recordingDisclosed = false;
     await this.emitRealtimeResilienceAudit('voice.disclosure.init_failed', {
       callSid,
       tenantId: session.tenantId,
       reason: 'disclosure_init_failed',
     });
-    session.recordingDisclosed = false;
     if (await this.attemptDegradeToGather('disclosure_init_failed')) return;
     this.closeWs(1011, 'disclosure_init_failed');
   }
