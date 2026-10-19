@@ -146,6 +146,21 @@ describe('POST /api/voice/tts — charged per synthesized clip, never per reques
     expect((await single(app, TURN[0])).status).toBe(200);
     expect(tts.synthesize).toHaveBeenCalledTimes(1);
   });
+
+  it('at the default cap of 20: twenty clips spent, the 21st request for a cached text is still a 200', async () => {
+    vi.stubEnv('VOICE_TTS_PER_MIN', '');
+    const tts = fakeTts();
+    const app = buildApp({ tts });
+
+    for (let i = 0; i < 20; i += 1) {
+      expect((await single(app, `Spoken line number ${i}.`)).status).toBe(200);
+    }
+    const hit = await single(app, 'Spoken line number 7.');
+    expect(hit.status).toBe(200);
+    expect(hit.body.cached).toBe(true);
+    expect((await single(app, 'A brand new line.')).status).toBe(429);
+    expect(tts.synthesize).toHaveBeenCalledTimes(20);
+  });
 });
 
 describe('POST /api/voice/tts/batch — bounded to one turn (the provider-spend guard)', () => {
@@ -269,6 +284,35 @@ describe('POST /api/voice/tts/batch — charged per clip from the one per-user b
     expect((await single(app, 'A fourth line.')).status).toBe(200);
     expect((await single(app, 'A fifth line.')).status).toBe(429);
     expect(tts.synthesize).toHaveBeenCalledTimes(4);
+  });
+
+  it('at the default cap of 20: three uncached items leave 17 — seventeen more single clips fit, the eighteenth does not', async () => {
+    vi.stubEnv('VOICE_TTS_PER_MIN', '');
+    const tts = fakeTts();
+    const app = buildApp({ tts });
+
+    expect((await batch(app, TURN)).status).toBe(200);
+    for (let i = 0; i < 17; i += 1) {
+      expect((await single(app, `Spoken line number ${i}.`)).status).toBe(200);
+    }
+    expect((await single(app, 'One line too many.')).status).toBe(429);
+    expect(tts.synthesize).toHaveBeenCalledTimes(20);
+  });
+
+  it('the same line twice in one turn is spoken and charged once: the repeat is served the clip just made', async () => {
+    const tts = fakeTts();
+    const audit = recordingAudit();
+    const app = buildApp({ tts, auditRepo: audit, clipsPerMin: 2 });
+
+    const res = await batch(app, [TURN[0], TURN[0]]);
+    expect(res.status).toBe(200);
+    expect(res.body.clips.map((c: { text: string }) => c.text)).toEqual([TURN[0], TURN[0]]);
+    expect(res.body.clips[1].audio).toBe(res.body.clips[0].audio);
+    expect(tts.synthesize).toHaveBeenCalledTimes(1);
+    expect(audit.create).toHaveBeenCalledTimes(1);
+    // One unit spent of two: one more new line still fits.
+    expect((await single(app, TURN[1])).status).toBe(200);
+    expect((await single(app, TURN[2])).status).toBe(429);
   });
 
   it('the same turn again charges zero: every clip a cache hit, no provider call, even with the budget spent', async () => {

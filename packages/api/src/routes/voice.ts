@@ -492,23 +492,26 @@ export function createVoiceRouter(
           ? { text, clipHash, audio: hit.audio.toString('base64'), contentType: hit.contentType, cached: true }
           : null;
       });
-      const misses = clips.filter((c) => c === null).length;
-      if (!(await chargeTtsClips(authReq, res, misses))) return;
+      // A line repeated within the turn is one clip: charged, spoken and
+      // audited once, and the repeat is served the bytes just made.
+      const misses = new Set(items.filter((_, i) => clips[i] === null));
+      if (!(await chargeTtsClips(authReq, res, misses.size))) return;
 
       const spoken: Array<{ text: string; result: Awaited<ReturnType<TtsProvider['synthesize']>> }> = [];
       try {
-        for (let i = 0; i < items.length; i += 1) {
-          if (clips[i]) continue;
-          const text = items[i];
+        for (const text of misses) {
           const result = await synthesizeClip(tts, voice, text, tenantId);
           spoken.push({ text, result });
-          clips[i] = {
+          const clip: Clip = {
             text,
             clipHash: hashOf(text),
             audio: result.audio.toString('base64'),
             contentType: result.contentType,
             cached: false,
           };
+          items.forEach((item, i) => {
+            if (item === text) clips[i] = clip;
+          });
         }
       } catch (err) {
         answerTtsFailed(authReq, res, 'POST /api/voice/tts/batch', err);
