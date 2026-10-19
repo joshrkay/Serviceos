@@ -197,7 +197,9 @@ describe('POST /draft/reset (real DB)', () => {
       const r = await pool.query(`SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE $1`, [`%${fragment}%`]);
       if (r.rows.length > 0) return;
       if (Date.now() > deadline) throw new Error(`no backend running "${fragment}" blocked within 5s`);
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 10);
+      });
     }
   }
   const actor = () => ({ userId: tenant.userId, role: OWNER_ROLE });
