@@ -930,7 +930,21 @@ describe('ai_spend_window — the shipped default is reachable at current scale'
   it('N tenants saturating their standard + classifier buckets on gpt-4o-mini breach the default; one tenant does not', async () => {
     const { loadConfig } = await import('../../src/shared/config');
     const { DEFAULT_TIER_CONFIG } = await import('../../src/ai/gateway/tenant-quota');
-    const { computeCostMicroCents } = await import('../../src/ai/gateway/model-pricing');
+    // OpenAI models are unpriced by default (GATEWAY-04, #1699); production
+    // prices them through AI_MODEL_PRICING_JSON, so this derives the per-
+    // tenant ceiling from that same config path. The pricing module reads
+    // the env once at load, hence the fresh import.
+    const priorPricing = process.env.AI_MODEL_PRICING_JSON;
+    process.env.AI_MODEL_PRICING_JSON = JSON.stringify({
+      'gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+      'gpt-4o': { inputCentsPerMillionTokens: 250, outputCentsPerMillionTokens: 1000 },
+    });
+    vi.resetModules();
+    const { computeCostMicroCents } = await import('../../src/ai/gateway/model-pricing').finally(() => {
+      if (priorPricing === undefined) delete process.env.AI_MODEL_PRICING_JSON;
+      else process.env.AI_MODEL_PRICING_JSON = priorPricing;
+      vi.resetModules();
+    });
     const config = loadConfig({ NODE_ENV: 'dev' });
     const windowSec = config.FAILURE_MONITOR_WINDOW_MIN * 60;
     // Every tenant gets 'standard' + 'classifier_standard' (nothing sets

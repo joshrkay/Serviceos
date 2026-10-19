@@ -2,6 +2,17 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 
 const ENV_KEY = 'AI_MODEL_PRICING_JSON';
 
+/**
+ * The production primary (AI Profile A) priced the way ops price it: through
+ * AI_MODEL_PRICING_JSON. OpenAI models are deliberately NOT in the default
+ * table (GATEWAY-04, #1699), so every OpenAI price in these tests arrives by
+ * the same config path production uses. Integer cents per 1M tokens.
+ */
+const PROFILE_A_PRICING_JSON = JSON.stringify({
+  'gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+  'gpt-4o': { inputCentsPerMillionTokens: 250, outputCentsPerMillionTokens: 1000 },
+});
+
 async function freshModule() {
   // AI_MODEL_PRICING_JSON is read once at module load (matches the rest of
   // the gateway's env-derived config, e.g. ai-routing.ts's model env vars),
@@ -67,10 +78,13 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
       expect(resolveModelPricing('CLAUDE-SONNET-4-6')).not.toBeNull();
     });
 
-    it('prices the live production primary (AI Profile A: gpt-4o-mini / gpt-4o), dated ids included', async () => {
+    it('prices the live production primary (AI Profile A: gpt-4o-mini / gpt-4o) from AI_MODEL_PRICING_JSON, dated ids included', async () => {
       // OBS-4 review round 1 — production runs OpenAI primary. While these
       // resolved to null every live run stored cost_micro_cents NULL, the
       // window SUM read 0 and the ai_spend_window rule could never fire.
+      // OpenAI stays unpriced by default (GATEWAY-04), so ops price it with
+      // AI_MODEL_PRICING_JSON — this proves that path prices it correctly.
+      process.env[ENV_KEY] = PROFILE_A_PRICING_JSON;
       const { resolveModelPricing } = await freshModule();
       const mini = { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 };
       const full = { inputCentsPerMillionTokens: 250, outputCentsPerMillionTokens: 1000 };
@@ -86,8 +100,9 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
     it('returns null for an unpriced model — never a guessed price', async () => {
       const { resolveModelPricing } = await freshModule();
       // Deliberately excluded from the default table (see model-pricing.ts
-      // header): deprecated Claude models and unknown models resolve to
-      // null rather than a fabricated rate.
+      // header): OpenAI models and deprecated Claude models both resolve
+      // to null rather than a fabricated rate.
+      expect(resolveModelPricing('gpt-4o-mini')).toBeNull();
       expect(resolveModelPricing('claude-opus-4-5')).toBeNull();
       expect(resolveModelPricing('totally-unknown-model')).toBeNull();
     });
@@ -139,7 +154,8 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
       expect(cost).toBeNull();
     });
 
-    it('prices the dated id OpenAI actually returns for the live default model', async () => {
+    it('prices the dated id OpenAI actually returns for the live default model (AI_MODEL_PRICING_JSON)', async () => {
+      process.env[ENV_KEY] = PROFILE_A_PRICING_JSON;
       const { computeCostMicroCents } = await freshModule();
       // gpt-4o-mini: 15 cents/M input, 60 cents/M output.
       // 9,000 * 15 + 100 * 60 = 135,000 + 6,000 = 141,000 micro-cents.

@@ -24,7 +24,7 @@ import {
   type FailureMonitorThresholds,
 } from '../../src/workers/failure-rate-monitor';
 import type { Logger } from '../../src/logging/logger';
-import { LLMGateway, type LLMProvider } from '../../src/ai/gateway/gateway';
+import type { LLMProvider } from '../../src/ai/gateway/gateway';
 import { PgAiRunRepository } from '../../src/ai/pg-ai-run';
 
 const NOW = new Date('2026-07-23T12:00:00.000Z');
@@ -233,6 +233,21 @@ describe('Postgres integration — OBS-4 per-tenant failure rate and window spen
     // unpriced the gateway wrote cost_micro_cents NULL, the window SUM read
     // 0 and ai_spend_window could never fire. Drive the REAL gateway into
     // the REAL ai_runs table and read it back through the monitor's query.
+    // OpenAI models are unpriced by default (GATEWAY-04, #1699): production
+    // prices them through AI_MODEL_PRICING_JSON, so this test prices them
+    // the same way. The pricing table is read once at module load, so the
+    // gateway (and the pricing module it imports) is loaded fresh with it set.
+    const priorPricing = process.env.AI_MODEL_PRICING_JSON;
+    process.env.AI_MODEL_PRICING_JSON = JSON.stringify({
+      'gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+      'gpt-4o': { inputCentsPerMillionTokens: 250, outputCentsPerMillionTokens: 1000 },
+    });
+    vi.resetModules();
+    const { LLMGateway } = await import('../../src/ai/gateway/gateway').finally(() => {
+      if (priorPricing === undefined) delete process.env.AI_MODEL_PRICING_JSON;
+      else process.env.AI_MODEL_PRICING_JSON = priorPricing;
+      vi.resetModules();
+    });
     const live = await createTestTenant(pool);
     try {
       // OpenAI answers a 'gpt-4o-mini' request with the dated snapshot id.

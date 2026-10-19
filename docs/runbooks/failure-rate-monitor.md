@@ -102,7 +102,21 @@ than 10% of all completed runs. Only rows the priced gateway path wrote
 (`created_by = 'gateway'`) can count as unpriced: the supervisor review
 wrapper row (`created_by = 'system'`) and a cache hit (`'gateway-cache'`)
 never carry a cost and are not an unpriced model. The page names the task
-types with the most unpriced runs. It is off whenever rule 5 is off.
+types with the most unpriced runs (not the model names; the triage query below
+and the gateway's boot warning "AI primary model(s) have no price" name the
+model). It is off whenever rule 5 is off.
+
+**Production prerequisite.** OpenAI models are deliberately unpriced by default
+(GATEWAY-04, #1699: no hard-coded vendor prices), so the Profile A deploy
+(gpt-4o-mini / gpt-4o) records no spend, rule 5 reads 0 and this rule keeps
+firing (once per `SLO_ALERT_COOLDOWN_MIN`) until ops set, in Railway:
+
+```
+AI_MODEL_PRICING_JSON={"gpt-4o-mini":{"inputCentsPerMillionTokens":15,"outputCentsPerMillionTokens":60},"gpt-4o":{"inputCentsPerMillionTokens":250,"outputCentsPerMillionTokens":1000}}
+```
+
+(OpenAI list prices, integer cents per 1M tokens: $0.15 / $0.60 and
+$2.50 / $10.00. Update the JSON when the provider's price changes.)
 
 ## How it reaches a human
 
@@ -230,7 +244,8 @@ this exists for were 0.85 and 1.00. Raise `FAILURE_MONITOR_TENANT_MIN_RUNS` if a
 small tenant pages on a handful of calls. `FAILURE_MONITOR_SPEND_MAX_CENTS`
 defaults to 200 cents per window, derived from the quota buckets: one tenant
 driven to its `standard` + `classifier_standard` ceiling for a 30-minute window
-spends about 3.55M tokens, roughly 53 cents on gpt-4o-mini, so the default
+spends about 3.55M tokens, roughly 53 cents on gpt-4o-mini (priced through
+`AI_MODEL_PRICING_JSON`, rule 6), so the default
 pages when about four tenants are saturated at once. That is the cross-tenant
 loop this rule exists for, at today's tenant count. If normal busy-half-hour
 spend approaches 200 cents as tenants grow, raise it to roughly three times
