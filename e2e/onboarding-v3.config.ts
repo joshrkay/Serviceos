@@ -20,6 +20,19 @@ import { defineConfig, devices } from '@playwright/test';
  * Billing is hermetic (synthetic Stripe keys, no plan prices): the trial turn is
  * proven against the real routes' real answers, and a trial cannot be completed
  * here, so the number and the test call are proven by component and shell tests.
+ *
+ * Speech is hermetic the same way (S3-6): TTS_PROVIDER=fixture makes the API
+ * speak every line as one bundled 200 ms silent mp3 (a non-production provider
+ * at the vendor boundary), so the browser really plays a clip after the tap
+ * while the voice routes, the clip cache, the per-clip charge and the audit run
+ * for real. Live transcription has no key here (POST /api/voice/stream-token
+ * answers 503), so the tap-only path is what is proven for listening.
+ *
+ * WebKit (iPhone 13) is a second project, opt-in with E2E_V3_WEBKIT=1 because
+ * it needs `npx playwright install --with-deps webkit`. It runs the voice spec
+ * only. Browser-specific tests are tagged and filtered per project (never
+ * skipped at run time: scripts/release/verify.mjs fails a run with any skip):
+ * `@webkit` runs only on WebKit, `@chromium` (the fake microphone) only on Chromium.
  */
 const apiPort = process.env.E2E_V3_API_PORT ?? '3011';
 const webPort = process.env.E2E_V3_WEB_PORT ?? '5176';
@@ -42,21 +55,39 @@ export default defineConfig({
   reporter: [['list']],
   outputDir: '../test-results/onboarding-v3',
   use: {
-    ...devices['Desktop Chrome'],
     baseURL,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     actionTimeout: 10_000,
     navigationTimeout: 20_000,
-    launchOptions: {
-      ...(process.env.QA_CHROMIUM_PATH ? { executablePath: process.env.QA_CHROMIUM_PATH } : {}),
-      // A fake microphone, so a test that grants the permission can open one (S3-5). A test that does not
-      // grant it is refused, as an owner who taps "Don't allow" is: headless Chromium would otherwise leave
-      // the prompt unanswered forever, which no owner can do to a visible prompt.
-      args: ['--use-fake-device-for-media-stream', '--deny-permission-prompts'],
-    },
   },
-  projects: [{ name: 'onboarding-v3' }],
+  projects: [
+    {
+      name: 'onboarding-v3',
+      grepInvert: /@webkit/,
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: {
+          ...(process.env.QA_CHROMIUM_PATH ? { executablePath: process.env.QA_CHROMIUM_PATH } : {}),
+          // A fake microphone, so a test that grants the permission can open one (S3-5). A test that does not
+          // grant it is refused, as an owner who taps "Don't allow" is: headless Chromium would otherwise leave
+          // the prompt unanswered forever, which no owner can do to a visible prompt.
+          args: ['--use-fake-device-for-media-stream', '--deny-permission-prompts'],
+        },
+      },
+    },
+    ...(process.env.E2E_V3_WEBKIT === '1'
+      ? [
+          {
+            // iOS Safari's engine: autoplay only after a gesture, and audio/mp4 recording.
+            name: 'onboarding-v3-webkit',
+            testMatch: ['onboarding-v3-voice-webkit.spec.ts'],
+            grepInvert: /@chromium/,
+            use: { ...devices['iPhone 13'] },
+          },
+        ]
+      : []),
+  ],
   webServer: [
     {
       // Prepare the database (create, migrate, seed one price tier), then boot the API on it.
@@ -64,7 +95,8 @@ export default defineConfig({
       cwd: '../',
       url: `${apiURL}/health`,
       reuseExistingServer: false,
-      timeout: 180_000,
+      // ts-node compiles the whole API at boot: ~60 s alone, measured at 192 s on a shared runner.
+      timeout: 360_000,
       stdout: 'ignore',
       stderr: 'pipe',
       env: {
@@ -87,8 +119,14 @@ export default defineConfig({
         // No live transcription in the lane (blanked so a developer's own key cannot open a real socket):
         // POST /api/voice/stream-token answers 503 and the shell's tap-only path is what is proven.
         DEEPGRAM_API_KEY: '',
+        // Rivet's voice: the dev-only fixture provider (refused in production), so a clip really plays
+        // after the tap with no vendor key. It wins over any vendor key in a developer's own shell.
+        TTS_PROVIDER: 'fixture',
         DATABASE_URL: databaseUrl,
         E2E_V3_DATABASE_URL: databaseUrl,
+        // The lane's Postgres is local and plain (CI sets the same at job level); without it every
+        // query fails "The server does not support SSL connections" while /health still answers.
+        DB_SSL: process.env.DB_SSL ?? 'false',
       },
     },
     {
