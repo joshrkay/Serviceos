@@ -3,12 +3,19 @@ import type { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { PaymentRepository } from './payment';
 import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
-import { SettingsRepository } from '../settings/settings';
+import { SettingsRepository, TenantSettings } from '../settings/settings';
 import { ValidationError, NotFoundError } from '../shared/errors';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { publicActorFromToken } from '../feedback/feedback-response';
 import { timedFetch } from '../shared/timed-fetch';
 import type { CatalogUnitValue } from '@ai-service-os/shared';
+import {
+  auditPaymentModeUnavailable,
+  CollectOnSiteError,
+  PaymentModeUnavailableError,
+  readPaymentCollectionMode,
+  type PaymentCollectionModeView,
+} from './payment-collection-mode';
 
 export interface StripeConfig {
   apiKey: string;
@@ -50,8 +57,18 @@ export interface PublicInvoiceView {
   customerMessage?: string;
   isPaid: boolean;
   viewCount: number;
-  /** Stripe-hosted checkout URL, populated once the customer requests checkout. */
+  /**
+   * Stripe-hosted checkout URL, populated once the customer requests checkout.
+   * S5a-1 (U8): present only when `paymentCollectionMode` is `pay_link`.
+   */
   stripePaymentLinkUrl?: string;
+  /**
+   * S5a-1 (U8) — the payment policy the page must honour: `pay_link` renders
+   * the payment form; `collect_on_site` renders the in-person note; and
+   * `unavailable` (the policy could not be read) renders no payment at all —
+   * the API already made the fail-closed decision, the page only shows it.
+   */
+  paymentCollectionMode: PaymentCollectionModeView;
   /**
    * Tier 4 (Deposit rules — PR 3c). Total deposit credit applied to
    * this invoice (in cents). Surfaced so the customer page can render
@@ -182,6 +199,24 @@ export class PublicInvoiceService {
    */
   async getOrCreateCheckoutUrl(token: string): Promise<{ url: string }> {
     const invoice = await this.lookupByToken(token);
+
+    // S5a-1 (U8) — policy before state, and before the stored-URL early
+    // return: a collect-on-site tenant serves no link even while the switch
+    // cleanup (S5a-5) has not yet retired a stored one, and an unreadable
+    // policy is a retryable 503, never a mint.
+    const mode = await readPaymentCollectionMode(this.deps.settingsRepo, invoice.tenantId);
+    if (!mode.ok) {
+      await auditPaymentModeUnavailable(this.deps.auditRepo, {
+        tenantId: invoice.tenantId,
+        invoiceId: invoice.id,
+        surface: 'checkout',
+        error: mode.error,
+      });
+      throw new PaymentModeUnavailableError();
+    }
+    if (mode.mode === 'collect_on_site') {
+      throw new CollectOnSiteError();
+    }
 
     if (!this.deps.stripeConfig?.apiKey && !this.deps.paymentLinkProvider) {
       throw new ValidationError('Payment processing is not configured');
@@ -416,7 +451,26 @@ export class PublicInvoiceService {
     const customer = job
       ? await this.deps.customerRepo.findById(invoice.tenantId, job.customerId)
       : null;
-    const settings = await this.deps.settingsRepo.findByTenant(invoice.tenantId);
+    // S5a-1 (U8) — one settings read gives the business context AND the
+    // payment policy. A read that throws no longer fails the page: the
+    // customer still sees their invoice, with no payment facts and
+    // `paymentCollectionMode: 'unavailable'`, and the occurrence is audited.
+    const modeRead = await readPaymentCollectionMode(this.deps.settingsRepo, invoice.tenantId);
+    let paymentCollectionMode: PaymentCollectionModeView;
+    let settings: TenantSettings | null;
+    if (modeRead.ok) {
+      paymentCollectionMode = modeRead.mode;
+      settings = modeRead.settings;
+    } else {
+      paymentCollectionMode = 'unavailable';
+      settings = null;
+      await auditPaymentModeUnavailable(this.deps.auditRepo, {
+        tenantId: invoice.tenantId,
+        invoiceId: invoice.id,
+        surface: 'public_page',
+        error: modeRead.error,
+      });
+    }
 
     // Tier 4 (Deposit rules — PR 3c). Sum payments tagged
     // providerReference='deposit_credit' for this invoice. The credit
@@ -467,7 +521,11 @@ export class PublicInvoiceService {
       customerMessage: invoice.customerMessage,
       isPaid: invoice.status === 'paid' || invoice.amountDueCents <= 0,
       viewCount: invoice.viewCount ?? 0,
-      stripePaymentLinkUrl: invoice.stripePaymentLinkUrl,
+      // A leftover link on a collect-on-site (or unreadable) tenant is never
+      // shown — the policy holds for old URLs as well as new ones.
+      stripePaymentLinkUrl:
+        paymentCollectionMode === 'pay_link' ? invoice.stripePaymentLinkUrl : undefined,
+      paymentCollectionMode,
       depositCreditCents,
     };
   }

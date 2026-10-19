@@ -69,6 +69,11 @@ import {
 } from '../portal/portal-token-middleware';
 import { ContactRepository } from '../customers/contact';
 import { routeParam } from '../shared/route-params';
+import {
+  auditPaymentModeUnavailable,
+  readPaymentCollectionMode,
+  type PaymentCollectionModeView,
+} from '../invoices/payment-collection-mode';
 
 export interface PublicPortalDeps {
   portalRepo: PortalSessionRepository;
@@ -413,9 +418,29 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       const provider = deps.paymentLinkProvider;
       const currency = deps.paymentCurrency ?? 'usd';
 
+      // S5a-1 (U8) — one policy read per request. A list cannot 409, so
+      // "Collect on the spot" (and a policy that cannot be read — never
+      // read as pay_link) means every row serves no pay-now URL and mints
+      // nothing. A harness with no settings repo is not a failed read
+      // (same posture as resolveTenantScheduling): today's behaviour.
+      let mode: PaymentCollectionModeView = 'pay_link';
+      if (deps.settingsRepo) {
+        const read = await readPaymentCollectionMode(deps.settingsRepo, tenantId);
+        if (read.ok) {
+          mode = read.mode;
+        } else {
+          mode = 'unavailable';
+          await auditPaymentModeUnavailable(deps.auditRepo, {
+            tenantId,
+            surface: 'portal',
+            error: read.error,
+          });
+        }
+      }
+
       const enriched = await Promise.all(
         allInvoices.map(async (inv) =>
-          buildInvoicePayload(inv, tenantId, provider, currency, deps.invoiceRepo),
+          buildInvoicePayload(inv, tenantId, provider, currency, deps.invoiceRepo, mode),
         ),
       );
       res.json({ invoices: enriched });
@@ -1159,6 +1184,12 @@ interface InvoicePayload {
   createdAt: string;
   /** Stripe-hosted checkout URL (or fallback) when payment is owed and the provider is wired. */
   payNowUrl: string | null;
+  /**
+   * S5a-1 (U8) — true when the business collects payment in person (or the
+   * policy could not be read): the page shows a "pay the tech on site"
+   * label instead of a Pay now link. Always paired with `payNowUrl: null`.
+   */
+  collectOnSite: boolean;
 }
 
 async function buildInvoicePayload(
@@ -1167,15 +1198,18 @@ async function buildInvoicePayload(
   provider: PaymentLinkProvider | undefined,
   currency: string,
   invoiceRepo: InvoiceRepository,
+  mode: PaymentCollectionModeView,
 ): Promise<InvoicePayload> {
-  let payNowUrl: string | null = inv.stripePaymentLinkUrl ?? null;
+  const collectOnSite = mode !== 'pay_link';
+  // A leftover stored link is never served under collect-on-site either.
+  let payNowUrl: string | null = collectOnSite ? null : (inv.stripePaymentLinkUrl ?? null);
 
   // Generate a payment link only when one is missing AND the invoice is
   // actually open for payment. Persist the generated link so subsequent
   // reads are idempotent — without this, every refresh of the portal
   // invoices page would mint a fresh provider link and the prior ones
   // would orphan as live charge URLs the customer never sees.
-  if (!payNowUrl && provider && inv.amountDueCents > 0 && isPayable(inv.status)) {
+  if (!collectOnSite && !payNowUrl && provider && inv.amountDueCents > 0 && isPayable(inv.status)) {
     const link = await safeGenerateLink(provider, {
       tenantId,
       invoiceId: inv.id,
@@ -1250,6 +1284,7 @@ async function buildInvoicePayload(
     dueDate: inv.dueDate ? inv.dueDate.toISOString() : null,
     createdAt: inv.createdAt.toISOString(),
     payNowUrl,
+    collectOnSite,
   };
 }
 
