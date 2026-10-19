@@ -32,7 +32,8 @@ import type { JobRepository } from '../jobs/job';
 import type { TtsProvider } from '../ai/tts/tts-provider';
 import { hashOf, type TtsClipCache } from '../ai/tts/clip-cache';
 import { createTtsClipBudget, ttsClipsPerMinFromEnv } from '../ai/tts/tts-clip-budget';
-import { resolveTtsVoice, TTS_VOICE_PRESET_SCHEMA } from '../ai/tts/resolve-voice';
+import { TTS_BATCH_BODY_SCHEMA } from '../ai/tts/tts-batch';
+import { resolveTtsVoice, TTS_VOICE_PRESET_SCHEMA, type ResolvedTtsVoice } from '../ai/tts/resolve-voice';
 import type { SettingsRepository } from '../settings/settings';
 import { routeParam } from '../shared/route-params';
 
@@ -355,63 +356,167 @@ export function createVoiceRouter(
       // and a 400 before it cost nothing.
       if (!(await chargeTtsClips(authReq, res, 1))) return;
       try {
-        const result = await tts.synthesize({
-          text,
-          tenantId,
-          // A provider with no catalogue for the presets speaks its own
-          // default; passing the cache-key placeholder would name no voice.
-          ...(tts.voiceForPreset ? { voice: voice.providerVoiceId } : {}),
-        });
-        opts?.clipCache?.set(voice.providerVoiceId, clipHash, {
-          audio: result.audio,
-          contentType: result.contentType,
-        });
+        const result = await synthesizeClip(tts, voice, text, tenantId);
         res.json({
           audio: result.audio.toString('base64'),
           contentType: result.contentType,
           clipHash,
           cached: false,
         });
-        // Cost attribution: who had how many characters spoken by which
-        // provider, in which preset (never the vendor voice id). Failure-soft
-        // like /transcribe's audit — never blocks the clip, but a broken sink
-        // is logged rather than swallowed.
-        if (auditRepo) {
-          try {
-            await auditRepo.create(createAuditEvent({
-              tenantId,
-              actorId: authReq.auth!.userId,
-              actorRole: 'user',
-              eventType: 'voice.tts.synthesized',
-              entityType: 'voice_tts',
-              entityId: `tts-${Date.now()}`,
-              metadata: {
-                chars: text.length,
-                provider: result.provider,
-                voice: voice.presetId,
-                ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
-              },
-            }));
-          } catch (auditErr) {
-            logger?.warn('voice.tts: audit write failed', {
-              route: 'POST /api/voice/tts',
-              tenantId: authReq.auth!.tenantId,
-              error: auditErr instanceof Error ? auditErr.message : String(auditErr),
-            });
-          }
+        await auditSynthesizedClip(authReq, 'POST /api/voice/tts', text, voice, result);
+      } catch (err) {
+        answerTtsFailed(authReq, res, 'POST /api/voice/tts', err);
+      }
+    }),
+  );
+
+  /**
+   * One billable clip: synthesize in the resolved voice and store it. A
+   * provider with no catalogue for the presets speaks its own default, so
+   * the cache-key placeholder is never passed as a voice name.
+   */
+  async function synthesizeClip(tts: TtsProvider, voice: ResolvedTtsVoice, text: string, tenantId: string) {
+    const result = await tts.synthesize({
+      text,
+      tenantId,
+      ...(tts.voiceForPreset ? { voice: voice.providerVoiceId } : {}),
+    });
+    opts?.clipCache?.set(voice.providerVoiceId, hashOf(text), {
+      audio: result.audio,
+      contentType: result.contentType,
+    });
+    return result;
+  }
+
+  /**
+   * Cost attribution: who had how many characters spoken by which provider,
+   * in which preset (never the vendor voice id). Failure-soft like
+   * /transcribe's audit — never blocks the clip, but a broken sink is logged
+   * rather than swallowed.
+   */
+  async function auditSynthesizedClip(
+    authReq: AuthenticatedRequest,
+    route: string,
+    text: string,
+    voice: ResolvedTtsVoice,
+    result: Awaited<ReturnType<TtsProvider['synthesize']>>,
+  ): Promise<void> {
+    if (!auditRepo) return;
+    try {
+      await auditRepo.create(createAuditEvent({
+        tenantId: authReq.auth!.tenantId,
+        actorId: authReq.auth!.userId,
+        actorRole: 'user',
+        eventType: 'voice.tts.synthesized',
+        entityType: 'voice_tts',
+        entityId: `tts-${Date.now()}`,
+        metadata: {
+          chars: text.length,
+          provider: result.provider,
+          voice: voice.presetId,
+          ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
+        },
+      }));
+    } catch (auditErr) {
+      logger?.warn('voice.tts: audit write failed', {
+        route,
+        tenantId: authReq.auth!.tenantId,
+        error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+      });
+    }
+  }
+
+  /**
+   * The raw provider text (quota/request ids) is logged, never sent — same
+   * posture as /transcribe's honest failures (#1497).
+   */
+  function answerTtsFailed(authReq: AuthenticatedRequest, res: Response, route: string, err: unknown): void {
+    logger?.error('voice.tts: synthesis failed', {
+      route,
+      tenantId: authReq.auth!.tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    res.status(502).json({
+      error: 'TTS_FAILED',
+      message: "Couldn't speak that answer right now — it's still on screen.",
+    });
+  }
+
+  /**
+   * POST /tts/batch — S3-2: one onboarding turn's clips in one request.
+   *
+   * The v3 shell prefetches the next turn (the question plus two option
+   * lines) while the current one plays; three single requests every few
+   * seconds would meet the per-user cap for a fast owner, so a turn is one
+   * request. The batch is not a way around the cap: it is bounded to one
+   * turn (ai/tts/tts-batch.ts — at most three items, 240 characters each,
+   * 600 in all, a 400 otherwise before anything is charged or looked up),
+   * cache hits are resolved first and cost nothing, the misses are charged
+   * in one go from the same per-user budget as POST /tts (a turn that does
+   * not fit is a 429 and nothing is synthesized), and each synthesized clip
+   * is audited on its own. A provider failure on any clip is a 502 for the
+   * whole turn (the client degrades the turn); clips already made stay
+   * cached, and the units already taken are not refunded, since the
+   * provider may have billed the failed call.
+   */
+  router.post(
+    '/tts/batch',
+    requireAuth,
+    requireTenant,
+    requirePermission('ai:run'),
+    asyncRoute(async (req: Request, res: Response) => {
+      const { items, voice: requestedPresetId } = TTS_BATCH_BODY_SCHEMA.parse(req.body ?? {});
+      const tts = opts?.tts;
+      if (!tts) {
+        res.status(501).json({ error: 'NOT_CONFIGURED', message: 'Speech synthesis is not configured' });
+        return;
+      }
+      const authReq = req as AuthenticatedRequest;
+      const tenantId = authReq.auth!.tenantId;
+      const voice = await resolveTtsVoice({
+        tenantId,
+        requestedPresetId,
+        settingsRepo: opts?.settingsRepo,
+        provider: tts,
+      });
+
+      type Clip = { text: string; clipHash: string; audio: string; contentType: string; cached: boolean };
+      const clips: Array<Clip | null> = items.map((text) => {
+        const clipHash = hashOf(text);
+        const hit = opts?.clipCache?.get(voice.providerVoiceId, clipHash);
+        return hit
+          ? { text, clipHash, audio: hit.audio.toString('base64'), contentType: hit.contentType, cached: true }
+          : null;
+      });
+      const misses = clips.filter((c) => c === null).length;
+      if (!(await chargeTtsClips(authReq, res, misses))) return;
+
+      const spoken: Array<{ text: string; result: Awaited<ReturnType<TtsProvider['synthesize']>> }> = [];
+      try {
+        for (let i = 0; i < items.length; i += 1) {
+          if (clips[i]) continue;
+          const text = items[i];
+          const result = await synthesizeClip(tts, voice, text, tenantId);
+          spoken.push({ text, result });
+          clips[i] = {
+            text,
+            clipHash: hashOf(text),
+            audio: result.audio.toString('base64'),
+            contentType: result.contentType,
+            cached: false,
+          };
         }
       } catch (err) {
-        // The raw provider text (quota/request ids) is logged, never sent —
-        // same posture as /transcribe's honest failures (#1497).
-        logger?.error('voice.tts: synthesis failed', {
-          route: 'POST /api/voice/tts',
-          tenantId: authReq.auth!.tenantId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        res.status(502).json({
-          error: 'TTS_FAILED',
-          message: "Couldn't speak that answer right now — it's still on screen.",
-        });
+        answerTtsFailed(authReq, res, 'POST /api/voice/tts/batch', err);
+        // What was synthesized before the failure was billed: audit it.
+        for (const { text, result } of spoken) {
+          await auditSynthesizedClip(authReq, 'POST /api/voice/tts/batch', text, voice, result);
+        }
+        return;
+      }
+      res.json({ clips });
+      for (const { text, result } of spoken) {
+        await auditSynthesizedClip(authReq, 'POST /api/voice/tts/batch', text, voice, result);
       }
     }),
   );

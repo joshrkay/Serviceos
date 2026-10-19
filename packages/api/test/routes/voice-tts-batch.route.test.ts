@@ -147,3 +147,230 @@ describe('POST /api/voice/tts — charged per synthesized clip, never per reques
     expect(tts.synthesize).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('POST /api/voice/tts/batch — bounded to one turn (the provider-spend guard)', () => {
+  it('an item over 240 characters is a 400: nothing charged, nothing synthesized', async () => {
+    const tts = fakeTts();
+    const app = buildApp({ tts, clipsPerMin: 1 });
+
+    const res = await batch(app, [TURN[0], 'x'.repeat(241)]);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(Object.keys(res.body.details.fields)).toContain('items');
+    expect(tts.synthesize).not.toHaveBeenCalled();
+    // Nothing was charged: the one unit is still there.
+    expect((await single(app, TURN[0])).status).toBe(200);
+  });
+
+  it('four items is a 400', async () => {
+    const tts = fakeTts();
+    const res = await batch(buildApp({ tts }), [...TURN, 'One more line.']);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(tts.synthesize).not.toHaveBeenCalled();
+  });
+
+  it('three items under 240 each but over 600 in total is a 400', async () => {
+    const tts = fakeTts();
+    const res = await batch(buildApp({ tts }), ['a'.repeat(200), 'b'.repeat(200), 'c'.repeat(201)]);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(Object.keys(res.body.details.fields)).toContain('items');
+    expect(tts.synthesize).not.toHaveBeenCalled();
+  });
+
+  it('an empty or whitespace-only item, or no items at all, is a 400', async () => {
+    const tts = fakeTts();
+    const app = buildApp({ tts });
+
+    expect((await batch(app, [TURN[0], ''])).status).toBe(400);
+    expect((await batch(app, [TURN[0], '   '])).status).toBe(400);
+    expect((await batch(app, [])).status).toBe(400);
+    expect((await request(app).post('/api/voice/tts/batch').send({})).status).toBe(400);
+    expect(tts.synthesize).not.toHaveBeenCalled();
+  });
+
+  it('a three-item turn exactly at the caps is a 200, in order, in the tenant voice', async () => {
+    const tts = fakeTts();
+    const items = ['q'.repeat(240), 'a'.repeat(240), 'b'.repeat(120)];
+
+    const res = await batch(buildApp({ tts }), items);
+
+    expect(res.status).toBe(200);
+    expect(res.body.clips).toHaveLength(3);
+    expect(res.body.clips.map((c: { text: string }) => c.text)).toEqual(items);
+    for (const [i, clip] of (res.body.clips as Array<Record<string, unknown>>).entries()) {
+      expect(clip).toMatchObject({
+        clipHash: hashOf(items[i]),
+        contentType: 'audio/mpeg',
+        cached: false,
+        audio: Buffer.from(`mp3:${ADAM}:${items[i]}`).toString('base64'),
+      });
+    }
+    expect(tts.synthesize).toHaveBeenCalledTimes(3);
+    expect(tts.synthesize).toHaveBeenCalledWith(expect.objectContaining({ text: items[0], voice: ADAM, tenantId: TENANT }));
+  });
+
+  it('refuses an unauthenticated request with 401', async () => {
+    expect((await batch(buildApp({ auth: null }), TURN)).status).toBe(401);
+  });
+
+  it("body voice: 'bella' overrides the tenant voice; 'santa' is a 400 naming `voice`", async () => {
+    const tts = fakeTts();
+    const app = buildApp({ tts });
+
+    const bella = await batch(app, [TURN[0]], 'bella');
+    expect(bella.status).toBe(200);
+    expect(tts.synthesize).toHaveBeenLastCalledWith(expect.objectContaining({ voice: BELLA }));
+
+    const santa = await batch(app, [TURN[0]], 'santa');
+    expect(santa.status).toBe(400);
+    expect(Object.keys(santa.body.details.fields)).toContain('voice');
+    expect(tts.synthesize).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers 501 NOT_CONFIGURED when no TTS provider is wired', async () => {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = { userId: 'u', sessionId: 's', tenantId: TENANT, role: 'owner' } as Auth;
+      next();
+    });
+    app.use(
+      '/api/voice',
+      createVoiceRouter(
+        new InMemoryVoiceRepository(),
+        { send: vi.fn(async () => 'queued-1') } as unknown as Queue,
+        undefined,
+        new InMemoryAuditRepository(),
+        undefined,
+        {},
+      ),
+    );
+    const res = await batch(app, TURN);
+    expect(res.status).toBe(501);
+    expect(res.body.error).toBe('NOT_CONFIGURED');
+  });
+});
+
+describe('POST /api/voice/tts/batch — charged per clip from the one per-user budget', () => {
+  it('three uncached items charge three units: with a cap of 4, one single clip still fits and the next does not', async () => {
+    const tts = fakeTts();
+    const app = buildApp({ tts, clipsPerMin: 4 });
+
+    const res = await batch(app, TURN);
+    expect(res.status).toBe(200);
+    expect(res.body.clips.map((c: { cached: boolean }) => c.cached)).toEqual([false, false, false]);
+    expect(tts.synthesize).toHaveBeenCalledTimes(3);
+
+    expect((await single(app, 'A fourth line.')).status).toBe(200);
+    expect((await single(app, 'A fifth line.')).status).toBe(429);
+    expect(tts.synthesize).toHaveBeenCalledTimes(4);
+  });
+
+  it('the same turn again charges zero: every clip a cache hit, no provider call, even with the budget spent', async () => {
+    const tts = fakeTts();
+    const app = buildApp({ tts, clipsPerMin: 3 });
+
+    expect((await batch(app, TURN)).status).toBe(200);
+    const again = await batch(app, TURN);
+
+    expect(again.status).toBe(200);
+    expect(again.body.clips.map((c: { cached: boolean }) => c.cached)).toEqual([true, true, true]);
+    expect(again.body.clips.map((c: { clipHash: string }) => c.clipHash)).toEqual(TURN.map(hashOf));
+    expect(tts.synthesize).toHaveBeenCalledTimes(3);
+  });
+
+  it('one cached and two uncached items charge two', async () => {
+    const tts = fakeTts();
+    const app = buildApp({ tts, clipsPerMin: 3 });
+
+    expect((await single(app, TURN[0])).status).toBe(200); // 1 of 3 spent
+    const res = await batch(app, TURN); // two misses: 3 of 3 spent
+
+    expect(res.status).toBe(200);
+    expect(res.body.clips.map((c: { cached: boolean }) => c.cached)).toEqual([true, false, false]);
+    expect(tts.synthesize).toHaveBeenCalledTimes(3);
+    expect((await single(app, 'A fourth line.')).status).toBe(429);
+  });
+
+  it('a turn whose misses exceed the remaining budget is a 429 with no provider call and no partial charge', async () => {
+    const tts = fakeTts();
+    const app = buildApp({ tts, clipsPerMin: 3 });
+
+    expect((await single(app, 'Already spoken.')).status).toBe(200); // 2 left
+    const res = await batch(app, TURN); // 3 misses
+
+    expect(res.status).toBe(429);
+    expect(res.body).toEqual({
+      error: 'RATE_LIMITED',
+      message: 'Too many spoken answers in a row. The answer is still on screen.',
+    });
+    expect(Number(res.headers['retry-after'])).toBeGreaterThan(0);
+    expect(tts.synthesize).toHaveBeenCalledTimes(1);
+    // The two remaining units are still there: a two-miss turn fits.
+    const smaller = await batch(app, [TURN[0], TURN[1]]);
+    expect(smaller.status).toBe(200);
+    expect(tts.synthesize).toHaveBeenCalledTimes(3);
+  });
+
+  it('the single route and the batch draw from one budget: twenty single clips leave a batch with nothing', async () => {
+    const tts = fakeTts();
+    const app = buildApp({ tts, clipsPerMin: 20 });
+
+    for (let i = 0; i < 20; i += 1) {
+      expect((await single(app, `Spoken line number ${i}.`)).status).toBe(200);
+    }
+    const res = await batch(app, [TURN[0]]);
+
+    expect(res.status).toBe(429);
+    expect(tts.synthesize).toHaveBeenCalledTimes(20);
+  });
+
+  it('audits every synthesized clip on its own (chars per clip, the preset, never the vendor id) and no cache hit', async () => {
+    const audit = recordingAudit();
+    const app = buildApp({ auditRepo: audit, clipsPerMin: 5 });
+
+    expect((await single(app, TURN[0])).status).toBe(200);
+    audit.create.mockClear();
+    expect((await batch(app, TURN)).status).toBe(200);
+
+    expect(audit.create).toHaveBeenCalledTimes(2);
+    const metas = audit.create.mock.calls.map((c) => (c[0] as { metadata: Record<string, unknown> }).metadata);
+    expect(metas).toEqual([
+      expect.objectContaining({ chars: TURN[1].length, provider: 'fake', voice: 'adam' }),
+      expect.objectContaining({ chars: TURN[2].length, provider: 'fake', voice: 'adam' }),
+    ]);
+    for (const call of audit.create.mock.calls) {
+      expect(call[0]).toMatchObject({ tenantId: TENANT, actorId: 'user-owner-1', eventType: 'voice.tts.synthesized' });
+      expect(JSON.stringify(call[0])).not.toContain(ADAM);
+    }
+  });
+
+  it('a provider failure on one clip is a 502 TTS_FAILED for the whole turn that leaks nothing; clips already made stay cached', async () => {
+    const tts = fakeTts();
+    tts.synthesize
+      .mockImplementationOnce(async (input: { text: string; voice?: string }) => ({
+        audio: Buffer.from(`mp3:${input.voice}:${input.text}`),
+        contentType: 'audio/mpeg',
+        provider: 'fake',
+      }))
+      .mockRejectedValueOnce(new Error('ElevenLabs 429 quota_exceeded req_9f8e'));
+    const app = buildApp({ tts });
+
+    const res = await batch(app, TURN);
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('TTS_FAILED');
+    expect(JSON.stringify(res.body)).not.toContain('quota_exceeded');
+    expect(JSON.stringify(res.body)).not.toContain('req_9f8e');
+    expect(tts.synthesize).toHaveBeenCalledTimes(2);
+
+    // The first clip was stored before the failure.
+    const first = await single(app, TURN[0]);
+    expect(first.body.cached).toBe(true);
+    expect(tts.synthesize).toHaveBeenCalledTimes(2);
+  });
+});
