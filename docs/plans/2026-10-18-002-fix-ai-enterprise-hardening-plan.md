@@ -494,6 +494,19 @@ flowchart LR
         speech source therefore can't bypass it.
       - A test pins the list. It checks every repository method that writes one of those columns,
         and a column added to the list without a scrubbing write path fails.
+      - **Detect across adjacent caller turns, not one write at a time.** A caller who pauses while
+        reading a card number can produce several `call_transcript_turns` rows, each shorter than
+        13 digits, that together rebuild the full number. So:
+        - On every caller-turn write, the detector also runs over the concatenation of the
+          session's preceding caller turns, in order, within a bounded window.
+        - When a Luhn-valid sequence spans turns, it rewrites every contributing span in all of
+          those rows to `[card number]`, in the same transaction.
+        - It does the same to the session's in-memory history, so the next model call doesn't
+          carry it.
+        - Test: a card number split across three caller turns is redacted in all three rows and in
+          the next model prompt.
+        - Batch D started before this was added, so it lands as a batch D follow-up, with the
+          word-form scrubber.
       - The transcription worker additionally scrubs and detects as soon as the provider returns,
         before the optional correction call, before persistence and before hand-off.
     - Add `redact=pci` to Deepgram.
@@ -962,6 +975,17 @@ flowchart LR
       `information_schema.columns` for every `%customer_id` column) in the Docker-gated suite. It
       fails when any match, or any newly added one, is missing from the manifest. A future table or
       bare link column therefore can't silently escape the erase.
+    - **The manifest covers the whole customer-owned graph, not just direct links.** Many tables
+      reach the subject only through another subject-owned entity. For example,
+      `appointments.notes` and `job_timeline_events.description` / `metadata` link only through
+      `job_id → jobs.customer_id`. So:
+      - The schema test computes the transitive closure from `customers`, recursively over
+        `pg_constraint`, and adds bare link columns named after a subject-owned table (`job_id`,
+        `appointment_id`, `estimate_id`, `invoice_id` and so on).
+      - Every table in that closure must have a manifest entry, a classification, and the erasure
+        trigger if it is `scrub` or `anonymize`.
+      - Test: a test-only migration adds a table linked only by `job_id`. The coverage test fails
+        until the manifest classifies it.
     - Free-text stores that can hold a customer's details without a foreign key (notes, messages,
       transcripts, `ai_runs`) are listed in the manifest explicitly, with how each is matched.
   - **Fence writers that are still in flight, or the erase can be undone.** An erase can overlap an
@@ -1027,13 +1051,21 @@ flowchart LR
         `telephony/recording-webhook.ts` and `telephony/voicemail-status-route.ts`. The structural
         test lists `generateUploadUrl` among the provider write methods, so a new call site has to
         go through the fence too.
-      - **Keep issued keys until their URLs expire.** The erase keeps the storage key of every
-        subject `files` row it deletes, whether or not the upload happened, along with when its
-        URL was issued.
-        - After the latest issued URL's expiry plus clock skew, it deletes each key again.
-        - Then a HEAD request confirms each key is gone.
-        - Until then the S3 store is `incomplete`, and the result says it finishes once
-          outstanding upload links expire, within about five minutes.
+      - **Keep issued keys until their URLs expire, durably.** A key held only in the running
+        erase is lost if the process restarts before the URL expires, and the client could then
+        upload with nothing left to find it. So:
+        - In the same transaction that deletes a subject `files` row, the erase inserts an
+          `erasure_storage_cleanup` row with the bucket, the key and `not_before`. `not_before` is
+          the issued URL's expiry plus clock skew. This happens whether or not the upload went
+          through.
+        - A worker processes those rows after `not_before`: it deletes each key again.
+        - Then a HEAD request confirms each key is gone, and only then is the cleanup row marked
+          done.
+        - Until every cleanup row for the erase is done, the S3 store is `incomplete`. The result
+          says it finishes once outstanding upload links expire, within about five minutes, and a
+          restart resumes from the rows.
+        - Test: the process restarts between the row delete and the re-delete. The worker still
+          removes the late upload.
       - Test: an upload URL is issued, the erase runs, and the client PUTs the bytes afterwards,
         before the URL expires. The re-delete removes the object, and the erase reports success
         only after the HEAD check.
@@ -1267,25 +1299,32 @@ flowchart LR
       - The reconcile is a recompute, not an increment. Running it again is exactly-once by
         construction, a late pre-ledger write is picked up on the next run, and nothing is counted
         twice, because ledger-era runs carry their `attempt_id`.
-      - **A cap can be enabled only after a durable cutover checkpoint, so no stale reconcile can
-        admit an overspend.** A reconcile on an interval leaves a window. An old-version request
-        can write a $90 untagged charge just after a reconcile, and a $15 request arriving before
-        the next one would see the stale total and pass a $100 cap. So:
-        - The first new-version process records a `spend_ledger_cutover` row: its boot time, plus
-          the old process's maximum lifetime. That lifetime is the graceful-shutdown drain plus
-          `MAX_GATEWAY_DEADLINE_MS`, plus a margin.
-        - After that moment no old writer can be alive, so no untagged charge can appear any more.
-        - A final reconcile runs once the cutover moment has passed, and marks the cutover
-          `complete`. `pre_ledger_spent` is then final.
-        - Until the cutover is `complete`, the settings write that enables a cap is refused, with a
-          plain "try again in a few minutes". A capped reservation can therefore never be admitted
-          against a stale pre-ledger total.
-        - From the next month on, `pre_ledger_spent` is zero, because every run carries its
-          `attempt_id`.
+      - **Pre-ledger spend is recomputed inside every capped reservation, so it is never stale and
+        never finalized early.** A periodic reconcile leaves a window. A checkpoint based on the
+        new version's boot time can't prove the old version has stopped either: during a rolling
+        deploy an old process can keep accepting work. So there is no "final" figure:
+        - A capped tenant's reserve transaction recomputes `pre_ledger_spent` itself before the
+          conditional update. It is a `SUM(cost_micro_cents)` over the month's untagged runs.
+        - A partial index on `ai_runs (tenant_id, created_at) WHERE attempt_id IS NULL` keeps that
+          sum cheap. It is empty from the first full month after deploy, because every ledger-era
+          run is tagged.
+        - Every untagged charge that has committed is therefore counted by the next reservation. A
+          late write is never permanently left out, whenever the old process stops.
+        - What no ledger can stop is a call an old-version process makes while it is still running,
+          because old code never consults the cap. The plan says so plainly. The cap governs every
+          call dispatched by ledger-era code, and old-version calls are counted as soon as they
+          land.
       - The cap compares `spent + pre_ledger_spent + reserved`.
-    - Rows with a null cost (unpriced models) are counted into `unpriced_runs` on the ledger row.
-      The settings response shows that count, so the owner can see the pre-ledger figure is a
-      floor.
+    - **Unpriced usage fails closed; it is not shown as a floor.** `SUM(cost_micro_cents)` skips
+      null-cost runs. A tenant with substantial unpriced usage could therefore enable a $100 cap
+      and still get close to another $100. So:
+      - Once a verified price exists for a run's model, the run is repriced from its stored
+        `model` and `token_usage`, and the computed cost is written back.
+      - While any current-month run is still unpriced after that repricing, the settings write that
+        enables a cap is refused. The message says plainly that this month's usage can't be fully
+        counted yet.
+      - A tenant that already has a cap and later gets an unpriced run has its capped reservations
+        refused. That matches the existing fail-closed rule for unpriced models.
     - Enabling a cap takes effect at once against the month's real spend. When `spent` is already
       over the new ceiling, the settings response says so in plain words, and new AI work is
       refused.
@@ -1391,12 +1430,16 @@ flowchart LR
   - **Integration (mid-month cap):** a tenant has $90 of `ai_runs` cost this month, all from before
     deploy. After a reconcile, it enables a $100 cap, and a $15 worst-case call is refused.
   - **Integration (rolling deploy):**
-    - An old-version request writes a $20 `ai_runs` cost, with no `attempt_id`, after the first
-      reconcile. The final reconcile at cutover adds it exactly once, and a second reconcile changes
-      nothing.
-    - Enabling a cap before the cutover is `complete` is refused.
-    - An untagged $90 charge lands just before the cutover. After the cutover, a $100 cap refuses a
-      $15 call.
+    - An old-version request writes a $20 `ai_runs` cost, with no `attempt_id`. The next capped
+      reservation counts it exactly once, and recomputing again changes nothing.
+    - An untagged $90 charge commits after a cap is set. The very next capped reservation counts
+      it, so a $100 cap refuses a $15 call.
+    - With an old-version process still running and writing untagged charges, every committed
+      charge is counted by the next reservation, and none is ever dropped.
+  - **Integration (unpriced):**
+    - A current-month run with a null cost blocks enabling a cap.
+    - After a verified price is added, the run is repriced from its `model` and `token_usage`, and
+      the cap can then be enabled against the full total.
 
 ## Owner decisions and actions (not code)
 
