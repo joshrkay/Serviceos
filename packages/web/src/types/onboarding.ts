@@ -7,7 +7,7 @@
  * packages/api/src/shared/contracts.ts for the API-side mirror).
  */
 
-import type { OnboardingDraftExecution } from '@ai-service-os/shared';
+import type { OnboardingDraftExecution, OnboardingStatusDraft } from '@ai-service-os/shared';
 
 export type OnboardingStepId =
   | 'signup'
@@ -25,10 +25,19 @@ export type OnboardingStepStatus =
   | 'error'
   | 'skipped';
 
+/**
+ * Why the phone step failed, as a closed code (ProvisioningFailureCodeSchema in
+ * the API's onboarding/contracts.ts). Set only on a failed phone step, and absent
+ * from an older server, so readers fall back to `blockers` without it.
+ */
+export type PhoneFailureCode = 'area_code_unavailable' | 'credentials_missing' | 'provider_error' | 'unknown';
+
 export interface OnboardingStep {
   id: OnboardingStepId;
   status: OnboardingStepStatus;
   blockers?: string[];
+  /** Phone step only, when it failed: why, as a code (never the recorded text). */
+  failureCode?: PhoneFailureCode;
   metadata?: Record<string, unknown>;
 }
 
@@ -65,14 +74,13 @@ export interface OnboardingStatusResponse {
   /** ISO-8601 timestamp of tenants.created_at. Lets the client tell a brand-new
    * account (welcome tour) from an established user (what's-new changelog). */
   accountCreatedAt?: string;
-  /** The "pick, don't build" draft, once the tenant has one. */
-  draft?: {
-    status: 'draft' | 'approved';
-    choicesAnswered: number;
-    version: number;
-    /** Additive: absent from an API that predates it, null while the draft is still being edited. */
-    execution?: OnboardingDraftExecution | null;
-  };
+  /**
+   * The "pick, don't build" draft, once the tenant has one (the shared
+   * OnboardingStatusDraftSchema shape). Once approved it also carries the
+   * derived hints `undoable` (the whole-draft undo can still run) and, for a
+   * `failed`/`stopped` set, `recovery` (`reset` or `settings`).
+   */
+  draft?: OnboardingStatusDraft;
 }
 
 export interface DayHours {

@@ -60,6 +60,11 @@ interface CreateVoiceRecordingBody {
 const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 
 const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
+
+/** PRIV-3 — the 410 copy for a recording whose audio was deleted early. */
+const CARD_NUMBER_AUDIO_DELETED_MESSAGE =
+  "This recording's audio was deleted because a card number was said on it. " +
+  'The transcript, with the card number removed, is still available.';
 const JOB_ID_SCHEMA = z.guid();
 /** H2 review — files.id is uuid: a malformed fileId is a 400, not a Postgres 22P02 → 500. */
 const FILE_ID_SCHEMA = z.guid();
@@ -968,6 +973,15 @@ export function createVoiceRouter(
         });
         return;
       }
+      // PRIV-3 — audio deleted early because a card number was said on it.
+      if (recording.audioPurgedAt) {
+        res.status(410).json({
+          error: 'RECORDING_PURGED',
+          message: CARD_NUMBER_AUDIO_DELETED_MESSAGE,
+          purgedAt: recording.audioPurgedAt.toISOString(),
+        });
+        return;
+      }
       if (!opts?.fileRepo || !opts?.storage) {
         res.status(501).json({ error: 'NOT_CONFIGURED', message: 'Audio download is not configured' });
         return;
@@ -1054,6 +1068,15 @@ export function createVoiceRouter(
           message:
             'This recording\'s audio was purged under the tenant retention policy and cannot be re-transcribed.',
           purgedAt: existing.purgedAt.toISOString(),
+        });
+        return;
+      }
+      // PRIV-3 — same for audio deleted early because a card number was said.
+      if (existing.audioPurgedAt) {
+        res.status(410).json({
+          error: 'RECORDING_PURGED',
+          message: CARD_NUMBER_AUDIO_DELETED_MESSAGE,
+          purgedAt: existing.audioPurgedAt.toISOString(),
         });
         return;
       }

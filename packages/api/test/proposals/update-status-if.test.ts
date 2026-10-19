@@ -66,6 +66,23 @@ describe('ProposalRepository.updateStatusIf', () => {
     expect(updated!.updatedAt.getTime()).toBeGreaterThanOrEqual(proposal.updatedAt.getTime());
   });
 
+  // S4: approveProposal writes through updateStatusIf and stamps the
+  // approver's role for config-writing types; it must persist, not be dropped.
+  it('applies the approval stamps, executedByRole included, exactly like updateStatus', async () => {
+    const repo = new InMemoryProposalRepository();
+    const proposal = await seed(repo);
+    const approvedAt = new Date('2026-10-19T12:00:00Z');
+
+    const updated = await repo.updateStatusIf(TENANT, proposal.id, ['draft', 'ready_for_review'], 'approved', {
+      approvedAt,
+      executedBy: 'owner-1',
+      executedByRole: 'owner',
+    });
+
+    expect(updated).toMatchObject({ status: 'approved', approvedAt, executedBy: 'owner-1', executedByRole: 'owner' });
+    expect(await repo.findById(TENANT, proposal.id)).toMatchObject({ executedBy: 'owner-1', executedByRole: 'owner' });
+  });
+
   it('is second-write-safe: the same conditional revoke twice is a no-op', async () => {
     const repo = new InMemoryProposalRepository();
     const proposal = await seed(repo);

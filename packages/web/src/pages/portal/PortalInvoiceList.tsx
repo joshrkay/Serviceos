@@ -80,6 +80,17 @@ export function PortalInvoiceList({ token, timezone = PORTAL_FALLBACK_TZ }: { to
               >
                 Pay now
               </a>
+            ) : inv.collectOnSite && inv.amountDueCents > 0 ? (
+              // S5a-2 (U8) — the business collects in person (or its choice
+              // could not be read): no link is served, so say how to pay.
+              // True in both cases: an in-person payment can always be
+              // recorded against the invoice.
+              <span
+                data-testid="portal-invoice-pay-in-person"
+                className="text-xs text-muted-foreground"
+              >
+                Pay in person
+              </span>
             ) : null}
           </div>
         </PortalCard>

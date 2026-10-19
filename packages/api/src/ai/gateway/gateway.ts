@@ -21,6 +21,7 @@ import {
 } from './router';
 import { computeCostMicroCents } from './model-pricing';
 import type { LLMTraceCompletionEvent, LLMTraceExporter } from './trace-exporter';
+import { redactCardNumbersInUserMessages } from '../privacy/pan-redact';
 
 /** Image detail hint passed through to vision-capable providers. */
 export type LLMImageDetail = 'low' | 'high' | 'auto';
@@ -470,7 +471,13 @@ export class LLMGateway {
     }
   }
 
-  async complete(request: LLMRequest): Promise<LLMResponse> {
+  async complete(rawRequest: LLMRequest): Promise<LLMResponse> {
+    // PRIV-3 — a card number in user-role text (a caller reciting one) is
+    // replaced before anything below sees the request: provider dispatch, the
+    // ai_runs snapshot and the trace export all read `request`.
+    const request: LLMRequest = Array.isArray(rawRequest.messages)
+      ? { ...rawRequest, messages: redactCardNumbersInUserMessages(rawRequest.messages) }
+      : rawRequest;
     const validationErrors = validateLLMRequest(request);
     if (validationErrors.length > 0) {
       throw new ValidationError('Invalid LLM request', { errors: validationErrors });

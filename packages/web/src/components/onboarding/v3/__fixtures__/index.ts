@@ -5,6 +5,7 @@ import {
   type StagedOnboardingChoices,
 } from '@ai-service-os/shared';
 import draftJson from './draft.plumbing-cle.json';
+import columbusJson from './draft.plumbing-cmh.json';
 
 /**
  * A draft captured from the API (assembleTypicalShop for plumbing in Cleveland,
@@ -12,6 +13,13 @@ import draftJson from './draft.plumbing-cle.json';
  * drifts, every test that uses it fails here rather than rendering stale data.
  */
 export const plumbingCleDraft: OnboardingDraft = OnboardingDraftSchema.parse(draftJson);
+
+/**
+ * The same draft after "Not Cleveland?" picked Columbus: the API's assembler run for
+ * CMH (with a Columbus tier), so the city, the prices and every rendered line are
+ * Columbus's, at version 2.
+ */
+export const plumbingCmhDraft: OnboardingDraft = OnboardingDraftSchema.parse(columbusJson);
 
 export function withDraft(patch: Partial<OnboardingDraft>): OnboardingDraft {
   return { ...plumbingCleDraft, ...patch };

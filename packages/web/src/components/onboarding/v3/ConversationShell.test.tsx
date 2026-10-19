@@ -12,7 +12,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import type { OnboardingDraft } from '@ai-service-os/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fullyAnsweredDraft, plumbingCleDraft, withChoices } from './__fixtures__';
+import { fullyAnsweredDraft, plumbingCleDraft, plumbingCmhDraft, withChoices } from './__fixtures__';
 import { PLANS, statusAt } from './__fixtures__/after';
 import { _resetOnboardingStatusCacheForTests } from '../../../hooks/useOnboardingStatus';
 import { expectAllTapTargets } from '../../../test-utils/tap-target';
@@ -56,8 +56,11 @@ interface Server {
   stageGate?: Promise<void>;
   /** How the voice routes answer: with clips, or with the API's error for that status. Default 501 (no voice configured). */
   tts?: 'ok' | 429 | 501 | 502;
-  /** How POST /api/voice/stream-token answers: a 30 s token, or 503 when transcription is not set up. Default 200. */
-  streamToken?: 200 | 503;
+  /**
+   * What happens to the next metro change before it lands: another window staged a choice
+   * (the API answers DRAFT_METRO_LOCKED), or moved the version without staging (VERSION_CONFLICT).
+   */
+  metroFault?: 'staged_elsewhere' | 'moved_elsewhere';
 }
 
 interface Request {
@@ -83,6 +86,7 @@ function ttsAnswer(path: string, method: string, body: Request['body']): Respons
   if (mode !== 'ok') return json(mode, TTS_ERRORS[mode]);
   if (path === '/api/voice/tts/batch') return json(200, { clips: body!.items!.map((text, i) => ({ text, ...clipFor(text, i) })) });
   return json(200, clipFor(body!.text!, 0));
+  body: { choice?: unknown; version?: number; metro?: string } | undefined;
 }
 
 let server: Server;
@@ -147,6 +151,25 @@ function stubNetwork(initial: Server) {
           return json(200, { draft: server.draft });
         };
         return gate ? gate.then(respond) : resolved(respond());
+      }
+      if (path === '/api/onboarding/draft/metro' && method === 'PUT') {
+        const current = server.draft!;
+        const fault = server.metroFault;
+        server.metroFault = undefined;
+        if (fault === 'staged_elsewhere') {
+          server.draft = withChoices(current, { greeting: { option: 'b' } });
+          return resolved(json(409, { error: 'CONFLICT', message: 'DRAFT_METRO_LOCKED: a choice is already staged, so the city can no longer change here' }));
+        }
+        if (fault === 'moved_elsewhere') server.draft = { ...current, version: current.version + 1, clientTimezone: 'America/Chicago' };
+        if (Object.keys(server.draft!.choices).length > 0) {
+          return resolved(json(409, { error: 'CONFLICT', message: 'DRAFT_METRO_LOCKED: a choice is already staged, so the city can no longer change here' }));
+        }
+        if (body?.version !== server.draft!.version) {
+          return resolved(json(409, { error: 'CONFLICT', message: `VERSION_CONFLICT: expected ${body?.version}, found ${server.draft!.version}; re-read the draft` }));
+        }
+        if (body.metro !== 'CMH') throw new Error(`the stub only knows Columbus, got ${body.metro}`);
+        server.draft = { ...plumbingCmhDraft, version: server.draft!.version + 1 };
+        return resolved(json(200, { draft: server.draft }));
       }
       if (path === '/api/onboarding/draft/approve' && method === 'POST') {
         if (server.approveFails) return resolved(json(500, { error: 'INTERNAL', message: 'boom' }));
@@ -979,6 +1002,89 @@ describe('ConversationShell', () => {
       await userEvent.click(screen.getByRole('button', { name: 'Back' }));
       await screen.findByRole('heading', READBACK);
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('"Not Cleveland?" on Ready', () => {
+    const metroCalls = () => requests.filter((r) => r.path === '/api/onboarding/draft/metro');
+    const REFRESHED = 'Your answers changed somewhere else, so I refreshed them.';
+
+    async function pickColumbus() {
+      await userEvent.click(await screen.findByRole('button', { name: 'Not Cleveland?' }));
+      await userEvent.type(screen.getByRole('searchbox', { name: 'Your city' }), 'Columbus');
+      await userEvent.click(within(screen.getByRole('list', { name: 'Cities' })).getByRole('button', { name: 'Columbus' }));
+    }
+
+    it('re-prices the shop for the city the owner picks, and the new city and prices carry through the turns and the read-back', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody() });
+      const { container } = renderShell();
+      expect(await screen.findByText(/the way most Cleveland plumbing shops run/)).toBeInTheDocument();
+      expectAllTapTargets(container, 'Ready');
+      await pickColumbus();
+
+      expect(await screen.findByText(/I built it the way most Columbus plumbing shops run\./)).toBeInTheDocument();
+      expect(metroCalls().map((r) => [r.method, r.body])).toEqual([['PUT', { metro: 'CMH', version: 1 }]]);
+      expect(screen.getByText('$79, then $135 an hour')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Not Columbus?' })).toBeInTheDocument();
+      expect(funnel('v3_metro_changed')).toEqual([{ from: 'CLE', to: 'CMH', shows_city: true }]);
+
+      // The first price turn and the read-back are Columbus's, and the next stage carries the new version.
+      await makeItMine();
+      await onTurn(0);
+      await choose(turn(0).a);
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(stagedCalls().filter((r) => r.path.includes('/choices/')).map((r) => r.body?.version)).toEqual([2]);
+      expect(screen.getByRole('radio', { name: /\$79 to come out, then \$135 an hour/ })).toBeInTheDocument();
+      expect(screen.getByText("This is the first number a caller hears. Here's where plumbing shops in Columbus land.")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Keep the rest as is' }));
+      expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
+      expect(screen.getByText('$79 to come out, $135 an hour after')).toBeInTheDocument();
+      expect(screen.getByText(/Typical for Columbus plumbers\./)).toBeInTheDocument();
+      // The read-back names the city as text: no change control there.
+      expect(screen.queryByRole('button', { name: /Not Columbus|Set my city/ })).not.toBeInTheDocument();
+      expect(screen.queryByText(/Cleveland/)).not.toBeInTheDocument();
+    });
+
+    it('a choice staged in another window: the refused change re-reads once, opens on the next turn with the one-line notice, and is not sent again', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), metroFault: 'staged_elsewhere' });
+      renderShell();
+      await pickColumbus();
+
+      // The greeting was staged elsewhere, so the owner picks up on the price turn, still Cleveland's.
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(screen.getByRole('status')).toHaveTextContent(REFRESHED);
+      expect(screen.getByRole('radio', { name: /\$89 to come out, then \$150 an hour/ })).toBeInTheDocument();
+      expect(metroCalls()).toHaveLength(1);
+      expect(draftCalls().filter((c) => c === 'GET /api/onboarding/draft')).toHaveLength(2);
+      expect(funnel('v3_metro_changed')).toEqual([]);
+    });
+
+    it('a version moved in another window: the refused change re-reads once, stays on Ready with the notice, and is not sent again', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), metroFault: 'moved_elsewhere' });
+      renderShell();
+      await pickColumbus();
+
+      expect(await screen.findByRole('status')).toHaveTextContent(REFRESHED);
+      expect(screen.getByRole('heading', { level: 1, name: 'Walsh Plumbing is already set up.' })).toBeInTheDocument();
+      expect(screen.getByText(/the way most Cleveland plumbing shops run/)).toBeInTheDocument();
+      expect(metroCalls()).toHaveLength(1);
+      // Picking again sends the re-read version, once.
+      await pickColumbus();
+      expect(await screen.findByText(/the way most Columbus plumbing shops run/)).toBeInTheDocument();
+      expect(metroCalls().map((r) => r.body?.version)).toEqual([1, 2]);
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('a resumed draft with a staged choice opens on its next turn and never offers the change; the read-back names the city as text', async () => {
+      stubNetwork({ draft: withChoices(draftJson, { greeting: { option: 'a' } }), status: statusBody() });
+      renderShell();
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Not Cleveland|Set my city/ })).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Keep the rest as is' }));
+      expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
+      expect(screen.getByText(/Typical for Cleveland plumbers\./)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Not Cleveland|Set my city/ })).not.toBeInTheDocument();
+      expect(metroCalls()).toHaveLength(0);
     });
   });
 

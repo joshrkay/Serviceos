@@ -72,6 +72,13 @@ export interface VoiceRecording {
    */
   purgedAt?: Date;
   /**
+   * PRIV-3 — set by the recording-retention worker when it deleted the
+   * stored audio early because a card number was said on the recording
+   * (migration 314). The row and its scrubbed transcript are kept; audio
+   * download paths answer 410 exactly as for `purgedAt`.
+   */
+  audioPurgedAt?: Date;
+  /**
    * U3 (E-lane answers) — routed outcome of the memo. Distinct from
    * `status` (the audio-file lifecycle): transcription flips
    * `status='completed'` BEFORE the voice-action-router job even
@@ -191,6 +198,13 @@ export interface VoiceRepository {
     id: string,
     provenance: 'caller' | 'mixed' | 'operator',
   ): Promise<VoiceRecording | null>;
+  /**
+   * PRIV-3 — flag the recording `pci_detected` (migration 314): a card
+   * number was said on it, so the retention sweep deletes its audio
+   * promptly. Idempotent; resolves true only on the write that set the
+   * flag (false when already set, or the row is missing / another tenant's).
+   */
+  markCardNumberDetected(tenantId: string, id: string): Promise<boolean>;
 }
 
 export interface TranscriptionProvider {
@@ -433,6 +447,16 @@ export class InMemoryVoiceRepository implements VoiceRepository {
     rec.updatedAt = new Date();
     this.recordings.set(id, rec);
     return { ...rec };
+  }
+
+  /** PRIV-3 — ids flagged `pci_detected`, for tests (the row type carries no flag). */
+  readonly cardNumberDetected = new Set<string>();
+
+  async markCardNumberDetected(tenantId: string, id: string): Promise<boolean> {
+    const rec = this.recordings.get(id);
+    if (!rec || rec.tenantId !== tenantId || this.cardNumberDetected.has(id)) return false;
+    this.cardNumberDetected.add(id);
+    return true;
   }
 
   async stampOutcomeByCallSid(
