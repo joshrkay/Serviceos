@@ -361,6 +361,18 @@ export const aiTaskRunsObserved = new Gauge({
 });
 
 /**
+ * OBS-4 — platform-wide ai_runs spend (micro-cents; divide by 1,000,000 for
+ * cents) over the last evaluated failure-monitor window. Unlabelled on
+ * purpose: per-tenant attribution rides in the alert details, never in a
+ * metric label (raw tenant_id is deliberately not a label anywhere here).
+ */
+export const aiSpendWindowMicroCents = new Gauge({
+  name: 'ai_spend_window_micro_cents',
+  help: 'SUM(ai_runs.cost_micro_cents) over the last evaluated failure-monitor window, platform-wide (unpriced runs count 0)',
+  registers: [metricsRegistry],
+});
+
+/**
  * FAIL-VIS — silent proposal-execution findings. `check` is
  * `stalled_executing` (stuck in `executing` past the staleness bound) or
  * `failed_without_error` (terminal `execution_failed` carrying a NULL
@@ -373,11 +385,27 @@ export const proposalSilentFailureFindings = new Gauge({
   registers: [metricsRegistry],
 });
 
-/** WS15 — operator alerts actually dispatched, per channel (post-cooldown). */
+/**
+ * WS15 — operator alerts actually dispatched, per channel (post-cooldown).
+ * `rule` is OperatorAlert.metricRule when set: a per-tenant rule keys its
+ * cooldown by tenant but labels this series by task family only, so no
+ * tenant id ever lands in a label here.
+ */
 export const sloAlertsSentTotal = new Counter({
   name: 'slo_alerts_sent_total',
   help: 'Operator alerts dispatched by alertOperator, by rule and channel (sentry|sms)',
   labelNames: ['rule', 'channel'],
+  registers: [metricsRegistry],
+});
+
+/**
+ * U7 (S6-2) — demo-call reservations refused because the day's call or cost
+ * cap is reached. The crossing that filled the cap paged once; refusals after
+ * it only count here, so a busy day never pages again.
+ */
+export const demoCallBudgetRefusalsTotal = new Counter({
+  name: 'demo_call_budget_refusals_total',
+  help: 'Demo-call budget reservations refused because the UTC day is at its call or cost cap',
   registers: [metricsRegistry],
 });
 

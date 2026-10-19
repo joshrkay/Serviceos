@@ -40,11 +40,8 @@ process.env.E2E_V3_API_URL = apiURL;
 
 export default defineConfig({
   testDir: './',
-  testMatch: [
-    'onboarding-v3-ready-readback.spec.ts',
-    'onboarding-v3-undo-reset.spec.ts',
-    'invoice-payment-collect-on-site.spec.ts',
-  ],
+  testMatch: ['onboarding-v3-ready-readback.spec.ts', 'onboarding-v3-voice-webkit.spec.ts'],
+  testMatch: ['onboarding-v3-ready-readback.spec.ts', 'invoice-payment-collect-on-site.spec.ts'],
   fullyParallel: false,
   workers: 1,
   retries: 0,

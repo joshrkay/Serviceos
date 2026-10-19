@@ -23,6 +23,7 @@
  */
 import { redactByTier } from '../../logging/redact';
 import { redactPiiRepeatedly } from '../../reputation/pii-redact';
+import { redactCardNumbers } from '../privacy/pan-redact';
 import type { AppConfig } from '../../shared/config';
 import { redactMessagesForSnapshot } from './gateway';
 import type { LLMGatewayLogger, LLMMessage } from './gateway';
@@ -142,13 +143,18 @@ const INLINE_SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   [/\b(authorization|api[_-]?key)\b(\s*[:=]\s*)\S+/gi, `$1$2${REDACTED}`],
 ];
 
-/** Free-text redaction for exported content: PII placeholders, then inline credentials. */
+/**
+ * Free-text redaction for exported content: card numbers, then PII
+ * placeholders, then inline credentials.
+ */
 export function redactTextForExport(text: string): string {
   return INLINE_SECRET_PATTERNS.reduce(
     (acc, [pattern, replacement]) => acc.replace(pattern, replacement),
     // #1205 — to a fixed point: one pass leaves the second of two abutting
     // addresses raw (see redactPiiRepeatedly).
-    redactPiiRepeatedly(text),
+    // PRIV-3 — card numbers FIRST: the phone pass would otherwise take ten
+    // digits out of an unspaced card and leave the rest ("41111[phone]").
+    redactPiiRepeatedly(redactCardNumbers(text)),
   );
 }
 

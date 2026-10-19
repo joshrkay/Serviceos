@@ -1,9 +1,13 @@
-import { render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { AssembledOnboardingChoice, OnboardingCoreChoiceKey, StagedOnboardingChoice } from '@ai-service-os/shared';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ReactNode } from 'react';
+import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
 import { plumbingCleDraft } from './__fixtures__';
 import { OptionPairTurn, type OptionPairTurnProps } from './OptionPairTurn';
+
+vi.mock('../../../lib/analytics', () => ({ trackFunnel: vi.fn(), track: vi.fn() }));
 
 function choiceFor(key: OnboardingCoreChoiceKey): AssembledOnboardingChoice {
   const choice = plumbingCleDraft.assembled.choices.find((c) => c.settingKey === key);
@@ -388,6 +392,77 @@ describe('OptionPairTurn', () => {
         expect(tripField()).toHaveAttribute('placeholder', '$89');
         expect(rateField()).toHaveAttribute('placeholder', '$150');
       });
+    });
+  });
+  describe('Rivet speaks (inside the shell)', () => {
+    /** The shell's real voice hook, as ConversationShell provides it; the network is stubbed at fetch. */
+    function Voice({ children }: { children: ReactNode }) {
+      const voice = useRivetVoice({ funnel: { tenantId: 't', userId: 'u' } });
+      return <RivetVoiceContext.Provider value={voice}>{children}</RivetVoiceContext.Provider>;
+    }
+    let batches: string[][];
+    let played: string[];
+    const src = (text: string) => `data:audio/mpeg;base64,${btoa(encodeURIComponent(text))}`;
+
+    beforeEach(() => {
+      batches = [];
+      played = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const { items } = JSON.parse(String(init?.body)) as { items: string[] };
+          if (String(input) !== '/api/voice/tts/batch') throw new Error(`unexpected request ${String(input)}`);
+          batches.push(items);
+          const clips = items.map((text, i) => ({
+            text,
+            clipHash: String(i).padStart(64, '0'),
+            audio: btoa(encodeURIComponent(text)),
+            contentType: 'audio/mpeg',
+            cached: false,
+          }));
+          return Promise.resolve(new Response(JSON.stringify({ clips }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+        }),
+      );
+      vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(function (this: HTMLMediaElement) {
+        played.push(this.src);
+        return Promise.resolve();
+      });
+      vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      cleanup();
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    });
+
+    it("says the question when the turn opens, and a tapped card selects it and plays that option's line", async () => {
+      const choice = choiceFor('booking_posture');
+      render(
+        <Voice>
+          <OptionPairTurn choice={choice} busy={false} error={null} notice={null} editing={false} onPick={vi.fn()} />
+        </Voice>,
+      );
+      await waitFor(() => expect(played).toEqual([src(choice.question)]));
+      expect(batches).toEqual([[choice.question, choice.options[0].rivetLine, choice.options[1].rivetLine]]);
+
+      await userEvent.click(screen.getByRole('radio', { name: 'Hold it for me' }));
+      expect(screen.getByRole('radio', { name: 'Hold it for me' })).toHaveAttribute('aria-checked', 'true');
+      await waitFor(() => expect(played.at(-1)).toBe(src(choice.options[1].rivetLine)));
+      // Played from the turn already fetched: still the one request.
+      expect(batches).toHaveLength(1);
+      expect(next()).toBeEnabled();
+    });
+
+    it('tells the owner on the greeting that tapping one plays it, and never yet to say first or second', () => {
+      setup('greeting');
+      expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
+      expect(screen.queryByText(/say .?first|say .?second/i)).not.toBeInTheDocument();
+    });
+
+    it('stays silent outside the shell: no voice, no request', () => {
+      setup('booking_posture', { onTypeInstead: undefined });
+      expect(batches).toEqual([]);
+      expect(played).toEqual([]);
     });
   });
 });

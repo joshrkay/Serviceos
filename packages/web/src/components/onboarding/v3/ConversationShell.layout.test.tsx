@@ -20,7 +20,8 @@ import { AnswerAsScreen } from './AnswerAsScreen';
 import { OptionPairTurn } from './OptionPairTurn';
 import { ReadbackCard } from './ReadbackCard';
 import { ReadyScreen } from './ReadyScreen';
-import { TurnFrame } from './TurnFrame';
+import { SpeakerLine, TurnFrame } from './TurnFrame';
+import { RivetVoiceContext, type RivetVoice } from '../../../hooks/useRivetVoice';
 
 const LONG_NAME = 'WalshAndSonsPlumbingHeatingAndCoolingOfGreaterClevelandOhio';
 const REFUSED_CELL = 'That does not look like a US cell number. Include the 10-digit area code, for example (216) 555-0100.';
@@ -119,6 +120,23 @@ describe('v3 mobile layout contract', () => {
     });
   }
 
+  it('the "Speaking" mark adds no control and wraps with the speaker name at 320px', () => {
+    const speaking: RivetVoice = { unlock: vi.fn(), speak: vi.fn(), prefetch: vi.fn(), stop: vi.fn(), speaking: true };
+    const { container } = render(
+      <RivetVoiceContext.Provider value={speaking}>
+        <TurnFrame minutesLeft={5} progress={0.5}>
+          <SpeakerLine />
+        </TurnFrame>
+      </RivetVoiceContext.Provider>,
+    );
+    const mark = screen.getByText('Speaking');
+    // Announced in words, politely: never the sound mark alone.
+    expect(mark.closest('[aria-live="polite"]')).not.toBeNull();
+    expect(container.querySelectorAll('button, [role="button"], a, input')).toHaveLength(0);
+    const line = mark.closest('[aria-live]')!.parentElement!;
+    expect(line.className).toMatch(/\bflex-wrap\b/);
+    expect(line.className).toMatch(/\bmin-w-0\b/);
+    expect(fixedWidths(container).filter((w) => w > 320)).toEqual([]);
   it('Ready with the city list open: every city, the search and the close are 44px targets that wrap, nothing wider than 320px', async () => {
     const { container } = render(<TurnFrame minutesLeft={6} progress={0.15} statusLabel="Nothing saved yet">{ready()}</TurnFrame>);
     await userEvent.click(screen.getByRole('button', { name: 'Not Cleveland?' }));

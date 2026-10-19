@@ -254,6 +254,51 @@ export function reconstructWebhookUrl(
   return `${proto}://${host}${req.originalUrl}`;
 }
 
+/** The public base URL option, resolved; `PUBLIC_API_URL` when unset. */
+function resolvePublicBaseUrl(
+  publicBaseUrl: string | (() => string | undefined) | undefined,
+): string | undefined {
+  const base = typeof publicBaseUrl === 'function' ? publicBaseUrl() : publicBaseUrl;
+  return base ?? process.env.PUBLIC_API_URL;
+}
+
+/**
+ * Twilio sends form-encoded bodies. Express's urlencoded() parser puts them on
+ * req.body as plain strings — exactly what validateRequest expects. Coerce
+ * defensively in case the route gets called with an unexpected body shape.
+ */
+function webhookParams(req: Request): Record<string, string> {
+  const params: Record<string, string> = {};
+  if (req.body && typeof req.body === 'object') {
+    for (const [k, v] of Object.entries(req.body as Record<string, unknown>)) {
+      if (typeof v === 'string') params[k] = v;
+      else if (v != null) params[k] = String(v);
+    }
+  }
+  return params;
+}
+
+/** A webhook request exactly as Twilio signed it (URL, form body, signature). */
+export interface SignedTwilioWebhook {
+  url: string;
+  params: Record<string, string>;
+  signature: string;
+}
+
+/**
+ * LCR-04 — the request as Twilio signed it, so it can be delivered again
+ * unchanged (its signature still verifies). Undefined without a signature.
+ */
+export function signedTwilioWebhookOf(req: Request, publicBaseUrl?: string): SignedTwilioWebhook | undefined {
+  const signature = req.header('x-twilio-signature');
+  if (!signature) return undefined;
+  return {
+    url: reconstructWebhookUrl(req, publicBaseUrl ?? process.env.PUBLIC_API_URL),
+    params: webhookParams(req),
+    signature,
+  };
+}
+
 /**
  * Express middleware factory that rejects requests with an invalid
  * `X-Twilio-Signature` header. Returns `403` on failure.
@@ -268,16 +313,36 @@ export function reconstructWebhookUrl(
  */
 export function requireTwilioSignature(
   authTokenGetter: TwilioAuthTokenGetter,
-  options: { publicBaseUrl?: string | (() => string | undefined) } = {},
+  options: {
+    publicBaseUrl?: string | (() => string | undefined);
+    /**
+     * LCR-04 — the tenant a request already belongs to from trusted,
+     * in-process state (a session-scoped callback's live session), the same
+     * way the media-stream upgrade passes its session's tenant. When it
+     * answers, the credential is that tenant's own — a stronger binding than
+     * the payload's dialled number — and the resolver's outage cache is keyed
+     * on it. Undefined keeps the dialled-number binding.
+     */
+    trustedTenantId?: (req: Request) => string | undefined;
+    /**
+     * LCR-04 — the credential lookup itself failed (a database outage, nothing
+     * cached): the request can be neither verified nor refused yet. When set,
+     * this answers it (e.g. queues the exact signed request for redelivery)
+     * instead of the 500 Twilio never retries. Never called for a request
+     * with no signature.
+     */
+    onCredentialUnavailable?: (req: Request, res: Response, signed: SignedTwilioWebhook) => void;
+  } = {},
 ): (req: Request, res: Response, next: NextFunction) => Promise<void> {
   return async (req: Request, res: Response, next: NextFunction) => {
     const accountSid = readAccountSid(req);
     const to = readDialedNumber(req);
+    const tenantId = options.trustedTenantId?.(req);
 
     const resolved = await Promise.resolve(
       authTokenGetter({
         ...(accountSid ? { accountSid } : {}),
-        ...(to ? { to } : {}),
+        ...(tenantId ? { tenantId } : to ? { to } : {}),
       }),
     );
 
@@ -302,6 +367,13 @@ export function requireTwilioSignature(
           route: req.path,
           reason: resolved.reason,
         });
+        if (resolved.reason === 'credential_lookup_failed' && options.onCredentialUnavailable) {
+          const signed = signedTwilioWebhookOf(req, resolvePublicBaseUrl(options.publicBaseUrl));
+          if (signed) {
+            options.onCredentialUnavailable(req, res, signed);
+            return;
+          }
+        }
         res.status(500).end();
         return;
       }
@@ -321,24 +393,9 @@ export function requireTwilioSignature(
       return;
     }
 
-    const baseUrl = typeof options.publicBaseUrl === 'function'
-      ? options.publicBaseUrl()
-      : options.publicBaseUrl;
-
-    const url = reconstructWebhookUrl(req, baseUrl ?? process.env.PUBLIC_API_URL);
+    const url = reconstructWebhookUrl(req, resolvePublicBaseUrl(options.publicBaseUrl));
     const signature = req.header('x-twilio-signature');
-
-    // Twilio sends form-encoded bodies. Express's urlencoded() parser puts
-    // them on req.body as plain strings — exactly what validateRequest
-    // expects. Coerce defensively in case the route gets called with an
-    // unexpected body shape.
-    const params: Record<string, string> = {};
-    if (req.body && typeof req.body === 'object') {
-      for (const [k, v] of Object.entries(req.body as Record<string, unknown>)) {
-        if (typeof v === 'string') params[k] = v;
-        else if (v != null) params[k] = String(v);
-      }
-    }
+    const params = webhookParams(req);
 
     // #1084 — primary first, then the secondary during a rotation overlap.
     let credentialSlot: 'primary' | 'secondary' = 'primary';
