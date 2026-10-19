@@ -313,9 +313,10 @@ export function scriptHermeticResponse(request: LLMRequest): string {
     // is prose-shaped JSON that could pass length-floor checks and get
     // mistaken for a real (if unhelpful) correction; echoing the raw text
     // lets hermetic dev exercise the correction seam harmlessly while
-    // staying trivially inert. correctTranscript()'s user prompt is either
-    // `Raw transcript: ${raw}` or `Tenant-specific vocabulary (...): ...\n\n
-    // Raw transcript: ${raw}` — pull everything after the last marker.
+    // staying trivially inert. correctTranscript()'s user prompt is the
+    // fenced raw transcript, preceded (PI-1) by the fenced tenant vocabulary
+    // when there is one; production never routes the correction pass here
+    // (app.ts passes a gateway only when AI_PROVIDER_API_KEY is set).
     const marker = 'Raw transcript: ';
     const idx = text.lastIndexOf(marker);
     return idx >= 0 ? text.slice(idx + marker.length) : text;
