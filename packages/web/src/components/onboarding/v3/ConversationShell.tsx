@@ -349,7 +349,6 @@ function Conversation() {
       )}
       {screen === 'answer_as' && <AnswerAsScreen onSubmit={startDraft} initial={answers ?? undefined} cellProblem={cellProblem} />}
       {screen === 'ready' && draft && (
-        <ReadyScreen draft={draft} onMakeItMine={makeItMine} onKeepAsIs={keepAsIs} />
         <ReadyScreen
           draft={draft}
           onMakeItMine={makeItMine}

@@ -43,7 +43,6 @@ let sent: Array<{ call: string; body: unknown }>;
 let routes: Record<string, ((body?: unknown) => Response | Promise<Response>) | undefined>;
 /** The lines Rivet asked the voice route to say, in order. */
 let spokenTexts: string[];
-let routes: Record<string, (() => Response | Promise<Response>) | undefined>;
 
 function stub(status: OnboardingStatusResponse, extra: typeof routes = {}) {
   world = { status };

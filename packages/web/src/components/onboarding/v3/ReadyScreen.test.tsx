@@ -2,7 +2,6 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
-import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
 import { describe, expect, it, vi } from 'vitest';
 import { ONBOARDING_METROS } from '@ai-service-os/shared';
 import { expectAllTapTargets } from '../../../test-utils/tap-target';
