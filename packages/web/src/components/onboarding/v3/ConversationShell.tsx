@@ -4,6 +4,7 @@ import { useAuth, useUser } from '@clerk/clerk-react';
 import type { CreateOnboardingDraftBody, OnboardingCoreChoiceKey, StagedOnboardingChoice } from '@ai-service-os/shared';
 import { useOnboardingDraft } from '../../../hooks/useOnboardingDraft';
 import { useOnboardingStatus } from '../../../hooks/useOnboardingStatus';
+import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
 import { UNDO_WINDOW_MS } from '../../../hooks/useUndoableApproval';
 import { trackFunnel, type AnalyticsEvent } from '../../../lib/analytics';
 import { isExplicitRerun } from '../../../utils/onboarding-rerun';
@@ -16,7 +17,16 @@ import { READBACK_PROGRESS, READY_PROGRESS, highestSeen, minutesLeft, turnProgre
 import { ReadbackCard } from './ReadbackCard';
 import { ReadyScreen } from './ReadyScreen';
 import { SpeakerLine, RivetHeading, TurnFrame } from './TurnFrame';
-import { answeredCount, coreTurns, landingTarget, makeItMineTarget, nextUnanswered, type CoreTurn, type TurnTarget } from './turns';
+import {
+  answeredCount,
+  coreTurns,
+  landingTarget,
+  makeItMineTarget,
+  nextUnanswered,
+  spokenLines,
+  type CoreTurn,
+  type TurnTarget,
+} from './turns';
 import { typedKind } from './typed-answer';
 
 type Screen = 'loading' | 'problem' | 'answer_as' | 'ready' | 'turn' | 'readback' | 'saved';
@@ -49,7 +59,9 @@ const placeFor = (target: TurnTarget): Place => (target.screen === 'turn' ? { sc
  * finished shop, the owner confirms it (or changes it), and the one tap on
  * "That's right" saves; the trial, the number and the test call follow in the
  * same frame (AfterApproval). Only an explicit re-run of setup opens the
- * sidebar shell.
+ * sidebar shell. Rivet speaks each screen's line in the tenant's voice
+ * (useRivetVoice): the taps that start the conversation unlock the audio, and
+ * the next turn's lines are fetched while the current one plays.
  */
 export function ConversationShell() {
   const [params] = useSearchParams();
@@ -78,6 +90,7 @@ function Conversation() {
   const tenantId = status.data?.tenantId ?? draft?.tenantId ?? null;
   const isComplete = status.data?.isComplete === true;
   const funnelContext = { tenantId, userId };
+  const voice = useRivetVoice({ funnel: funnelContext });
 
   // Once the shop is saved, the hand-off home belongs to AfterApproval (it can wait for one last tap).
   const savedShop = draft?.status === 'approved';
@@ -120,6 +133,25 @@ function Conversation() {
     trackFunnel('v3_turn_viewed', { tenantId, userId }, { choice_key: turnKey });
   }, [turnKey, tenantId, userId]);
 
+  // One turn ahead and no further: on Ready the first turn to answer, on a turn the next unanswered one.
+  const aheadKey =
+    !draft || editing
+      ? null
+      : screen === 'ready'
+        ? (() => {
+            const target = makeItMineTarget(draft);
+            return target.screen === 'turn' ? target.key : null;
+          })()
+        : turnKey
+          ? nextUnanswered(draft, turnKey)
+          : null;
+  const aheadTurn = aheadKey ? turns.find((t) => t.settingKey === aheadKey) : undefined;
+  const aheadLines = aheadTurn ? spokenLines(aheadTurn).join('\n') : '';
+  const { prefetch } = voice;
+  useEffect(() => {
+    if (aheadLines) prefetch(aheadLines.split('\n'));
+  }, [aheadLines, prefetch]);
+
   const highestProgress = useRef(0);
 
   const goTo = (next: Place) => {
@@ -129,12 +161,21 @@ function Conversation() {
 
   const startDraft = (input: AnswerAsInput) => {
     const ownerFirstName = user?.firstName?.trim().slice(0, 60);
+    // The submit is a tap: unlock the audio, so Rivet can say the opener when the shop is ready.
+    voice.unlock('start');
     setAnswers(input);
     setCreateInput({ ...input, ...(ownerFirstName ? { ownerFirstName } : {}) });
   };
 
   const makeItMine = () => {
+    // Inside the tap, before anything is awaited: iOS lets the element play later only if it played here.
+    voice.unlock('make_it_mine');
     if (draft) goTo(placeFor(makeItMineTarget(draft)));
+  };
+
+  const keepAsIs = () => {
+    voice.unlock('keep_as_is');
+    goTo({ screen: 'readback' });
   };
 
   const keepTheRest = () => {
@@ -185,13 +226,15 @@ function Conversation() {
   // Past "That's right": the trial, the number and the test call, in the same frame.
   if (screen === 'saved') {
     return (
-      <AfterApproval
-        status={status}
-        saving={saving}
-        changeCount={draft?.proposalIds.length ?? 0}
-        packId={draft?.packId ?? null}
-        userId={userId}
-      />
+      <RivetVoiceContext.Provider value={voice}>
+        <AfterApproval
+          status={status}
+          saving={saving}
+          changeCount={draft?.proposalIds.length ?? 0}
+          packId={draft?.packId ?? null}
+          userId={userId}
+        />
+      </RivetVoiceContext.Provider>
     );
   }
   if (isComplete) return null;
@@ -204,7 +247,7 @@ function Conversation() {
       ? { ...(editing ? { label: 'Back', onSelect: () => goTo({ screen: 'readback' }) } : { label: 'Keep the rest as is', onSelect: keepTheRest }), busy: staging }
       : undefined;
 
-  return (
+  const body = (
     <TurnFrame minutesLeft={frame.minutesLeft} progress={highestProgress.current} statusLabel={frame.statusLabel} escape={escape}>
       {screen === 'loading' && (
         <div className="flex flex-1 items-center justify-center" role="status" aria-label="Getting your shop ready">
@@ -236,7 +279,7 @@ function Conversation() {
       )}
       {screen === 'answer_as' && <AnswerAsScreen onSubmit={startDraft} initial={answers ?? undefined} cellProblem={cellProblem} />}
       {screen === 'ready' && draft && (
-        <ReadyScreen draft={draft} onMakeItMine={makeItMine} onKeepAsIs={() => goTo({ screen: 'readback' })} />
+        <ReadyScreen draft={draft} onMakeItMine={makeItMine} onKeepAsIs={keepAsIs} />
       )}
       {screen === 'turn' && draft && currentTurn && (
         <OptionPairTurn
@@ -264,6 +307,8 @@ function Conversation() {
       )}
     </TurnFrame>
   );
+  // Every screen's SpeakerLine shows when Rivet is speaking, and each screen says its own line.
+  return <RivetVoiceContext.Provider value={voice}>{body}</RivetVoiceContext.Provider>;
 }
 
 /** The route guard sends a removed teammate here; Rivet tells them what happened and offers the one way out. */

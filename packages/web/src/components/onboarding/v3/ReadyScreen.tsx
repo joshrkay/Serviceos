@@ -1,4 +1,5 @@
 import type { OnboardingDraft } from '@ai-service-os/shared';
+import { useRivetLine } from '../../../hooks/useRivetVoice';
 import { Button } from '../../ui';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
 import { CHOICE_COUNT, readyRows, typicalShopPhrase } from './summarize';
@@ -14,10 +15,12 @@ export interface ReadyScreenProps {
 /** The finished shop, shown before anything is asked. */
 export function ReadyScreen({ draft, onMakeItMine, onKeepAsIs }: ReadyScreenProps) {
   const rows = readyRows(draft);
+  const opener = `${draft.businessName} is already set up.`;
+  useRivetLine('ready', opener);
   return (
     <>
       <SpeakerLine />
-      <RivetHeading>{draft.businessName} is already set up.</RivetHeading>
+      <RivetHeading>{opener}</RivetHeading>
       <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">
         I built it the way {typicalShopPhrase(draft)} run. {numberWord(CHOICE_COUNT)} quick choices make it yours. Nothing to type.
       </p>

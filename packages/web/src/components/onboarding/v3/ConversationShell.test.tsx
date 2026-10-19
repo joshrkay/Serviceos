@@ -3,9 +3,11 @@
  * The draft is a fixture captured from the API (pinned to the shared contract
  * in __fixtures__), so the screens render what the API really sends. The stub
  * server behaves like the draft routes: PUT /choices/:key is a compare-and-swap
- * on `version` that merges the staged choice and bumps it.
+ * on `version` that merges the staged choice and bumps it. The voice routes
+ * answer as the API does: by default as a keyless environment (501, so Rivet
+ * falls back), or with clips when a test turns the voice on (`tts: 'ok'`).
  */
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import type { OnboardingDraft } from '@ai-service-os/shared';
@@ -52,12 +54,33 @@ interface Server {
   approveFails?: boolean;
   /** Hold the next staged choice until this settles, so a test can act while a save is in flight. */
   stageGate?: Promise<void>;
+  /** How the voice routes answer: with clips, or with the API's error for that status. Default 501 (no voice configured). */
+  tts?: 'ok' | 429 | 501 | 502;
 }
 
 interface Request {
   method: string;
   path: string;
-  body: { choice?: unknown; version?: number } | undefined;
+  body: { choice?: unknown; version?: number; items?: string[]; text?: string } | undefined;
+}
+
+const TTS_ERRORS = {
+  429: { error: 'RATE_LIMITED', message: 'Too many spoken answers in a row. The answer is still on screen.' },
+  501: { error: 'NOT_CONFIGURED', message: 'Speech synthesis is not configured' },
+  502: { error: 'TTS_FAILED', message: "Couldn't speak that answer right now — it's still on screen." },
+} as const;
+const audioOf = (text: string) => btoa(encodeURIComponent(text));
+/** What the audio element is given for a line the server spoke. */
+const srcFor = (text: string) => `data:audio/mpeg;base64,${audioOf(text)}`;
+const clipFor = (text: string, i: number) => ({ clipHash: String(i).padStart(64, '0'), audio: audioOf(text), contentType: 'audio/mpeg', cached: false });
+
+function ttsAnswer(path: string, method: string, body: Request['body']): Response | null {
+  if (!path.startsWith('/api/voice/tts')) return null;
+  if (method === 'GET') return json(404, { error: 'NOT_CACHED', message: 'That clip is not cached here' });
+  const mode = server.tts ?? 501;
+  if (mode !== 'ok') return json(mode, TTS_ERRORS[mode]);
+  if (path === '/api/voice/tts/batch') return json(200, { clips: body!.items!.map((text, i) => ({ text, ...clipFor(text, i) })) });
+  return json(200, clipFor(body!.text!, 0));
 }
 
 let server: Server;
@@ -75,6 +98,8 @@ function stubNetwork(initial: Server) {
       const method = init?.method ?? 'GET';
       const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Request['body']) : undefined;
       requests.push({ method, path, body });
+      const tts = ttsAnswer(path, method, body);
+      if (tts) return resolved(tts);
       if (path === '/api/onboarding/status') return resolved(json(200, server.status));
       if (path === '/api/onboarding/billing/plans') return resolved(json(200, { plans: PLANS }));
       if (path === '/api/onboarding/draft' && method === 'GET') {
@@ -136,6 +161,17 @@ function renderShell(url = '/onboarding') {
   );
 }
 
+/** The audio element: jsdom plays nothing, so play() records the clip and the test fires the element's own events. */
+let played: string[];
+const play = vi.fn(function (this: HTMLMediaElement) {
+  played.push(this.src);
+  queueMicrotask(() => this.dispatchEvent(new Event('playing')));
+  return Promise.resolve();
+});
+const audio = () => play.mock.contexts.at(-1) as HTMLMediaElement;
+const ttsBatches = () => requests.filter((r) => r.path === '/api/voice/tts/batch').map((r) => r.body?.items ?? []);
+const ttsPosts = () => requests.filter((r) => r.path.startsWith('/api/voice/tts') && r.method === 'POST');
+
 const draftCalls = () => requests.filter((r) => r.path.startsWith('/api/onboarding/draft')).map((r) => `${r.method} ${r.path}`);
 const stagedCalls = () => requests.filter((r) => r.method === 'PUT');
 const funnel = (event: string) => track.trackFunnel.mock.calls.filter(([e]) => e === event).map(([, , extra]) => extra);
@@ -169,8 +205,20 @@ describe('ConversationShell', () => {
   beforeEach(() => {
     _resetOnboardingStatusCacheForTests();
     track.trackFunnel.mockClear();
+    played = [];
+    play.mockClear();
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(play as unknown as () => Promise<void>);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    try {
+      sessionStorage.clear();
+    } catch {
+      /* no storage */
+    }
   });
   afterEach(() => {
+    // Unmount first, while play/pause are still stubbed: unmounting stops Rivet, which pauses the element.
+    cleanup();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -201,9 +249,9 @@ describe('ConversationShell', () => {
 
       // Turn 1: Rivet's own words, both options, the typical one marked, nothing selected, Next waiting.
       expect(await onTurn(0)).toBeInTheDocument();
-      // Nothing here plays a greeting or listens, so no line promises it (S3 brings voice).
-      expect(screen.getByText('Pick the one that sounds right.')).toBeInTheDocument();
-      expect(screen.queryByText(/hear it|say "first"/i)).not.toBeInTheDocument();
+      // Rivet speaks (S3-3): tapping an option plays it. Nothing listens yet (S3-5), so nothing says "say first".
+      expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
+      expect(screen.queryByText(/say "first"|say "second"/i)).not.toBeInTheDocument();
       expect(screen.getAllByRole('radio')).toHaveLength(2);
       expect(screen.getAllByText('Most shops like yours')).toHaveLength(1);
       expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
@@ -411,6 +459,116 @@ describe('ConversationShell', () => {
       await userEvent.dblClick(next);
       await onTurn(1);
       expect(stagedCalls().filter((r) => r.path.endsWith('/greeting'))).toHaveLength(1);
+    });
+  });
+
+  describe('Rivet speaks', () => {
+    const lines = (i: number) => {
+      const t = draftJson.assembled.choices.find((c) => c.settingKey === turn(i).key)!;
+      return [t.question, t.options[0].rivetLine, t.options[1].rivetLine];
+    };
+
+    it('the "Make it mine" tap plays the audio inside the tap, then the first question is spoken in the server voice', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
+      renderShell();
+      const button = await screen.findByRole('button', { name: 'Make it mine, 7 choices' });
+      play.mockClear();
+      button.click();
+      // Same task as the tap: the element is unlocked before anything is awaited.
+      expect(play).toHaveBeenCalled();
+      await onTurn(0);
+      await waitFor(() => expect(played).toContain(srcFor(turn(0).question)));
+      // The turn's three lines came in one request (fetched while Ready was on screen).
+      expect(ttsBatches()).toContainEqual(lines(0));
+      await waitFor(() =>
+        expect(track.trackFunnel).toHaveBeenCalledWith(
+          'v3_first_heard',
+          expect.objectContaining({ tenantId: TENANT }),
+          expect.objectContaining({ source: 'server', gesture: 'make_it_mine', ms_since_make_it_mine: expect.any(Number) }),
+        ),
+      );
+    });
+
+    it('shows that Rivet is speaking, in words, while a line plays', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      await waitFor(() => expect(played.at(-1)).toBe(srcFor(turn(0).question)));
+      expect(await screen.findByText('Speaking')).toBeInTheDocument();
+      act(() => {
+        audio().dispatchEvent(new Event('ended'));
+      });
+      await waitFor(() => expect(screen.queryByText('Speaking')).not.toBeInTheDocument());
+    });
+
+    it('tapping an option plays what Rivet would say, from the turn already fetched', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      await choose(turn(0).a);
+      await onTurn(1);
+      await userEvent.click(screen.getByRole('radio', { name: turn(1).a }));
+      await userEvent.click(screen.getByRole('button', { name: 'Next' }));
+      await onTurn(2);
+      await waitFor(() => expect(played.at(-1)).toBe(srcFor(turn(2).question)));
+      const before = ttsPosts().length;
+      await userEvent.click(screen.getByRole('radio', { name: turn(2).b }));
+      await waitFor(() => expect(played.at(-1)).toBe(srcFor(lines(2)[2])));
+      expect(screen.getByRole('radio', { name: turn(2).b })).toHaveAttribute('aria-checked', 'true');
+      expect(ttsPosts().length).toBe(before);
+    });
+
+    it('counts the clips of a full pass: one request a turn, at most three clips each, never two turns ahead', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
+      renderShell();
+      await makeItMine();
+      for (let i = 0; i < TURNS.length; i += 1) {
+        await onTurn(i);
+        await waitFor(() => expect(played).toContain(srcFor(turn(i).question)));
+        // Fetched so far: this turn and at most the next one.
+        const asked = ttsBatches().map((items) => items[0]);
+        expect(asked.every((q) => TURNS.slice(0, i + 2).some((t) => t.question === q))).toBe(true);
+        if (i === 1) {
+          await userEvent.click(screen.getByRole('radio', { name: turn(1).a }));
+          await userEvent.click(screen.getByRole('button', { name: 'Next' }));
+        } else {
+          await choose(turn(i).a);
+        }
+      }
+      expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
+      const batches = ttsBatches();
+      expect(batches).toEqual(TURNS.map((_, i) => lines(i)));
+      expect(batches.every((items) => items.length <= 3)).toBe(true);
+      expect(batches.flat()).toHaveLength(21);
+    });
+
+    it.each([429, 501, 502] as const)('a %s from the voice routes still leaves every turn answerable by tap, with no alert', async (status) => {
+      stubNetwork({ draft: draftJson, status: statusBody(), tts: status });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      expect(screen.getAllByRole('radio')).toHaveLength(2);
+      expect(screen.getByRole('button', { name: 'Next' })).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      await choose(turn(0).a);
+      await onTurn(1);
+      const reason = { 429: 'rate_limited', 501: 'not_configured', 502: 'tts_failed' }[status];
+      await waitFor(() => expect(funnel('v3_tts_fallback')).toContainEqual({ reason, mode: 'silent', turn: 'greeting' }));
+      expect(played).not.toContain(srcFor(turn(0).question));
+    });
+
+    it('"Looks right as is" unlocks the audio too, and Rivet reads the read-back heading', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
+      renderShell();
+      const keep = await screen.findByRole('button', { name: 'Looks right as is, skip the choices' });
+      play.mockClear();
+      keep.click();
+      expect(play).toHaveBeenCalled();
+      expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
+      await waitFor(() => expect(played.at(-1)).toBe(srcFor(READBACK.name)));
+      expect(ttsPosts().find((r) => r.body?.text === READBACK.name)?.path).toBe('/api/voice/tts');
     });
   });
 

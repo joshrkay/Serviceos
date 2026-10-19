@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ONBOARDING_CORE_CHOICE_KEYS, type OnboardingDraft } from '@ai-service-os/shared';
 import { plumbingCleDraft, withChoices } from './__fixtures__';
-import { answeredCount, coreTurns, landingTarget, makeItMineTarget, nextUnanswered } from './turns';
+import { answeredCount, coreTurns, landingTarget, makeItMineTarget, nextUnanswered, spokenLines } from './turns';
 
 const [GREETING, PRICE, POSTURE, PAID, HOURS, EMERGENCY, AFTER] = ONBOARDING_CORE_CHOICE_KEYS;
 
@@ -45,6 +45,17 @@ describe('turns', () => {
     expect(nextUnanswered(plumbingCleDraft, AFTER)).toBeNull();
     const draft = withChoices(plumbingCleDraft, { [EMERGENCY]: { option: 'a' }, [AFTER]: { option: 'a' } });
     expect(nextUnanswered(draft, HOURS)).toBeNull();
+  });
+});
+
+describe('what Rivet says on a turn', () => {
+  it('is the question, then each option line, in order: one batch of three', () => {
+    const price = coreTurns(plumbingCleDraft).find((t) => t.settingKey === PRICE)!;
+    expect(spokenLines(price)).toEqual([
+      'What do you charge to come out?',
+      "It's $89 for the visit, and that's credited if you go ahead with the repair.",
+      "It's $129 for the visit. That covers the diagnosis, and it's credited toward the repair.",
+    ]);
   });
 });
 

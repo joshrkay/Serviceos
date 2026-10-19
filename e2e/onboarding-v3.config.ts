@@ -34,7 +34,7 @@ process.env.E2E_V3_API_URL = apiURL;
 
 export default defineConfig({
   testDir: './',
-  testMatch: ['onboarding-v3-ready-readback.spec.ts'],
+  testMatch: ['onboarding-v3-ready-readback.spec.ts', 'onboarding-v3-voice-webkit.spec.ts'],
   fullyParallel: false,
   workers: 1,
   retries: 0,
