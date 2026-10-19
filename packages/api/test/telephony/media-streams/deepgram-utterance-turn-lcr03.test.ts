@@ -87,7 +87,9 @@ beforeEach(async () => {
   vi.stubGlobal('WebSocket', undefined);
   received.length = 0;
   server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
-  await new Promise<void>((resolve) => server.once('listening', resolve));
+  await new Promise<void>((resolve) => {
+    server.once('listening', resolve);
+  });
   baseUrl = `ws://127.0.0.1:${(server.address() as AddressInfo).port}`;
   deepgramSide = new Promise<ServerSocket>((resolve) => {
     server.once('connection', (socket) => {
@@ -101,7 +103,9 @@ beforeEach(async () => {
 
 afterEach(async () => {
   for (const client of server.clients) client.terminate();
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await new Promise<void>((resolve) => {
+    server.close(() => resolve());
+  });
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -237,7 +241,9 @@ describe('LCR-03 — media-streams adapter with the real Deepgram provider', () 
     });
     const socket = await deepgramSide;
     // Let the adapter finish attaching the session before Deepgram talks.
-    await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => {
+      setTimeout(r, 20);
+    });
     return { speechTurn, ws, socket };
   }
 
@@ -248,7 +254,9 @@ describe('LCR-03 — media-streams adapter with the real Deepgram provider', () 
     socket.send(utteranceEnd());
 
     await vi.waitFor(() => expect(speechTurn).toHaveBeenCalled());
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => {
+      setTimeout(r, 50);
+    });
     expect(speechTurn).toHaveBeenCalledTimes(1);
     expect(speechTurn.mock.calls[0][0]).toMatchObject({
       speechResult: 'my furnace stopped at 42 Elm Street',
@@ -266,11 +274,15 @@ describe('LCR-03 — media-streams adapter with the real Deepgram provider', () 
       socket.close();
     });
     socket.send(results('my furnace stopped', { is_final: true, speech_final: false }));
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => {
+      setTimeout(r, 30);
+    });
 
     ws.inboundJson({ event: 'stop' });
     await vi.waitFor(() => expect(received.map((m) => JSON.parse(m).type)).toContain('CloseStream'));
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => {
+      setTimeout(r, 50);
+    });
     expect(speechTurn).not.toHaveBeenCalled();
   });
 });
