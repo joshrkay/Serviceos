@@ -47,6 +47,32 @@ export function flushCredentialCache(tenantId: string): void {
   }
 }
 
+/** The platform account the pre-signup demo call dials from (U7, D-037). */
+export interface PlatformTwilioCreds {
+  accountSid: string;
+  authToken: string;
+  fromE164: string;
+}
+
+/**
+ * The demo call's platform Twilio account, from the explicit
+ * `PLATFORM_TWILIO_ACCOUNT_SID` / `PLATFORM_TWILIO_AUTH_TOKEN` /
+ * `PLATFORM_TWILIO_FROM_NUMBER`, or null when any is missing or blank. Fails
+ * closed and never falls through to the global `TWILIO_*` names or to a
+ * tenant's integration: a demo tenant has none, and the platform number must
+ * never be confused with a customer's account
+ * (docs/solutions/logic-errors/click-to-call-gate-requires-global-twilio-sid.md).
+ */
+export function getPlatformTwilioCreds(
+  env: Record<string, string | undefined> = process.env,
+): PlatformTwilioCreds | null {
+  const accountSid = env.PLATFORM_TWILIO_ACCOUNT_SID?.trim();
+  const authToken = env.PLATFORM_TWILIO_AUTH_TOKEN?.trim();
+  const fromE164 = env.PLATFORM_TWILIO_FROM_NUMBER?.trim();
+  if (!accountSid || !authToken || !fromE164) return null;
+  return { accountSid, authToken, fromE164 };
+}
+
 export async function getTenantTwilioCreds(
   tenantId: string,
   pool: Pool
