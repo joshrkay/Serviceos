@@ -1371,6 +1371,9 @@ export class TwilioGatherAdapter {
     // idempotent and never reject.
     this.sweepPendingConsentCommits();
     this.pendingConsentCommit.set(session.id, async () => {
+      // The point of evidence for the greeting is the point the caller heard
+      // the assistant notice; a later degrade reads this latch.
+      session.assistantNoticeHeard = true;
       await disclosure.commitConsentLedger();
       await assistantNotice.commitDisclosureLedger();
     });
