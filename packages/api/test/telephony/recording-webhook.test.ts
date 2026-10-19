@@ -543,14 +543,19 @@ describe('P8-014 record_call recording webhook', () => {
   });
 });
 
-/** A pool whose voice_recordings INSERT fails (the DB write never lands). */
+/**
+ * A pool whose voice_recordings INSERT fails (the DB write never lands) while
+ * `failInsert` is true.
+ */
 class FailingInsertPool extends FakePool {
+  failInsert = true;
+
   override async connect() {
     const client = await super.connect();
     return {
       ...client,
       query: async (sql: string, params: unknown[] = []) => {
-        if (/INSERT INTO voice_recordings/i.test(sql)) throw new Error('insert failed');
+        if (this.failInsert && /INSERT INTO voice_recordings/i.test(sql)) throw new Error('insert failed');
         return client.query(sql, params);
       },
     };
@@ -598,13 +603,15 @@ describe('PRIV-2 — the Twilio copy is deleted once our storage and our row hol
     expect(pool.voiceRows[0].recording_url).toBe(RECORDING_URL);
   });
 
-  it('never deletes the Twilio copy when the S3 upload fails', async () => {
+  it('never deletes the Twilio copy when the S3 upload fails; the redelivery that stores it then deletes it', async () => {
     const twilioCopyRemover = vi.fn(async () => true);
+    const uploadObject = vi
+      .fn<(url: string, bytes: Buffer, contentType: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('S3 PUT failed 503'))
+      .mockResolvedValue(undefined);
     const { app, pool } = buildHarness({
       fetchRecording: async () => Buffer.from('mp3'),
-      uploadObject: async () => {
-        throw new Error('S3 PUT failed 503');
-      },
+      uploadObject,
       twilioCopyRemover,
     });
 
@@ -613,12 +620,24 @@ describe('PRIV-2 — the Twilio copy is deleted once our storage and our row hol
     expect(res.status).toBe(500);
     expect(pool.voiceRows).toHaveLength(0);
     expect(twilioCopyRemover).not.toHaveBeenCalled();
+
+    // Positive control: Twilio retries, the upload now lands, and only then
+    // is the Twilio copy deleted, with the row that now exists.
+    const retry = await signedRecordingRequest(app, params);
+
+    expect(retry.status).toBe(200);
+    expect(pool.voiceRows).toHaveLength(1);
+    expect(twilioCopyRemover).toHaveBeenCalledOnce();
+    expect(twilioCopyRemover).toHaveBeenCalledWith(
+      expect.objectContaining({ voiceRecordingId: pool.voiceRows[0].id, recordingUrl: RECORDING_URL }),
+    );
   });
 
-  it('never deletes the Twilio copy when the row insert fails', async () => {
+  it('never deletes the Twilio copy when the row insert fails; the redelivery that inserts it then deletes it', async () => {
     const twilioCopyRemover = vi.fn(async () => true);
+    const pool = new FailingInsertPool();
     const { app } = buildHarness({
-      pool: new FailingInsertPool(),
+      pool,
       fetchRecording: async () => Buffer.from('mp3'),
       uploadObject: async () => undefined,
       twilioCopyRemover,
@@ -627,7 +646,20 @@ describe('PRIV-2 — the Twilio copy is deleted once our storage and our row hol
     const res = await signedRecordingRequest(app, params);
 
     expect(res.status).toBe(500);
+    expect(pool.voiceRows).toHaveLength(0);
     expect(twilioCopyRemover).not.toHaveBeenCalled();
+
+    // Positive control: the database recovers, Twilio retries, the row is
+    // inserted, and only then is the Twilio copy deleted.
+    pool.failInsert = false;
+    const retry = await signedRecordingRequest(app, params);
+
+    expect(retry.status).toBe(200);
+    expect(pool.voiceRows).toHaveLength(1);
+    expect(twilioCopyRemover).toHaveBeenCalledOnce();
+    expect(twilioCopyRemover).toHaveBeenCalledWith(
+      expect.objectContaining({ voiceRecordingId: pool.voiceRows[0].id }),
+    );
   });
 
   it('a delete that could not be confirmed still answers 200 (the recording is stored; the sweep retries the delete)', async () => {

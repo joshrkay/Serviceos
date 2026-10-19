@@ -349,29 +349,38 @@ describe('PRIV-2 — the Twilio copy of a call recording', () => {
     expect((await recordingRow(tenant.tenantId, voiceRecordingId)).recording_url).toBe(rec.recordingUrl);
   });
 
-  it('a recording on legal hold keeps its Twilio copy', async () => {
-    const callSid = `CA${hex()}`;
-    const rec = newRecording();
-    twilioAnswers.set(rec.resource, [204]);
-    const { voiceRecordingId } = await recordInboundCall(pool, {
-      tenantId: tenant.tenantId,
-      callSid,
-      recordingUrl: rec.recordingUrl,
-      durationSeconds: 30,
-      storageBucket: BUCKET,
-      storageKey: `${tenant.tenantId}/${callSid}.mp3`,
-      sizeBytes: 1024,
-    });
-    await pool.query(
-      `UPDATE voice_recordings SET legal_hold = true, created_at = now() - interval '30 days'
-        WHERE tenant_id = $1 AND id = $2`,
-      [tenant.tenantId, voiceRecordingId],
-    );
+  it('a recording on legal hold keeps its Twilio copy (a non-held one of the same age loses it)', async () => {
+    async function seedThirtyDayOld(legalHold: boolean) {
+      const callSid = `CA${hex()}`;
+      const rec = newRecording();
+      twilioAnswers.set(rec.resource, [204]);
+      const { voiceRecordingId } = await recordInboundCall(pool, {
+        tenantId: tenant.tenantId,
+        callSid,
+        recordingUrl: rec.recordingUrl,
+        durationSeconds: 30,
+        storageBucket: BUCKET,
+        storageKey: `${tenant.tenantId}/${callSid}.mp3`,
+        sizeBytes: 1024,
+      });
+      await pool.query(
+        `UPDATE voice_recordings SET legal_hold = $3, created_at = now() - interval '30 days'
+          WHERE tenant_id = $1 AND id = $2`,
+        [tenant.tenantId, voiceRecordingId, legalHold],
+      );
+      return { rec, voiceRecordingId };
+    }
+    const held = await seedThirtyDayOld(true);
+    const control = await seedThirtyDayOld(false);
 
     await sweep();
 
-    expect(deletesOf(rec.resource)).toHaveLength(0);
-    expect((await recordingRow(tenant.tenantId, voiceRecordingId)).twilio_deleted_at).toBeNull();
+    // Positive control: the same sweep does delete a non-held copy of the
+    // same age and tenant, so the held row's zero deletes are the exemption.
+    expect(deletesOf(control.rec.resource)).toHaveLength(1);
+    expect((await recordingRow(tenant.tenantId, control.voiceRecordingId)).twilio_deleted_at).toBeInstanceOf(Date);
+    expect(deletesOf(held.rec.resource)).toHaveLength(0);
+    expect((await recordingRow(tenant.tenantId, held.voiceRecordingId)).twilio_deleted_at).toBeNull();
   });
 
   it('the stamp is tenant-scoped: another tenant cannot mark this recording\'s copy deleted', async () => {

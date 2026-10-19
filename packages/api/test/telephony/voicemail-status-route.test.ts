@@ -663,13 +663,15 @@ describe('PRIV-2 — the voicemail\'s Twilio copy is deleted only after the whol
     expect(twilioCopyRemover).toHaveBeenCalledOnce();
   });
 
-  it('never deletes the Twilio copy when the S3 upload fails', async () => {
+  it('never deletes the Twilio copy when the S3 upload fails; the redelivery that stores it then deletes it', async () => {
     const twilioCopyRemover = vi.fn(async () => true);
+    const uploadObject = vi
+      .fn<(url: string, bytes: Buffer, contentType: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('S3 PUT failed 503'))
+      .mockResolvedValue(undefined);
     const h = buildHarness({
       sessionCallSid: 'CA-vm-1',
-      uploadObject: async () => {
-        throw new Error('S3 PUT failed 503');
-      },
+      uploadObject,
       twilioCopyRemover,
     });
 
@@ -678,5 +680,16 @@ describe('PRIV-2 — the voicemail\'s Twilio copy is deleted only after the whol
     expect(res.status).toBe(500);
     expect(h.pool.voiceRows).toHaveLength(0);
     expect(twilioCopyRemover).not.toHaveBeenCalled();
+
+    // Positive control: Twilio retries, the upload lands, the pipeline
+    // completes, and only then is the Twilio copy deleted.
+    const retry = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+
+    expect(retry.status).toBe(200);
+    expect(h.pool.voiceRows).toHaveLength(1);
+    expect(twilioCopyRemover).toHaveBeenCalledOnce();
+    expect(twilioCopyRemover).toHaveBeenCalledWith(
+      expect.objectContaining({ voiceRecordingId: h.pool.voiceRows[0].id, recordingUrl: FINAL_PARAMS.RecordingUrl }),
+    );
   });
 });

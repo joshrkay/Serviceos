@@ -80,6 +80,34 @@ describe('redactCardNumbers', () => {
     );
   });
 
+  // Speech-to-text punctuates the pause between spoken digit groups: Twilio
+  // Gather returns "4111, 1111, 1111, 1111." and there is no upstream
+  // redaction on that path, so these must be caught here.
+  it('replaces a card whose groups STT separated with commas', () => {
+    expect(redactCardNumbers('my card is 4111, 1111, 1111, 1111.')).toBe('my card is [card number].');
+  });
+
+  it('replaces a card whose groups STT separated with periods', () => {
+    expect(redactCardNumbers('4111. 1111. 1111. 1111')).toBe('[card number]');
+  });
+
+  it('replaces a card whose groups are separated by double spaces or spaced dashes', () => {
+    expect(redactCardNumbers('card 4111  1111  1111  1111 ok')).toBe('card [card number] ok');
+    expect(redactCardNumbers('card 5555 - 5555 - 5555 - 4444 ok')).toBe('card [card number] ok');
+  });
+
+  it('keeps the CVV and its comma after a comma-grouped card', () => {
+    expect(redactCardNumbers('4111, 1111, 1111, 1111, 123')).toBe('[card number], 123');
+  });
+
+  it('leaves a comma-grouped run that fails the Luhn check untouched', () => {
+    expect(redactCardNumbers('ref 4111, 1111, 1111, 1112.')).toBe('ref 4111, 1111, 1111, 1112.');
+  });
+
+  it('leaves a period-separated phone number followed by a zip untouched', () => {
+    expect(redactCardNumbers('call 602.555.0199, 85006')).toBe('call 602.555.0199, 85006');
+  });
+
   it('leaves digits that are part of a longer token untouched', () => {
     expect(redactCardNumbers('id ab4111111111111111cd')).toBe('id ab4111111111111111cd');
   });

@@ -207,6 +207,7 @@ describe('approveDraft (lock, version check, idempotence)', () => {
       setOwnerPhone: (t, p, v) => h.repo.setOwnerPhone(t, p, v),
       markApproved: (t, ids, v) => h.repo.markApproved(t, ids, v),
       markRetried: (t, v) => h.repo.markRetried(t, v),
+      updateLocked: (t, o, c) => h.repo.updateLocked(t, o, c),
     };
     await approveDraft({ ...h.deps, draftRepo: double }, TENANT, ACTOR);
     expect(getForTenant).not.toHaveBeenCalled();
@@ -261,6 +262,28 @@ describe('approveDraft (lock, version check, idempotence)', () => {
     expect(await approvedAudits(h.auditRepo)).toHaveLength(1);
   });
 
+  it.each([1, 2, 3])('after %i retries the version it was approved from is `version - 1 - r`: that one and none are 200, every other is refused', async (r) => {
+    const h = await approveHarness();
+    const first = await approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: h.draft.version });
+    let row = first.draft;
+    for (let i = 0; i < r; i++) row = await h.repo.markRetried(TENANT, row.version);
+    expect(row.version).toBe(h.draft.version + 1 + r);
+    const approvedFrom = row.version - 1 - r;
+    expect(approvedFrom).toBe(h.draft.version);
+
+    // The original confirmation (and anything else but the latest attempt's base) is a stale tab now.
+    for (const stale of [approvedFrom, approvedFrom - 1, row.version, row.version + 1]) {
+      const attempt = approveDraft(h.deps, TENANT, ACTOR, { expectedVersion: stale });
+      await expect(attempt).rejects.toBeInstanceOf(DraftVersionConflictError);
+      await expect(attempt).rejects.toMatchObject({ expected: stale, actual: row.version - 1 });
+    }
+    for (const body of [{}, { expectedVersion: row.version - 1 }]) {
+      expect(await approveDraft(h.deps, TENANT, ACTOR, body)).toMatchObject({ approvedNow: false, proposalIds: first.proposalIds });
+    }
+    expect(await h.proposalRepo.findByTenant(TENANT)).toHaveLength(2);
+    expect(await approvedAudits(h.auditRepo)).toHaveLength(1);
+  });
+
   it('no draft rejects with DraftNotFoundError', async () => {
     const h = await approveHarness();
     await expect(approveDraft(h.deps, '00000000-0000-0000-0000-00000000ffff', ACTOR)).rejects.toBeInstanceOf(DraftNotFoundError);
@@ -281,6 +304,7 @@ describe('approveDraft (lock, version check, idempotence)', () => {
       setOwnerPhone: (t, p, v) => h.repo.setOwnerPhone(t, p, v),
       markApproved: (t, ids, v) => h.repo.markApproved(t, ids, v),
       markRetried: (t, v) => h.repo.markRetried(t, v),
+      updateLocked: (t, o, c) => h.repo.updateLocked(t, o, c),
     };
     await expect(approveDraft({ ...h.deps, draftRepo: spy }, TENANT, ACTOR)).rejects.toThrow(/TIMEZONE_REQUIRED/);
     expect(order).toEqual(['lock']);

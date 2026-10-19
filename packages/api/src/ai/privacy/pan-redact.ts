@@ -17,8 +17,9 @@
  *   - `scrubPii` (knowledge-chunk corpus) and the recording transcription
  *     worker's `sanitizeTranscript`.
  *
- * Detection: runs of 13–19 digits, optionally grouped by single spaces or
- * dashes, that pass the Luhn check. A run that is longer than one card (a
+ * Detection: runs of 13–19 digits, optionally grouped by spaces, dashes,
+ * commas or periods (how STT punctuates paused groups), that pass the Luhn
+ * check. A run that is longer than one card (a
  * card followed by its CVV, a phone number spoken next to it) is searched for
  * the leftmost-longest Luhn-valid window of whole groups, so "4111 1111 1111
  * 1111 123" keeps the "123". Phone numbers (10–11 digits), integer cents and
@@ -38,9 +39,22 @@ export const CARD_NUMBER_PLACEHOLDER = '[card number]';
 const MIN_PAN_DIGITS = 13;
 const MAX_PAN_DIGITS = 19;
 
-/** Digit groups joined by single spaces or dashes, not touching letters/digits. */
-const DIGIT_RUN = /(?<![0-9A-Za-z])\d+(?:[ -]\d+)*(?![0-9A-Za-z])/g;
-const GROUP_SEPARATOR = /[ -]/;
+/**
+ * What may sit between two spoken digit groups: whitespace, or a comma,
+ * period or dash with optional whitespace around it. Speech-to-text
+ * punctuates the pause between groups ("4111, 1111, 1111, 1111." from Twilio
+ * Gather, which has no upstream redaction), so a space-or-dash-only separator
+ * let those cards through every chokepoint.
+ */
+const GROUP_SEPARATOR_SOURCE = String.raw`(?:[ \t]*[,.\-][ \t]*|[ \t]+)`;
+
+/** Digit groups joined by a group separator, not touching letters/digits. */
+const DIGIT_RUN = new RegExp(
+  String.raw`(?<![0-9A-Za-z])\d+(?:${GROUP_SEPARATOR_SOURCE}\d+)*(?![0-9A-Za-z])`,
+  'g',
+);
+/** Splits a run into groups, keeping each separator verbatim (capture group). */
+const GROUP_SPLIT = new RegExp(`(${GROUP_SEPARATOR_SOURCE})`);
 
 /** Deepgram's card tag (`redact=pci`), e.g. `[CREDIT_CARD_1]`. */
 const DEEPGRAM_CARD_TAG = /\[CREDIT_CARD(?:_\d+)?\]/g;
@@ -97,14 +111,21 @@ function redactRun(
   placeholder: string,
   onRedact?: CardRedactionListener,
 ): string {
-  const groups = run.split(GROUP_SEPARATOR);
-  const separators = run.match(/[ -]/g) ?? [];
+  // split with a capture group alternates group, separator, group, ...
+  const tokens = run.split(GROUP_SPLIT);
+  const groups: string[] = [];
+  const separators: string[] = [];
   // Character offset of each group inside the run.
   const starts: number[] = [];
   let pos = 0;
-  for (let g = 0; g < groups.length; g++) {
-    starts.push(pos);
-    pos += groups[g].length + 1;
+  for (let t = 0; t < tokens.length; t++) {
+    if (t % 2 === 0) {
+      starts.push(pos);
+      groups.push(tokens[t]);
+    } else {
+      separators.push(tokens[t]);
+    }
+    pos += tokens[t].length;
   }
   const out: string[] = [];
   let i = 0;
@@ -158,7 +179,7 @@ export function redactCardNumbers(
   return text
     .replace(DEEPGRAM_CARD_TAG, placeholder)
     .replace(DIGIT_RUN, (run: string, offset: number) => {
-      const digitCount = run.replace(/[ -]/g, '').length;
+      const digitCount = run.replace(/\D/g, '').length;
       return digitCount < MIN_PAN_DIGITS ? run : redactRun(run, offset, placeholder, onRedact);
     });
 }
