@@ -1,11 +1,12 @@
 import type { PhoneLineState } from './phone-line';
+import type { ProvisioningFailureCode } from './provisioning-failure';
 import { isInUndoWindow } from '../proposals/lifecycle';
 import type {
   DraftExecution,
   DraftRecovery,
   OnboardingStatusResponse,
+  OnboardingStep,
   OnboardingStepId,
-  OnboardingStepStatus,
 } from './contracts';
 
 export interface OnboardingFacts {
@@ -41,6 +42,10 @@ export interface OnboardingFacts {
   twilioLineState?: PhoneLineState | null;
   /** #1563 — the number an in-flight pick is claiming (null for auto-pick). */
   twilioPendingNumber?: string | null;
+  /** Why the twilio row failed, classified from its `last_error`
+   * (provisioning-failure.ts); null unless the row is `failed`. Optional so
+   * older fixtures compile: a failed row without one reads as `unknown`. */
+  twilioFailureCode?: ProvisioningFailureCode | null;
   subscription: {
     stripeSubscriptionId: string | null;
     status: 'trialing' | 'active' | 'past_due' | 'canceled' | 'incomplete' | null;
@@ -283,6 +288,23 @@ const isIdentityDone = (i: OnboardingFacts['identity']): boolean =>
 const isBillingDone = (s: OnboardingFacts['subscription']): boolean =>
   !!s.stripeSubscriptionId && (s.status === 'trialing' || s.status === 'active');
 
+/**
+ * The phone step's blocker for each failure code, listed BEFORE the generic
+ * `twilio_provisioning_failed` (kept on every failure, and alone for
+ * `unknown`, so existing readers of that blocker keep working).
+ */
+const PHONE_FAILURE_BLOCKER: Record<ProvisioningFailureCode, string | null> = {
+  area_code_unavailable: 'area_code_unavailable',
+  credentials_missing: 'twilio_credentials_missing',
+  provider_error: 'twilio_provider_error',
+  unknown: null,
+};
+
+function phoneFailureBlockers(code: ProvisioningFailureCode): string[] {
+  const specific = PHONE_FAILURE_BLOCKER[code];
+  return specific ? [specific, 'twilio_provisioning_failed'] : ['twilio_provisioning_failed'];
+}
+
 const isTestCallDone = (f: OnboardingFacts): boolean => f.inboundCallCount > 0;
 const isTestCallSkipped = (f: OnboardingFacts): boolean =>
   f.testCallSkippedAt !== null && f.inboundCallCount === 0;
@@ -318,9 +340,16 @@ export function deriveOnboardingStatus(f: OnboardingFacts, now: Date = new Date(
   };
   const phoneMetadata = Object.keys(phoneMetadataFields).length > 0 ? phoneMetadataFields : undefined;
 
-  const steps = order.map((id): { id: OnboardingStepId; status: OnboardingStepStatus; blockers?: string[]; metadata?: Record<string, unknown> } => {
+  const steps = order.map((id): OnboardingStep => {
     if (id === 'phone' && f.twilioStatus === 'failed') {
-      return { id, status: 'error', blockers: ['twilio_provisioning_failed'], ...(phoneMetadata ? { metadata: phoneMetadata } : {}) };
+      const failureCode = f.twilioFailureCode ?? 'unknown';
+      return {
+        id,
+        status: 'error',
+        failureCode,
+        blockers: phoneFailureBlockers(failureCode),
+        ...(phoneMetadata ? { metadata: phoneMetadata } : {}),
+      };
     }
     if (id === 'ai_check') {
       if (f.aiVerificationStatus === 'passed') {

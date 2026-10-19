@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { isTwilioTestNumber } from '../telephony/phone-policy';
+import { PROVISIONING_FAILURE_CODES } from './provisioning-failure';
 
 const TimeOfDay = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM');
 const DayHours = z.object({ open: TimeOfDay, close: TimeOfDay }).nullable();
@@ -133,10 +134,18 @@ export type OnboardingStepId = z.infer<typeof OnboardingStepIdSchema>;
 export const OnboardingStepStatusSchema = z.enum(['done', 'current', 'pending', 'error', 'skipped']);
 export type OnboardingStepStatus = z.infer<typeof OnboardingStepStatusSchema>;
 
+/**
+ * Why the phone step failed, as a closed code (onboarding/provisioning-failure.ts
+ * classifies the recorded text; the text itself never reaches the status).
+ */
+export const ProvisioningFailureCodeSchema = z.enum(PROVISIONING_FAILURE_CODES);
+
 export const OnboardingStepSchema = z.object({
   id: OnboardingStepIdSchema,
   status: OnboardingStepStatusSchema,
   blockers: z.array(z.string()).optional(),
+  /** Additive: set only on a failed phone step. */
+  failureCode: ProvisioningFailureCodeSchema.optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 export type OnboardingStep = z.infer<typeof OnboardingStepSchema>;
