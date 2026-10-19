@@ -52,6 +52,16 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(src).toMatch(/defaultRules:\s*platformDefaultSupervisorRules/);
   });
 
+  it('the daily payment-link reconciliation sweep runs under its own leader lock, worker roles only (S5a-6)', () => {
+    expect(src).toMatch(/paymentLinkReconciliation:\s*590033/);
+    const segment = src.slice(src.indexOf('// S5a-6 (U8) — daily payment-link reconciliation sweep.'));
+    const block = segment.slice(0, segment.indexOf('// Billing resilience (Part B)'));
+    expect(block).toContain('if (shouldRunWorkers) {');
+    expect(block).toContain('isPaymentLinkReconciliationHour(new Date())');
+    expect(block).toMatch(/runAsLeader\(SWEEP_LOCK\.paymentLinkReconciliation/);
+    expect(block).toContain('listCollectOnSiteTenantIds(pool)');
+  });
+
   it('exactly one digest path remains; SWEEP_LOCK has no duplicate keys (U5)', () => {
     // U5 — the redundant P5-020 hourly digest worker was deleted; only the
     // RV-063 daily digest sweep remains.

@@ -48,6 +48,14 @@
  * follow-up; the crashed-claimer lease; and the unreadable / unset / no-row
  * claims — all through the real `PgQueue`, repositories and claim, with the
  * worker driven on the job rows the writes committed.
+ *
+ * S5a-6 (the nested "daily reconciliation sweep" block): the production
+ * enumerator (`listCollectOnSiteTenantIds`, cross-tenant role, real
+ * `tenant_settings.payment_collection_mode` and `tenants` join, keyset pages
+ * of 500) under `RLS_RUNTIME_ROLE=true`, the sweep enqueueing per-day
+ * `:sweep:<date>` pass-1 jobs only for collect-on-site tenants with a live
+ * link (`invoices.stripe_payment_link_id`), the same-day dedupe, the jobs run
+ * through the real worker and claim, and a switch back after listing.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import crypto from 'crypto';
@@ -98,6 +106,10 @@ import {
   type DeactivatePaymentLinksPayload,
 } from '../../src/invoices/payment-mode-change';
 import { createDeactivatePaymentLinksWorker } from '../../src/workers/deactivate-payment-links';
+import {
+  listCollectOnSiteTenantIds,
+  runPaymentLinkReconciliationSweep,
+} from '../../src/workers/payment-link-reconciliation-sweep';
 
 const LOOPS = 20;
 const CONNECT_ACCOUNT = 'acct_s5a4_minting_scope';
@@ -1663,5 +1675,160 @@ describe('Postgres integration — attach-time revalidation under the payment-mo
         expect(await jobRows(t.tenantId)).toEqual([]);
       });
     }
+
+    // ── S5a-6: the daily reconciliation sweep ───────────────────────────────
+
+    describe('the daily reconciliation sweep (S5a-6): the real enumerator over real tenant_settings and invoices', () => {
+      /** The sweep exactly as app.ts runs it: the production enumerator, the real repository, the real queue. */
+      async function sweep(at: Date) {
+        return runPaymentLinkReconciliationSweep({
+          listCollectOnSiteTenantIds: () => listCollectOnSiteTenantIds(pool),
+          invoiceRepo: new PgInvoiceRepository(pool),
+          queue,
+          logger: quiet,
+          now: () => at,
+        });
+      }
+
+      /** Drop the switch's own job rows: the "lost or dead-lettered job" the sweep is the backstop for. */
+      async function loseJobs(tenantId: string): Promise<void> {
+        await pool.query(`DELETE FROM _queue_messages WHERE type = $1 AND payload->>'tenantId' = $2`, [JOB, tenantId]);
+      }
+
+      it('enqueues one pass-1 job per collect-on-site tenant still holding a live link (lost job; link that predates the policy) and none for a tenant with no live link or on pay_link; a second sweep the same day adds nothing; running the jobs retires both links; a tenant that switched back after being listed keeps its link', async () => {
+        const previous = process.env.RLS_RUNTIME_ROLE;
+        // The enumerator runs with the RLS runtime role in place (the named
+        // cross-tenant role for the listing, the tenant role per repository read).
+        process.env.RLS_RUNTIME_ROLE = 'true';
+        try {
+          // A: collect on site, its switch's job lost.
+          const lost = await seedLinked({ settingsRow: true, links: 1 });
+          await switchTo(lost.t.tenantId, 'collect_on_site');
+          await loseJobs(lost.t.tenantId);
+          // B: a link that predates the policy (the mode was stored by a path with no cleanup hook).
+          const predates = await seedLinked({ settingsRow: true, links: 1 });
+          await pool.query(`UPDATE tenant_settings SET payment_collection_mode = 'collect_on_site' WHERE tenant_id = $1`, [
+            predates.t.tenantId,
+          ]);
+          // C: pay_link, holding a link — allowed.
+          const payLink = await seedLinked({ settingsRow: true, links: 1 });
+          await switchTo(payLink.t.tenantId, 'pay_link');
+          // D: collect on site with no live link (one plain invoice).
+          const none = await seedLinked({ settingsRow: true, links: 0, plain: 1 });
+          await switchTo(none.t.tenantId, 'collect_on_site');
+          await loseJobs(none.t.tenantId);
+          // E: collect on site with a live link; switches back after the sweep lists it.
+          const back = await seedLinked({ settingsRow: true, links: 1 });
+          await switchTo(back.t.tenantId, 'collect_on_site');
+          await loseJobs(back.t.tenantId);
+
+          // The production enumerator, against real columns, in tenant-id order.
+          const listed = await listCollectOnSiteTenantIds(pool);
+          expect([...listed].sort()).toEqual(listed);
+          for (const t of [lost, predates, none, back]) expect(listed).toContain(t.t.tenantId);
+          expect(listed).not.toContain(payLink.t.tenantId);
+
+          const at = new Date();
+          const day = at.toISOString().slice(0, 10);
+          const first = await sweep(at);
+          expect(first.candidates).toBe(listed.length);
+          expect(first.failed).toBe(0);
+
+          const sweepRows = async (tenantId: string) =>
+            (await jobRows(tenantId)).map((r) => ({ payload: r.payload, key: r.idempotency_key }));
+          for (const t of [lost, predates, back]) {
+            expect(await sweepRows(t.t.tenantId)).toEqual([
+              { payload: { tenantId: t.t.tenantId, pass: 1 }, key: `deactivate-payment-links:${t.t.tenantId}:sweep:${day}` },
+            ]);
+          }
+          expect(await jobRows(payLink.t.tenantId)).toEqual([]);
+          expect(await jobRows(none.t.tenantId)).toEqual([]);
+
+          // A second sweep the same day enqueues nothing new (same key).
+          const idsBefore = (await Promise.all([lost, predates, back].map((t) => jobRows(t.t.tenantId)))).flat().map((r) => r.id);
+          await sweep(new Date(at.getTime() + 1000));
+          const idsAfter = (await Promise.all([lost, predates, back].map((t) => jobRows(t.t.tenantId)))).flat().map((r) => r.id);
+          expect(idsAfter).toEqual(idsBefore);
+          expect(await jobRows(payLink.t.tenantId)).toEqual([]);
+          expect(await jobRows(none.t.tenantId)).toEqual([]);
+
+          // E's owner switches back before E's job runs.
+          await switchTo(back.t.tenantId, 'pay_link');
+
+          // Run each sweep job through the real worker and the real claim.
+          for (const t of [lost, predates]) {
+            const provider = new JobProvider(t.t.tenantId);
+            await jobWorker(provider).handle(asMessage(await pass1(t.t.tenantId)), quiet);
+            expect(provider.deactivatedIds()).toEqual([t.linked[0].linkId]);
+            expect(provider.locksDuringCall).toEqual([0]);
+            expect(await linkColumns(t.t.tenantId, t.linked[0].id)).toEqual({
+              stripe_payment_link_id: null,
+              stripe_payment_link_url: null,
+            });
+            expect(
+              (await auditRows(t.t.tenantId, t.linked[0].id, 'invoice.payment_link_deactivated')).map((m) => m.reason),
+            ).toEqual(['payment_mode_changed']);
+            // Its follow-up pass has a key of its own: the sweep key plus :pass2.
+            expect((await jobRows(t.t.tenantId)).filter((r) => r.payload.pass === 2).map((r) => r.idempotency_key)).toEqual([
+              `deactivate-payment-links:${t.t.tenantId}:sweep:${day}:pass2`,
+            ]);
+          }
+
+          const backProvider = new JobProvider(back.t.tenantId);
+          await jobWorker(backProvider).handle(asMessage(await pass1(back.t.tenantId)), quiet);
+          expect(backProvider.deactivations).toEqual([]);
+          expect((await linkColumns(back.t.tenantId, back.linked[0].id)).stripe_payment_link_id).toBe(back.linked[0].linkId);
+          expect((await tenantEvents(back.t.tenantId, 'payment_links.cleanup_superseded')).map((r) => r.metadata)).toEqual([
+            { pass: 1, modeRead: 'pay_link', deactivated: 0, failed: 0 },
+          ]);
+          expect((await jobRows(back.t.tenantId)).filter((r) => r.payload.pass === 2)).toEqual([]);
+
+          // C's allowed link was never touched.
+          expect((await linkColumns(payLink.t.tenantId, payLink.linked[0].id)).stripe_payment_link_id).toBe(
+            payLink.linked[0].linkId,
+          );
+
+          // The next day's sweep finds nothing left to retire for A and B.
+          const nextDay = new Date(at.getTime() + 24 * 60 * 60_000);
+          await pool.query(`DELETE FROM _queue_messages WHERE type = $1 AND payload->>'tenantId' = ANY($2::text[])`, [
+            JOB,
+            [lost.t.tenantId, predates.t.tenantId],
+          ]);
+          await sweep(nextDay);
+          expect(await jobRows(lost.t.tenantId)).toEqual([]);
+          expect(await jobRows(predates.t.tenantId)).toEqual([]);
+        } finally {
+          if (previous === undefined) delete process.env.RLS_RUNTIME_ROLE;
+          else process.env.RLS_RUNTIME_ROLE = previous;
+        }
+      });
+
+      it('the enumerator visits every collect-on-site tenant past one 500-tenant page', async () => {
+        // 501+ collect-on-site rows exist only for this check; each is a real tenant + settings row.
+        const before = await listCollectOnSiteTenantIds(pool);
+        const need = Math.max(0, 501 - before.length);
+        const created: string[] = [];
+        for (let i = 0; i < need; i++) {
+          const t = await createTestTenant(pool);
+          await pool.query(
+            `INSERT INTO tenant_settings (id, tenant_id, business_name, payment_collection_mode)
+             VALUES ($1, $2, 'Page HVAC', 'collect_on_site')`,
+            [crypto.randomUUID(), t.tenantId],
+          );
+          created.push(t.tenantId);
+        }
+        try {
+          const listed = await listCollectOnSiteTenantIds(pool);
+          expect(listed.length).toBeGreaterThan(500);
+          expect(new Set(listed).size).toBe(listed.length);
+          for (const id of created) expect(listed).toContain(id);
+          expect([...listed].sort()).toEqual(listed);
+        } finally {
+          await pool.query(`UPDATE tenant_settings SET payment_collection_mode = NULL WHERE tenant_id = ANY($1::uuid[])`, [created]);
+        }
+      });
+
+      it.todo('S6 (U7): a tenants.demo tenant on collect_on_site holding a live link gets no sweep job (add AND NOT t.demo when the column lands)');
+    });
   });
 });
