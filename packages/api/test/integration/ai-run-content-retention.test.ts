@@ -218,6 +218,13 @@ describe('PRIV-1 — the retention sweep purges ai_runs prompt and reply content
     });
   });
 
+  /** The guards below prove something only when this sweep really purged. */
+  async function expectOldAPurged(): Promise<void> {
+    const purged = (await runRow(tenantA.tenantId, oldA))!;
+    expect(purged.content_purged_at).toBeInstanceOf(Date);
+    expect(JSON.stringify(purged.input_snapshot)).not.toContain('Maria Lopez');
+  }
+
   it("strips the messages and the reply from tenant A's 2-day-old run; the row and its accounting columns are kept", async () => {
     const row = (await runRow(tenantA.tenantId, oldA))!;
     expect(row).toBeDefined();
@@ -238,12 +245,16 @@ describe('PRIV-1 — the retention sweep purges ai_runs prompt and reply content
 
   it('keeps the proposal that points at the purged run (FK intact)', async () => {
     const { rows } = await pool.query(
-      `SELECT p.ai_run_id, r.id AS run_id
+      `SELECT p.ai_run_id, r.id AS run_id, r.input_snapshot, r.content_purged_at
          FROM proposals p JOIN ai_runs r ON r.id = p.ai_run_id
         WHERE p.tenant_id = $1 AND p.id = $2`,
       [tenantA.tenantId, proposalId],
     );
-    expect(rows).toEqual([{ ai_run_id: oldA, run_id: oldA }]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ ai_run_id: oldA, run_id: oldA });
+    // Purged AND still referenced: the guard means nothing unless the purge ran.
+    expect(rows[0].content_purged_at).toBeInstanceOf(Date);
+    expect(JSON.stringify(rows[0].input_snapshot)).not.toContain('Maria Lopez');
   });
 
   it('scrubs every task type: a supervisor review run written outside the gateway loses its summary and rationale', async () => {
@@ -254,6 +265,8 @@ describe('PRIV-1 — the retention sweep purges ai_runs prompt and reply content
   });
 
   it("keeps tenant A's 1-hour-old run untouched (inside the horizon)", async () => {
+    // Precondition: the same sweep did purge this tenant's 2-day-old run.
+    await expectOldAPurged();
     const row = (await runRow(tenantA.tenantId, freshA))!;
     expect(JSON.stringify(row.input_snapshot)).toContain('Maria Lopez');
     expect(row.output_snapshot).toMatchObject({ content: SUMMARY_REPLY });
@@ -261,6 +274,8 @@ describe('PRIV-1 — the retention sweep purges ai_runs prompt and reply content
   });
 
   it("keeps tenant B's 2-day-old run untouched (365-day retention)", async () => {
+    // Precondition: the same sweep did purge tenant A's run of the same age.
+    await expectOldAPurged();
     const row = (await runRow(tenantB.tenantId, oldB))!;
     expect(JSON.stringify(row.input_snapshot)).toContain('Maria Lopez');
     expect(row.output_snapshot).toMatchObject({ content: SUMMARY_REPLY });
