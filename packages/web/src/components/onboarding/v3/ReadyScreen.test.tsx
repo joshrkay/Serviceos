@@ -44,7 +44,7 @@ describe('ReadyScreen', () => {
 
   it('in the shell, on a browser that can listen, says the owner can tap or say "first" or "second"', () => {
     withMicrophone();
-    setup(plumbingCleDraft, { inShell: true });
+    setup();
     expect(
       screen.getByText('Each choice is two options. Tap the one that sounds right, or say "first" or "second". Nothing is saved until you say so.'),
     ).toBeInTheDocument();
