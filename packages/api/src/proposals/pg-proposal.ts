@@ -2,7 +2,7 @@ import { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 import { PgBaseRepository } from '../db/pg-base';
-import { tenantContextStore } from '../middleware/tenant-context';
+import { currentTenantContext } from '../middleware/tenant-context';
 import {
   LANE_BOOKING_BOOKED_STATUSES,
   Proposal,
@@ -168,7 +168,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   }
 
   async findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]> {
-    if (tenantContextStore.getStore()?.tenantId !== tenantId) {
+    if (currentTenantContext()?.tenantId !== tenantId) {
       throw new Error('findByIdsForUpdate requires the request transaction: a row lock taken outside it is released immediately');
     }
     if (ids.length === 0) return [];
