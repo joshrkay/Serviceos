@@ -96,6 +96,9 @@ export class TwilioRecordingApiDeleter implements TwilioRecordingDeleter {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // No `cause` on purpose: the transport error can carry the basic
+      // credential or the token, and loggers serialise the cause chain.
+      // eslint-disable-next-line preserve-caught-error
       throw new Error(`Twilio recording delete failed: ${this.scrub(message, basic)}`);
     }
     if (res.status === 404) return 'already_gone';
