@@ -432,7 +432,10 @@ describe('TwilioGatherAdapter.handleInbound', () => {
       to: '+15125550999',
       tenantId: 'tenant-es',
     });
-    expect(replay).toContain('Un momento, por favor.');
+    // PRIV-4 — the retry replays the Spanish greeting (notices included),
+    // since Twilio discarded the first response.
+    expect(replay).toContain('Gracias por llamar a Acme Plumbing');
+    expect(replay).toContain('Para que lo sepa, soy un asistente virtual');
     expect(replay).toContain('language="es-US"');
     expect(replay).toContain('<Say voice="Polly.Lupe-Neural">');
     expect(replay).not.toContain('One moment, please.');

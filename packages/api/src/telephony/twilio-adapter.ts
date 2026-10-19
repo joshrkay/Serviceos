@@ -1388,6 +1388,7 @@ export class TwilioGatherAdapter {
     // resumes capture on this leg (the realtime→Gather degrade) reads this
     // instead of assuming establishment ran.
     session.recordingDisclosed = true;
+    session.greetingText = greetingText;
     const expanded = sideEffects.map((fx) =>
       fx.type === 'tts_play' && fx.payload.text === 'greeting'
         ? { ...fx, payload: { ...fx.payload, text: greetingText } }
@@ -2205,8 +2206,21 @@ export class TwilioGatherAdapter {
         sessionId: session.id,
       });
       const replayHints = await this.resolveGatherHints(opts.tenantId);
+      // PRIV-4 — Twilio discarded the first response, so this document is the
+      // only greeting the caller hears: replay the established greeting (it
+      // carries the virtual-assistant and recording notices). A retry that
+      // lands while the first attempt is still establishing says both notices
+      // ahead of the hold line.
+      const replayLanguage = session.language ?? 'en';
+      const replayText =
+        session.greetingText ??
+        [
+          buildAiDisclosureText({ businessName: this.deps.businessName, language: replayLanguage }),
+          t('disclose.two_party', replayLanguage),
+          t('greeting.one_moment', replayLanguage),
+        ].join(' ');
       return buildTwiML(
-        [{ type: 'tts_play', payload: { text: t('greeting.one_moment', session.language ?? 'en') } }],
+        [{ type: 'tts_play', payload: { text: replayText } }],
         {
           gatherActionUrl: this.gatherUrl(session.id),
           ...(session.language ? { language: session.language } : {}),
