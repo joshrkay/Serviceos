@@ -2362,7 +2362,11 @@ describe('PRIV-4 — the first thing a phone caller hears says they are talking 
 
   async function noticeRows(auditRepo: InMemoryAuditRepository, tenantId: string, sessionId: string) {
     // The Gather commit is fire-and-forget; let it settle.
-    for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r));
+    for (let i = 0; i < 5; i += 1) {
+      await new Promise<void>((r) => {
+        setImmediate(r);
+      });
+    }
     return (await auditRepo.findByEntity(tenantId, 'voice_session', sessionId)).filter(
       (e) => e.eventType === NOTICE_EVENT,
     );
