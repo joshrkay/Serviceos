@@ -80,7 +80,7 @@ Drop-off reads as `v3_ready_viewed` with no `v3_turn_viewed`, a `v3_turn_viewed`
 choice with no `v3_choice_made` (the owner stalled on that turn), `v3_keep_rest` (how far
 they got before skipping, from `answered_count`), or `v3_readback_viewed` with no
 `v3_approved`. `v3_readback_edit` per tenant is the quality signal for the typical shop:
-how often the finished answer needed changing. `answer_mode` splits taps from typing.
+how often the finished answer needed changing. `answer_mode` splits taps, typing and spoken answers.
 
 After the read-back the same frame carries the trial, the number and the test call, so
 the funnel continues without a gap: `v3_approved` -> `v3_trial_viewed` -> `v3_trial_started`

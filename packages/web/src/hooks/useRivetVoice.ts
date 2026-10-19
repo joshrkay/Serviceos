@@ -27,7 +27,7 @@ import { useTTS } from './useTTS';
  */
 
 export type RivetVoiceGesture = 'start' | 'make_it_mine' | 'keep_as_is';
-export type TtsFallbackReason = 'rate_limited' | 'not_configured' | 'tts_failed' | 'network' | 'playback' | 'autoplay';
+type TtsFallbackReason = 'rate_limited' | 'not_configured' | 'tts_failed' | 'network' | 'playback' | 'autoplay';
 
 export interface SpeakOptions {
   /** The turn this line belongs to: a choice key, or 'ready' / 'readback' / 'trial' / 'number'. */
