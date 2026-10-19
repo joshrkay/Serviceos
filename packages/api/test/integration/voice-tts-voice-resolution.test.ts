@@ -11,6 +11,11 @@
  *     miss and a fresh provider call.
  *   - The audit row lands in `audit_events` with `voice: 'adam'` in its
  *     metadata, and never the vendor voice id.
+ *   - S3-2: POST /api/voice/tts/batch resolves the same real column: A's
+ *     turn is spoken with Adam's id, B's with the default, B is never
+ *     served A's bytes, and GET /api/voice/tts/clip/:hash reads A's clip
+ *     back in A's voice, is a miss for B until B has spoken the line, and
+ *     then gives B its own bytes.
  *
  * Seam: the real route over PgSettingsRepository + PgAuditRepository, with
  * the TTS vendor faked at the provider boundary.
@@ -48,7 +53,7 @@ const ADAM = 'pNInz6obpgDQGcFmaJgB';
 const RACHEL = '21m00Tcm4TlvDq8ikWAM';
 const LINE = 'Tap one to hear it.';
 
-describe('Postgres integration — S3-1 POST /api/voice/tts speaks the tenant voice', () => {
+describe('Postgres integration — S3-1/S3-2 POST /api/voice/tts and /tts/batch speak the tenant voice', () => {
   let pool: Pool;
   let settingsRepo: PgSettingsRepository;
   let app: express.Express;
@@ -212,4 +217,81 @@ describe('Postgres integration — S3-1 POST /api/voice/tts speaks the tenant vo
     expect(bRows.length).toBeGreaterThan(0);
     for (const row of bRows) expect(row.metadata.voice).toBe('rachel');
   });
+
+  it("S3-2: the batch speaks A's turn with Adam's id from the real column, B's with the default, and the hash read follows the voice", async () => {
+    const turn = [
+      'How should I answer your phone?',
+      'Voice Co, how can I help?',
+      "Thanks for calling Voice Co. What's going on today?",
+    ];
+
+    acting = adamTenant;
+    synthesize.mockClear();
+    const a = await request(app).post('/api/voice/tts/batch').send({ items: turn });
+    expect(a.status).toBe(200);
+    expect(a.body.clips.map((c: { cached: boolean }) => c.cached)).toEqual([false, false, false]);
+    expect(synthesize).toHaveBeenCalledTimes(3);
+    for (const call of synthesize.mock.calls) {
+      expect(call[0]).toMatchObject({ voice: ADAM, tenantId: adamTenant.tenantId });
+    }
+
+    // Before B has spoken the turn, A's hash is a miss for B: the read
+    // resolves B's voice from the same column and B has no clip in it.
+    const hash = a.body.clips[1].clipHash as string;
+    acting = defaultTenant;
+    const missB = await request(app).get(`/api/voice/tts/clip/${hash}`);
+    expect(missB.status).toBe(404);
+    expect(missB.body.error).toBe('NOT_CACHED');
+
+    const b = await request(app).post('/api/voice/tts/batch').send({ items: turn });
+    expect(b.status).toBe(200);
+    // Same lines, other voice: three fresh clips, never Adam's bytes.
+    expect(b.body.clips.map((c: { cached: boolean }) => c.cached)).toEqual([false, false, false]);
+    expect(synthesize).toHaveBeenCalledTimes(6);
+    for (const call of synthesize.mock.calls.slice(3)) {
+      expect(call[0]).toMatchObject({ voice: RACHEL, tenantId: defaultTenant.tenantId });
+    }
+    for (const [i, clip] of (b.body.clips as Array<{ audio: string; clipHash: string }>).entries()) {
+      expect(clip.clipHash).toBe(hashOf(turn[i]));
+      expect(Buffer.from(clip.audio, 'base64').toString()).toBe(`mp3:${RACHEL}:${turn[i]}`);
+      expect(clip.audio).not.toBe(a.body.clips[i].audio);
+    }
+
+    // Same hash, two voices: A reads Adam's bytes, B (now that B has spoken
+    // the line) reads Rachel's, never A's. Reads never call the provider.
+    acting = adamTenant;
+    const readA = await request(app).get(`/api/voice/tts/clip/${hash}`).buffer(true).parse(binaryParser);
+    expect(readA.status).toBe(200);
+    expect(readA.headers['etag']).toBe(`"${hash}"`);
+    expect((readA.body as Buffer).toString()).toBe(`mp3:${ADAM}:${turn[1]}`);
+    acting = defaultTenant;
+    const readB = await request(app).get(`/api/voice/tts/clip/${hash}`).buffer(true).parse(binaryParser);
+    expect(readB.status).toBe(200);
+    expect((readB.body as Buffer).toString()).toBe(`mp3:${RACHEL}:${turn[1]}`);
+    expect(synthesize).toHaveBeenCalledTimes(6);
+
+    // Each synthesized clip of A's turn landed as its own audit row, in A's preset.
+    const rows = await waitForRows(
+      () =>
+        pool.query<{ metadata: Record<string, unknown> }>(
+          `SELECT metadata FROM audit_events
+            WHERE tenant_id = $1 AND event_type = 'voice.tts.synthesized'
+              AND (metadata->>'chars')::int = ANY($2::int[])`,
+          [adamTenant.tenantId, turn.map((t) => t.length)],
+        ),
+      40,
+    );
+    expect(rows.map((r) => r.metadata.chars).sort()).toEqual(turn.map((t) => t.length).sort());
+    for (const row of rows) {
+      expect(row.metadata).toMatchObject({ provider: 'fake', voice: 'adam' });
+      expect(JSON.stringify(row.metadata)).not.toContain(ADAM);
+    }
+  });
 });
+
+/** supertest parses only text/JSON by default; audio bytes need a buffer parser. */
+function binaryParser(res: NodeJS.ReadableStream, cb: (err: Error | null, body: Buffer) => void) {
+  const chunks: Buffer[] = [];
+  res.on('data', (c: Buffer) => chunks.push(c));
+  res.on('end', () => cb(null, Buffer.concat(chunks)));
+}
