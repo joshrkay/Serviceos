@@ -200,7 +200,7 @@ const DIGIT_RUN_REGEX = /[0-9]{7,}/g;
  * pass the gate. Phones are already placeholders by the time this runs.
  */
 const GROUPED_DIGIT_RUN_REGEX =
-  /(?<![0-9])\d{2,}(?:(?:[ \t]*[,.\-][ \t]*|[ \t]+)\d{2,}){2,}(?![0-9])/g;
+  /(?<![0-9])\d{2,}(?:(?:[ \t]*[,.-][ \t]*|[ \t]+)\d{2,}){2,}(?![0-9])/g;
 const MIN_GROUPED_RESIDUAL_DIGITS = 12;
 
 /**
