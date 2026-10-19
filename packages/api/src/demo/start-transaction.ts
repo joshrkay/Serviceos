@@ -59,13 +59,15 @@ export interface DemoStartRequest {
 export interface TakenLease {
   leaseId: string;
   tenantId: string;
+  /** The lease's fencing generation (the lease token's `gen`). */
+  generation: number;
 }
 
 export interface StartTransactionSteps {
   /**
    * Step (2): insert the lease on `client`, inside this transaction, or
-   * return null when the trade has no free demo tenant. S6-3's
-   * `demo/lease.ts` supplies it; nothing else may run here.
+   * return null when the trade has no free demo tenant. Production passes
+   * `demo/lease.ts#demoLeaseStep`; nothing else may run here.
    */
   takeLease(client: PoolClient, req: DemoStartRequest, at: Date): Promise<TakenLease | null>;
 }
@@ -84,6 +86,7 @@ export interface StartedDemoCall {
   demoCallId: string;
   leaseId: string;
   tenantId: string;
+  leaseGeneration: number;
   leadId: string;
   budgetDay: string;
   reservedCents: number;
@@ -225,6 +228,7 @@ async function runSteps(
       demoCallId,
       leaseId: lease.leaseId,
       tenantId: lease.tenantId,
+      leaseGeneration: lease.generation,
       leadId,
       budgetDay,
       reservedCents: unitCents,

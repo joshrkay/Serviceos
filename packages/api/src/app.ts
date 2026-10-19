@@ -195,6 +195,8 @@ import { reportHandlerWrittenServerErrors } from './monitoring/report-server-res
 import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
+import { createDemoCallsRouter } from './demo/routes';
+import { loadDemoConfig } from './demo/config';
 import { recordSweepSuccess, sweepLastSuccessMs } from './monitoring/sweep-heartbeats';
 import { PgPlatformSloRepository } from './monitoring/pg-platform-slo';
 // #1602 — production call-quality grading (nightly sampler + owner surface).
@@ -1660,6 +1662,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
       ? undefined
       : 'dev-one-tap-approve-secret');
+  // U7 (S6-3) — the demo call's lease-token secret (also keys the visitor's
+  // phone hash). Read the same way: explicit in prod / staging (unset there
+  // closes the demo module: 503 DEMO_DISABLED), a fixed dev fallback elsewhere.
+  const demoLeaseTokenSecret =
+    process.env.DEMO_LEASE_TOKEN_SECRET ??
+    (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
+      ? undefined
+      : 'dev-demo-lease-token-secret');
   const oneTapApiBaseUrl = (
     process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000'
   ).replace(/\/+$/, '');
@@ -2645,7 +2655,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // `supervisor_annotate` ran 26,894 times and completed ZERO times, and
     // estimate executions terminal-failed for weeks with `execution_error`
     // NULL. This sweep reads `ai_runs` (non-completion rate per task_type over
-    // a settled window, behind a volume floor) and `proposals` (stuck in
+    // a settled window, behind a volume floor; OBS-4: the same rate per
+    // tenant AND task behind its own floor, so one tenant's outage is not
+    // diluted by healthy tenants, plus platform-wide window spend so a
+    // completing runaway loop pages) and `proposals` (stuck in
     // `executing`; `execution_failed` with no reason) every 10 minutes and
     // pages through the SAME alertOperator seam as the SLO monitor above —
     // Sentry error event always, owner-class operator SMS when ALERT_SMS_TO is
@@ -2673,6 +2686,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             failureMonitorRepo
               ? failureMonitorRepo.taskRunCounts(windowStart, windowEnd)
               : Promise.resolve([]),
+          getTenantTaskRunCounts: (windowStart, windowEnd) =>
+            failureMonitorRepo
+              ? failureMonitorRepo.tenantTaskRunCounts(windowStart, windowEnd)
+              : Promise.resolve([]),
           getProposalExecutionCounts: (stalledBefore, failedSince) =>
             failureMonitorRepo
               ? failureMonitorRepo.proposalExecutionCounts(stalledBefore, failedSince)
@@ -2691,6 +2708,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             maxTaskAlerts: config.FAILURE_MONITOR_MAX_TASK_ALERTS,
             proposalStaleMin: config.FAILURE_MONITOR_PROPOSAL_STALE_MIN,
             proposalLookbackHours: config.FAILURE_MONITOR_PROPOSAL_LOOKBACK_HOURS,
+            tenantMinRuns: config.FAILURE_MONITOR_TENANT_MIN_RUNS,
+            spendMaxCents: config.FAILURE_MONITOR_SPEND_MAX_CENTS,
           },
           logger: failureMonitorLogger,
         });
@@ -3231,6 +3250,32 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // `feedback_response.submitted` with the synthetic public:<tokenHash>
   // actor required by CLAUDE.md "all mutations emit audit events".
   app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo, auditRepo));
+
+  // U7 (S6-3) — pre-signup demo call start, `POST /public/demo/calls`. Under
+  // the `/public` per-IP limiter (above); the visitor's one-call-a-day
+  // allowance is the second layer. Always mounted so a switched-off or
+  // misconfigured module answers 503 DEMO_DISABLED: the kill switch
+  // (DEMO_CALLS_ENABLED) is read per request, the DEMO_* numbers once here.
+  // Budget-crossing pages need their own operator seam: the SLO monitor's
+  // exists only on worker replicas.
+  const demoLogger = createLogger({ service: 'demo-call', environment: process.env.NODE_ENV || 'development' });
+  app.use(
+    '/public/demo',
+    createDemoCallsRouter({
+      pool: pool ?? null,
+      config: loadDemoConfig(process.env, demoLogger),
+      leaseTokenSecret: demoLeaseTokenSecret,
+      publicApiUrl: process.env.PUBLIC_API_URL,
+      alert: createAlertOperator({
+        sentry: sentryClient,
+        delivery: messageDelivery,
+        alertSmsTo: config.ALERT_SMS_TO,
+        cooldownMs: config.SLO_ALERT_COOLDOWN_MIN * 60 * 1000,
+        logger: demoLogger,
+      }),
+      logger: demoLogger,
+    }),
+  );
 
   // Public lead intake — embedded marketing-page form posts here.
   // Tenant identified by UUID in the URL. The outer `/public` limiter

@@ -69,7 +69,12 @@ function config(env: Record<string, string> = {}): DemoConfig {
   return loadDemoConfig(env);
 }
 
-/** The real lease row (S6-3 replaces the tenant pick), written on the start transaction's client. */
+/**
+ * A real lease row on a fresh tenant per call (an unbounded pool, so these
+ * budget cases never meet pool exhaustion), written on the start
+ * transaction's client. The real pick is `demo/lease.ts#demoLeaseStep`,
+ * proven in demo-tenant-leases.test.ts.
+ */
 function leaseStep(): StartTransactionSteps & { calls: number } {
   const step = {
     calls: 0,
@@ -80,12 +85,12 @@ function leaseStep(): StartTransactionSteps & { calls: number } {
         `INSERT INTO tenants (id, owner_id, owner_email, name) VALUES ($1, $2, 'lease-test@invalid.test', 'Lease test tenant')`,
         [tenantId, `lease-test:${tenantId}`],
       );
-      const { rows } = await client.query<{ id: string }>(
-        `INSERT INTO demo_tenant_leases (tenant_id, visitor_phone_hash, expires_at)
-         VALUES ($1, $2, $3) RETURNING id`,
-        [tenantId, req.phoneHash, new Date(at.getTime() + 70_000)],
+      const { rows } = await client.query<{ id: string; generation: string }>(
+        `INSERT INTO demo_tenant_leases (tenant_id, visitor_phone_hash, leased_at, expires_at)
+         VALUES ($1, $2, $3, $4) RETURNING id, generation`,
+        [tenantId, req.phoneHash, at, new Date(at.getTime() + 70_000)],
       );
-      return { leaseId: rows[0].id, tenantId };
+      return { leaseId: rows[0].id, tenantId, generation: Number(rows[0].generation) };
     },
   };
   return step;
