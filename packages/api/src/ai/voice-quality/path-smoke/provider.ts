@@ -123,10 +123,12 @@ interface SmokeRates {
 
 /**
  * Smoke-local price table for the cost cap. It stays separate from the
- * production pricing table (gateway/model-pricing.ts) because the Anthropic
- * fallback is priced at the conservative Layer-2 harness rate below, not at
- * Haiku's list price; the OpenAI rates match. Longest family first so a dated snapshot id
- * ("gpt-4o-mini-2024-07-18") never matches the shorter "gpt-4o" prefix.
+ * production pricing table (gateway/model-pricing.ts) so the cap never
+ * depends on which models that table or AI_MODEL_PRICING_JSON prices, and
+ * because the Anthropic fallback is priced at the conservative Layer-2
+ * harness rate below, not at Haiku's list price. Longest family first so a
+ * dated snapshot id ("gpt-4o-mini-2024-07-18") never matches the shorter
+ * "gpt-4o" prefix.
  *
  *   gpt-4o-mini  $0.15 / $0.60 per 1M  (OpenAI list price)
  *   gpt-4o       $2.50 / $10.00 per 1M (OpenAI list price)
