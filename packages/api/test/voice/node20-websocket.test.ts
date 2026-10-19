@@ -27,7 +27,8 @@ describe('speech providers on the deployed Node 20 runtime', () => {
       authHeader = request.headers['sec-websocket-protocol'];
       requestUrl = request.url;
       socket.on('message', () => socket.send(JSON.stringify({
-      type: 'Results', is_final: true,
+      // LCR-03 — the endpoint frame: a segment alone is only a partial now.
+      type: 'Results', is_final: true, speech_final: true,
       channel: { alternatives: [{ transcript: 'QA test', confidence: 0.99 }] },
     })));
     });
