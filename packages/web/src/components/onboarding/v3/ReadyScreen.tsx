@@ -22,6 +22,8 @@ export interface ReadyScreenProps {
 /** The finished shop, shown before anything is asked. */
 export function ReadyScreen({ draft, onMakeItMine, onKeepAsIs, onChangeMetro, changingMetro, notice, error }: ReadyScreenProps) {
   const rows = readyRows(draft);
+  const opener = `${draft.businessName} is already set up.`;
+  useRivetLine('ready', opener);
   const [picking, setPicking] = useState(false);
   // The server refuses a metro change once ANY choice is staged (a staged pick names a price the
   // owner saw), so the control exists only while nothing is.
@@ -34,7 +36,7 @@ export function ReadyScreen({ draft, onMakeItMine, onKeepAsIs, onChangeMetro, ch
   return (
     <>
       <SpeakerLine />
-      <RivetHeading>{draft.businessName} is already set up.</RivetHeading>
+      <RivetHeading>{opener}</RivetHeading>
       <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">
         I built it the way {typicalShopPhrase(draft)} run. {numberWord(CHOICE_COUNT)} quick choices make it yours. Nothing to type.
       </p>

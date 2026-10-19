@@ -38,11 +38,14 @@ const phoneDone: Patch = { phone: { status: 'done', metadata: { phoneNumber: NUM
 
 let world: { status: OnboardingStatusResponse };
 let requests: string[];
+/** The lines Rivet asked the voice route to say, in order. */
+let spokenTexts: string[];
 let routes: Record<string, (() => Response | Promise<Response>) | undefined>;
 
 function stub(status: OnboardingStatusResponse, extra: typeof routes = {}) {
   world = { status };
   requests = [];
+  spokenTexts = [];
   routes = {
     'GET /api/onboarding/status': () => json(200, world.status),
     'GET /api/onboarding/draft': () => json(200, { draft: approved }),
@@ -55,6 +58,8 @@ function stub(status: OnboardingStatusResponse, extra: typeof routes = {}) {
       world.status = statusAt(null, { ...phoneDone, test_call: { status: 'skipped' } });
       return json(200, { ok: true });
     },
+    // A keyless environment: no voice is configured, so Rivet's lines stay on screen (S3-3 falls back).
+    'POST /api/voice/tts': () => json(501, { error: 'NOT_CONFIGURED', message: 'Speech synthesis is not configured' }),
     'POST /api/voice/go-live': () => {
       world.status = { ...world.status, voiceAgentLive: true };
       return json(200, { ok: true });
@@ -66,6 +71,7 @@ function stub(status: OnboardingStatusResponse, extra: typeof routes = {}) {
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const call = `${init?.method ?? 'GET'} ${String(input)}`;
       requests.push(call);
+      if (call === 'POST /api/voice/tts' && typeof init?.body === 'string') spokenTexts.push((JSON.parse(init.body) as { text: string }).text);
       const handler = routes[call];
       if (!handler) throw new Error(`unexpected request ${call}`);
       return Promise.resolve(handler());
@@ -437,6 +443,8 @@ describe('ConversationShell after "That\'s right"', () => {
     expect(heading()).toHaveTextContent("Here's your number.");
     expect(screen.getByText('(216) 555-0180')).toBeInTheDocument();
     expect(fired('v3_number_ready')).toHaveLength(1);
+    // Rivet says each heading as it appears (the wait for the number is not a line of its own).
+    expect(spokenTexts).toEqual(['Last thing before your number: start your free trial.', "Here's your number."]);
 
     world.status = statusAt('ai_check', { ...phoneDone, ai_check: { status: 'current', metadata: { verifying: true } } });
     await nextPoll();
