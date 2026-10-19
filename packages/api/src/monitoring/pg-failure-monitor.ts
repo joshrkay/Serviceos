@@ -83,7 +83,9 @@ export class PgFailureMonitorRepository extends PgBaseRepository {
    * read that makes it visible. SUM(cost_micro_cents) treats an unpriced
    * run (NULL — unknown model price) as 0, so spend can under-count but
    * never fabricate; it is returned as a JS number (pg hands BIGINT back as
-   * a string).
+   * a string). `unpriced_completed` counts the completed runs that summed as
+   * 0 that way, so the monitor can tell "no spend" from "spend it cannot
+   * see" (ai_spend_unpriced).
    */
   async tenantTaskRunCounts(windowStart: Date, windowEnd: Date): Promise<TenantTaskRunCounts[]> {
     return this.withCrossTenantSweep(async (client) => {
@@ -95,6 +97,7 @@ export class PgFailureMonitorRepository extends PgBaseRepository {
         failed: string;
         unresolved: string;
         cost_micro_cents: string;
+        unpriced_completed: string;
       }>(
         `SELECT
            tenant_id,
@@ -103,7 +106,8 @@ export class PgFailureMonitorRepository extends PgBaseRepository {
            COUNT(*) FILTER (WHERE status = 'completed') AS completed,
            COUNT(*) FILTER (WHERE status = 'failed') AS failed,
            COUNT(*) FILTER (WHERE status IN ('pending', 'running')) AS unresolved,
-           COALESCE(SUM(cost_micro_cents), 0) AS cost_micro_cents
+           COALESCE(SUM(cost_micro_cents), 0) AS cost_micro_cents,
+           COUNT(*) FILTER (WHERE status = 'completed' AND cost_micro_cents IS NULL) AS unpriced_completed
          FROM ai_runs
          WHERE created_at >= $1
            AND created_at < $2
@@ -118,6 +122,7 @@ export class PgFailureMonitorRepository extends PgBaseRepository {
         failed: Number(r.failed),
         unresolved: Number(r.unresolved),
         costMicroCents: Number(r.cost_micro_cents),
+        unpricedCompleted: Number(r.unpriced_completed),
       }));
     });
   }

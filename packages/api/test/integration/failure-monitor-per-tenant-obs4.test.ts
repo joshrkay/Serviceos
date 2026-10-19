@@ -18,10 +18,14 @@ import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb, type TestTenant } from './shared';
 import { PgFailureMonitorRepository } from '../../src/monitoring/pg-failure-monitor';
 import {
+  evaluateTaskFailureRate,
+  evaluateTenantTaskFailureRate,
   runFailureRateMonitor,
   type FailureMonitorThresholds,
 } from '../../src/workers/failure-rate-monitor';
 import type { Logger } from '../../src/logging/logger';
+import { LLMGateway, type LLMProvider } from '../../src/ai/gateway/gateway';
+import { PgAiRunRepository } from '../../src/ai/pg-ai-run';
 
 const NOW = new Date('2026-07-23T12:00:00.000Z');
 const WINDOW_END = new Date('2026-07-23T11:55:00.000Z'); // now - settle 5
@@ -127,6 +131,7 @@ describe('Postgres integration — OBS-4 per-tenant failure rate and window spen
           failed: 12,
           unresolved: 0,
           costMicroCents: 0, // every run unpriced → 0, never a guess
+          unpricedCompleted: 0, // failed runs are not completed spend
         },
         {
           tenantId: healthy.tenantId,
@@ -136,6 +141,7 @@ describe('Postgres integration — OBS-4 per-tenant failure rate and window spen
           failed: 0,
           unresolved: 0,
           costMicroCents: 42_000_000, // 60 × 700,000 — a JS number, not pg's BIGINT string
+          unpricedCompleted: 0,
         },
         {
           tenantId: healthy.tenantId,
@@ -145,6 +151,7 @@ describe('Postgres integration — OBS-4 per-tenant failure rate and window spen
           failed: 0,
           unresolved: 0,
           costMicroCents: 0,
+          unpricedCompleted: 5, // completed with NULL cost — the spend rule's blind spot
         },
       ]),
     );
@@ -153,11 +160,28 @@ describe('Postgres integration — OBS-4 per-tenant failure rate and window spen
   });
 
   it('the platform aggregate is diluted (12/72 = 16.7%) while the per-tenant aggregate is not', async () => {
+    // Review round 1: this used to read only the platform aggregate and
+    // assert row counts, so it passed with the fix reverted. It now judges
+    // BOTH real aggregates with the real evaluators.
     const platform = await repo.taskRunCounts(WINDOW_START, WINDOW_END);
-    const classify = platform.find((r) => r.taskType === 'classify_intent');
-    // Other files' leftovers could in principle add rows; ours alone are 72/60.
-    expect(classify!.total).toBeGreaterThanOrEqual(72);
-    expect(classify!.completed).toBeGreaterThanOrEqual(60);
+    const classify = platform.find((r) => r.taskType === 'classify_intent')!;
+    // Other files' leftovers could in principle add rows; ours alone are
+    // 72 runs / 60 completed. Judge OUR share so a leftover cannot flip it.
+    expect(classify.total).toBeGreaterThanOrEqual(72);
+    const ourPlatformRow = { taskType: 'classify_intent', total: 72, completed: 60, failed: 12, unresolved: 0 };
+    expect(evaluateTaskFailureRate(ourPlatformRow, thresholds)!.breached).toBe(false);
+
+    const perTenant = await repo.tenantTaskRunCounts(WINDOW_START, WINDOW_END);
+    const failingRow = perTenant.find(
+      (r) => r.tenantId === failing.tenantId && r.taskType === 'classify_intent',
+    )!;
+    const healthyRow = perTenant.find(
+      (r) => r.tenantId === healthy.tenantId && r.taskType === 'classify_intent',
+    )!;
+    const failingFinding = evaluateTenantTaskFailureRate(failingRow, thresholds)!;
+    expect(failingFinding.breached).toBe(true);
+    expect(failingFinding.value).toBe(1);
+    expect(evaluateTenantTaskFailureRate(healthyRow, thresholds)!.breached).toBe(false);
   });
 
   it('the real tick over the real repository pages ONLY the failing tenant', async () => {
@@ -176,6 +200,7 @@ describe('Postgres integration — OBS-4 per-tenant failure rate and window spen
       'ai_task_failure_rate',
       'ai_tenant_task_failure_rate',
       'ai_spend_window',
+      'ai_spend_unpriced',
       'proposal_execution_stalled',
       'proposal_execution_failed_silently',
     ]);
@@ -200,6 +225,92 @@ describe('Postgres integration — OBS-4 per-tenant failure rate and window spen
     expect(alert).not.toHaveBeenCalledWith(
       expect.objectContaining({ rule: `ai_task_failure_rate:classify_intent:${healthy.tenantId}` }),
     );
+  });
+
+  it('a completed gateway call on the live production model stores a real cost the spend rule can see', async () => {
+    // OBS-4 review round 1. Production runs AI Profile A (gpt-4o-mini
+    // primary), and OpenAI answers with a dated id. While that model was
+    // unpriced the gateway wrote cost_micro_cents NULL, the window SUM read
+    // 0 and ai_spend_window could never fire. Drive the REAL gateway into
+    // the REAL ai_runs table and read it back through the monitor's query.
+    const live = await createTestTenant(pool);
+    try {
+      // OpenAI answers a 'gpt-4o-mini' request with the dated snapshot id.
+      const openai: LLMProvider = {
+        name: 'openai',
+        async complete() {
+          return {
+            content: 'ok',
+            model: 'gpt-4o-mini-2024-07-18',
+            provider: 'openai',
+            tokenUsage: { input: 9000, output: 100, total: 9100 },
+            latencyMs: 0,
+          };
+        },
+        async isAvailable() {
+          return true;
+        },
+      };
+      const gateway = new LLMGateway(
+        { defaultProvider: 'openai' },
+        new Map<string, LLMProvider>([['openai', openai]]),
+        undefined,
+        new PgAiRunRepository(pool),
+      );
+      const started = new Date(Date.now() - 1000);
+      const response = await gateway.complete({
+        taskType: 'classify_intent',
+        model: 'gpt-4o-mini',
+        tenantId: live.tenantId,
+        messages: [{ role: 'user', content: 'Book Maria for Tuesday' }],
+      });
+      // 9,000 × 15 + 100 × 60 = 141,000 micro-cents.
+      expect(response.costMicroCents).toBe(141_000);
+
+      const { rows } = await pool.query(
+        `SELECT status, model, cost_micro_cents FROM ai_runs WHERE tenant_id = $1`,
+        [live.tenantId],
+      );
+      expect(rows).toEqual([
+        { status: 'completed', model: 'gpt-4o-mini-2024-07-18', cost_micro_cents: '141000' },
+      ]);
+
+      const counted = (await repo.tenantTaskRunCounts(started, new Date(Date.now() + 1000))).find(
+        (r) => r.tenantId === live.tenantId,
+      );
+      expect(counted).toMatchObject({ completed: 1, costMicroCents: 141_000, unpricedCompleted: 0 });
+    } finally {
+      await pool.query('DELETE FROM ai_runs WHERE tenant_id = $1', [live.tenantId]);
+    }
+  });
+
+  it('a window of completed runs on an unpriced model pages the blind-spend warning', async () => {
+    const blind = await createTestTenant(pool);
+    try {
+      await pool.query(
+        `INSERT INTO ai_runs (tenant_id, task_type, model, status, cost_micro_cents, created_by, created_at)
+         SELECT $1, 'supervisor_annotate', 'some-unpriced-model', 'completed', NULL, 'gateway', $2
+         FROM generate_series(1, 2000)`,
+        [blind.tenantId, IN_WINDOW],
+      );
+      const alert = vi.fn().mockResolvedValue(undefined);
+      const result = await runFailureRateMonitor({
+        getTaskRunCounts: (s, e) => repo.taskRunCounts(s, e),
+        getTenantTaskRunCounts: (s, e) => repo.tenantTaskRunCounts(s, e),
+        getProposalExecutionCounts: (s, f) => repo.proposalExecutionCounts(s, f),
+        alert,
+        thresholds,
+        logger: noopLogger,
+        now: () => NOW,
+      });
+      expect(result.breached).toContain('ai_spend_unpriced');
+      expect(result.breached).not.toContain('ai_spend_window');
+      const call = alert.mock.calls.find(([a]) => a.rule === 'ai_spend_unpriced');
+      expect(call![0].severity).toBe('warning');
+      expect(call![0].details.topTaskTypes).toContain('supervisor_annotate=2000');
+    } finally {
+      await pool.query('DELETE FROM ai_runs WHERE tenant_id = $1', [blind.tenantId]);
+    }
   });
 
   it('the spend rule pages on a completing loop that the failure rules cannot see', async () => {

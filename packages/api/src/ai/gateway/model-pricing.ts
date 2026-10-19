@@ -58,10 +58,8 @@ export interface TokenUsageLike {
  * `config/ai-routing.ts`.
  *
  * ONLY models with a verified current price are listed. Deliberately
- * excluded: OpenAI models (gpt-4o, gpt-4o-mini — reachable via
- * AI_DEFAULT_MODEL / AI_PROVIDER_BASE_URL for system-tenant calls) and
- * legacy/deprecated Claude models (opus-4-5, opus-4-1, sonnet-4-5, sonnet-4-0,
- * opus-4-0, haiku-3). Per the "never a guess" rule for AI-emitted money
+ * excluded: legacy/deprecated Claude models (opus-4-5, opus-4-1, sonnet-4-5,
+ * sonnet-4-0, opus-4-0, haiku-3). Per the "never a guess" rule for AI-emitted money
  * figures (see CLAUDE.md catalog-resolver pattern — the same discipline
  * applies to cost accounting), an unpriced model resolves to a null cost
  * rather than a fabricated number. Ops can add any of these via
@@ -80,6 +78,14 @@ export interface TokenUsageLike {
  * the routed provider). Override via AI_MODEL_PRICING_JSON if your routed
  * provider differs: Llama 3.1 8B $0.02/$0.03, Llama 3.3 70B $0.10/$0.32,
  * Qwen 2.5 72B $0.36/$0.40, Qwen 2.5 VL 72B $0.80/$0.80.
+ *
+ * OpenAI (published standard pricing, USD per 1,000,000 tokens): gpt-4o-mini
+ * $0.15/$0.60, gpt-4o $2.50/$10.00. These are the LIVE production primary
+ * (AI Profile A — AI_DEFAULT/LIGHTWEIGHT/STANDARD_MODEL=gpt-4o-mini,
+ * COMPLEX=gpt-4o). OBS-4 review round 1: while they were unpriced every live
+ * run stored cost_micro_cents NULL, so the failure monitor's ai_spend_window
+ * SUM read 0 and that rule could never fire. OpenAI answers with dated ids
+ * (gpt-4o-mini-2024-07-18); the longest-family match below prices them.
  */
 export const DEFAULT_MODEL_PRICING: Readonly<Record<string, ModelPriceRates>> = {
   'claude-haiku-4-5': { inputCentsPerMillionTokens: 100, outputCentsPerMillionTokens: 500 },
@@ -95,6 +101,9 @@ export const DEFAULT_MODEL_PRICING: Readonly<Record<string, ModelPriceRates>> = 
   'llama-3.3-70b-instruct': { inputCentsPerMillionTokens: 10, outputCentsPerMillionTokens: 32 },
   'qwen-2.5-72b-instruct': { inputCentsPerMillionTokens: 36, outputCentsPerMillionTokens: 40 },
   'qwen2.5-vl-72b-instruct': { inputCentsPerMillionTokens: 80, outputCentsPerMillionTokens: 80 },
+  // OpenAI — the live production primary (AI Profile A).
+  'gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+  'gpt-4o': { inputCentsPerMillionTokens: 250, outputCentsPerMillionTokens: 1000 },
 };
 
 function isFiniteNonNegativeInteger(n: unknown): n is number {

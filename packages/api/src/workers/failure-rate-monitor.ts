@@ -61,6 +61,11 @@
  *      page names the top tenants and task types by spend. Keyed on the
  *      cross-tenant total because per-tenant spend is already bounded by the
  *      gateway's quota buckets; a loop that fans out across tenants is not.
+ *   6. ai_spend_unpriced — OBS-4 review round 1. Rule 5 sums
+ *      cost_micro_cents, and an unpriced model stores NULL (summed as 0), so
+ *      a window whose completed runs are mostly unpriced makes rule 5 blind.
+ *      This pages a warning naming the unpriced task types, so a missing
+ *      price can never silently switch the spend rule off.
  *
  * SAFE BY CONSTRUCTION — this watches for runaway failure and must never
  * become one:
@@ -160,6 +165,12 @@ export interface TenantTaskRunCounts extends TaskRunCounts {
    * spend page can under-count but never fabricate.
    */
   costMicroCents: number;
+  /**
+   * Completed runs in this row whose cost_micro_cents is NULL — a model the
+   * gateway has no price for. They add 0 to `costMicroCents`, so a window
+   * dominated by them makes the spend rule blind (see evaluateUnpricedSpend).
+   */
+  unpricedCompleted: number;
 }
 
 /** Aggregate counts for the two silent-execution proposal predicates. */
@@ -318,6 +329,63 @@ export function evaluateWindowSpend(
 }
 
 /**
+ * Above this share of completed runs carrying no price, the spend rule is
+ * judged blind. 10%: an occasional unpriced side task is tolerable; a
+ * window where most spend is invisible is not.
+ */
+const UNPRICED_SHARE_MAX = 0.1;
+
+/**
+ * Rule 6 (OBS-4 review round 1) — the spend rule's blind spot. An unpriced
+ * model stores cost NULL, which sums as 0, so a production profile running
+ * on an unpriced model makes `ai_spend_window` read 0 forever and never
+ * fire. This pages a WARNING when, at volume (minRuns completed unpriced
+ * runs), more than UNPRICED_SHARE_MAX of the window's completed runs have
+ * no price, so a missing price can never silently switch the spend rule off
+ * again. Off with the spend rule (spendMaxCents 0).
+ */
+export function evaluateUnpricedSpend(
+  rows: ReadonlyArray<Pick<TenantTaskRunCounts, 'taskType' | 'completed' | 'unpricedCompleted'>>,
+  thresholds: Pick<FailureMonitorThresholds, 'spendMaxCents' | 'minRuns' | 'windowMin'>,
+): FailureFinding | null {
+  if (thresholds.spendMaxCents <= 0) return null;
+  let completed = 0;
+  let unpriced = 0;
+  const byTask = new Map<string, number>();
+  for (const r of rows) {
+    completed += r.completed;
+    unpriced += r.unpricedCompleted;
+    if (r.unpricedCompleted > 0) {
+      byTask.set(r.taskType, (byTask.get(r.taskType) ?? 0) + r.unpricedCompleted);
+    }
+  }
+  const share = completed > 0 ? unpriced / completed : 0;
+  const topTasks =
+    [...byTask.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, SPEND_TOP_N)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(',') || 'none';
+  return {
+    rule: 'ai_spend_unpriced',
+    breached: unpriced >= thresholds.minRuns && share > UNPRICED_SHARE_MAX,
+    value: share,
+    summary:
+      `ai spend rule cannot see spend: ${unpriced}/${completed} completed runs over last ` +
+      `${thresholds.windowMin}min have no price recorded (unpriced model) — top tasks ${topTasks}. ` +
+      `Add the serving model to DEFAULT_MODEL_PRICING or AI_MODEL_PRICING_JSON`,
+    details: {
+      unpricedCompleted: unpriced,
+      completed,
+      shareMax: UNPRICED_SHARE_MAX,
+      windowMin: thresholds.windowMin,
+      topTaskTypes: topTasks,
+    },
+    severity: 'warning',
+  };
+}
+
+/**
  * Rule 2 — proposals stuck in `executing`. Any stale row is a breach: the
  * execution handler is a queued job that finishes in seconds, so a row older
  * than the bound means nothing is ever going to move it.
@@ -469,6 +537,11 @@ export async function runFailureRateMonitor(
         setGauge(() => aiSpendWindowMicroCents.set(spend.value), deps.logger);
         findings.push(spend);
         evaluated.push('ai_spend_window');
+      }
+      const unpriced = evaluateUnpricedSpend(rows, t);
+      if (unpriced) {
+        findings.push(unpriced);
+        evaluated.push('ai_spend_unpriced');
       }
     } catch (err) {
       deps.logger.error('Failure monitor: per-tenant ai_runs aggregate failed', {

@@ -90,6 +90,17 @@ never fabricate. It keys on the cross-tenant total because per-tenant spend is
 already bounded by the gateway's quota buckets; a loop that fans out across
 tenants is not.
 
+### 6. `ai_spend_unpriced` — warning (OBS-4)
+
+Rule 5 can only see priced runs. A model with no entry in
+`DEFAULT_MODEL_PRICING` (`packages/api/src/ai/gateway/model-pricing.ts`) or
+`AI_MODEL_PRICING_JSON` stores `cost_micro_cents` NULL, which sums as 0 — so a
+production profile running on an unpriced model makes rule 5 read 0 forever.
+This rule pages a **warning** when, over the same window, at least
+`FAILURE_MONITOR_MIN_RUNS` completed runs carry no price **and** they are more
+than 10% of all completed runs. The page names the task types with the most
+unpriced runs. It is off whenever rule 5 is off.
+
 ## How it reaches a human
 
 The **same `alertOperator` seam the SLO monitor uses**
@@ -175,6 +186,18 @@ SELECT task_type, COUNT(*), SUM(cost_micro_cents) / 1000000.0 AS cents
 FROM ai_runs
 WHERE created_at > NOW() - INTERVAL '35 minutes'
 GROUP BY 1 ORDER BY 3 DESC NULLS LAST;
+```
+
+**`ai_spend_unpriced`** — the spend rule is blind, not the platform broken.
+Find the model that is serving without a price and add it to
+`DEFAULT_MODEL_PRICING` (a deploy) or `AI_MODEL_PRICING_JSON` (no deploy):
+
+```sql
+SELECT model, task_type, COUNT(*)
+FROM ai_runs
+WHERE created_at > NOW() - INTERVAL '35 minutes'
+  AND status = 'completed' AND cost_micro_cents IS NULL
+GROUP BY 1, 2 ORDER BY 3 DESC;
 ```
 
 **`proposal_execution_stalled`** — the sample ids are in the alert details.

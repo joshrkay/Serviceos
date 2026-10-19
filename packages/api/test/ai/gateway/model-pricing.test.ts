@@ -67,12 +67,27 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
       expect(resolveModelPricing('CLAUDE-SONNET-4-6')).not.toBeNull();
     });
 
+    it('prices the live production primary (AI Profile A: gpt-4o-mini / gpt-4o), dated ids included', async () => {
+      // OBS-4 review round 1 — production runs OpenAI primary. While these
+      // resolved to null every live run stored cost_micro_cents NULL, the
+      // window SUM read 0 and the ai_spend_window rule could never fire.
+      const { resolveModelPricing } = await freshModule();
+      const mini = { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 };
+      const full = { inputCentsPerMillionTokens: 250, outputCentsPerMillionTokens: 1000 };
+      expect(resolveModelPricing('gpt-4o-mini')).toEqual(mini);
+      expect(resolveModelPricing('gpt-4o')).toEqual(full);
+      expect(resolveModelPricing('openai/gpt-4o-mini')).toEqual(mini);
+      expect(resolveModelPricing('gpt-4o-2024-08-06')).toEqual(full);
+      // The dated mini id must resolve to the MINI family, not to the
+      // shorter 'gpt-4o' prefix that also matches it.
+      expect(resolveModelPricing('gpt-4o-mini-2024-07-18')).toEqual(mini);
+    });
+
     it('returns null for an unpriced model — never a guessed price', async () => {
       const { resolveModelPricing } = await freshModule();
       // Deliberately excluded from the default table (see model-pricing.ts
-      // header): OpenAI models and deprecated Claude models both resolve
-      // to null rather than a fabricated rate.
-      expect(resolveModelPricing('gpt-4o-mini')).toBeNull();
+      // header): deprecated Claude models and unknown models resolve to
+      // null rather than a fabricated rate.
       expect(resolveModelPricing('claude-opus-4-5')).toBeNull();
       expect(resolveModelPricing('totally-unknown-model')).toBeNull();
     });
@@ -120,8 +135,17 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
 
     it('returns null for an unpriced model regardless of token usage', async () => {
       const { computeCostMicroCents } = await freshModule();
-      const cost = computeCostMicroCents('gpt-4o-mini', { input: 1000, output: 1000, total: 2000 });
+      const cost = computeCostMicroCents('totally-unknown-model', { input: 1000, output: 1000, total: 2000 });
       expect(cost).toBeNull();
+    });
+
+    it('prices the dated id OpenAI actually returns for the live default model', async () => {
+      const { computeCostMicroCents } = await freshModule();
+      // gpt-4o-mini: 15 cents/M input, 60 cents/M output.
+      // 9,000 * 15 + 100 * 60 = 135,000 + 6,000 = 141,000 micro-cents.
+      expect(
+        computeCostMicroCents('gpt-4o-mini-2024-07-18', { input: 9000, output: 100, total: 9100 }),
+      ).toBe(141_000);
     });
 
     it('returns null when tokenUsage is absent', async () => {
@@ -199,14 +223,14 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
       });
     });
 
-    it('adds a brand-new model not in the default table (e.g. gpt-4o-mini)', async () => {
+    it('adds a brand-new model not in the default table (e.g. mistral-large)', async () => {
       process.env[ENV_KEY] = JSON.stringify({
-        'gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+        'mistral-large': { inputCentsPerMillionTokens: 200, outputCentsPerMillionTokens: 600 },
       });
       const { resolveModelPricing } = await freshModule();
-      expect(resolveModelPricing('gpt-4o-mini')).toEqual({
-        inputCentsPerMillionTokens: 15,
-        outputCentsPerMillionTokens: 60,
+      expect(resolveModelPricing('mistral-large')).toEqual({
+        inputCentsPerMillionTokens: 200,
+        outputCentsPerMillionTokens: 600,
       });
     });
 
@@ -247,34 +271,34 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
       // config, but resolveModelPricing() only ever sees/looks up the bare
       // last-segment id at call time.
       process.env[ENV_KEY] = JSON.stringify({
-        'openai/gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+        'openai/gpt-4o-mini': { inputCentsPerMillionTokens: 99, outputCentsPerMillionTokens: 77 },
       });
       const { resolveModelPricing } = await freshModule();
       expect(resolveModelPricing('gpt-4o-mini')).toEqual({
-        inputCentsPerMillionTokens: 15,
-        outputCentsPerMillionTokens: 60,
+        inputCentsPerMillionTokens: 99,
+        outputCentsPerMillionTokens: 77,
       });
     });
 
     it('a bare override key ("gpt-4o-mini") matches a namespaced runtime id', async () => {
       process.env[ENV_KEY] = JSON.stringify({
-        'gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+        'gpt-4o-mini': { inputCentsPerMillionTokens: 99, outputCentsPerMillionTokens: 77 },
       });
       const { resolveModelPricing } = await freshModule();
       expect(resolveModelPricing('openai/gpt-4o-mini')).toEqual({
-        inputCentsPerMillionTokens: 15,
-        outputCentsPerMillionTokens: 60,
+        inputCentsPerMillionTokens: 99,
+        outputCentsPerMillionTokens: 77,
       });
     });
 
     it('normalizes override keys case-insensitively too, mirroring the lookup path', async () => {
       process.env[ENV_KEY] = JSON.stringify({
-        'OpenAI/GPT-4o-Mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+        'OpenAI/GPT-4o-Mini': { inputCentsPerMillionTokens: 99, outputCentsPerMillionTokens: 77 },
       });
       const { resolveModelPricing } = await freshModule();
       expect(resolveModelPricing('gpt-4o-mini')).toEqual({
-        inputCentsPerMillionTokens: 15,
-        outputCentsPerMillionTokens: 60,
+        inputCentsPerMillionTokens: 99,
+        outputCentsPerMillionTokens: 77,
       });
     });
   });

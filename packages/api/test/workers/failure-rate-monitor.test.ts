@@ -14,6 +14,7 @@ import {
   evaluateTaskFailureRate,
   evaluateTenantTaskFailureRate,
   evaluateWindowSpend,
+  evaluateUnpricedSpend,
   evaluateStalledExecutions,
   evaluateSilentExecutionFailures,
   runFailureRateMonitor,
@@ -65,6 +66,7 @@ function tenantCounts(over: Partial<TenantTaskRunCounts>): TenantTaskRunCounts {
     failed: 0,
     unresolved: 0,
     costMicroCents: 0,
+    unpricedCompleted: 0,
     ...over,
   };
 }
@@ -218,6 +220,7 @@ describe('runFailureRateMonitor', () => {
       'ai_task_failure_rate',
       'ai_tenant_task_failure_rate',
       'ai_spend_window',
+      'ai_spend_unpriced',
       'proposal_execution_stalled',
       'proposal_execution_failed_silently',
     ]);
@@ -763,16 +766,101 @@ describe('runFailureRateMonitor — OBS-4 spend rule', () => {
   });
 
   it('does not evaluate the spend rule when it is turned off', async () => {
+    const getTenantTaskRunCounts = vi
+      .fn()
+      .mockResolvedValue([tenantCounts({ costMicroCents: 10 ** 12, completed: 500, total: 500, unpricedCompleted: 500 })]);
     const deps: FailureRateMonitorDeps = {
       getTaskRunCounts: vi.fn().mockResolvedValue([]),
-      getTenantTaskRunCounts: vi.fn().mockResolvedValue([tenantCounts({ costMicroCents: 10 ** 12 })]),
+      getTenantTaskRunCounts,
       getProposalExecutionCounts: vi.fn().mockResolvedValue(healthyProposals),
       alert: vi.fn().mockResolvedValue(undefined),
       thresholds: { ...thresholds, spendMaxCents: 0 },
       logger: noopLogger,
     };
     const result = await runFailureRateMonitor(deps);
+    // Positive control (review round 1): the per-tenant rows WERE read and
+    // the per-tenant rule ran — only the spend rules were skipped. Without
+    // this the test passes on code that has no spend rule at all.
+    expect(getTenantTaskRunCounts).toHaveBeenCalledTimes(1);
+    expect(result.evaluated).toContain('ai_tenant_task_failure_rate');
     expect(result.evaluated).not.toContain('ai_spend_window');
+    expect(result.evaluated).not.toContain('ai_spend_unpriced');
     expect(result.breached).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OBS-4 review round 1 — the spend rule must not go silently blind. Every
+// live run on an unpriced model stores cost NULL and sums as 0, so a window
+// full of unpriced completions reads as "no spend" and the rule can never
+// fire. That shape pages a warning naming the blind spot.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('evaluateUnpricedSpend', () => {
+  it('warns when most completed runs in the window carry no price', () => {
+    const r = evaluateUnpricedSpend(
+      [
+        tenantCounts({ tenantId: TENANT_A, taskType: 'supervisor_annotate', total: 900, completed: 900, unpricedCompleted: 900 }),
+        tenantCounts({ tenantId: TENANT_B, taskType: 'classify_intent', total: 100, completed: 100, unpricedCompleted: 40, costMicroCents: 60 * 135_000 }),
+      ],
+      thresholds,
+    );
+    expect(r).not.toBeNull();
+    expect(r!.rule).toBe('ai_spend_unpriced');
+    expect(r!.breached).toBe(true);
+    expect(r!.severity).toBe('warning');
+    expect(r!.value).toBeCloseTo(0.94);
+    expect(r!.details.unpricedCompleted).toBe(940);
+    expect(r!.details.completed).toBe(1000);
+    expect(r!.details.topTaskTypes).toBe('supervisor_annotate=900,classify_intent=40');
+    expect(r!.summary).toMatch(/AI_MODEL_PRICING_JSON/);
+  });
+
+  it('is quiet when unpriced runs are a small share or below the volume floor', () => {
+    // 5 of 200 = 2.5% — an occasional unpriced side task is not a blind rule.
+    expect(
+      evaluateUnpricedSpend(
+        [tenantCounts({ total: 200, completed: 200, unpricedCompleted: 5 })],
+        thresholds,
+      )!.breached,
+    ).toBe(false);
+    // 15 of 15 is 100% but under the 20-run floor — not enough to judge.
+    expect(
+      evaluateUnpricedSpend(
+        [tenantCounts({ total: 15, completed: 15, unpricedCompleted: 15 })],
+        thresholds,
+      )!.breached,
+    ).toBe(false);
+    expect(evaluateUnpricedSpend([], thresholds)!.breached).toBe(false);
+  });
+
+  it('is off with the spend rule (threshold 0)', () => {
+    expect(
+      evaluateUnpricedSpend(
+        [tenantCounts({ total: 900, completed: 900, unpricedCompleted: 900 })],
+        { ...thresholds, spendMaxCents: 0 },
+      ),
+    ).toBeNull();
+  });
+
+  it('the tick pages the blind-spend warning while ai_spend_window reads 0', async () => {
+    const alert = vi.fn().mockResolvedValue(undefined);
+    const result = await runFailureRateMonitor({
+      getTaskRunCounts: vi.fn().mockResolvedValue([]),
+      getTenantTaskRunCounts: vi
+        .fn()
+        .mockResolvedValue([
+          tenantCounts({ taskType: 'supervisor_annotate', total: 5000, completed: 5000, unpricedCompleted: 5000 }),
+        ]),
+      getProposalExecutionCounts: vi.fn().mockResolvedValue(healthyProposals),
+      alert,
+      thresholds,
+      logger: noopLogger,
+    });
+    expect(result.evaluated).toContain('ai_spend_window');
+    expect(result.evaluated).toContain('ai_spend_unpriced');
+    expect(result.breached).toEqual(['ai_spend_unpriced']);
+    expect(alert).toHaveBeenCalledWith(
+      expect.objectContaining({ rule: 'ai_spend_unpriced', severity: 'warning' }),
+    );
   });
 });
