@@ -4432,6 +4432,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // in-memory dev, in which case the global flag alone decides.
       ...(tenantFeatureFlags ? { tenantFeatureFlags } : {}),
       realtimeCircuit: realtimeHealthCircuit,
+      // LCR-06 — the same registry the media-streams adapter acquires from,
+      // so a tenant already at its realtime cap is answered on Gather.
+      connectionRegistry,
       realtimePrerequisitesMet: () => {
         const c = realtimeCapabilities();
         return c.sttEnabled && c.ttsEnabled;

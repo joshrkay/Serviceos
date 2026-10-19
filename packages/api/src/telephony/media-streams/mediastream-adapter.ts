@@ -60,6 +60,7 @@ import {
   ConnectionRegistry,
   ConnectionLease,
   globalConnectionRegistry,
+  TWILIO_MEDIA_STREAMS_SURFACE as TWILIO_SURFACE,
 } from '../../ws/connection-registry';
 import {
   transcriptReceivedEvent,
@@ -499,7 +500,6 @@ export interface MediaStreamAdapterDeps {
   e1SupersedeMaxWaitMs?: number;
 }
 
-const TWILIO_SURFACE = 'twilio_media_streams';
 /** Connection-cap lease TTL for telephony — no registry heartbeat, so it must
  *  exceed any call's duration; it only serves as the crashed-replica backstop. */
 const TELEPHONY_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
@@ -1148,7 +1148,7 @@ export class TwilioMediaStreamAdapter {
       pendingSilenceRepromptTurnId: null,
       callerActivityGeneration: 0,
       queue: new BoundedSendQueue({
-        surface: 'twilio_media_streams',
+        surface: TWILIO_SURFACE,
         maxMsgs: TWILIO_QUEUE_MAX_MSGS,
         maxBytes: TWILIO_QUEUE_MAX_BYTES,
         highWatermark: TWILIO_QUEUE_HIGH_WATERMARK,
@@ -1365,7 +1365,20 @@ export class TwilioMediaStreamAdapter {
       return;
     }
 
-    // Per-tenant connection cap.
+    // LCR-06 — the call ids go on state BEFORE the cap check so a capped leg
+    // can still be moved to Gather (attemptDegradeToGather needs the CallSid).
+    // `state.session` is deliberately NOT set until a lease is held: a capped
+    // leg never opens the transport, and a session on state would make a
+    // failed degrade's close — including one that lands while the redirect is
+    // in flight and is settled inside attemptDegradeToGather — stamp a
+    // terminal outcome that the 1013 close below has never stamped.
+    this.state.callSid = callSid;
+    this.state.accountSid = frame.start.accountSid ?? null;
+    this.state.tenantId = session.tenantId;
+
+    // Per-tenant connection cap. The /voice route already sends a tenant at
+    // the cap to Gather; this is the backstop for the count-then-acquire race
+    // between two concurrent /voice requests.
     const registry = this.deps.connectionRegistry ?? globalConnectionRegistry;
     // Telephony has no registry heartbeat loop, so use a long lease TTL that
     // covers any call; the slot is released on teardown and the TTL is only the
@@ -1381,6 +1394,9 @@ export class TwilioMediaStreamAdapter {
         callSid,
         tenantId: session.tenantId,
       });
+      // LCR-06 — overflow degrades instead of dropping: the caller continues
+      // on Gather. Only a refused/unwired redirect keeps the old close.
+      if (await this.attemptDegradeToGather('tenant_connection_cap')) return;
       this.closeWs(1013, 'tenant_connection_cap');
       return;
     }
@@ -1388,10 +1404,7 @@ export class TwilioMediaStreamAdapter {
     this.state.registryReleased = false;
 
     this.state.streamSid = frame.start.streamSid;
-    this.state.callSid = callSid;
-    this.state.accountSid = frame.start.accountSid ?? null;
     this.state.session = session;
-    this.state.tenantId = session.tenantId;
 
     // F6c (per-tenant) — resolve escalation settings now that tenantId is known.
     // Stored on RuntimeState so the sentiment gating check reads a live value
@@ -1811,10 +1824,13 @@ export class TwilioMediaStreamAdapter {
       return false;
     }
     this.state.handoffTwiml = null;
-    if (this.state.session) {
+    // LCR-06 — read the tenant from state.tenantId (assigned with the call
+    // ids), so a leg degraded before its session is on state is still audited.
+    const tenantId = this.state.tenantId;
+    if (tenantId) {
       await this.emitRealtimeResilienceAudit('voice.realtime.degraded_to_gather', {
         callSid,
-        tenantId: this.state.session.tenantId,
+        tenantId,
         reason,
       });
     }
