@@ -176,7 +176,10 @@ describe('#1061 — /gather + /dial-result resolve the tenant through phoneNumbe
     expect(handleGatherSpy).not.toHaveBeenCalled();
   });
 
-  it('/gather in prod: a repo outage is a 503 (Twilio retries), never the env default', async () => {
+  // LCR-04 — Twilio does not retry a 5xx action URL, so the old 503 dropped
+  // the call. With no live session the caller now leaves a voicemail; the env
+  // default is still never used.
+  it('/gather in prod: a repo outage with no live session is a voicemail, never the env default', async () => {
     const store = new VoiceSessionStore({ startInterval: false });
     const adapter = new TwilioGatherAdapter({
       store,
@@ -206,7 +209,8 @@ describe('#1061 — /gather + /dial-result resolve the tenant through phoneNumbe
       From: CALLER,
       To: KNOWN_NUMBER,
     });
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Record');
     expect(handleGatherSpy).not.toHaveBeenCalled();
   });
 
@@ -299,20 +303,40 @@ describe('#1061 — createDidTenantResolver (the app.ts payload-alias fallback)'
   });
 
   it.each(['production', 'prod', 'staging'])(
-    'in %s: a miss, a missing To, or a lookup error is undefined — never the env default',
+    'in %s: a miss or a missing To is undefined — never the env default',
     async (nodeEnv) => {
       const resolve = createDidTenantResolver({ phoneNumberRepo: repo(), nodeEnv });
       expect(await resolve({ to: '+18005550000', from: CALLER })).toBeUndefined();
       expect(await resolve({ to: '', from: '' })).toBeUndefined();
-      const broken = createDidTenantResolver({
-        phoneNumberRepo: { findByNumber: vi.fn().mockRejectedValue(new Error('db down')) },
-        nodeEnv,
-      });
-      expect(await broken({ to: KNOWN_NUMBER, from: CALLER })).toBeUndefined();
       const noRepo = createDidTenantResolver({ nodeEnv });
       expect(await noRepo({ to: KNOWN_NUMBER, from: CALLER })).toBeUndefined();
     },
   );
+
+  // LCR-04 — a lookup ERROR is an outage, not a miss. Answering `undefined`
+  // made /recording and /voicemail-status log "missing tenant" and 200 the
+  // callback, dropping the voicemail left during the outage. It throws, so
+  // those handlers answer 500 and the callback is not acknowledged — and it
+  // still never reaches the env default.
+  it.each(['production', 'prod', 'staging'])(
+    'in %s: a lookup error throws — never the env default',
+    async (nodeEnv) => {
+      const broken = createDidTenantResolver({
+        phoneNumberRepo: { findByNumber: vi.fn().mockRejectedValue(new Error('db down')) },
+        nodeEnv,
+      });
+      await expect(broken({ to: KNOWN_NUMBER, from: CALLER })).rejects.toThrow('db down');
+    },
+  );
+
+  it('in dev: a lookup error stays failure-soft and falls back to the env default', async () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
+    const broken = createDidTenantResolver({
+      phoneNumberRepo: { findByNumber: vi.fn().mockRejectedValue(new Error('db down')) },
+      nodeEnv: 'development',
+    });
+    expect(await broken({ to: KNOWN_NUMBER, from: CALLER })).toBe(DEFAULT_TENANT_ID);
+  });
 
   it('in dev: a miss falls back to the env default with a WARN', async () => {
     const stdoutChunks: string[] = [];

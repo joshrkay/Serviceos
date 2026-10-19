@@ -252,17 +252,20 @@ export function createRecordingRouter(
   options: RecordingHandlerOptions = {},
 ): Router {
   const router = Router();
-  router.use(express.urlencoded({ extended: false }));
-  router.use(
+  // LCR-04 — parser and signature check scoped to /recording: this router is
+  // mounted with no path, so a router-level `use` ran the check (and its
+  // credential lookup) on every telephony request.
+  const parseAndVerify = [
+    express.urlencoded({ extended: false }),
     requireTwilioSignature(deps.authTokenGetter, {
       publicBaseUrl: deps.publicBaseUrl,
     }),
-  );
+  ];
 
   const fetchRecording = options.fetchRecording ?? fetchRecordingBytes;
   const uploadObject = options.uploadObject ?? uploadToS3;
 
-  router.post('/recording', async (req: Request, res: Response) => {
+  router.post('/recording', ...parseAndVerify, async (req: Request, res: Response) => {
     const body = req.body as Record<string, string | undefined>;
     const callSid = body.CallSid ?? '';
     const recordingSid = body.RecordingSid ?? '';

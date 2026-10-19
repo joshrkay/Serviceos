@@ -114,6 +114,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /dial-result
          └─ POST /gather
          └─ POST /voice
+         └─ POST /voice/fallback
          └─ POST /voice/gather-fallback
 043  authenticated use    /api/calls    [router: router]
          └─ POST /bridge
@@ -444,6 +445,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
 109  authenticated use    /api/voice    [router: router]
          └─ GET /recordings/:id
          └─ GET /recordings/:id/audio
+         └─ GET /tts/clip/:hash
          └─ POST /go-live
          └─ POST /pause
          └─ POST /recordings
@@ -451,6 +453,7 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /stream-token
          └─ POST /transcribe
          └─ POST /tts
+         └─ POST /tts/batch
 110  authenticated use    /api/voice/quality    [router: router]
          └─ GET /
          └─ POST /grade
