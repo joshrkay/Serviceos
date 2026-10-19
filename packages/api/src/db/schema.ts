@@ -7922,6 +7922,8 @@ export const MIGRATIONS = {
         RAISE NOTICE 'insufficient privilege to REVOKE from rls_app_runtime; skipping';
     END
     $demo_revoke$;
+  `,
+
   // PRIV-3 — a caller recited a card number on this recording. The stored
   // transcript only ever carries the `[card number]` marker
   // (callerTranscriptText / sanitizeTranscript), but the audio still holds
