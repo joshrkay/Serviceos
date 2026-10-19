@@ -44,7 +44,7 @@ async function waitForRows<T>(query: () => Promise<{ rows: T[] }>, attempts = 40
   for (let i = 0; i < attempts; i += 1) {
     const { rows } = await query();
     if (rows.length > 0) return rows;
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
   }
   return [];
 }
