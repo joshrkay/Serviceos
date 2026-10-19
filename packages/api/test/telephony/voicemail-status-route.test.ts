@@ -39,6 +39,10 @@ import {
   type VoicemailPersistedEvent,
 } from '../../src/telephony/voicemail-status-route';
 import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
+import {
+  createVoicemailRedelivery,
+  type VoicemailRedelivery,
+} from '../../src/telephony/voicemail-redelivery';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryWebhookEventRepository } from '../../src/webhooks/in-memory-webhook-event';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -187,6 +191,10 @@ interface HarnessOptions {
   withTranscriptionLeg?: boolean;
   /** Tenant fallback result for session-less callbacks. */
   resolveTenantId?: () => string | undefined;
+  /** Replace the fixed-token credential getter (outage tests). */
+  authTokenGetter?: Parameters<typeof createTelephonyRouter>[0]['authTokenGetter'];
+  /** LCR-04 — the redelivery queue for callbacks taken during an outage. */
+  redelivery?: VoicemailRedelivery;
 }
 
 function buildHarness(opts: HarnessOptions = {}) {
@@ -226,7 +234,7 @@ function buildHarness(opts: HarnessOptions = {}) {
     '/api/telephony',
     createTelephonyRouter({
       adapter,
-      authTokenGetter: () => AUTH_TOKEN,
+      authTokenGetter: opts.authTokenGetter ?? (() => AUTH_TOKEN),
       publicBaseUrl: PUBLIC_BASE_URL,
       resolveTenantId: opts.resolveTenantId ?? (() => TENANT_ID),
       pool: pool as unknown as import('pg').Pool,
@@ -252,6 +260,7 @@ function buildHarness(opts: HarnessOptions = {}) {
       },
       voicemail: {
         ...(withReceiptStore ? { webhookEventRepo } : {}),
+        ...(opts.redelivery ? { redelivery: opts.redelivery } : {}),
         options: {
           fetchRecording: fetchRecording as never,
           uploadObject: uploadObject as never,
@@ -610,5 +619,101 @@ describe('U9 voicemail-status route', () => {
     expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
     expect(h.pool.voiceRows).toHaveLength(0);
     expect(h.persistedEvents).toHaveLength(0);
+  });
+});
+
+// LCR-04 (review round 1) — Twilio never redelivers a recording callback that
+// answered 5xx. A voicemail recorded while the database is down (the
+// VoiceFallbackUrl voicemail, an uncached DID) must still be filed once the
+// database is back.
+describe('LCR-04 — a voicemail callback that arrives during a database outage', () => {
+  /** Routes a redelivery back into the same app, as the public URL would. */
+  function redeliverInto(app: () => express.Application) {
+    return createVoicemailRedelivery({
+      delaysMs: [20],
+      fetchImpl: (async (url: string, init: { headers: Record<string, string>; body: string }) => {
+        const path = new URL(url).pathname + new URL(url).search;
+        let req = request(app()).post(path).type('form');
+        for (const [k, v] of Object.entries(init.headers)) req = req.set(k, v);
+        const res = await req.send(init.body);
+        return { ok: res.status >= 200 && res.status < 300, status: res.status } as Response;
+      }) as unknown as typeof fetch,
+    });
+  }
+
+  it('credential lookup down (nothing cached): answered 200, then filed by redelivery once the database is back', async () => {
+    const db = { down: true };
+    let app!: express.Application;
+    const redelivery = redeliverInto(() => app);
+    const h = buildHarness({
+      authTokenGetter: () =>
+        db.down ? { outcome: 'misconfigured', reason: 'credential_lookup_failed' } : AUTH_TOKEN,
+      resolveTenantId: () => TENANT_ID,
+      redelivery,
+    });
+    app = h.app;
+
+    const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    // Not a 5xx Twilio would drop: the callback is held for redelivery.
+    expect(res.status).toBe(200);
+    expect(redelivery.size()).toBe(1);
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(0);
+
+    // Still down at the first redelivery: kept, not dropped.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(redelivery.size()).toBe(1);
+
+    db.down = false;
+    await vi.waitFor(() => expect(redelivery.size()).toBe(0), { timeout: 2_000 });
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
+    expect(h.pool.voiceRows).toHaveLength(1);
+    expect(h.persistedEvents).toHaveLength(1);
+    redelivery.stop();
+  });
+
+  it('tenant lookup down (signature verified): answered 200, then filed by redelivery', async () => {
+    const db = { down: true };
+    let app!: express.Application;
+    const redelivery = redeliverInto(() => app);
+    const h = buildHarness({
+      resolveTenantId: (() => {
+        if (db.down) throw new Error('connection timeout');
+        return TENANT_ID;
+      }) as never,
+      redelivery,
+    });
+    app = h.app;
+
+    const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(res.status).toBe(200);
+    expect(redelivery.size()).toBe(1);
+
+    db.down = false;
+    await vi.waitFor(() => expect(redelivery.size()).toBe(0), { timeout: 2_000 });
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
+    redelivery.stop();
+  });
+
+  it('a forged callback is queued but never filed: the redelivery is still signature-checked', async () => {
+    let app!: express.Application;
+    const db = { down: true };
+    const redelivery = redeliverInto(() => app);
+    const h = buildHarness({
+      authTokenGetter: () =>
+        db.down ? { outcome: 'misconfigured', reason: 'credential_lookup_failed' } : AUTH_TOKEN,
+      redelivery,
+    });
+    app = h.app;
+    const res = await request(h.app)
+      .post(`/api/telephony/voicemail-status${CALLER_QUERY}`)
+      .set('X-Twilio-Signature', 'forged')
+      .type('form')
+      .send(FINAL_PARAMS);
+    expect(res.status).toBe(200);
+    db.down = false;
+    // The redelivery is refused (403) and dropped, not retried for hours.
+    await vi.waitFor(() => expect(redelivery.size()).toBe(0), { timeout: 2_000 });
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(0);
+    redelivery.stop();
   });
 });

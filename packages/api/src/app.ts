@@ -29,6 +29,7 @@ import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from '
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
 import { createTwilioCallRedirector } from './telephony/twilio-call-redirect';
+import { createVoicemailRedelivery } from './telephony/voicemail-redelivery';
 import { createRecordingTranscriptHook } from './telephony/recording-transcript-hook';
 import { RealtimeHealthCircuit } from './telephony/realtime-health-circuit';
 import { attachClientGateway, setChannelGate } from './ws/client-gateway';
@@ -3555,6 +3556,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     transport: voiceEventTransport,
     callTranscriptTurnRepo,
   });
+  // LCR-04 — voicemail recording callbacks that arrive while the database is
+  // down are re-POSTed (exactly as Twilio signed them) until acknowledged:
+  // Twilio itself never redelivers a 5xx recording callback.
+  const voicemailRedelivery = createVoicemailRedelivery();
   // F6b: Process-local whisper TwiML cache. Shared between:
   //   - whisperRouter (serves TwiML to Twilio when dispatcher answers)
   //   - MediaStreamAdapter (stores whisper text after escalation_started)
@@ -4399,6 +4404,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // storage/Twilio-cred deps are shared with `recording` above.
       voicemail: {
         webhookEventRepo,
+        redelivery: voicemailRedelivery,
         options: {
           onVoicemailPersisted: async (event) => {
             // Enqueue on EVERY invocation, including event.inserted=false
@@ -7869,6 +7875,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // Stop the voice-session-store reaper interval so the process can
       // exit cleanly even when no DB pool is wired (dev / in-memory mode).
       voiceSessionStore.dispose();
+      // LCR-04 — stop redelivery timers; anything still queued is logged by
+      // RecordingSid (process-local: there is no store to hand it to).
+      voicemailRedelivery.stop();
       // Flush any queued PostHog server-side funnel events before the
       // process exits so Railway shutdown doesn't drop in-flight
       // signup/trial/conversion captures.

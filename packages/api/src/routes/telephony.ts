@@ -58,6 +58,7 @@ import {
   type VoicemailStatusHandlerOptions,
   type VoicemailWebhookReceiptStore,
 } from '../telephony/voicemail-status-route';
+import type { VoicemailRedelivery } from '../telephony/voicemail-redelivery';
 import type { SettingsRepository } from '../settings/settings';
 import { resolveEscalationSettings } from '../settings/settings';
 import type { LeadRepository } from '../leads/lead';
@@ -165,6 +166,8 @@ export interface TelephonyRouterDeps {
   voicemail?: {
     webhookEventRepo?: VoicemailWebhookReceiptStore;
     options?: VoicemailStatusHandlerOptions;
+    /** LCR-04 — redelivers voicemail callbacks taken during a database outage. */
+    redelivery?: VoicemailRedelivery;
   };
   /**
    * P8-012 — when true, /voice returns a `<Connect><Stream/></Connect>`
@@ -413,6 +416,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           ...(deps.voicemail?.webhookEventRepo
             ? { webhookEventRepo: deps.voicemail.webhookEventRepo }
             : {}),
+          ...(deps.voicemail?.redelivery ? { redelivery: deps.voicemail.redelivery } : {}),
         },
         deps.voicemail?.options ?? {},
       ),
