@@ -54,6 +54,11 @@ export interface PortalInvoice {
   dueDate: string | null;
   createdAt: string;
   payNowUrl: string | null;
+  /**
+   * S5a-1 (U8) — true when the business collects payment in person (or the
+   * API could not read the policy); always paired with `payNowUrl: null`.
+   */
+  collectOnSite?: boolean;
 }
 
 export interface PortalJob {

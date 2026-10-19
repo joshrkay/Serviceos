@@ -55,6 +55,14 @@ interface PublicInvoiceView {
   viewCount: number;
   stripePaymentLinkUrl?: string;
   /**
+   * S5a-1 (U8) — the payment policy the API applied: `pay_link` (the form
+   * renders), `collect_on_site` (the business collects in person) or
+   * `unavailable` (the API could not read the policy and made the
+   * fail-closed decision). Absent from an older API → treat as `pay_link`
+   * on the web only. The page behaviour lands in S5a-2.
+   */
+  paymentCollectionMode?: 'pay_link' | 'collect_on_site' | 'unavailable';
+  /**
    * Total deposit credit applied to
    * this invoice. Surfaced as a discrete totals row so the customer
    * can see the credit explicitly; the credit is also baked into

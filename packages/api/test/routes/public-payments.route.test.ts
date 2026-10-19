@@ -4,6 +4,9 @@ import request from 'supertest';
 import { v4 as uuidv4 } from 'uuid';
 import { createPublicPaymentsRouter } from '../../src/routes/public-payments';
 import { Invoice, InMemoryInvoiceRepository } from '../../src/invoices/invoice';
+// S5a-1 — the route reads `payment_collection_mode`; an empty settings repo is
+// a successful read of an unset key (the pay_link default), so nothing here changes.
+import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { calculateDocumentTotals } from '../../src/shared/billing-engine';
 import { StripeFetch } from '../../src/payments/stripe-payment-intent';
 
@@ -85,6 +88,7 @@ async function build(opts: {
     '/api/public-payments',
     createPublicPaymentsRouter({
       invoiceRepo,
+      settingsRepo: new InMemorySettingsRepository(),
       stripeConfig: opts.stripeConfigured === false ? null : { apiKey: 'sk_test' },
       stripeFetch: opts.stripeFetch ?? makeStripeFetch(),
       connectAccountResolver: opts.connectAccountResolver,
@@ -271,6 +275,7 @@ describe('P5-016 routes/public-payments — POST /create-payment-intent', () => 
         invoiceRepo: {
           findByViewToken: async () => expired,
         } as unknown as InMemoryInvoiceRepository,
+        settingsRepo: new InMemorySettingsRepository(),
         stripeConfig: { apiKey: 'sk_test' },
         stripeFetch: makeStripeFetch(),
       }),
