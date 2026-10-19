@@ -22,7 +22,7 @@ export interface CatalogItem {
    */
   imageFileId?: string | null;
   /**
-   * U6 seeded-price baseline (migration 318) — internal provenance, never
+   * U6 seeded-price baseline (migration 324) — internal provenance, never
    * owner-facing (not in the catalog route's API model). `seedKey` is
    * '<packId>:visit' | '<packId>:labor' on the pack's two headline items,
    * written once by the seeder; `seededUnitPriceCents` is the price the

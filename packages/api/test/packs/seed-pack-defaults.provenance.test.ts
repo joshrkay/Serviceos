@@ -1,5 +1,5 @@
 /**
- * Seeded-price baseline (U6, migration 318): the seeder writes positive,
+ * Seeded-price baseline (U6, migration 324): the seeder writes positive,
  * per-row provenance on exactly what a setup re-run may later reprice — the
  * pack's two headline catalog items (`seedKey`, `seededUnitPriceCents`) and
  * the template lines seeded from them (`seededUnitPriceCents` +
