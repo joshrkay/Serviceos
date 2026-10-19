@@ -301,6 +301,12 @@ function Conversation() {
           status={status}
           saving={saving}
           changeCount={draft?.proposalIds.length ?? 0}
+          draftVersion={draft?.version ?? 0}
+          onUndo={undoApproval}
+          onRetry={retrySave}
+          onReset={startOver}
+          recovering={recovering}
+          notice={attempt === 'after' ? notice : null}
           packId={draft?.packId ?? null}
           userId={userId}
         />
