@@ -665,6 +665,12 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
 
     // Unknown CallSid — no live session to continue. Start a fresh inbound
     // Gather session (never Stream). Mirrors /voice's tenant resolution.
+    // LCR-05 — this is where a realtime call lands when the process that held
+    // it handed it off at shutdown (a deploy): the call starts over here.
+    logger.warn('telephony/gather-fallback: unknown call — starting it over (deploy_induced_restart)', {
+      event: 'deploy_induced_restart',
+      callSid,
+    });
     const from = body.From ?? '';
     const to = body.To ?? '';
     if (!from || !to) {
@@ -781,6 +787,11 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         speechResult,
         confidence: confidence !== undefined && Number.isFinite(confidence) ? confidence : undefined,
         tenantId,
+        // LCR-05 — what a session this process never held (a deploy cut-over)
+        // is started over from, instead of hanging up.
+        ...(body.From ? { from: body.From } : {}),
+        ...(body.To ? { to: body.To } : {}),
+        ...(body.StirVerstat ? { stirVerstat: body.StirVerstat } : {}),
       });
       res.status(200).type('text/xml').send(twiml);
     } catch (err) {
@@ -875,8 +886,33 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     }
 
     if (!session) {
+      // LCR-05 — the transfer was ringing on a process that has since gone
+      // (a deploy cut over mid-<Dial>), so this one never held the session.
+      // An unanswered transfer leaves the caller on the line: take a callback
+      // message (/callback-message tolerates an unknown session), exactly as a
+      // known single-line transfer does, instead of hanging up on them.
+      if (dialStatus !== 'completed' && dialStatus !== 'answered') {
+        logger.warn('telephony/dial-result: unknown session — taking a callback message (deploy_induced_restart)', {
+          event: 'deploy_induced_restart',
+          sessionId,
+          callSid,
+          dialStatus,
+        });
+        const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
+        res
+          .status(200)
+          .type('text/xml')
+          .send(
+            buildCallbackGatherTwiml({
+              promptText: t('callback.prompt', 'en'),
+              actionUrl: `${base}/api/telephony/callback-message?sid=${encodeURIComponent(sessionId)}`,
+              lang: 'en',
+            }),
+          );
+        return;
+      }
       logger.warn('telephony/dial-result: unknown session', { sessionId, callSid });
-      // Hangup gracefully — Twilio's leg is going away anyway.
+      // The transfer was answered: the call is over on this leg.
       res
         .status(200)
         .type('text/xml')

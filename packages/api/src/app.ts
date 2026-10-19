@@ -28,6 +28,10 @@ import { DefaultTwilioCallControl } from './telephony/twilio-call-control';
 import { createUserPhoneDispatcherResolver, createBusinessPhoneFallback } from './telephony/dispatcher-phone-resolver';
 import { PgPhoneNumberRepository } from './integrations/twilio/phone-number-repository';
 import { attachMediaStreamServer } from './telephony/media-streams';
+import {
+  createLiveRealtimeCalls,
+  SHUTDOWN_HAND_OFF_TIMEOUT_MS,
+} from './telephony/media-streams/live-realtime-calls';
 import { createTwilioCallRedirector } from './telephony/twilio-call-redirect';
 import { createRecordingTranscriptHook } from './telephony/recording-transcript-hook';
 import { RealtimeHealthCircuit } from './telephony/realtime-health-circuit';
@@ -1631,6 +1635,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         customerRepo,
         settingsRepo,
         dispatchRepo,
+        // S5a-1 (U8) — audits `invoice.payment_mode_unavailable` when a
+        // send goes out fail-closed (no pay CTA) because the policy read failed.
+        auditRepo,
         publicBaseUrl,
       })
     : undefined;
@@ -1763,6 +1770,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // is not retained (no plaintext PII at rest).
       rawTranscriptEncryptionKey:
         process.env.TRANSCRIPT_ENCRYPTION_KEY ?? process.env.TENANT_ENCRYPTION_KEY,
+      // PRIV-3 — audits the card-number flag on a transcribed recording.
+      auditRepo,
     }
   );
 
@@ -3426,6 +3435,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/public-payments',
     createPublicPaymentsRouter({
       invoiceRepo,
+      // S5a-1 (U8) — the PaymentIntent mint honours payment_collection_mode.
+      settingsRepo,
+      auditRepo,
       stripeConfig: process.env.STRIPE_SECRET_KEY
         ? { apiKey: process.env.STRIPE_SECRET_KEY }
         : null,
@@ -3555,6 +3567,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     transport: voiceEventTransport,
     callTranscriptTurnRepo,
   });
+  // LCR-05 — the live realtime call legs on this process (filled by the
+  // media-stream server below), so runShutdown can hand them to the next
+  // process instead of hanging up. Empty when media streams are off.
+  const liveRealtimeCalls = createLiveRealtimeCalls();
   // F6b: Process-local whisper TwiML cache. Shared between:
   //   - whisperRouter (serves TwiML to Twilio when dispatcher answers)
   //   - MediaStreamAdapter (stores whisper text after escalation_started)
@@ -4385,6 +4401,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           onPersisted: createRecordingTranscriptHook({
             store: voiceSessionStore,
             callTranscriptTurnRepo,
+            voiceRepo,
             auditRepo,
             ...(embeddingProvider ? { queue } : {}),
             logger: createLogger({
@@ -4836,6 +4853,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             store: voiceSessionStore,
             connectionRegistry,
             streamingProvider,
+            liveCalls: liveRealtimeCalls,
             // WS3 — feed the shared realtime health circuit (the /voice branch
             // reads it) and emit the alertable resilience audit events
             // (session_failed / disclosure.init_failed).
@@ -7848,6 +7866,25 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // index.ts's force-exit and Railway's stop grace period; calls still live
       // at the deadline are closed by the teardown below (Twilio ends the call).
       const drainDeadline = Date.now() + (Number(process.env.DRAIN_TIMEOUT_MS) || 25_000);
+      // LCR-05 — a call's session lives only in this process, and a realtime
+      // call has no next webhook: left alone it is hung up at the teardown
+      // below. So first move every live realtime call to the Gather fallback
+      // (REST redirect to /voice/gather-fallback). index.ts has already stopped
+      // this server accepting connections, so the redirected request reaches
+      // the new deployment, which starts the call over as a fresh disclosed
+      // session. Each handed-off session is marked ended here, so the drain
+      // below only waits for what is left. Runs inside the drain window (its
+      // bound comes out of the same deadline), so it adds nothing to the
+      // force-exit budget. No redirector (PUBLIC_API_URL unset) → every
+      // hand-off is refused and the drain behaves as before.
+      if (liveRealtimeCalls.size() > 0) {
+        const handOff = await liveRealtimeCalls.handOffAll({
+          timeoutMs: Math.max(0, Math.min(SHUTDOWN_HAND_OFF_TIMEOUT_MS, drainDeadline - Date.now())),
+        });
+        console.log(
+          `[app] handed ${handOff.handedOff} of ${handOff.attempted} live realtime call(s) to the next process`,
+        );
+      }
       while (voiceSessionStore.liveCount() > 0 && Date.now() < drainDeadline) {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }

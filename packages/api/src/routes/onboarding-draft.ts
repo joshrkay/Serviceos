@@ -6,6 +6,10 @@
  *   GET    /                      read it
  *   PUT    /choices/:settingKey   stage a choice (compare-and-swap on version)
  *   PUT    /owner-phone           add or change the owner's cell (compare-and-swap on version)
+ *   PUT    /metro                 "Not Cleveland?": re-price an unstaged draft for another curated metro
+ *                                 (409 DRAFT_APPROVED, then 409 DRAFT_METRO_LOCKED once any choice is
+ *                                 staged, then 409 VERSION_CONFLICT; the code, the name and the whole
+ *                                 assembled shop change in one version bump)
  *   POST   /approve               "That's right": lock the draft row, mint onboarding_* proposals and
  *                                 approve them (optional expectedVersion; repeat taps are idempotent)
  *   POST   /retry                 re-queue the proposals whose execution failed (lock the draft row,
@@ -31,15 +35,23 @@ import { ConflictError, NotFoundError, ValidationError } from '../shared/errors'
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import type { ProposalRepository } from '../proposals/proposal';
 import type { ApprovalReferenceCheck } from '../proposals/approval-reference-checks';
-import { metroForPhone } from '../compliance/us-geography';
+import { NPA_METROS, metroForPhone } from '../compliance/us-geography';
 import { assembleTypicalShop } from '../onboarding/choices/assemble';
 import type { RegionalPriceTierRepository } from '../onboarding/choices/price-tiers';
 import { ChoiceKeySchema, WritesNotAllowedError } from '../onboarding/choices/schema';
-import { ApproveDraftBodySchema, CreateDraftInputSchema, SetOwnerPhoneBodySchema, StageChoiceBodySchema } from '../onboarding/draft/contracts';
+import {
+  ApproveDraftBodySchema,
+  CreateDraftInputSchema,
+  SetMetroBodySchema,
+  SetOwnerPhoneBodySchema,
+  StageChoiceBodySchema,
+} from '../onboarding/draft/contracts';
 import { parseOwnerPhone } from '../onboarding/draft/owner-phone';
 import { maskPhone } from '../telephony/twilio-call-control';
 import {
   DraftAlreadyApprovedError,
+  DraftMetroLockedError,
+  DraftNotApprovedError,
   DraftNotFoundError,
   DraftVersionConflictError,
   type OnboardingDraftRepository,
@@ -55,7 +67,11 @@ export interface OnboardingDraftRouterDeps {
   approvalReferenceChecks?: ApprovalReferenceCheck[];
 }
 
-/** One mapping from repository errors to HTTP errors, shared by PUT /choices and POST /approve. */
+/**
+ * One mapping from repository errors to HTTP errors, shared by every draft
+ * write (the field PUTs, approve, retry; undo and reset follow). The typed
+ * errors are the ones `updateLocked` throws, in its order of checks.
+ */
 function rethrowDraftError(err: unknown, tenantId: string): never {
   if (err instanceof WritesNotAllowedError) throw new ValidationError(err.message);
   if (err instanceof DraftNotFoundError) throw new NotFoundError('OnboardingDraft', tenantId);
@@ -63,6 +79,10 @@ function rethrowDraftError(err: unknown, tenantId: string): never {
     throw new ConflictError(`VERSION_CONFLICT: expected ${err.expected}, found ${err.actual}; re-read the draft`);
   }
   if (err instanceof DraftAlreadyApprovedError) throw new ConflictError('DRAFT_APPROVED: the draft is already approved');
+  if (err instanceof DraftNotApprovedError) throw new ConflictError('DRAFT_NOT_APPROVED: the draft has not been approved');
+  if (err instanceof DraftMetroLockedError) {
+    throw new ConflictError('DRAFT_METRO_LOCKED: a choice is already staged, so the city can no longer change here');
+  }
   throw err;
 }
 
@@ -100,8 +120,8 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
           try {
             updated = await draftRepo.setClientTimezone(tenantId, clientTimezone);
           } catch (err) {
-            if (err instanceof DraftAlreadyApprovedError) throw new ConflictError('DRAFT_APPROVED: the draft is already approved');
-            throw err;
+            // Approved between the read above and the lock: 409 DRAFT_APPROVED, as for every draft write.
+            rethrowDraftError(err, tenantId);
           }
           await auditRepo.create(
             createAuditEvent({
@@ -233,6 +253,47 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
     }),
   );
 
+  router.put(
+    '/metro',
+    ...guards,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      // Validated before anything is locked: an unknown code is a 400 naming `metro`.
+      const body = validate(SetMetroBodySchema, req.body);
+      const metro = { kind: 'metro' as const, metroCode: body.metro, name: NPA_METROS[body.metro].name };
+
+      let from: string | null = null;
+      let draft;
+      try {
+        // Built from the LOCKED row, inside the one write: the shop the approval copies is this one.
+        draft = await draftRepo.setMetro(tenantId, body.metro, body.version, (row) => {
+          from = row.metroCode;
+          return assembleTypicalShop(tierRepo, {
+            packId: row.packId,
+            businessName: row.businessName,
+            ownerFirstName: row.ownerFirstName ?? undefined,
+            metro,
+          });
+        });
+      } catch (err) {
+        rethrowDraftError(err, tenantId);
+      }
+
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId,
+          actorId: req.auth!.userId,
+          actorRole: req.auth!.role as Role,
+          eventType: 'onboarding.metro_changed',
+          entityType: 'onboarding_draft',
+          entityId: draft.id,
+          metadata: { from, to: draft.metroCode, version: draft.version },
+        }),
+      );
+      res.json({ draft });
+    }),
+  );
+
   router.post(
     '/approve',
     ...guards,
@@ -260,21 +321,28 @@ export function createOnboardingDraftRouter(deps: OnboardingDraftRouterDeps): Ro
     }),
   );
 
-  // The request body carries nothing and is ignored. Errors are plain AppErrors (404/409).
+  // The request body carries nothing and is ignored. The retry's own guards are
+  // plain AppErrors (404/409); its version bump goes through the shared mapper.
   router.post(
     '/retry',
     ...guards,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const result = await retryFailedDraftProposals(
-        {
-          draftRepo,
-          proposalRepo,
-          auditRepo,
-          ...(approvalReferenceChecks ? { approvalOptions: { referenceChecks: approvalReferenceChecks } } : {}),
-        },
-        req.auth!.tenantId,
-        { userId: req.auth!.userId, role: req.auth!.role as Role },
-      );
+      const tenantId = req.auth!.tenantId;
+      let result;
+      try {
+        result = await retryFailedDraftProposals(
+          {
+            draftRepo,
+            proposalRepo,
+            auditRepo,
+            ...(approvalReferenceChecks ? { approvalOptions: { referenceChecks: approvalReferenceChecks } } : {}),
+          },
+          tenantId,
+          { userId: req.auth!.userId, role: req.auth!.role as Role },
+        );
+      } catch (err) {
+        rethrowDraftError(err, tenantId);
+      }
       res.json(result);
     }),
   );
