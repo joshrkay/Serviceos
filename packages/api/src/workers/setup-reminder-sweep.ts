@@ -75,6 +75,8 @@ const ELIGIBLE_SQL = `
     LEFT JOIN tenant_settings ts
       ON ts.tenant_id = t.id
    WHERE t.created_at <= $1
+     AND t.demo = false
+     AND t.platform = false
      AND le.tenant_id IS NULL
      AND ts.activated_at IS NULL
    ORDER BY t.created_at ASC

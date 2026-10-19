@@ -398,6 +398,17 @@ export const sloAlertsSentTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+/**
+ * U7 (S6-2) — demo-call reservations refused because the day's call or cost
+ * cap is reached. The crossing that filled the cap paged once; refusals after
+ * it only count here, so a busy day never pages again.
+ */
+export const demoCallBudgetRefusalsTotal = new Counter({
+  name: 'demo_call_budget_refusals_total',
+  help: 'Demo-call budget reservations refused because the UTC day is at its call or cost cap',
+  registers: [metricsRegistry],
+});
+
 export async function renderMetrics(): Promise<{
   contentType: string;
   body: string;

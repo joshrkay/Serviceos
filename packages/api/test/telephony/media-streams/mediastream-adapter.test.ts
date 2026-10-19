@@ -1412,9 +1412,10 @@ describe('P8-012 TwilioMediaStreamAdapter', () => {
     });
 
     it('drops a non-PCM buffered fallback and plays a filler clip instead of static', async () => {
-      // ElevenLabs REST returns mp3 — feeding that to streamPcmAsMedia would
-      // be inaudible static, so the PCM guard must reject it and fall through
-      // to a short filler clip (audible acknowledgement, not dead air).
+      // A provider that ignores the raw-PCM request (LCR-01) answers with mp3
+      // — feeding that to streamPcmAsMedia would be inaudible static, so the
+      // PCM guard must reject it and fall through to a short filler clip
+      // (audible acknowledgement, not dead air).
       const synthesize = vi.fn(
         async (): Promise<TtsSynthesizeResult> => ({
           audio: Buffer.from([0xff, 0xfb, 0x00]),
