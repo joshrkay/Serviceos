@@ -7751,6 +7751,25 @@ export const MIGRATIONS = {
       ON voice_recordings (created_at)
       WHERE pci_detected AND audio_purged_at IS NULL AND purged_at IS NULL AND legal_hold = false;
   `,
+
+  // PRIV-2 — the Twilio-hosted copy of each inbound recording. The recording
+  // webhook and the voicemail route delete it once our storage and our row
+  // hold the audio, stamping `twilio_deleted_at`; the retention sweep retries
+  // every copy not yet confirmed gone (legacy rows, failed deletes) and stamps
+  // `twilio_delete_attempted_at` on a failure so it backs off instead of
+  // stalling the drain. `recording_url` is kept (the idempotency key in
+  // recordInboundCall). The partial index serves the sweep's retry query.
+  // RLS rides the existing voice_recordings policy (migration 007). Additive
+  // and idempotent.
+  '315_voice_recordings_twilio_copy_deleted': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS twilio_deleted_at TIMESTAMPTZ;
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS twilio_delete_attempted_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_twilio_copy_due
+      ON voice_recordings (twilio_delete_attempted_at NULLS FIRST, created_at)
+      WHERE twilio_deleted_at IS NULL AND recording_url IS NOT NULL AND legal_hold = false;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

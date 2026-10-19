@@ -68,9 +68,26 @@
  * The row, its scrubbed transcript, summary and embeddings stay until the
  * horizon purge, which still tombstones it later (its S3 delete of the gone
  * object is a no-op). Legal hold exempts it, as everywhere. A failed delete
- * leaves the row due for the next sweep; the rest continue.
- *   - The Twilio-hosted copy of the call recording is not deleted here: no
- *     Twilio deleter exists yet (PRIV-2 adds it on this phase).
+ * leaves the row due for the next sweep; the rest continue. The Twilio
+ * copy goes in the same pass (PRIV-2, below), with no grace window.
+ *
+ * PRIV-2 — the Twilio-hosted copy. Every inbound recording also exists at
+ * Twilio (`voice_recordings.recording_url`). The recording webhook and the
+ * voicemail route delete it once our storage and our row hold the audio
+ * (`telephony/twilio-recording-deleter.ts`), stamping `twilio_deleted_at`
+ * (migration 315). The sweep finishes the job:
+ *   - the horizon purge and the card-number phase delete a copy not yet
+ *     confirmed gone, and record `hadTwilioCopy` / `twilioDeleted` in their
+ *     audit event. A failed Twilio delete never blocks the S3 and derived
+ *     purge: the tombstone stands and the audit says `twilioDeleted: false`.
+ *   - a retry phase deletes every copy still not confirmed gone — legacy
+ *     rows from before PRIV-2 (tombstoned ones included) and failed ingest
+ *     deletes — oldest first, skipping rows younger than a day (the
+ *     voicemail route's at-least-once retry still fetches from Twilio) and
+ *     rows that failed in the last six hours (back-off, so a copy that can
+ *     never be deleted cannot stall the drain). Legal hold exempts it.
+ *   - `recording_url` is never nulled: it is the per-recording idempotency
+ *     key in `recordInboundCall`, and once the copy is gone it holds no audio.
  *
  * Pattern: cross-tenant batch drain like dropped-call-worker — per-row
  * failures are logged and left unpurged for the next sweep; the table query
@@ -82,6 +99,12 @@ import { PgBaseRepository } from '../db/pg-base';
 import type { StorageProvider } from '../files/file-service';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import type { Logger } from '../logging/logger';
+import {
+  deleteTwilioCopy,
+  type TwilioCopyDeleteReason,
+  type TwilioCopyStateStore,
+  type TwilioRecordingDeleter,
+} from '../telephony/twilio-recording-deleter';
 
 /** Default rows purged per sweep — bounds S3 round-trips under a backlog. */
 export const RECORDING_RETENTION_SWEEP_BATCH = 50;
@@ -101,6 +124,20 @@ export const SESSION_TRANSCRIPT_SWEEP_BATCH = 500;
 /** PRIV-3 — flagged recordings whose audio is deleted per sweep. */
 const CARD_NUMBER_AUDIO_SWEEP_BATCH = 50;
 
+/** PRIV-2 — Twilio copies the retry phase deletes per sweep. */
+const TWILIO_COPY_SWEEP_BATCH = 100;
+
+/**
+ * PRIV-2 — the retry phase leaves a recording younger than this alone: the
+ * voicemail route's at-least-once retry still fetches it from Twilio.
+ */
+export const TWILIO_COPY_RETRY_GRACE_MS = 24 * 3600 * 1000;
+
+/** PRIV-2 — a failed Twilio delete is retried no sooner than this. */
+export const TWILIO_COPY_RETRY_BACKOFF_MS = 6 * 3600 * 1000;
+
+const RETENTION_ACTOR = 'recording-retention-worker';
+
 /** A purgeable recording (joined with its files row for the object key). */
 export interface PurgeableRecording {
   id: string;
@@ -108,6 +145,19 @@ export interface PurgeableRecording {
   callSid: string | null;
   storageBucket: string | null;
   storageKey: string | null;
+  createdAt: Date;
+  /** PRIV-2 — the Twilio-hosted copy; null for a recording that never had one. */
+  recordingUrl: string | null;
+  /** PRIV-2 — when the Twilio copy was confirmed gone (migration 315). */
+  twilioDeletedAt: Date | null;
+}
+
+/** PRIV-2 — a recording whose Twilio copy is not yet confirmed gone. */
+export interface TwilioCopyDue {
+  id: string;
+  tenantId: string;
+  callSid: string | null;
+  recordingUrl: string;
   createdAt: Date;
 }
 
@@ -135,7 +185,7 @@ export interface PurgedSessionTranscript {
   transcriptLines: number;
 }
 
-export interface RecordingRetentionRepository {
+export interface RecordingRetentionRepository extends TwilioCopyStateStore {
   /**
    * Cross-tenant: recordings past their tenant's retention horizon that are
    * neither purged nor on legal hold. The horizon is evaluated per-tenant
@@ -194,6 +244,13 @@ export interface RecordingRetentionRepository {
    * Idempotent (`audio_purged_at IS NULL` guard).
    */
   markAudioPurged(tenantId: string, id: string, purgedAt: Date): Promise<void>;
+  /**
+   * PRIV-2 — cross-tenant: recordings with a Twilio copy not yet confirmed
+   * gone (tombstoned ones included), created before `now - grace`, not on
+   * legal hold, and not attempted since `now - backoff`; never-attempted
+   * rows first, then oldest first.
+   */
+  findTwilioCopiesDue(now: Date, limit: number): Promise<TwilioCopyDue[]>;
 }
 
 export class PgRecordingRetentionRepository
@@ -211,7 +268,8 @@ export class PgRecordingRetentionRepository
     return this.withCrossTenantSweep(async (client) => {
       const { rows } = await client.query(
         `SELECT vr.id, vr.tenant_id, vr.call_sid,
-                f.s3_bucket, f.s3_key, vr.created_at
+                f.s3_bucket, f.s3_key, vr.created_at,
+                vr.recording_url, vr.twilio_deleted_at
            FROM voice_recordings vr
            JOIN tenant_settings ts ON ts.tenant_id = vr.tenant_id
            LEFT JOIN files f ON f.id = vr.file_id
@@ -223,14 +281,7 @@ export class PgRecordingRetentionRepository
           LIMIT $2`,
         [now, limit],
       );
-      return rows.map((row) => ({
-        id: String(row.id),
-        tenantId: String(row.tenant_id),
-        callSid: (row.call_sid as string | null) ?? null,
-        storageBucket: (row.s3_bucket as string | null) ?? null,
-        storageKey: (row.s3_key as string | null) ?? null,
-        createdAt: new Date(row.created_at as string),
-      }));
+      return rows.map(toPurgeableRecording);
     });
   }
 
@@ -240,7 +291,8 @@ export class PgRecordingRetentionRepository
     return this.withCrossTenantSweep(async (client) => {
       const { rows } = await client.query(
         `SELECT vr.id, vr.tenant_id, vr.call_sid,
-                f.s3_bucket, f.s3_key, vr.created_at
+                f.s3_bucket, f.s3_key, vr.created_at,
+                vr.recording_url, vr.twilio_deleted_at
            FROM voice_recordings vr
            LEFT JOIN files f ON f.id = vr.file_id
           WHERE vr.pci_detected
@@ -251,14 +303,7 @@ export class PgRecordingRetentionRepository
           LIMIT $1`,
         [limit],
       );
-      return rows.map((row) => ({
-        id: String(row.id),
-        tenantId: String(row.tenant_id),
-        callSid: (row.call_sid as string | null) ?? null,
-        storageBucket: (row.s3_bucket as string | null) ?? null,
-        storageKey: (row.s3_key as string | null) ?? null,
-        createdAt: new Date(row.created_at as string),
-      }));
+      return rows.map(toPurgeableRecording);
     });
   }
 
@@ -269,6 +314,58 @@ export class PgRecordingRetentionRepository
             SET audio_purged_at = $3, updated_at = now()
           WHERE tenant_id = $1 AND id = $2 AND audio_purged_at IS NULL`,
         [tenantId, id, purgedAt],
+      );
+    });
+  }
+
+  async findTwilioCopiesDue(now: Date, limit: number): Promise<TwilioCopyDue[]> {
+    // Same cross-tenant convention as findDue; served by the migration-315
+    // partial index idx_voice_recordings_twilio_copy_due.
+    return this.withCrossTenantSweep(async (client) => {
+      const { rows } = await client.query(
+        `SELECT vr.id, vr.tenant_id, vr.call_sid, vr.recording_url, vr.created_at
+           FROM voice_recordings vr
+          WHERE vr.twilio_deleted_at IS NULL
+            AND vr.recording_url IS NOT NULL
+            AND vr.legal_hold = false
+            AND vr.created_at < $1::timestamptz - make_interval(secs => $2::double precision / 1000)
+            AND (vr.twilio_delete_attempted_at IS NULL
+                 OR vr.twilio_delete_attempted_at <
+                    $1::timestamptz - make_interval(secs => $3::double precision / 1000))
+          ORDER BY vr.twilio_delete_attempted_at ASC NULLS FIRST, vr.created_at ASC
+          LIMIT $4`,
+        [now, TWILIO_COPY_RETRY_GRACE_MS, TWILIO_COPY_RETRY_BACKOFF_MS, limit],
+      );
+      return rows.map((row) => ({
+        id: String(row.id),
+        tenantId: String(row.tenant_id),
+        callSid: (row.call_sid as string | null) ?? null,
+        recordingUrl: String(row.recording_url),
+        createdAt: new Date(row.created_at as string),
+      }));
+    });
+  }
+
+  async markTwilioCopyDeleted(tenantId: string, id: string, deletedAt: Date): Promise<boolean> {
+    return this.withTenant(tenantId, async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE voice_recordings
+            SET twilio_deleted_at = $3, updated_at = now()
+          WHERE tenant_id = $1 AND id = $2 AND twilio_deleted_at IS NULL`,
+        [tenantId, id, deletedAt],
+      );
+      return (rowCount ?? 0) > 0;
+    });
+  }
+
+  async markTwilioCopyDeleteFailed(tenantId: string, id: string, attemptedAt: Date): Promise<void> {
+    // Sweep bookkeeping only (the back-off cursor); no content changes.
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `UPDATE voice_recordings
+            SET twilio_delete_attempted_at = $3
+          WHERE tenant_id = $1 AND id = $2 AND twilio_deleted_at IS NULL`,
+        [tenantId, id, attemptedAt],
       );
     });
   }
@@ -494,6 +591,19 @@ export class PgRecordingRetentionRepository
   }
 }
 
+function toPurgeableRecording(row: Record<string, unknown>): PurgeableRecording {
+  return {
+    id: String(row.id),
+    tenantId: String(row.tenant_id),
+    callSid: (row.call_sid as string | null) ?? null,
+    storageBucket: (row.s3_bucket as string | null) ?? null,
+    storageKey: (row.s3_key as string | null) ?? null,
+    createdAt: new Date(row.created_at as string),
+    recordingUrl: (row.recording_url as string | null) ?? null,
+    twilioDeletedAt: row.twilio_deleted_at ? new Date(row.twilio_deleted_at as string) : null,
+  };
+}
+
 /** #1202 — fold deleted turn rows into one audit entry per call. */
 function groupPurgedTurnsByCall(
   turns: ReadonlyArray<{ callSid: string | null; createdAt: Date }>,
@@ -526,13 +636,18 @@ export class InMemoryRecordingRetentionRepository
 
   constructor(
     public rows: Array<
-      PurgeableRecording & {
+      Omit<PurgeableRecording, 'recordingUrl' | 'twilioDeletedAt'> & {
+        /** PRIV-2 — migration 315 (absent → no Twilio copy / not deleted). */
+        recordingUrl?: string | null;
+        twilioDeletedAt?: Date | null;
         legalHold?: boolean;
         purgedAt?: Date | null;
         retentionDays: number;
         /** PRIV-3 — migration 314. */
         pciDetected?: boolean;
         audioPurgedAt?: Date | null;
+        /** PRIV-2 — migration 315. */
+        twilioDeleteAttemptedAt?: Date | null;
       }
     > = [],
     /** #1202 — call_transcript_turns rows with no recording. */
@@ -635,14 +750,7 @@ export class InMemoryRecordingRetentionRepository
             now.getTime() - r.retentionDays * 24 * 3600 * 1000,
       )
       .slice(0, limit)
-      .map(({ id, tenantId, callSid, storageBucket, storageKey, createdAt }) => ({
-        id,
-        tenantId,
-        callSid,
-        storageBucket,
-        storageKey,
-        createdAt,
-      }));
+      .map(toInMemoryPurgeable);
   }
 
   async markPurged(tenantId: string, id: string, purgedAt: Date): Promise<void> {
@@ -655,20 +763,69 @@ export class InMemoryRecordingRetentionRepository
       .filter((r) => r.pciDetected && !r.audioPurgedAt && !r.purgedAt && !r.legalHold)
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
       .slice(0, limit)
-      .map(({ id, tenantId, callSid, storageBucket, storageKey, createdAt }) => ({
-        id,
-        tenantId,
-        callSid,
-        storageBucket,
-        storageKey,
-        createdAt,
-      }));
+      .map(toInMemoryPurgeable);
   }
 
   async markAudioPurged(tenantId: string, id: string, purgedAt: Date): Promise<void> {
     const row = this.rows.find((r) => r.tenantId === tenantId && r.id === id);
     if (row && !row.audioPurgedAt) row.audioPurgedAt = purgedAt;
   }
+
+  async findTwilioCopiesDue(now: Date, limit: number): Promise<TwilioCopyDue[]> {
+    const t = now.getTime();
+    return this.rows
+      .filter(
+        (r) =>
+          r.recordingUrl &&
+          !r.twilioDeletedAt &&
+          !r.legalHold &&
+          r.createdAt.getTime() < t - TWILIO_COPY_RETRY_GRACE_MS &&
+          (!r.twilioDeleteAttemptedAt ||
+            r.twilioDeleteAttemptedAt.getTime() < t - TWILIO_COPY_RETRY_BACKOFF_MS),
+      )
+      .sort(
+        (a, b) =>
+          (a.twilioDeleteAttemptedAt?.getTime() ?? -Infinity) -
+            (b.twilioDeleteAttemptedAt?.getTime() ?? -Infinity) ||
+          a.createdAt.getTime() - b.createdAt.getTime(),
+      )
+      .slice(0, limit)
+      .map((r) => ({
+        id: r.id,
+        tenantId: r.tenantId,
+        callSid: r.callSid,
+        recordingUrl: r.recordingUrl!,
+        createdAt: r.createdAt,
+      }));
+  }
+
+  async markTwilioCopyDeleted(tenantId: string, id: string, deletedAt: Date): Promise<boolean> {
+    const row = this.rows.find((r) => r.tenantId === tenantId && r.id === id);
+    if (!row || row.twilioDeletedAt) return false;
+    row.twilioDeletedAt = deletedAt;
+    return true;
+  }
+
+  async markTwilioCopyDeleteFailed(tenantId: string, id: string, attemptedAt: Date): Promise<void> {
+    const row = this.rows.find((r) => r.tenantId === tenantId && r.id === id);
+    if (row && !row.twilioDeletedAt) row.twilioDeleteAttemptedAt = attemptedAt;
+  }
+}
+
+function toInMemoryPurgeable(
+  r: Omit<PurgeableRecording, 'recordingUrl' | 'twilioDeletedAt'> &
+    Partial<Pick<PurgeableRecording, 'recordingUrl' | 'twilioDeletedAt'>>,
+): PurgeableRecording {
+  return {
+    id: r.id,
+    tenantId: r.tenantId,
+    callSid: r.callSid,
+    storageBucket: r.storageBucket,
+    storageKey: r.storageKey,
+    createdAt: r.createdAt,
+    recordingUrl: r.recordingUrl ?? null,
+    twilioDeletedAt: r.twilioDeletedAt ?? null,
+  };
 }
 
 export interface RecordingRetentionWorkerDeps {
@@ -683,6 +840,13 @@ export interface RecordingRetentionWorkerDeps {
   sessionTranscriptBatchSize?: number;
   /** PRIV-3 — flagged recordings whose audio is deleted per sweep. */
   cardNumberAudioBatchSize?: number;
+  /**
+   * PRIV-2 — deletes the Twilio-hosted copy. Absent (no Twilio credentials)
+   * → nothing is sent and the audit events record `twilioDeleted: false`.
+   */
+  twilioRecordingDeleter?: TwilioRecordingDeleter;
+  /** PRIV-2 — Twilio copies the retry phase deletes per sweep. */
+  twilioCopyBatchSize?: number;
   now?: () => Date;
 }
 
@@ -702,6 +866,71 @@ export interface RecordingRetentionSweepResult {
   cardNumberAudioPurged: number;
   /** PRIV-3 — flagged recordings whose audio delete failed (retried next sweep). */
   cardNumberAudioFailed: number;
+  /** PRIV-2 — Twilio copies the retry phase confirmed gone. */
+  twilioCopiesDeleted: number;
+  /** PRIV-2 — Twilio copies the retry phase could not delete (retried after the back-off). */
+  twilioCopiesFailed: number;
+}
+
+/**
+ * PRIV-2 — delete a purged recording's Twilio copy as part of that purge.
+ * Never throws: a failure is stamped for the retry phase and reported as
+ * `twilioDeleted: false`.
+ */
+async function removeTwilioCopyWithPurge(
+  deps: RecordingRetentionWorkerDeps,
+  now: () => Date,
+  row: PurgeableRecording,
+  reason: TwilioCopyDeleteReason,
+): Promise<{ hadTwilioCopy: boolean; twilioDeleted: boolean }> {
+  if (!row.recordingUrl) return { hadTwilioCopy: false, twilioDeleted: false };
+  if (row.twilioDeletedAt) return { hadTwilioCopy: true, twilioDeleted: true };
+  if (!deps.twilioRecordingDeleter) return { hadTwilioCopy: true, twilioDeleted: false };
+  const twilioDeleted = await deleteTwilioCopy(
+    {
+      deleter: deps.twilioRecordingDeleter,
+      repo: deps.repo,
+      ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+      logger: deps.logger,
+      now,
+    },
+    { tenantId: row.tenantId, voiceRecordingId: row.id, callSid: row.callSid, recordingUrl: row.recordingUrl },
+    { actorId: RETENTION_ACTOR, reason },
+  );
+  return { hadTwilioCopy: true, twilioDeleted };
+}
+
+/**
+ * PRIV-2 — the retry phase: delete every Twilio copy still not confirmed
+ * gone (legacy rows, failed ingest deletes). Never throws.
+ */
+async function purgeTwilioCopies(
+  deps: RecordingRetentionWorkerDeps,
+  now: () => Date,
+): Promise<Pick<RecordingRetentionSweepResult, 'twilioCopiesDeleted' | 'twilioCopiesFailed'>> {
+  const deleter = deps.twilioRecordingDeleter;
+  if (!deleter) return { twilioCopiesDeleted: 0, twilioCopiesFailed: 0 };
+  let due: TwilioCopyDue[];
+  try {
+    due = await deps.repo.findTwilioCopiesDue(now(), deps.twilioCopyBatchSize ?? TWILIO_COPY_SWEEP_BATCH);
+  } catch (err) {
+    deps.logger.error('recording-retention sweep: Twilio copy selection failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { twilioCopiesDeleted: 0, twilioCopiesFailed: 0 };
+  }
+  let twilioCopiesDeleted = 0;
+  let twilioCopiesFailed = 0;
+  for (const row of due) {
+    const ok = await deleteTwilioCopy(
+      { deleter, repo: deps.repo, ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}), logger: deps.logger, now },
+      { tenantId: row.tenantId, voiceRecordingId: row.id, callSid: row.callSid, recordingUrl: row.recordingUrl },
+      { actorId: RETENTION_ACTOR, reason: 'retry' },
+    );
+    if (ok) twilioCopiesDeleted++;
+    else twilioCopiesFailed++;
+  }
+  return { twilioCopiesDeleted, twilioCopiesFailed };
 }
 
 /**
@@ -888,6 +1117,8 @@ async function purgeCardNumberAudio(
       continue;
     }
     cardNumberAudioPurged++;
+    // PRIV-2 — the Twilio copy holds the same digits; no grace window here.
+    const twilio = await removeTwilioCopyWithPurge(deps, now, row, 'card_number_detected');
     if (!deps.auditRepo) continue;
     try {
       await deps.auditRepo.create(
@@ -902,6 +1133,7 @@ async function purgeCardNumberAudio(
             callSid: row.callSid,
             reason: 'card_number_detected',
             hadStoredObject,
+            ...twilio,
             recordedAt: row.createdAt.toISOString(),
           },
         }),
@@ -938,7 +1170,8 @@ export async function runRecordingRetentionSweep(
     const unattached = await purgeUnattachedTranscriptTurns(deps, now);
     const sessions = await purgeSessionTranscripts(deps, now);
     const cardAudio = await purgeCardNumberAudio(deps, now);
-    return { due: 0, purged: 0, failed: 0, ...unattached, ...sessions, ...cardAudio };
+    const twilioCopies = await purgeTwilioCopies(deps, now);
+    return { due: 0, purged: 0, failed: 0, ...unattached, ...sessions, ...cardAudio, ...twilioCopies };
   }
 
   let purged = 0;
@@ -957,6 +1190,10 @@ export async function runRecordingRetentionSweep(
       //    leaves the row unpurged and retried next sweep, never a
       //    tombstoned recording with surviving derived data.
       const derived = await deps.repo.purgeDerived(row.tenantId, row.id);
+      // PRIV-2 — the Twilio copy. Never throws and never blocks the
+      // tombstone: a failure is audited as twilioDeleted:false and retried
+      // by the retry phase.
+      const twilio = await removeTwilioCopyWithPurge(deps, now, row, 'past_retention');
       // 3. Tombstone — the row itself + audit trail are KEPT.
       await deps.repo.markPurged(row.tenantId, row.id, now());
       // 4. Audit.
@@ -973,6 +1210,7 @@ export async function runRecordingRetentionSweep(
               metadata: {
                 callSid: row.callSid,
                 hadStoredObject: Boolean(row.storageBucket && row.storageKey),
+                ...twilio,
                 recordedAt: row.createdAt.toISOString(),
                 derivedPurged: derived,
               },
@@ -1001,6 +1239,9 @@ export async function runRecordingRetentionSweep(
   // PRIV-3 — flagged recordings, whatever their age. After the horizon drain,
   // so a row due for both is tombstoned there and skipped here.
   const cardAudio = await purgeCardNumberAudio(deps, now);
+  // PRIV-2 — Twilio copies still not confirmed gone. Last, so a row handled
+  // (or failed) above this sweep is not attempted twice.
+  const twilioCopies = await purgeTwilioCopies(deps, now);
 
   deps.logger.info('recording-retention sweep completed', {
     due: due.length,
@@ -1009,6 +1250,7 @@ export async function runRecordingRetentionSweep(
     ...unattached,
     ...sessions,
     ...cardAudio,
+    ...twilioCopies,
   });
-  return { due: due.length, purged, failed, ...unattached, ...sessions, ...cardAudio };
+  return { due: due.length, purged, failed, ...unattached, ...sessions, ...cardAudio, ...twilioCopies };
 }

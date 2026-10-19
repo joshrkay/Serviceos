@@ -21,6 +21,7 @@ import {
   createRecordingRouter,
 } from '../../src/telephony/recording-webhook';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import type { TwilioCopyRemover } from '../../src/telephony/twilio-recording-deleter';
 import type {
   StorageProvider,
   ObjectMetadata,
@@ -160,6 +161,7 @@ interface HarnessOptions {
     token: string,
   ) => Promise<Buffer>;
   uploadObject?: (url: string, bytes: Buffer, contentType: string) => Promise<void>;
+  twilioCopyRemover?: TwilioCopyRemover;
 }
 
 function buildHarness(opts: HarnessOptions = {}) {
@@ -198,6 +200,7 @@ function buildHarness(opts: HarnessOptions = {}) {
         options: {
           ...(opts.fetchRecording ? { fetchRecording: opts.fetchRecording } : {}),
           ...(opts.uploadObject ? { uploadObject: opts.uploadObject } : {}),
+          ...(opts.twilioCopyRemover ? { twilioCopyRemover: opts.twilioCopyRemover } : {}),
         },
       },
     }),
@@ -537,6 +540,109 @@ describe('P8-014 record_call recording webhook', () => {
       expect(res.status).toBe(200);
       expect(pool.voiceRows).toHaveLength(1);
     });
+  });
+});
+
+/** A pool whose voice_recordings INSERT fails (the DB write never lands). */
+class FailingInsertPool extends FakePool {
+  override async connect() {
+    const client = await super.connect();
+    return {
+      ...client,
+      query: async (sql: string, params: unknown[] = []) => {
+        if (/INSERT INTO voice_recordings/i.test(sql)) throw new Error('insert failed');
+        return client.query(sql, params);
+      },
+    };
+  }
+}
+
+describe('PRIV-2 — the Twilio copy is deleted once our storage and our row hold the recording', () => {
+  const SUB_SID = 'AC' + 'b'.repeat(32);
+  const RECORDING_URL = `https://api.twilio.com/2010-04-01/Accounts/${SUB_SID}/Recordings/RE${'c'.repeat(32)}`;
+  const params = {
+    CallSid: 'CA-rec-1',
+    RecordingSid: `RE${'c'.repeat(32)}`,
+    RecordingUrl: RECORDING_URL,
+    RecordingDuration: '42',
+  };
+
+  it('deletes the Twilio copy after the S3 PUT and the row insert, with the inserted row and its recording URL', async () => {
+    const order: string[] = [];
+    const uploadObject = vi.fn(async () => {
+      order.push('s3_put');
+    });
+    const pool = new FakePool();
+    const twilioCopyRemover = vi.fn(async () => {
+      order.push(`twilio_delete(rows=${pool.voiceRows.length})`);
+      return true;
+    });
+    const { app } = buildHarness({
+      pool,
+      fetchRecording: async () => Buffer.from('mp3'),
+      uploadObject,
+      twilioCopyRemover,
+    });
+
+    const res = await signedRecordingRequest(app, params);
+
+    expect(res.status).toBe(200);
+    expect(order).toEqual(['s3_put', 'twilio_delete(rows=1)']);
+    expect(twilioCopyRemover).toHaveBeenCalledWith({
+      tenantId: TENANT_ID,
+      voiceRecordingId: pool.voiceRows[0].id,
+      callSid: 'CA-rec-1',
+      recordingUrl: RECORDING_URL,
+    });
+    // recording_url stays on the row: it is the per-recording idempotency key.
+    expect(pool.voiceRows[0].recording_url).toBe(RECORDING_URL);
+  });
+
+  it('never deletes the Twilio copy when the S3 upload fails', async () => {
+    const twilioCopyRemover = vi.fn(async () => true);
+    const { app, pool } = buildHarness({
+      fetchRecording: async () => Buffer.from('mp3'),
+      uploadObject: async () => {
+        throw new Error('S3 PUT failed 503');
+      },
+      twilioCopyRemover,
+    });
+
+    const res = await signedRecordingRequest(app, params);
+
+    expect(res.status).toBe(500);
+    expect(pool.voiceRows).toHaveLength(0);
+    expect(twilioCopyRemover).not.toHaveBeenCalled();
+  });
+
+  it('never deletes the Twilio copy when the row insert fails', async () => {
+    const twilioCopyRemover = vi.fn(async () => true);
+    const { app } = buildHarness({
+      pool: new FailingInsertPool(),
+      fetchRecording: async () => Buffer.from('mp3'),
+      uploadObject: async () => undefined,
+      twilioCopyRemover,
+    });
+
+    const res = await signedRecordingRequest(app, params);
+
+    expect(res.status).toBe(500);
+    expect(twilioCopyRemover).not.toHaveBeenCalled();
+  });
+
+  it('a delete that could not be confirmed still answers 200 (the recording is stored; the sweep retries the delete)', async () => {
+    const twilioCopyRemover = vi.fn(async () => false);
+    const { app, pool } = buildHarness({
+      fetchRecording: async () => Buffer.from('mp3'),
+      uploadObject: async () => undefined,
+      twilioCopyRemover,
+    });
+
+    const res = await signedRecordingRequest(app, params);
+
+    expect(res.status).toBe(200);
+    expect(pool.voiceRows).toHaveLength(1);
+    expect(twilioCopyRemover).toHaveBeenCalledOnce();
   });
 });
 

@@ -42,6 +42,7 @@ import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryWebhookEventRepository } from '../../src/webhooks/in-memory-webhook-event';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import type { TwilioCopyRemover } from '../../src/telephony/twilio-recording-deleter';
 import type {
   StorageProvider,
   ObjectMetadata,
@@ -187,6 +188,8 @@ interface HarnessOptions {
   withTranscriptionLeg?: boolean;
   /** Tenant fallback result for session-less callbacks. */
   resolveTenantId?: () => string | undefined;
+  /** PRIV-2 — the Twilio-copy delete after the whole pipeline. */
+  twilioCopyRemover?: TwilioCopyRemover;
 }
 
 function buildHarness(opts: HarnessOptions = {}) {
@@ -256,6 +259,7 @@ function buildHarness(opts: HarnessOptions = {}) {
           fetchRecording: fetchRecording as never,
           uploadObject: uploadObject as never,
           onVoicemailPersisted,
+          ...(opts.twilioCopyRemover ? { twilioCopyRemover: opts.twilioCopyRemover } : {}),
         },
       },
     }),
@@ -610,5 +614,69 @@ describe('U9 voicemail-status route', () => {
     expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
     expect(h.pool.voiceRows).toHaveLength(0);
     expect(h.persistedEvents).toHaveLength(0);
+  });
+});
+
+describe('PRIV-2 — the voicemail\'s Twilio copy is deleted only after the whole pipeline lands', () => {
+  it('deletes the Twilio copy after the row, the hand-off and the success receipt', async () => {
+    const order: string[] = [];
+    let h: ReturnType<typeof buildHarness>;
+    const twilioCopyRemover = vi.fn(async () => {
+      const receipt = await h.webhookEventRepo.findById(
+        'twilio_voicemail_transcription',
+        `${TENANT_ID}:RE-vm-1`,
+      );
+      order.push(`twilio_delete(rows=${h.pool.voiceRows.length},handoffs=${h.persistedEvents.length},receipt=${Boolean(receipt)})`);
+      return true;
+    });
+    h = buildHarness({ sessionCallSid: 'CA-vm-1', twilioCopyRemover });
+
+    const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+
+    expect(res.status).toBe(200);
+    expect(order).toEqual(['twilio_delete(rows=1,handoffs=1,receipt=true)']);
+    expect(twilioCopyRemover).toHaveBeenCalledWith({
+      tenantId: TENANT_ID,
+      voiceRecordingId: h.pool.voiceRows[0].id,
+      callSid: 'CA-vm-1',
+      recordingUrl: FINAL_PARAMS.RecordingUrl,
+    });
+  });
+
+  it('a failing hand-off keeps the Twilio copy, so the Twilio retry can still fetch it; the retry then deletes it', async () => {
+    const onVoicemailPersisted = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        throw new Error('queue unavailable');
+      })
+      .mockImplementation(async () => undefined);
+    const twilioCopyRemover = vi.fn(async () => true);
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1', onVoicemailPersisted, twilioCopyRemover });
+
+    const first = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(first.status).toBe(500);
+    expect(twilioCopyRemover).not.toHaveBeenCalled();
+
+    const retry = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(retry.status).toBe(200);
+    expect(h.fetchRecording).toHaveBeenCalledTimes(2);
+    expect(twilioCopyRemover).toHaveBeenCalledOnce();
+  });
+
+  it('never deletes the Twilio copy when the S3 upload fails', async () => {
+    const twilioCopyRemover = vi.fn(async () => true);
+    const h = buildHarness({
+      sessionCallSid: 'CA-vm-1',
+      uploadObject: async () => {
+        throw new Error('S3 PUT failed 503');
+      },
+      twilioCopyRemover,
+    });
+
+    const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+
+    expect(res.status).toBe(500);
+    expect(h.pool.voiceRows).toHaveLength(0);
+    expect(twilioCopyRemover).not.toHaveBeenCalled();
   });
 });

@@ -20,6 +20,11 @@
  *      which is idempotent on `(tenant_id, call_sid, recording_url)` —
  *      per-recording identity, so the voicemail leg's row for the same
  *      call (delivered to /voicemail-status) never collides with this one.
+ *   6. PRIV-2 — deletes the Twilio-hosted copy (`twilioCopyRemover`) once
+ *      the S3 PUT and the row insert have both succeeded: our copy is the
+ *      one the app plays and the retention sweep purges. Failure-soft; an
+ *      unconfirmed delete is retried by the sweep. `recording_url` stays on
+ *      the row (it is the idempotency key above).
  *
  * Logging discipline
  * ──────────────────
@@ -41,6 +46,7 @@ import {
 import type { VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { StorageProvider } from '../files/file-service';
 import { recordInboundCall } from '../voice/voice-service';
+import type { TwilioCopyRemover } from './twilio-recording-deleter';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -214,6 +220,12 @@ export interface RecordingHandlerOptions {
    * never fail the webhook — the recording is already persisted.
    */
   onPersisted?: (event: RecordingPersistedEvent) => Promise<void> | void;
+  /**
+   * PRIV-2 — deletes the Twilio-hosted copy after the S3 PUT and the row
+   * insert succeed. Never throws. Absent (no Twilio credentials, tests) →
+   * the copy stays until the retention sweep's retry phase deletes it.
+   */
+  twilioCopyRemover?: TwilioCopyRemover;
 }
 
 /**
@@ -401,6 +413,18 @@ export function createRecordingRouter(
             error: error.message,
           });
         }
+      }
+
+      // PRIV-2 — the recording is in our storage and our row: delete the
+      // Twilio copy. Never throws; an unconfirmed delete is retried by the
+      // retention sweep. Runs on a replay too (the stamp is idempotent).
+      if (options.twilioCopyRemover) {
+        await options.twilioCopyRemover({
+          tenantId,
+          voiceRecordingId: result.voiceRecordingId,
+          callSid,
+          recordingUrl,
+        });
       }
 
       res.status(200).type('text/plain').send('OK');
