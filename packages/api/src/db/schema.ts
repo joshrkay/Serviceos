@@ -7751,6 +7751,20 @@ export const MIGRATIONS = {
       ON voice_recordings (created_at)
       WHERE pci_detected AND audio_purged_at IS NULL AND purged_at IS NULL AND legal_hold = false;
   `,
+
+  // "Pick, don't build" onboarding (S5a / U8) — the durable per-link claim of
+  // the payment-mode cleanup: when a cleanup claimed the invoice's CURRENT
+  // pay link for deactivation. Nullable; every write of the link columns sets
+  // it back to NULL, so it never outlives the link it claimed. The partial
+  // index serves the cleanup and the daily sweep, which page through a
+  // tenant's invoices that can still capture money through a hosted link.
+  // RLS on invoices (025) covers the new column.
+  '314_invoices_cleanup_claimed_at': `
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS cleanup_claimed_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_invoices_live_payment_link
+      ON invoices (tenant_id, id)
+      WHERE stripe_payment_link_id IS NOT NULL AND status IN ('open', 'partially_paid');
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

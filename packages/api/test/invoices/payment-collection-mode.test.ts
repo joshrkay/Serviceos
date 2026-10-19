@@ -20,6 +20,7 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import {
   readPaymentCollectionMode,
   auditPaymentModeUnavailable,
+  renderCollectOnSiteInactiveMessage,
 } from '../../src/invoices/payment-collection-mode';
 
 const TENANT = 'tenant-pcm-1';
@@ -930,5 +931,40 @@ describe('owner invoice routes honour payment_collection_mode', () => {
     const r3 = await request(asToday.app).post(`/api/invoices/${asToday.invoice.id}/payment-link`).send({});
     expect(r3.status).toBe(200);
     expect(r3.body.url).toMatch(/^https:\/\/pay\.mock\.com\//);
+  });
+});
+
+describe('renderCollectOnSiteInactiveMessage — what an already-sent link shows (S5a-3)', () => {
+  it('with the owner\'s first name: the plan\'s sentence', () => {
+    expect(
+      renderCollectOnSiteInactiveMessage({ businessName: 'Acme HVAC', ownerFirstName: 'Dana' }),
+    ).toBe('Acme HVAC collects payment in person. Please settle up with Dana when the work is done.');
+  });
+
+  it('without a first name (absent, empty or blank): the business-name-only sentence, never a placeholder', () => {
+    const expected = 'Acme HVAC collects payment in person. Please settle up when the work is done.';
+    expect(renderCollectOnSiteInactiveMessage({ businessName: 'Acme HVAC' })).toBe(expected);
+    expect(renderCollectOnSiteInactiveMessage({ businessName: 'Acme HVAC', ownerFirstName: '' })).toBe(expected);
+    expect(renderCollectOnSiteInactiveMessage({ businessName: ' Acme HVAC ', ownerFirstName: '   ' })).toBe(expected);
+  });
+
+  it('stays within Stripe\'s 500-character inactive_message limit for any business or owner name', () => {
+    const longName = 'B'.repeat(800);
+    const longOwner = 'O'.repeat(800);
+    for (const msg of [
+      renderCollectOnSiteInactiveMessage({ businessName: longName, ownerFirstName: 'Dana' }),
+      renderCollectOnSiteInactiveMessage({ businessName: longName }),
+      renderCollectOnSiteInactiveMessage({ businessName: 'Acme HVAC', ownerFirstName: longOwner }),
+    ]) {
+      expect(msg.length).toBeLessThanOrEqual(500);
+      expect(msg).toContain('collects payment in person.');
+      expect(msg.endsWith('when the work is done.')).toBe(true);
+    }
+  });
+
+  it('an empty business name falls back to plain words, not a blank subject', () => {
+    expect(renderCollectOnSiteInactiveMessage({ businessName: '  ' })).toBe(
+      'Your service team collects payment in person. Please settle up when the work is done.',
+    );
   });
 });

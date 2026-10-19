@@ -49,6 +49,13 @@ export interface Invoice {
   stripePaymentLinkId?: string;
   /** Stripe-hosted checkout URL returned with the payment link. */
   stripePaymentLinkUrl?: string;
+  /**
+   * S5a-3 (U8, migration 314) — when a payment-link cleanup claimed the
+   * CURRENT link for deactivation (the durable per-link claim). Written only
+   * by the cleanup claim; every write of the link columns resets it, so it
+   * never outlives the link it claimed. Not settable through `update`.
+   */
+  cleanupClaimedAt?: Date;
   /** Inherits from `job.originatingLeadId` at creation; preserves source attribution. */
   originatingLeadId?: string;
   /** P21-001 — set when this invoice is a milestone of an invoice_schedules row. */
@@ -128,7 +135,7 @@ export interface InvoiceListResult {
  */
 export type InvoiceUpdate = Omit<
   Partial<Invoice>,
-  'stripePaymentLinkId' | 'stripePaymentLinkUrl'
+  'stripePaymentLinkId' | 'stripePaymentLinkUrl' | 'cleanupClaimedAt'
 > & {
   stripePaymentLinkId?: string | null;
   stripePaymentLinkUrl?: string | null;
@@ -296,6 +303,21 @@ export interface InvoiceRepository {
     id: string,
     expectedLinkId: string,
   ): Promise<boolean>;
+  /**
+   * S5a-3 (U8) — one page of the tenant's invoices that can still capture
+   * money through a hosted link: status `open`/`partially_paid` AND a stored
+   * `stripe_payment_link_id`. Ordered by id; `afterId` is the keyset cursor
+   * (null = first page); `limit` is clamped to [1, 500]. The payment-mode
+   * cleanup and the daily reconciliation sweep page through it.
+   */
+  findOpenWithPaymentLink(tenantId: string, afterId: string | null, limit: number): Promise<Invoice[]>;
+  /**
+   * S5a-3 (U8) — drop the cleanup claim marker (`cleanup_claimed_at`) ONLY
+   * while the row still holds `linkId`, so a failed deactivation hands the
+   * link back to the next pass without ever un-claiming a different link.
+   * Returns true when a row matched.
+   */
+  releaseCleanupClaim(tenantId: string, id: string, linkId: string): Promise<boolean>;
   /** Look up by unauthenticated view token — no tenant isolation needed (token is the secret). */
   findByViewToken?(token: string): Promise<Invoice | null>;
   /**
@@ -304,6 +326,15 @@ export interface InvoiceRepository {
    * to avoid the read-modify-write race when concurrent requests arrive.
    */
   incrementViewCount?(tenantId: string, id: string): Promise<void>;
+}
+
+/** S5a-3 — the cleanup page size bound (plan: 500-row pages). */
+const MAX_CLEANUP_PAGE_SIZE = 500;
+
+/** Clamp a caller's page size to an integer in [1, MAX_CLEANUP_PAGE_SIZE]. */
+export function clampCleanupPageSize(limit: number): number {
+  if (!Number.isFinite(limit)) return MAX_CLEANUP_PAGE_SIZE;
+  return Math.min(MAX_CLEANUP_PAGE_SIZE, Math.max(1, Math.floor(limit)));
 }
 
 export const INVOICE_STATUS_TRANSITIONS: Record<InvoiceStatus, InvoiceStatus[]> = {
@@ -801,6 +832,8 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     const updated: Invoice = { ...i, ...rest };
     if (stripePaymentLinkId !== undefined) {
       updated.stripePaymentLinkId = stripePaymentLinkId ?? undefined;
+      // S5a-3 — the cleanup claim belongs to the link it claimed (Pg parity).
+      updated.cleanupClaimedAt = undefined;
     }
     if (stripePaymentLinkUrl !== undefined) {
       updated.stripePaymentLinkUrl = stripePaymentLinkUrl ?? undefined;
@@ -1001,6 +1034,7 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
       ...i,
       stripePaymentLinkId: link.linkId,
       stripePaymentLinkUrl: link.linkUrl,
+      cleanupClaimedAt: undefined,
       updatedAt: now,
     };
     this.invoices.set(id, updated);
@@ -1019,8 +1053,32 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
       ...i,
       stripePaymentLinkId: undefined,
       stripePaymentLinkUrl: undefined,
+      cleanupClaimedAt: undefined,
       updatedAt: new Date(),
     });
+    return true;
+  }
+
+  async findOpenWithPaymentLink(tenantId: string, afterId: string | null, limit: number): Promise<Invoice[]> {
+    const pageSize = clampCleanupPageSize(limit);
+    return Array.from(this.invoices.values())
+      .filter(
+        (i) =>
+          i.tenantId === tenantId &&
+          (i.status === 'open' || i.status === 'partially_paid') &&
+          i.stripePaymentLinkId !== undefined &&
+          (afterId === null || i.id > afterId),
+      )
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .slice(0, pageSize)
+      .map((i) => ({ ...i, lineItems: [...i.lineItems] }));
+  }
+
+  async releaseCleanupClaim(tenantId: string, id: string, linkId: string): Promise<boolean> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return false;
+    if (i.stripePaymentLinkId !== linkId) return false;
+    this.invoices.set(id, { ...i, cleanupClaimedAt: undefined });
     return true;
   }
 

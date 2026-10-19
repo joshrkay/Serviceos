@@ -143,3 +143,40 @@ export class PaymentModeUnavailableError extends ServiceUnavailableError {
     this.name = 'PaymentModeUnavailableError';
   }
 }
+
+/** Stripe's limit on a Payment Link's `inactive_message`. */
+const STRIPE_INACTIVE_MESSAGE_MAX_CHARS = 500;
+
+/** The subject when the business has no name on file — same words the send path uses. */
+const NO_BUSINESS_NAME = 'Your service team';
+
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : text.slice(0, Math.max(0, max - 1)).trimEnd() + '…';
+}
+
+/**
+ * S5a-3 (U8) — what a pay link that was already sent shows once the owner
+ * switches to "Collect on the spot": the deactivation sets it as the link's
+ * customer-facing inactive message at Stripe. With the owner's first name it
+ * is the plan's sentence; without one, the business-name-only sentence
+ * (never a placeholder like "the owner"). The names are clipped so the whole
+ * message stays within Stripe's 500 characters; the closing words are kept.
+ */
+export function renderCollectOnSiteInactiveMessage(params: {
+  businessName: string;
+  ownerFirstName?: string | null;
+}): string {
+  const business = params.businessName.trim() || NO_BUSINESS_NAME;
+  const owner = params.ownerFirstName?.trim() ?? '';
+  const middle = ' collects payment in person. Please settle up';
+  const end = ' when the work is done.';
+  const ownerPart = owner ? ` with ${owner}` : '';
+  const fixed = middle.length + end.length;
+  const budget = STRIPE_INACTIVE_MESSAGE_MAX_CHARS - fixed;
+  // The business name gets the budget first (it is the subject); the owner
+  // name takes what is left, and is dropped rather than cut to a stub.
+  const subject = clip(business, Math.max(1, budget - Math.min(ownerPart.length, 64)));
+  const ownerBudget = budget - subject.length;
+  const withOwner = ownerPart && ownerPart.length <= ownerBudget ? ownerPart : '';
+  return `${subject}${middle}${withOwner}${end}`;
+}

@@ -10,6 +10,7 @@ import {
   InvoiceUpdate,
   DEFAULT_INVOICE_LIMIT,
   MAX_INVOICE_LIMIT,
+  clampCleanupPageSize,
 } from './invoice';
 import { LineItem } from '../shared/billing-engine';
 import { mapLineItemRow, mapDocumentTotalsRow } from '../shared/document-row-mappers';
@@ -306,6 +307,9 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       if (updates.stripePaymentLinkId !== undefined) {
         setClauses.push(`stripe_payment_link_id = $${paramIndex++}`);
         values.push(updates.stripePaymentLinkId);
+        // S5a-3 — the cleanup claim belongs to the link it claimed: any write
+        // of the link id drops it in the same statement (migration 314).
+        setClauses.push('cleanup_claimed_at = NULL');
       }
       if (updates.stripePaymentLinkUrl !== undefined) {
         setClauses.push(`stripe_payment_link_url = $${paramIndex++}`);
@@ -584,6 +588,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         `UPDATE invoices
          SET stripe_payment_link_id = $3,
              stripe_payment_link_url = $4,
+             cleanup_claimed_at = NULL,
              updated_at = $5
          WHERE id = $2 AND tenant_id = $1
            AND status IN ('open', 'partially_paid')
@@ -612,10 +617,48 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         `UPDATE invoices
          SET stripe_payment_link_id = NULL,
              stripe_payment_link_url = NULL,
+             cleanup_claimed_at = NULL,
              updated_at = NOW()
          WHERE id = $2 AND tenant_id = $1
            AND stripe_payment_link_id = $3`,
         [tenantId, id, expectedLinkId],
+      );
+      return (rowCount ?? 0) > 0;
+    });
+  }
+
+  /**
+   * S5a-3 (U8) — keyset page of the tenant's invoices that can still capture
+   * money through a hosted link (served by migration 314's partial index).
+   */
+  async findOpenWithPaymentLink(tenantId: string, afterId: string | null, limit: number): Promise<Invoice[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM invoices
+          WHERE tenant_id = $1
+            AND status IN ('open', 'partially_paid')
+            AND stripe_payment_link_id IS NOT NULL
+            AND ($2::uuid IS NULL OR id > $2::uuid)
+          ORDER BY id
+          LIMIT $3`,
+        [tenantId, afterId, clampCleanupPageSize(limit)],
+      );
+      return this.mapRowsToInvoices(client, tenantId, rows);
+    });
+  }
+
+  /**
+   * S5a-3 (U8) — drop the cleanup claim marker only while the row still
+   * holds `linkId` (CAS on the link id). The link columns are untouched.
+   */
+  async releaseCleanupClaim(tenantId: string, id: string, linkId: string): Promise<boolean> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE invoices
+            SET cleanup_claimed_at = NULL
+          WHERE id = $2 AND tenant_id = $1
+            AND stripe_payment_link_id = $3`,
+        [tenantId, id, linkId],
       );
       return (rowCount ?? 0) > 0;
     });
@@ -770,6 +813,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       viewCount: row.view_count !== undefined && row.view_count !== null ? Number(row.view_count) : undefined,
       stripePaymentLinkId: row.stripe_payment_link_id ?? undefined,
       stripePaymentLinkUrl: row.stripe_payment_link_url ?? undefined,
+      cleanupClaimedAt: row.cleanup_claimed_at ? new Date(row.cleanup_claimed_at) : undefined,
       originatingLeadId: row.originating_lead_id ?? undefined,
       scheduleId: row.schedule_id ?? undefined,
       milestoneIndex:
