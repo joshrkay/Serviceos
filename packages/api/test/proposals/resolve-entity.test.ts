@@ -365,6 +365,46 @@ describe('U8/U1 — resolveProposalEntity re-draft', () => {
     });
   });
 
+  // B3 — the row's payload is now the RE-DRAFT run's output, so the row must
+  // name that run (proposals.ai_run_id) and carry its confidence factors and
+  // explanation, not the clarification's.
+  it('the re-draft links the row to the run that authored the re-drafted payload', async () => {
+    await repo.create(ambiguousWithIntent({ aiRunId: 'run-clarification' }));
+    const update = vi.spyOn(repo, 'update');
+    const factors = { catalogMatch: 0.9 } as unknown as Proposal['confidenceFactors'];
+    const handler: TaskHandler = {
+      taskType: 'draft_invoice',
+      handle: async (ctx) => ({
+        taskType: 'draft_invoice',
+        proposal: createProposal({
+          tenantId: ctx.tenantId,
+          proposalType: 'draft_invoice',
+          payload: {
+            customerId: (ctx.existingEntities as Record<string, unknown>).customerId,
+            lineItems: [{ description: 'Water heater', quantity: 1, unitPrice: 45000 }],
+          },
+          summary: 'Invoice Bob Jones for the water heater',
+          explanation: 'Billed the water heater install',
+          confidenceScore: 0.88,
+          confidenceFactors: factors,
+          aiRunId: 'run-redraft',
+          createdBy: ctx.userId,
+        }),
+      }),
+    };
+
+    const result = await call(CUST_B, factoryOf(handler));
+
+    expect(result.aiRunId).toBe('run-redraft');
+    expect(result.confidenceFactors).toEqual(factors);
+    expect(result.explanation).toBe('Billed the water heater install');
+    expect(update.mock.calls.at(-1)?.[2]).toMatchObject({
+      aiRunId: 'run-redraft',
+      confidenceFactors: factors,
+      explanation: 'Billed the water heater install',
+    });
+  });
+
   it('per-kind: a create_customer original intent re-drafts to create_customer (resolved id in the right field)', async () => {
     await repo.create(ambiguousWithIntent({}, {
       originalIntent: { intentType: 'create_customer', extractedEntities: { name: 'Bob' } },
