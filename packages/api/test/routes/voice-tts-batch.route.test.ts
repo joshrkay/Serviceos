@@ -374,3 +374,67 @@ describe('POST /api/voice/tts/batch — charged per clip from the one per-user b
     expect(tts.synthesize).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('GET /api/voice/tts/clip/:hash — a cached clip by content hash, never charged, never synthesized', () => {
+  it('serves a cached clip as raw bytes with its content type, a private cache header and the hash as ETag', async () => {
+    const tts = fakeTts();
+    const app = buildApp({ tts, clipsPerMin: 1 });
+    const made = await single(app, TURN[0]); // the one unit is spent
+    expect(made.status).toBe(200);
+
+    const res = await request(app).get(`/api/voice/tts/clip/${made.body.clipHash}`).buffer(true).parse(binaryParser);
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/^audio\/mpeg/);
+    expect(res.headers['cache-control']).toBe('private, max-age=3600');
+    expect(res.headers['etag']).toBe(`"${made.body.clipHash}"`);
+    expect((res.body as Buffer).toString()).toBe(`mp3:${ADAM}:${TURN[0]}`);
+    expect(tts.synthesize).toHaveBeenCalledTimes(1);
+    // Nothing was charged: the budget is still spent, not over-spent, and a read never refuses.
+    expect((await request(app).get(`/api/voice/tts/clip/${made.body.clipHash}`)).status).toBe(200);
+  });
+
+  it('an unknown hash is a 404 NOT_CACHED with no provider call (the client falls back to the charged POST)', async () => {
+    const tts = fakeTts();
+    const res = await request(buildApp({ tts })).get(`/api/voice/tts/clip/${hashOf('never spoken')}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_CACHED');
+    expect(tts.synthesize).not.toHaveBeenCalled();
+  });
+
+  it('a malformed hash is a 404 too', async () => {
+    const tts = fakeTts();
+    const app = buildApp({ tts });
+
+    expect((await request(app).get('/api/voice/tts/clip/not-a-hash')).status).toBe(404);
+    expect((await request(app).get(`/api/voice/tts/clip/${'A'.repeat(64)}`)).status).toBe(404);
+    expect((await request(app).get(`/api/voice/tts/clip/${'a'.repeat(63)}`)).status).toBe(404);
+    expect(tts.synthesize).not.toHaveBeenCalled();
+  });
+
+  it('reads in the tenant voice: a clip made in another voice is a miss unless ?voice names it; a bad ?voice is a 400', async () => {
+    const tts = fakeTts();
+    const app = buildApp({ tts });
+    const bella = await batch(app, [TURN[1]], 'bella');
+    const hash = bella.body.clips[0].clipHash as string;
+
+    expect((await request(app).get(`/api/voice/tts/clip/${hash}`)).status).toBe(404);
+    const res = await request(app).get(`/api/voice/tts/clip/${hash}?voice=bella`).buffer(true).parse(binaryParser);
+    expect(res.status).toBe(200);
+    expect((res.body as Buffer).toString()).toBe(`mp3:${BELLA}:${TURN[1]}`);
+    expect((await request(app).get(`/api/voice/tts/clip/${hash}?voice=santa`)).status).toBe(400);
+    expect(tts.synthesize).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses an unauthenticated request with 401', async () => {
+    expect((await request(buildApp({ auth: null })).get(`/api/voice/tts/clip/${hashOf(TURN[0])}`)).status).toBe(401);
+  });
+});
+
+/** supertest parses only text/JSON by default; audio bytes need a buffer parser. */
+function binaryParser(res: NodeJS.ReadableStream, cb: (err: Error | null, body: Buffer) => void) {
+  const chunks: Buffer[] = [];
+  res.on('data', (c: Buffer) => chunks.push(c));
+  res.on('end', () => cb(null, Buffer.concat(chunks)));
+}

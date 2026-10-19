@@ -72,6 +72,10 @@ const TTS_BODY_SCHEMA = z.object({
   text: z.string().trim().min(1).max(2000),
   voice: TTS_VOICE_PRESET_SCHEMA.optional(),
 });
+/** S3-2 — a clip read may name a preset, as the POST body may. */
+const TTS_CLIP_READ_QUERY_SCHEMA = z.object({ voice: TTS_VOICE_PRESET_SCHEMA.optional() });
+/** S3-2 — a clip hash is sha256 hex exactly as `hashOf` emits it; anything else is a miss. */
+const CLIP_HASH = /^[0-9a-f]{64}$/;
 
 const ALLOWED_MIME_TYPES = new Set([
   'audio/webm', 'audio/ogg', 'audio/wav', 'audio/mpeg',
@@ -518,6 +522,50 @@ export function createVoiceRouter(
       for (const { text, result } of spoken) {
         await auditSynthesizedClip(authReq, 'POST /api/voice/tts/batch', text, voice, result);
       }
+    }),
+  );
+
+  /**
+   * GET /tts/clip/:hash — S3-2: a cached clip by content hash.
+   *
+   * Replays and reloads of a line the client already heard (it knows the
+   * hash from an earlier POST) read the stored bytes straight back: never
+   * charged, never synthesized, never audited, since nothing is billed. A
+   * miss — an unknown hash, a malformed one, another replica's cache — is a
+   * 404 and the client falls back to the charged POST. The voice is the
+   * tenant's, or the preset `?voice` names (a 400 otherwise, as on the POST).
+   */
+  router.get(
+    '/tts/clip/:hash',
+    requireAuth,
+    requireTenant,
+    requirePermission('ai:run'),
+    asyncRoute(async (req: Request, res: Response) => {
+      const hash = routeParam(req, 'hash');
+      const requestedPresetId = TTS_CLIP_READ_QUERY_SCHEMA.parse(req.query ?? {}).voice;
+      const tts = opts?.tts;
+      const cached =
+        tts && CLIP_HASH.test(hash)
+          ? opts?.clipCache?.get(
+              (
+                await resolveTtsVoice({
+                  tenantId: (req as AuthenticatedRequest).auth!.tenantId,
+                  requestedPresetId,
+                  settingsRepo: opts?.settingsRepo,
+                  provider: tts,
+                })
+              ).providerVoiceId,
+              hash,
+            )
+          : undefined;
+      if (!cached) {
+        res.status(404).json({ error: 'NOT_CACHED', message: 'That clip is not cached here' });
+        return;
+      }
+      res.setHeader('Content-Type', cached.contentType);
+      res.setHeader('Cache-Control', 'private, max-age=3600');
+      res.setHeader('ETag', `"${hash}"`);
+      res.send(cached.audio);
     }),
   );
 
