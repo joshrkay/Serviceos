@@ -10,6 +10,7 @@
  * prove a REPEATED approval intent (new sid) cannot double-execute.
  */
 import { describe, it, expect } from 'vitest';
+import { ACCEPTANCE_VOID_MARKER } from '../../../src/proposals/acceptance-void';
 import {
   handleProposalSmsReply,
   handleProposalSmsFallback,
@@ -1313,6 +1314,22 @@ describe('handleProposalSmsReply — approve_all (U5 "ALL" / "APPROVE ALL")', ()
     expect((await h.proposalRepo.findById(TENANT, lowConf.id))?.status).toBe('ready_for_review');
     expect(h.sent[0].body).toContain('Approved all 2');
     expect(h.auditRepo.getAll().map((e) => e.eventType)).toContain('proposal.sms_approved_all');
+  });
+
+  it('OVAS-01 — excludes an edit that voids a customer acceptance from ALL', async () => {
+    const h = makeHarness();
+    const a = await seedReady(h, { proposalType: 'create_appointment' });
+    const voids = await seedReady(
+      h,
+      { proposalType: 'create_appointment' },
+      { overallConfidence: 'high', markers: [ACCEPTANCE_VOID_MARKER] },
+    );
+
+    const result = await handleProposalSmsReply(ctx('ALL'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approved_all' });
+    expect((await h.proposalRepo.findById(TENANT, a.id))?.status).toBe('approved');
+    expect((await h.proposalRepo.findById(TENANT, voids.id))?.status).toBe('ready_for_review');
   });
 
   it('"APPROVE ALL" (and "YES ALL") also route to bulk approve', async () => {

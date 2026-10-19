@@ -3,7 +3,7 @@ import type { Pool } from 'pg';
 import type { KnownEntities } from '../ai/training/scrub';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import { runInTenantTransaction } from '../commands/command-runner';
-import { tenantContextStore } from '../middleware/tenant-context';
+import { currentTenantContext } from '../middleware/tenant-context';
 import { PRESIDIO_UNAVAILABLE_SIGNAL } from '../ai/privacy/presidio-adapter';
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import type {
@@ -289,7 +289,7 @@ export class TrainingAssetService {
     // Reuse the ambient transaction instead: every PgBaseRepository write in
     // `fn` already joins it, and a throw propagates to the middleware, which
     // rolls the whole request unit back — same all-or-nothing guarantee.
-    const ambient = tenantContextStore.getStore();
+    const ambient = currentTenantContext();
     if (ambient && ambient.tenantId === tenantId) {
       return fn();
     }

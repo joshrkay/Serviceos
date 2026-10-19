@@ -110,7 +110,7 @@ import {
   type MeTenantSettings,
   type UserModeService,
 } from './routes/me';
-import { setUserModeLoader } from './middleware/auth';
+import { setUserModeLoader, resolveUserMode } from './middleware/auth';
 import {
   setSupervisorPresenceLoader,
   pgSupervisorPresenceLoader,
@@ -145,6 +145,7 @@ import { createRedraftHandlerFactory } from './proposals/redraft-handler-factory
 import {
   invoiceReferenceCheck,
   invoiceSendableReferenceCheck,
+  jobReferenceCheck,
   serviceLocationReferenceCheck,
   sendRecipientReferenceCheck,
   executionAnchorReferenceCheck,
@@ -1115,6 +1116,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     estimateReferenceCheck(estimateRepo),
     // #1480 item 4 — a send_invoice for a draft (unissued) or dead invoice.
     invoiceSendableReferenceCheck(invoiceRepo),
+    // OVAS-03 — a drafted jobId must be this tenant's job, of the card's customer.
+    jobReferenceCheck(jobRepo),
   ];
 
   const webhookSettingsRepo = settingsRepo;
@@ -3014,6 +3017,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // execute their skill instead of skipping. `voiceRepo` doubles as the
     // memo-creator resolver for the owner-grade authorization gate.
     voiceRepo,
+    // OVAS-02 — the memo creator's DB role gates auto-approval (same loader).
+    resolveMemberRole: resolveVoiceMemberRole,
+    // OVAS-04 — and their current_mode sets the threshold (req.auth.mode's loader).
+    resolveMemberMode: (tenantId: string, userId: string) => resolveUserMode(userId, tenantId),
     // Same object the assistant-chat router gets — see `lookupAnswerDeps`.
     lookupAnswers: lookupAnswerDeps,
     // B5.5 — en_route ("on my way") voice leg: userRepo resolves the memo
@@ -6100,9 +6107,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         // partly-completed form wizard) is not asked for it again on the
         // gated tenant-settings card. Never a source of a guessed zone.
         settingsRepo,
-        // Review finding #4 — session-scoped advisory lock so two browser
-        // tabs racing the same persisted sessionId can't clobber each
-        // other's turn (see OnboardingConversationDeps.pool doc).
+        // Review finding #4 / TI-02 — each turn commits in one short
+        // transaction, only if no other tab advanced the session meanwhile
+        // (see OnboardingConversationDeps.pool doc).
         pool: pool ?? undefined,
       }),
     }),

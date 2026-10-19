@@ -62,6 +62,22 @@ describe('CreateStandingInstructionExecutionHandler', () => {
     expect(created?.actorId).toBe('owner-1');
   });
 
+  it('PI-2 — the audit names the real approver role (stamped at approval), not "system"', async () => {
+    const repo = new InMemoryStandingInstructionRepository();
+    const audit = new InMemoryAuditRepository();
+    const handler = new CreateStandingInstructionExecutionHandler(repo, audit);
+
+    const result = await handler.execute(proposal({ instruction: 'Always mention the warranty' }), {
+      ...CONTEXT,
+      executedByRole: 'owner',
+    });
+
+    const events = await audit.findByEntity('t-1', 'standing_instruction', result.resultEntityId!);
+    const created = events.find((e) => e.eventType === 'standing_instruction.created');
+    expect(created?.actorId).toBe('owner-1');
+    expect(created?.actorRole).toBe('owner');
+  });
+
   it('is idempotent: a proposal that already carries resultEntityId short-circuits (no second row)', async () => {
     const repo = new InMemoryStandingInstructionRepository();
     const handler = new CreateStandingInstructionExecutionHandler(repo);

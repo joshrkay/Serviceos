@@ -53,7 +53,7 @@ import {
   PgTenantTransactionRunner,
   type TenantTransactionRunner,
 } from '../../db/tenant-transaction';
-import { tenantContextStore } from '../../middleware/tenant-context';
+import { currentTenantContext } from '../../middleware/tenant-context';
 import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
 import {
@@ -3575,7 +3575,7 @@ export function createVoiceTurnProcessor(
     : new InMemoryTransactionRunner();
   const revocationTx: Pick<TenantTransactionRunner, 'run'> = {
     run: (tenantId, fn) =>
-      tenantContextStore.getStore()?.tenantId === tenantId
+      currentTenantContext()?.tenantId === tenantId
         ? new InMemoryTransactionRunner().run(tenantId, fn)
         : ownRevocationTx.run(tenantId, fn),
   };

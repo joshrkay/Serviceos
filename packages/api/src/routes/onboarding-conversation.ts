@@ -77,6 +77,14 @@ export function createOnboardingConversationRouter(
           });
           return;
         }
+        if (message === 'ONBOARDING_SESSION_CONFLICT') {
+          // Another tab kept advancing this session; nothing was written.
+          res.status(409).json({
+            error: 'ONBOARDING_SESSION_CONFLICT',
+            message: 'This conversation was updated in another tab. Reload to continue.',
+          });
+          return;
+        }
         res.status(500).json({
           error: 'ONBOARDING_CONVERSATION_FAILED',
           message,

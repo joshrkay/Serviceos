@@ -40,7 +40,7 @@ import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { BRAND_VOICE_FIELDS } from '../../tenants/brand/brand-voice';
 import { LLMGateway } from '../gateway/gateway';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
-import { TaskContext, TaskHandler, TaskResult } from './task-handlers';
+import { TaskContext, TaskHandler, TaskResult, draftingRunLink, draftingRunMetadata } from './task-handlers';
 import { entitiesFrom, inputFor } from './task-input';
 
 const MAX_OPENING_LINE_LEN = 200;
@@ -194,7 +194,8 @@ async function extractRaw(
   gateway: LLMGateway,
   tenantId: string,
   spoken: string,
-): Promise<Record<string, unknown> | null> {
+  runMetadata?: Record<string, unknown>,
+): Promise<{ parsed: Record<string, unknown> | null; aiRunId?: string }> {
   try {
     const response = await gateway.complete({
       taskType: 'update_brand_voice',
@@ -204,11 +205,13 @@ async function extractRaw(
         { role: 'user', content: JSON.stringify({ instruction: spoken }) },
       ],
       responseFormat: 'json',
-      metadata: { tenantId },
+      metadata: { tenantId, ...(runMetadata ?? {}) },
     });
-    return tryParseJson(response.content);
+    const parsed = tryParseJson(response.content);
+    // OBS-2 — the run authored the payload only when its output parsed.
+    return { parsed, ...(parsed ? draftingRunLink(response) : {}) };
   } catch {
-    return null;
+    return { parsed: null };
   }
 }
 
@@ -217,6 +220,8 @@ export interface BrandVoiceProposalFields {
   missingFields: string[];
   summary: string;
   confidenceScore: number;
+  /** OBS-2 — the extraction run that shaped the payload, when one persisted. */
+  aiRunId?: string;
 }
 
 /**
@@ -246,8 +251,10 @@ export async function extractBrandVoiceProposalFields(
   gateway: LLMGateway,
   tenantId: string,
   spoken: string,
+  /** OBS-2 — `draftingRunMetadata(context).metadata`, when the caller has one. */
+  runMetadata?: Record<string, unknown>,
 ): Promise<BrandVoiceProposalFields> {
-  const parsed = await extractRaw(gateway, tenantId, spoken);
+  const { parsed, aiRunId } = await extractRaw(gateway, tenantId, spoken, runMetadata);
 
   const payload: Record<string, unknown> = {};
   const markers: Array<{ path: string; reason: string }> = [];
@@ -341,7 +348,13 @@ export async function extractBrandVoiceProposalFields(
       ? [FREE_TEXT_GATE_FIELD]
       : [];
 
-  return { payload, missingFields, summary, confidenceScore: effectiveScore };
+  return {
+    payload,
+    missingFields,
+    summary,
+    confidenceScore: effectiveScore,
+    ...(aiRunId ? { aiRunId } : {}),
+  };
 }
 
 export class UpdateBrandVoiceTaskHandler implements TaskHandler {
@@ -356,11 +369,13 @@ export class UpdateBrandVoiceTaskHandler implements TaskHandler {
         ? ee.brandVoiceInstruction.trim()
         : context.message.trim();
 
-    const { payload, missingFields, summary, confidenceScore } = await extractBrandVoiceProposalFields(
-      this.gateway,
-      context.tenantId,
-      spoken,
-    );
+    const { payload, missingFields, summary, confidenceScore, aiRunId } =
+      await extractBrandVoiceProposalFields(
+        this.gateway,
+        context.tenantId,
+        spoken,
+        draftingRunMetadata(context).metadata,
+      );
 
     const input: CreateProposalInput = {
       // No sourceTrustTier (inputFor's default): the action class
@@ -369,6 +384,8 @@ export class UpdateBrandVoiceTaskHandler implements TaskHandler {
       ...inputFor(context, this.taskType, payload, missingFields),
       summary,
       confidenceScore,
+      // OBS-2 — the extraction run that shaped this payload.
+      ...draftingRunLink({ aiRunId }),
     };
 
     return { proposal: createProposal(input), taskType: this.taskType };

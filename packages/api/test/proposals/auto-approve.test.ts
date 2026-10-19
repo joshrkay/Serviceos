@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { ACCEPTANCE_VOID_MARKER } from '../../src/proposals/acceptance-void';
 import {
   resolveAutoApproveThreshold,
   shouldAutoApprove,
@@ -83,6 +84,62 @@ describe('P12-004 — resolveAutoApproveThreshold', () => {
         supervisorPresent: true,
       }),
     ).toBe(DEFAULT_AUTO_APPROVE_THRESHOLDS.tech);
+  });
+
+  // OVAS-04 — with no mode threaded, the resolver returned the legacy 0.9
+  // BEFORE it read the tenant override, so an owner's "require review"
+  // setting was silently skipped on any surface that lacked a mode.
+  describe('OVAS-04 — no mode threaded: the tenant override is not dropped', () => {
+    it('an all-strict override {supervisor:1, tech:1, both:1} is honoured', () => {
+      expect(
+        resolveAutoApproveThreshold({
+          supervisorPresent: true,
+          tenantOverride: { supervisor: 1, tech: 1, both: 1 },
+        }),
+      ).toBe(1);
+    });
+
+    it('a single-mode override {tech: 1} is honoured (strictest defined value wins)', () => {
+      expect(
+        resolveAutoApproveThreshold({ supervisorPresent: true, tenantOverride: { tech: 1 } }),
+      ).toBe(1);
+      expect(
+        resolveAutoApproveThreshold({
+          supervisorPresent: true,
+          tenantOverride: { supervisor: 0.93, both: 0.97 },
+        }),
+      ).toBe(0.97);
+    });
+
+    it('a permissive override never lowers the no-mode threshold below the legacy 0.9', () => {
+      expect(
+        resolveAutoApproveThreshold({ supervisorPresent: true, tenantOverride: { supervisor: 0.5 } }),
+      ).toBe(LEGACY_AUTO_APPROVE_THRESHOLD);
+    });
+
+    it('no override (or an empty one) keeps the legacy 0.9 exactly', () => {
+      expect(resolveAutoApproveThreshold({ supervisorPresent: true, tenantOverride: {} })).toBe(
+        LEGACY_AUTO_APPROVE_THRESHOLD,
+      );
+    });
+
+    it('the unsupervised hard-block still beats the backstop', () => {
+      expect(
+        resolveAutoApproveThreshold({ supervisorPresent: false, tenantOverride: { tech: 1 } }),
+      ).toBeNull();
+    });
+
+    it('decideInitialStatus: a 0.92 capture proposal with no mode no longer auto-approves under an all-1.0 override', () => {
+      expect(
+        decideInitialStatus({
+          proposalType: 'draft_invoice',
+          sourceTrustTier: 'autonomous',
+          confidenceScore: 0.92,
+          supervisorPresent: true,
+          tenantThresholdOverride: { supervisor: 1, tech: 1, both: 1 },
+        }),
+      ).toBe('draft');
+    });
   });
 });
 
@@ -1107,6 +1164,39 @@ describe('RV-074 — routeUnsupervisedProposal: low/very_low confidence suppress
     });
     // No one-tap link in the body.
     expect(sms[0].body).not.toContain('https://app.test/p/approve');
+  });
+
+  // OVAS-01 — an edit that voids a customer's signed acceptance never gets a
+  // single-tap approve link: the owner reviews it (and its warning) first.
+  it('an acceptance-voiding payload gets no one-tap link: suppressReason is "acceptance_void"', async () => {
+    const audit = new InMemoryAuditRepository();
+    const sms: { to: string; body: string }[] = [];
+
+    const result = await routeUnsupervisedProposal(
+      {
+        auditRepo: audit,
+        secret: SECRET,
+        sendSms: async (to, body) => sms.push({ to, body }),
+        buildApproveUrl: (token) => `https://app.test/p/approve?token=${token}`,
+      },
+      {
+        ...baseInput,
+        payload: {
+          _meta: { overallConfidence: 'high', markers: [ACCEPTANCE_VOID_MARKER] },
+        },
+        renderSmsBody: (approveUrl: string) =>
+          approveUrl ? `Approve: ${approveUrl}` : 'Review in app.',
+      },
+    );
+
+    expect(result.smsSent).toBe(true);
+    expect(result.approveLinkExpiresAt).toBeUndefined();
+    expect(sms[0].body).not.toContain('https://app.test/p/approve');
+    const events = await audit.findByEntity('tenant-1', 'proposal', 'prop-1');
+    expect(events[0].metadata).toMatchObject({
+      approveLinkSuppressed: true,
+      suppressReason: 'acceptance_void',
+    });
   });
 
   it('only suppressApproveLink (no low confidence): suppressReason is "action_class"', async () => {

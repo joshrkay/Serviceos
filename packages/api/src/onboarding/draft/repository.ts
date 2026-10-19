@@ -17,7 +17,7 @@
  */
 import type { Pool } from 'pg';
 import { PgBaseRepository } from '../../db/pg-base';
-import { tenantContextStore } from '../../middleware/tenant-context';
+import { currentTenantContext } from '../../middleware/tenant-context';
 import type { AssembledShop } from '../choices/assemble';
 import { ChoiceKeySchema, assertOverrideAllowedFor, type AnyChoiceKey } from '../choices/schema';
 import { OwnerPhoneE164Schema } from './owner-phone';
@@ -188,7 +188,7 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
   }
 
   async getForTenantForUpdate(tenantId: string): Promise<OnboardingDraft | null> {
-    if (tenantContextStore.getStore()?.tenantId !== tenantId) {
+    if (currentTenantContext()?.tenantId !== tenantId) {
       throw new Error('getForTenantForUpdate requires the request transaction: a row lock taken outside it is released immediately');
     }
     return this.withTenant(tenantId, async (client) => {

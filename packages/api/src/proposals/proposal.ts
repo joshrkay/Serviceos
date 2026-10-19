@@ -411,10 +411,12 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'add_service_location':
     case 'log_time_entry':
     // UB-A2 — capturing a standing instruction WRITES a directive row, moves
-    // no money and contacts no customer; the instruction only ever shapes
-    // future DRAFTS (which are themselves reviewed). Capture-class, but the
+    // no money and contacts no customer directly. Capture-class, but the
     // voice task handler deliberately omits sourceTrustTier, so the
-    // instruction itself always lands for human review in v1.
+    // instruction itself always lands for human review in v1. It is NOT
+    // harmless config: it shapes every future draft AND the unreviewed
+    // dropped-call recovery SMS, so approving it is config-writing
+    // (PI-2 — actions.ts CONFIG_WRITING_PROPOSAL_TYPES, settings:update).
     case 'create_standing_instruction':
     // WS20 — updating a catalog item's unit price is a config change: it moves
     // no money (only shapes FUTURE drafts, which are themselves reviewed),

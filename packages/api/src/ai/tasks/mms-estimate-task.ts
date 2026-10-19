@@ -32,6 +32,7 @@
  * draft never auto-issues — it lands in the owner approval queue.
  */
 import { createProposal, CreateProposalInput, Proposal } from '../../proposals/proposal';
+import { draftingRunLink, draftingRunMetadata } from './task-handlers';
 import { assertValidProposalPayload } from '../../proposals/contracts';
 import { LLMGateway, type LLMContentPart } from '../gateway/gateway';
 import { assessConfidence, getConfidenceLevel } from '../guardrails/confidence';
@@ -156,6 +157,7 @@ export class MmsEstimateTaskHandler {
     }
 
     let rawContent: string;
+    let authoringRun: { aiRunId?: string } | undefined;
     try {
       const llmResponse = await this.gateway.complete({
         taskType: MMS_ESTIMATE_TASK_TYPE,
@@ -165,8 +167,11 @@ export class MmsEstimateTaskHandler {
           { role: 'user', content: userContent.content, parts: userContent.parts },
         ],
         responseFormat: 'json',
+        // OBS-2 — ai_runs.correlation_id → this MMS conversation.
+        ...draftingRunMetadata({ conversationId: input.conversationId }),
       });
       rawContent = llmResponse.content;
+      authoringRun = llmResponse;
     } catch (err) {
       // Gateway/provider failure → safe fallback, never a crash. The
       // intake layer notifies the owner of the un-drafted photo.
@@ -278,6 +283,8 @@ export class MmsEstimateTaskHandler {
       confidenceFactors,
       sourceContext,
       createdBy: input.createdBy,
+      // OBS-2 — the vision run that authored this payload.
+      ...draftingRunLink(authoringRun),
       // Ambiguous catalog matches force 'draft' so the operator picks the
       // item — an uncertain match must never silently set a price.
       ...(catalogOutcome && catalogOutcome.missingFields.length > 0

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { ACCEPTANCE_VOID_MARKER } from '../../src/proposals/acceptance-void';
 import {
   computeDigestPayload,
   buildFallbackNarrative,
@@ -787,6 +788,23 @@ describe('summarizeProposalForDigest', () => {
     const absent = summarizeProposalForDigest(proposal({ payload: {} }));
     expect(absent.overallConfidence).toBeUndefined();
     expect(absent.reviewInApp).toBeUndefined();
+  });
+
+  it('OVAS-01 — marks an acceptance-voiding edit voidsAcceptance + reviewInApp, at any confidence', () => {
+    const voids = summarizeProposalForDigest(
+      proposal({
+        proposalType: 'update_estimate',
+        payload: { _meta: { overallConfidence: 'high', markers: [ACCEPTANCE_VOID_MARKER] } },
+      }),
+    );
+    expect(voids.voidsAcceptance).toBe(true);
+    expect(voids.reviewInApp).toBe(true);
+
+    const plain = summarizeProposalForDigest(
+      proposal({ proposalType: 'update_estimate', payload: { _meta: { overallConfidence: 'high' } } }),
+    );
+    expect(plain.voidsAcceptance).toBeUndefined();
+    expect(plain.reviewInApp).toBeUndefined();
   });
 
   it('marks hasMissingFields when the proposal has unresolved missingFields (draft with ambiguous line)', () => {
