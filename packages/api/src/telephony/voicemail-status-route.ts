@@ -208,17 +208,23 @@ export function createVoicemailStatusRouter(
   // urlencoded; without this parser req.body is empty and every callback
   // no-ops (silent voicemail-lead loss), and without the signature check the
   // endpoint would accept forged JSON leads.
-  router.use(express.urlencoded({ extended: false }));
-  router.use(
+  //
+  // LCR-04 — both are scoped to THIS route. The sub-router is mounted with no
+  // path, so a router-level `use` ran the signature check (and its credential
+  // lookup) on every telephony request — /gather and /voice paid it once here,
+  // once in the recording sub-router and once in the shared middleware, each
+  // waiting out a database checkout during a brownout.
+  const parseAndVerify = [
+    express.urlencoded({ extended: false }),
     requireTwilioSignature(deps.authTokenGetter, {
       publicBaseUrl: deps.publicBaseUrl,
     }),
-  );
+  ];
 
   const fetchRecording = options.fetchRecording ?? fetchRecordingBytes;
   const uploadObject = options.uploadObject ?? uploadToS3;
 
-  router.post('/voicemail-status', async (req: Request, res: Response) => {
+  router.post('/voicemail-status', ...parseAndVerify, async (req: Request, res: Response) => {
     const body = req.body as Record<string, string | undefined>;
     const callSid = body.CallSid ?? '';
     const recordingSid = body.RecordingSid ?? '';

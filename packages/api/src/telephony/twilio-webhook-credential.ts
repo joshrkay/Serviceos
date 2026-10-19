@@ -78,6 +78,11 @@ export interface TwilioWebhookCredentialResolverDeps {
    * lookup that THROWS. Default {@link CREDENTIAL_OUTAGE_CACHE_TTL_MS}.
    */
   cacheTtlMs?: number;
+  /**
+   * LCR-04 — how long a lookup may run before a cached row answers instead.
+   * Default {@link CREDENTIAL_LOOKUP_CACHED_BOUND_MS}.
+   */
+  lookupTimeoutMs?: number;
   /** Clock seam for the outage cache (tests). */
   now?: () => number;
 }
@@ -93,6 +98,16 @@ export interface TwilioWebhookCredentialResolverDeps {
  * bounding how long a revoked or rotated credential could outlive the database.
  */
 export const CREDENTIAL_OUTAGE_CACHE_TTL_MS = 15 * 60 * 1000;
+/**
+ * LCR-04 — pool exhaustion does not make a checkout throw: `pool.connect()`
+ * waits for a free connection until connectionTimeoutMillis (5 s, db/pool.ts)
+ * and only then rejects. Waiting that out before reading the cache spent a
+ * third of Twilio's ~15 s webhook timeout on one signature check. When a fresh
+ * cached row exists, a lookup still running after this bound is answered from
+ * the cache; the lookup carries on and refreshes the cache if it succeeds. With
+ * nothing cached there is nothing to answer with, so the lookup is awaited.
+ */
+export const CREDENTIAL_LOOKUP_CACHED_BOUND_MS = 1_000;
 /** Bound on cached keys; the oldest entry is evicted first. */
 const CREDENTIAL_OUTAGE_CACHE_MAX_ENTRIES = 10_000;
 
@@ -196,6 +211,7 @@ export function createTwilioWebhookCredentialResolver(
   const readEnv = deps.env ?? (() => process.env);
   const now = deps.now ?? Date.now;
   const cacheTtlMs = deps.cacheTtlMs ?? CREDENTIAL_OUTAGE_CACHE_TTL_MS;
+  const lookupTimeoutMs = deps.lookupTimeoutMs ?? CREDENTIAL_LOOKUP_CACHED_BOUND_MS;
   const outageCache = new Map<string, { row: IntegrationRow | null; at: number }>();
 
   const remember = (key: string, row: IntegrationRow | null): void => {
@@ -207,30 +223,61 @@ export function createTwilioWebhookCredentialResolver(
     }
   };
 
-  /** Run a lookup; on success remember it, on a throw answer the remembered row. */
+  /** A cached row for `key` still inside its TTL, or undefined. */
+  const freshHit = (key: string): { row: IntegrationRow | null; at: number } | undefined => {
+    const hit = outageCache.get(key);
+    return hit && now() - hit.at <= cacheTtlMs ? hit : undefined;
+  };
+
+  const servedFromCache = (key: string, hit: { at: number }, cause: string): void => {
+    logger.warn('telephony.credential_lookup_served_from_cache', {
+      lookup: key.slice(0, key.indexOf(':')),
+      ageMs: now() - hit.at,
+      error: cause,
+    });
+  };
+
+  /**
+   * Run a lookup; on success remember it. On a throw — or, when a fresh row is
+   * cached, on a lookup still running after `lookupTimeoutMs` — answer the
+   * remembered row.
+   */
   const lookupWithOutageCache = async (
     key: string,
     run: () => Promise<IntegrationRow | null>,
   ): Promise<IntegrationRow | null> => {
-    try {
-      const row = await run();
+    const lookup = run().then((row) => {
       remember(key, row);
       // The row a DID resolves to is the same row the tenant-keyed lookup
       // reads, so a call's mid-call callbacks (verified on the session's
       // tenant) survive a brownout that starts right after its /voice.
       if (row && key.startsWith('did:')) remember(`tenant:${row.tenant_id}`, row);
       return row;
+    });
+    const cachedAtStart = freshHit(key);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      if (!cachedAtStart) return await lookup;
+      const timedOut = Symbol('timedOut');
+      const bound = new Promise<typeof timedOut>((resolve) => {
+        timer = setTimeout(() => resolve(timedOut), lookupTimeoutMs);
+      });
+      const first = await Promise.race([lookup, bound]);
+      if (first !== timedOut) return first;
+      // The lookup is still waiting (pool exhaustion): answer from the cache
+      // now and let it finish on its own — never unhandled.
+      lookup.catch(() => undefined);
+      servedFromCache(key, cachedAtStart, `lookup still running after ${lookupTimeoutMs}ms`);
+      return cachedAtStart.row;
     } catch (err) {
-      const hit = outageCache.get(key);
-      if (hit && now() - hit.at <= cacheTtlMs) {
-        logger.warn('telephony.credential_lookup_served_from_cache', {
-          lookup: key.slice(0, key.indexOf(':')),
-          ageMs: now() - hit.at,
-          error: err instanceof Error ? err.message : String(err),
-        });
+      const hit = freshHit(key);
+      if (hit) {
+        servedFromCache(key, hit, err instanceof Error ? err.message : String(err));
         return hit.row;
       }
       throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   };
 

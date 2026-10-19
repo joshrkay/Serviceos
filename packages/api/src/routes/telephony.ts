@@ -34,6 +34,7 @@ import {
   requireTwilioSignature,
   sessionBelongsToAnotherTenant,
   actingTenantMismatchesCredential,
+  getVerifiedTwilioTenantId,
   type TwilioAuthTokenGetter,
 } from '../telephony/twilio-signature';
 import {
@@ -773,37 +774,41 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    // #1061 — same DID → tenant path as /voice (phoneNumberRepo, dev-only
-    // env fallback), never the legacy callback directly: that callback
-    // answered TWILIO_DEFAULT_TENANT_ID on a miss in every environment.
-    let tenantId: string | undefined;
-    try {
-      tenantId = await resolveInboundTenantId({
-        to: body.To ?? '',
-        from: body.From ?? '',
-        callSid,
-        deps,
-        req,
-      });
-    } catch (err) {
-      // LCR-04 — transient infra failure (e.g. DB outage during the tenant
-      // lookup). Twilio does not retry a 5xx action URL, so a 503 here dropped
-      // the call mid-conversation. The live session already knows its tenant:
-      // carry the turn on it (the cross-tenant guard below still runs against
-      // the verifying credential). With no live session, take a voicemail.
-      tenantId = sessionStoreFor(deps)?.get(sessionId)?.tenantId;
-      logger.error('telephony/gather: tenant lookup failed', {
-        sessionId,
-        callSid,
-        continuingOnSession: Boolean(tenantId),
-        error: err instanceof Error ? err.message : String(err),
-      });
-      if (!tenantId) {
-        res
-          .status(200)
-          .type('text/xml')
-          .send(outageVoicemailTwiml(deps, { from: body.From ?? '', to: body.To ?? '' }));
-        return;
+    // LCR-04 — a live session whose tenant the signature already proved
+    // needs no lookup. Otherwise #1061 — same DID → tenant path as /voice
+    // (phoneNumberRepo, dev-only env fallback), never the legacy callback
+    // directly: that callback answered TWILIO_DEFAULT_TENANT_ID on a miss in
+    // every environment.
+    let tenantId: string | undefined = verifiedLiveSessionTenant(deps, req, sessionId);
+    if (!tenantId) {
+      try {
+        tenantId = await resolveInboundTenantId({
+          to: body.To ?? '',
+          from: body.From ?? '',
+          callSid,
+          deps,
+          req,
+        });
+      } catch (err) {
+        // LCR-04 — transient infra failure (e.g. DB outage during the tenant
+        // lookup). Twilio does not retry a 5xx action URL, so a 503 here dropped
+        // the call mid-conversation. The live session already knows its tenant:
+        // carry the turn on it (the cross-tenant guard below still runs against
+        // the verifying credential). With no live session, take a voicemail.
+        tenantId = sessionStoreFor(deps)?.get(sessionId)?.tenantId;
+        logger.error('telephony/gather: tenant lookup failed', {
+          sessionId,
+          callSid,
+          continuingOnSession: Boolean(tenantId),
+          error: err instanceof Error ? err.message : String(err),
+        });
+        if (!tenantId) {
+          res
+            .status(200)
+            .type('text/xml')
+            .send(outageVoicemailTwiml(deps, { from: body.From ?? '', to: body.To ?? '' }));
+          return;
+        }
       }
     }
     if (!tenantId) {
@@ -881,34 +886,37 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
-    // #1061 — same DID → tenant path as /voice; see /gather.
-    let tenantId: string | undefined;
-    try {
-      tenantId = await resolveInboundTenantId({
-        to: body.To ?? '',
-        from: body.From ?? '',
-        callSid,
-        deps,
-        req,
-      });
-    } catch (err) {
-      // LCR-04 — transient infra failure. Twilio does not retry a 5xx action
-      // URL, so a 503 dropped the dial leg. Carry on with the live session's
-      // tenant (the cross-tenant guard below still runs); with none, take a
-      // voicemail. Mirrors /gather.
-      tenantId = sessionStoreFor(deps)?.get(sessionId)?.tenantId;
-      logger.error('telephony/dial-result: tenant lookup failed', {
-        sessionId,
-        callSid,
-        continuingOnSession: Boolean(tenantId),
-        error: err instanceof Error ? err.message : String(err),
-      });
-      if (!tenantId) {
-        res
-          .status(200)
-          .type('text/xml')
-          .send(outageVoicemailTwiml(deps, { from: body.From ?? '', to: body.To ?? '' }));
-        return;
+    // LCR-04 — a live session whose tenant the signature already proved needs
+    // no lookup; otherwise #1061 — same DID → tenant path as /voice; see /gather.
+    let tenantId: string | undefined = verifiedLiveSessionTenant(deps, req, sessionId);
+    if (!tenantId) {
+      try {
+        tenantId = await resolveInboundTenantId({
+          to: body.To ?? '',
+          from: body.From ?? '',
+          callSid,
+          deps,
+          req,
+        });
+      } catch (err) {
+        // LCR-04 — transient infra failure. Twilio does not retry a 5xx action
+        // URL, so a 503 dropped the dial leg. Carry on with the live session's
+        // tenant (the cross-tenant guard below still runs); with none, take a
+        // voicemail. Mirrors /gather.
+        tenantId = sessionStoreFor(deps)?.get(sessionId)?.tenantId;
+        logger.error('telephony/dial-result: tenant lookup failed', {
+          sessionId,
+          callSid,
+          continuingOnSession: Boolean(tenantId),
+          error: err instanceof Error ? err.message : String(err),
+        });
+        if (!tenantId) {
+          res
+            .status(200)
+            .type('text/xml')
+            .send(outageVoicemailTwiml(deps, { from: body.From ?? '', to: body.To ?? '' }));
+          return;
+        }
       }
     }
     if (!tenantId) {
@@ -1517,6 +1525,22 @@ function sessionStoreFor(
   if (deps.voiceSessionStore) return deps.voiceSessionStore;
   const getDeps = (deps.adapter as Partial<TwilioGatherAdapter>).getDeps;
   return typeof getDeps === 'function' ? deps.adapter.getDeps().store : undefined;
+}
+
+/**
+ * LCR-04 — the tenant of a mid-call callback's live session, when the request
+ * was verified with that tenant's own credential (the shared middleware binds
+ * these callbacks to the session's tenant). The signature then already proves
+ * the tenant, so the route needs no DID lookup: under pool exhaustion that
+ * lookup waited out a database checkout before its outage path could answer,
+ * pushing a live turn past Twilio's ~15 s action timeout. Undefined (no
+ * session, or a credential that names no tenant or another one) keeps the
+ * DID lookup and the cross-tenant guard after it.
+ */
+function verifiedLiveSessionTenant(deps: TelephonyRouterDeps, req: Request, sessionId: string): string | undefined {
+  const session = sessionStoreFor(deps)?.get(sessionId);
+  if (!session) return undefined;
+  return getVerifiedTwilioTenantId(req) === session.tenantId ? session.tenantId : undefined;
 }
 
 /**

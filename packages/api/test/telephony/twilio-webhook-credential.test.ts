@@ -487,6 +487,48 @@ describe('createTwilioWebhookCredentialResolver — brownout cache (LCR-04)', ()
     });
   });
 
+  /**
+   * Pool exhaustion: a checkout WAITS (until connectionTimeoutMillis) rather
+   * than throwing, so a cache read only on the throw came seconds too late.
+   */
+  function exhaustiblePool(checkoutTimeoutMs: number) {
+    const state = { exhausted: false };
+    const { pool: inner } = stubPool(ROWS);
+    const pool = {
+      connect: () => {
+        if (!state.exhausted) return (inner as unknown as { connect: () => Promise<unknown> }).connect();
+        return new Promise((_resolve, reject) => {
+          setTimeout(() => reject(new Error('timeout exceeded when trying to connect')), checkoutTimeoutMs);
+        });
+      },
+    } as unknown as Pool;
+    return { pool, state };
+  }
+
+  it('a lookup still waiting for a connection is answered from the cache within the lookup bound', async () => {
+    const { pool, state } = exhaustiblePool(2_000);
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv, lookupTimeoutMs: 50 });
+    await resolve({ accountSid: B_SUBACCOUNT, to: B_DID });
+    state.exhausted = true;
+    const started = Date.now();
+    expect(await resolve({ accountSid: B_SUBACCOUNT, to: B_DID })).toEqual({
+      outcome: 'verify',
+      authToken: B_TOKEN,
+      path: 'tenant_integration',
+      tenantId: B_TENANT,
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('with nothing cached, a waiting lookup is awaited and still fails closed when it times out', async () => {
+    const { pool, state } = exhaustiblePool(150);
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv, lookupTimeoutMs: 20 });
+    state.exhausted = true;
+    const started = Date.now();
+    expect(await resolve({ to: B_DID })).toMatchObject({ outcome: 'misconfigured', reason: 'credential_lookup_failed' });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(140);
+  });
+
   it('covers the tenant-keyed (session) and subaccount-keyed lookups too', async () => {
     const { pool, state } = flakyPool();
     const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });

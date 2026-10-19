@@ -129,6 +129,36 @@ describe('LCR-04 — credential resolver outage cache at real Postgres', () => {
     expect(await resolve({ to: B_DID })).toMatchObject({ outcome: 'verify', authToken: B_TOKEN, tenantId: tenantB });
   });
 
+  it('pool exhaustion (a checkout that waits instead of throwing) is answered from the cache within the lookup bound', async () => {
+    const state = { exhausted: false };
+    const pool = {
+      connect: () =>
+        state.exhausted
+          ? new Promise((_resolve, reject) => {
+              // connectionTimeoutMillis — far past the lookup bound below.
+              setTimeout(() => reject(new Error('timeout exceeded when trying to connect')), 3_000);
+            })
+          : real.connect(),
+    } as unknown as Pool;
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env, lookupTimeoutMs: 100 });
+    // Real row, real columns: the session-tenant lookup works and is cached.
+    expect(await resolve({ tenantId: tenantA, accountSid: A_SUBACCOUNT })).toMatchObject({
+      outcome: 'verify',
+      authToken: A_TOKEN,
+      tenantId: tenantA,
+    });
+
+    state.exhausted = true;
+    const started = Date.now();
+    expect(await resolve({ tenantId: tenantA, accountSid: A_SUBACCOUNT })).toEqual({
+      outcome: 'verify',
+      authToken: A_TOKEN,
+      path: 'tenant_integration',
+      tenantId: tenantA,
+    });
+    expect(Date.now() - started).toBeLessThan(1_500);
+  });
+
   it('the session-tenant and subaccount keys are cached the same way', async () => {
     const { pool, state } = brownoutPool(real);
     const resolve = createTwilioWebhookCredentialResolver({ pool, env });
