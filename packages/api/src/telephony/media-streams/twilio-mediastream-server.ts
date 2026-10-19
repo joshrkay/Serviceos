@@ -25,6 +25,7 @@ import twilio from 'twilio';
 import { createLogger } from '../../logging/logger';
 import type { TwilioAuthTokenGetter } from '../twilio-signature';
 import { instrument } from '../../monitoring/instrumentation';
+import type { LiveRealtimeCalls } from './live-realtime-calls';
 import {
   TwilioMediaStreamAdapter,
   type MediaStreamAdapterDeps,
@@ -74,6 +75,12 @@ export interface MediaStreamServerDeps extends MediaStreamAdapterDeps {
    * unit test (VQ2-007) lints the source to enforce that.
    */
   authTestMode?: boolean;
+  /**
+   * LCR-05 — every live leg is tracked here from the moment its adapter
+   * starts until its socket closes, so runShutdown can hand the calls to the
+   * next process (`handOffAll`) instead of hanging up on them.
+   */
+  liveCalls?: LiveRealtimeCalls;
 }
 
 export interface AttachOptions {
@@ -222,6 +229,7 @@ export function attachMediaStreamServer(
       try {
         const adapter = new TwilioMediaStreamAdapter({ ...deps, authenticatedCall }, ws as unknown as WsLike);
         adapter.start();
+        if (deps.liveCalls) ws.once('close', deps.liveCalls.add(adapter));
       } catch (err) {
         logger.error('mediastream adapter init failed', {
           error: err instanceof Error ? err.message : String(err),

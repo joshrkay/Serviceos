@@ -210,11 +210,13 @@ describe('WS3 /voice realtime-vs-Gather decision matrix', () => {
   });
 });
 
-// ─── OBS — the handleInbound catch never 5xxs by design (graceful hangup
-// TwiML so Twilio doesn't retry), which makes it invisible to recordApiError.
+// ─── OBS — the handleInbound catch never 5xxs by design (voicemail
+// TwiML — a 5xx is never retried by Twilio), which makes it invisible to recordApiError.
 // voice_error(inbound_handler_failed) is the only backend signal for it. ────
 describe('WS3/OBS voice_error — inbound handler failure', () => {
-  it('adapter.handleInbound throws → still 200s graceful hangup TwiML, and fires voice_error', async () => {
+  // LCR-04 — the caller now leaves a voicemail instead of hearing "try again
+  // later" and a hang-up.
+  it('adapter.handleInbound throws → still 200s, with voicemail TwiML, and fires voice_error', async () => {
     const handleInbound = vi.fn().mockRejectedValue(new Error('adapter boom'));
     const handleInboundForStream = vi.fn();
     const { app } = mountRouter({
@@ -228,7 +230,8 @@ describe('WS3/OBS voice_error — inbound handler failure', () => {
     const res = await signedVoicePost(app, VOICE_PARAMS);
 
     expect(res.status).toBe(200);
-    expect(res.text).toContain('technical difficulties');
+    expect(res.text).toContain('<Record');
+    expect(res.text).not.toContain('try again later');
     // OBS — fired after the graceful hangup TwiML is already queued above.
     expect(recordVoiceErrorMock).toHaveBeenCalledWith(
       expect.objectContaining({

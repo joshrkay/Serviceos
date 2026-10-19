@@ -72,8 +72,10 @@ export class PgTenantUsageRepository extends PgBaseRepository implements TenantU
         subscription_status: string | null;
         created_at: Date;
       }>(
+        // Demo-pool and platform tenants (U7) are hidden from every report:
+        // null here is the route's 404, the same as an unknown id.
         `SELECT id, name, plan_id, subscription_status, created_at
-           FROM tenants WHERE id = $1`,
+           FROM tenants WHERE id = $1 AND demo = false AND platform = false`,
         [tenantId],
       );
       const t = tenant.rows[0];

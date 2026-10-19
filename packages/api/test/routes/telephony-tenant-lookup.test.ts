@@ -294,7 +294,10 @@ describe('D2-3 inbound /voice tenant resolution', () => {
     });
   });
 
-  it('repo throws → Sentry sees `telephony.tenant_lookup_error`, prod still declines', async () => {
+  // LCR-04 — Twilio does not retry a 5xx voice webhook: the old 503 played
+  // Twilio's generic error and dropped the call. A DB outage now takes a
+  // voicemail (200 + <Record>), and still never 200-declines the number.
+  it('repo throws → Sentry sees `telephony.tenant_lookup_error`, prod takes a voicemail and never declines', async () => {
     const { app, sentry } = buildHarness({
       nodeEnv: 'production',
       numbers: {},
@@ -332,12 +335,13 @@ describe('D2-3 inbound /voice tenant resolution', () => {
       To: UNKNOWN_NUMBER,
     });
 
-    // Codex P1 (PR #384) — DB outages MUST surface as 5xx so Twilio's
-    // retry policy can recover from transient failures. Previously we
-    // 200-declined which made every transient blip look like a
-    // permanent "number not in service" misroute.
-    expect(res.status).toBe(503);
-    expect(res.text).toMatch(/temporarily unavailable/i);
+    // Codex P1 (PR #384) — a DB outage must never 200-decline (every
+    // transient blip read as a permanent "number not in service" misroute).
+    // LCR-04 — nor 5xx (Twilio never retries it; the call drops): voicemail.
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Record');
+    expect(res.text).not.toMatch(/not in service/i);
+    expect(res.text).not.toMatch(/temporarily unavailable/i);
     expect(throwingRepo.findByNumber).toHaveBeenCalledTimes(1);
     // Only the error capture is emitted now — we no longer fall through
     // to the dev-fallback / prod-miss path on infra errors.
