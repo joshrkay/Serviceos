@@ -53,7 +53,7 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
   });
 
   it('the daily payment-link reconciliation sweep runs under its own leader lock, worker roles only (S5a-6)', () => {
-    expect(src).toMatch(/paymentLinkReconciliation:\s*590033/);
+    expect(src).toMatch(/paymentLinkReconciliation:\s*590034/);
     const segment = src.slice(src.indexOf('// S5a-6 (U8) — daily payment-link reconciliation sweep.'));
     const block = segment.slice(0, segment.indexOf('// Billing resilience (Part B)'));
     expect(block).toContain('if (shouldRunWorkers) {');

@@ -2505,8 +2505,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     voiceQualityGrading: 590032,
     // S5a-6 (U8) — daily payment-link reconciliation sweep (backstop for a
     // lost cleanup job and pay links that predate "Collect on the spot").
-    // DISTINCT key per the collision discipline above.
-    paymentLinkReconciliation: 590033,
+    // DISTINCT key per the collision discipline above; 590033 is claimed by
+    // the S6 demo lease reaper (#1722), so this owns 590034.
+    paymentLinkReconciliation: 590034,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
