@@ -995,6 +995,11 @@ flowchart LR
     the scrub would put the data back.
     - The erase first writes a durable, tenant-scoped erasure tombstone. It is keyed by:
       - the customer id, and the collected session, call and correlation ids
+      - **every owned-entity id in the subject's graph**: the jobs, estimates, invoices,
+        appointments, service locations and the rest of the manifest's transitive closure,
+        collected in phase 1. Phase 2 severs or anonymizes the parent links, so a child row such as
+        `invoice_line_items`, which carries only `invoice_id` (`schema.ts:653-664`), could no
+        longer be traced to the subject. Its `invoice_id` still matches the tombstone.
       - the subject's normalized phone numbers and email addresses, stored as keyed hashes
         (HMAC-SHA256 with a server-side key), so the tombstone keeps no raw identifier
       A writer that knows only a recipient, with no customer id, still matches. The erased
@@ -1013,9 +1018,26 @@ flowchart LR
       - business-integration creates: QuickBooks `ensureCustomerExternalId`
         (`integrations/accounting/sync-service.ts:280-310`) and Stripe saved-card customer
         creation (`payments/stripe-saved-card.ts:84-124`)
-      A structural test lists every call site of each external provider client's write methods
-      (Twilio Messages and Calls, both email providers, QuickBooks, Stripe, Langfuse). It fails
-      when a call site is not wrapped in the fence, so a new writer can't skip it.
+      **The structural test enumerates every outbound call, not a list of known clients.** A
+      closed list missed two existing writers:
+      - `financing/financing.ts:133-145` sends the customer's name, email and phone to Wisetack
+        before it saves the local application.
+      - `integrations/calendar-sync.ts:132-179` creates a Google Calendar event with the customer's
+        name and address before it saves the external event id.
+      So:
+      - Every module that makes an outbound network call (`fetch`, a provider SDK or a presigned
+        URL) registers in one `externalSinks` registry.
+      - Each entry is classified either as a subject-data writer, which goes through the fence and
+        has a manifest entry with its delete or retention rule, or as exempt, with a reason (for
+        example a model provider receiving only already-fenced content).
+      - The test greps `packages/api/src` for outbound call sites and fails on any file that isn't
+        registered, so a new integration can't skip the erase.
+      - Wisetack and Google Calendar join the fence and the external-sink manifest:
+        - **Ambiguous creates.** The financing application id we send, and a deterministic event id
+          we set on the calendar insert, let the erase find a create whose response was lost.
+        - **On erase.** The erase deletes the subject's calendar events. For financing, which the
+          lender holds under its own obligations, it records what the provider keeps and says so in
+          the result.
     - **Local writes are fenced in the database, so no repository can skip the fence.** A test over
       provider calls can't see a local write. For example, a transcription already waiting on its
       provider still runs `voiceRepository.updateStatus(..., 'completed', { transcript, metadata })`
@@ -1026,7 +1048,10 @@ flowchart LR
       - The trigger takes the subject's erasure lock in shared mode, so it serializes with phase 1
         like every other writer.
       - It checks the row's subject keys against the tombstone. The manifest maps those keys for
-        each table: `customer_id`, session id, call SID or correlation id.
+        each table: `customer_id`, session id, call SID or correlation id, or, for a transitively
+        linked table, the owned-entity link column, such as `invoice_line_items.invoice_id`.
+      - Test: after phase 2 has severed an invoice's customer link, an in-flight update that writes a
+        description into one of that invoice's `invoice_line_items` rows is refused.
       - On a match, it raises a dedicated SQLSTATE. A write that only blanks content columns, which
         is what the erase itself does, passes, because it can't put data back.
       - Writers treat that SQLSTATE as "erased, drop the content". It is never an error that
@@ -1287,34 +1312,24 @@ flowchart LR
     enable a $100 ceiling and spend another $100.
     - Every attempt is reserved and settled in the ledger whether or not a ceiling is set. With a
       null ceiling, the reserve step just skips the comparison.
-    - **Spend from before the ledger existed is recomputed, never seeded once.** A one-time seed
-      guarded by "no ledger row yet" would miss a charge that an old-version or already-dispatched
-      request writes to `ai_runs` during a rolling deploy, after the seed ran, and the ledger would
-      understate the month for good. So:
-      - Each `ai_runs` row records the `attempt_id` of its reservation. Rows written by an old
-        version, before the ledger existed, have none.
-      - The ledger keeps `pre_ledger_spent` separate from `spent`. A reconcile step sets it by
-        recomputing `SUM(cost_micro_cents)` over the month's `ai_runs` rows that have no
-        `attempt_id`.
-      - The reconcile is a recompute, not an increment. Running it again is exactly-once by
-        construction, a late pre-ledger write is picked up on the next run, and nothing is counted
-        twice, because ledger-era runs carry their `attempt_id`.
-      - **Pre-ledger spend is recomputed inside every capped reservation, so it is never stale and
-        never finalized early.** A periodic reconcile leaves a window. A checkpoint based on the
-        new version's boot time can't prove the old version has stopped either: during a rolling
-        deploy an old process can keep accepting work. So there is no "final" figure:
-        - A capped tenant's reserve transaction recomputes `pre_ledger_spent` itself before the
-          conditional update. It is a `SUM(cost_micro_cents)` over the month's untagged runs.
-        - A partial index on `ai_runs (tenant_id, created_at) WHERE attempt_id IS NULL` keeps that
-          sum cheap. It is empty from the first full month after deploy, because every ledger-era
-          run is tagged.
-        - Every untagged charge that has committed is therefore counted by the next reservation. A
-          late write is never permanently left out, whenever the old process stops.
-        - What no ledger can stop is a call an old-version process makes while it is still running,
-          because old code never consults the cap. The plan says so plainly. The cap governs every
-          call dispatched by ledger-era code, and old-version calls are counted as soon as they
-          land.
-      - The cap compares `spent + pre_ledger_spent + reserved`.
+    - **Caps start in the first full calendar month after the ledger ships, so no pre-ledger
+      spend has to be estimated.** Every attempt to reconcile old-version spend inside a month
+      left a race. A seed missed late writes. A reconcile on an interval went stale. Even a
+      recompute inside the reserve transaction can't serialize with an old-version write it never
+      sees under `READ COMMITTED`, because old code takes no lock. Old-version processes can't be
+      proven gone either, because they predate any heartbeat. So:
+      - Each `ai_runs` row records the `attempt_id` of its reservation. Every ledger-era run is
+        tagged from the day the ledger ships.
+      - A cap can be enabled from the first full calendar month after the ledger ships. Every run
+        in that month, and in every month after it, was written by ledger-era code, so `spent` is
+        the month's real spend. During the ship month, the settings write that enables a cap is
+        refused, with a plain "available from <date>".
+      - **A tripwire stays in place.** A capped tenant's reserve transaction checks a partial index
+        on `ai_runs (tenant_id, created_at) WHERE attempt_id IS NULL` for the current month. Any
+        untagged row means an old-version writer is still alive, weeks after the ship. The capped
+        reservation is then refused, and `alertOperator` fires.
+      - The conditional reserve therefore compares `spent + reserved + $cost` with the cap. There is
+        no `pre_ledger_spent`.
     - **Unpriced usage fails closed; it is not shown as a floor.** `SUM(cost_micro_cents)` skips
       null-cost runs. A tenant with substantial unpriced usage could therefore enable a $100 cap
       and still get close to another $100. So:
@@ -1367,10 +1382,9 @@ flowchart LR
       - Its RLS matches every tenant table.
       - A per-tenant monthly `ai_spend_ledger` row holds `spent` and `reserved`.
       - **Reserve** is one transaction. A conditional
-        `UPDATE ai_spend_ledger SET reserved = reserved + $cost WHERE spent + pre_ledger_spent +
-        reserved + $cost <= cap RETURNING …` runs first. `pre_ledger_spent` is in the same atomic
-        predicate, so concurrent reservations can't pass the real monthly total. When it returns a
-        row, the reservation row is inserted.
+        `UPDATE ai_spend_ledger SET reserved = reserved + $cost WHERE spent + reserved + $cost <= cap
+        RETURNING …` runs first. When it returns a row, the reservation row is inserted. Caps start
+        only in a month with no untagged runs (see below), so `spent` is the month's full spend.
       - **Every later step is a guarded transition on that one row**, in the same transaction as
         the ledger adjustment:
         `UPDATE ai_spend_reservations SET state = $next WHERE attempt_id = $1 AND state = 'reserved'
@@ -1427,15 +1441,12 @@ flowchart LR
       exactly that attempt's amount, and the other attempt settles normally.
     - A completion delivered twice settles once.
     - A reaper racing a late completion produces exactly one transition.
-  - **Integration (mid-month cap):** a tenant has $90 of `ai_runs` cost this month, all from before
-    deploy. After a reconcile, it enables a $100 cap, and a $15 worst-case call is refused.
-  - **Integration (rolling deploy):**
-    - An old-version request writes a $20 `ai_runs` cost, with no `attempt_id`. The next capped
-      reservation counts it exactly once, and recomputing again changes nothing.
-    - An untagged $90 charge commits after a cap is set. The very next capped reservation counts
-      it, so a $100 cap refuses a $15 call.
-    - With an old-version process still running and writing untagged charges, every committed
-      charge is counted by the next reservation, and none is ever dropped.
+  - **Integration (mid-month cap):** in a month after the ship month, a tenant has $90 of tagged
+    `ai_runs` cost. It enables a $100 cap, and a $15 worst-case call is refused.
+  - **Integration (ship month):**
+    - Enabling a cap during the ship month is refused, with the date it becomes available.
+    - An untagged run in a later month trips the wire: the capped reservation is refused, and an
+      alert fires.
   - **Integration (unpriced):**
     - A current-month run with a null cost blocks enabling a cap.
     - After a verified price is added, the run is repriced from its `model` and `token_usage`, and
