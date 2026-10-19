@@ -8,6 +8,7 @@ import { AppointmentRepository, updateAppointment } from '../appointments/appoin
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { logProposalEvent } from './audit';
 import { confidenceMetaBlocksAutoApprove } from './auto-approve';
+import { voidsCustomerAcceptance } from './acceptance-void';
 import { chainMetaFor } from './chain';
 import { resolveChainReferences } from './execution/chain-resolution';
 import { undoCorrectionLesson } from '../learning/corrections/apply-undo';
@@ -71,6 +72,28 @@ const CONFIG_WRITING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
   'update_brand_voice',
   'update_catalog_item',
   'add_catalog_item',
+  // PI-2 — a standing instruction is injected as "OWNER STANDING
+  // INSTRUCTIONS" into every drafting prompt and composeBrandVoiceMessage,
+  // including the dropped-call recovery SMS that goes to customers unreviewed.
+  // POST /api/standing-instructions requires settings:update; approving the
+  // memo-drafted equivalent must demand the same.
+  'create_standing_instruction',
+]);
+
+/**
+ * PI-3 — line-item document types whose operator edits become correction
+ * lessons on execution (learning/corrections/record-on-execution.ts). A
+ * lesson cascades into the tenant price book, labor rate and brand voice —
+ * settings:update authority, exercised by whoever APPROVED the edited card.
+ * The sweep runs detached from the approval and would otherwise attribute
+ * the work to the drafter, so the approver's id and role are stamped here;
+ * the recorder cascades only when that role holds settings:update.
+ */
+const APPROVER_ATTRIBUTED_LINE_ITEM_TYPES: ReadonlySet<string> = new Set([
+  'draft_estimate',
+  'update_estimate',
+  'draft_invoice',
+  'update_invoice',
 ]);
 
 /**
@@ -114,6 +137,7 @@ export interface ApproveChainSetResult {
       | 'low_confidence'
       | 'pending_edit'
       | 'missing_fields'
+      | 'voids_acceptance'
       | 'error';
   }[];
 }
@@ -359,10 +383,13 @@ export async function approveProposal(
     // reason and one more: the sweep runs detached from this request, so if
     // the approver's role isn't stamped here it cannot be recovered later, and
     // the audit falls back to asserting 'owner' regardless of who acted.
+    // Line-item types join for the correction lessons their edits cascade
+    // (PI-3, APPROVER_ATTRIBUTED_LINE_ITEM_TYPES).
     ...(proposal.proposalType === 'adopt_entity_alias'
       ? { executedBy: actorId }
       : {}),
-    ...(CONFIG_WRITING_PROPOSAL_TYPES.has(proposal.proposalType)
+    ...(CONFIG_WRITING_PROPOSAL_TYPES.has(proposal.proposalType) ||
+    APPROVER_ATTRIBUTED_LINE_ITEM_TYPES.has(proposal.proposalType)
       ? { executedBy: actorId, executedByRole: actorRole }
       : {}),
   });
@@ -541,6 +568,12 @@ export async function approveChainSet(
     }
     if (confidenceMetaBlocksAutoApprove(proposal.payload)) {
       skipped.push({ id: proposal.id, reason: 'low_confidence' });
+      continue;
+    }
+    // OVAS-01 — voiding a customer's signed acceptance needs its own
+    // deliberate approval with the warning in front of the approver.
+    if (voidsCustomerAcceptance(proposal.payload)) {
+      skipped.push({ id: proposal.id, reason: 'voids_acceptance' });
       continue;
     }
     if (hasPendingEdit && (await hasPendingEdit(tenantId, proposal.id))) {

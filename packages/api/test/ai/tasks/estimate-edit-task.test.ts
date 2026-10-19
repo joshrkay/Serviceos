@@ -654,6 +654,88 @@ describe('EstimateEditTaskHandler', () => {
       expect(meta?.markers).toContainEqual(ACCEPTANCE_VOID_MARKER);
     });
 
+    // OVAS-01 — the marker alone never gated anything: auto-approval reads
+    // overallConfidence, not markers, and a price-less remove action keeps the
+    // level 'high'. An edit that voids the customer's signed acceptance must be
+    // born 'draft' so a human reads the warning before it can execute.
+    describe('OVAS-01 — an acceptance-voiding edit never auto-approves', () => {
+      const ROUTER_ESTIMATE_ID = '5d2f7c1e-9a4b-4c3d-8e2f-1a2b3c4d5e6f';
+
+      function removeGateway(confidence: number): LLMGateway {
+        return mockGateway(
+          JSON.stringify({
+            estimateReference: 'the Garcia estimate',
+            editActions: [{ type: 'remove_line_item', description: 'disposal fee' }],
+            confidence_score: confidence,
+          }),
+        );
+      }
+
+      const supervisedTech = {
+        supervisorPresent: true,
+        supervisorMode: 'tech' as const,
+      };
+
+      it('an ACCEPTED target is born draft at confidence 0.99 with a supervisor present', async () => {
+        const estimateRepo = new InMemoryEstimateRepository();
+        await estimateRepo.create(makeEstimate({ id: ROUTER_ESTIMATE_ID }));
+
+        const handler = new EstimateEditTaskHandler(removeGateway(0.99), estimateRepo);
+        const result = await handler.handle({
+          tenantId,
+          userId,
+          message: 'take the disposal fee off the Garcia estimate',
+          existingEntities: { estimateId: ROUTER_ESTIMATE_ID },
+          ...supervisedTech,
+        });
+
+        const payload = result.proposal.payload as Record<string, unknown>;
+        // The router-verified id lifts the estimateId gate, so nothing but the
+        // acceptance rule stands between this card and auto-approval.
+        expect(payload.estimateId).toBe(ROUTER_ESTIMATE_ID);
+        expect(result.proposal.sourceContext ?? {}).not.toHaveProperty('missingFields');
+        expect(acceptanceMarkerPresent(payload)).toBe(true);
+        expect(result.proposal.status).toBe('draft');
+        expect(result.proposal.approvedAt).toBeUndefined();
+      });
+
+      it('an accepted target stays draft in every supervisor mode, including none threaded', async () => {
+        for (const mode of [undefined, 'supervisor', 'both', 'tech'] as const) {
+          const estimateRepo = new InMemoryEstimateRepository();
+          await estimateRepo.create(makeEstimate({ id: ROUTER_ESTIMATE_ID }));
+          const handler = new EstimateEditTaskHandler(removeGateway(0.99), estimateRepo);
+          const result = await handler.handle({
+            tenantId,
+            userId,
+            message: 'take the disposal fee off the Garcia estimate',
+            existingEntities: { estimateId: ROUTER_ESTIMATE_ID },
+            supervisorPresent: true,
+            ...(mode ? { supervisorMode: mode } : {}),
+          });
+          expect(result.proposal.status, `mode=${mode ?? 'none'}`).toBe('draft');
+        }
+      });
+
+      it('a NON-accepted target with the same input still auto-approves (no behavior change)', async () => {
+        const estimateRepo = new InMemoryEstimateRepository();
+        await estimateRepo.create(
+          makeEstimate({ id: ROUTER_ESTIMATE_ID, status: 'draft', acceptedAt: undefined }),
+        );
+
+        const handler = new EstimateEditTaskHandler(removeGateway(0.99), estimateRepo);
+        const result = await handler.handle({
+          tenantId,
+          userId,
+          message: 'take the disposal fee off the Garcia estimate',
+          existingEntities: { estimateId: ROUTER_ESTIMATE_ID },
+          ...supervisedTech,
+        });
+
+        expect(acceptanceMarkerPresent(result.proposal.payload as Record<string, unknown>)).toBe(false);
+        expect(result.proposal.status).toBe('approved');
+      });
+    });
+
     it('a repo failure never blocks proposal creation (marker skipped)', async () => {
       const failingRepo = {
         findById: async () => {

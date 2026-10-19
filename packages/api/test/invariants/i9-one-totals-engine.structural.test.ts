@@ -220,7 +220,7 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     why: 'Averages `e.totals.totalCents` across similar estimates for AI context.',
   },
   {
-    at: 'src/digest/digest-service.ts:972',
+    at: 'src/digest/digest-service.ts:985',
     as: 'cross-document-aggregate',
     why: 'Pipeline value for the daily digest — sums `e.totals.totalCents` across sent estimates.',
   },

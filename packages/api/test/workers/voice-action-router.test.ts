@@ -63,6 +63,30 @@ import type {
  */
 const TZ_RESOLVER = async () => ({ timezone: 'America/Phoenix' });
 
+/**
+ * OVAS-02 — an auto-approved memo proposal survives only when the memo
+ * creator (voice_recordings.created_by) holds the type's direct permission.
+ * Tests that pin an auto-approval route a stamped in-app memo recorded by
+ * the owner; pair with `recordingId: OWNER_MEMO_RECORDING_ID` on the message.
+ */
+const OWNER_MEMO_RECORDING_ID = 'rec-owner-memo';
+const OWNER_MEMO_DEPS = {
+  voiceRepo: {
+    findById: async (tenantId: string, id: string) =>
+      ({
+        id,
+        tenantId,
+        source: 'inapp_voice',
+        transcriptMetadata: { provenance: 'operator' },
+        createdBy: 'clerk-owner',
+        status: 'completed',
+      }) as never,
+    recordAnswer: async () => null,
+  },
+  resolveMemberRole: async (_tenantId: string, userId: string) =>
+    userId === 'clerk-owner' ? 'owner' : null,
+};
+
 function silentLogger(): Logger {
   const noop = (..._args: unknown[]) => {};
   const base = {
@@ -231,9 +255,19 @@ describe('voice-action-router worker', () => {
       }),
     ]);
 
-    const worker = createVoiceActionRouterWorker({ gateway, proposalRepo, tenantSchedulingResolver: TZ_RESOLVER });
+    const worker = createVoiceActionRouterWorker({
+      gateway,
+      proposalRepo,
+      tenantSchedulingResolver: TZ_RESOLVER,
+      ...OWNER_MEMO_DEPS,
+    });
     await worker.handle(
-      msg({ tenantId: 't-sup', userId: 'u-1', transcript: 'Book Mrs Lee next Tuesday at 2pm' }),
+      msg({
+        tenantId: 't-sup',
+        userId: 'u-1',
+        transcript: 'Book Mrs Lee next Tuesday at 2pm',
+        recordingId: OWNER_MEMO_RECORDING_ID,
+      }),
       silentLogger()
     );
 
@@ -1883,10 +1917,16 @@ describe('P8/latency — per-segment resolver reads run concurrently', () => {
       // Resolves fine — must come through untouched despite its two
       // Promise.all siblings rejecting.
       tenantSchedulingResolver: async () => ({ timezone: 'America/Denver' }),
+      ...OWNER_MEMO_DEPS,
     });
 
     await worker.handle(
-      msg({ tenantId: 't-1', userId: 'u-1', transcript: 'Book the AC repair tomorrow at 2pm' }),
+      msg({
+        tenantId: 't-1',
+        userId: 'u-1',
+        transcript: 'Book the AC repair tomorrow at 2pm',
+        recordingId: OWNER_MEMO_RECORDING_ID,
+      }),
       silentLogger(),
     );
 
