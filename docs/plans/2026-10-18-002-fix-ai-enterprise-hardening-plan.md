@@ -566,6 +566,14 @@ flowchart LR
         `raw_transcript_retention`, `knowledge_chunks.content` and `content_scrubbed`, and the
         `ai_runs` input/output snapshots. Every designated column is covered; the context builder
         sends `content_scrubbed` back to the model (`context-builder.ts:189`).
+      - **It applies the same cross-turn detection as live writes.** A caller who split a card
+        number across turns before the deploy left rows that each fall under 13 digits.
+        - For each session, the backfill walks the stored caller turns of `call_transcript_turns`
+          in order, over the same bounded window the live path uses.
+        - It rewrites every contributing span in one transaction.
+        - It does the same for any session-level transcript stitched from those turns.
+        - Test: a pre-deploy session with a card number split over three turn rows is redacted in all
+          three by the backfill.
       - It deletes or regenerates the embedding of every knowledge chunk it changes, so a vector
         built from the card number can't keep matching.
       - It sets every remaining recording, legal-hold ones included, to `pci_scan = 'pending'`, so
@@ -1340,6 +1348,11 @@ flowchart LR
         `settled`, `WHERE attempt_id = $1 AND state = 'settled_unpriced'`. The ledger's `spent` grows
         by exactly the repriced amount. A repricing that runs twice matches no row the second time.
         Retried attempts each have their own row, so each one is counted.
+      - Each row is repriced from its own stored inputs, never from the logical `ai_runs` row:
+        - An attempt with recorded usage is settled at the new price.
+        - An attempt with no usage (it timed out after dispatch) is charged at the worst case from
+          its stored bound, and moves to `charged_unreconciled`.
+        So every `settled_unpriced` row can be cleared, and none blocks enabling a cap forever.
       - The cap-enable check counts `settled_unpriced` rows for the current month, not just null
         `ai_runs` costs. Once all of them are repriced, the ledger already holds that spend.
       - While any current-month run is still unpriced after that repricing, the settings write that
@@ -1383,8 +1396,15 @@ flowchart LR
     - **Give each physical attempt its own durable reservation, in Postgres.** An aggregate
       `reserved` counter can't say which of two concurrent attempts expired, whether that attempt
       was already reconciled, or whether a retried completion has already been counted. So:
-      - An `ai_spend_reservations` row is keyed by a unique `attempt_id`. It holds `tenant_id`, the
-        month, `amount_micro_cents`, `state` and `lease_expires_at`, plus the `ai_run_id` once known.
+      - An `ai_spend_reservations` row is keyed by a unique `attempt_id`. It holds:
+        - `tenant_id`, the month, `amount_micro_cents`, `state` and `lease_expires_at`
+        - the `ai_run_id`, once known
+        - **this physical attempt's own pricing inputs:** the `model`, the worst-case input-token
+          bound and `maxTokens` it reserved against, and its actual `token_usage` when the provider
+          returned one
+        The logical `ai_runs` row keeps only the final attempt's usage. A timed-out first attempt
+        followed by a successful retry would otherwise leave nothing to price the first attempt
+        from.
         The states, and the only transitions allowed out of `reserved`:
         - `settled`: the actual cost from the usage object is charged.
         - `released`: a definitive no-dispatch failure, so nothing is charged.
@@ -1447,9 +1467,14 @@ flowchart LR
     exceed the cap, and every rejection is typed.
   - **Unit:** an expired lease is charged at worst case and marked `charged_unreconciled`. A usage
     object that arrives later settles it once, with the difference.
-  - **Integration (unpriced, uncapped):** an uncapped tenant makes two unpriced attempts, one a
-    retry. After a price is added, repricing moves both rows to `settled` and adds both amounts to
-    `spent`. A second repricing changes nothing, and enabling a cap then counts that spend.
+  - **Integration (unpriced, uncapped):** an uncapped tenant makes two unpriced attempts. The first
+    times out after dispatch with no usage, and the retry succeeds. After a price is added,
+    repricing does two things:
+    - It charges the first attempt at the worst case from its own stored bound, as
+      `charged_unreconciled`.
+    - It settles the retry from its own usage.
+    Both amounts are added to `spent` once. A second repricing changes nothing, and enabling a cap
+    then counts that spend.
   - **Unit:** a definitive no-dispatch failure releases its reservation, and an ambiguous timeout keeps
     the worst-case charge.
   - **Unit:** a capped tenant's request to an unpriced model is rejected with a typed error.
