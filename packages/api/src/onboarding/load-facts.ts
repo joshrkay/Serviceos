@@ -3,6 +3,7 @@ import type { SettingsRepository } from '../settings/settings';
 import type { OnboardingFacts } from './derive-status';
 import { currentTenantContext } from '../middleware/tenant-context';
 import { toPhoneLineView, type TwilioIntegrationRow } from './phone-line';
+import { classifyProvisioningFailure } from './provisioning-failure';
 import { effectiveBufferMinutes } from '../scheduling/booking-availability';
 
 const VALID_SUBSCRIPTION_STATUSES = new Set(['trialing', 'active', 'past_due', 'canceled', 'incomplete']);
@@ -102,7 +103,8 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
   const activePackCount = packsRes.rows[0]?.n ?? 0;
   const settingsPacks = settings?.activeVerticalPacks?.length ?? 0;
 
-  const twilioLine = toPhoneLineView(integRes.rows[0]);
+  const twilioRow = integRes.rows[0];
+  const twilioLine = toPhoneLineView(twilioRow);
   return {
     tenantId,
     tenantExists: !!tenant,
@@ -133,6 +135,8 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
     twilioPhoneNumber: twilioLine.phoneNumber,
     twilioLineState: integRes.rows[0] ? twilioLine.state : null,
     twilioPendingNumber: twilioLine.pendingNumber,
+    // The status carries the code, never the recorded text.
+    twilioFailureCode: twilioRow?.status === 'failed' ? classifyProvisioningFailure(twilioRow.last_error) : null,
     subscription: {
       stripeSubscriptionId: tenant?.stripe_subscription_id ?? null,
       status: normalizeSubscriptionStatus(tenant?.subscription_status),

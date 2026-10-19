@@ -423,3 +423,56 @@ describe('deriveOnboardingStatus — draft execution on the status', () => {
     expect(withDraft.draft?.execution).toBe('pending');
   });
 });
+
+describe('deriveOnboardingStatus — the phone step\'s failure code (S5b-1)', () => {
+  const lineFacts = { twilioPhoneNumber: '+12165550123', twilioLineState: 'failed' as const, twilioPendingNumber: '+12165550199' };
+  const phone = (r: ReturnType<typeof deriveOnboardingStatus>) => r.steps.find((s) => s.id === 'phone')!;
+
+  it.each([
+    ['area_code_unavailable', ['area_code_unavailable', 'twilio_provisioning_failed']],
+    ['credentials_missing', ['twilio_credentials_missing', 'twilio_provisioning_failed']],
+    ['provider_error', ['twilio_provider_error', 'twilio_provisioning_failed']],
+    ['unknown', ['twilio_provisioning_failed']],
+  ] as const)('a failed row with %s → error, the code, and its blockers', (code, blockers) => {
+    const r = deriveOnboardingStatus(billingDoneFacts({ twilioStatus: 'failed', twilioFailureCode: code, ...lineFacts }));
+    expect(phone(r)).toEqual({
+      id: 'phone',
+      status: 'error',
+      failureCode: code,
+      blockers,
+      metadata: { phoneNumber: '+12165550123', lineState: 'failed', pendingNumber: '+12165550199' },
+    });
+  });
+
+  it('a failed row with no code in the facts reads as unknown (a failed step always carries a code)', () => {
+    const r = deriveOnboardingStatus(billingDoneFacts({ twilioStatus: 'failed' }));
+    expect(phone(r)).toEqual({ id: 'phone', status: 'error', failureCode: 'unknown', blockers: ['twilio_provisioning_failed'] });
+  });
+
+  it.each([
+    ['full_readiness', 'done'],
+    ['t0_requested', 'current'],
+  ] as const)('a row that did not fail (%s) carries no failureCode, even if a stale one is in the facts', (twilioStatus, status) => {
+    const r = deriveOnboardingStatus(billingDoneFacts({
+      twilioStatus,
+      twilioFailureCode: 'provider_error',
+      twilioPhoneNumber: '+12165550123',
+      twilioLineState: twilioStatus === 'full_readiness' ? 'active' : 'claiming',
+      twilioPendingNumber: '+12165550199',
+    }));
+    const step = phone(r);
+    expect(step.status).toBe(status);
+    expect(step).not.toHaveProperty('failureCode');
+    expect(step).not.toHaveProperty('blockers');
+    expect(step.metadata).toEqual({
+      phoneNumber: '+12165550123',
+      lineState: twilioStatus === 'full_readiness' ? 'active' : 'claiming',
+      pendingNumber: '+12165550199',
+    });
+  });
+
+  it('no other step gains a failureCode', () => {
+    const r = deriveOnboardingStatus(billingDoneFacts({ twilioStatus: 'failed', twilioFailureCode: 'provider_error' }));
+    for (const s of r.steps.filter((x) => x.id !== 'phone')) expect(s).not.toHaveProperty('failureCode');
+  });
+});
