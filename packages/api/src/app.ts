@@ -5087,6 +5087,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // a degrade so /voice/gather-fallback bridges the call instead.
             setPendingTransferTwiml: twilioAdapter.setPendingTransferTwiml.bind(twilioAdapter),
             takePendingTransferTwiml: twilioAdapter.takePendingTransferTwiml.bind(twilioAdapter),
+            // LCR-02: the voicemail <Record> a silence / failed-turn ladder cap
+            // offers, delivered through the same REST hand-off as a <Dial>.
+            ladderVoicemailTwiml: (session, kind) => twilioAdapter.buildLadderVoicemailTwiml(session, kind),
             // F6b: Wire the shared whisper cache so the MediaStream adapter
             // stores whisper TwiML after handleEscalateWithContext runs.
             whisperCache: sharedWhisperCache,

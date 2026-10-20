@@ -28,8 +28,12 @@ import { callerTranscriptText } from '../../ai/voice-turn/transcript-append';
 import {
   isLowSttConfidence,
   lowSttLadderStep,
+  parkedHandoffKind,
   recordLowSttLadderError,
   LOW_STT_LADDER_TERMINAL_REASON,
+  type LadderVoicemailKind,
+  type LowSttLadderStep,
+  type LowSttStrikeCause,
 } from '../../ai/voice-turn/shared/low-stt-ladder';
 import { decideLanguageSwitch } from '../../ai/voice-turn/shared/language-switch';
 import {
@@ -83,7 +87,6 @@ import {
   ttsCopy,
   LANGUAGE_SWITCH_ACK,
   SPEECH_TURN_FAILURE_REPROMPT_COPY,
-  SPEECH_TURN_FAILURE_ESCALATION_COPY,
   HANDOFF_UNAVAILABLE_COPY,
   TURN_HOLD_COPY,
   MAX_CALL_DURATION_WRAP_UP_COPY,
@@ -376,6 +379,15 @@ export interface MediaStreamAdapterDeps {
    * Wire via: `gatherAdapter.takePendingTransferTwiml.bind(gatherAdapter)`
    */
   takePendingTransferTwiml?: (sessionId: string) => string | undefined;
+  /**
+   * LCR-02 — the voicemail `<Record>` a ladder cap offers (a silent line, or
+   * an escalation that could not dial anyone), delivered to the live call
+   * through the same REST hand-off as a parked `<Dial>`. Absent → the cap
+   * speaks its closing line and ends the leg instead.
+   *
+   * Wire via: `gatherAdapter.buildLadderVoicemailTwiml(session, kind)`
+   */
+  ladderVoicemailTwiml?: (session: VoiceSession, kind: LadderVoicemailKind) => string;
   /**
    * Realtime hand-off — upper bound (ms) on waiting for the spoken hand-off
    * line ("connecting you…") to finish playing before the call is pulled off
@@ -2093,7 +2105,7 @@ export class TwilioMediaStreamAdapter {
     // missing/non-finite value is treated as HIGH so it can never block a
     // turn on absent data (requirement: never block on absent confidence).
     if (isLowSttConfidence(event.confidence)) {
-      await this.recoverFromLowSttConfidence(session);
+      await this.recoverFromLowSttConfidence(session, 'low_confidence');
       return;
     }
     // A dispatched (high-confidence, or confidence-absent) final resets the
@@ -2358,11 +2370,10 @@ export class TwilioMediaStreamAdapter {
    * the apology behave exactly like barge-in during any other agent speech.
    *
    * Failure {@link MAX_CONSECUTIVE_SPEECH_TURN_FAILURES} (back-to-back): the
-   * turn pipeline is really down, so stop apologizing — speak the FSM's own
-   * system-failure hand-off line and end the call gracefully via the existing
-   * `end_session` close path (which finalizes the leg as a `failed` outcome
-   * and arms the durable dropped-call recovery follow-up) rather than trapping
-   * the caller in an apology loop.
+   * turn pipeline is really down, so stop apologizing and escalate through
+   * the FSM's own `system_failure` (LCR-02,
+   * {@link escalateRepeatedTurnFailure}) rather than trapping the caller in
+   * an apology loop — or, before LCR-02, promising a transfer and hanging up.
    *
    * The counter is bumped here and reset to 0 by any successful turn.
    */
@@ -2373,8 +2384,14 @@ export class TwilioMediaStreamAdapter {
     if (
       this.state.consecutiveSpeechTurnFailures >= MAX_CONSECUTIVE_SPEECH_TURN_FAILURES
     ) {
-      await this.speakAndEndAfterRepeatedSpeechTurnFailures(session);
-      // OBS — fired after the hand-off is spoken/the call is torn down;
+      this.state.consecutiveSpeechTurnFailures = 0;
+      await this.escalateRepeatedTurnFailure(
+        session,
+        'speech_turn_repeated_failure',
+        'system_failure:speech_turn_repeated_failure',
+        'speech_turn_failure_cap',
+      );
+      // OBS — fired after the escalation started / the call is torn down;
       // never alters the recovery behavior above.
       recordVoiceError({
         errorKind: 'speech_turn_repeated_failure',
@@ -2397,35 +2414,133 @@ export class TwilioMediaStreamAdapter {
   }
 
   /**
-   * VOX-35c — repeated-failure branch: speak the localized hand-off line then
-   * tear the call down through the normal `end_session` path. The synthetic
-   * `end_session` effect is stashed so `finalizeOnClose` reads its
-   * `payload.reason` (system_failure:* → `failed` outcome) exactly as it would
-   * for an FSM-emitted end_session.
+   * LCR-02 — the caller is speaking but cannot be served (two low-confidence
+   * finals, or the turn pipeline throwing twice): run the FSM's real
+   * escalation instead of promising a transfer and hanging up.
    *
-   * A3 reuses this exact hand-off (speak the escalation line, stash a
-   * synthetic `end_session`, close) for repeated low-STT-confidence turns —
-   * same graceful-hand-off shape, different root cause — so it takes an
-   * optional `endSessionReason` to keep `voice_sessions.terminal_reason`
-   * accurate for each caller rather than mislabeling a noisy-line hand-off
-   * as a pipeline failure. `deriveCallOutcome` doesn't special-case either
-   * string beyond the shared `system_failure:` prefix check (which neither
-   * of these calls exercises — finalState here is never `escalating`), so
-   * both fall through to the same `failed` outcome; the string only affects
-   * the persisted reason.
+   * `system_failure` is dispatched under the session lock (callers are never
+   * inside it) and its effects delivered through the host processor
+   * (`deliverEscalationEffects`), whose `notify_oncall` pages on-call and
+   * parks what the caller should get. Then, from what was parked:
+   *   - a `<Dial>`: the FSM's "connect you" line is spoken — it is true now —
+   *     and the hand-off delivers the transfer once it has played
+   *     (/dial-result owns the terminal stamp);
+   *   - the no-one-available message: delivered as is (it carries its own
+   *     line); the "connect you" line is never spoken;
+   *   - nothing: a voicemail `<Record>`, or — when no TwiML can reach this
+   *     call — the honest {@link HANDOFF_UNAVAILABLE_COPY} line, then the leg
+   *     ends with `closeReason`.
    */
-  private async speakAndEndAfterRepeatedSpeechTurnFailures(
+  private async escalateRepeatedTurnFailure(
     session: VoiceSession,
-    endSessionReason: string = 'system_failure:speech_turn_repeated_failure',
+    fsmReason: string,
+    closeReason: string,
+    trigger: string,
   ): Promise<void> {
-    await this.speakRecoveryLine(session, SPEECH_TURN_FAILURE_ESCALATION_COPY);
     if (this.state.closed) return;
-    this.state.pendingFinalizeEffects = [
-      {
-        type: 'end_session',
-        payload: { reason: endSessionReason },
-      },
-    ];
+    let effects: SideEffect[] = [];
+    try {
+      effects = await this.deps.store.withSessionLock(session.id, () =>
+        Promise.resolve(session.machine.dispatch({ type: 'system_failure', reason: fsmReason })),
+      );
+      await this.deps.deliverEscalationEffects?.(session, effects, session.tenantId);
+    } catch (err) {
+      logger.error('mediastream: ladder escalation failed — nothing parked', {
+        callSid: this.state.callSid,
+        sessionId: session.id,
+        trigger,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (this.state.closed) return;
+    const terminal: SideEffect[] = [{ type: 'end_session', payload: { reason: closeReason } }];
+    const canDeliver = this.canDeliverLadderTwiml();
+    const parkedTwiml = canDeliver ? this.deps.takePendingTransferTwiml?.(session.id) : undefined;
+    const parked = parkedHandoffKind(parkedTwiml);
+    if (parkedTwiml && parked === 'dial') {
+      await this.emitSideEffects(effects);
+      const line = [...effects].reverse().find((fx) => fx.type === 'tts_play');
+      if (line && typeof line.payload.text === 'string') {
+        this.deps.store.appendTranscript(session.id, {
+          speaker: 'agent',
+          text: renderTtsText(line.payload.text, {}, this.currentSpokenLanguage()),
+          ts: Date.now(),
+        });
+      }
+      void this.maybeHandOffToHuman(trigger, parkedTwiml);
+      return;
+    }
+    if (parkedTwiml) {
+      this.state.pendingFinalizeEffects = terminal;
+      void this.maybeHandOffToHuman(trigger, parkedTwiml);
+      return;
+    }
+    if (this.offerLadderVoicemail(session, 'no_handoff', terminal, trigger)) return;
+    await this.speakAndClose(session, HANDOFF_UNAVAILABLE_COPY, terminal);
+  }
+
+  /**
+   * LCR-02 — a silent line at the cap. Nobody may be there (a pocket dial, a
+   * dead line), so on-call is never paged: offer a voicemail, else ask the
+   * caller to call back and end the leg. Runs inside the silence timer's
+   * session lock — it must not take the lock again.
+   */
+  private async endSilentCall(
+    session: VoiceSession,
+    step: Extract<LowSttLadderStep, { kind: 'silence_close' }>,
+  ): Promise<void> {
+    const terminal: SideEffect[] = [{ type: 'end_session', payload: { reason: step.reason } }];
+    if (this.offerLadderVoicemail(session, 'silence', terminal, 'silence_ladder_cap')) return;
+    await this.speakAndClose(session, step.copy, terminal);
+  }
+
+  /** A TwiML hand-off can reach this live call (REST wired, call known, nothing in flight). */
+  private canDeliverLadderTwiml(): boolean {
+    return Boolean(
+      this.deps.restRedirect &&
+        this.state.callSid &&
+        this.state.handoff === 'none' &&
+        !this.state.closed &&
+        !this.state.wsCloseInitiated,
+    );
+  }
+
+  /**
+   * LCR-02 — hand the live call a voicemail `<Record>` through the realtime
+   * hand-off (bounded playout wait → REST inline TwiML; refused → the WS7
+   * degrade re-parks it for /voice/gather-fallback). The terminal stamp is
+   * stashed first so the stream's end records `terminal`'s reason. Returns
+   * false when no voicemail can reach this call. Not awaited: the hand-off
+   * waits on playout and may run under the silence timer's lock.
+   */
+  private offerLadderVoicemail(
+    session: VoiceSession,
+    kind: LadderVoicemailKind,
+    terminal: SideEffect[],
+    trigger: string,
+  ): boolean {
+    if (!this.canDeliverLadderTwiml() || !this.deps.ladderVoicemailTwiml) return false;
+    let twiml: string;
+    try {
+      twiml = this.deps.ladderVoicemailTwiml(session, kind);
+    } catch {
+      return false;
+    }
+    this.state.pendingFinalizeEffects = terminal;
+    void this.maybeHandOffToHuman(trigger, twiml);
+    return true;
+  }
+
+  /**
+   * Speak a closing line, let it play (closing the stream drops audio Twilio
+   * has not played yet; bounded), then end the leg through the `end_session`
+   * close path with `terminal`'s reason.
+   */
+  private async speakAndClose(session: VoiceSession, line: string, terminal: SideEffect[]): Promise<void> {
+    await this.speakRecoveryLine(session, line);
+    await this.awaitPlayout(this.deps.handoffPlayoutMaxWaitMs ?? DEFAULT_HANDOFF_PLAYOUT_MAX_WAIT_MS);
+    if (this.state.closed) return;
+    this.state.pendingFinalizeEffects = terminal;
     this.handleClose('end_session');
   }
 
@@ -2443,27 +2558,40 @@ export class TwilioMediaStreamAdapter {
    * ({@link speakRecoveryLine}) — barge-in/TTFA/transcript bookkeeping
    * behave identically to any other agent line.
    *
-   * Streak {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} (back-to-back): the
-   * line itself is the problem (noisy/crosstalk/bad connection), not a
-   * one-off blip — stop reprompting and hand off through the SAME
-   * escalation/`end_session` path VOX-35c uses for a persistently broken
-   * turn pipeline ({@link speakAndEndAfterRepeatedSpeechTurnFailures}),
-   * rather than trapping the caller in a "could you repeat that" loop.
+   * Streak {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} (back-to-back): stop
+   * reprompting. LCR-02 — the end is decided by the capping strike's
+   * `cause`: a low-confidence final (the line itself is the problem — noise,
+   * crosstalk, a bad connection) escalates through the FSM exactly like a
+   * broken turn pipeline ({@link escalateRepeatedTurnFailure}); a silence
+   * expiry offers a voicemail and pages nobody ({@link endSilentCall}).
    *
    * The streak is bumped here and reset to 0 by any dispatched
    * (high-confidence, or confidence-absent) final.
    */
-  private async recoverFromLowSttConfidence(session: VoiceSession): Promise<void> {
+  private async recoverFromLowSttConfidence(
+    session: VoiceSession,
+    cause: LowSttStrikeCause,
+  ): Promise<void> {
     if (this.repromptSuppressed(session)) return;
     // #1601 step 2 — the rules (cap, copy, terminal reason) are the shared
     // ladder's; this leg owns its streak counter and how the line is spoken.
     this.state.consecutiveLowConfidenceTurns += 1;
-    const step = lowSttLadderStep(this.state.consecutiveLowConfidenceTurns);
+    const step = lowSttLadderStep(this.state.consecutiveLowConfidenceTurns, cause);
 
-    if (step.escalate) {
-      await this.speakAndEndAfterRepeatedSpeechTurnFailures(session, LOW_STT_LADDER_TERMINAL_REASON);
-    } else {
+    if (step.kind === 'reprompt') {
       await this.speakRecoveryLine(session, step.copy);
+    } else {
+      this.state.consecutiveLowConfidenceTurns = 0;
+      if (step.kind === 'silence_close') {
+        await this.endSilentCall(session, step);
+      } else {
+        await this.escalateRepeatedTurnFailure(
+          session,
+          step.reason,
+          LOW_STT_LADDER_TERMINAL_REASON,
+          'low_stt_ladder_cap',
+        );
+      }
     }
     // OBS — fired after the line is spoken / the call is torn down; never
     // alters the recovery behavior above.
@@ -2519,7 +2647,7 @@ export class TwilioMediaStreamAdapter {
         return;
       }
     }
-    await this.recoverFromLowSttConfidence(session);
+    await this.recoverFromLowSttConfidence(session, 'silence');
   }
 
   /**
@@ -3881,7 +4009,7 @@ export class TwilioMediaStreamAdapter {
 
   /**
    * The limit hit. Same speak-then-end shape as
-   * {@link speakAndEndAfterRepeatedSpeechTurnFailures}: stash a synthetic
+   * {@link speakAndClose}: stash a synthetic
    * `end_session` carrying the real reason and close through the existing
    * `end_session` path, so `finalizeOnClose` persists
    * `voice_sessions.terminal_reason = 'max_call_duration'`. A NEW bare
@@ -4231,9 +4359,9 @@ export class TwilioMediaStreamAdapter {
    *      the stream leg. `/dial-result` owns the terminal stamp of a `<Dial>`.
    * Never throws (every call site is fire-and-forget).
    */
-  private async maybeHandOffToHuman(trigger: string): Promise<void> {
+  private async maybeHandOffToHuman(trigger: string, taken?: string): Promise<void> {
     try {
-      await this.handOffToHuman(trigger);
+      await this.handOffToHuman(trigger, taken);
     } catch (err) {
       logger.error('realtime hand-off threw', {
         callSid: this.state.callSid,
@@ -4243,13 +4371,14 @@ export class TwilioMediaStreamAdapter {
     }
   }
 
-  private async handOffToHuman(trigger: string): Promise<void> {
+  /** `taken` — TwiML the caller already took (LCR-02's ladder inspects what was parked first). */
+  private async handOffToHuman(trigger: string, taken?: string): Promise<void> {
     const { takePendingTransferTwiml, restRedirect } = this.deps;
     const session = this.state.session;
     const callSid = this.state.callSid;
-    if (!takePendingTransferTwiml || !session || !callSid) return;
+    if ((!taken && !takePendingTransferTwiml) || !session || !callSid) return;
     if (this.state.handoff !== 'none' || this.state.closed || this.state.wsCloseInitiated) return;
-    const twiml = takePendingTransferTwiml(session.id);
+    const twiml = taken ?? takePendingTransferTwiml?.(session.id);
     if (!twiml) return;
     this.state.handoff = 'awaiting_playout';
     this.state.handoffTwiml = twiml;
