@@ -12,6 +12,8 @@ export interface OptionCardOption<K extends string = string> {
   rivetLine?: string;
   /** The option most shops pick; gets the small "Most shops like yours" mark. */
   mostShops?: boolean;
+  /** What the owner said out loud that picked this option, shown as `Heard: "…"` under it. */
+  heard?: string;
 }
 
 export interface OptionCardProps<K extends string = string> {
@@ -66,6 +68,7 @@ export function OptionCard<K extends string = string>({
           option.mostShops ? `${id}-most` : null,
           option.detail ? `${id}-detail` : null,
           option.rivetLine ? `${id}-say` : null,
+          option.heard ? `${id}-heard` : null,
         ]
           .filter(Boolean)
           .join(' ');
@@ -117,6 +120,11 @@ export function OptionCard<K extends string = string>({
               {option.rivetLine ? (
                 <span id={`${id}-say`} className="break-words text-sm leading-[1.45] text-muted-foreground">
                   Rivet would say: &ldquo;{option.rivetLine}&rdquo;
+                </span>
+              ) : null}
+              {option.heard ? (
+                <span id={`${id}-heard`} className="break-words text-sm font-medium leading-[1.45] text-primary">
+                  Heard: &ldquo;{option.heard}&rdquo;
                 </span>
               ) : null}
             </span>

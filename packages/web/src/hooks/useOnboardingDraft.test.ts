@@ -11,6 +11,7 @@ import { useOnboardingDraft } from './useOnboardingDraft';
 
 const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const CREATE = { packId: 'plumbing', businessName: 'Walsh Plumbing' };
+const TIMEZONE_ERROR = "I couldn't save your time zone. Check your connection and tap again.";
 
 interface Call {
   method: string;
@@ -488,7 +489,179 @@ describe('useOnboardingDraft', () => {
       });
       expect(res).toBeNull();
       expect(calls.map((c) => `${c.method} ${c.path}`).slice(2)).toEqual(['POST /api/onboarding/draft']);
-      expect(result.current.error).toBe("That didn't go through. Try again.");
+      expect(result.current.error).toBe(TIMEZONE_ERROR);
+    });
+
+    it('says the same plain words when approve itself is refused for a missing zone, and sends nothing more', async () => {
+      stubFetch([
+        json(200, { draft: draftJson }),
+        json(400, { error: 'VALIDATION_ERROR', message: 'TIMEZONE_REQUIRED: the browser timezone must be recorded on the draft before approval' }),
+      ]);
+      const { result } = renderHook(() => useOnboardingDraft(null));
+      await waitFor(() => expect(result.current.draft).not.toBeNull());
+      let res: unknown = 'unset';
+      await act(async () => {
+        res = await result.current.approve();
+      });
+      expect(res).toBeNull();
+      expect(calls).toHaveLength(2);
+      expect(result.current.error).toBe(TIMEZONE_ERROR);
+    });
+  });
+
+  describe('after approval: undo, retry and start over', () => {
+    const IDS = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
+    const approvedAt = (version: number) =>
+      withDraft({ status: 'approved', version, proposalIds: IDS, approvedAt: '2026-10-18T10:05:00.000Z', choices: { greeting: { option: 'b' } } });
+    const editableAt = (version: number) => withDraft({ version, choices: { greeting: { option: 'b' } } });
+    const conflict = (message: string) => json(409, { error: 'CONFLICT', message });
+    const paths = () => calls.map((c) => `${c.method} ${c.path}`);
+
+    async function holding(draft: object, queue: Array<Response | Error>) {
+      stubFetch([json(200, { draft }), ...queue]);
+      const hook = renderHook(() => useOnboardingDraft(null));
+      await waitFor(() => expect(hook.result.current.draft).not.toBeNull());
+      return hook.result;
+    }
+
+    it('undo posts the version it holds with the owner token and commits the draft, editable again with nothing listed', async () => {
+      const result = await holding(approvedAt(2), [json(200, { draft: editableAt(3) })]);
+      let outcome: unknown;
+      await act(async () => {
+        outcome = await result.current.undo();
+      });
+      expect(calls[1]).toEqual({ method: 'POST', path: '/api/onboarding/draft/undo', body: { expectedVersion: 2 }, authorization: 'Bearer tok-test-default' });
+      expect(outcome).toMatchObject({ kind: 'done' });
+      expect(result.current.draft).toMatchObject({ status: 'draft', version: 3, proposalIds: [], choices: { greeting: { option: 'b' } } });
+      expect(result.current.error).toBeNull();
+      expect(result.current.notice).toBeNull();
+    });
+
+    it('start over posts the version it holds and commits the draft with the answers intact', async () => {
+      const result = await holding(approvedAt(4), [json(200, { draft: editableAt(5) })]);
+      await act(async () => {
+        await result.current.reset();
+      });
+      expect(calls[1]).toEqual({ method: 'POST', path: '/api/onboarding/draft/reset', body: { expectedVersion: 4 }, authorization: 'Bearer tok-test-default' });
+      expect(result.current.draft).toMatchObject({ status: 'draft', version: 5, proposalIds: [], choices: { greeting: { option: 'b' } } });
+    });
+
+    it('retry posts the version it holds and commits the next one, so the undo after it carries v + 1', async () => {
+      const result = await holding(approvedAt(2), [
+        json(200, { draft: approvedAt(3), retriedProposalIds: IDS, undoable: true }),
+        json(200, { draft: editableAt(4) }),
+      ]);
+      let outcome: unknown;
+      await act(async () => {
+        outcome = await result.current.retry();
+      });
+      expect(calls[1]).toMatchObject({ path: '/api/onboarding/draft/retry', body: { expectedVersion: 2 } });
+      expect(outcome).toMatchObject({ kind: 'done', response: { undoable: true, retriedProposalIds: IDS } });
+      expect(result.current.version).toBe(3);
+
+      await act(async () => {
+        await result.current.undo();
+      });
+      expect(calls[2]).toMatchObject({ path: '/api/onboarding/draft/undo', body: { expectedVersion: 3 } });
+    });
+
+    it('posts a newer version the screen has seen on a status poll (another window retried), never an older one', async () => {
+      const result = await holding(approvedAt(2), [json(200, { draft: editableAt(5) }), json(200, { draft: editableAt(6) })]);
+      await act(async () => {
+        await result.current.reset(4);
+      });
+      expect(calls[1].body).toEqual({ expectedVersion: 4 });
+      await act(async () => {
+        await result.current.undo(1);
+      });
+      expect(calls[2].body).toEqual({ expectedVersion: 5 });
+    });
+
+    for (const message of ['VERSION_CONFLICT: expected 2, found 3; re-read the draft', 'DRAFT_NOT_APPROVED: the draft has not been approved']) {
+      for (const action of ['undo', 'retry', 'reset'] as const) {
+        it(`${action}: a 409 ${message.split(':')[0]} re-reads the draft, says it changed in another window, and does not repeat the call`, async () => {
+          const result = await holding(approvedAt(2), [conflict(message), json(200, { draft: editableAt(3) })]);
+          let outcome: unknown;
+          await act(async () => {
+            outcome = await result.current[action]();
+          });
+          expect(outcome).toEqual({ kind: 'moved' });
+          expect(paths()).toEqual(['GET /api/onboarding/draft', `POST /api/onboarding/draft/${action}`, 'GET /api/onboarding/draft']);
+          expect(result.current.version).toBe(3);
+          expect(result.current.notice).toBe('This changed in another window.');
+          expect(result.current.error).toBeNull();
+        });
+      }
+    }
+
+    it('hands a typed refusal back to the screen to decide, without an error line or a re-read', async () => {
+      const result = await holding(approvedAt(2), [
+        conflict('UNDO_WINDOW_CLOSED: It is too late to undo this.'),
+        conflict('DRAFT_UNDO_REFUSED: part of it is being saved right now.'),
+        json(409, { error: 'CONFLICT', message: 'DRAFT_RESET_REFUSED: Part of your setup is already saved.', details: { reason: 'applied' } }),
+        json(409, { error: 'CONFLICT', message: 'DRAFT_RESET_REFUSED: being saved right now.', details: { reason: 'executing' } }),
+        conflict('DRAFT_RETRY_UNSAFE: Retrying could leave your setup half saved.'),
+      ]);
+      const outcomes: unknown[] = [];
+      await act(async () => {
+        outcomes.push(await result.current.undo());
+        outcomes.push(await result.current.undo());
+        outcomes.push(await result.current.reset());
+        outcomes.push(await result.current.reset());
+        outcomes.push(await result.current.retry());
+      });
+      expect(outcomes).toEqual([
+        { kind: 'refused', refusal: 'UNDO_WINDOW_CLOSED', resetReason: null },
+        { kind: 'refused', refusal: 'DRAFT_UNDO_REFUSED', resetReason: null },
+        { kind: 'refused', refusal: 'DRAFT_RESET_REFUSED', resetReason: 'applied' },
+        { kind: 'refused', refusal: 'DRAFT_RESET_REFUSED', resetReason: 'executing' },
+        { kind: 'refused', refusal: 'DRAFT_RETRY_UNSAFE', resetReason: null },
+      ]);
+      expect(paths().filter((p) => p.startsWith('GET'))).toHaveLength(1);
+      expect(result.current.error).toBeNull();
+      expect(result.current.notice).toBeNull();
+      expect(result.current.draft?.version).toBe(2);
+    });
+
+    it('reports a dropped connection or a server failure as failed, with the status to word it by', async () => {
+      const result = await holding(approvedAt(2), [new TypeError('network down'), json(500, { error: 'INTERNAL', message: 'boom' })]);
+      const outcomes: unknown[] = [];
+      await act(async () => {
+        outcomes.push(await result.current.retry());
+        outcomes.push(await result.current.retry());
+      });
+      expect(outcomes).toEqual([
+        { kind: 'failed', status: null },
+        { kind: 'failed', status: 500 },
+      ]);
+      expect(result.current.draft?.version).toBe(2);
+    });
+
+    it('a double tap sends one request, and says which action is in flight while it is', async () => {
+      let release: (r: Response) => void = () => undefined;
+      stubFetch([json(200, { draft: approvedAt(2) })]);
+      const { result } = renderHook(() => useOnboardingDraft(null));
+      await waitFor(() => expect(result.current.draft).not.toBeNull());
+      vi.mocked(fetch).mockImplementationOnce((input, init) => {
+        calls.push({ method: init?.method ?? 'GET', path: String(input), body: JSON.parse(String(init?.body)), authorization: undefined });
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      });
+      let first: Promise<unknown> = Promise.resolve();
+      let second: Promise<unknown> = Promise.resolve();
+      act(() => {
+        first = result.current.undo();
+        second = result.current.undo();
+      });
+      await waitFor(() => expect(result.current.recovering).toBe('undo'));
+      await act(async () => {
+        release(json(200, { draft: editableAt(3) }));
+        await Promise.all([first, second]);
+      });
+      expect(paths().filter((p) => p.endsWith('/undo'))).toHaveLength(1);
+      expect(await second).toMatchObject({ kind: 'done' });
+      expect(result.current.recovering).toBeNull();
     });
   });
 

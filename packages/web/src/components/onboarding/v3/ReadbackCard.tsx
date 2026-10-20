@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { ChevronRight } from 'lucide-react';
 import type { OnboardingCoreChoiceKey, OnboardingDraft } from '@ai-service-os/shared';
+import { useRivetLine } from '../../../hooks/useRivetVoice';
 import { Button } from '../../ui';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
 import { readbackRows } from './summarize';
@@ -18,6 +19,8 @@ export interface ReadbackCardProps {
   onEdit: (key: OnboardingCoreChoiceKey) => void;
 }
 
+const READBACK_LINE = "Here's what I've got. Tap anything to change it.";
+
 const ROW =
   'flex min-h-11 w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 ' +
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40 disabled:opacity-60';
@@ -28,10 +31,11 @@ export function ReadbackCard({ draft, approving, error, notice, onApprove, onEdi
   const heading = useRef<HTMLHeadingElement>(null);
   // The read-back replaces a turn (or the Ready screen): put focus on what Rivet now says.
   useEffect(() => heading.current?.focus(), []);
+  useRivetLine('readback', READBACK_LINE);
   return (
     <>
       <SpeakerLine />
-      <RivetHeading ref={heading}>Here&apos;s what I&apos;ve got. Tap anything to change it.</RivetHeading>
+      <RivetHeading ref={heading}>{READBACK_LINE}</RivetHeading>
 
       <ul className="mt-5 flex flex-col rounded-2xl border border-border bg-card">
         {rows.map((row) => (

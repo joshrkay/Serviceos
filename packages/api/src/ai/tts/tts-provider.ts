@@ -1,6 +1,7 @@
 import { ElevenLabsStreamConnection } from './elevenlabs-stream';
 import { speakableText } from './speakable-text';
 import { classifyElevenLabsError, TtsProviderRejectedError } from './tts-errors';
+import { FixtureTtsProvider } from './fixture-tts-provider';
 
 /**
  * Text-to-speech provider interface for hands-free voice readback.
@@ -35,12 +36,20 @@ export interface TtsSynthesizeInput {
    * attempt before retrying). Providers combine it with their own timeout.
    */
   signal?: AbortSignal;
+  /**
+   * LCR-01 — ask for raw PCM16 LE @ 16 kHz mono instead of the provider's
+   * compressed default. The media-streams adapter can only play raw PCM, so
+   * its buffered synth (the recovery after a failed stream) always asks for
+   * it. A provider that cannot honour it returns its default; `contentType`
+   * on the result always says what came back.
+   */
+  outputFormat?: 'pcm_16000';
 }
 
 export interface TtsSynthesizeResult {
   /** Raw audio bytes. Caller decides whether to persist to S3. */
   audio: Buffer;
-  /** MIME type — 'audio/mpeg' for OpenAI tts-1. */
+  /** MIME type — 'audio/mpeg' by default, 'audio/pcm' when raw PCM was asked for and honoured. */
   contentType: string;
   /** Provider identifier for observability. */
   provider: string;
@@ -87,6 +96,21 @@ export interface TtsProvider {
    * isFinal=true so consumers can detect end-of-stream.
    */
   synthesizeStream?(input: TtsSynthesizeStreamInput): AsyncIterable<TtsStreamChunk>;
+  /**
+   * S3-1 — optional: the provider-specific `voice` for one of the tenant
+   * voice presets (`VOICE_PRESETS`, stored as a preset key in
+   * `tenant_settings.voice_id`). `POST /api/voice/tts` passes the answer as
+   * `voice` and keys its clip cache on it. Absent, or returning undefined,
+   * means the provider has no catalogue for the presets: it speaks its own
+   * default voice and clips are cached under one `'default'` voice.
+   */
+  voiceForPreset?(preset: TtsVoicePreset): string | undefined;
+}
+
+/** The fields of a tenant voice preset a provider may map to its own voice id. */
+export interface TtsVoicePreset {
+  id: string;
+  elevenLabsVoiceId: string;
 }
 
 /**
@@ -169,14 +193,21 @@ export class ElevenLabsTtsProvider implements TtsProvider {
     // English falls back to the constructor default (turbo).
     const modelId =
       input.language === 'es' ? 'eleven_multilingual_v2' : this.modelId;
+    // LCR-01 — raw PCM uses the same `output_format=pcm_16000` pin as the
+    // probe and the stream, so the media path can play the buffered result.
+    // Every other caller keeps the mp3 default.
+    const pcm = input.outputFormat === 'pcm_16000';
+    // S3-1 — a per-call voice (the tenant's resolved preset) wins over the
+    // constructor default; the streaming path keeps the constructor voice.
+    const voiceId = input.voice ?? this.voiceId;
     const res = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`,
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}${pcm ? '?output_format=pcm_16000' : ''}`,
       {
         method: 'POST',
         headers: {
           'xi-api-key': this.apiKey,
           'Content-Type': 'application/json',
-          Accept: 'audio/mpeg',
+          ...(pcm ? {} : { Accept: 'audio/mpeg' }),
         },
         body: JSON.stringify({
           text: speakableText(input.text, input.language),
@@ -197,9 +228,14 @@ export class ElevenLabsTtsProvider implements TtsProvider {
     const buffer = Buffer.from(await res.arrayBuffer());
     return {
       audio: buffer,
-      contentType: 'audio/mpeg',
+      contentType: pcm ? 'audio/pcm' : 'audio/mpeg',
       provider: 'elevenlabs',
     };
+  }
+
+  /** S3-1 — the presets are ElevenLabs voices, so the mapping is direct. */
+  voiceForPreset(preset: TtsVoicePreset): string {
+    return preset.elevenLabsVoiceId;
   }
 
   /**
@@ -252,6 +288,8 @@ export class ElevenLabsTtsProvider implements TtsProvider {
 /**
  * Factory — selects provider based on environment:
  *   TTS_PROVIDER=elevenlabs → ElevenLabsTtsProvider (lower TTFA)
+ *   TTS_PROVIDER=fixture    → FixtureTtsProvider (S3-6: the e2e lane's silent
+ *                             clip; outside production only, throws there)
  *   default                 → OpenAiTtsProvider
  *
  * Returns undefined when no API key is configured so callers can
@@ -262,7 +300,14 @@ export function createTtsProvider(env: {
   ELEVENLABS_API_KEY?: string;
   ELEVENLABS_VOICE_ID?: string;
   AI_PROVIDER_API_KEY?: string;
+  NODE_ENV?: string;
 }): TtsProvider | undefined {
+  if (env.TTS_PROVIDER === 'fixture') {
+    if (env.NODE_ENV === 'production') {
+      throw new Error('TTS_PROVIDER=fixture speaks silence and is refused in production. Set elevenlabs or openai.');
+    }
+    return new FixtureTtsProvider();
+  }
   if (env.TTS_PROVIDER === 'elevenlabs') {
     if (!env.ELEVENLABS_API_KEY) return undefined;
     // UB-C2 — honor the same ELEVENLABS_VOICE_ID that scripts/render-fillers.ts
@@ -285,7 +330,7 @@ export function createTtsProvider(env: {
  * emitting raw PCM (`synthesizeStream`). `mediastream-adapter.ts` feeds
  * `synthesize()`'s buffered result straight into `streamPcmAsMedia`, which
  * assumes raw PCM16 and does no decoding — a provider that only implements
- * `synthesize()` returns compressed audio (mp3 for OpenAI/ElevenLabs),
+ * `synthesize()` returns compressed audio (mp3 for OpenAI),
  * which streams out as inaudible static with no error surfaced anywhere.
  *
  * Call this once at boot, right after resolving the shared TTS provider,
