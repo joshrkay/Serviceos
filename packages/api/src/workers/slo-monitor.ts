@@ -44,6 +44,20 @@
  *      not an outage, but it is the only production signal that calls are
  *      going well, so it pages the same way the others do.
  *
+ *   6. voice_reply_gap_p95 (voice parity U1, D-043) — P95 of
+ *      `voice_reply_gap_ms{anchor="last_word"}`: the caller's LAST WORD → the
+ *      first real reply frame Twilio acked. Breach above SLO_REPLY_GAP_P95_MS
+ *      (default 1500) once SLO_REPLY_GAP_MIN_SAMPLE (default 30) last-word-
+ *      anchored replies are recorded; `anchor="stt_final"` fallbacks are never
+ *      mixed in. Same in-process caveat and PROCESS_ROLE=all gate as rule 4.
+ *      Runs beside rule 4 for seven days; rule 4 retires once this one has
+ *      held (docs/runbooks/slo-alerts.md).
+ *   7. voice_reply_unacked_rate (U1, D-043) — replies whose first real frame
+ *      was enqueued but never acked (`voice_reply_unacked_total`) over all
+ *      replies with a first real frame. Breach above SLO_REPLY_UNACKED_RATE_MAX
+ *      (default 0.01) at the same sample floor. The p95 alone would look
+ *      healthier as playout failures multiply, so the two are one SLO.
+ *
  * Evaluators are exported pure functions so unit tests need no DB.
  */
 import type { Logger } from '../logging/logger';
@@ -70,6 +84,12 @@ export interface SloThresholds {
   gradedPassRateMin: number;
   /** #1602 — minimum graded calls in the window before the rule can breach. Default 10. */
   gradedPassRateMinSample: number;
+  /** U1 — reply-gap (last word → first acked real frame) P95 breach threshold in ms. Default 1500. */
+  replyGapP95Ms: number;
+  /** U1 — maximum share of replies that never played (0..1). Default 0.01. */
+  replyUnackedRateMax: number;
+  /** U1 — minimum recorded replies before either reply-gap rule can breach. Default 30. */
+  replyGapMinSample: number;
 }
 
 export interface SloRuleResult {
@@ -241,6 +261,98 @@ export function evaluateTurnLatency(
 }
 
 /**
+ * U1 — reply-gap snapshot read from the in-process `voice_reply_gap_ms` and
+ * `voice_reply_unacked_total` metrics.
+ */
+export interface ReplyGapSnapshot {
+  /** P95 (ms) over `anchor="last_word"` observations only. */
+  p95Ms: number;
+  /** `anchor="last_word"` acked replies — drives the p95 sample floor. */
+  lastWordCount: number;
+  /** Acked replies under every anchor — the acked half of the unacked-rate denominator. */
+  ackedCount: number;
+  /** Replies with a first real frame enqueued and no acked mark (all reasons). */
+  unackedCount: number;
+}
+
+/**
+ * U1 — build a {@link ReplyGapSnapshot} from the exported samples of the two
+ * metrics. The p95 uses only the `last_word` population: an `stt_final`
+ * observation is measured from a later anchor and would flatter the number.
+ * The unacked rate keeps every acked reply in its denominator, whichever
+ * anchor it carried, because the question there is "did the audio play".
+ */
+export function snapshotReplyGap(
+  gapValues: ReadonlyArray<HistogramSampleValue>,
+  unackedValues: ReadonlyArray<HistogramSampleValue>,
+): ReplyGapSnapshot {
+  const lastWord = estimateTurnLatencyP95(gapValues.filter((v) => v.labels.anchor === 'last_word'));
+  let ackedCount = 0;
+  for (const v of gapValues) {
+    if ((v.metricName ?? '').endsWith('_count')) ackedCount += v.value;
+  }
+  let unackedCount = 0;
+  for (const v of unackedValues) unackedCount += v.value;
+  return {
+    p95Ms: lastWord.p95Ms,
+    lastWordCount: lastWord.sampleCount,
+    ackedCount,
+    unackedCount,
+  };
+}
+
+/**
+ * Rule 6 (U1, D-043) — reply-gap P95 from the caller's last word. `null` when
+ * there is no snapshot (monitor not co-located with the voice service) or fewer
+ * than the sample floor of last-word-anchored replies exist.
+ */
+export function evaluateReplyGap(
+  snapshot: ReplyGapSnapshot | null,
+  thresholds: Pick<SloThresholds, 'replyGapP95Ms' | 'replyGapMinSample'>,
+): SloRuleResult | null {
+  if (!snapshot) return null;
+  if (snapshot.lastWordCount < thresholds.replyGapMinSample) return null;
+  return {
+    rule: 'voice_reply_gap_p95',
+    breached: snapshot.p95Ms > thresholds.replyGapP95Ms,
+    value: snapshot.p95Ms,
+    summary: `voice reply gap P95 ${Math.round(snapshot.p95Ms)}ms (last word to first acked reply audio) over ${snapshot.lastWordCount} replies (threshold ${thresholds.replyGapP95Ms}ms)`,
+    details: {
+      p95Ms: Math.round(snapshot.p95Ms),
+      sampleCount: snapshot.lastWordCount,
+      thresholdMs: thresholds.replyGapP95Ms,
+    },
+    severity: 'warning',
+  };
+}
+
+/**
+ * Rule 7 (U1, D-043) — share of replies that never played. `null` below the
+ * sample floor of replies that enqueued a first real frame (acked + unacked).
+ */
+export function evaluateReplyUnackedRate(
+  snapshot: ReplyGapSnapshot | null,
+  thresholds: Pick<SloThresholds, 'replyUnackedRateMax' | 'replyGapMinSample'>,
+): SloRuleResult | null {
+  if (!snapshot) return null;
+  const total = snapshot.ackedCount + snapshot.unackedCount;
+  if (total < thresholds.replyGapMinSample) return null;
+  const rate = snapshot.unackedCount / total;
+  return {
+    rule: 'voice_reply_unacked_rate',
+    breached: rate > thresholds.replyUnackedRateMax,
+    value: rate,
+    summary: `voice replies that never played ${(rate * 100).toFixed(1)}% (${snapshot.unackedCount}/${total}; threshold ${(thresholds.replyUnackedRateMax * 100).toFixed(1)}%)`,
+    details: {
+      unacked: snapshot.unackedCount,
+      total,
+      thresholdRate: thresholds.replyUnackedRateMax,
+    },
+    severity: 'warning',
+  };
+}
+
+/**
  * Rule 5 (#1602) — 7-day production graded pass rate against the Layer 2 gate.
  * `null` below the sample floor: a handful of graded calls says nothing yet.
  */
@@ -282,6 +394,13 @@ export interface SloMonitorDeps {
    * `null` when unavailable. Only invoked when `processRole === 'all'`.
    */
   getTurnLatencySnapshot(): Promise<TurnLatencySnapshot | null>;
+  /**
+   * U1 — snapshot of the in-process `voice_reply_gap_ms` histogram and
+   * `voice_reply_unacked_total` counter, or `null` when unavailable. Same role
+   * gate as {@link getTurnLatencySnapshot}: only invoked when
+   * `processRole === 'all'`.
+   */
+  getReplyGapSnapshot(): Promise<ReplyGapSnapshot | null>;
   /** #1602 — cross-tenant graded-call counts for grades recorded at/after `windowStart`. */
   getGradedPassRate(windowStart: Date): Promise<{ total: number; passed: number }>;
   alert(alert: OperatorAlert): Promise<void>;
@@ -351,6 +470,24 @@ export async function runSloMonitor(deps: SloMonitorDeps): Promise<SloMonitorRun
       evaluated.push('voice_turn_latency_p95');
     } catch (err) {
       deps.logger.error('SLO monitor: turn-latency read failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Rules 6 + 7 (U1, D-043) — reply gap from the caller's last word, and the
+  // share of replies that never played. Same in-process histogram caveat and
+  // role gate as rule 4; they run beside it until rule 4 is retired.
+  if (deps.processRole === 'all') {
+    try {
+      const snapshot = await deps.getReplyGapSnapshot();
+      const gap = evaluateReplyGap(snapshot, deps.thresholds);
+      if (gap) results.push(gap);
+      const unacked = evaluateReplyUnackedRate(snapshot, deps.thresholds);
+      if (unacked) results.push(unacked);
+      evaluated.push('voice_reply_gap_p95', 'voice_reply_unacked_rate');
+    } catch (err) {
+      deps.logger.error('SLO monitor: reply-gap read failed', {
         error: err instanceof Error ? err.message : String(err),
       });
     }

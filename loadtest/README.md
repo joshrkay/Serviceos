@@ -208,3 +208,160 @@ U2) into `docs/runbooks/voice-capacity.md`.
 > staging env (N replicas + Redis + PgBouncer). This harness is the artifact you
 > run there; locally it establishes the per-instance curve the replica math
 > builds on.
+
+## Voice realtime concurrency (U1 replica trigger)
+
+`voice-realtime-concurrency.ts` — plan U1 of
+`docs/plans/2026-10-16-001-feat-voice-parity-bland-avoca-plan.md`. It drives
+**N emulated Twilio Media Streams against ONE API process** and records the N
+at which **p95 time-to-first-audio (TTFA) crosses 800 ms**. That N is the
+**replica trigger** recorded in `docs/decisions.md` D-043.
+
+### What it measures
+
+Each emulated call is a `TwilioStreamEmulator`
+(`packages/api/src/ai/voice-quality/audio/twilio-stream-emulator.ts`) — the
+Layer 2 harness's client, speaking the real Media Streams protocol
+(`connected`/`start` → paced 20 ms μ-law `media` frames → `mark` `eot-<n>` →
+collect the agent's reply frames → `stop`). TTFA uses the Layer 2 definition
+(`audio/audio-timings.ts`): **start** = the caller's audio is fully delivered
+(the emulator's synthetic `transcript_received`), **stop** = the first inbound
+`media` frame, so production, Layer 2 and this sweep agree on the stop point.
+A turn that gets no reply frame within `--reply-timeout` counts as `noReply`,
+never as a 0 ms sample. A turn counts as replied only when a reply frame arrived
+after that turn's own transcript timestamp (`ttfaMs > 0`); a previous turn's late
+reply landing during the next caller fixture is stale and never makes that turn a
+sample.
+
+Sweep: for N = `--start`, +`--step`, … ≤ `--max`, open N streams (CallSids
+`<--callsid-prefix><N>_<i>`), each sends `--turns` utterances with `--pause`
+between them, capped by `--hold` seconds of wall clock per level (no new turn
+starts after the cap). Per level: p50/p95/p99 TTFA over the real replies
+(informational), the **censored p95** (`p95CensoredMs`, the decision number),
+`censored`, `noReply`, errors, dropped streams, one printed line. A single
+stream failure never aborts the run; it is counted.
+
+**Breach rule (what drives the decision).** A level breaches on its
+**censored p95**, not on the p95 of the surviving samples — otherwise 99
+timed-out turns plus one 100 ms reply would pass. Every turn with no
+post-transcript reply within `--reply-timeout` (`noReply`), every turn that
+threw (`errors`), and every turn a dropped stream never got to run (all
+`--turns` for a stream that failed to open) is a **censored** turn counted at
+the reply timeout (floored at `--threshold` + 1, so a timeout at or below the
+threshold can never pass). `p95CensoredMs` = p95 of real samples ∪ censored
+values; the level breaches when it exceeds `--threshold`, which happens as soon
+as the censored share exceeds 5 %. A level with no real sample at all always
+breaches. The printed `p50/p95/p99` stay measured over real replies only. The
+sweep stops early once a level breaches on **two consecutive levels**, or when
+`--max` is reached.
+
+The capacity result comes from the **confirmed** breach pair that stopped the
+sweep, not from the first breach seen. Stopped on two consecutive breaches:
+`firstBreachAt` = the first level of that final pair, `replicaTrigger` = the
+highest passing level below it (null if none). Reached `--max` with no such
+pair: `firstBreachAt` = null and `replicaTrigger` = the highest passing level
+overall (a lower bound). An isolated breach that recovered (e.g. breach / pass /
+breach / breach at N=3/5/7/9 → `firstBreachAt` 7, `replicaTrigger` 5; or a
+single breach followed by passes through max) stays in the per-level rows but
+is never the trigger; `stopReason` and the summary line say so.
+
+### Self-check (no app, no docker, no network)
+
+```bash
+npm run loadtest:voice-realtime:selfcheck     # < 30 s, in-process ws stub
+```
+
+### Running it against a live stack
+
+The emulator sends **no `x-twilio-signature`**, so it can only connect to a
+media-streams server booted with the test-only bypass. That bypass is
+**`authTestMode: true` on the deps object of `attachMediaStreamServer`**
+(`packages/api/src/telephony/media-streams/twilio-mediastream-server.ts`,
+VQ2-007). It is deliberately **not read from any environment variable** —
+there is no `MEDIA_STREAMS_AUTH_TEST_MODE` or similar — so a stray env value
+can never disable upgrade auth in production, and `app.ts` never sets it (a
+VQ2-007 unit test in `twilio-mediastream-server.test.ts` pins both). Two
+consequences:
+
+1. A plain `npm run dev` API rejects the emulator's upgrade with **403**; and
+   even a signed upgrade is closed `1008 unknown_callsid` by the adapter's
+   `handleStart` unless the CallSid already has a session in the
+   `VoiceSessionStore` (production creates it from the `/voice` webhook).
+2. The target is therefore a **harness boot**: an `http.Server` with
+   `attachMediaStreamServer(httpServer, { store, streamingProvider,
+   ttsProvider, fillerEngine, fillerCache, speechTurn, authTokenGetter,
+   authTestMode: true })` whose `store` is pre-seeded with one session per
+   CallSid the sweep will use. The reference for that boot is the Layer 2
+   suite's `beforeAll` (`packages/api/test/voice-quality/voice-quality.layer2.test.ts`,
+   the `attachMediaStreamServer` call); for the capacity run replace its
+   scripted-transcript STT bridge and OpenAI TTS with the **real** providers,
+   i.e. run that boot with `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`,
+   `TTS_PROVIDER=elevenlabs` and `TWILIO_MEDIA_STREAMS_ENABLED=true` set, so
+   the sweep exercises Deepgram + the production turn + ElevenLabs end to end.
+   That boot script is **not yet in the repo**: it needs the production turn's
+   per-session bootstrap (FSM state and caller identification) on top of the
+   real providers, which today only the Layer 2 harness builds
+   (`packages/api/test/voice-quality/voice-quality.layer2.test.ts`). Until it
+   exists the sweep can only be run against the self-check stub or the Layer 2
+   in-process server.
+
+With a real STT the caller audio must be speech: the default 1.5 s 440 Hz tone
+transcribes to nothing, every turn reads `noReply`, and the report says so
+(`fixture.note`). Pass `--fixture <path>` — PCM16 mono, **16 kHz** (raw, or a
+WAV carrying its rate; 8 kHz WAV also accepted). 16 kHz is downsampled with
+the production codec (`downsample16to8`).
+
+```bash
+# boot the harness server (see above) on :3000, seeding CA_LOADTEST_<N>_<i>, then:
+npx tsx loadtest/voice-realtime-concurrency.ts \
+  --url ws://localhost:3000/api/telephony/stream \
+  --start 1 --step 2 --max 40 --turns 3 --hold 20 --threshold 800 \
+  --fixture path/to/caller-16k.wav \
+  --out voice-realtime-concurrency-report.json
+```
+
+Prints one line per level and the summary
+`censored p95 TTFA … crossed <threshold> ms … at N=<n>; replica trigger = <trigger> [N=<n>: censored p95 <ms> ms, <c> censored turn(s)]`. Exit 0
+when a trigger was found or `--max` was reached cleanly; 1 on a harness error
+(unreadable fixture, or no stream could open at the first level).
+
+### Report
+
+JSON (`--out`, default `voice-realtime-concurrency-report.json`): `levels[]`
+rows (`concurrency`, `streamsOpened`, `streamsDropped`, `turnsAttempted`,
+`samples`, `noReply`, `errors`, `censored`, `ttfaMs {p50,p95,p99,max,mean} | null`
+(real replies only), `p95CensoredMs` (drives `breached`), `breached`, `durationMs`), `firstBreachAt` (first N of the confirmed
+two-consecutive-breach pair that stopped the sweep; null when the sweep ended
+at max without one), `replicaTrigger` (with a confirmed pair, the highest N that
+passed below it, null if none; without one, the highest N that passed overall),
+`stoppedBecause`, `stopReason` (human-readable, names any isolated breaches
+ignored), and `fixture` (source, duration,
+and the stand-in note when no `--fixture` was given).
+
+**Where the number goes:** `docs/decisions.md` **D-043** ("Replica trigger:")
+— replace the TBD with the measured N, the run date and the instance size.
+`docs/runbooks/voice-capacity.md` states no per-instance figure for realtime
+calls today (its per-instance ceiling row is still TBD); add a row there too
+once there is a real run. Note the runbook's scaling guidance: a process that
+answers calls cannot be replicated at all until call state is shared (LCR-05),
+so the trigger is the point at which a larger instance or a shared session
+store is needed, not the point at which a replica can simply be added.
+
+### CLI flags (`voice-realtime-concurrency.ts`)
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--url` | `ws://localhost:3000/api/telephony/stream` | Media Streams WS endpoint |
+| `--start` | `1` | First concurrency level |
+| `--step` | `2` | Increment between levels |
+| `--max` | `40` | Last concurrency level |
+| `--turns` | `3` | Caller utterances per stream per level |
+| `--hold` | `20` | Wall-clock cap per level (s); no new turn starts after it |
+| `--threshold` | `800` | p95 TTFA threshold (ms) |
+| `--pause` | `500` | Pause between a stream's turns (ms) |
+| `--reply-timeout` | `10000` | Wait for a turn's first reply frame before counting `noReply`; also the value a censored (timed-out/errored/dropped) turn contributes to the breach p95 (ms) |
+| `--silence` | `500` | Inbound silence that ends the agent's reply (ms) |
+| `--stagger` | `20` | Stagger between stream openings within a level (ms) |
+| `--callsid-prefix` | `CA_LOADTEST_` | CallSid = `<prefix><N>_<i>` — seed the harness store with these |
+| `--fixture` | — (440 Hz tone) | Caller utterance: PCM16 mono 16 kHz raw, or WAV at 16/8 kHz |
+| `--out` | `voice-realtime-concurrency-report.json` | JSON report path |
