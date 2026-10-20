@@ -249,10 +249,10 @@ describe('VoiceSessionStore', () => {
       expect(Object.keys(recordTurn.mock.calls[0][0] as object).sort()).toEqual(
         ['callSid', 'sessionId', 'speaker', 'tenantId', 'text', 'turnIndex'],
       );
-      expect(store.peek(session.id)?.replyTiming).toBeUndefined();
+      expect(store.peek(session.id)?.replyTimings).toEqual([]);
     });
 
-    it('exposes the reply anchors of the latest caller turn and keeps one retained promise', async () => {
+    it('exposes the reply anchors of the recent caller turns and retains only the last few promises', async () => {
       const { repo } = timedRepo();
       const store = newStore({ callTranscriptTurnRepo: repo });
       const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
@@ -262,14 +262,66 @@ describe('VoiceSessionStore', () => {
       store.appendTranscript(session.id, { speaker: 'agent', text: 'hi' });
       store.beginCallerTurnTiming(session.id, { transport: 'realtime', sttFinalAt, lastWordAt });
       store.appendTranscript(session.id, { speaker: 'caller', text: 'first' });
-      expect(store.peek(session.id)?.replyTiming).toEqual({ turnIndex: 1, sttFinalAt, lastWordAt });
+      expect(store.peek(session.id)?.replyTimings).toEqual([{ turnIndex: 1, sttFinalAt, lastWordAt }]);
       expect([...store.peek(session.id)!.pendingTurnPersist.keys()]).toEqual([1]);
 
-      store.beginCallerTurnTiming(session.id, { transport: 'realtime', sttFinalAt: new Date(9_000) });
-      store.appendTranscript(session.id, { speaker: 'agent', text: 'ok' });
-      store.appendTranscript(session.id, { speaker: 'caller', text: 'second' });
-      expect([...store.peek(session.id)!.pendingTurnPersist.keys()]).toEqual([3]);
+      // Five more caller turns: only the last four anchors / promises survive.
+      for (let i = 0; i < 5; i++) {
+        store.beginCallerTurnTiming(session.id, { transport: 'realtime', sttFinalAt: new Date(9_000 + i) });
+        store.appendTranscript(session.id, { speaker: 'agent', text: 'ok' });
+        store.appendTranscript(session.id, { speaker: 'caller', text: `more ${i}` });
+      }
+      const kept = store.peek(session.id)!;
+      expect(kept.replyTimings.map((t) => t.turnIndex)).toEqual([5, 7, 9, 11]);
+      expect([...kept.pendingTurnPersist.keys()]).toEqual([5, 7, 9, 11]);
       await settle();
+    });
+
+    it('back-to-back finals: each caller append takes its own timing, oldest first', async () => {
+      const { repo, recordTurn } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      const first = { transport: 'realtime' as const, sttFinalAt: new Date(1_000), lastWordAt: new Date(800) };
+      const second = { transport: 'realtime' as const, sttFinalAt: new Date(1_500), lastWordAt: new Date(1_400) };
+
+      // Both finals are armed before the first caller line is appended.
+      store.beginCallerTurnTiming(session.id, first);
+      store.beginCallerTurnTiming(session.id, second);
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'one moment' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'my AC is broken' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'and it is hot' });
+      await settle();
+
+      const callerRows = recordTurn.mock.calls
+        .map(([input]) => input as Record<string, unknown>)
+        .filter((i) => i.speaker === 'caller');
+      expect(callerRows[0]).toMatchObject({ turnIndex: 1, sttFinalAt: first.sttFinalAt, endpointDelayMs: 200 });
+      expect(callerRows[1]).toMatchObject({ turnIndex: 2, sttFinalAt: second.sttFinalAt, endpointDelayMs: 100 });
+      expect(store.peek(session.id)?.replyTimings).toEqual([
+        { turnIndex: 1, sttFinalAt: first.sttFinalAt, lastWordAt: first.lastWordAt },
+        { turnIndex: 2, sttFinalAt: second.sttFinalAt, lastWordAt: second.lastWordAt },
+      ]);
+    });
+
+    it('a discarded timing is skipped by the next caller line; one already consumed is left alone', async () => {
+      const { repo, recordTurn } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      const unanswered = { transport: 'realtime' as const, sttFinalAt: new Date(1_000) };
+      const answered = { transport: 'realtime' as const, sttFinalAt: new Date(2_000) };
+
+      store.beginCallerTurnTiming(session.id, unanswered);
+      store.beginCallerTurnTiming(session.id, answered);
+      store.discardCallerTurnTiming(session.id, unanswered); // its turn appended no caller line
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
+      store.discardCallerTurnTiming(session.id, answered); // already consumed: a no-op
+      store.discardCallerTurnTiming('unknown-session', answered);
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'again' });
+      await settle();
+
+      const inputs = recordTurn.mock.calls.map(([input]) => input as Record<string, unknown>);
+      expect(inputs[0]).toMatchObject({ sttFinalAt: answered.sttFinalAt });
+      expect(inputs[1]).not.toHaveProperty('sttFinalAt');
     });
 
     it('markReplyAudio chains behind a still-pending recordTurn, never racing the INSERT', async () => {

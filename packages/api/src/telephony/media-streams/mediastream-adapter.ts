@@ -49,6 +49,7 @@ import type {
 } from '../../voice/transcription-providers';
 import type { TtsProvider, TtsSynthesizeInput, TtsSynthesizeResult } from '../../ai/tts/tts-provider';
 import type {
+  CallerTurnTiming,
   ReplyAudioStamp,
   VoiceSession,
   VoiceSessionStore,
@@ -576,6 +577,15 @@ interface PendingReplyMark {
   timer: NodeJS.Timeout;
 }
 
+/** U1 — one accepted final's reply-timing anchors (see `RuntimeState.replyAnchor`). */
+interface ReplyAnchor {
+  sttFinalMs: number;
+  lastWordMs?: number;
+  stamped: boolean;
+  /** The still-unanswered anchor this one displaced, restored if this final speaks nothing. */
+  resume: ReplyAnchor | null;
+}
+
 interface RuntimeState {
   ws: WsLike;
   streamSid: string | null;
@@ -938,12 +948,16 @@ interface RuntimeState {
   /** U1 — the `deepgramGeneration` that `deepgramAnchorMs` belongs to (0 = none yet). */
   deepgramAnchorGeneration: number;
   /**
-   * U1 — timing anchors of the turn currently being answered, set when a final
-   * dispatches into the FSM. `stamped` flips once the first real frame of the
-   * reply has been marked, so a hold line followed by the real reply (which
-   * re-arms `awaitingFirstAudioFrame`) is still one stamp per turn.
+   * U1 — timing anchors of the turn whose reply is (about to be) heard. Bound
+   * when a final arrives, and re-bound by that final's own turn right before it
+   * speaks its reply (`bindReplyAnchor`): turns are serialized but a second
+   * final can arrive while the first is still thinking, so this single slot
+   * must not be trusted to still be the speaking turn's own. `stamped` flips
+   * once the first real frame of the reply has been marked, so a hold line
+   * followed by the real reply (which re-arms `awaitingFirstAudioFrame`) is
+   * still one stamp per turn.
    */
-  replyAnchor: { sttFinalMs: number; lastWordMs?: number; stamped: boolean } | null;
+  replyAnchor: ReplyAnchor | null;
   /**
    * U1 — first-real-frame (`first_real:<turnId>`) and first-audible-filler
    * (`first_audible:<turnId>`) marks enqueued and not yet acked, keyed by mark name. Each holds the 5 s ack-timeout timer so
@@ -2182,13 +2196,20 @@ export class TwilioMediaStreamAdapter {
     // row and the reply-gap anchors. A branch that ends up speaking nothing
     // disarms it again (disarmUnansweredReply) so a later, unrelated outbound
     // turn is never timed against this final.
-    const replyAnchor = { sttFinalMs, ...(lastWordMs !== undefined ? { lastWordMs } : {}), stamped: false };
+    const prior = this.state.replyAnchor;
+    const replyAnchor: ReplyAnchor = {
+      sttFinalMs,
+      ...(lastWordMs !== undefined ? { lastWordMs } : {}),
+      stamped: false,
+      resume: prior && !prior.stamped ? prior : null,
+    };
     this.state.replyAnchor = replyAnchor;
-    this.deps.store.beginCallerTurnTiming(session.id, {
+    const callerTiming: CallerTurnTiming = {
       transport: 'realtime',
       sttFinalAt: new Date(sttFinalMs),
       ...(lastWordMs !== undefined ? { lastWordAt: new Date(lastWordMs) } : {}),
-    });
+    };
+    this.deps.store.beginCallerTurnTiming(session.id, callerTiming);
     this.state.awaitingFirstAudioFrame = true;
     this.state.earlyFillerFirstAudioObserved = false;
 
@@ -2198,7 +2219,7 @@ export class TwilioMediaStreamAdapter {
     // recording-objection pattern) — "hablo español" is not a booking
     // utterance. Emergency keywords always win the turn: an utterance
     // that contains both is never consumed here.
-    if (await this.maybeHandleExplicitLanguageSwitch(event.transcript)) {
+    if (await this.maybeHandleExplicitLanguageSwitch(event.transcript, replyAnchor)) {
       this.disarmUnansweredReply(replyAnchor);
       return;
     }
@@ -2228,6 +2249,7 @@ export class TwilioMediaStreamAdapter {
       // its gap is observed (histogram) but no transcript row is stamped.
       await this.recoverFromLowSttConfidence(session, 'low_confidence');
       this.disarmUnansweredReply(replyAnchor);
+      this.deps.store.discardCallerTurnTiming(session.id, callerTiming);
       return;
     }
     // A dispatched (high-confidence, or confidence-absent) final resets the
@@ -2261,14 +2283,19 @@ export class TwilioMediaStreamAdapter {
       if (e1Turn) this.state.e1TurnsInFlight -= 1;
     };
     try {
-      sideEffects = await this.deps.store.withSessionLock(session.id, () =>
-        this.deps.speechTurn({
-          session,
-          speechResult: event.transcript,
-          callSid,
-          tenantId,
-        }),
-      );
+      sideEffects = await this.deps
+        .store.withSessionLock(session.id, () =>
+          this.deps.speechTurn({
+            session,
+            speechResult: event.transcript,
+            callSid,
+            tenantId,
+          }),
+        )
+        // The caller line is appended inside speechTurn: once it is over, a
+        // timing still queued will never be consumed and must not be handed
+        // to the next turn's line.
+        .finally(() => this.deps.store.discardCallerTurnTiming(session.id, callerTiming));
       releaseE1Turn();
       clearTimeout(hold.timer);
       // The hold line took this turn's first-audio mark; re-arm it so the
@@ -2289,6 +2316,7 @@ export class TwilioMediaStreamAdapter {
       // language-aware apology + reprompt through the normal outbound-turn
       // path instead, and after repeated back-to-back failures hand the
       // caller off gracefully rather than looping apologies forever.
+      this.bindReplyAnchor(replyAnchor);
       await this.recoverFromSpeechTurnFailure(session);
       return;
     }
@@ -2310,7 +2338,10 @@ export class TwilioMediaStreamAdapter {
       this.clearEarlyFillerTimerOnly();
     }
 
+    // A second final may have re-bound the anchor while this turn was thinking.
+    this.bindReplyAnchor(replyAnchor);
     await this.emitSideEffects(sideEffects);
+    this.disarmUnansweredReply(replyAnchor);
     // Realtime hand-off — this turn may have parked a transfer (escalation,
     // emergency dial, no-one-available). Not awaited: it waits on playout.
     void this.maybeHandOffToHuman('speech_turn');
@@ -2830,7 +2861,7 @@ export class TwilioMediaStreamAdapter {
    *   - the tenant hasn't opted into the target language,
    *   - the flap guard has been exhausted (switchLanguage refuses).
    */
-  private async maybeHandleExplicitLanguageSwitch(transcript: string): Promise<boolean> {
+  private async maybeHandleExplicitLanguageSwitch(transcript: string, replyAnchor: ReplyAnchor): Promise<boolean> {
     const session = this.state.session;
     if (!session) return false;
     const target = detectLanguageSwitchIntent(transcript);
@@ -2871,6 +2902,9 @@ export class TwilioMediaStreamAdapter {
       ts: Date.now(),
     });
     const ack = LANGUAGE_SWITCH_ACK[target];
+    // The switch waited on the session lock behind any earlier turn, whose own
+    // reply may have re-bound the anchor since this final armed it.
+    this.bindReplyAnchor(replyAnchor);
     await this.emitSideEffects([{ type: 'tts_play', payload: { text: ack } }]);
     this.deps.store.appendTranscript(session.id, {
       speaker: 'agent',
@@ -3989,15 +4023,22 @@ export class TwilioMediaStreamAdapter {
   }
 
   /**
-   * The persisted transcript row this reply anchor belongs to: the session's
-   * latest caller turn, but only if its STT-final instant is the anchor's —
-   * otherwise a newer turn has replaced it and nothing is stamped.
+   * The persisted transcript row this reply anchor belongs to: the one of the
+   * session's recent caller turns whose STT-final instant is the anchor's.
+   * None (not persisted yet, or too old) means nothing is stamped.
    */
   private currentReplyTurnIndex(anchor: { sttFinalMs: number }): number | undefined {
-    const replyTiming = this.state.session?.replyTiming;
-    return replyTiming && replyTiming.sttFinalAt.getTime() === anchor.sttFinalMs
-      ? replyTiming.turnIndex
-      : undefined;
+    return this.state.session?.replyTimings.find((t) => t.sttFinalAt.getTime() === anchor.sttFinalMs)?.turnIndex;
+  }
+
+  /**
+   * Make `anchor` the one the next real frame is timed against, right before
+   * its own turn speaks. A reply already stamped keeps its stamp (a hold line
+   * was its first audio); only an unstamped one re-arms the first-frame guard.
+   */
+  private bindReplyAnchor(anchor: ReplyAnchor): void {
+    this.state.replyAnchor = anchor;
+    if (!anchor.stamped) this.state.awaitingFirstAudioFrame = true;
   }
 
   /**
@@ -4033,12 +4074,14 @@ export class TwilioMediaStreamAdapter {
    * A final armed reply timing but its branch spoke nothing (suppressed
    * reprompt, empty acknowledgement): drop the anchor and the first-frame guard
    * so the next, unrelated outbound turn is not timed against it. Only if this
-   * final's anchor is still current and nothing was stamped.
+   * final's anchor is still current and nothing was stamped; an earlier final
+   * still thinking when this one arrived gets its anchor back, untouched.
    */
-  private disarmUnansweredReply(anchor: { stamped: boolean }): void {
+  private disarmUnansweredReply(anchor: ReplyAnchor): void {
     if (this.state.replyAnchor !== anchor || anchor.stamped) return;
-    this.state.replyAnchor = null;
-    this.state.awaitingFirstAudioFrame = false;
+    const resume = anchor.resume && !anchor.resume.stamped ? anchor.resume : null;
+    this.state.replyAnchor = resume;
+    this.state.awaitingFirstAudioFrame = resume !== null;
   }
 
   /**

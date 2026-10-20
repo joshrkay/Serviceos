@@ -26,6 +26,7 @@ import type {
 } from '../../../src/voice/transcription-providers';
 import type { TtsProvider } from '../../../src/ai/tts/tts-provider';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
+import { LANGUAGE_SWITCH_ACK } from '../../../src/ai/agents/customer-calling/tts-copy';
 import { voiceReplyGapMs, voiceReplyUnackedTotal, voiceTurnLatencyMs } from '../../../src/monitoring/metrics';
 
 // ─── Fakes ─────────────────────────────────────────────────────────────────
@@ -121,6 +122,8 @@ interface Harness {
   recordTurn: ReturnType<typeof vi.fn>;
   markReplyAudio: ReturnType<typeof vi.fn>;
   speechGate?: { release: () => void };
+  /** One releaser per speechTurn that has STARTED under `deferSpeechTurns`, in start order. */
+  speechReleases: Array<() => void>;
 }
 
 function setup(
@@ -129,6 +132,8 @@ function setup(
     ttsProvider?: TtsProvider;
     /** Hold speechTurn open until `speechGate.release()` (the caller line is appended first). */
     holdSpeechTurn?: boolean;
+    /** Every speechTurn appends its caller line, then waits for its own releaser in `speechReleases`. */
+    deferSpeechTurns?: boolean;
     fillerDelayMs?: number;
     withFiller?: boolean;
   } = {},
@@ -146,6 +151,7 @@ function setup(
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
+  const speechReleases: Array<() => void> = [];
   const adapter = new TwilioMediaStreamAdapter(
     {
       store,
@@ -156,6 +162,11 @@ function setup(
         // The real speechTurn appends the caller line before delegating.
         store.appendTranscript(session.id, { speaker: 'caller', text: speechResult });
         if (opts.holdSpeechTurn) await gate;
+        if (opts.deferSpeechTurns) {
+          await new Promise<void>((resolve) => {
+            speechReleases.push(resolve);
+          });
+        }
         return [{ type: 'tts_play', payload: { text: 'Sure, one moment.' } }];
       },
       ...(opts.withFiller
@@ -169,7 +180,7 @@ function setup(
     ws,
   );
   adapter.start();
-  return { adapter, ws, store, opens, recordTurn, markReplyAudio, speechGate: { release } };
+  return { adapter, ws, store, opens, recordTurn, markReplyAudio, speechGate: { release }, speechReleases };
 }
 
 const callerTurn = (h: Harness): Record<string, unknown> =>
@@ -763,5 +774,115 @@ describe('U1c first real acked audio', () => {
     }).state;
     expect(state.replyAnchor).toBeNull();
     expect(state.awaitingFirstAudioFrame).toBe(false);
+  });
+  describe('back-to-back finals while the first turn is still thinking', () => {
+    const ackAndStamps = async (h: Harness, markName: string, atMs: number): Promise<void> => {
+      vi.setSystemTime(atMs);
+      h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: markName } });
+      await flush();
+    };
+
+    it('each reply stamps its OWN caller row with its own gap, and the histogram gets two observations', async () => {
+      const h = setup({ deferSpeechTurns: true });
+      const anchorMs = 30_000_000;
+      vi.setSystemTime(anchorMs - 500);
+      h.ws.inboundJson(startFrame);
+      await flush();
+      vi.setSystemTime(anchorMs);
+      h.ws.inboundJson(mediaFrame);
+      await flush();
+
+      vi.setSystemTime(anchorMs + 2_000);
+      h.opens[0].emit({ transcript: 'my AC is broken', lastWordEndMs: 800 });
+      await flush();
+      vi.setSystemTime(anchorMs + 2_600);
+      h.opens[0].emit({ transcript: 'and it is very hot', lastWordEndMs: 2_300 });
+      await flush();
+      // The second final is queued behind the first turn's session lock.
+      expect(h.speechReleases).toHaveLength(1);
+      expect(h.ws.markNames('first_real:')).toHaveLength(0);
+
+      vi.setSystemTime(anchorMs + 3_000);
+      h.speechReleases[0]();
+      await flush();
+      const [firstMark] = h.ws.markNames('first_real:');
+      expect(firstMark).toBeDefined();
+      await ackAndStamps(h, firstMark, anchorMs + 3_400);
+
+      // Reply 1 → the FIRST caller row (index 0), measured from the first last word.
+      expect(stampsOf(h).filter((s) => s.replyGapMs !== undefined)).toEqual([
+        expect.objectContaining({ turnIndex: 0, replyGapMs: 3_400 - 800 }),
+      ]);
+
+      expect(h.speechReleases).toHaveLength(2);
+      vi.setSystemTime(anchorMs + 4_000);
+      h.speechReleases[1]();
+      await flush();
+      const secondMarks = h.ws.markNames('first_real:');
+      expect(secondMarks).toHaveLength(2);
+      await ackAndStamps(h, secondMarks[1], anchorMs + 4_500);
+
+      // Reply 2 → the SECOND caller row, not skipped as "already stamped".
+      expect(stampsOf(h).filter((s) => s.replyGapMs !== undefined)).toEqual([
+        expect.objectContaining({ turnIndex: 0, replyGapMs: 3_400 - 800 }),
+        expect.objectContaining({ turnIndex: 1, replyGapMs: 4_500 - 2_300 }),
+      ]);
+      expect(await histogramCount('last_word')).toBe(2);
+      // Each row carries its own STT-final timing.
+      const callerRows = h.recordTurn.mock.calls
+        .map(([i]) => i as Record<string, unknown>)
+        .filter((i) => i.speaker === 'caller');
+      expect(callerRows.map((r) => r.sttFinalAt)).toEqual([new Date(anchorMs + 2_000), new Date(anchorMs + 2_600)]);
+    });
+
+    it('a second final that speaks nothing does not disturb the first turn\'s anchor', async () => {
+      const ackEs = LANGUAGE_SWITCH_ACK.es;
+      const tts: TtsProvider = {
+        // The language-switch acknowledgement synthesises to nothing; real replies have audio.
+        synthesize: vi.fn(async ({ text }: { text: string }) => ({
+          audio: text.includes(ackEs) ? Buffer.alloc(0) : Buffer.alloc(640),
+          contentType: 'audio/pcm',
+          provider: 'test',
+        })),
+      };
+      const h = setup({ deferSpeechTurns: true, ttsProvider: tts });
+      h.ws.inboundJson(startFrame);
+      await flush();
+      h.store.findByCallSid(CALL_SID)!.supportedLanguages = ['en', 'es'];
+      const anchorMs = 31_000_000;
+      vi.setSystemTime(anchorMs);
+      h.ws.inboundJson(mediaFrame);
+      await flush();
+
+      vi.setSystemTime(anchorMs + 2_000);
+      h.opens[0].emit({ transcript: 'my AC is broken', lastWordEndMs: 800 });
+      await flush();
+      expect(h.speechReleases).toHaveLength(1);
+
+      // The second final is an explicit switch: it waits on the session lock
+      // behind the first turn, then consumes itself with a silent acknowledgement.
+      vi.setSystemTime(anchorMs + 2_600);
+      h.opens[0].emit({ transcript: 'Hablo español, por favor', lastWordEndMs: 2_300 });
+      await flush();
+      expect(h.opens).toHaveLength(1);
+
+      vi.setSystemTime(anchorMs + 3_000);
+      h.speechReleases[0]();
+      await flush();
+      expect(h.opens).toHaveLength(2); // the switch happened and spoke nothing
+      const markNames = h.ws.markNames('first_real:');
+      // Only the first turn's reply was marked; the silent acknowledgement left no mark.
+      expect(markNames).toHaveLength(1);
+      await ackAndStamps(h, markNames[0], anchorMs + 3_400);
+
+      expect(stampsOf(h).filter((s) => s.replyGapMs !== undefined)).toEqual([
+        expect.objectContaining({ turnIndex: 0, replyGapMs: 3_400 - 800 }),
+      ]);
+      expect(await histogramCount('last_word')).toBe(1);
+      const callerRows = h.recordTurn.mock.calls
+        .map(([i]) => i as Record<string, unknown>)
+        .filter((i) => i.speaker === 'caller');
+      expect(callerRows.map((r) => r.sttFinalAt)).toEqual([new Date(anchorMs + 2_000), new Date(anchorMs + 2_600)]);
+    });
   });
 });

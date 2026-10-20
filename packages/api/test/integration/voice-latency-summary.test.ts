@@ -296,7 +296,7 @@ describe('Postgres integration — call_transcript_turns reply timing (U1)', () 
         store.appendTranscript(session.id, { speaker: 'agent', text: 'Thanks for calling.' });
         store.beginCallerTurnTiming(session.id, { transport: 'realtime', sttFinalAt, lastWordAt });
         store.appendTranscript(session.id, { speaker: 'caller', text: 'my AC is broken' });
-        const anchor = session.replyTiming!;
+        const anchor = session.replyTimings.at(-1)!;
         expect(anchor.turnIndex).toBe(1);
 
         // Stamped straight away: the update chains behind the (possibly pending) insert.

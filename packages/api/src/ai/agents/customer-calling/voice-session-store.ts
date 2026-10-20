@@ -58,6 +58,13 @@ export const DEFAULT_IDLE_TTL_MS = 30 * 60 * 1000;
 /** How often the cleanup sweep runs. */
 const DEFAULT_SWEEP_INTERVAL_MS = 60 * 1000;
 
+/**
+ * U1 — how many of a session's most recent caller turns keep their reply
+ * timing anchors and retained persist promise. Back-to-back finals queue
+ * behind the per-session lock, so a handful covers every reply still in flight.
+ */
+const RETAINED_CALLER_TURNS = 4;
+
 export type VoiceSessionEvent =
   /**
    * FSM transitioned to a new state.
@@ -382,23 +389,27 @@ export interface VoiceSession {
    */
   supportedLanguages?: ('en' | 'es')[];
   /**
-   * U1 — timing for the NEXT caller line appended on this session; consumed by
-   * that append (an agent append never consumes it). See
-   * {@link VoiceSessionStore.beginCallerTurnTiming}.
+   * U1 — timings for the NEXT caller lines appended on this session, oldest
+   * first: each caller append consumes the head (an agent append never does),
+   * because the turn pipeline serializes turns, so finals arrive and append in
+   * the same order. See {@link VoiceSessionStore.beginCallerTurnTiming}.
    */
-  pendingCallerTurnTiming?: CallerTurnTiming;
+  pendingCallerTurnTimings: CallerTurnTiming[];
   /**
-   * U1 — the timing anchors of the most recent persisted caller turn, so the
-   * reply to it can be measured: its transcript index plus the last-word /
-   * STT-final instants stored with it.
+   * U1 — the timing anchors of the last few persisted caller turns (oldest
+   * first, bounded to {@link RETAINED_CALLER_TURNS}), so the reply to each can
+   * be measured against ITS OWN row even when a newer turn has already been
+   * persisted: transcript index plus the last-word / STT-final instants stored
+   * with it.
    */
-  replyTiming?: { turnIndex: number; lastWordAt?: Date; sttFinalAt: Date };
+  replyTimings: Array<{ turnIndex: number; lastWordAt?: Date; sttFinalAt: Date }>;
   /**
-   * U1 — the `recordTurn` promise of the latest caller turn, keyed by
+   * U1 — the `recordTurn` promise of the latest caller turns, keyed by
    * transcript index and RETAINED after it settles so a reply stamp can chain
    * behind the INSERT whether the insert is still pending or long resolved.
-   * Never rejects. Holds one entry (the previous caller turn's is dropped when
-   * the next is persisted) and is cleared with the session.
+   * Never rejects. Holds the last {@link RETAINED_CALLER_TURNS} entries (older
+   * ones are dropped as newer caller turns are persisted) and is cleared with
+   * the session.
    */
   pendingTurnPersist: Map<number, Promise<void>>;
   /**
@@ -739,6 +750,8 @@ export class VoiceSessionStore {
       ttsCharacters: 0,
       mediaStreamsUsed: false,
       pendingTurnPersist: new Map(),
+      pendingCallerTurnTimings: [],
+      replyTimings: [],
       transcript: [],
       proposalIds: [],
       ended: false,
@@ -897,19 +910,31 @@ export class VoiceSessionStore {
 
   /**
    * U1 — record the timing of the caller utterance whose line is about to be
-   * appended. Consumed by the next CALLER `appendTranscript` on the session
-   * (agent appends leave it in place); a later call before that append
-   * replaces it. No-op if the session is unknown.
+   * appended. Queued behind earlier ones and consumed, oldest first, by the
+   * next CALLER `appendTranscript` on the session (agent appends leave it in
+   * place). A final that will append no caller line must hand its timing back
+   * with {@link discardCallerTurnTiming}, or the next line would take it. No-op
+   * if the session is unknown.
    */
   beginCallerTurnTiming(sessionId: string, timing: CallerTurnTiming): void {
-    const session = this.sessions.get(sessionId);
-    if (session) session.pendingCallerTurnTiming = timing;
+    this.sessions.get(sessionId)?.pendingCallerTurnTimings.push(timing);
+  }
+
+  /**
+   * U1 — drop a timing (matched by identity) that no caller line consumed:
+   * its turn was dispatched or abandoned without appending one. A timing that
+   * was already consumed is not found, so this is safe to call unconditionally
+   * once the turn is over.
+   */
+  discardCallerTurnTiming(sessionId: string, timing: CallerTurnTiming): void {
+    const pending = this.sessions.get(sessionId)?.pendingCallerTurnTimings;
+    const at = pending?.indexOf(timing) ?? -1;
+    if (at >= 0) pending?.splice(at, 1);
   }
 
   private persistTurn(session: VoiceSession, turnIndex: number, entry: TranscriptEntry): void {
-    // Only a caller line consumes the pending timing, whether or not it is persisted below.
-    const timing = entry.speaker === 'caller' ? session.pendingCallerTurnTiming : undefined;
-    if (timing) session.pendingCallerTurnTiming = undefined;
+    // Only a caller line consumes the oldest pending timing, whether or not it is persisted below.
+    const timing = entry.speaker === 'caller' ? session.pendingCallerTurnTimings.shift() : undefined;
     const repo = this.callTranscriptTurnRepo;
     if (!repo || !session.callSid) return; // in-app sessions have no CallSid: nothing to key on
     const text = entry.text.trim();
@@ -952,13 +977,17 @@ export class VoiceSessionStore {
         },
       );
     if (entry.speaker === 'caller') {
-      // The previous caller turn's reply is over (or abandoned) once the next
-      // caller line lands, so its promise is dropped: the map stays O(1).
-      session.pendingTurnPersist.clear();
+      // A caller turn's reply can still be in flight when the next caller line
+      // lands (back-to-back finals), so the last few are retained and older
+      // ones dropped: both stay O(1).
       session.pendingTurnPersist.set(turnIndex, persisted);
-      session.replyTiming = timing
-        ? { turnIndex, sttFinalAt: timing.sttFinalAt, lastWordAt: timing.lastWordAt }
-        : undefined;
+      if (session.pendingTurnPersist.size > RETAINED_CALLER_TURNS) {
+        session.pendingTurnPersist.delete(session.pendingTurnPersist.keys().next().value as number);
+      }
+      if (timing) {
+        session.replyTimings.push({ turnIndex, sttFinalAt: timing.sttFinalAt, lastWordAt: timing.lastWordAt });
+        if (session.replyTimings.length > RETAINED_CALLER_TURNS) session.replyTimings.shift();
+      }
     }
   }
 
