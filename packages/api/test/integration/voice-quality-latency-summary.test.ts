@@ -45,6 +45,7 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
   let tenantD: TestTenant;
   let tenantE: TestTenant;
   let tenantF: TestTenant;
+  let tenantG: TestTenant;
   let seq = 0;
 
   beforeAll(async () => {
@@ -57,6 +58,7 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     tenantD = await createTestTenant(pool);
     tenantE = await createTestTenant(pool);
     tenantF = await createTestTenant(pool);
+    tenantG = await createTestTenant(pool);
   });
 
   afterAll(async () => {
@@ -301,6 +303,32 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     // A filler can only bring the first sound earlier, never later, than the acked reply (median 1150).
     expect(s.p50FirstAudibleMs!).toBeLessThanOrEqual(s.p50ReplyGapMs!);
     expect(s.p50FirstAudibleMs).toBe(1150);
+  });
+
+  it('first-audible delta is clamped at zero: a first sound stamped before the last word is 0, never negative', async () => {
+    const call = newCall();
+    const lastWordAt = new Date('2026-10-20T10:00:00.000Z');
+    await repo.recordTurn({
+      tenantId: tenantG.tenantId,
+      ...call,
+      turnIndex: 0,
+      speaker: 'caller',
+      text: 'skewed word timing',
+      lastWordAt,
+      sttFinalAt: new Date(lastWordAt.getTime() + 300),
+      endpointDelayMs: 300,
+      transport: 'realtime',
+    });
+    await repo.markReplyAudio({
+      tenantId: tenantG.tenantId,
+      ...call,
+      turnIndex: 0,
+      // 400 ms BEFORE the last word the recogniser reported.
+      firstAudibleAt: new Date(lastWordAt.getTime() - 400),
+    });
+    const s = await reader.read(tenantG.tenantId, { days: 7 });
+    expect(s.p50FirstAudibleMs).toBe(0);
+    expect(s.p95FirstAudibleMs).toBe(0);
   });
 
   it('computes the endpoint-delay p95 over every in-window realtime turn that carries one', async () => {

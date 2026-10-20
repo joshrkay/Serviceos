@@ -126,33 +126,42 @@ export class PgCallTranscriptTurnRepository
   }
 
   /**
-   * U1 — the reply-audio stamps. One UPDATE on the mid-call key; every column
-   * is COALESCEd so the first stamp stands (a filler's `first_audible_at` is
-   * not overwritten by the real frame; a redelivered stamp is a no-op). Never
-   * inserts: a zero row count is the caller's signal that the row was deleted
-   * underneath it (it increments `voice_reply_stamp_lost_total`).
+   * U1 — the reply-audio stamps. One UPDATE, by primary key when the caller
+   * has the row's id (stable across `attachRecording`'s renumbering) and by
+   * the mid-call key otherwise. Every column is COALESCEd so the first stamp
+   * stands (a filler's `first_audible_at` is not overwritten by the real
+   * frame; a redelivered stamp is a no-op). Never inserts: a zero row count is
+   * the caller's signal that the row was deleted underneath it (it increments
+   * `voice_reply_stamp_lost_total`).
    */
   async markReplyAudio(input: MarkReplyAudioInput): Promise<number> {
     validateMarkReplyAudioInput(input);
+    // Key placeholders come last so both branches share $1..$6 and no
+    // placeholder is left unused (pg cannot type an unreferenced parameter).
+    const { where, keyParams } =
+      input.id !== undefined
+        ? { where: 'id = $7', keyParams: [input.id] }
+        : {
+            where: 'call_sid = $7 AND session_id = $8 AND turn_index = $9',
+            keyParams: [input.callSid, input.sessionId, input.turnIndex],
+          };
     return this.withTenantTransaction(input.tenantId, async (client) => {
       const result = await client.query(
         `UPDATE call_transcript_turns SET
-           first_audible_at        = COALESCE(first_audible_at, $5),
-           first_audio_enqueued_at = COALESCE(first_audio_enqueued_at, $6),
-           first_audio_at          = COALESCE(first_audio_at, $7),
-           reply_gap_ms            = COALESCE(reply_gap_ms, $8),
-           reply_unacked_reason    = COALESCE(reply_unacked_reason, $9)
-         WHERE tenant_id = $1 AND call_sid = $2 AND session_id = $3 AND turn_index = $4`,
+           first_audible_at        = COALESCE(first_audible_at, $2),
+           first_audio_enqueued_at = COALESCE(first_audio_enqueued_at, $3),
+           first_audio_at          = COALESCE(first_audio_at, $4),
+           reply_gap_ms            = COALESCE(reply_gap_ms, $5),
+           reply_unacked_reason    = COALESCE(reply_unacked_reason, $6)
+         WHERE tenant_id = $1 AND ${where}`,
         [
           input.tenantId,
-          input.callSid,
-          input.sessionId,
-          input.turnIndex,
           input.firstAudibleAt ?? null,
           input.firstAudioEnqueuedAt ?? null,
           input.firstAudioAt ?? null,
           input.replyGapMs ?? null,
           input.replyUnackedReason ?? null,
+          ...keyParams,
         ],
       );
       return result.rowCount ?? 0;

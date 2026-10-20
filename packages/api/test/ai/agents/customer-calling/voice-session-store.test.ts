@@ -194,7 +194,7 @@ describe('VoiceSessionStore', () => {
       return { repo: { recordTurn, markReplyAudio }, recordTurn, markReplyAudio, order };
     }
 
-    it('hands the pending timing to the next CALLER append only, computing endpointDelayMs', async () => {
+    it('stamps the timing carried on a CALLER append only, computing endpointDelayMs', async () => {
       const { repo, recordTurn } = timedRepo();
       const store = newStore({ callTranscriptTurnRepo: repo });
       const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
@@ -202,10 +202,17 @@ describe('VoiceSessionStore', () => {
       const sttFinalAt = new Date(1_850);
 
       store.appendTranscript(session.id, { speaker: 'agent', text: 'hi' });
-      store.beginCallerTurnTiming(session.id, { transport: 'realtime', sttFinalAt, lastWordAt });
-      // An agent append in between must not consume the timing.
-      store.appendTranscript(session.id, { speaker: 'agent', text: 'one moment' });
-      store.appendTranscript(session.id, { speaker: 'caller', text: 'my AC is broken' });
+      // A timing on an agent line is ignored: only caller rows are stamped.
+      store.appendTranscript(session.id, {
+        speaker: 'agent',
+        text: 'one moment',
+        timing: { transport: 'realtime', sttFinalAt: new Date(7) },
+      });
+      store.appendTranscript(session.id, {
+        speaker: 'caller',
+        text: 'my AC is broken',
+        timing: { transport: 'realtime', sttFinalAt, lastWordAt },
+      });
       store.appendTranscript(session.id, { speaker: 'caller', text: 'and it is hot' });
       await settle();
 
@@ -219,7 +226,7 @@ describe('VoiceSessionStore', () => {
         lastWordAt,
         endpointDelayMs: 850,
       });
-      // Consumed by the first caller append: the next one carries nothing.
+      // The next caller append carried no timing, so its row has none.
       expect(inputs[3]).not.toHaveProperty('transport');
       expect(inputs[3]).not.toHaveProperty('endpointDelayMs');
     });
@@ -230,8 +237,11 @@ describe('VoiceSessionStore', () => {
       const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
       const sttFinalAt = new Date(5_000);
 
-      store.beginCallerTurnTiming(session.id, { transport: 'gather', sttFinalAt });
-      store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
+      store.appendTranscript(session.id, {
+        speaker: 'caller',
+        text: 'hello',
+        timing: { transport: 'gather', sttFinalAt },
+      });
       await settle();
 
       const input = recordTurn.mock.calls[0][0] as Record<string, unknown>;
@@ -240,7 +250,7 @@ describe('VoiceSessionStore', () => {
       expect(input).not.toHaveProperty('endpointDelayMs');
     });
 
-    it('no timing begun → a caller append records none of the new fields', async () => {
+    it('a caller append with no timing records none of the new fields', async () => {
       const { repo, recordTurn } = timedRepo();
       const store = newStore({ callTranscriptTurnRepo: repo });
       const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
@@ -260,16 +270,22 @@ describe('VoiceSessionStore', () => {
       const lastWordAt = new Date(1_200);
 
       store.appendTranscript(session.id, { speaker: 'agent', text: 'hi' });
-      store.beginCallerTurnTiming(session.id, { transport: 'realtime', sttFinalAt, lastWordAt });
-      store.appendTranscript(session.id, { speaker: 'caller', text: 'first' });
+      store.appendTranscript(session.id, {
+        speaker: 'caller',
+        text: 'first',
+        timing: { transport: 'realtime', sttFinalAt, lastWordAt },
+      });
       expect(store.peek(session.id)?.replyTimings).toEqual([{ turnIndex: 1, sttFinalAt, lastWordAt }]);
       expect([...store.peek(session.id)!.pendingTurnPersist.keys()]).toEqual([1]);
 
       // Five more caller turns: only the last four anchors / promises survive.
       for (let i = 0; i < 5; i++) {
-        store.beginCallerTurnTiming(session.id, { transport: 'realtime', sttFinalAt: new Date(9_000 + i) });
         store.appendTranscript(session.id, { speaker: 'agent', text: 'ok' });
-        store.appendTranscript(session.id, { speaker: 'caller', text: `more ${i}` });
+        store.appendTranscript(session.id, {
+          speaker: 'caller',
+          text: `more ${i}`,
+          timing: { transport: 'realtime', sttFinalAt: new Date(9_000 + i) },
+        });
       }
       const kept = store.peek(session.id)!;
       expect(kept.replyTimings.map((t) => t.turnIndex)).toEqual([5, 7, 9, 11]);
@@ -277,51 +293,41 @@ describe('VoiceSessionStore', () => {
       await settle();
     });
 
-    it('back-to-back finals: each caller append takes its own timing, oldest first', async () => {
+    it('finals that append out of arrival order: each row carries its OWN timing', async () => {
       const { repo, recordTurn } = timedRepo();
       const store = newStore({ callTranscriptTurnRepo: repo });
       const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
-      const first = { transport: 'realtime' as const, sttFinalAt: new Date(1_000), lastWordAt: new Date(800) };
-      const second = { transport: 'realtime' as const, sttFinalAt: new Date(1_500), lastWordAt: new Date(1_400) };
+      // "habla español" arrived first but waits behind the session lock in
+      // switchLanguage(); the later final's turn queues and appends before it.
+      const switchFinal = { transport: 'realtime' as const, sttFinalAt: new Date(1_000), lastWordAt: new Date(800) };
+      const laterFinal = { transport: 'realtime' as const, sttFinalAt: new Date(1_500), lastWordAt: new Date(1_400) };
 
-      // Both finals are armed before the first caller line is appended.
-      store.beginCallerTurnTiming(session.id, first);
-      store.beginCallerTurnTiming(session.id, second);
       store.appendTranscript(session.id, { speaker: 'agent', text: 'one moment' });
-      store.appendTranscript(session.id, { speaker: 'caller', text: 'my AC is broken' });
-      store.appendTranscript(session.id, { speaker: 'caller', text: 'and it is hot' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'my AC is broken', timing: laterFinal });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'habla español', timing: switchFinal });
       await settle();
 
       const callerRows = recordTurn.mock.calls
         .map(([input]) => input as Record<string, unknown>)
         .filter((i) => i.speaker === 'caller');
-      expect(callerRows[0]).toMatchObject({ turnIndex: 1, sttFinalAt: first.sttFinalAt, endpointDelayMs: 200 });
-      expect(callerRows[1]).toMatchObject({ turnIndex: 2, sttFinalAt: second.sttFinalAt, endpointDelayMs: 100 });
+      expect(callerRows[0]).toMatchObject({
+        turnIndex: 1,
+        text: 'my AC is broken',
+        sttFinalAt: laterFinal.sttFinalAt,
+        lastWordAt: laterFinal.lastWordAt,
+        endpointDelayMs: 100,
+      });
+      expect(callerRows[1]).toMatchObject({
+        turnIndex: 2,
+        text: 'habla español',
+        sttFinalAt: switchFinal.sttFinalAt,
+        lastWordAt: switchFinal.lastWordAt,
+        endpointDelayMs: 200,
+      });
       expect(store.peek(session.id)?.replyTimings).toEqual([
-        { turnIndex: 1, sttFinalAt: first.sttFinalAt, lastWordAt: first.lastWordAt },
-        { turnIndex: 2, sttFinalAt: second.sttFinalAt, lastWordAt: second.lastWordAt },
+        { turnIndex: 1, sttFinalAt: laterFinal.sttFinalAt, lastWordAt: laterFinal.lastWordAt },
+        { turnIndex: 2, sttFinalAt: switchFinal.sttFinalAt, lastWordAt: switchFinal.lastWordAt },
       ]);
-    });
-
-    it('a discarded timing is skipped by the next caller line; one already consumed is left alone', async () => {
-      const { repo, recordTurn } = timedRepo();
-      const store = newStore({ callTranscriptTurnRepo: repo });
-      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
-      const unanswered = { transport: 'realtime' as const, sttFinalAt: new Date(1_000) };
-      const answered = { transport: 'realtime' as const, sttFinalAt: new Date(2_000) };
-
-      store.beginCallerTurnTiming(session.id, unanswered);
-      store.beginCallerTurnTiming(session.id, answered);
-      store.discardCallerTurnTiming(session.id, unanswered); // its turn appended no caller line
-      store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
-      store.discardCallerTurnTiming(session.id, answered); // already consumed: a no-op
-      store.discardCallerTurnTiming('unknown-session', answered);
-      store.appendTranscript(session.id, { speaker: 'caller', text: 'again' });
-      await settle();
-
-      const inputs = recordTurn.mock.calls.map(([input]) => input as Record<string, unknown>);
-      expect(inputs[0]).toMatchObject({ sttFinalAt: answered.sttFinalAt });
-      expect(inputs[1]).not.toHaveProperty('sttFinalAt');
     });
 
     it('markReplyAudio chains behind a still-pending recordTurn, never racing the INSERT', async () => {
@@ -332,8 +338,11 @@ describe('VoiceSessionStore', () => {
       const { repo, markReplyAudio, order } = timedRepo({ recordGate: gate });
       const store = newStore({ callTranscriptTurnRepo: repo });
       const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
-      store.beginCallerTurnTiming(session.id, { transport: 'realtime', sttFinalAt: new Date(1) });
-      store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
+      store.appendTranscript(session.id, {
+        speaker: 'caller',
+        text: 'hello',
+        timing: { transport: 'realtime', sttFinalAt: new Date(1) },
+      });
 
       const stamped = store.markReplyAudio(session.id, { turnIndex: 0, firstAudioAt: new Date(2), replyGapMs: 900 });
       await settle();
@@ -360,6 +369,47 @@ describe('VoiceSessionStore', () => {
       await settle();
       await store.markReplyAudio(session.id, { turnIndex: 0, firstAudibleAt: new Date(3) });
       expect(markReplyAudio).toHaveBeenCalledTimes(1);
+    });
+
+    it('markReplyAudio stamps by the row id recordTurn returned, not the (possibly renumbered) index', async () => {
+      const recordTurn = vi.fn(async (input: unknown) => ({ ...(input as object), id: 'row-uuid-1' }) as never);
+      const markReplyAudio = vi.fn(async (_input: unknown) => 1);
+      const store = newStore({ callTranscriptTurnRepo: { recordTurn, markReplyAudio } });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
+
+      await store.markReplyAudio(session.id, { turnIndex: 0, firstAudioAt: new Date(2) });
+      expect(markReplyAudio).toHaveBeenCalledWith({
+        tenantId: 'tenant-a',
+        id: 'row-uuid-1',
+        callSid: CALL_SID,
+        sessionId: session.id,
+        turnIndex: 0,
+        firstAudioAt: new Date(2),
+      });
+    });
+
+    it('a failed insert resolves no id: the stamp falls back to the mid-call key', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const recordTurn = vi.fn(async () => {
+          throw new Error('insert failed');
+        });
+        const markReplyAudio = vi.fn(async (_input: unknown) => 0);
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        try {
+          const store = newStore({ callTranscriptTurnRepo: { recordTurn, markReplyAudio } as never });
+          const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+          store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
+          await store.markReplyAudio(session.id, { turnIndex: 0, firstAudioAt: new Date(2) });
+          expect(markReplyAudio.mock.calls[0][0]).not.toHaveProperty('id');
+          expect(markReplyAudio.mock.calls[0][0]).toMatchObject({ callSid: CALL_SID, turnIndex: 0 });
+        } finally {
+          warnSpy.mockRestore();
+        }
+      } finally {
+        errorSpy.mockRestore();
+      }
     });
 
     it('an in-app session or an unknown session is a silent no-op', async () => {

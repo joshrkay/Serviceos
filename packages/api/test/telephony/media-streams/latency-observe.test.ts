@@ -158,9 +158,13 @@ function setup(
       streamingProvider: provider,
       ttsProvider: opts.ttsProvider ?? pcmTts,
       ...(opts.initializeSession ? { initializeSession: opts.initializeSession } : {}),
-      speechTurn: async ({ session, speechResult }) => {
-        // The real speechTurn appends the caller line before delegating.
-        store.appendTranscript(session.id, { speaker: 'caller', text: speechResult });
+      speechTurn: async ({ session, speechResult, callerTiming }) => {
+        // The real speechTurn appends the caller line before delegating, carrying the final's timing.
+        store.appendTranscript(session.id, {
+          speaker: 'caller',
+          text: speechResult,
+          ...(callerTiming ? { timing: callerTiming } : {}),
+        });
         if (opts.holdSpeechTurn) await gate;
         if (opts.deferSpeechTurns) {
           await new Promise<void>((resolve) => {
@@ -835,6 +839,46 @@ describe('U1c first real acked audio', () => {
       expect(callerRows.map((r) => r.sttFinalAt)).toEqual([new Date(anchorMs + 2_000), new Date(anchorMs + 2_600)]);
     });
 
+    it('two finals in the same millisecond each stamp their OWN row (turn 0 and turn 1)', async () => {
+      const h = setup({ deferSpeechTurns: true });
+      const anchorMs = 33_000_000;
+      vi.setSystemTime(anchorMs - 500);
+      h.ws.inboundJson(startFrame);
+      await flush();
+      vi.setSystemTime(anchorMs);
+      h.ws.inboundJson(mediaFrame);
+      await flush();
+
+      // Both finals land on one faked Date.now(): identical sttFinalAt.
+      vi.setSystemTime(anchorMs + 2_000);
+      h.opens[0].emit({ transcript: 'my AC is broken', lastWordEndMs: 800 });
+      h.opens[0].emit({ transcript: 'and it is very hot', lastWordEndMs: 900 });
+      await flush();
+      expect(h.speechReleases).toHaveLength(1);
+
+      vi.setSystemTime(anchorMs + 3_000);
+      h.speechReleases[0]();
+      await flush();
+      const [firstMark] = h.ws.markNames('first_real:');
+      await ackAndStamps(h, firstMark, anchorMs + 3_400);
+      expect(h.speechReleases).toHaveLength(2);
+      vi.setSystemTime(anchorMs + 4_000);
+      h.speechReleases[1]();
+      await flush();
+      const secondMarks = h.ws.markNames('first_real:');
+      expect(secondMarks).toHaveLength(2);
+      await ackAndStamps(h, secondMarks[1], anchorMs + 4_500);
+
+      const callerRows = h.recordTurn.mock.calls
+        .map(([i]) => i as Record<string, unknown>)
+        .filter((i) => i.speaker === 'caller');
+      expect(callerRows[0].sttFinalAt).toEqual(callerRows[1].sttFinalAt);
+      expect(stampsOf(h).filter((s) => s.replyGapMs !== undefined)).toEqual([
+        expect.objectContaining({ turnIndex: 0, replyGapMs: 3_400 - 800 }),
+        expect.objectContaining({ turnIndex: 1, replyGapMs: 4_500 - 900 }),
+      ]);
+    });
+
     it('a second final that speaks nothing does not disturb the first turn\'s anchor', async () => {
       const ackEs = LANGUAGE_SWITCH_ACK.es;
       const tts: TtsProvider = {
@@ -883,6 +927,67 @@ describe('U1c first real acked audio', () => {
         .map(([i]) => i as Record<string, unknown>)
         .filter((i) => i.speaker === 'caller');
       expect(callerRows.map((r) => r.sttFinalAt)).toEqual([new Date(anchorMs + 2_000), new Date(anchorMs + 2_600)]);
+    });
+
+    it('an explicit-switch final that reaches the lock after a later final: each row keeps its OWN timing', async () => {
+      const h = setup({ deferSpeechTurns: true });
+      h.ws.inboundJson(startFrame);
+      await flush();
+      h.store.findByCallSid(CALL_SID)!.supportedLanguages = ['en', 'es'];
+      const anchorMs = 32_000_000;
+      vi.setSystemTime(anchorMs);
+      h.ws.inboundJson(mediaFrame);
+      await flush();
+
+      // Turn 1 holds the session lock inside speechTurn.
+      vi.setSystemTime(anchorMs + 2_000);
+      h.opens[0].emit({ transcript: 'my AC is broken', lastWordEndMs: 800 });
+      await flush();
+      expect(h.speechReleases).toHaveLength(1);
+
+      // The next lock request (the explicit switch's switchLanguage) is held back,
+      // so a LATER final's speechTurn queues for the lock first and appends first.
+      let releaseSwitch!: () => void;
+      const switchHeld = new Promise<void>((resolve) => {
+        releaseSwitch = resolve;
+      });
+      const realLock = h.store.withSessionLock.bind(h.store);
+      let lockCalls = 0;
+      vi.spyOn(h.store, 'withSessionLock').mockImplementation(((id: string, fn: () => Promise<unknown>) => {
+        lockCalls += 1;
+        return lockCalls === 1 ? switchHeld.then(() => realLock(id, fn)) : realLock(id, fn);
+      }) as typeof h.store.withSessionLock);
+
+      vi.setSystemTime(anchorMs + 2_600);
+      h.opens[0].emit({ transcript: 'Hablo español, por favor', lastWordEndMs: 2_300 });
+      await flush();
+      vi.setSystemTime(anchorMs + 3_200);
+      h.opens[0].emit({ transcript: 'it is very hot', lastWordEndMs: 2_900 });
+      await flush();
+
+      h.speechReleases[0]();
+      await flush();
+      expect(h.speechReleases).toHaveLength(2); // the later final's turn took the lock and appended
+      h.speechReleases[1]();
+      await flush();
+      releaseSwitch();
+      await flush();
+      expect(h.opens).toHaveLength(2); // the switch happened and appended its line last
+
+      const callerRows = h.recordTurn.mock.calls
+        .map(([i]) => i as Record<string, unknown>)
+        .filter((i) => i.speaker === 'caller');
+      expect(callerRows.map((r) => r.text)).toEqual(['my AC is broken', 'it is very hot', 'Hablo español, por favor']);
+      expect(callerRows.map((r) => r.sttFinalAt)).toEqual([
+        new Date(anchorMs + 2_000),
+        new Date(anchorMs + 3_200),
+        new Date(anchorMs + 2_600),
+      ]);
+      expect(callerRows.map((r) => r.lastWordAt)).toEqual([
+        new Date(anchorMs + 800),
+        new Date(anchorMs + 2_900),
+        new Date(anchorMs + 2_300),
+      ]);
     });
   });
 });

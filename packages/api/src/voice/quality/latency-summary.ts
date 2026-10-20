@@ -10,7 +10,9 @@
  *     turns never carry a gap and are not estimated.
  *   - p50 / p95 first-audible delay (filler or real reply, whichever played
  *     first, measured from the caller's last word), over realtime turns with a
- *     `first_audible_at` stamp AND a `last_word_at`. A turn that only has the
+ *     `first_audible_at` stamp AND a `last_word_at`. Each delta is clamped to
+ *     zero (as the adapter clamps `reply_gap_ms`): a word-timing offset that
+ *     lands after the first sound is clock skew, never a negative delay. A turn that only has the
  *     STT-final fallback anchor is excluded: it omits the endpointing delay and
  *     would bias the number down. A filler makes this look better than the reply
  *     gap by design; the card labels it so.
@@ -165,8 +167,8 @@ class PgLatencySummaryReader extends PgBaseRepository implements LatencySummaryR
              FILTER (WHERE transport = 'realtime' AND reply_gap_ms IS NOT NULL) AS reply_gaps_ms,
            array_agg(endpoint_delay_ms ORDER BY endpoint_delay_ms)
              FILTER (WHERE transport = 'realtime' AND endpoint_delay_ms IS NOT NULL) AS endpoint_delays_ms,
-           array_agg(ROUND(EXTRACT(EPOCH FROM (first_audible_at - last_word_at)) * 1000)::int
-                     ORDER BY ROUND(EXTRACT(EPOCH FROM (first_audible_at - last_word_at)) * 1000)::int)
+           array_agg(GREATEST(0, ROUND(EXTRACT(EPOCH FROM (first_audible_at - last_word_at)) * 1000))::int
+                     ORDER BY GREATEST(0, ROUND(EXTRACT(EPOCH FROM (first_audible_at - last_word_at)) * 1000))::int)
              FILTER (WHERE transport = 'realtime' AND first_audible_at IS NOT NULL
                        AND last_word_at IS NOT NULL)                                                   AS first_audibles_ms,
            COUNT(*) FILTER (WHERE transport = 'realtime' AND reply_unacked_reason = 'clear_echo')     AS unacked_clear_echo,

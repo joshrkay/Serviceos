@@ -185,17 +185,31 @@ export interface TranscriptEntry {
   speaker: 'caller' | 'agent';
   text: string;
   ts?: number;
+  /**
+   * U1 — timing of the caller utterance this line records. Carried WITH the
+   * append (never queued separately) because caller finals do not append in
+   * arrival order: an explicit language-switch final can wait behind the
+   * session lock while a later final's turn appends first. Ignored on agent
+   * lines.
+   */
+  timing?: CallerTurnTiming;
 }
 
 /**
  * U1 — timing the transport knows about the caller's utterance at the moment
  * its text is appended: when the recogniser finalised it and, on the realtime
  * path only, when the caller's last word ended (Deepgram word timing anchored
- * to wall clock). Handed to the store just before the caller line is appended
- * and consumed by that append alone.
+ * to wall clock). Rides on the caller line's {@link TranscriptEntry} so each
+ * row is stamped with its own utterance's timing.
  */
 export interface CallerTurnTiming {
   transport: CallTurnTransport;
+  /**
+   * Unique per accepted final (the realtime adapter sets it). Kept with the
+   * row's reply anchor so a reply resolves ITS row by key: STT-final instants
+   * are millisecond-resolution and two finals can share one.
+   */
+  turnKey?: string;
   sttFinalAt: Date;
   lastWordAt?: Date;
 }
@@ -389,29 +403,25 @@ export interface VoiceSession {
    */
   supportedLanguages?: ('en' | 'es')[];
   /**
-   * U1 — timings for the NEXT caller lines appended on this session, oldest
-   * first: each caller append consumes the head (an agent append never does),
-   * because the turn pipeline serializes turns, so finals arrive and append in
-   * the same order. See {@link VoiceSessionStore.beginCallerTurnTiming}.
-   */
-  pendingCallerTurnTimings: CallerTurnTiming[];
-  /**
    * U1 — the timing anchors of the last few persisted caller turns (oldest
    * first, bounded to {@link RETAINED_CALLER_TURNS}), so the reply to each can
    * be measured against ITS OWN row even when a newer turn has already been
    * persisted: transcript index plus the last-word / STT-final instants stored
    * with it.
    */
-  replyTimings: Array<{ turnIndex: number; lastWordAt?: Date; sttFinalAt: Date }>;
+  replyTimings: Array<{ turnIndex: number; turnKey?: string; lastWordAt?: Date; sttFinalAt: Date }>;
   /**
    * U1 — the `recordTurn` promise of the latest caller turns, keyed by
    * transcript index and RETAINED after it settles so a reply stamp can chain
    * behind the INSERT whether the insert is still pending or long resolved.
+   * Resolves to the row's primary key (undefined when the insert failed), which
+   * is the stable identity for the reply stamp: `attachRecording` renumbers
+   * `turn_index` at end of call, so the index alone can miss a late stamp.
    * Never rejects. Holds the last {@link RETAINED_CALLER_TURNS} entries (older
    * ones are dropped as newer caller turns are persisted) and is cleared with
    * the session.
    */
-  pendingTurnPersist: Map<number, Promise<void>>;
+  pendingTurnPersist: Map<number, Promise<string | undefined>>;
   /**
    * P11-002 — resolved per-tenant TTS voice override for the session
    * language (settings.ttsVoiceEn/Es). When set, the `<Say voice>` uses
@@ -750,7 +760,6 @@ export class VoiceSessionStore {
       ttsCharacters: 0,
       mediaStreamsUsed: false,
       pendingTurnPersist: new Map(),
-      pendingCallerTurnTimings: [],
       replyTimings: [],
       transcript: [],
       proposalIds: [],
@@ -908,37 +917,12 @@ export class VoiceSessionStore {
     this.persistTurn(session, turnIndex, entry);
   }
 
-  /**
-   * U1 — record the timing of the caller utterance whose line is about to be
-   * appended. Queued behind earlier ones and consumed, oldest first, by the
-   * next CALLER `appendTranscript` on the session (agent appends leave it in
-   * place). A final that will append no caller line must hand its timing back
-   * with {@link discardCallerTurnTiming}, or the next line would take it. No-op
-   * if the session is unknown.
-   */
-  beginCallerTurnTiming(sessionId: string, timing: CallerTurnTiming): void {
-    this.sessions.get(sessionId)?.pendingCallerTurnTimings.push(timing);
-  }
-
-  /**
-   * U1 — drop a timing (matched by identity) that no caller line consumed:
-   * its turn was dispatched or abandoned without appending one. A timing that
-   * was already consumed is not found, so this is safe to call unconditionally
-   * once the turn is over.
-   */
-  discardCallerTurnTiming(sessionId: string, timing: CallerTurnTiming): void {
-    const pending = this.sessions.get(sessionId)?.pendingCallerTurnTimings;
-    const at = pending?.indexOf(timing) ?? -1;
-    if (at >= 0) pending?.splice(at, 1);
-  }
-
   private persistTurn(session: VoiceSession, turnIndex: number, entry: TranscriptEntry): void {
-    // Only a caller line consumes the oldest pending timing, whether or not it is persisted below.
-    const timing = entry.speaker === 'caller' ? session.pendingCallerTurnTimings.shift() : undefined;
+    const timing = entry.speaker === 'caller' ? entry.timing : undefined;
     const repo = this.callTranscriptTurnRepo;
     if (!repo || !session.callSid) return; // in-app sessions have no CallSid: nothing to key on
     const text = entry.text.trim();
-    if (text.length === 0) return; // an empty utterance still consumed its index above
+    if (text.length === 0) return; // an empty utterance still took its transcript index
     const { callSid } = session;
     const endpointDelayMs =
       timing?.lastWordAt !== undefined
@@ -965,8 +949,8 @@ export class VoiceSessionStore {
         }),
       )
       .then(
-        () => undefined,
-        (err: unknown) => {
+        (row): string | undefined => row?.id,
+        (err: unknown): string | undefined => {
           // eslint-disable-next-line no-console
           console.error('voice-session-store: mid-call transcript persist failed', {
             sessionId: session.id,
@@ -974,6 +958,7 @@ export class VoiceSessionStore {
             turnIndex,
             error: err instanceof Error ? err.message : String(err),
           });
+          return undefined;
         },
       );
     if (entry.speaker === 'caller') {
@@ -985,7 +970,12 @@ export class VoiceSessionStore {
         session.pendingTurnPersist.delete(session.pendingTurnPersist.keys().next().value as number);
       }
       if (timing) {
-        session.replyTimings.push({ turnIndex, sttFinalAt: timing.sttFinalAt, lastWordAt: timing.lastWordAt });
+        session.replyTimings.push({
+          turnIndex,
+          turnKey: timing.turnKey,
+          sttFinalAt: timing.sttFinalAt,
+          lastWordAt: timing.lastWordAt,
+        });
         if (session.replyTimings.length > RETAINED_CALLER_TURNS) session.replyTimings.shift();
       }
     }
@@ -1006,10 +996,19 @@ export class VoiceSessionStore {
     if (!session || !session.callSid || !repo) return Promise.resolve();
     const { callSid } = session;
     const { turnIndex, ...stamps } = stamp;
-    const insert = session.pendingTurnPersist.get(turnIndex) ?? Promise.resolve();
+    const insert = session.pendingTurnPersist.get(turnIndex) ?? Promise.resolve(undefined);
     return insert
-      .then(() =>
-        repo.markReplyAudio({ tenantId: session.tenantId, callSid, sessionId: session.id, turnIndex, ...stamps }),
+      .then((id) =>
+        // By primary key when the insert resolved one (stable across
+        // attachRecording's renumbering); the mid-call key only when it never did.
+        repo.markReplyAudio({
+          tenantId: session.tenantId,
+          callSid,
+          sessionId: session.id,
+          turnIndex,
+          ...(id ? { id } : {}),
+          ...stamps,
+        }),
       )
       .then((rows) => {
         if (rows === 0) {

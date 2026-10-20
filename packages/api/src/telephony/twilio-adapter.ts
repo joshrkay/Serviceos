@@ -57,7 +57,7 @@ import type {
   CallingAgentEvent,
   SideEffect,
 } from '../ai/agents/customer-calling/types';
-import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+import type { CallerTurnTiming, VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { VulnerabilityTriageHook } from '../ai/agents/customer-calling/vulnerability-triage-hook';
 import { extractPriorTurns } from '../ai/agents/customer-calling/transcript-turns';
 import type { VoiceSessionRepository } from '../voice/voice-session';
@@ -2045,6 +2045,8 @@ export class TwilioGatherAdapter {
     callSid: string;
     speechResult: string;
     tenantId: string;
+    /** U1 — this final's timing, stamped onto the caller line appended below. */
+    callerTiming?: CallerTurnTiming;
   }): Promise<SideEffect[]> {
     // PRIV-3 — a recited card number is scrubbed where the caller's words
     // enter the turn, so the FSM events, task handlers and the proposals they
@@ -2073,6 +2075,7 @@ export class TwilioGatherAdapter {
         // at each consumer, so every derived summary inherits it.
         text: callerTranscriptText(session, opts.speechResult),
         ts: Date.now(),
+        ...(opts.callerTiming ? { timing: opts.callerTiming } : {}),
       });
     }
 
@@ -2340,15 +2343,12 @@ export class TwilioGatherAdapter {
     if (opts.speechResult.trim().length > 0) {
       // U1 — Gather has no stream clock: only the webhook receipt is known, so
       // the row records transport + stt_final_at and never a reply gap.
-      this.deps.store.beginCallerTurnTiming(opts.sessionId, {
-        transport: 'gather',
-        sttFinalAt: new Date(),
-      });
       this.deps.store.appendTranscript(opts.sessionId, {
         speaker: 'caller',
         // #850 — see the sibling append above.
         text: callerTranscriptText(session, opts.speechResult),
         ts: Date.now(),
+        timing: { transport: 'gather', sttFinalAt: new Date() },
       });
     }
 

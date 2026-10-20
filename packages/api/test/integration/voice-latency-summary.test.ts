@@ -11,14 +11,17 @@
  *     frame sets first_audio_at + reply_gap_ms, a repeat is a no-op, a missing
  *     row returns 0, and RLS keeps another tenant's rows out of reach
  *   - a Gather turn carries transport + stt_final_at only
+ *   - a stamp keyed by the row id still lands after `attachRecording`
+ *     renumbered the turn; the stale (call_sid, session_id, turn_index) key misses
  *
  * Runs only under `npm run test:integration` (vitest globalSetup starts the
  * Postgres testcontainer and sets TEST_DB_URL).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
-import { getSharedTestDb, closeSharedTestDb, createTestTenant, type TestTenant } from './shared';
+import { getSharedTestDb, closeSharedTestDb, createTestTenant, createTestFile, type TestTenant } from './shared';
 import { PgCallTranscriptTurnRepository } from '../../src/voice/pg-call-transcript-turn';
+import { PgVoiceRepository } from '../../src/voice/pg-voice';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 
 interface TurnTimingRow {
@@ -51,6 +54,20 @@ describe('Postgres integration — call_transcript_turns reply timing (U1)', () 
   afterAll(async () => {
     await closeSharedTestDb();
   });
+
+  async function makeRecording(): Promise<string> {
+    const fileId = await createTestFile(pool, tenant.tenantId, tenant.userId);
+    const recording = await new PgVoiceRepository(pool).create({
+      id: crypto.randomUUID(),
+      tenantId: tenant.tenantId,
+      fileId,
+      status: 'pending',
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    return recording.id;
+  }
 
   function newCallSid(): string {
     callCounter += 1;
@@ -294,8 +311,11 @@ describe('Postgres integration — call_transcript_turns reply timing (U1)', () 
         const firstAudioAt = new Date('2026-10-20T11:00:02.250Z');
 
         store.appendTranscript(session.id, { speaker: 'agent', text: 'Thanks for calling.' });
-        store.beginCallerTurnTiming(session.id, { transport: 'realtime', sttFinalAt, lastWordAt });
-        store.appendTranscript(session.id, { speaker: 'caller', text: 'my AC is broken' });
+        store.appendTranscript(session.id, {
+          speaker: 'caller',
+          text: 'my AC is broken',
+          timing: { transport: 'realtime', sttFinalAt, lastWordAt },
+        });
         const anchor = session.replyTimings.at(-1)!;
         expect(anchor.turnIndex).toBe(1);
 
@@ -335,8 +355,11 @@ describe('Postgres integration — call_transcript_turns reply timing (U1)', () 
         const session = store.create(tenant.tenantId, 'telephony', { callSid });
         const sttFinalAt = new Date('2026-10-20T12:00:00.000Z');
 
-        store.beginCallerTurnTiming(session.id, { transport: 'gather', sttFinalAt });
-        store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
+        store.appendTranscript(session.id, {
+          speaker: 'caller',
+          text: 'hello',
+          timing: { transport: 'gather', sttFinalAt },
+        });
         // Let the fire-and-forget insert settle through the retained promise.
         await session.pendingTurnPersist.get(0);
 
@@ -348,6 +371,46 @@ describe('Postgres integration — call_transcript_turns reply timing (U1)', () 
         expect(row.first_audio_at).toBeNull();
         expect(row.first_audible_at).toBeNull();
         expect(row.reply_gap_ms).toBeNull();
+      } finally {
+        store.dispose();
+      }
+    });
+    it('a reply stamp lands by row id after attachRecording renumbered the turn', async () => {
+      const store = new VoiceSessionStore({ startInterval: false, callTranscriptTurnRepo: repo });
+      try {
+        const callSid = newCallSid();
+        // Leg 1 holds one turn; leg 2 restarts at index 0 and is renumbered to 1 on attach.
+        const first = store.create(tenant.tenantId, 'telephony', { callSid });
+        store.appendTranscript(first.id, { speaker: 'caller', text: 'first leg' });
+        await first.pendingTurnPersist.get(0);
+        const second = store.create(tenant.tenantId, 'telephony', { callSid });
+        store.appendTranscript(second.id, {
+          speaker: 'caller',
+          text: 'second leg',
+          timing: { transport: 'gather', sttFinalAt: new Date('2026-10-20T13:00:00.000Z') },
+        });
+        const rowId = await second.pendingTurnPersist.get(0);
+        expect(rowId).toEqual(expect.any(String));
+
+        const recordingId = await makeRecording();
+        expect(await repo.attachRecording(tenant.tenantId, callSid, recordingId)).toBe(2);
+        expect((await readTiming(tenant.tenantId, callSid)).map((r) => r.turn_index)).toEqual([0, 1]);
+
+        // A stamp keyed on the pre-attach index would have missed the renumbered row...
+        expect(
+          await repo.markReplyAudio({
+            tenantId: tenant.tenantId, callSid, sessionId: second.id, turnIndex: 0, replyGapMs: 5,
+          }),
+        ).toBe(0);
+        // ...but the store stamps by id, so the late reply stamp still lands.
+        const firstAudioAt = new Date('2026-10-20T13:00:02.000Z');
+        await second.pendingTurnPersist.get(0);
+        await store.markReplyAudio(second.id, { turnIndex: 0, firstAudioAt, firstAudibleAt: firstAudioAt, replyGapMs: 1500 });
+
+        const rows = await readTiming(tenant.tenantId, callSid);
+        expect(rows[0].reply_gap_ms).toBeNull();
+        expect(rows[1].reply_gap_ms).toBe(1500);
+        expect(rows[1].first_audio_at?.toISOString()).toBe(firstAudioAt.toISOString());
       } finally {
         store.dispose();
       }

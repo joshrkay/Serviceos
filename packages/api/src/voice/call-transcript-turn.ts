@@ -127,8 +127,9 @@ export interface RecordTurnInput {
 }
 
 /**
- * U1 — the second write of a caller turn's reply timing, keyed on the mid-call
- * upsert key `(tenant_id, call_sid, session_id, turn_index)`. Every stamp is
+ * U1 — the second write of a caller turn's reply timing, keyed on the row's id
+ * when known, else on the mid-call upsert key
+ * `(tenant_id, call_sid, session_id, turn_index)`. Every stamp is
  * `COALESCE`d onto the row, so a filler's `firstAudibleAt` is never overwritten
  * by the later real frame and a repeated stamp is a no-op. Returns the number
  * of rows updated: 0 means the row is gone and the caller counts a lost stamp
@@ -136,6 +137,14 @@ export interface RecordTurnInput {
  */
 export interface MarkReplyAudioInput {
   tenantId: string;
+  /**
+   * The row's primary key, as `recordTurn` returned it. When set the UPDATE
+   * matches on it (plus tenant) and ignores the mid-call key: `attachRecording`
+   * renumbers `turn_index` at end of call, so a stamp that lands after it must
+   * not chase the stale index. Absent only when the insert never resolved an
+   * id; then the (callSid, sessionId, turnIndex) key is used.
+   */
+  id?: string;
   callSid: string;
   sessionId: string;
   turnIndex: number;
@@ -334,12 +343,13 @@ export class InMemoryCallTranscriptTurnRepository implements CallTranscriptTurnR
 
   async markReplyAudio(input: MarkReplyAudioInput): Promise<number> {
     validateMarkReplyAudioInput(input);
-    const row = this.rows.find(
-      (r) =>
-        r.tenantId === input.tenantId &&
-        r.callSid === input.callSid &&
-        r.sessionId === input.sessionId &&
-        r.turnIndex === input.turnIndex,
+    const row = this.rows.find((r) =>
+      input.id
+        ? r.tenantId === input.tenantId && r.id === input.id
+        : r.tenantId === input.tenantId &&
+          r.callSid === input.callSid &&
+          r.sessionId === input.sessionId &&
+          r.turnIndex === input.turnIndex,
     );
     if (!row) return 0;
     // COALESCE: the first stamp of each column stands (a filler's

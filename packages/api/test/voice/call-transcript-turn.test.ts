@@ -480,6 +480,29 @@ describe('InMemoryCallTranscriptTurnRepository', () => {
       ).rejects.toThrow(/replyUnackedReason/);
     });
 
+    it('stamps by row id after attachRecording renumbered the index; a stale-index stamp misses', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      // Leg 2 starts at index 0 again; attachRecording compacts the call into one sequence.
+      await repo.recordTurn({ tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 0, speaker: 'caller', text: 'one' });
+      const second = await repo.recordTurn({
+        tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_2, turnIndex: 0, speaker: 'caller', text: 'two',
+      });
+      expect(await repo.attachRecording(TENANT_A, CALL_SID, 'rec-1')).toBe(2);
+
+      const stale = { tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_2, turnIndex: 0 };
+      // The stale key now addresses nothing for leg 2 (its row is index 1).
+      expect(await repo.markReplyAudio({ ...stale, firstAudioAt: new Date(1) })).toBe(0);
+      expect(await repo.markReplyAudio({ ...stale, id: second.id, firstAudioAt: new Date(1), replyGapMs: 700 })).toBe(1);
+
+      const rows = await repo.listByRecording(TENANT_A, 'rec-1');
+      expect(rows.map((r) => [r.text, r.turnIndex, r.replyGapMs])).toEqual([
+        ['one', 0, undefined],
+        ['two', 1, 700],
+      ]);
+      // Tenant-scoped: another tenant's id lookup never matches.
+      expect(await repo.markReplyAudio({ ...stale, tenantId: TENANT_B, id: second.id, replyGapMs: 1 })).toBe(0);
+    });
+
     it('records an unacked reason without inventing first_audio_at', async () => {
       const repo = new InMemoryCallTranscriptTurnRepository();
       await seedCaller(repo);
