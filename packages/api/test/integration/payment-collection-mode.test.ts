@@ -49,6 +49,7 @@ import { PublicInvoiceService } from '../../src/invoices/public-invoice-service'
 import { createPublicInvoicesRouter } from '../../src/routes/public-invoices';
 import { createPublicPaymentsRouter } from '../../src/routes/public-payments';
 import { readPaymentCollectionMode } from '../../src/invoices/payment-collection-mode';
+import { applyTenantContext, clearTenantContext } from '../../src/db/rls-runtime-role';
 import {
   MockPaymentLinkProvider,
   type PaymentLinkRequest,
@@ -478,5 +479,175 @@ describe('Postgres integration — payment_collection_mode at the pay surfaces (
     });
     expect((await linkColumns(payLinkTenant.tenantId, invoice.id)).stripe_payment_link_url).toBe(recovered.url);
     expect(await unavailableRows(payLinkTenant.tenantId, invoice.id)).toHaveLength(2);
+  });
+  // ── S5a-3 (U8): migration 322 and the cleanup primitives, by column name ──
+
+  /** Raw marker read — `invoices.cleanup_claimed_at` (migration 322). */
+  async function claimColumns(tenantId: string, invoiceId: string) {
+    const { rows } = await pool.query<{
+      cleanup_claimed_at: Date | null;
+      stripe_payment_link_id: string | null;
+    }>(
+      `SELECT cleanup_claimed_at, stripe_payment_link_id FROM invoices WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, invoiceId],
+    );
+    return rows[0];
+  }
+
+  /** Put a link (and optionally a claim marker) on a row, the way S5a-5's claim writes it. */
+  async function setLinkRaw(tenantId: string, invoiceId: string, linkId: string | null, claimed: boolean) {
+    await pool.query(
+      `UPDATE invoices
+          SET stripe_payment_link_id = $3::text,
+              stripe_payment_link_url = CASE WHEN $3::text IS NULL THEN NULL ELSE 'https://pay.stripe.com/' || $3::text END,
+              cleanup_claimed_at = CASE WHEN $4 THEN NOW() ELSE NULL END
+        WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, invoiceId, linkId, claimed],
+    );
+  }
+
+  async function setStatusRaw(tenantId: string, invoiceId: string, status: string) {
+    await pool.query(`UPDATE invoices SET status = $3 WHERE tenant_id = $1 AND id = $2`, [tenantId, invoiceId, status]);
+  }
+
+  it('migration 322: invoices.cleanup_claimed_at is a nullable timestamptz and the live-link partial index exists', async () => {
+    const col = await pool.query<{ data_type: string; is_nullable: string }>(
+      `SELECT data_type, is_nullable FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'invoices' AND column_name = 'cleanup_claimed_at'`,
+    );
+    expect(col.rows).toEqual([{ data_type: 'timestamp with time zone', is_nullable: 'YES' }]);
+    const idx = await pool.query<{ indexdef: string }>(
+      `SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_invoices_live_payment_link'`,
+    );
+    expect(idx.rows).toHaveLength(1);
+    expect(idx.rows[0].indexdef).toMatch(/ON public\.invoices USING btree \(tenant_id, id\)/);
+    expect(idx.rows[0].indexdef).toMatch(/stripe_payment_link_id IS NOT NULL/);
+    expect(idx.rows[0].indexdef).toMatch(/'open'::text, 'partially_paid'::text/);
+  });
+
+  it('findOpenWithPaymentLink: only open/partially_paid rows holding a link, ordered by id, paged; a neighbour is invisible under RLS', async () => {
+    const t = await createTestTenant(pool);
+    const neighbour = await createTestTenant(pool);
+    const jobId = await seedJobChain(t, 'FOWPL');
+    const neighbourJob = await seedJobChain(neighbour, 'FOWPL-N');
+
+    const live: string[] = [];
+    for (const [label, status, link] of [
+      ['L1', 'open', true],
+      ['L2', 'partially_paid', true],
+      ['L3', 'open', true],
+      ['NOLINK', 'open', false],
+      ['PAID', 'paid', true],
+      ['VOID', 'void', true],
+      ['CANCELED', 'canceled', true],
+    ] as const) {
+      const inv = await seedOpenInvoice(t, jobId, `FOWPL-${label}`);
+      if (link) await setLinkRaw(t.tenantId, inv.id, `plink_${label}_${inv.id.slice(0, 6)}`, false);
+      if (status !== 'open') await setStatusRaw(t.tenantId, inv.id, status);
+      if (link && (status === 'open' || status === 'partially_paid')) live.push(inv.id);
+    }
+    const theirs = await seedOpenInvoice(neighbour, neighbourJob, 'FOWPL-THEIRS');
+    await setLinkRaw(neighbour.tenantId, theirs.id, `plink_theirs_${theirs.id.slice(0, 6)}`, false);
+
+    const expected = [...live].sort();
+    const page1 = await invoiceRepo.findOpenWithPaymentLink(t.tenantId, null, 2);
+    expect(page1.map((i) => i.id)).toEqual(expected.slice(0, 2));
+    // Real rows come back mapped, line items included (one batched read).
+    expect(page1[0].stripePaymentLinkId).toMatch(/^plink_/);
+    expect(page1[0].lineItems).toHaveLength(1);
+    expect(page1[0].cleanupClaimedAt).toBeUndefined();
+    const page2 = await invoiceRepo.findOpenWithPaymentLink(t.tenantId, page1[1].id, 2);
+    expect(page2.map((i) => i.id)).toEqual(expected.slice(2));
+    expect(await invoiceRepo.findOpenWithPaymentLink(t.tenantId, expected[2], 2)).toEqual([]);
+    expect((await invoiceRepo.findOpenWithPaymentLink(neighbour.tenantId, null, 10)).map((i) => i.id)).toEqual([
+      theirs.id,
+    ]);
+
+    // RLS alone hides the neighbour: under t's context, the same predicate
+    // with NO tenant filter sees only t's rows.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await applyTenantContext(client, t.tenantId, { transactional: true });
+      if (process.env.RLS_RUNTIME_ROLE === 'true') {
+        const role = await client.query<{ r: string }>('SELECT current_user AS r');
+        expect(role.rows[0].r).toBe('rls_app_runtime');
+      }
+      const { rows } = await client.query<{ id: string }>(
+        `SELECT id FROM invoices
+          WHERE stripe_payment_link_id IS NOT NULL AND status IN ('open', 'partially_paid')
+          ORDER BY id`,
+      );
+      expect(rows.map((r) => r.id)).toEqual(expected);
+      await client.query('ROLLBACK');
+    } finally {
+      await clearTenantContext(client);
+      client.release();
+    }
+  });
+
+  it('releaseCleanupClaim clears the marker only while the row still holds that link', async () => {
+    const inv = await seedOpenInvoice(payLinkTenant, payLinkJobId, 'RELEASE');
+    await setLinkRaw(payLinkTenant.tenantId, inv.id, 'plink_release_A', true);
+    expect((await claimColumns(payLinkTenant.tenantId, inv.id)).cleanup_claimed_at).toBeInstanceOf(Date);
+
+    expect(await invoiceRepo.releaseCleanupClaim(payLinkTenant.tenantId, inv.id, 'plink_release_B')).toBe(false);
+    expect((await claimColumns(payLinkTenant.tenantId, inv.id)).cleanup_claimed_at).toBeInstanceOf(Date);
+    // Another tenant's id for the same row matches nothing.
+    expect(await invoiceRepo.releaseCleanupClaim(collectTenant.tenantId, inv.id, 'plink_release_A')).toBe(false);
+
+    const claimed = await invoiceRepo.findById(payLinkTenant.tenantId, inv.id);
+    expect(claimed!.cleanupClaimedAt).toBeInstanceOf(Date);
+
+    expect(await invoiceRepo.releaseCleanupClaim(payLinkTenant.tenantId, inv.id, 'plink_release_A')).toBe(true);
+    expect(await claimColumns(payLinkTenant.tenantId, inv.id)).toEqual({
+      cleanup_claimed_at: null,
+      stripe_payment_link_id: 'plink_release_A',
+    });
+  });
+
+  it('every link-column write nulls cleanup_claimed_at in the same statement: CAS clear, guarded attach, plain update', async () => {
+    const cleared = await seedOpenInvoice(payLinkTenant, payLinkJobId, 'CLR-MARK');
+    await setLinkRaw(payLinkTenant.tenantId, cleared.id, 'plink_clr_mark', true);
+    // A CAS that misses touches nothing — the marker stays.
+    expect(await invoiceRepo.clearPaymentLinkIfMatches(payLinkTenant.tenantId, cleared.id, 'plink_other')).toBe(false);
+    expect((await claimColumns(payLinkTenant.tenantId, cleared.id)).cleanup_claimed_at).toBeInstanceOf(Date);
+    expect(await invoiceRepo.clearPaymentLinkIfMatches(payLinkTenant.tenantId, cleared.id, 'plink_clr_mark')).toBe(true);
+    expect(await claimColumns(payLinkTenant.tenantId, cleared.id)).toEqual({
+      cleanup_claimed_at: null,
+      stripe_payment_link_id: null,
+    });
+
+    // A leftover marker with no link (pinned state) is dropped by the attach.
+    const attached = await seedOpenInvoice(payLinkTenant, payLinkJobId, 'ATT-MARK');
+    await pool.query(`UPDATE invoices SET cleanup_claimed_at = NOW() WHERE id = $1`, [attached.id]);
+    const row = await invoiceRepo.attachPaymentLink(
+      payLinkTenant.tenantId,
+      attached.id,
+      { linkId: 'plink_att_mark', linkUrl: 'https://pay.stripe.com/att' },
+      40000,
+      new Date(),
+    );
+    expect(row.ok && row.invoice.stripePaymentLinkId).toBe('plink_att_mark');
+    expect(await claimColumns(payLinkTenant.tenantId, attached.id)).toEqual({
+      cleanup_claimed_at: null,
+      stripe_payment_link_id: 'plink_att_mark',
+    });
+
+    const updated = await seedOpenInvoice(payLinkTenant, payLinkJobId, 'UPD-MARK');
+    await setLinkRaw(payLinkTenant.tenantId, updated.id, 'plink_upd_old', true);
+    await invoiceRepo.update(payLinkTenant.tenantId, updated.id, {
+      stripePaymentLinkId: 'plink_upd_new',
+      stripePaymentLinkUrl: 'https://pay.stripe.com/new',
+      updatedAt: new Date(),
+    });
+    expect(await claimColumns(payLinkTenant.tenantId, updated.id)).toEqual({
+      cleanup_claimed_at: null,
+      stripe_payment_link_id: 'plink_upd_new',
+    });
+    // An update that does not touch the link leaves a marker alone.
+    await setLinkRaw(payLinkTenant.tenantId, updated.id, 'plink_upd_new', true);
+    await invoiceRepo.update(payLinkTenant.tenantId, updated.id, { customerMessage: 'thanks', updatedAt: new Date() });
+    expect((await claimColumns(payLinkTenant.tenantId, updated.id)).cleanup_claimed_at).toBeInstanceOf(Date);
   });
 });

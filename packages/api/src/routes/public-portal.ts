@@ -22,7 +22,8 @@ import { z } from 'zod';
 import { toErrorResponse } from '../shared/errors';
 import { CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
-import { InvoiceRepository, Invoice } from '../invoices/invoice';
+import { InvoiceRepository, Invoice, type AttachPaymentLinkResult } from '../invoices/invoice';
+import { retireCheckoutLink } from '../invoices/invoice-payment-link';
 import { JobRepository, createJob } from '../jobs/job';
 import { deriveDepositStatus, isDepositPayable } from '../jobs/deposit-rule';
 import { AgreementRepository } from '../agreements/agreement';
@@ -440,7 +441,13 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
 
       const enriched = await Promise.all(
         allInvoices.map(async (inv) =>
-          buildInvoicePayload(inv, tenantId, provider, currency, deps.invoiceRepo, mode),
+          buildInvoicePayload(inv, tenantId, mode, {
+            provider,
+            currency,
+            invoiceRepo: deps.invoiceRepo,
+            auditRepo: deps.auditRepo,
+            connectAccountResolver: deps.connectAccountResolver,
+          }),
         ),
       );
       res.json({ invoices: enriched });
@@ -1195,12 +1202,17 @@ interface InvoicePayload {
 async function buildInvoicePayload(
   inv: Invoice,
   tenantId: string,
-  provider: PaymentLinkProvider | undefined,
-  currency: string,
-  invoiceRepo: InvoiceRepository,
   mode: PaymentCollectionModeView,
+  mint: {
+    provider: PaymentLinkProvider | undefined;
+    currency: string;
+    invoiceRepo: InvoiceRepository;
+    auditRepo?: AuditRepository;
+    connectAccountResolver?: ConnectAccountResolver;
+  },
 ): Promise<InvoicePayload> {
-  const collectOnSite = mode !== 'pay_link';
+  const { provider, currency, invoiceRepo, auditRepo, connectAccountResolver } = mint;
+  let collectOnSite = mode !== 'pay_link';
   // A leftover stored link is never served under collect-on-site either.
   let payNowUrl: string | null = collectOnSite ? null : (inv.stripePaymentLinkUrl ?? null);
 
@@ -1218,57 +1230,54 @@ async function buildInvoicePayload(
       description: `Invoice ${inv.invoiceNumber}`,
     });
     if (link) {
-      try {
-        await invoiceRepo.update(tenantId, inv.id, {
-          stripePaymentLinkId: link.linkId,
-          stripePaymentLinkUrl: link.linkUrl,
-          updatedAt: new Date(),
+      // S5a-4 (U8) — persist through the guarded attach, which re-reads the
+      // mode under the payment-mode lock: an owner's switch to "Collect on
+      // the spot" during the mint (or a mode that cannot be read — a throw)
+      // stores nothing, the fresh link dies through the audited
+      // deactivation, and the row shows the in-person label. That
+      // deactivation's CAS clear also settles an attach whose throw hid a
+      // commit, so a dead link is never left stored and served.
+      const retire = () =>
+        retireCheckoutLink({
+          tenantId,
+          invoice: inv,
+          linkId: link.linkId,
+          invoiceRepo,
+          provider,
+          connectAccountResolver,
+          auditRepo,
         });
+      let attached: AttachPaymentLinkResult | null = null;
+      try {
+        attached = await invoiceRepo.attachPaymentLink(
+          tenantId,
+          inv.id,
+          { linkId: link.linkId, linkUrl: link.linkUrl },
+          inv.amountDueCents,
+          new Date(),
+        );
+      } catch (error) {
+        await retire();
+        await auditPaymentModeUnavailable(auditRepo, { tenantId, invoiceId: inv.id, surface: 'portal', error });
+        collectOnSite = true;
+      }
+      if (attached?.ok) {
         payNowUrl = link.linkUrl;
-      } catch {
-        // Persistence threw — but the throw is ambiguous: the DB may
-        // have actually committed and only the response timed out.
-        //
-        // Codex P2 (PR #315 review): blindly calling deactivateLink
-        // here would create a permanent dead-link footgun. If the DB
-        // commit went through, future reads of this invoice will see
-        // `stripePaymentLinkUrl === link.linkUrl` and serve it — but
-        // the link would already be deactivated, leaving the customer
-        // with a pay button that goes nowhere until manual repair.
-        //
-        // Resolve the ambiguity by re-reading the invoice. Three cases:
-        //   1. Re-read shows our just-minted URL persisted → success
-        //      hidden inside a noisy throw. Use the URL.
-        //   2. Re-read shows no URL (or a different URL) → persist
-        //      genuinely failed. Deactivate to avoid an orphan.
-        //   3. Re-read also throws → can't tell. Don't deactivate
-        //      (avoid the dead-link footgun) and serve no payNowUrl.
-        //      Next refresh will retry persistence on a clean read.
-        let confirmedPersisted = false;
-        let canTellFromReread = true;
+      } else if (attached?.reason === 'mode_not_pay_link') {
+        await retire();
+        collectOnSite = true;
+      } else if (attached) {
+        // not_payable — a void or credit landed during the mint, or a
+        // concurrent portal refresh minted first. Our link prices nothing
+        // stored: kill it, and serve the winner's link if there is one.
         try {
-          const fresh = await invoiceRepo.findById(tenantId, inv.id);
-          confirmedPersisted = !!fresh && fresh.stripePaymentLinkUrl === link.linkUrl;
-        } catch {
-          canTellFromReread = false;
+          await provider.deactivateLink(link.linkId);
+        } catch (err) {
+          await auditPortalLoserLinkCleanupFailure(auditRepo, tenantId, inv.id, link.linkId, err);
         }
-        if (confirmedPersisted) {
-          payNowUrl = link.linkUrl;
-        } else if (canTellFromReread) {
-          // Persist genuinely failed — deactivate the orphan.
-          try {
-            await provider.deactivateLink(link.linkId);
-          } catch {
-            // Stripe deactivate also failed. The just-minted link
-            // stays live until manual cleanup. Next refresh retries.
-          }
-          payNowUrl = null;
-        } else {
-          // Re-read failed too — DB is genuinely degraded. Don't
-          // deactivate (would risk dead-linking a successful persist)
-          // and don't serve a URL we're not sure persisted.
-          payNowUrl = null;
-        }
+        const fresh = await invoiceRepo.findById(tenantId, inv.id).catch(() => null);
+        payNowUrl =
+          fresh && isPayable(fresh.status) && fresh.stripePaymentLinkUrl ? fresh.stripePaymentLinkUrl : null;
       }
     }
   }
@@ -1286,6 +1295,34 @@ async function buildInvoicePayload(
     payNowUrl,
     collectOnSite,
   };
+}
+
+/** The loser link of a lost portal mint is live at Stripe and stored nowhere: audit its id. */
+async function auditPortalLoserLinkCleanupFailure(
+  auditRepo: AuditRepository | undefined,
+  tenantId: string,
+  invoiceId: string,
+  linkId: string,
+  err: unknown,
+): Promise<void> {
+  if (!auditRepo) return;
+  await auditRepo
+    .create(
+      createAuditEvent({
+        tenantId,
+        actorId: 'system',
+        actorRole: 'system',
+        eventType: 'invoice.payment_link_deactivation_failed',
+        entityType: 'invoice',
+        entityId: invoiceId,
+        metadata: {
+          stripePaymentLinkId: linkId,
+          reason: 'mint_guard_lost',
+          error: err instanceof Error ? err.message : String(err),
+        },
+      }),
+    )
+    .catch(() => undefined);
 }
 
 function isPayable(status: string): boolean {

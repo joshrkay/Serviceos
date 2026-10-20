@@ -92,14 +92,51 @@ export class PgQueue extends PgBaseRepository implements Queue {
       // receive/receiveBatch skip the row until the delay elapses. Delay 0 is
       // the pre-existing immediate path.
       const delaySeconds = Math.max(0, options?.delaySeconds ?? 0);
-      await client.query(
-        `INSERT INTO _queue_messages (id, type, payload, attempts, max_attempts, idempotency_key, visible_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' seconds')::interval, NOW())
-         ON CONFLICT (idempotency_key) DO NOTHING`,
-        [id, type, JSON.stringify(payload), 0, this.config.maxRetries, key, String(delaySeconds)]
-      );
+      await this.insertMessage(client, id, type, payload, key, delaySeconds);
       return id;
     });
+  }
+
+  /**
+   * S5a-3 (U8) — enqueue inside the caller's open transaction on the
+   * caller's client (see `Queue.sendOn`). The table bootstrap is DDL and must
+   * never run in the caller's transaction (a ROLLBACK there would take the
+   * table with it), so it runs first on the queue's own connection — and once
+   * the bootstrap promise exists no connection is taken at all, so a caller
+   * holding the pool's last connection cannot wait on itself.
+   */
+  async sendOn<T>(
+    client: import('pg').PoolClient,
+    type: string,
+    payload: T,
+    idempotencyKey: string,
+    options?: SendOptions,
+  ): Promise<string> {
+    if (this.initPromise) {
+      await this.initPromise;
+    } else {
+      await this.withClient((own) => this.ensureTable(own));
+    }
+    const id = randomUUID();
+    await this.insertMessage(client, id, type, payload, idempotencyKey, Math.max(0, options?.delaySeconds ?? 0));
+    return id;
+  }
+
+  /** The one enqueue statement `send` and `sendOn` share. */
+  private async insertMessage<T>(
+    client: import('pg').PoolClient,
+    id: string,
+    type: string,
+    payload: T,
+    key: string,
+    delaySeconds: number,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO _queue_messages (id, type, payload, attempts, max_attempts, idempotency_key, visible_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' seconds')::interval, NOW())
+       ON CONFLICT (idempotency_key) DO NOTHING`,
+      [id, type, JSON.stringify(payload), 0, this.config.maxRetries, key, String(delaySeconds)]
+    );
   }
 
   async receive<T>(): Promise<QueueMessage<T> | null> {

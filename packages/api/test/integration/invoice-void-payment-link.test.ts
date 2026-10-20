@@ -12,7 +12,7 @@
  * What is proven here, and what is NOT:
  *
  *  - PROVEN at real Postgres: the link columns are persisted by the guarded
- *    `setPaymentLinkIfPayable` UPDATE and CLEARED by the `clearPaymentLinkIfMatches`
+ *    `attachPaymentLink` UPDATE and CLEARED by the `clearPaymentLinkIfMatches`
  *    CAS; the status flip commits; the `invoice.payment_link_deactivated` and
  *    `invoice.payment_intent_canceled` audit rows exist and are tenant-scoped;
  *    a neighbour tenant's live link and audit trail are untouched by this
