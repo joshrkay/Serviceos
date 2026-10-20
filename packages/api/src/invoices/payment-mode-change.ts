@@ -87,15 +87,6 @@ export function deactivatePaymentLinksKey(tenantId: string, updatedAt: Date): st
 }
 
 /**
- * S5a-6 — the daily reconciliation sweep's key: one job per tenant per UTC
- * calendar day, so a second sweep the same day enqueues nothing new while
- * that day's job is still queued.
- */
-export function deactivatePaymentLinksSweepKey(tenantId: string, at: Date): string {
-  return `deactivate-payment-links:${tenantId}:sweep:${at.toISOString().slice(0, 10)}`;
-}
-
-/**
  * The follow-up's key: the delivered pass-1 job's own key plus `:pass2` — a
  * key of its own, or the queue's unique index would silently drop it. Derived
  * from the message, so a sweep job's `…:sweep:<date>` key gets its own too.
