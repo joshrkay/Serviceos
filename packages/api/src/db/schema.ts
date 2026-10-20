@@ -8100,7 +8100,7 @@ export const MIGRATIONS = {
   // percentiles, never counted as zero. CHECKs are NOT VALID per
   // docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md.
   // The partial index serves the 7-day per-tenant percentile query.
-  '325_call_transcript_turns_reply_timing': `
+  '326_call_transcript_turns_reply_timing': `
     ALTER TABLE call_transcript_turns
       ADD COLUMN IF NOT EXISTS last_word_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS stt_final_at TIMESTAMPTZ,

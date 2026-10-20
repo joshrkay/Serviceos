@@ -78,7 +78,8 @@ describe('VoiceSessionStore', () => {
         if (opts.reject) throw opts.reject;
         return input as never;
       });
-      return { repo: { recordTurn }, recordTurn };
+      const markReplyAudio = vi.fn(async () => 1);
+      return { repo: { recordTurn, markReplyAudio }, recordTurn };
     }
 
     it('persists each appended turn keyed by tenant + callSid + sessionId with the append-time index', async () => {
@@ -309,17 +310,12 @@ describe('VoiceSessionStore', () => {
       expect(markReplyAudio).toHaveBeenCalledTimes(1);
     });
 
-    it('a repo without markReplyAudio, an in-app session or an unknown session is a silent no-op', async () => {
-      const recordTurn = vi.fn(async (input: unknown) => input as never);
-      const store = newStore({ callTranscriptTurnRepo: { recordTurn } });
-      const phone = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
-      await expect(store.markReplyAudio(phone.id, { turnIndex: 0, firstAudioAt: new Date() })).resolves.toBeUndefined();
-      await expect(store.markReplyAudio('missing', { turnIndex: 0 })).resolves.toBeUndefined();
-
+    it('an in-app session or an unknown session is a silent no-op', async () => {
       const { repo, markReplyAudio } = timedRepo();
-      const store2 = newStore({ callTranscriptTurnRepo: repo });
-      const inapp = store2.create('tenant-a', 'inapp');
-      await store2.markReplyAudio(inapp.id, { turnIndex: 0, firstAudioAt: new Date() });
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      await expect(store.markReplyAudio('missing', { turnIndex: 0 })).resolves.toBeUndefined();
+      const inapp = store.create('tenant-a', 'inapp');
+      await store.markReplyAudio(inapp.id, { turnIndex: 0, firstAudioAt: new Date() });
       expect(markReplyAudio).not.toHaveBeenCalled();
     });
 

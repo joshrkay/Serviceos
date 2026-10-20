@@ -574,9 +574,8 @@ export interface VoiceSessionStoreOptions {
   callTranscriptTurnRepo?: CallTranscriptTurnRepoPort;
 }
 
-/** The slice of the repository the store writes through. `markReplyAudio` is optional: a store wired with `recordTurn` only simply never stamps replies. */
-type CallTranscriptTurnRepoPort = Pick<CallTranscriptTurnRepository, 'recordTurn'> &
-  Partial<Pick<CallTranscriptTurnRepository, 'markReplyAudio'>>;
+/** The slice of the repository the store writes through. */
+type CallTranscriptTurnRepoPort = Pick<CallTranscriptTurnRepository, 'recordTurn' | 'markReplyAudio'>;
 
 export class VoiceSessionStore {
   private readonly sessions = new Map<string, VoiceSession>();
@@ -966,23 +965,22 @@ export class VoiceSessionStore {
   /**
    * U1 — stamp what the adapter learned about a reply's audio onto the caller
    * turn it answers. The repository UPDATE is chained behind that turn's
-   * `recordTurn` (pending or long settled) so it never races the INSERT. A
-   * repository without `markReplyAudio`, an unknown or in-app session, or a
-   * rejected write is a silent no-op for the call; an UPDATE that touches zero
-   * rows (the row was deleted underneath it) is counted and logged. The
-   * returned promise never rejects — callers may ignore it, tests await it.
+   * `recordTurn` (pending or long settled) so it never races the INSERT. An
+   * unknown or in-app session, a store with no repository, or a rejected write
+   * is a silent no-op for the call; an UPDATE that touches zero rows (the row
+   * was deleted underneath it) is counted and logged. The returned promise
+   * never rejects — callers may ignore it, tests await it.
    */
   markReplyAudio(sessionId: string, stamp: ReplyAudioStamp): Promise<void> {
     const session = this.sessions.get(sessionId);
     const repo = this.callTranscriptTurnRepo;
-    if (!session || !session.callSid || !repo?.markReplyAudio) return Promise.resolve();
+    if (!session || !session.callSid || !repo) return Promise.resolve();
     const { callSid } = session;
     const { turnIndex, ...stamps } = stamp;
-    const markReplyAudio = repo.markReplyAudio.bind(repo);
     const insert = session.pendingTurnPersist.get(turnIndex) ?? Promise.resolve();
     return insert
       .then(() =>
-        markReplyAudio({ tenantId: session.tenantId, callSid, sessionId: session.id, turnIndex, ...stamps }),
+        repo.markReplyAudio({ tenantId: session.tenantId, callSid, sessionId: session.id, turnIndex, ...stamps }),
       )
       .then((rows) => {
         if (rows === 0) {

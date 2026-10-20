@@ -1830,6 +1830,9 @@ number decides whether a shared session store becomes a unit of the next plan (o
 5). Because a call-answering process cannot be replicated today, reaching the trigger means a
 larger instance or that shared store, not an extra replica — the runbook's scaling guidance
 stands until call state is shared. The Call Quality card and `GET /api/voice/quality` report
-the new gap and the unacked rate filtered to realtime turns; `voice_turn_latency_ms` keeps its
+the new gap, the first-sound delay (filler counted) and the unacked rate filtered to realtime
+turns; the unacked rate's denominator is every realtime turn whose first real frame was enqueued,
+and the card renders whenever there are enough such attempts, so a window where every reply
+failed shows 100 % rather than "not enough calls"; `voice_turn_latency_ms` keeps its
 "first audible, filler included" meaning and is not reused for the SLO. The number in (3) is
 replaced, with the run date and instance size, by whoever runs the first staging sweep.

@@ -46,7 +46,8 @@ export type CallTurnSpeaker = 'agent' | 'caller';
  * stamps. `null` on rows written before the stamps existed, on agent turns,
  * and on in-app sessions (no transport clock to anchor to).
  */
-export type CallTurnTransport = 'gather' | 'realtime';
+export const CALL_TURN_TRANSPORTS = ['gather', 'realtime'] as const;
+export type CallTurnTransport = (typeof CALL_TURN_TRANSPORTS)[number];
 
 /**
  * U1 — why a reply's first REAL frame was enqueued but never acknowledged by
@@ -82,7 +83,7 @@ export interface CallTranscriptTurn {
   completedAt?: Date;
   createdAt: Date;
   /**
-   * U1 reply-gap stamps (caller turns only; see migration 325). Written in two
+   * U1 reply-gap stamps (caller turns only; see migration 326). Written in two
    * steps: `recordTurn` carries what is known when the caller's text is
    * appended (STT-final), `markReplyAudio` adds what is known only once the
    * reply's audio played. `replyGapMs = firstAudioAt − lastWordAt`;
@@ -200,7 +201,7 @@ export function validateRecordTurnInput(input: RecordTurnInput): void {
   if (input.text.length === 0) {
     throw new Error('call_transcript_turns: text must be non-empty');
   }
-  if (input.transport !== undefined && input.transport !== 'gather' && input.transport !== 'realtime') {
+  if (input.transport !== undefined && !CALL_TURN_TRANSPORTS.includes(input.transport)) {
     throw new Error(`call_transcript_turns: transport must be 'gather' or 'realtime' (got ${input.transport})`);
   }
 }

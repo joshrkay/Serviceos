@@ -195,12 +195,15 @@ describe('GET /api/voice/quality (#1602)', () => {
     expect(res.body).toHaveProperty('latency', null);
   });
 
-  it('returns the reply-gap summary read for the caller\'s tenant over a 7-day window', async () => {
+  it('returns the reply-gap summary read for the caller\'s tenant over the default window', async () => {
     const summary: LatencySummary = {
       sampleTurns: 42,
       p50ReplyGapMs: 900,
       p95ReplyGapMs: 1400,
       p95EndpointDelayMs: 1000,
+      p50FirstAudibleMs: 400,
+      p95FirstAudibleMs: 700,
+      replyAttempts: 43,
       unacked: { rate: 0.02, total: 1, byReason: { clear_echo: 0, ack_timeout: 1, stream_closed: 0 } },
       gatherShare: { calls: 0.25, turns: 0.1 },
       enough: true,
@@ -210,7 +213,7 @@ describe('GET /api/voice/quality (#1602)', () => {
     const res = await request(app).get('/api/voice/quality');
     expect(res.status).toBe(200);
     expect(res.body.latency).toEqual(summary);
-    expect(read).toHaveBeenCalledWith(TENANT, { days: 7 });
+    expect(read).toHaveBeenCalledWith(TENANT);
   });
 
   it('is owner-only: a dispatcher is refused', async () => {

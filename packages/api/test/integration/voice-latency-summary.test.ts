@@ -1,7 +1,7 @@
 /**
  * Voice parity U1 (docs/plans/2026-10-16-001) — the reply gap on real Postgres.
  *
- * Pins migration 325 on real columns (the mocked-pool trap in
+ * Pins migration 326 on real columns (the mocked-pool trap in
  * docs/solutions/database-issues/mocked-pool-hides-real-schema-mismatch.md):
  *   - the nine timing columns exist, nullable, with the two CHECKs
  *   - `recordTurn` writes the append-time stamps and an interim → final
@@ -69,7 +69,7 @@ describe('Postgres integration — call_transcript_turns reply timing (U1)', () 
     return rows;
   }
 
-  describe('migration 325 schema', () => {
+  describe('migration 326 schema', () => {
     it('adds the nine nullable timing columns with the expected types', async () => {
       const { rows } = await pool.query<{ column_name: string; is_nullable: string; data_type: string }>(
         `SELECT column_name, is_nullable, data_type

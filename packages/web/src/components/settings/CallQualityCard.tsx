@@ -30,16 +30,16 @@ interface GradedCall {
 }
 /** Mirrors `latency` on GET /api/voice/quality (U1, D-043): the 7-day reply gap. */
 interface LatencySummary {
-  sampleTurns: number;
   p50ReplyGapMs: number | null;
   p95ReplyGapMs: number | null;
   p95EndpointDelayMs: number | null;
+  p95FirstAudibleMs: number | null;
   unacked: {
     rate: number | null;
     total: number;
     byReason: { clear_echo: number; ack_timeout: number; stream_closed: number };
   };
-  gatherShare: { calls: number | null; turns: number | null };
+  gatherShare: { calls: number | null };
   enough: boolean;
 }
 interface CallQuality {
@@ -68,11 +68,22 @@ function pctOrDash(rate: number | null): string {
   return rate === null ? '—' : pct(rate);
 }
 
-function Tile({ label, value, testId }: { label: string; value: string; testId: string }) {
+function Tile({
+  label,
+  value,
+  testId,
+  note,
+}: {
+  label: string;
+  value: string;
+  testId: string;
+  note?: string;
+}) {
   return (
     <div className="rounded-lg bg-slate-50 px-3 py-2 min-w-0" data-testid={testId}>
       <p className="text-xs text-slate-400 break-words">{label}</p>
       <p className="text-sm text-slate-800 mt-0.5">{value}</p>
+      {note && <p className="text-xs text-slate-400 mt-0.5 break-words">{note}</p>}
     </div>
   );
 }
@@ -85,6 +96,7 @@ function Tile({ label, value, testId }: { label: string; value: string; testId: 
  */
 function ReplyGapRow({ latency }: { latency: LatencySummary }) {
   const degradedCalls = latency.gatherShare.calls;
+  const { byReason, total: unackedTotal } = latency.unacked;
   return (
     <div className="mt-3 border-t border-slate-100 pt-3" data-testid="reply-gap-row">
       <p className="text-xs font-medium text-slate-600">Reply gap</p>
@@ -96,6 +108,11 @@ function ReplyGapRow({ latency }: { latency: LatencySummary }) {
           <Tile label="Typical reply" value={formatMs(latency.p50ReplyGapMs)} testId="reply-gap-p50" />
           <Tile label="Slowest 1 in 20" value={formatMs(latency.p95ReplyGapMs)} testId="reply-gap-p95" />
           <Tile
+            label="First sound (filler counts)"
+            value={formatMs(latency.p95FirstAudibleMs)}
+            testId="reply-gap-first-audible"
+          />
+          <Tile
             label="Wait before the AI starts"
             value={formatMs(latency.p95EndpointDelayMs)}
             testId="reply-gap-endpoint"
@@ -104,11 +121,21 @@ function ReplyGapRow({ latency }: { latency: LatencySummary }) {
             label="Replies that never played"
             value={pctOrDash(latency.unacked.rate)}
             testId="reply-gap-unacked"
+            note={
+              unackedTotal > 0
+                ? `timed out ${byReason.ack_timeout} · cleared ${byReason.clear_echo} · call ended ${byReason.stream_closed}`
+                : undefined
+            }
           />
         </div>
       ) : (
         <p className="mt-2 text-xs text-slate-500" data-testid="reply-gap-not-enough">
           Not enough calls yet
+        </p>
+      )}
+      {degradedCalls === null && (
+        <p className="mt-2 text-xs text-slate-500" data-testid="reply-gap-no-calls">
+          No calls in the last 7 days
         </p>
       )}
       {degradedCalls !== null && degradedCalls > 0 && (

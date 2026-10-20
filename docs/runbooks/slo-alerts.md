@@ -216,7 +216,8 @@ First response:
 1. Confirm it is live, not cumulative drift: run the query above over a recent
    window (the in-process value is cumulative since boot).
 2. Compare with the owner-facing 7-day number (Settings, Call quality, "Reply
-   gap": p50/p95 and p95 endpoint delay, read from `call_transcript_turns`).
+   gap": p50/p95, p95 first sound with filler counted, and p95 endpoint delay,
+   read from `call_transcript_turns`).
    A large `endpoint_delay_ms` means the wait is endpointing (Deepgram
    `UtteranceEnd` guard), not generation; a small one points at the turn
    (LLM gateway latency, `gateway_request_latency_ms`) or TTS first-byte.
@@ -252,11 +253,10 @@ First response:
    tenant; the owner card shows the same rate as "replies that never played".
 
 **Retiring rule 4.** `voice_turn_latency_p95` (STT-final to first enqueued
-chunk) stays untouched and runs beside 4a/4b for seven days after realtime goes
+chunk) stays untouched and runs beside 4a/4b from the day realtime goes
 default-on (D-043). It is retired (rule, `SLO_TURN_LATENCY_*` knobs, the
-`getTurnLatencySnapshot` dep) once, over that window, 4a and 4b have run on
-production traffic with no unexplained breach and the seven-day reply-gap
-numbers on the quality card agree with the Prometheus query.
+`getTurnLatencySnapshot` dep) once both new rules, 4a and 4b, have held, with
+no breach, for seven consecutive days of production traffic.
 
 ### 5. `voice_graded_pass_rate_7d` (warning)
 

@@ -3943,13 +3943,7 @@ export class TwilioMediaStreamAdapter {
     const anchor = this.state.replyAnchor;
     if (!anchor || anchor.stamped || !this.state.streamSid) return;
     anchor.stamped = true;
-    const session = this.state.session;
-    const replyTiming = session?.replyTiming;
-    // The transcript row is only this turn's if its STT-final instant is the anchor's.
-    const turnIndex =
-      replyTiming && replyTiming.sttFinalAt.getTime() === anchor.sttFinalMs
-        ? replyTiming.turnIndex
-        : undefined;
+    const turnIndex = this.currentReplyTurnIndex(anchor);
     const name = `${FIRST_REAL_MARK_PREFIX}${turnId}`;
     const timer = setTimeout(() => this.settleReplyMark(name, 'ack_timeout'), REPLY_ACK_TIMEOUT_MS);
     if (typeof timer.unref === 'function') timer.unref();
@@ -3968,12 +3962,23 @@ export class TwilioMediaStreamAdapter {
     this.stampReply(turnIndex, { firstAudioEnqueuedAt: new Date() });
   }
 
+  /**
+   * The persisted transcript row this reply anchor belongs to: the session's
+   * latest caller turn, but only if its STT-final instant is the anchor's —
+   * otherwise a newer turn has replaced it and nothing is stamped.
+   */
+  private currentReplyTurnIndex(anchor: { sttFinalMs: number }): number | undefined {
+    const replyTiming = this.state.session?.replyTiming;
+    return replyTiming && replyTiming.sttFinalAt.getTime() === anchor.sttFinalMs
+      ? replyTiming.turnIndex
+      : undefined;
+  }
+
   /** A filler's first chunk is the turn's first audible sound: stamp `first_audible_at` only. */
   private stampFirstAudible(): void {
     const anchor = this.state.replyAnchor;
-    const replyTiming = this.state.session?.replyTiming;
-    if (!anchor || !replyTiming || replyTiming.sttFinalAt.getTime() !== anchor.sttFinalMs) return;
-    this.stampReply(replyTiming.turnIndex, { firstAudibleAt: new Date() });
+    if (!anchor) return;
+    this.stampReply(this.currentReplyTurnIndex(anchor), { firstAudibleAt: new Date() });
   }
 
   /**
@@ -3997,19 +4002,20 @@ export class TwilioMediaStreamAdapter {
     }
     const now = Date.now();
     const anchor = pending.lastWordMs !== undefined ? 'last_word' : 'stt_final';
-    const gapMs = now - (pending.lastWordMs ?? pending.sttFinalMs);
-    if (gapMs >= 0) {
-      try {
-        voiceReplyGapMs.observe({ anchor }, gapMs);
-      } catch {
-        /* metrics must never throw into the audio pipeline */
-      }
+    // Clock skew between the Deepgram word timing and this host can put the ack
+    // "before" the last word; clamp to 0 so the reply still counts in the SLO
+    // denominator instead of silently dropping out of it.
+    const gapMs = Math.max(0, now - (pending.lastWordMs ?? pending.sttFinalMs));
+    try {
+      voiceReplyGapMs.observe({ anchor }, gapMs);
+    } catch {
+      /* metrics must never throw into the audio pipeline */
     }
     this.stampReply(pending.turnIndex, {
       firstAudioAt: new Date(now),
       // reply_gap_ms is the last-word-anchored SLO number: an stt_final-anchored
       // sample lives in the histogram's own label and never in the column.
-      ...(anchor === 'last_word' && gapMs >= 0 ? { replyGapMs: gapMs } : {}),
+      ...(anchor === 'last_word' ? { replyGapMs: gapMs } : {}),
       ...(pending.fillerAudible ? {} : { firstAudibleAt: new Date(now) }),
     });
   }

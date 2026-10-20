@@ -272,9 +272,12 @@ consequences:
    i.e. run that boot with `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`,
    `TTS_PROVIDER=elevenlabs` and `TWILIO_MEDIA_STREAMS_ENABLED=true` set, so
    the sweep exercises Deepgram + the production turn + ElevenLabs end to end.
-   That boot script is **not yet in the repo** (this change touches nothing
-   under `packages/`); until it exists the sweep can only be run against the
-   self-check stub or the Layer 2 in-process server.
+   That boot script is **not yet in the repo**: it needs the production turn's
+   per-session bootstrap (FSM state and caller identification) on top of the
+   real providers, which today only the Layer 2 harness builds
+   (`packages/api/test/voice-quality/voice-quality.layer2.test.ts`). Until it
+   exists the sweep can only be run against the self-check stub or the Layer 2
+   in-process server.
 
 With a real STT the caller audio must be speech: the default 1.5 s 440 Hz tone
 transcribes to nothing, every turn reads `noReply`, and the report says so

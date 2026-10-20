@@ -25,7 +25,7 @@ interface CallTranscriptTurnRow {
   started_at: Date;
   completed_at: Date | null;
   created_at: Date;
-  // U1 — migration 325 (all nullable; null on pre-migration rows and agent turns).
+  // U1 — migration 326 (all nullable; null on pre-migration rows and agent turns).
   last_word_at: Date | null;
   stt_final_at: Date | null;
   first_audio_enqueued_at: Date | null;

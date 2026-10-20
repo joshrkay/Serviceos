@@ -34,10 +34,7 @@ import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { tenantContextStore } from '../middleware/tenant-context';
 import type { VoiceSessionGrader } from '../voice/quality/grade-voice-session';
-import {
-  LATENCY_SUMMARY_DEFAULT_DAYS,
-  type LatencySummaryReader,
-} from '../voice/quality/latency-summary';
+import type { LatencySummaryReader } from '../voice/quality/latency-summary';
 import type {
   VoiceQualityWindow,
   VoiceSessionGrade,
@@ -142,7 +139,7 @@ export function createVoiceQualityRouter(deps: VoiceQualityRouterDeps): Router {
       const quota = await deps.store.quota(tenantId);
       const gradedToday = await deps.store.countGradedSince(tenantId, startOfUtcDay(at));
       const latency = deps.latencySummary
-        ? await deps.latencySummary.read(tenantId, { days: LATENCY_SUMMARY_DEFAULT_DAYS })
+        ? await deps.latencySummary.read(tenantId)
         : null;
       res.json({
         windows: { last7d: windowJson(summary.last7d), last30d: windowJson(summary.last30d) },

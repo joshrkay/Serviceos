@@ -1,6 +1,6 @@
 /**
  * Voice parity U1 (D-043) — the owner's 7-day reply-gap summary on real
- * Postgres. Pins the aggregate query against the real migration-325 columns
+ * Postgres. Pins the aggregate query against the real migration-326 columns
  * (the mocked-pool trap in
  * docs/solutions/database-issues/mocked-pool-hides-real-schema-mismatch.md):
  * rows are written through the real `PgCallTranscriptTurnRepository`
@@ -8,9 +8,12 @@
  * read back through `createPgLatencySummaryReader`.
  *
  * Seed for tenant A: eight calls. Six realtime calls carry 12 acked gaps
- * (600..1700 ms), 1 acked-but-gapless reply and 2 unacked replies (ack_timeout, clear_echo); two Gather
- * calls carry 3 turns. Agent turns, a turn with no transport (pre-migration
- * shape) and a gap older than the window are noise the summary must ignore.
+ * (600..1700 ms; three of them heard a filler first), 1 acked-but-gapless
+ * reply, 1 enqueued-only reply (no ack, no reason) and 2 unacked replies
+ * (ack_timeout, clear_echo); two Gather calls carry 3 turns. Agent turns, a
+ * turn with no transport (pre-migration shape) and a gap older than the window
+ * are noise the summary must ignore. Tenant D is the plan's Gather-share
+ * fixture: 3 one-turn Gather calls beside one twenty-turn realtime call.
  *
  * Runs only under `npm run test:integration` (vitest globalSetup starts the
  * Postgres testcontainer and sets TEST_DB_URL).
@@ -39,6 +42,8 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
   let tenantA: TestTenant;
   let tenantB: TestTenant;
   let tenantC: TestTenant;
+  let tenantD: TestTenant;
+  let tenantE: TestTenant;
   let seq = 0;
 
   beforeAll(async () => {
@@ -48,6 +53,8 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     tenantA = await createTestTenant(pool);
     tenantB = await createTestTenant(pool);
     tenantC = await createTestTenant(pool);
+    tenantD = await createTestTenant(pool);
+    tenantE = await createTestTenant(pool);
   });
 
   afterAll(async () => {
@@ -66,7 +73,7 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     turnIndex: number,
     gapMs: number,
     endpointDelayMs: number,
-    opts: { startedAt?: Date } = {},
+    opts: { startedAt?: Date; fillerHeardAfterMs?: number } = {},
   ): Promise<void> {
     const lastWordAt = new Date('2026-10-20T10:00:00.000Z');
     await repo.recordTurn({
@@ -86,7 +93,11 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
       tenantId: tenant.tenantId,
       ...call,
       turnIndex,
-      firstAudibleAt: firstAudioAt,
+      // A filler played first: the first sound precedes the acked real frame.
+      firstAudibleAt:
+        opts.fillerHeardAfterMs !== undefined
+          ? new Date(lastWordAt.getTime() + opts.fillerHeardAfterMs)
+          : firstAudioAt,
       firstAudioEnqueuedAt: new Date(firstAudioAt.getTime() - 50),
       firstAudioAt,
       replyGapMs: gapMs,
@@ -116,6 +127,29 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
       turnIndex,
       firstAudioEnqueuedAt: new Date('2026-10-20T10:05:01.200Z'),
       replyUnackedReason: reason,
+    });
+  }
+
+  /** A reply whose first real frame was enqueued, with neither an ack nor an unacked reason (still in flight, or a stamp lost). */
+  async function realtimeEnqueuedOnlyTurn(
+    tenant: TestTenant,
+    call: { callSid: string; sessionId: string },
+    turnIndex: number,
+  ): Promise<void> {
+    await repo.recordTurn({
+      tenantId: tenant.tenantId,
+      ...call,
+      turnIndex,
+      speaker: 'caller',
+      text: `enqueued-only line ${turnIndex}`,
+      sttFinalAt: new Date('2026-10-20T10:15:00.000Z'),
+      transport: 'realtime',
+    });
+    await repo.markReplyAudio({
+      tenantId: tenant.tenantId,
+      ...call,
+      turnIndex,
+      firstAudioEnqueuedAt: new Date('2026-10-20T10:15:01.000Z'),
     });
   }
 
@@ -168,7 +202,9 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     let delay = 500;
     for (const call of realtimeCalls) {
       for (const turnIndex of [0, 1]) {
-        await realtimeGapTurn(tenantA, call, turnIndex, gap, delay);
+        // The first turn of the first three calls heard a filler after 250 ms.
+        const filler = turnIndex === 0 && realtimeCalls.indexOf(call) < 3;
+        await realtimeGapTurn(tenantA, call, turnIndex, gap, delay, filler ? { fillerHeardAfterMs: 250 } : {});
         gap += 100;
         delay += 20;
       }
@@ -179,6 +215,8 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     // One acked reply with no anchored gap: it is a reply attempt (denominator)
     // but not a percentile sample.
     await realtimeAckedGaplessTurn(tenantA, realtimeCalls[3]!, 2);
+    // One more attempt that was enqueued but neither acked nor given a reason.
+    await realtimeEnqueuedOnlyTurn(tenantA, realtimeCalls[4]!, 2);
     // Noise the summary must not count: an agent turn, and a caller turn with
     // no transport (the pre-migration shape).
     await repo.recordTurn({
@@ -206,6 +244,11 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
       startedAt: new Date(Date.now() - 30 * DAY_MS),
     });
 
+    // Tenant D — the plan's fixture: 3 one-turn Gather calls + 1 twenty-turn realtime call.
+    for (let i = 0; i < 3; i += 1) await gatherTurn(tenantD, newCall(), 0);
+    const dRealtime = newCall();
+    for (let i = 0; i < 20; i += 1) await realtimeGapTurn(tenantD, dRealtime, i, 800, 300);
+
     // Tenant B — five realtime gaps: fewer than the 10-turn floor.
     const bCall = newCall();
     for (let i = 0; i < 5; i += 1) await realtimeGapTurn(tenantB, bCall, i, 1000 + i * 10, 300);
@@ -218,17 +261,36 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     // Gaps 600..1700 step 100: p50 = 1150, p95 = 1600 + 0.45 * 100.
     expect(s.p50ReplyGapMs).toBe(1150);
     expect(s.p95ReplyGapMs).toBe(1645);
-    // 2 unacked of the 15 realtime turns that attempted a reply: 12 acked with a
-    // gap, 1 acked without one (counts here, not in the percentile sample), 2 unacked.
+    // 2 unacked of the 16 realtime turns that attempted a reply: 12 acked with a
+    // gap, 1 acked without one and 1 enqueued-only (both count here, not in the
+    // percentile sample), 2 unacked.
+    expect(s.replyAttempts).toBe(16);
     expect(s.unacked.total).toBe(2);
-    expect(s.unacked.rate).toBeCloseTo(2 / 15, 10);
+    expect(s.unacked.rate).toBeCloseTo(2 / 16, 10);
     expect(s.unacked.byReason).toEqual({ clear_echo: 1, ack_timeout: 1, stream_closed: 0 });
 
-    // 2 of 8 calls and 3 of 18 caller turns ran on Gather; agent turns, the
+    // 2 of 8 calls and 3 of 19 caller turns ran on Gather; agent turns, the
     // transport-less row and the month-old call are not in either figure.
     expect(s.gatherShare.calls).toBeCloseTo(2 / 8, 10);
-    expect(s.gatherShare.turns).toBeCloseTo(3 / 18, 10);
+    expect(s.gatherShare.turns).toBeCloseTo(3 / 19, 10);
     expect(s.enough).toBe(true);
+  });
+
+  it('first-audible percentiles count the filler, and fall back to the STT-final anchor without a last word', async () => {
+    const s = await reader.read(tenantA.tenantId, { days: 7 });
+    // Acked turns hear their reply at the gap (600..1700 step 100) except the first turn of
+    // calls 0..2 (gaps 600, 800, 1000), whose filler played at 250 ms. The gapless row's
+    // first sound is 1000 ms after its STT-final (no last word); the enqueued-only row has none.
+    const audible = [250, 250, 250, 700, 900, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1000].sort((a, b) => a - b);
+    const at = (q: number): number => {
+      const rank = q * (audible.length - 1);
+      const lo = Math.floor(rank);
+      return Math.round(audible[lo]! + ((audible[Math.min(lo + 1, audible.length - 1)]! - audible[lo]!) * (rank - lo)));
+    };
+    expect(s.p50FirstAudibleMs).toBe(at(0.5));
+    expect(s.p95FirstAudibleMs).toBe(at(0.95));
+    // The filler makes the first-sound median better than the reply-gap median (1150).
+    expect(s.p50FirstAudibleMs!).toBeLessThan(s.p50ReplyGapMs!);
   });
 
   it('computes the endpoint-delay p95 over every in-window realtime turn that carries one', async () => {
@@ -260,6 +322,26 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     expect(s.gatherShare.calls).toBe(0);
   });
 
+  it('the plan\'s Gather-share fixture: 3 one-turn Gather calls + 1 twenty-turn realtime call is 0.75 by calls and 3/23 by turns', async () => {
+    const s = await reader.read(tenantD.tenantId, { days: 7 });
+    expect(s.gatherShare.calls).toBe(0.75);
+    expect(s.gatherShare.turns).toBeCloseTo(3 / 23, 10);
+    expect(s.gatherShare.turns!).toBeCloseTo(0.13, 2);
+    expect(s.replyAttempts).toBe(20);
+    expect(s.enough).toBe(true);
+  });
+
+  it('a window where every reply went unacked is still "enough": the card must show the 100 % rate, not hide it', async () => {
+    const call = newCall();
+    for (let i = 0; i < 10; i += 1) await realtimeUnackedTurn(tenantE, call, i, 'ack_timeout');
+    const s = await reader.read(tenantE.tenantId, { days: 7 });
+    expect(s.sampleTurns).toBe(0);
+    expect(s.p95ReplyGapMs).toBeNull();
+    expect(s.replyAttempts).toBe(10);
+    expect(s.unacked.rate).toBe(1);
+    expect(s.enough).toBe(true);
+  });
+
   it('a tenant with no calls gets nulls, not zeros or a division error', async () => {
     const s = await reader.read(tenantC.tenantId, { days: 7 });
     expect(s).toEqual({
@@ -267,6 +349,9 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
       p50ReplyGapMs: null,
       p95ReplyGapMs: null,
       p95EndpointDelayMs: null,
+      p50FirstAudibleMs: null,
+      p95FirstAudibleMs: null,
+      replyAttempts: 0,
       unacked: { rate: null, total: 0, byReason: { clear_echo: 0, ack_timeout: 0, stream_closed: 0 } },
       gatherShare: { calls: null, turns: null },
       enough: false,

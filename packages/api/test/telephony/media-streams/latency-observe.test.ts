@@ -26,7 +26,7 @@ import type {
 } from '../../../src/voice/transcription-providers';
 import type { TtsProvider } from '../../../src/ai/tts/tts-provider';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
-import { voiceReplyGapMs, voiceReplyUnackedTotal } from '../../../src/monitoring/metrics';
+import { voiceReplyGapMs, voiceReplyUnackedTotal, voiceTurnLatencyMs } from '../../../src/monitoring/metrics';
 
 // ─── Fakes ─────────────────────────────────────────────────────────────────
 
@@ -180,6 +180,11 @@ async function histogramCount(anchor: string): Promise<number> {
   return snap.values.find((v) => v.metricName === 'voice_reply_gap_ms_count' && v.labels.anchor === anchor)?.value ?? 0;
 }
 
+async function turnLatencyCount(): Promise<number> {
+  const snap = await voiceTurnLatencyMs.get();
+  return snap.values.find((v) => v.metricName === 'voice_turn_latency_ms_count')?.value ?? 0;
+}
+
 async function unackedCount(reason: string): Promise<number> {
   const snap = await voiceReplyUnackedTotal.get();
   return snap.values.find((v) => v.labels.reason === reason)?.value ?? 0;
@@ -189,6 +194,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
   voiceReplyGapMs.reset();
   voiceReplyUnackedTotal.reset();
+  voiceTurnLatencyMs.reset();
 });
 
 afterEach(() => {
@@ -518,5 +524,83 @@ describe('U1c first real acked audio', () => {
     // The earlier filler stamp stands: the ack does not offer a later audible time.
     expect(ack).not.toHaveProperty('firstAudibleAt');
     expect(await histogramCount('last_word')).toBe(1);
+  });
+
+  it('a filler then a real frame: voice_turn_latency_ms is observed at the filler, voice_reply_gap_ms only at the real frame\'s ack', async () => {
+    const h = setup({ holdSpeechTurn: true, withFiller: true, fillerDelayMs: 50 });
+    await driveTurn(h, { anchorMs: 17_000_000, finalMs: 17_002_000, lastWordEndMs: 600 });
+
+    vi.setSystemTime(17_002_100);
+    await vi.advanceTimersByTimeAsync(100);
+    await flush();
+    // The filler is the first audible sound: the turn-latency histogram has it, the reply gap does not.
+    expect(await turnLatencyCount()).toBe(1);
+    expect(await histogramCount('last_word')).toBe(0);
+    expect(h.ws.markNames('first_real:')).toHaveLength(0);
+
+    vi.setSystemTime(17_003_000);
+    h.speechGate!.release();
+    await flush();
+    const [markName] = h.ws.markNames('first_real:');
+    expect(markName).toBeDefined();
+    // The real frame is enqueued but not yet heard: no gap, and no second turn-latency sample.
+    expect(await histogramCount('last_word')).toBe(0);
+    expect(await turnLatencyCount()).toBe(1);
+
+    vi.setSystemTime(17_003_400);
+    h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: markName } });
+    await flush();
+    expect(await histogramCount('last_word')).toBe(1);
+    expect(await histogramCount('stt_final')).toBe(0);
+    expect(await turnLatencyCount()).toBe(1);
+  });
+
+  it('a barge-in before any real chunk observes neither histogram and stamps nothing', async () => {
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The first audio chunk never arrives before the caller talks over the agent.
+    const slowTts: TtsProvider = {
+      synthesize: vi.fn(),
+      synthesizeStream: vi.fn(() => ({
+        async *[Symbol.asyncIterator]() {
+          await hold;
+          yield { pcm: Buffer.alloc(640), isFinal: true };
+        },
+      })),
+    };
+    const h = setup({ ttsProvider: slowTts });
+    await driveTurn(h, { anchorMs: 18_000_000, finalMs: 18_002_000, lastWordEndMs: 500 });
+    expect(h.ws.markNames('first_real:')).toHaveLength(0);
+
+    h.opens[0].emit({ type: 'partial', isFinal: false, transcript: 'wait', confidence: 0.5 });
+    await flush();
+    expect(h.ws.sent.some((f) => f.event === 'clear')).toBe(true);
+    release();
+    await flush();
+
+    expect(h.ws.markNames('first_real:')).toHaveLength(0);
+    expect(stampsOf(h)).toHaveLength(0);
+    expect(await histogramCount('last_word')).toBe(0);
+    expect(await histogramCount('stt_final')).toBe(0);
+    expect(await turnLatencyCount()).toBe(0);
+    expect(await unackedCount('clear_echo')).toBe(0);
+  });
+
+  it('an ack that lands before the last-word instant (clock skew) counts as a 0 ms gap, not a dropped sample', async () => {
+    const h = setup();
+    // Deepgram says the caller stopped 5 s into the stream: later than the wall-clock ack below.
+    await driveTurn(h, { anchorMs: 19_000_000, finalMs: 19_002_000, lastWordEndMs: 5_000 });
+    const [markName] = h.ws.markNames('first_real:');
+
+    vi.setSystemTime(19_002_300);
+    h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: markName } });
+    await flush();
+
+    expect(await histogramCount('last_word')).toBe(1);
+    const snap = await voiceReplyGapMs.get();
+    expect(snap.values.find((v) => v.metricName === 'voice_reply_gap_ms_sum' && v.labels.anchor === 'last_word')?.value).toBe(0);
+    expect(stampsOf(h)[1]).toMatchObject({ firstAudioAt: new Date(19_002_300), replyGapMs: 0 });
   });
 });
