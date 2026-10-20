@@ -164,6 +164,15 @@ const configSchema = z.object({
   SLO_TURN_LATENCY_P95_MS: z.coerce.number().positive().default(3500),
   // WS26 — minimum recorded turns before the turn-latency rule can breach.
   SLO_TURN_LATENCY_MIN_SAMPLE: z.coerce.number().int().positive().default(30),
+  // Voice parity U1 (D-043) — reply gap: caller's last word → first reply frame
+  // Twilio acked (voice_reply_gap_ms{anchor="last_word"}), P95 breach threshold
+  // (ms). Runs beside the STT-final-anchored SLO_TURN_LATENCY_P95_MS rule.
+  SLO_REPLY_GAP_P95_MS: z.coerce.number().positive().default(1500),
+  // U1 — max share of replies whose first real frame was enqueued but never
+  // acked (voice_reply_unacked_total over acked + unacked), 0..1.
+  SLO_REPLY_UNACKED_RATE_MAX: z.coerce.number().min(0).max(1).default(0.01),
+  // U1 — minimum recorded replies before either reply-gap rule can breach.
+  SLO_REPLY_GAP_MIN_SAMPLE: z.coerce.number().int().positive().default(30),
   // #1602 — minimum 7-day PRODUCTION graded pass rate (voice_session_grades,
   // cross-tenant). Default 0.85 = the Layer 2 launch gate the CI harness enforces.
   SLO_VOICE_GRADED_PASS_MIN: z.coerce.number().min(0).max(1).default(0.85),

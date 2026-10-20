@@ -93,6 +93,7 @@ import {
   type PaymentLinkResult,
 } from '../../src/payments/payment-link-provider';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
+import { DEMO_PLATFORM_TENANT_ID } from '../../src/demo/platform-tenant';
 import { PgQueue } from '../../src/queues/pg-queue';
 import type { QueueMessage } from '../../src/queues/queue';
 import { PgUserRepository } from '../../src/users/pg-user';
@@ -1832,7 +1833,40 @@ describe('Postgres integration — attach-time revalidation under the payment-mo
         }
       });
 
-      it.todo('S6 (U7): a tenants.demo tenant on collect_on_site holding a live link gets no sweep job (add AND NOT t.demo when the column lands)');
+      it('S6-1: a demo tenant and the platform tenant on collect_on_site are not listed; an ordinary one is', async () => {
+        const ordinary = await createTestTenant(pool);
+        const demo = await createTestTenant(pool);
+        await pool.query(`UPDATE tenants SET demo = true WHERE id = $1`, [demo.tenantId]);
+        for (const id of [ordinary.tenantId, demo.tenantId]) {
+          await pool.query(
+            `INSERT INTO tenant_settings (id, tenant_id, business_name, payment_collection_mode)
+             VALUES ($1, $2, 'S6 HVAC', 'collect_on_site')`,
+            [crypto.randomUUID(), id],
+          );
+        }
+        const platformUpdated = await pool.query(
+          `UPDATE tenant_settings SET payment_collection_mode = 'collect_on_site' WHERE tenant_id = $1`,
+          [DEMO_PLATFORM_TENANT_ID],
+        );
+        if (platformUpdated.rowCount === 0) {
+          await pool.query(
+            `INSERT INTO tenant_settings (id, tenant_id, business_name, payment_collection_mode)
+             VALUES ($1, $2, 'Platform', 'collect_on_site')`,
+            [crypto.randomUUID(), DEMO_PLATFORM_TENANT_ID],
+          );
+        }
+        try {
+          const listed = await listCollectOnSiteTenantIds(pool);
+          expect(listed).toContain(ordinary.tenantId);
+          expect(listed).not.toContain(demo.tenantId);
+          expect(listed).not.toContain(DEMO_PLATFORM_TENANT_ID);
+        } finally {
+          await pool.query(
+            `UPDATE tenant_settings SET payment_collection_mode = NULL WHERE tenant_id = ANY($1::uuid[])`,
+            [[ordinary.tenantId, demo.tenantId, DEMO_PLATFORM_TENANT_ID]],
+          );
+        }
+      });
     });
   });
 });

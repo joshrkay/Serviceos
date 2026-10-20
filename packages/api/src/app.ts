@@ -192,7 +192,13 @@ import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
 import { captureServerError, redactedRoute } from './monitoring/capture-server-error';
 import { reportHandlerWrittenServerErrors } from './monitoring/report-server-responses';
-import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
+import {
+  dbPoolConnections,
+  pgQueueDepth,
+  voiceReplyGapMs,
+  voiceReplyUnackedTotal,
+  voiceTurnLatencyMs,
+} from './monitoring/metrics';
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
 import { createDemoCallsRouter } from './demo/routes';
@@ -205,6 +211,7 @@ import { PgPlatformSloRepository } from './monitoring/pg-platform-slo';
 import { createVoiceSessionGrader } from './voice/quality/grade-voice-session';
 import { InMemoryVoiceSessionGradeStore } from './voice/quality/voice-session-grade-store';
 import { PgVoiceSessionGradeStore } from './voice/quality/pg-voice-session-grade-store';
+import { createPgLatencySummaryReader } from './voice/quality/latency-summary';
 import {
   createVoiceQualityGradingWorker,
   VOICE_QUALITY_GRADING_INTERVAL_MS,
@@ -213,6 +220,7 @@ import {
   runSloMonitor,
   SLO_MONITOR_INTERVAL_MS,
   estimateTurnLatencyP95,
+  snapshotReplyGap,
 } from './workers/slo-monitor';
 import { PgFailureMonitorRepository } from './monitoring/pg-failure-monitor';
 import {
@@ -2647,6 +2655,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
               return null;
             }
           },
+          // U1 (D-043) — reply-gap + unacked snapshot, same role gate and
+          // failure-soft read as the turn-latency snapshot above.
+          getReplyGapSnapshot: async () => {
+            try {
+              const [gap, unacked] = await Promise.all([
+                voiceReplyGapMs.get(),
+                voiceReplyUnackedTotal.get(),
+              ]);
+              return snapshotReplyGap(gap.values, unacked.values);
+            } catch {
+              return null;
+            }
+          },
           // #1602 — 7-day production graded pass rate (voice_session_grades,
           // cross-tenant). In-memory dev: zero counts, below the sample floor.
           getGradedPassRate: (windowStart) =>
@@ -2663,6 +2684,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             turnLatencyMinSample: config.SLO_TURN_LATENCY_MIN_SAMPLE,
             gradedPassRateMin: config.SLO_VOICE_GRADED_PASS_MIN,
             gradedPassRateMinSample: config.SLO_VOICE_GRADED_MIN_SAMPLE,
+            replyGapP95Ms: config.SLO_REPLY_GAP_P95_MS,
+            replyUnackedRateMax: config.SLO_REPLY_UNACKED_RATE_MAX,
+            replyGapMinSample: config.SLO_REPLY_GAP_MIN_SAMPLE,
           },
           logger: sloLogger,
         });
@@ -5074,12 +5098,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // at start() and never re-armed by media frames (the audio-idle
             // timer is, so it never fires on a live call).
             maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
-            speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
+            speechTurn: async ({ session, speechResult, callSid, tenantId, callerTiming }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
                 callSid,
                 speechResult,
                 tenantId,
+                ...(callerTiming ? { callerTiming } : {}),
               }),
             // RV-130 (CRITICAL) — greeting + recording-disclosure bootstrap
             // once Deepgram opens. initializeStreamSession speaks the
@@ -6262,6 +6287,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       auditRepo,
       logger: voiceQualityLogger,
       passRateMin: config.SLO_VOICE_GRADED_PASS_MIN,
+      // U1 (D-043) — the 7-day reply-gap summary from call_transcript_turns.
+      // In-memory dev: no table, `latency` stays null and the card hides the row.
+      ...(pool ? { latencySummary: createPgLatencySummaryReader(pool) } : {}),
     }),
   );
   if (shouldRunWorkers) {

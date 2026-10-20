@@ -17,6 +17,7 @@ import { createVoiceSessionGrader } from '../../src/voice/quality/grade-voice-se
 import { InMemoryVoiceSessionGradeStore } from '../../src/voice/quality/voice-session-grade-store';
 import { createVoiceQualityGradingWorker } from '../../src/workers/voice-quality-grading-worker';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import type { LatencySummary, LatencySummaryReader } from '../../src/voice/quality/latency-summary';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 const OTHER_TENANT = '22222222-2222-4222-8222-222222222222';
@@ -88,7 +89,11 @@ function seedCall(
   });
 }
 
-function buildApp(role: 'owner' | 'dispatcher', store: InMemoryVoiceSessionGradeStore) {
+function buildApp(
+  role: 'owner' | 'dispatcher',
+  store: InMemoryVoiceSessionGradeStore,
+  latencySummary?: LatencySummaryReader,
+) {
   const gateway = fakeGateway();
   const grader = createVoiceSessionGrader({ store, gateway, now: () => NOW });
   const worker = createVoiceQualityGradingWorker({
@@ -112,7 +117,14 @@ function buildApp(role: 'owner' | 'dispatcher', store: InMemoryVoiceSessionGrade
   });
   app.use(
     '/api/voice/quality',
-    createVoiceQualityRouter({ store, grader, worker, auditRepo, now: () => NOW }),
+    createVoiceQualityRouter({
+      store,
+      grader,
+      worker,
+      auditRepo,
+      now: () => NOW,
+      ...(latencySummary ? { latencySummary } : {}),
+    }),
   );
   return { app, grader, auditRepo };
 }
@@ -175,6 +187,33 @@ describe('GET /api/voice/quality (#1602)', () => {
     expect(res.status).toBe(200);
     expect(res.body.windows.last7d).toEqual({ graded: 0, passed: 0, passRate: null });
     expect(res.body.recent).toEqual([]);
+  });
+
+  it('latency is null when no reply-gap reader is wired', async () => {
+    const { app } = buildApp('owner', new InMemoryVoiceSessionGradeStore());
+    const res = await request(app).get('/api/voice/quality');
+    expect(res.body).toHaveProperty('latency', null);
+  });
+
+  it('returns the reply-gap summary read for the caller\'s tenant over the default window', async () => {
+    const summary: LatencySummary = {
+      sampleTurns: 42,
+      p50ReplyGapMs: 900,
+      p95ReplyGapMs: 1400,
+      p95EndpointDelayMs: 1000,
+      p50FirstAudibleMs: 400,
+      p95FirstAudibleMs: 700,
+      replyAttempts: 43,
+      unacked: { rate: 0.02, total: 1, byReason: { clear_echo: 0, ack_timeout: 1, stream_closed: 0 } },
+      gatherShare: { calls: 0.25, turns: 0.1 },
+      enough: true,
+    };
+    const read = vi.fn<LatencySummaryReader['read']>().mockResolvedValue(summary);
+    const { app } = buildApp('owner', new InMemoryVoiceSessionGradeStore(), { read });
+    const res = await request(app).get('/api/voice/quality');
+    expect(res.status).toBe(200);
+    expect(res.body.latency).toEqual(summary);
+    expect(read).toHaveBeenCalledWith(TENANT);
   });
 
   it('is owner-only: a dispatcher is refused', async () => {

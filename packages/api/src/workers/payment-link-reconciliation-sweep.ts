@@ -62,7 +62,9 @@ const COLLECT_ON_SITE_TENANTS_SQL = `
     JOIN tenants t ON t.id = s.tenant_id
    WHERE s.payment_collection_mode = 'collect_on_site'
      AND ($1::uuid IS NULL OR s.tenant_id > $1::uuid)
-     -- S6 (U7): add AND NOT t.demo when the tenants.demo column lands
+     -- Demo and platform tenants are excluded from sweeps (S6-1).
+     AND t.demo = false
+     AND t.platform = false
    ORDER BY s.tenant_id
    LIMIT $2
 `;
