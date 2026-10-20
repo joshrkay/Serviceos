@@ -202,7 +202,9 @@ import {
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
 import { createDemoCallsRouter } from './demo/routes';
-import { loadDemoConfig } from './demo/config';
+import { isDemoCallsEnabled, loadDemoConfig } from './demo/config';
+import { createDemoLeaseResetter } from './demo/reset';
+import { scheduleDemoLeaseReaper } from './workers/demo-lease-reaper';
 import { recordSweepSuccess, sweepLastSuccessMs } from './monitoring/sweep-heartbeats';
 import { PgPlatformSloRepository } from './monitoring/pg-platform-slo';
 // #1602 — production call-quality grading (nightly sampler + owner surface).
@@ -238,7 +240,11 @@ import { createCustomerGroupRouter } from './routes/customer-groups';
 import { createStandingInstructionRouter } from './routes/standing-instructions';
 import { runBatchInvoiceSweep } from './workers/batch-invoice-worker';
 import { createPaymentLinkProvider } from './payments/payment-link-provider';
-import { resolveEscalationSettings, createSettingsOwnerPhoneResolver } from './settings/settings';
+import {
+  resolveEscalationSettings,
+  createSettingsOwnerPhoneResolver,
+  InMemorySettingsRepository,
+} from './settings/settings';
 import { InMemoryAuditRepository, createAuditEvent } from './audit/audit';
 import { LookupEventService } from './lookup-events/lookup-event-service';
 import { TrainingAssetRedactionService } from './verticals/training-asset-redaction';
@@ -358,6 +364,12 @@ import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
 import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
 import { runTrialReminderSweep } from './workers/trial-reminder-sweep';
 import { runDunningSweep } from './workers/dunning-sweep';
+import {
+  PAYMENT_LINK_RECONCILIATION_TICK_MS,
+  isPaymentLinkReconciliationHour,
+  listCollectOnSiteTenantIds,
+  runPaymentLinkReconciliationSweep,
+} from './workers/payment-link-reconciliation-sweep';
 import { runOverageSettlementReconciliation } from './workers/overage-settlement-reconciliation';
 import { runClerkMetadataBackfillSweep } from './workers/clerk-metadata-backfill-sweep';
 import { runVoiceCostReconciliationSweep } from './workers/voice-cost-reconciliation';
@@ -2524,6 +2536,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     orphanedNumberSweep: 590031,
     // #1602 — nightly production call-quality grading sampler. DISTINCT key.
     voiceQualityGrading: 590032,
+    // U7 (S6-4) — demo lease reaper (expired leases, stale resets). DISTINCT key.
+    demoLeaseReaper: 590033,
+    // S5a-6 — daily pay-link reconciliation sweep (collect-on-site tenants
+    // that still hold a live link). DISTINCT key.
+    paymentLinkReconciliation: 590034,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -3317,24 +3334,51 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // (DEMO_CALLS_ENABLED) is read per request, the DEMO_* numbers once here.
   // Budget-crossing pages need their own operator seam: the SLO monitor's
   // exists only on worker replicas.
+  // U7 (S6-4) — one resetter ends every lease: the start service's no-call
+  // path here, and the reaper below (expired leases, stale resets).
   const demoLogger = createLogger({ service: 'demo-call', environment: process.env.NODE_ENV || 'development' });
+  const demoConfig = loadDemoConfig(process.env, demoLogger);
+  const demoAlert = createAlertOperator({
+    sentry: sentryClient,
+    delivery: messageDelivery,
+    alertSmsTo: config.ALERT_SMS_TO,
+    cooldownMs: config.SLO_ALERT_COOLDOWN_MIN * 60 * 1000,
+    logger: demoLogger,
+  });
+  const demoResetter =
+    pool && demoConfig.open
+      ? createDemoLeaseResetter({
+          pool,
+          settings: demoConfig.settings,
+          alert: demoAlert,
+          storage: storageProvider,
+          logger: demoLogger,
+        })
+      : null;
   app.use(
     '/public/demo',
     createDemoCallsRouter({
       pool: pool ?? null,
-      config: loadDemoConfig(process.env, demoLogger),
+      config: demoConfig,
       leaseTokenSecret: demoLeaseTokenSecret,
       publicApiUrl: process.env.PUBLIC_API_URL,
-      alert: createAlertOperator({
-        sentry: sentryClient,
-        delivery: messageDelivery,
-        alertSmsTo: config.ALERT_SMS_TO,
-        cooldownMs: config.SLO_ALERT_COOLDOWN_MIN * 60 * 1000,
-        logger: demoLogger,
-      }),
+      alert: demoAlert,
+      resetter: demoResetter,
       logger: demoLogger,
     }),
   );
+  // The lease reaper: leader-gated, every 30 s, registered only on worker
+  // replicas with a database while the demo call is switched on.
+  scheduleDemoLeaseReaper({
+    shouldRunWorkers,
+    pool: pool ?? null,
+    resetter: demoResetter,
+    isEnabled: isDemoCallsEnabled,
+    lockKey: SWEEP_LOCK.demoLeaseReaper,
+    runAsLeader,
+    registerInterval,
+    logger: demoLogger,
+  });
 
   // Public lead intake — embedded marketing-page form posts here.
   // Tenant identified by UUID in the URL. The outer `/public` limiter
@@ -7552,6 +7596,44 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         });
       });
     }, 60 * 60_000));
+  }
+
+  // S5a-6 (U8) — daily payment-link reconciliation sweep. The backstop for
+  // what the switch's own cleanup job cannot see (a job lost or dead-lettered,
+  // links that predate the "Collect on the spot" choice): once a day it lists
+  // the collect-on-site tenants and enqueues a `deactivate_payment_links`
+  // pass-1 job for each one still holding a live link, keyed per UTC day. It
+  // takes no lock; the job's claim re-reads the mode. Hourly tick, gated to
+  // the 03:00 UTC hour (a 24 h interval resets on every redeploy). The
+  // enumerator follows the cleanup claimer: Postgres with a pool, the
+  // in-memory settings repository without one.
+  if (shouldRunWorkers) {
+    const paymentLinkSweepLogger = createLogger({
+      service: 'payment-link-reconciliation-sweep',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const listCollectOnSiteTenants: (() => Promise<string[]>) | null = pool
+      ? () => listCollectOnSiteTenantIds(pool)
+      : settingsRepo instanceof InMemorySettingsRepository
+        ? () => settingsRepo.listTenantIdsByPaymentCollectionMode('collect_on_site')
+        : null;
+    if (listCollectOnSiteTenants) {
+      registerInterval(setInterval(() => {
+        if (!isPaymentLinkReconciliationHour(new Date())) return;
+        void runAsLeader(SWEEP_LOCK.paymentLinkReconciliation, async () => {
+          await runPaymentLinkReconciliationSweep({
+            listCollectOnSiteTenantIds: listCollectOnSiteTenants,
+            invoiceRepo,
+            queue,
+            logger: paymentLinkSweepLogger,
+          });
+        }).catch((err) => {
+          paymentLinkSweepLogger.error('Payment-link reconciliation sweep failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }, PAYMENT_LINK_RECONCILIATION_TICK_MS));
+    }
   }
 
   // Billing resilience (Part B) — overage settlement reconciliation: retries
