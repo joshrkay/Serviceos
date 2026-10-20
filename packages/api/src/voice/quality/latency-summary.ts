@@ -10,7 +10,9 @@
  *     turns never carry a gap and are not estimated.
  *   - p50 / p95 first-audible delay (filler or real reply, whichever played
  *     first, measured from the caller's last word), over realtime turns with a
- *     `first_audible_at` stamp. A filler makes this look better than the reply
+ *     `first_audible_at` stamp AND a `last_word_at`. A turn that only has the
+ *     STT-final fallback anchor is excluded: it omits the endpointing delay and
+ *     would bias the number down. A filler makes this look better than the reply
  *     gap by design; the card labels it so.
  *   - the unacked rate: realtime turns whose reply never played, over all
  *     realtime turns with a reply attempt. A reply attempt is a turn whose first
@@ -20,7 +22,8 @@
  *     failures multiply, so the rate is returned beside it, and `enough` counts
  *     reply attempts so a window where every reply failed still renders.
  *   - the Gather share, by calls (a call is degraded if any turn ran on
- *     Gather) and by turns. The two diverge whenever call lengths differ, so
+ *     Gather; calls are counted by CallSid, since one Twilio call can span
+ *     several session ids after a restart) and by turns. The two diverge whenever call lengths differ, so
  *     the card shows the call share and the turn share is for the SLO page.
  *
  * Only caller turns that carry a transport stamp are counted: agent turns and
@@ -162,17 +165,17 @@ class PgLatencySummaryReader extends PgBaseRepository implements LatencySummaryR
              FILTER (WHERE transport = 'realtime' AND reply_gap_ms IS NOT NULL) AS reply_gaps_ms,
            array_agg(endpoint_delay_ms ORDER BY endpoint_delay_ms)
              FILTER (WHERE transport = 'realtime' AND endpoint_delay_ms IS NOT NULL) AS endpoint_delays_ms,
-           array_agg(ROUND(EXTRACT(EPOCH FROM (first_audible_at - COALESCE(last_word_at, stt_final_at))) * 1000)::int
-                     ORDER BY ROUND(EXTRACT(EPOCH FROM (first_audible_at - COALESCE(last_word_at, stt_final_at))) * 1000)::int)
+           array_agg(ROUND(EXTRACT(EPOCH FROM (first_audible_at - last_word_at)) * 1000)::int
+                     ORDER BY ROUND(EXTRACT(EPOCH FROM (first_audible_at - last_word_at)) * 1000)::int)
              FILTER (WHERE transport = 'realtime' AND first_audible_at IS NOT NULL
-                       AND COALESCE(last_word_at, stt_final_at) IS NOT NULL)                           AS first_audibles_ms,
+                       AND last_word_at IS NOT NULL)                                                   AS first_audibles_ms,
            COUNT(*) FILTER (WHERE transport = 'realtime' AND reply_unacked_reason = 'clear_echo')     AS unacked_clear_echo,
            COUNT(*) FILTER (WHERE transport = 'realtime' AND reply_unacked_reason = 'ack_timeout')    AS unacked_ack_timeout,
            COUNT(*) FILTER (WHERE transport = 'realtime' AND reply_unacked_reason = 'stream_closed')  AS unacked_stream_closed,
            COUNT(*) FILTER (WHERE transport = 'realtime'
                               AND (first_audio_enqueued_at IS NOT NULL OR reply_unacked_reason IS NOT NULL)) AS reply_attempts,
-           COUNT(DISTINCT session_id) FILTER (WHERE transport = 'gather')                              AS gather_calls,
-           COUNT(DISTINCT session_id)                                                                  AS calls,
+           COUNT(DISTINCT call_sid) FILTER (WHERE transport = 'gather')                                 AS gather_calls,
+           COUNT(DISTINCT call_sid)                                                                     AS calls,
            COUNT(*) FILTER (WHERE transport = 'gather')                                                AS gather_turns,
            COUNT(*)                                                                                    AS turns
            FROM call_transcript_turns

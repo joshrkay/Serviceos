@@ -319,6 +319,50 @@ describe('U1b caller-turn timing into recordTurn', () => {
     expect(turn).not.toHaveProperty('endpointDelayMs');
   });
 
+  it('a first-final language detection (Deepgram reopen) keeps the pre-switch last word', async () => {
+    vi.setSystemTime(6_000_000);
+    const h = setup();
+    h.ws.inboundJson(startFrame);
+    await flush();
+    h.store.findByCallSid(CALL_SID)!.supportedLanguages = ['en', 'es'];
+    vi.setSystemTime(6_000_500);
+    h.ws.inboundJson(mediaFrame); // anchors generation 1
+    await flush();
+
+    // Caller audio keeps flowing: a frame lands on the NEW Deepgram session (re-taking the
+    // anchor for generation 3) in the window between the reopen and the turn resuming.
+    const realLock = h.store.withSessionLock.bind(h.store);
+    let reopened = false;
+    vi.spyOn(h.store, 'withSessionLock').mockImplementation(async (id, fn) => {
+      const result = await realLock(id, fn);
+      if (!reopened) {
+        reopened = true;
+        vi.setSystemTime(6_002_050);
+        h.ws.inboundJson(mediaFrame);
+        await new Promise<void>((r) => {
+          setImmediate(r);
+        });
+      }
+      return result;
+    });
+
+    vi.setSystemTime(6_002_000);
+    h.opens[0].emit({ transcript: 'Hola, necesito una cita por favor', lastWordEndMs: 900 });
+    await flush();
+
+    // The first-utterance detection reopened Deepgram before the turn was armed, and the new
+    // session already took its own anchor...
+    expect(h.opens).toHaveLength(2);
+    expect(h.opens[1].session.send).toHaveBeenCalledTimes(1);
+    // ...but the final's offsets were taken on generation 1's clock, so its last word stands.
+    expect(callerTurn(h)).toMatchObject({
+      transport: 'realtime',
+      sttFinalAt: new Date(6_002_000),
+      lastWordAt: new Date(6_000_500 + 900),
+      endpointDelayMs: 6_002_000 - (6_000_500 + 900),
+    });
+  });
+
   it('a final without lastWordEndMs records sttFinalAt and transport but no lastWordAt', async () => {
     vi.setSystemTime(5_000_000);
     const h = setup();
@@ -500,30 +544,67 @@ describe('U1c first real acked audio', () => {
     const h = setup({ holdSpeechTurn: true, withFiller: true, fillerDelayMs: 50 });
     await driveTurn(h, { anchorMs: 15_000_000, finalMs: 15_002_000, lastWordEndMs: 600 });
 
-    // speechTurn is still thinking: the early filler fires and is the first audible sound.
+    // speechTurn is still thinking: the early filler is enqueued with a mark right behind it,
+    // but enqueue is not "heard": nothing is stamped until Twilio acks that mark.
     vi.setSystemTime(15_002_100);
     await vi.advanceTimersByTimeAsync(100);
     await flush();
+    const [audibleMark] = h.ws.markNames('first_audible:');
+    expect(audibleMark).toBeDefined();
+    expect(stampsOf(h)).toHaveLength(0);
+    expect(h.ws.markNames('first_real:')).toHaveLength(0);
+    // Like first_real, the filler's mark is outside the backpressure count.
+    expect((h.adapter as unknown as { state: { unackedMarks: number } }).state.unackedMarks).toBe(1);
+
+    vi.setSystemTime(15_002_400);
+    h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: audibleMark } });
+    await flush();
     expect(stampsOf(h)).toHaveLength(1);
-    expect(stampsOf(h)[0]).toMatchObject({ firstAudibleAt: expect.any(Date) });
+    expect(stampsOf(h)[0]).toMatchObject({ firstAudibleAt: new Date(15_002_400) });
     expect(stampsOf(h)[0]).not.toHaveProperty('firstAudioAt');
     expect(stampsOf(h)[0]).not.toHaveProperty('firstAudioEnqueuedAt');
-    expect(h.ws.markNames('first_real:')).toHaveLength(0);
+    expect(await histogramCount('last_word')).toBe(0);
+    // A repeated ack is not a second stamp.
+    h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: audibleMark } });
+    await flush();
+    expect(stampsOf(h)).toHaveLength(1);
 
     vi.setSystemTime(15_003_000);
     h.speechGate!.release();
     await flush();
     const [markName] = h.ws.markNames('first_real:');
     expect(markName).toBeDefined();
+    // One first_audible mark per turn.
+    expect(h.ws.markNames('first_audible:')).toHaveLength(1);
     vi.setSystemTime(15_003_400);
     h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: markName } });
     await flush();
 
     const ack = stampsOf(h).at(-1)!;
     expect(ack).toMatchObject({ firstAudioAt: new Date(15_003_400), replyGapMs: 15_003_400 - 15_000_600 });
-    // The earlier filler stamp stands: the ack does not offer a later audible time.
+    // The filler's stamp stands: the real ack does not offer a later audible time.
     expect(ack).not.toHaveProperty('firstAudibleAt');
     expect(await histogramCount('last_word')).toBe(1);
+  });
+
+  it('a filler mark flushed by a barge-in is dropped: no audible stamp, no unacked reason, a late ack stamps nothing', async () => {
+    const h = setup({ holdSpeechTurn: true, withFiller: true, fillerDelayMs: 50 });
+    await driveTurn(h, { anchorMs: 16_000_000, finalMs: 16_002_000, lastWordEndMs: 600 });
+    vi.setSystemTime(16_002_100);
+    await vi.advanceTimersByTimeAsync(100);
+    await flush();
+    const [audibleMark] = h.ws.markNames('first_audible:');
+    expect(audibleMark).toBeDefined();
+
+    h.opens[0].emit({ type: 'partial', isFinal: false, transcript: 'wait', confidence: 0.5 });
+    await flush();
+    expect(h.ws.sent.some((f) => f.event === 'clear')).toBe(true);
+    h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: audibleMark } });
+    await flush();
+
+    expect(stampsOf(h)).toHaveLength(0);
+    expect(await unackedCount('clear_echo')).toBe(0);
+    expect((h.adapter as unknown as { state: { pendingReplyMarks: Map<string, unknown> } }).state.pendingReplyMarks.size).toBe(0);
   });
 
   it('a filler then a real frame: voice_turn_latency_ms is observed at the filler, voice_reply_gap_ms only at the real frame\'s ack', async () => {
@@ -602,5 +683,85 @@ describe('U1c first real acked audio', () => {
     const snap = await voiceReplyGapMs.get();
     expect(snap.values.find((v) => v.metricName === 'voice_reply_gap_ms_sum' && v.labels.anchor === 'last_word')?.value).toBe(0);
     expect(stampsOf(h)[1]).toMatchObject({ firstAudioAt: new Date(19_002_300), replyGapMs: 0 });
+  });
+
+  it('an explicit language-switch turn is timed too: the caller line carries transport + sttFinalAt and the acknowledgement stamps it', async () => {
+    const h = setup();
+    h.ws.inboundJson(startFrame);
+    await flush();
+    h.store.findByCallSid(CALL_SID)!.supportedLanguages = ['en', 'es'];
+    vi.setSystemTime(20_000_000);
+    h.ws.inboundJson(mediaFrame);
+    await flush();
+
+    vi.setSystemTime(20_002_000);
+    h.opens[0].emit({ transcript: 'Hablo español, por favor', lastWordEndMs: 700 });
+    await flush();
+
+    expect(h.opens).toHaveLength(2); // the switch happened and consumed the turn
+    expect(callerTurn(h)).toMatchObject({
+      transport: 'realtime',
+      sttFinalAt: new Date(20_002_000),
+      lastWordAt: new Date(20_000_000 + 700),
+    });
+    const [markName] = h.ws.markNames('first_real:');
+    expect(markName).toBeDefined();
+
+    vi.setSystemTime(20_002_900);
+    h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: markName } });
+    await flush();
+    expect(stampsOf(h).at(-1)).toMatchObject({
+      turnIndex: callerTurn(h).turnIndex,
+      firstAudioAt: new Date(20_002_900),
+      replyGapMs: 20_002_900 - (20_000_000 + 700),
+    });
+    expect(await histogramCount('last_word')).toBe(1);
+  });
+
+  it('a low-confidence reprompt is observed in the gap histogram; no caller line exists, so no transcript row is stamped', async () => {
+    const h = setup();
+    h.ws.inboundJson(startFrame);
+    await flush();
+    vi.setSystemTime(21_000_000);
+    h.ws.inboundJson(mediaFrame);
+    await flush();
+
+    vi.setSystemTime(21_002_000);
+    h.opens[0].emit({ confidence: 0.05, lastWordEndMs: 600 });
+    await flush();
+
+    const [markName] = h.ws.markNames('first_real:');
+    expect(markName).toBeDefined();
+    vi.setSystemTime(21_002_800);
+    h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: markName } });
+    await flush();
+
+    expect(await histogramCount('last_word')).toBe(1);
+    // The reprompt answers an utterance that was never persisted as a caller turn.
+    expect(h.recordTurn.mock.calls.some(([i]) => (i as { speaker: string }).speaker === 'caller')).toBe(false);
+    expect(h.markReplyAudio).not.toHaveBeenCalled();
+  });
+
+  it('a final whose branch speaks nothing disarms the anchor, so a later outbound turn is not timed against it', async () => {
+    const silentTts: TtsProvider = {
+      synthesize: vi.fn(async () => ({ audio: Buffer.alloc(0), contentType: 'audio/pcm', provider: 'test' })),
+    };
+    const h = setup({ ttsProvider: silentTts });
+    h.ws.inboundJson(startFrame);
+    await flush();
+    vi.setSystemTime(22_000_000);
+    h.ws.inboundJson(mediaFrame);
+    await flush();
+
+    vi.setSystemTime(22_002_000);
+    h.opens[0].emit({ confidence: 0.05, lastWordEndMs: 600 });
+    await flush();
+
+    expect(h.ws.markNames('first_real:')).toHaveLength(0);
+    const state = (h.adapter as unknown as {
+      state: { replyAnchor: unknown; awaitingFirstAudioFrame: boolean };
+    }).state;
+    expect(state.replyAnchor).toBeNull();
+    expect(state.awaitingFirstAudioFrame).toBe(false);
   });
 });

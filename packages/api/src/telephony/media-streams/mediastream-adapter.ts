@@ -557,13 +557,21 @@ const MAX_CONSECUTIVE_SPEECH_TURN_FAILURES = 2;
 // the shared ladder (#1601 step 2, `ai/voice-turn/shared/low-stt-ladder.ts`):
 // ONE env var (`VOICE_MIN_STT_CONFIDENCE`), ONE number, for every surface.
 
-/** U1 — a reply's first real frame is enqueued; Twilio has not yet acked the mark behind it. */
+/**
+ * U1 — a reply mark is enqueued; Twilio has not yet acked it. `real` brackets the
+ * first real frame (its ack is the reply gap); `audible` brackets an early
+ * filler's first frame (its ack is `first_audible_at`, nothing else).
+ */
 interface PendingReplyMark {
-  /** Transcript index of the caller turn this reply answers (undefined: no persisted row to stamp). */
+  kind: 'real' | 'audible';
+  /**
+   * Transcript index of the caller turn this reply answers (undefined: no
+   * persisted row to stamp). Resolved at enqueue for `real`, at ack for `audible`.
+   */
   turnIndex: number | undefined;
   sttFinalMs: number;
   lastWordMs?: number;
-  /** True when a filler already stamped `first_audible_at` for this turn. */
+  /** True when a filler's first-audible mark was sent for this turn (`real` marks only). */
   fillerAudible: boolean;
   timer: NodeJS.Timeout;
 }
@@ -937,8 +945,8 @@ interface RuntimeState {
    */
   replyAnchor: { sttFinalMs: number; lastWordMs?: number; stamped: boolean } | null;
   /**
-   * U1 — first-real-frame marks (`first_real:<turnId>`) enqueued and not yet
-   * acked, keyed by mark name. Each holds the 5 s ack-timeout timer so
+   * U1 — first-real-frame (`first_real:<turnId>`) and first-audible-filler
+   * (`first_audible:<turnId>`) marks enqueued and not yet acked, keyed by mark name. Each holds the 5 s ack-timeout timer so
    * `handleClose` can clear them all.
    */
   pendingReplyMarks: Map<string, PendingReplyMark>;
@@ -1007,6 +1015,8 @@ const TWILIO_QUEUE_HIGH_WATERMARK = 0.7;
 const TWILIO_MAX_UNACKED_MARKS = 3;
 /** U1 — prefix of the mark sent right behind a reply's first real frame; its ack is the playout stamp. */
 const FIRST_REAL_MARK_PREFIX = 'first_real:';
+/** U1 — prefix of the mark sent right behind an early filler's first frame; its ack stamps `first_audible_at`. */
+const FIRST_AUDIBLE_MARK_PREFIX = 'first_audible:';
 /** U1 — a first_real mark not acked this long after enqueue is counted as `ack_timeout`. */
 const REPLY_ACK_TIMEOUT_MS = 5_000;
 
@@ -1346,16 +1356,17 @@ export class TwilioMediaStreamAdapter {
         // accounting), so decrementing on its ack would underflow the
         // counter. Only decrement for the marks that incremented it.
         const isSilenceArmMark = frame.mark?.name?.startsWith('silence-arm-') ?? false;
-        // The `first_real:` mark (U1) is likewise outside the backpressure count.
+        // The `first_real:` / `first_audible:` marks (U1) are likewise outside the backpressure count.
         if (
           !isSilenceArmMark &&
           !frame.mark?.name?.startsWith(FIRST_REAL_MARK_PREFIX) &&
+          !frame.mark?.name?.startsWith(FIRST_AUDIBLE_MARK_PREFIX) &&
           this.state.unackedMarks > 0
         ) {
           this.state.unackedMarks--;
         }
-        // U1 — an ack of a pending first_real mark is the reply's playout stamp
-        // (a no-op for any other mark, or one already settled).
+        // U1 — an ack of a pending first_real / first_audible mark is the reply's
+        // playout stamp (a no-op for any other mark, or one already settled).
         this.settleReplyMark(frame.mark?.name ?? '', 'acked');
         // C5 / consent ordering — capture may open ONLY on the disclosure
         // turn's own end-of-utterance ack, and only once handleStart has
@@ -2122,6 +2133,19 @@ export class TwilioMediaStreamAdapter {
     // pre-scans below can await a Deepgram reopen, and that wait belongs to the
     // caller's gap, not to the endpoint delay.
     const sttFinalMs = Date.now();
+    // U1 — the caller's last-word instant, resolved NOW (before any await): the
+    // language pre-scans below can reopen Deepgram and bump the generation, after
+    // which this final's offsets would look like they belong to a dead clock.
+    // `lastWordAt` only when this final belongs to the Deepgram session the anchor
+    // was taken for: a late event from a finished generation has offsets on a
+    // clock we no longer hold.
+    const anchorMs = this.state.deepgramAnchorMs;
+    const lastWordMs =
+      generation === this.state.deepgramAnchorGeneration &&
+      anchorMs !== null &&
+      event.lastWordEndMs !== undefined
+        ? anchorMs + event.lastWordEndMs
+        : undefined;
     // T2-F05 — any caller audio (interim or final) means not-silent.
     // Bump the activity generation FIRST (Codex P2, PR #702): clearing the
     // timer can't stop a silence expiry whose timeout callback already fired
@@ -2152,6 +2176,22 @@ export class TwilioMediaStreamAdapter {
     const tenantId = this.state.tenantId;
     if (!session || !callSid || !tenantId) return;
 
+    // U1 — arm reply timing for EVERY accepted final, before the branches that
+    // speak a reply without dispatching the turn (explicit language switch,
+    // low-STT-confidence reprompt): the caller-turn timing for the transcript
+    // row and the reply-gap anchors. A branch that ends up speaking nothing
+    // disarms it again (disarmUnansweredReply) so a later, unrelated outbound
+    // turn is never timed against this final.
+    const replyAnchor = { sttFinalMs, ...(lastWordMs !== undefined ? { lastWordMs } : {}), stamped: false };
+    this.state.replyAnchor = replyAnchor;
+    this.deps.store.beginCallerTurnTiming(session.id, {
+      transport: 'realtime',
+      sttFinalAt: new Date(sttFinalMs),
+      ...(lastWordMs !== undefined ? { lastWordAt: new Date(lastWordMs) } : {}),
+    });
+    this.state.awaitingFirstAudioFrame = true;
+    this.state.earlyFillerFirstAudioObserved = false;
+
     // UB-C1 trigger (b) — explicit language request ("hablo español" /
     // "switch to english"). Deterministic pre-scan; when it performs a
     // switch it CONSUMES the turn with a localized acknowledgment (the
@@ -2159,6 +2199,7 @@ export class TwilioMediaStreamAdapter {
     // utterance. Emergency keywords always win the turn: an utterance
     // that contains both is never consumed here.
     if (await this.maybeHandleExplicitLanguageSwitch(event.transcript)) {
+      this.disarmUnansweredReply(replyAnchor);
       return;
     }
 
@@ -2183,7 +2224,10 @@ export class TwilioMediaStreamAdapter {
     // missing/non-finite value is treated as HIGH so it can never block a
     // turn on absent data (requirement: never block on absent confidence).
     if (isLowSttConfidence(event.confidence)) {
+      // The reprompt is the reply to this final; no caller line is appended, so
+      // its gap is observed (histogram) but no transcript row is stamped.
       await this.recoverFromLowSttConfidence(session, 'low_confidence');
+      this.disarmUnansweredReply(replyAnchor);
       return;
     }
     // A dispatched (high-confidence, or confidence-absent) final resets the
@@ -2192,29 +2236,10 @@ export class TwilioMediaStreamAdapter {
     this.state.consecutiveLowConfidenceTurns = 0;
 
     // VQ2-004: TTFA-start. Stamp the moment the STT provider returned a
-    // final transcript on the session bus and arm the per-turn
-    // first-frame guard so the next outbound chunk emits
-    // `audio_frame_emitted`. Emitted BEFORE speechTurn to capture the
-    // full agent-thinking window.
-    // U1 — caller-turn timing for the transcript row + the reply-gap anchors.
-    // `lastWordAt` only when this final belongs to the Deepgram session the
-    // anchor was taken for: a late event from a finished generation (language
-    // switch / reopen) has offsets on a clock we no longer hold.
-    const anchorMs = this.state.deepgramAnchorMs;
-    const lastWordMs =
-      generation === this.state.deepgramAnchorGeneration &&
-      anchorMs !== null &&
-      event.lastWordEndMs !== undefined
-        ? anchorMs + event.lastWordEndMs
-        : undefined;
-    this.state.replyAnchor = { sttFinalMs, ...(lastWordMs !== undefined ? { lastWordMs } : {}), stamped: false };
-    this.deps.store.beginCallerTurnTiming(session.id, {
-      transport: 'realtime',
-      sttFinalAt: new Date(sttFinalMs),
-      ...(lastWordMs !== undefined ? { lastWordAt: new Date(lastWordMs) } : {}),
-    });
-    this.state.awaitingFirstAudioFrame = true;
-    this.state.earlyFillerFirstAudioObserved = false;
+    // final transcript on the session bus; the per-turn first-frame guard
+    // (`awaitingFirstAudioFrame`, armed with the U1 reply anchor above) makes
+    // the next outbound chunk emit `audio_frame_emitted`. Emitted BEFORE
+    // speechTurn to capture the full agent-thinking window.
     // WS26 — stamp the turn-latency start (STT-final). Plain assignment; a
     // metrics failure can only happen at observe() time, which is wrapped.
     this.state.turnLatencyStartMs = Date.now();
@@ -3871,7 +3896,7 @@ export class TwilioMediaStreamAdapter {
         this.state.turnLatencyStartMs !== null
       ) {
         this.state.earlyFillerFirstAudioObserved = true;
-        this.stampFirstAudible();
+        this.markFirstAudibleFrame(turnId);
         observeTurnLatency(this.state.turnLatencyStartMs);
         // Keep turnLatencyStartMs for optional real-TTS delta until real
         // frame arrives; clear so we don't double-observe if only filler.
@@ -3948,6 +3973,7 @@ export class TwilioMediaStreamAdapter {
     const timer = setTimeout(() => this.settleReplyMark(name, 'ack_timeout'), REPLY_ACK_TIMEOUT_MS);
     if (typeof timer.unref === 'function') timer.unref();
     this.state.pendingReplyMarks.set(name, {
+      kind: 'real',
       turnIndex,
       sttFinalMs: anchor.sttFinalMs,
       ...(anchor.lastWordMs !== undefined ? { lastWordMs: anchor.lastWordMs } : {}),
@@ -3974,11 +4000,45 @@ export class TwilioMediaStreamAdapter {
       : undefined;
   }
 
-  /** A filler's first chunk is the turn's first audible sound: stamp `first_audible_at` only. */
-  private stampFirstAudible(): void {
+  /**
+   * A filler's first chunk is the turn's first audible sound: send a
+   * `first_audible:<turnId>` mark right behind it, whose ack stamps
+   * `first_audible_at` (and nothing else) — same playout semantics as the real
+   * frame's mark, instead of the enqueue instant. The caller line may not be
+   * appended yet at enqueue, so the transcript row is resolved at ack. A mark
+   * that is never acked (clear / close / timeout) is dropped: `first_audible_at`
+   * stays null and no reason is recorded, it is not an SLO field.
+   */
+  private markFirstAudibleFrame(turnId: number): void {
     const anchor = this.state.replyAnchor;
-    if (!anchor) return;
-    this.stampReply(this.currentReplyTurnIndex(anchor), { firstAudibleAt: new Date() });
+    if (!anchor || !this.state.streamSid) return;
+    const name = `${FIRST_AUDIBLE_MARK_PREFIX}${turnId}`;
+    const timer = setTimeout(() => this.settleReplyMark(name, 'ack_timeout'), REPLY_ACK_TIMEOUT_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+    this.state.pendingReplyMarks.set(name, {
+      kind: 'audible',
+      turnIndex: undefined,
+      sttFinalMs: anchor.sttFinalMs,
+      fillerAudible: false,
+      timer,
+    });
+    this.enqueueOutbound('control', {
+      event: 'mark',
+      streamSid: this.state.streamSid,
+      mark: { name },
+    });
+  }
+
+  /**
+   * A final armed reply timing but its branch spoke nothing (suppressed
+   * reprompt, empty acknowledgement): drop the anchor and the first-frame guard
+   * so the next, unrelated outbound turn is not timed against it. Only if this
+   * final's anchor is still current and nothing was stamped.
+   */
+  private disarmUnansweredReply(anchor: { stamped: boolean }): void {
+    if (this.state.replyAnchor !== anchor || anchor.stamped) return;
+    this.state.replyAnchor = null;
+    this.state.awaitingFirstAudioFrame = false;
   }
 
   /**
@@ -3991,6 +4051,12 @@ export class TwilioMediaStreamAdapter {
     if (!pending) return;
     clearTimeout(pending.timer);
     this.state.pendingReplyMarks.delete(name);
+    if (pending.kind === 'audible') {
+      if (outcome === 'acked') {
+        this.stampReply(this.currentReplyTurnIndex(pending), { firstAudibleAt: new Date() });
+      }
+      return;
+    }
     if (outcome !== 'acked') {
       try {
         voiceReplyUnackedTotal.inc({ reason: outcome });

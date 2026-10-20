@@ -44,6 +44,7 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
   let tenantC: TestTenant;
   let tenantD: TestTenant;
   let tenantE: TestTenant;
+  let tenantF: TestTenant;
   let seq = 0;
 
   beforeAll(async () => {
@@ -55,6 +56,7 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     tenantC = await createTestTenant(pool);
     tenantD = await createTestTenant(pool);
     tenantE = await createTestTenant(pool);
+    tenantF = await createTestTenant(pool);
   });
 
   afterAll(async () => {
@@ -249,6 +251,12 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     const dRealtime = newCall();
     for (let i = 0; i < 20; i += 1) await realtimeGapTurn(tenantD, dRealtime, i, 800, 300);
 
+    // Tenant F — one Twilio call that spans two session ids (a restart moved it
+    // from the realtime path to Gather): one call, and it is degraded.
+    const fRealtime = newCall();
+    await realtimeGapTurn(tenantF, fRealtime, 0, 900, 300);
+    await gatherTurn(tenantF, { callSid: fRealtime.callSid, sessionId: `${fRealtime.sessionId}-gather` }, 0);
+
     // Tenant B — five realtime gaps: fewer than the 10-turn floor.
     const bCall = newCall();
     for (let i = 0; i < 5; i += 1) await realtimeGapTurn(tenantB, bCall, i, 1000 + i * 10, 300);
@@ -276,12 +284,13 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     expect(s.enough).toBe(true);
   });
 
-  it('first-audible percentiles count the filler, and fall back to the STT-final anchor without a last word', async () => {
+  it('first-audible percentiles count the filler, and leave out turns anchored only at the STT-final', async () => {
     const s = await reader.read(tenantA.tenantId, { days: 7 });
     // Acked turns hear their reply at the gap (600..1700 step 100) except the first turn of
     // calls 0..2 (gaps 600, 800, 1000), whose filler played at 250 ms. The gapless row's
-    // first sound is 1000 ms after its STT-final (no last word); the enqueued-only row has none.
-    const audible = [250, 250, 250, 700, 900, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1000].sort((a, b) => a - b);
+    // first sound has no last word to measure from (STT-final fallback only), so it is NOT in the
+    // sample: the fallback omits the endpointing delay and would bias the percentile down.
+    const audible = [250, 250, 250, 700, 900, 1100, 1200, 1300, 1400, 1500, 1600, 1700].sort((a, b) => a - b);
     const at = (q: number): number => {
       const rank = q * (audible.length - 1);
       const lo = Math.floor(rank);
@@ -289,8 +298,9 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     };
     expect(s.p50FirstAudibleMs).toBe(at(0.5));
     expect(s.p95FirstAudibleMs).toBe(at(0.95));
-    // The filler makes the first-sound median better than the reply-gap median (1150).
-    expect(s.p50FirstAudibleMs!).toBeLessThan(s.p50ReplyGapMs!);
+    // A filler can only bring the first sound earlier, never later, than the acked reply (median 1150).
+    expect(s.p50FirstAudibleMs!).toBeLessThanOrEqual(s.p50ReplyGapMs!);
+    expect(s.p50FirstAudibleMs).toBe(1150);
   });
 
   it('computes the endpoint-delay p95 over every in-window realtime turn that carries one', async () => {
@@ -329,6 +339,13 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     expect(s.gatherShare.turns!).toBeCloseTo(0.13, 2);
     expect(s.replyAttempts).toBe(20);
     expect(s.enough).toBe(true);
+  });
+
+  it('Gather share is per CallSid: one call with a realtime session then a Gather session is 1 of 1 degraded call', async () => {
+    const s = await reader.read(tenantF.tenantId, { days: 7 });
+    expect(s.gatherShare.calls).toBe(1);
+    // By turns it is still one Gather turn of two.
+    expect(s.gatherShare.turns).toBe(0.5);
   });
 
   it('a window where every reply went unacked is still "enough": the card must show the 100 % rate, not hide it', async () => {
