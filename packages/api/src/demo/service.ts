@@ -19,8 +19,10 @@
  *      after an unconfirmed outcome could ring the visitor twice.
  *   5. `created` binds the CallSid and renews nothing (the call may still be
  *      queued); `not_created` returns the reservation and the allowance once
- *      (D11), releases the lease and fails the row; `unconfirmed` keeps all
- *      three and answers the visitor as for a success.
+ *      (D11) and fails the row; `unconfirmed` keeps all three and answers
+ *      the visitor as for a success.
+ *   6. After a `not_created` settle commits, the lease ends through
+ *      `resetAndRelease` (S6-4), the one way any lease ends.
  */
 import { createHmac, randomBytes } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
@@ -36,6 +38,7 @@ import { releaseNoCall } from './call-budget';
 import { isDemoCallsEnabled, type DemoConfig } from './config';
 import { CALLS_REQUEST_TIMEOUT_MS, RING_TIMEOUT_S, TIME_LIMIT_S, demoLeaseStep } from './lease';
 import { mintLeaseToken } from './lease-token';
+import type { DemoLeaseResetter } from './reset';
 import { setPlatformTenantContext, writePlatformAudit } from './platform-audit';
 import { runStartTransaction, type StartedDemoCall } from './start-transaction';
 import { classifyCallsOutcome, type CallsOutcome, type CallsRequestResult } from './twilio-outcome';
@@ -72,6 +75,8 @@ export interface DemoCallServiceDeps {
   publicApiUrl: string | undefined;
   /** Budget-crossing pages, sent after the start transaction commits. */
   alert: AlertOperatorFn;
+  /** Ends a lease (claim, reset, release; S6-4). Null without a database or with a closed config: the module is closed. */
+  resetter: Pick<DemoLeaseResetter, 'resetAndRelease'> | null;
   fetchImpl?: typeof fetch;
   apiBaseUrl?: string;
   /** The request's abort signal for a bound in ms (default `AbortSignal.timeout`). */
@@ -192,6 +197,7 @@ export function buildCallsRequest(input: CallsRequestInput): {
 
 interface OpenGate {
   pool: Pool;
+  resetter: Pick<DemoLeaseResetter, 'resetAndRelease'>;
   creds: PlatformTwilioCreds;
   secret: string;
   publicApiUrl: string;
@@ -209,10 +215,10 @@ export function demoCallGate(deps: DemoCallServiceDeps): { kind: 'disabled'; rea
   if (!creds) return { kind: 'disabled', reason: 'PLATFORM_TWILIO_* is not set' };
   if (!deps.leaseTokenSecret) return { kind: 'disabled', reason: 'DEMO_LEASE_TOKEN_SECRET is not set' };
   if (!deps.publicApiUrl) return { kind: 'disabled', reason: 'PUBLIC_API_URL is not set' };
-  if (!deps.pool) return { kind: 'disabled', reason: 'no database' };
+  if (!deps.pool || !deps.resetter) return { kind: 'disabled', reason: 'no database' };
   return {
     kind: 'open',
-    gate: { pool: deps.pool, creds, secret: deps.leaseTokenSecret, publicApiUrl: deps.publicApiUrl },
+    gate: { pool: deps.pool, resetter: deps.resetter, creds, secret: deps.leaseTokenSecret, publicApiUrl: deps.publicApiUrl },
   };
 }
 
@@ -220,7 +226,7 @@ export async function startDemoCall(fields: DemoCallStartFields, deps: DemoCallS
   // (1) Refusals that need no database.
   const opened = demoCallGate(deps);
   if (opened.kind === 'disabled') return opened;
-  const { pool, creds, secret, publicApiUrl } = opened.gate;
+  const { pool, resetter, creds, secret, publicApiUrl } = opened.gate;
 
   const e164 = normalizeDemoPhone(fields.phone);
   const allowed = isOutboundAllowed(e164);
@@ -253,14 +259,34 @@ export async function startDemoCall(fields: DemoCallStartFields, deps: DemoCallS
 
   // (5) Settle. A failure here leaves the row `initiating`, which every
   // later sweep reads as unconfirmed: nothing is released on a guess.
+  let settled = false;
   try {
     await settle(pool, call, outcome);
+    settled = true;
   } catch (err) {
     deps.logger?.error('demo call: settling the Calls outcome failed; row left initiating', {
       demoCallId: call.demoCallId,
       outcome: outcome.outcome,
       error: err instanceof Error ? err.message : String(err),
     });
+  }
+
+  // (6) No call exists, so nothing will ever call back: end the lease now
+  // (claim, reset, release; S6-4). Its claim only takes a lease no callback
+  // has bound. A failed reset has alerted and returned the claim with
+  // `expires_at = now()`, and the reaper's next sweep retries it.
+  if (settled && outcome.outcome === 'not_created') {
+    try {
+      const ended = await resetter.resetAndRelease(call.leaseId, { source: 'no_call' });
+      if (ended.kind !== 'released') {
+        deps.logger?.warn('demo call: the no-call lease was not released here', { leaseId: call.leaseId, result: ended.kind });
+      }
+    } catch (err) {
+      deps.logger?.error('demo call: ending the no-call lease threw; the reaper will reclaim it', {
+        leaseId: call.leaseId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   if (outcome.outcome === 'not_created') {
@@ -371,13 +397,9 @@ async function settle(pool: Pool, call: StartedDemoCall, outcome: CallsOutcome):
         return;
       }
       case 'not_created': {
+        // The lease itself ends after this commits, through resetAndRelease
+        // (`no_call`), like every other end of a lease.
         const released = await releaseNoCall(client, call.demoCallId);
-        // TODO(S6-4): replace with resetAndRelease (claim, purge, release).
-        await client.query(
-          `UPDATE demo_tenant_leases SET state = 'released', released_at = now()
-            WHERE id = $1 AND call_sid IS NULL AND released_at IS NULL`,
-          [call.leaseId],
-        );
         await client.query(
           `UPDATE demo_calls SET status = 'failed', updated_at = now()
             WHERE id = $1 AND status = 'initiating' AND call_sid IS NULL`,
