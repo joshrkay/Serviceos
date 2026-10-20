@@ -455,9 +455,8 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
          └─ POST /stream-token
          └─ POST /transcribe
          └─ POST /tts
-111  authenticated use    /api/voice/quality    [router: router]
          └─ POST /tts/batch
-110  authenticated use    /api/voice/quality    [router: router]
+111  authenticated use    /api/voice/quality    [router: router]
          └─ GET /
          └─ POST /grade
 112  authenticated use    /api/onboarding    [router: router]
