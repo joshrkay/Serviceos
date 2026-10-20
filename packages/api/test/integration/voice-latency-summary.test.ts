@@ -314,18 +314,17 @@ describe('Postgres integration — call_transcript_turns reply timing (U1)', () 
         store.appendTranscript(session.id, {
           speaker: 'caller',
           text: 'my AC is broken',
-          timing: { transport: 'realtime', sttFinalAt, lastWordAt },
+          timing: { transport: 'realtime', turnKey: 'turn-key-1', sttFinalAt, lastWordAt },
         });
-        const anchor = session.replyTimings.at(-1)!;
-        expect(anchor.turnIndex).toBe(1);
+        expect(session.replyTimings.at(-1)!.turnIndex).toBe(1);
 
         // Stamped straight away: the update chains behind the (possibly pending) insert.
         await store.markReplyAudio(session.id, {
-          turnIndex: anchor.turnIndex,
+          turnKey: 'turn-key-1',
           firstAudioEnqueuedAt: new Date('2026-10-20T11:00:02.100Z'),
         });
         await store.markReplyAudio(session.id, {
-          turnIndex: anchor.turnIndex,
+          turnKey: 'turn-key-1',
           firstAudioAt,
           firstAudibleAt: firstAudioAt,
           replyGapMs: firstAudioAt.getTime() - lastWordAt.getTime(),
@@ -375,6 +374,41 @@ describe('Postgres integration — call_transcript_turns reply timing (U1)', () 
         store.dispose();
       }
     });
+    it('a stamp that arrives before its caller row is retained and lands on the row once appended', async () => {
+      const store = new VoiceSessionStore({ startInterval: false, callTranscriptTurnRepo: repo });
+      try {
+        const callSid = newCallSid();
+        const session = store.create(tenant.tenantId, 'telephony', { callSid });
+        const firstAudibleAt = new Date('2026-10-20T14:00:02.000Z');
+
+        // The filler was acked while the final was still queued: no row yet.
+        await store.markReplyAudio(session.id, { turnKey: 'queued-key', firstAudibleAt });
+        expect(session.pendingReplyStamps.has('queued-key')).toBe(true);
+
+        store.appendTranscript(session.id, { speaker: 'agent', text: 'One moment.' });
+        store.appendTranscript(session.id, {
+          speaker: 'caller',
+          text: 'it is very hot',
+          timing: {
+            transport: 'realtime',
+            turnKey: 'queued-key',
+            sttFinalAt: new Date('2026-10-20T14:00:01.000Z'),
+          },
+        });
+        expect(session.pendingReplyStamps.size).toBe(0);
+        const rowId = await session.pendingTurnPersist.get(1);
+        expect(rowId).toEqual(expect.any(String));
+        // The flush is chained behind the INSERT; one more stamp for the key queues behind it.
+        await store.markReplyAudio(session.id, { turnKey: 'queued-key', firstAudioAt: new Date('2026-10-20T14:00:03.000Z') });
+
+        const rows = await readTiming(tenant.tenantId, callSid);
+        expect(rows[1].first_audible_at?.toISOString()).toBe(firstAudibleAt.toISOString());
+        expect(rows[1].first_audio_at?.toISOString()).toBe('2026-10-20T14:00:03.000Z');
+      } finally {
+        store.dispose();
+      }
+    });
+
     it('a reply stamp lands by row id after attachRecording renumbered the turn', async () => {
       const store = new VoiceSessionStore({ startInterval: false, callTranscriptTurnRepo: repo });
       try {
@@ -387,7 +421,7 @@ describe('Postgres integration — call_transcript_turns reply timing (U1)', () 
         store.appendTranscript(second.id, {
           speaker: 'caller',
           text: 'second leg',
-          timing: { transport: 'gather', sttFinalAt: new Date('2026-10-20T13:00:00.000Z') },
+          timing: { transport: 'gather', turnKey: 'second-leg-key', sttFinalAt: new Date('2026-10-20T13:00:00.000Z') },
         });
         const rowId = await second.pendingTurnPersist.get(0);
         expect(rowId).toEqual(expect.any(String));
@@ -405,7 +439,7 @@ describe('Postgres integration — call_transcript_turns reply timing (U1)', () 
         // ...but the store stamps by id, so the late reply stamp still lands.
         const firstAudioAt = new Date('2026-10-20T13:00:02.000Z');
         await second.pendingTurnPersist.get(0);
-        await store.markReplyAudio(second.id, { turnIndex: 0, firstAudioAt, firstAudibleAt: firstAudioAt, replyGapMs: 1500 });
+        await store.markReplyAudio(second.id, { turnKey: 'second-leg-key', firstAudioAt, firstAudibleAt: firstAudioAt, replyGapMs: 1500 });
 
         const rows = await readTiming(tenant.tenantId, callSid);
         expect(rows[0].reply_gap_ms).toBeNull();

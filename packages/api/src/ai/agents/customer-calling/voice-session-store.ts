@@ -65,6 +65,17 @@ const DEFAULT_SWEEP_INTERVAL_MS = 60 * 1000;
  */
 const RETAINED_CALLER_TURNS = 4;
 
+/** Fold retained stamps into one, the first stamp for a field winning (as the repository's COALESCE does). */
+function mergeReplyStamps(stamps: ReplyAudioStampFields[]): ReplyAudioStampFields {
+  const merged: ReplyAudioStampFields = {};
+  for (const stamp of stamps) {
+    for (const [field, value] of Object.entries(stamp) as Array<[keyof ReplyAudioStampFields, never]>) {
+      if (value !== undefined && merged[field] === undefined) merged[field] = value;
+    }
+  }
+  return merged;
+}
+
 export type VoiceSessionEvent =
   /**
    * FSM transitioned to a new state.
@@ -219,13 +230,23 @@ export interface CallerTurnTiming {
  * stamp the repository COALESCEs onto the caller turn's row, so a repeated or
  * later stamp never overwrites the first.
  */
-export interface ReplyAudioStamp {
-  turnIndex: number;
+export interface ReplyAudioStampFields {
   firstAudibleAt?: Date;
   firstAudioEnqueuedAt?: Date;
   firstAudioAt?: Date;
   replyGapMs?: number;
   replyUnackedReason?: ReplyUnackedReason;
+}
+
+/**
+ * A stamp addressed by the caller turn's unique key (see
+ * {@link CallerTurnTiming.turnKey}), not by transcript index: the adapter can
+ * learn something about a reply before the caller row it answers is appended
+ * (a final queued behind an earlier turn), so the store resolves the row —
+ * immediately, or once it appears.
+ */
+export interface ReplyAudioStamp extends ReplyAudioStampFields {
+  turnKey: string;
 }
 
 export interface VoiceSession {
@@ -422,6 +443,15 @@ export interface VoiceSession {
    * the session.
    */
   pendingTurnPersist: Map<number, Promise<string | undefined>>;
+  /**
+   * U1 — reply stamps that arrived before their caller row was appended (a
+   * final queued behind an earlier turn can have its filler acked first),
+   * keyed by the turn's unique key and flushed, in order, when `persistTurn`
+   * records the row carrying that key. Holds at most the last
+   * {@link RETAINED_CALLER_TURNS} keys (older ones are dropped with a warning)
+   * and is cleared with the session.
+   */
+  pendingReplyStamps: Map<string, ReplyAudioStampFields[]>;
   /**
    * P11-002 — resolved per-tenant TTS voice override for the session
    * language (settings.ttsVoiceEn/Es). When set, the `<Say voice>` uses
@@ -760,6 +790,7 @@ export class VoiceSessionStore {
       ttsCharacters: 0,
       mediaStreamsUsed: false,
       pendingTurnPersist: new Map(),
+      pendingReplyStamps: new Map(),
       replyTimings: [],
       transcript: [],
       proposalIds: [],
@@ -977,14 +1008,23 @@ export class VoiceSessionStore {
           lastWordAt: timing.lastWordAt,
         });
         if (session.replyTimings.length > RETAINED_CALLER_TURNS) session.replyTimings.shift();
+        const early = timing.turnKey !== undefined ? session.pendingReplyStamps.get(timing.turnKey) : undefined;
+        if (timing.turnKey !== undefined && early) {
+          session.pendingReplyStamps.delete(timing.turnKey);
+          void this.writeReplyStamp(session, turnIndex, mergeReplyStamps(early));
+        }
       }
     }
   }
 
   /**
    * U1 — stamp what the adapter learned about a reply's audio onto the caller
-   * turn it answers. The repository UPDATE is chained behind that turn's
-   * `recordTurn` (pending or long settled) so it never races the INSERT. An
+   * turn it answers, addressed by the turn's unique key. When that turn's row
+   * has been appended the repository UPDATE is chained behind its
+   * `recordTurn` (pending or long settled) so it never races the INSERT. When
+   * it has not (the final is still queued behind an earlier turn), the stamp
+   * is retained and written the moment `persistTurn` records the row; a key
+   * that never gets one is dropped once four newer keys are waiting. An
    * unknown or in-app session, a store with no repository, or a rejected write
    * is a silent no-op for the call; an UPDATE that touches zero rows (the row
    * was deleted underneath it) is counted and logged. The returned promise
@@ -992,10 +1032,46 @@ export class VoiceSessionStore {
    */
   markReplyAudio(sessionId: string, stamp: ReplyAudioStamp): Promise<void> {
     const session = this.sessions.get(sessionId);
+    if (!session || !session.callSid || !this.callTranscriptTurnRepo) return Promise.resolve();
+    const { turnKey, ...fields } = stamp;
+    const row = session.replyTimings.find((t) => t.turnKey === turnKey);
+    if (!row) {
+      this.retainReplyStamp(session, turnKey, fields);
+      return Promise.resolve();
+    }
+    return this.writeReplyStamp(session, row.turnIndex, fields);
+  }
+
+  /** Hold a stamp for a caller row that is not appended yet; evict beyond the last few keys. */
+  private retainReplyStamp(session: VoiceSession, turnKey: string, fields: ReplyAudioStampFields): void {
+    const held = session.pendingReplyStamps.get(turnKey);
+    if (held) {
+      held.push(fields);
+      return;
+    }
+    session.pendingReplyStamps.set(turnKey, [fields]);
+    if (session.pendingReplyStamps.size > RETAINED_CALLER_TURNS) {
+      const oldest = session.pendingReplyStamps.keys().next().value as string;
+      session.pendingReplyStamps.delete(oldest);
+      // eslint-disable-next-line no-console
+      console.warn('voice-session-store: dropped reply-audio stamps for a turn that never got a row', {
+        tenantId: session.tenantId,
+        callSid: session.callSid,
+        sessionId: session.id,
+        turnKey: oldest,
+      });
+    }
+  }
+
+  /** Chain the repository UPDATE for one caller row behind its INSERT. Never rejects. */
+  private writeReplyStamp(
+    session: VoiceSession,
+    turnIndex: number,
+    fields: ReplyAudioStampFields,
+  ): Promise<void> {
     const repo = this.callTranscriptTurnRepo;
-    if (!session || !session.callSid || !repo) return Promise.resolve();
     const { callSid } = session;
-    const { turnIndex, ...stamps } = stamp;
+    if (!repo || !callSid) return Promise.resolve();
     const insert = session.pendingTurnPersist.get(turnIndex) ?? Promise.resolve(undefined);
     return insert
       .then((id) =>
@@ -1007,7 +1083,7 @@ export class VoiceSessionStore {
           sessionId: session.id,
           turnIndex,
           ...(id ? { id } : {}),
-          ...stamps,
+          ...fields,
         }),
       )
       .then((rows) => {
@@ -1074,6 +1150,7 @@ export class VoiceSessionStore {
     if (session.callSid) this.callSidIndex.delete(session.callSid);
     this.locks.delete(sessionId);
     session.pendingTurnPersist.clear();
+    session.pendingReplyStamps.clear();
     this.sessions.delete(sessionId);
   }
 

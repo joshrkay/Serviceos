@@ -572,13 +572,8 @@ const MAX_CONSECUTIVE_SPEECH_TURN_FAILURES = 2;
  */
 interface PendingReplyMark {
   kind: 'real' | 'audible';
-  /**
-   * Transcript index of the caller turn this reply answers (undefined: no
-   * persisted row to stamp). Resolved at enqueue for `real`, at ack for `audible`.
-   */
-  turnIndex: number | undefined;
   sttFinalMs: number;
-  /** The final's unique key (see {@link CallerTurnTiming.turnKey}); resolves the row at ack. */
+  /** The final's unique key (see {@link CallerTurnTiming.turnKey}); the store resolves the row. */
   turnKey: string;
   lastWordMs?: number;
   /** True when a filler's first-audible mark was sent for this turn (`real` marks only). */
@@ -4017,13 +4012,11 @@ export class TwilioMediaStreamAdapter {
     const anchor = this.state.replyAnchor;
     if (!anchor || anchor.stamped || !this.state.streamSid) return;
     anchor.stamped = true;
-    const turnIndex = this.currentReplyTurnIndex(anchor);
     const name = `${FIRST_REAL_MARK_PREFIX}${turnId}`;
     const timer = setTimeout(() => this.settleReplyMark(name, 'ack_timeout'), REPLY_ACK_TIMEOUT_MS);
     if (typeof timer.unref === 'function') timer.unref();
     this.state.pendingReplyMarks.set(name, {
       kind: 'real',
-      turnIndex,
       sttFinalMs: anchor.sttFinalMs,
       turnKey: anchor.turnKey,
       ...(anchor.lastWordMs !== undefined ? { lastWordMs: anchor.lastWordMs } : {}),
@@ -4035,17 +4028,7 @@ export class TwilioMediaStreamAdapter {
       streamSid: this.state.streamSid,
       mark: { name },
     });
-    this.stampReply(turnIndex, { firstAudioEnqueuedAt: new Date() });
-  }
-
-  /**
-   * The persisted transcript row this reply anchor belongs to: the one of the
-   * session's recent caller turns carrying the anchor's unique key (not its
-   * STT-final instant: two finals can share a millisecond). None (not persisted
-   * yet, or too old) means nothing is stamped.
-   */
-  private currentReplyTurnIndex(anchor: { turnKey: string }): number | undefined {
-    return this.state.session?.replyTimings.find((t) => t.turnKey === anchor.turnKey)?.turnIndex;
+    this.stampReply(anchor.turnKey, { firstAudioEnqueuedAt: new Date() });
   }
 
   /**
@@ -4063,7 +4046,7 @@ export class TwilioMediaStreamAdapter {
    * `first_audible:<turnId>` mark right behind it, whose ack stamps
    * `first_audible_at` (and nothing else) — same playout semantics as the real
    * frame's mark, instead of the enqueue instant. The caller line may not be
-   * appended yet at enqueue, so the transcript row is resolved at ack. A mark
+   * appended yet at enqueue, so the store holds the stamp until the row exists. A mark
    * that is never acked (clear / close / timeout) is dropped: `first_audible_at`
    * stays null and no reason is recorded, it is not an SLO field.
    */
@@ -4075,7 +4058,6 @@ export class TwilioMediaStreamAdapter {
     if (typeof timer.unref === 'function') timer.unref();
     this.state.pendingReplyMarks.set(name, {
       kind: 'audible',
-      turnIndex: undefined,
       sttFinalMs: anchor.sttFinalMs,
       turnKey: anchor.turnKey,
       fillerAudible: false,
@@ -4114,7 +4096,7 @@ export class TwilioMediaStreamAdapter {
     this.state.pendingReplyMarks.delete(name);
     if (pending.kind === 'audible') {
       if (outcome === 'acked') {
-        this.stampReply(this.currentReplyTurnIndex(pending), { firstAudibleAt: new Date() });
+        this.stampReply(pending.turnKey, { firstAudibleAt: new Date() });
       }
       return;
     }
@@ -4124,7 +4106,7 @@ export class TwilioMediaStreamAdapter {
       } catch {
         /* metrics must never throw into the audio pipeline */
       }
-      this.stampReply(pending.turnIndex, { replyUnackedReason: outcome });
+      this.stampReply(pending.turnKey, { replyUnackedReason: outcome });
       return;
     }
     const now = Date.now();
@@ -4138,7 +4120,7 @@ export class TwilioMediaStreamAdapter {
     } catch {
       /* metrics must never throw into the audio pipeline */
     }
-    this.stampReply(pending.turnIndex, {
+    this.stampReply(pending.turnKey, {
       firstAudioAt: new Date(now),
       // reply_gap_ms is the last-word-anchored SLO number: an stt_final-anchored
       // sample lives in the histogram's own label and never in the column.
@@ -4151,14 +4133,15 @@ export class TwilioMediaStreamAdapter {
     for (const name of [...this.state.pendingReplyMarks.keys()]) this.settleReplyMark(name, reason);
   }
 
-  /** Best-effort store stamp; no persisted row for the turn (or no store) means nothing to stamp. */
-  private stampReply(
-    turnIndex: number | undefined,
-    stamp: Omit<ReplyAudioStamp, 'turnIndex'>,
-  ): void {
+  /**
+   * Best-effort store stamp, addressed by the final's key: the store resolves
+   * the caller row, or holds the stamp until the row is appended (the final may
+   * still be queued behind an earlier turn).
+   */
+  private stampReply(turnKey: string, stamp: Omit<ReplyAudioStamp, 'turnKey'>): void {
     const session = this.state.session;
-    if (turnIndex === undefined || !session) return;
-    void this.deps.store.markReplyAudio(session.id, { turnIndex, ...stamp });
+    if (!session) return;
+    void this.deps.store.markReplyAudio(session.id, { turnKey, ...stamp });
   }
 
   private async waitForMarkAck(maxWaitMs = 200): Promise<void> {

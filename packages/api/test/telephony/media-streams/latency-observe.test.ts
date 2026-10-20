@@ -879,6 +879,132 @@ describe('U1c first real acked audio', () => {
       ]);
     });
 
+    describe('a stamp that fires before its caller row is appended (final queued behind an earlier turn)', () => {
+      /** Final A holds the lock in a deferred speechTurn; final B queues behind it with no row yet. */
+      const queueSecondFinal = async (
+        h: Harness,
+        anchorMs: number,
+      ): Promise<void> => {
+        vi.setSystemTime(anchorMs - 500);
+        h.ws.inboundJson(startFrame);
+        await flush();
+        vi.setSystemTime(anchorMs);
+        h.ws.inboundJson(mediaFrame);
+        await flush();
+        vi.setSystemTime(anchorMs + 2_000);
+        h.opens[0].emit({ transcript: 'my AC is broken', lastWordEndMs: 800 });
+        await flush();
+        vi.setSystemTime(anchorMs + 2_100);
+        h.opens[0].emit({ transcript: 'and it is very hot', lastWordEndMs: 1_900 });
+        await flush();
+        expect(h.speechReleases).toHaveLength(1); // B has not reached the lock: no row for it
+        expect(h.recordTurn).toHaveBeenCalledTimes(1);
+      };
+
+      it('a filler acked before the row exists: the stamp is retained and lands on the row once appended', async () => {
+        const h = setup({ deferSpeechTurns: true, withFiller: true, fillerDelayMs: 50 });
+        const anchorMs = 34_000_000;
+        await queueSecondFinal(h, anchorMs);
+
+        // B's filler fires while B waits for the lock; Twilio acks it.
+        vi.setSystemTime(anchorMs + 2_300);
+        await vi.advanceTimersByTimeAsync(100);
+        await flush();
+        const [audibleMark] = h.ws.markNames('first_audible:');
+        expect(audibleMark).toBeDefined();
+        vi.setSystemTime(anchorMs + 2_600);
+        h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: audibleMark } });
+        await flush();
+        // Acked, but B's caller row does not exist: nothing can be written yet.
+        expect(stampsOf(h)).toHaveLength(0);
+
+        // A's turn ends; B takes the lock and appends its caller row.
+        vi.setSystemTime(anchorMs + 3_000);
+        h.speechReleases[0]();
+        await flush();
+        expect(h.speechReleases).toHaveLength(2);
+        const rows = h.recordTurn.mock.calls
+          .map(([i]) => i as Record<string, unknown>)
+          .filter((i) => i.speaker === 'caller');
+        expect(rows.map((r) => r.turnIndex)).toEqual([0, 1]);
+        expect(stampsOf(h).filter((s) => s.turnIndex === 1)).toEqual([
+          expect.objectContaining({ callSid: CALL_SID, turnIndex: 1, firstAudibleAt: new Date(anchorMs + 2_600) }),
+        ]);
+      });
+
+      it('a first_real enqueue stamped before the row exists is flushed at append; the ack after it stamps the row directly', async () => {
+        const h = setup({ deferSpeechTurns: true });
+        const anchorMs = 35_000_000;
+        await queueSecondFinal(h, anchorMs);
+
+        // Past the hold deadline, the hold line speaks for the latest final (B): its
+        // first real frame is enqueued, and the enqueue stamp has no row to land on.
+        vi.setSystemTime(anchorMs + 2_100);
+        await vi.advanceTimersByTimeAsync(4_600);
+        await flush();
+        const [holdMark] = h.ws.markNames('first_real:');
+        expect(holdMark).toBeDefined();
+        expect(stampsOf(h)).toHaveLength(0);
+
+        vi.setSystemTime(anchorMs + 6_800);
+        h.speechReleases[0]();
+        await flush();
+        expect(h.speechReleases).toHaveLength(2);
+        // The hold line's agent row took an index, so B's caller row is not simply turn 1.
+        const secondCaller = h.recordTurn.mock.calls
+          .map(([i]) => i as Record<string, unknown>)
+          .filter((i) => i.speaker === 'caller')[1].turnIndex;
+        expect(stampsOf(h).filter((s) => s.turnIndex === secondCaller)).toEqual([
+          expect.objectContaining({ turnIndex: secondCaller, firstAudioEnqueuedAt: expect.any(Date) }),
+        ]);
+
+        // The ack arrives after the row exists: resolved by key, no retention needed.
+        vi.setSystemTime(anchorMs + 6_900);
+        h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: holdMark } });
+        await flush();
+        expect(stampsOf(h).filter((s) => s.turnIndex === secondCaller && s.firstAudioAt !== undefined)).toEqual([
+          expect.objectContaining({
+            turnIndex: secondCaller,
+            firstAudioAt: new Date(anchorMs + 6_900),
+            replyGapMs: 6_900 - 1_900,
+          }),
+        ]);
+      });
+
+      it('a stamp whose key never gets a row is dropped (warned once) after four newer keys are waiting', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        try {
+          const h = setup({ deferSpeechTurns: true, withFiller: true, fillerDelayMs: 50 });
+          const anchorMs = 36_000_000;
+          await queueSecondFinal(h, anchorMs);
+
+          vi.setSystemTime(anchorMs + 2_300);
+          await vi.advanceTimersByTimeAsync(100);
+          await flush();
+          const [audibleMark] = h.ws.markNames('first_audible:');
+          vi.setSystemTime(anchorMs + 2_600);
+          h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: audibleMark } });
+          await flush();
+          expect(stampsOf(h)).toHaveLength(0);
+
+          // Four newer turns also stamp before their rows exist: B's key is the oldest, so it is evicted.
+          const sessionId = h.store.findByCallSid(CALL_SID)!.id;
+          for (const key of ['k1', 'k2', 'k3', 'k4']) {
+            await h.store.markReplyAudio(sessionId, { turnKey: key, firstAudibleAt: new Date(anchorMs) });
+          }
+          expect(warn).toHaveBeenCalledTimes(1);
+
+          vi.setSystemTime(anchorMs + 3_000);
+          h.speechReleases[0]();
+          await flush();
+          expect(h.speechReleases).toHaveLength(2); // B's row was appended ...
+          expect(stampsOf(h).filter((s) => s.turnIndex === 1)).toHaveLength(0); // ... with nothing left to flush
+        } finally {
+          warn.mockRestore();
+        }
+      });
+    });
+
     it('a second final that speaks nothing does not disturb the first turn\'s anchor', async () => {
       const ackEs = LANGUAGE_SWITCH_ACK.es;
       const tts: TtsProvider = {

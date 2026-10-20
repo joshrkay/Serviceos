@@ -180,6 +180,14 @@ describe('VoiceSessionStore', () => {
         setImmediate(resolve);
       });
 
+    /** Append a caller line carrying a unique turn key, as the realtime adapter does. */
+    const appendKeyed = (store: VoiceSessionStore, sessionId: string, turnKey: string): void =>
+      store.appendTranscript(sessionId, {
+        speaker: 'caller',
+        text: `line ${turnKey}`,
+        timing: { transport: 'realtime', turnKey, sttFinalAt: new Date(1) },
+      });
+
     function timedRepo(opts: { markResult?: number; recordGate?: Promise<void> } = {}) {
       const order: string[] = [];
       const recordTurn = vi.fn(async (input: unknown) => {
@@ -341,10 +349,10 @@ describe('VoiceSessionStore', () => {
       store.appendTranscript(session.id, {
         speaker: 'caller',
         text: 'hello',
-        timing: { transport: 'realtime', sttFinalAt: new Date(1) },
+        timing: { transport: 'realtime', turnKey: 'k0', sttFinalAt: new Date(1) },
       });
 
-      const stamped = store.markReplyAudio(session.id, { turnIndex: 0, firstAudioAt: new Date(2), replyGapMs: 900 });
+      const stamped = store.markReplyAudio(session.id, { turnKey: 'k0', firstAudioAt: new Date(2), replyGapMs: 900 });
       await settle();
       expect(markReplyAudio).not.toHaveBeenCalled();
 
@@ -365,9 +373,9 @@ describe('VoiceSessionStore', () => {
       const { repo, markReplyAudio } = timedRepo();
       const store = newStore({ callTranscriptTurnRepo: repo });
       const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
-      store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
+      appendKeyed(store, session.id, 'k0');
       await settle();
-      await store.markReplyAudio(session.id, { turnIndex: 0, firstAudibleAt: new Date(3) });
+      await store.markReplyAudio(session.id, { turnKey: 'k0', firstAudibleAt: new Date(3) });
       expect(markReplyAudio).toHaveBeenCalledTimes(1);
     });
 
@@ -376,9 +384,9 @@ describe('VoiceSessionStore', () => {
       const markReplyAudio = vi.fn(async (_input: unknown) => 1);
       const store = newStore({ callTranscriptTurnRepo: { recordTurn, markReplyAudio } });
       const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
-      store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
+      appendKeyed(store, session.id, 'k0');
 
-      await store.markReplyAudio(session.id, { turnIndex: 0, firstAudioAt: new Date(2) });
+      await store.markReplyAudio(session.id, { turnKey: 'k0', firstAudioAt: new Date(2) });
       expect(markReplyAudio).toHaveBeenCalledWith({
         tenantId: 'tenant-a',
         id: 'row-uuid-1',
@@ -400,8 +408,8 @@ describe('VoiceSessionStore', () => {
         try {
           const store = newStore({ callTranscriptTurnRepo: { recordTurn, markReplyAudio } as never });
           const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
-          store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
-          await store.markReplyAudio(session.id, { turnIndex: 0, firstAudioAt: new Date(2) });
+          appendKeyed(store, session.id, 'k0');
+          await store.markReplyAudio(session.id, { turnKey: 'k0', firstAudioAt: new Date(2) });
           expect(markReplyAudio.mock.calls[0][0]).not.toHaveProperty('id');
           expect(markReplyAudio.mock.calls[0][0]).toMatchObject({ callSid: CALL_SID, turnIndex: 0 });
         } finally {
@@ -415,10 +423,11 @@ describe('VoiceSessionStore', () => {
     it('an in-app session or an unknown session is a silent no-op', async () => {
       const { repo, markReplyAudio } = timedRepo();
       const store = newStore({ callTranscriptTurnRepo: repo });
-      await expect(store.markReplyAudio('missing', { turnIndex: 0 })).resolves.toBeUndefined();
+      await expect(store.markReplyAudio('missing', { turnKey: 'k0' })).resolves.toBeUndefined();
       const inapp = store.create('tenant-a', 'inapp');
-      await store.markReplyAudio(inapp.id, { turnIndex: 0, firstAudioAt: new Date() });
+      await store.markReplyAudio(inapp.id, { turnKey: 'k0', firstAudioAt: new Date() });
       expect(markReplyAudio).not.toHaveBeenCalled();
+      expect(inapp.pendingReplyStamps.size).toBe(0); // nothing to retain for a session that never persists
     });
 
     it('a zero-row update increments voice_reply_stamp_lost_total and logs the key', async () => {
@@ -429,8 +438,8 @@ describe('VoiceSessionStore', () => {
         const { repo } = timedRepo({ markResult: 0 });
         const store = newStore({ callTranscriptTurnRepo: repo });
         const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
-        store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
-        await store.markReplyAudio(session.id, { turnIndex: 0, firstAudioAt: new Date() });
+        appendKeyed(store, session.id, 'k0');
+        await store.markReplyAudio(session.id, { turnKey: 'k0', firstAudioAt: new Date() });
 
         const snap = await voiceReplyStampLostTotal.get();
         expect(snap.values[0].value).toBe(1);
@@ -452,12 +461,125 @@ describe('VoiceSessionStore', () => {
         };
         const store = newStore({ callTranscriptTurnRepo: repo as never });
         const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
-        store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
-        await expect(store.markReplyAudio(session.id, { turnIndex: 0, firstAudioAt: new Date() })).resolves.toBeUndefined();
+        appendKeyed(store, session.id, 'k0');
+        await expect(store.markReplyAudio(session.id, { turnKey: 'k0', firstAudioAt: new Date() })).resolves.toBeUndefined();
         expect(errorSpy).toHaveBeenCalledTimes(1);
       } finally {
         errorSpy.mockRestore();
       }
+    });
+
+    it('resolves a stamp to the row carrying its key, whatever index that row took', async () => {
+      const { repo, markReplyAudio } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'hi' });
+      appendKeyed(store, session.id, 'ka');
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'ok' });
+      appendKeyed(store, session.id, 'kb');
+
+      await store.markReplyAudio(session.id, { turnKey: 'kb', firstAudioAt: new Date(2) });
+      await store.markReplyAudio(session.id, { turnKey: 'ka', firstAudioAt: new Date(3) });
+      expect(markReplyAudio.mock.calls.map(([i]) => (i as { turnIndex: number }).turnIndex)).toEqual([3, 1]);
+      expect(session.pendingReplyStamps.size).toBe(0);
+    });
+
+    it('retains a stamp whose caller row is not appended yet and writes it, merged, when the row appears', async () => {
+      const { repo, markReplyAudio, order } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+
+      // Both arrive before the row exists (a filler ack, then the first-real enqueue).
+      await store.markReplyAudio(session.id, { turnKey: 'late', firstAudibleAt: new Date(10) });
+      await store.markReplyAudio(session.id, {
+        turnKey: 'late',
+        firstAudibleAt: new Date(99), // a later duplicate loses: first stamp for a field wins
+        firstAudioEnqueuedAt: new Date(20),
+      });
+      await settle();
+      expect(markReplyAudio).not.toHaveBeenCalled();
+      expect(session.pendingReplyStamps.get('late')).toHaveLength(2);
+
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'hi' });
+      appendKeyed(store, session.id, 'late');
+      await settle();
+
+      expect(order).toEqual(['recordTurn', 'recordTurn', 'markReplyAudio']); // chained behind the INSERT
+      expect(markReplyAudio).toHaveBeenCalledTimes(1);
+      expect(markReplyAudio).toHaveBeenCalledWith({
+        tenantId: 'tenant-a',
+        callSid: CALL_SID,
+        sessionId: session.id,
+        turnIndex: 1,
+        firstAudibleAt: new Date(10),
+        firstAudioEnqueuedAt: new Date(20),
+      });
+      expect(session.pendingReplyStamps.size).toBe(0);
+
+      // Once the row exists a stamp goes straight through.
+      await store.markReplyAudio(session.id, { turnKey: 'late', firstAudioAt: new Date(30), replyGapMs: 700 });
+      expect(markReplyAudio).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps retained stamps per key: another key\'s row flushes only its own', async () => {
+      const { repo, markReplyAudio } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      await store.markReplyAudio(session.id, { turnKey: 'kb', firstAudibleAt: new Date(2) });
+
+      appendKeyed(store, session.id, 'ka');
+      await settle();
+      expect(markReplyAudio).not.toHaveBeenCalled();
+      expect([...session.pendingReplyStamps.keys()]).toEqual(['kb']);
+
+      appendKeyed(store, session.id, 'kb');
+      await settle();
+      expect(markReplyAudio).toHaveBeenCalledWith(expect.objectContaining({ turnIndex: 1, firstAudibleAt: new Date(2) }));
+    });
+
+    it('drops the oldest key\'s stamps beyond the last four keys, warning once for it', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const { repo, markReplyAudio } = timedRepo();
+        const store = newStore({ callTranscriptTurnRepo: repo });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        const { voiceReplyStampLostTotal } = await import('../../../../src/monitoring/metrics');
+        voiceReplyStampLostTotal.reset();
+
+        for (const key of ['k1', 'k2', 'k3', 'k4']) {
+          await store.markReplyAudio(session.id, { turnKey: key, firstAudibleAt: new Date(1) });
+        }
+        // A second stamp for an already-held key does not count as a newer key.
+        await store.markReplyAudio(session.id, { turnKey: 'k1', firstAudioEnqueuedAt: new Date(2) });
+        expect(warnSpy).not.toHaveBeenCalled();
+        expect([...session.pendingReplyStamps.keys()]).toEqual(['k1', 'k2', 'k3', 'k4']);
+
+        await store.markReplyAudio(session.id, { turnKey: 'k5', firstAudibleAt: new Date(1) });
+        expect([...session.pendingReplyStamps.keys()]).toEqual(['k2', 'k3', 'k4', 'k5']);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy.mock.calls[0][1]).toMatchObject({ callSid: CALL_SID, turnKey: 'k1' });
+        // "a row was deleted underneath" is a different failure: its counter stays untouched.
+        expect((await voiceReplyStampLostTotal.get()).values.every((v) => v.value === 0)).toBe(true);
+
+        // The dropped key's row appearing later flushes nothing; a held key still flushes.
+        appendKeyed(store, session.id, 'k1');
+        appendKeyed(store, session.id, 'k2');
+        await settle();
+        expect(markReplyAudio).toHaveBeenCalledTimes(1);
+        expect(markReplyAudio).toHaveBeenCalledWith(expect.objectContaining({ turnIndex: 1 }));
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('delete clears the retained reply stamps', async () => {
+      const { repo } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      await store.markReplyAudio(session.id, { turnKey: 'k1', firstAudibleAt: new Date(1) });
+      expect(session.pendingReplyStamps.size).toBe(1);
+      store.delete(session.id);
+      expect(session.pendingReplyStamps.size).toBe(0);
     });
 
     it('delete clears the retained persist promises', async () => {
