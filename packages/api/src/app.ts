@@ -2530,6 +2530,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     voiceQualityGrading: 590032,
     // U7 (S6-4) — demo lease reaper (expired leases, stale resets). DISTINCT key.
     demoLeaseReaper: 590033,
+    // S5a-6 — daily pay-link reconciliation sweep (collect-on-site tenants
+    // that still hold a live link). DISTINCT key.
+    paymentLinkReconciliation: 590034,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
