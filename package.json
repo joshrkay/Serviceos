@@ -97,7 +97,9 @@
     "loadtest:http": "tsx loadtest/http-load.ts",
     "loadtest:http:selfcheck": "tsx loadtest/http-load-selfcheck.ts",
     "loadtest:mixed": "tsx loadtest/mixed-1000.ts",
-    "loadtest:mixed:selfcheck": "tsx loadtest/mixed-1000-selfcheck.ts"
+    "loadtest:mixed:selfcheck": "tsx loadtest/mixed-1000-selfcheck.ts",
+    "loadtest:voice-realtime": "tsx loadtest/voice-realtime-concurrency.ts",
+    "loadtest:voice-realtime:selfcheck": "tsx loadtest/voice-realtime-concurrency-selfcheck.ts"
   },
   "devDependencies": {
     "@clerk/testing": "^2.2.44",

@@ -1755,3 +1755,81 @@ categorisation, the Layer 1 graders and #1614's pin all hold.
 code; their cassettes were re-recorded with the offline mock. The simulator still carries no gate
 of its own (the #1587 structural test). In-app voice (S2, the authenticated operator) is
 deliberately outside (1)–(3).
+
+## D-043 — Realtime is the default voice transport; the reply gap is measured from the caller's last word; the replica trigger is the concurrency at which single-process p95 TTFA crosses 800 ms
+
+**Date:** 2026-10-20
+**Status:** Accepted (plan U1, `docs/plans/2026-10-16-001-feat-voice-parity-bland-avoca-plan.md`,
+requirements R1 and R2)
+**Resolves:** the plan's open question 6 (the realtime default-on / capacity entry) and the
+capacity half of open question 5. Paths are relative to `packages/api/src/`.
+
+**Context.** Two transports answer a call: Twilio Media Streams ("realtime": Deepgram STT →
+the production turn → ElevenLabs TTS over one WebSocket, `telephony/media-streams/`) and the
+legacy `<Gather>` loop. `shared/config.ts` `resolveMediaStreamsEnabled` already has three
+states — `true` (forced on), `false` (kill switch), unset/`auto` (on iff `TTS_PROVIDER=elevenlabs`
++ `ELEVENLABS_API_KEY` + `DEEPGRAM_API_KEY` are all set) — but the production env and
+`.env.production.example` ship `TWILIO_MEDIA_STREAMS_ENABLED=false`, so every production call
+runs on Gather and the realtime stack is measured only by the Layer 2 harness. The one latency
+SLO in production, `voice_turn_latency_p95` (`workers/slo-monitor.ts`, 3,500 ms warning,
+`docs/runbooks/slo-alerts.md` §4), is anchored at the STT-final transcript and stops at the
+first enqueued chunk, so it neither starts when the caller stopped talking nor stops when the
+caller actually heard something. A live call's state lives only in the memory of the process
+that answered it, so `docs/runbooks/voice-capacity.md` forbids replicas on a process that
+answers calls (LCR-05 refuses to boot with `NUM_REPLICAS > 1` on `web`/`voice`); nothing
+records how many concurrent realtime calls one process sustains before replies audibly lag.
+
+**Decision (1) — Realtime is the default transport.** The production value of
+`TWILIO_MEDIA_STREAMS_ENABLED` moves from `false` to `auto` (and
+`.env.production.example` with it): realtime is on whenever the full ElevenLabs + Deepgram
+stack is configured, off on any partial stack, with `resolveMediaStreamsEnabled`'s semantics
+unchanged. `false` stays the kill switch. The ramp is per tenant first: the first accounts are
+moved through the `voice_realtime` tenant flag (`tenant_feature_flags`, default on when the
+master switch is on, `routes/telephony.ts` `shouldUseRealtimeStream`) while
+`telephony/realtime-health-circuit.ts` is watched — it already degrades new calls to Gather on
+repeated session-establishment failures — and only then does the env default move. Gather
+remains the degrade path for every failure (`docs/runbooks/voice-realtime-rollout.md`).
+
+**Decision (2) — The SLO is the reply gap from the caller's last word, and it is two numbers.**
+`reply_gap_ms` = first **real** acked reply audio − the caller's last word. "Last word" is
+Deepgram's own word timing (the `Results` message's `start` + `duration`, or
+`words[].end` where present) converted to wall clock through an anchor taken at the **first
+sample forwarded to that Deepgram session** — not the stream's `start` frame, because the
+adapter drops frames until the disclosure has played, and per Deepgram session, because
+`switchLanguage` and the same-language recovery path open a new session whose offsets restart
+at zero. "First real acked audio" is the acknowledged mark that brackets the first non-filler
+chunk — when Twilio played it, not when it was enqueued. A reply whose mark is never acked
+(`reply_unacked_reason` ∈ `clear_echo` / `ack_timeout` / `stream_closed`) keeps `reply_gap_ms`
+null and is **counted, never dropped**, so the SLO is the p95 of acked gaps **and** the
+unacked-reply rate: **p95 ≤ 1,500 ms and unacked ≤ 1 %**, both held for **seven days**, before
+the old `voice_turn_latency_p95` rule is retired. Until then the new `voice_reply_gap_p95` rule
+(U1 item in `workers/slo-monitor.ts`, not yet landed as of this entry) runs beside the old
+one; a rate above 1 % fails the gate however good the p95 looks, since the
+p95 only describes replies that played. Gather turns record no gap and are reported as the
+share of calls that ran degraded, so a degraded tenant never shows an artificially good
+percentile.
+
+**Decision (3) — The replica trigger is measured, not assumed.** The trigger is the
+concurrency at which one API process's p95 time-to-first-audio crosses **800 ms** (the Layer 2
+TTFA gate), produced by `npm run loadtest:voice-realtime`
+(`loadtest/voice-realtime-concurrency.ts`): N emulated Twilio Media Streams
+(`ai/voice-quality/audio/twilio-stream-emulator.ts`, the same client and the same TTFA stop
+point as Layer 2 — first inbound `media` frame after the caller's audio is fully delivered)
+against ONE process, swept upward until p95 breaches on two consecutive levels; the report's
+`replicaTrigger` is the highest level that still passed. **Replica trigger: TBD — to be
+filled from the first staging run of `loadtest/voice-realtime-concurrency.ts`; until then the
+trigger is 10 concurrent realtime calls per replica — a placeholder, not a measurement:
+`docs/runbooks/voice-capacity.md` states no per-instance figure for realtime calls (its
+per-instance ceiling row is still TBD).** The run needs a harness boot of
+`attachMediaStreamServer` with `authTestMode: true` and real Deepgram/ElevenLabs providers
+(see `loadtest/README.md` "Voice realtime concurrency"); that boot script does not exist yet
+and is the first follow-up.
+
+**Consequences.** Below the trigger the in-memory session store stays acceptable; the measured
+number decides whether a shared session store becomes a unit of the next plan (open question
+5). Because a call-answering process cannot be replicated today, reaching the trigger means a
+larger instance or that shared store, not an extra replica — the runbook's scaling guidance
+stands until call state is shared. The Call Quality card and `GET /api/voice/quality` report
+the new gap and the unacked rate filtered to realtime turns; `voice_turn_latency_ms` keeps its
+"first audible, filler included" meaning and is not reused for the SLO. The number in (3) is
+replaced, with the run date and instance size, by whoever runs the first staging sweep.
