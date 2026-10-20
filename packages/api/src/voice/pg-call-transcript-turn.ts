@@ -4,8 +4,12 @@ import {
   CallTranscriptTurn,
   CallTranscriptTurnRepository,
   CallTurnSpeaker,
+  CallTurnTransport,
+  MarkReplyAudioInput,
   RecordTurnInput,
+  ReplyUnackedReason,
   sortTurnsAcrossLegs,
+  validateMarkReplyAudioInput,
   validateRecordTurnInput,
 } from './call-transcript-turn';
 
@@ -21,6 +25,16 @@ interface CallTranscriptTurnRow {
   started_at: Date;
   completed_at: Date | null;
   created_at: Date;
+  // U1 — migration 325 (all nullable; null on pre-migration rows and agent turns).
+  last_word_at: Date | null;
+  stt_final_at: Date | null;
+  first_audio_enqueued_at: Date | null;
+  first_audio_at: Date | null;
+  first_audible_at: Date | null;
+  reply_gap_ms: number | null;
+  endpoint_delay_ms: number | null;
+  reply_unacked_reason: ReplyUnackedReason | null;
+  transport: CallTurnTransport | null;
 }
 
 function rowToTurn(row: CallTranscriptTurnRow): CallTranscriptTurn {
@@ -36,6 +50,15 @@ function rowToTurn(row: CallTranscriptTurnRow): CallTranscriptTurn {
     startedAt: row.started_at,
     completedAt: row.completed_at ?? undefined,
     createdAt: row.created_at,
+    lastWordAt: row.last_word_at ?? undefined,
+    sttFinalAt: row.stt_final_at ?? undefined,
+    firstAudioEnqueuedAt: row.first_audio_enqueued_at ?? undefined,
+    firstAudioAt: row.first_audio_at ?? undefined,
+    firstAudibleAt: row.first_audible_at ?? undefined,
+    replyGapMs: row.reply_gap_ms ?? undefined,
+    endpointDelayMs: row.endpoint_delay_ms ?? undefined,
+    replyUnackedReason: row.reply_unacked_reason ?? undefined,
+    transport: row.transport ?? undefined,
   };
 }
 
@@ -67,13 +90,18 @@ export class PgCallTranscriptTurnRepository
       const result = await client.query<CallTranscriptTurnRow>(
         `INSERT INTO call_transcript_turns (
            tenant_id, voice_recording_id, call_sid, session_id, turn_index, speaker, text,
-           started_at, completed_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()), $9)
+           started_at, completed_at,
+           last_word_at, stt_final_at, endpoint_delay_ms, transport
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()), $9, $10, $11, $12, $13)
          ON CONFLICT ${conflictTarget} DO UPDATE SET
            text         = EXCLUDED.text,
            speaker      = EXCLUDED.speaker,
            started_at   = COALESCE($8, call_transcript_turns.started_at),
-           completed_at = EXCLUDED.completed_at
+           completed_at = EXCLUDED.completed_at,
+           last_word_at      = COALESCE($10, call_transcript_turns.last_word_at),
+           stt_final_at      = COALESCE($11, call_transcript_turns.stt_final_at),
+           endpoint_delay_ms = COALESCE($12, call_transcript_turns.endpoint_delay_ms),
+           transport         = COALESCE($13, call_transcript_turns.transport)
          RETURNING *`,
         [
           input.tenantId,
@@ -85,11 +113,49 @@ export class PgCallTranscriptTurnRepository
           input.text,
           input.startedAt ?? null,
           input.completedAt ?? null,
+          input.lastWordAt ?? null,
+          input.sttFinalAt ?? null,
+          input.endpointDelayMs ?? null,
+          input.transport ?? null,
         ],
       );
       const row = result.rows[0];
       if (!row) throw new Error('call_transcript_turns: INSERT returned no row');
       return rowToTurn(row);
+    });
+  }
+
+  /**
+   * U1 — the reply-audio stamps. One UPDATE on the mid-call key; every column
+   * is COALESCEd so the first stamp stands (a filler's `first_audible_at` is
+   * not overwritten by the real frame; a redelivered stamp is a no-op). Never
+   * inserts: a zero row count is the caller's signal that the row was deleted
+   * underneath it (it increments `voice_reply_stamp_lost_total`).
+   */
+  async markReplyAudio(input: MarkReplyAudioInput): Promise<number> {
+    validateMarkReplyAudioInput(input);
+    return this.withTenantTransaction(input.tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE call_transcript_turns SET
+           first_audible_at        = COALESCE(first_audible_at, $5),
+           first_audio_enqueued_at = COALESCE(first_audio_enqueued_at, $6),
+           first_audio_at          = COALESCE(first_audio_at, $7),
+           reply_gap_ms            = COALESCE(reply_gap_ms, $8),
+           reply_unacked_reason    = COALESCE(reply_unacked_reason, $9)
+         WHERE tenant_id = $1 AND call_sid = $2 AND session_id = $3 AND turn_index = $4`,
+        [
+          input.tenantId,
+          input.callSid,
+          input.sessionId,
+          input.turnIndex,
+          input.firstAudibleAt ?? null,
+          input.firstAudioEnqueuedAt ?? null,
+          input.firstAudioAt ?? null,
+          input.replyGapMs ?? null,
+          input.replyUnackedReason ?? null,
+        ],
+      );
+      return result.rowCount ?? 0;
     });
   }
 

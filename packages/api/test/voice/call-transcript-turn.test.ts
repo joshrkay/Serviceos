@@ -396,6 +396,103 @@ describe('InMemoryCallTranscriptTurnRepository', () => {
     });
   });
 
+  describe('U1 reply timing — recordTurn stamps and markReplyAudio', () => {
+    const LAST_WORD = new Date('2026-10-20T10:00:00.000Z');
+    const STT_FINAL = new Date('2026-10-20T10:00:00.800Z');
+
+    async function seedCaller(repo: InMemoryCallTranscriptTurnRepository): Promise<void> {
+      await repo.recordTurn({
+        tenantId: TENANT_A,
+        callSid: CALL_SID,
+        sessionId: SESSION_1,
+        turnIndex: 0,
+        speaker: 'caller',
+        text: 'hello',
+        lastWordAt: LAST_WORD,
+        sttFinalAt: STT_FINAL,
+        endpointDelayMs: 800,
+        transport: 'realtime',
+      });
+    }
+
+    it('carries the append-time stamps and keeps them on an interim → final replacement', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      await seedCaller(repo);
+      const replaced = await repo.recordTurn({
+        tenantId: TENANT_A,
+        callSid: CALL_SID,
+        sessionId: SESSION_1,
+        turnIndex: 0,
+        speaker: 'caller',
+        text: 'hello there',
+      });
+      expect(replaced.lastWordAt).toEqual(LAST_WORD);
+      expect(replaced.sttFinalAt).toEqual(STT_FINAL);
+      expect(replaced.endpointDelayMs).toBe(800);
+      expect(replaced.transport).toBe('realtime');
+    });
+
+    it('rejects an unknown transport', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      await expect(
+        repo.recordTurn({
+          tenantId: TENANT_A,
+          callSid: CALL_SID,
+          sessionId: SESSION_1,
+          turnIndex: 0,
+          speaker: 'caller',
+          text: 'hello',
+          transport: 'sms' as never,
+        }),
+      ).rejects.toThrow(/transport/);
+    });
+
+    it('keeps the first stamp of each column: a filler first_audible_at survives the real frame', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      await seedCaller(repo);
+      const key = { tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 0 };
+      const fillerAt = new Date('2026-10-20T10:00:00.900Z');
+      const ackedAt = new Date('2026-10-20T10:00:01.650Z');
+      expect(await repo.markReplyAudio({ ...key, firstAudibleAt: fillerAt })).toBe(1);
+      expect(
+        await repo.markReplyAudio({ ...key, firstAudibleAt: ackedAt, firstAudioAt: ackedAt, replyGapMs: 1650 }),
+      ).toBe(1);
+      expect(await repo.markReplyAudio({ ...key, firstAudioAt: new Date(), replyGapMs: 99_999 })).toBe(1);
+      const [row] = await repo.listByCallSid(TENANT_A, CALL_SID);
+      expect(row.firstAudibleAt).toEqual(fillerAt);
+      expect(row.firstAudioAt).toEqual(ackedAt);
+      expect(row.replyGapMs).toBe(1650);
+    });
+
+    it('returns 0 and never inserts for a missing row; rejects an unknown unacked reason', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      expect(
+        await repo.markReplyAudio({
+          tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 3, firstAudioAt: new Date(),
+        }),
+      ).toBe(0);
+      expect(await repo.listByCallSid(TENANT_A, CALL_SID)).toEqual([]);
+      await expect(
+        repo.markReplyAudio({
+          tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 0,
+          replyUnackedReason: 'lost' as never,
+        }),
+      ).rejects.toThrow(/replyUnackedReason/);
+    });
+
+    it('records an unacked reason without inventing first_audio_at', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      await seedCaller(repo);
+      await repo.markReplyAudio({
+        tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 0, replyUnackedReason: 'clear_echo',
+      });
+      const [row] = await repo.listByCallSid(TENANT_A, CALL_SID);
+      expect(row.replyUnackedReason).toBe('clear_echo');
+      expect(row.firstAudioAt).toBeUndefined();
+      expect(row.replyGapMs).toBeUndefined();
+    });
+  });
+
   describe('parseTranscriptLine', () => {
     it('parses agent:/caller: prefixes and falls back to caller for unprefixed lines', () => {
       expect(parseTranscriptLine('agent: hi there')).toEqual({ speaker: 'agent', text: 'hi there' });

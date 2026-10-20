@@ -8077,6 +8077,53 @@ export const MIGRATIONS = {
         CHECK (forwarding_carrier IS NULL
                OR forwarding_carrier IN ('verizon', 'att', 'tmobile', 'other')) NOT VALID;
   `,
+
+  // Voice parity U1 (docs/plans/2026-10-16-001) — the reply gap, measured and
+  // stored per caller turn. `started_at`/`completed_at` are set when the text
+  // is appended (before synthesis), so the caller-perceived gap cannot be
+  // reconstructed from them; these columns hold it:
+  //   last_word_at            — when the caller stopped speaking (Deepgram
+  //                             word timing anchored to wall clock; realtime)
+  //   stt_final_at            — when the recogniser finalised (realtime) or the
+  //                             Gather webhook was received
+  //   first_audio_enqueued_at — first REAL frame enqueued (transport diagnostics)
+  //   first_audio_at          — first REAL frame as Twilio ACKED the mark behind
+  //                             it, i.e. when the caller heard it
+  //   first_audible_at        — filler or real, whichever played first
+  //   reply_gap_ms            — first_audio_at − last_word_at (the SLO)
+  //   endpoint_delay_ms       — stt_final_at − last_word_at (what U2 changes)
+  //   reply_unacked_reason    — a real frame was enqueued but never acked;
+  //                             counted, never estimated
+  //   transport               — 'gather' | 'realtime'; Gather turns leave the
+  //                             audio stamps null (TwiML is not audio)
+  // All nullable: rows from before this migration are excluded from the
+  // percentiles, never counted as zero. CHECKs are NOT VALID per
+  // docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md.
+  // The partial index serves the 7-day per-tenant percentile query.
+  '325_call_transcript_turns_reply_timing': `
+    ALTER TABLE call_transcript_turns
+      ADD COLUMN IF NOT EXISTS last_word_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS stt_final_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS first_audio_enqueued_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS first_audio_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS first_audible_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS reply_gap_ms INTEGER,
+      ADD COLUMN IF NOT EXISTS endpoint_delay_ms INTEGER,
+      ADD COLUMN IF NOT EXISTS reply_unacked_reason TEXT,
+      ADD COLUMN IF NOT EXISTS transport TEXT;
+    ALTER TABLE call_transcript_turns
+      DROP CONSTRAINT IF EXISTS call_transcript_turns_transport_check,
+      ADD CONSTRAINT call_transcript_turns_transport_check
+        CHECK (transport IS NULL OR transport IN ('gather', 'realtime')) NOT VALID;
+    ALTER TABLE call_transcript_turns
+      DROP CONSTRAINT IF EXISTS call_transcript_turns_reply_unacked_reason_check,
+      ADD CONSTRAINT call_transcript_turns_reply_unacked_reason_check
+        CHECK (reply_unacked_reason IS NULL
+               OR reply_unacked_reason IN ('clear_echo', 'ack_timeout', 'stream_closed')) NOT VALID;
+    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_tenant_transport_started
+      ON call_transcript_turns (tenant_id, started_at DESC)
+      WHERE transport IS NOT NULL;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
