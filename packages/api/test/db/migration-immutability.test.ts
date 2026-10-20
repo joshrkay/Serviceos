@@ -624,6 +624,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['318_seeded_price_baseline', '19a3806bcb2f0be4cc31345f6c06d8a2b2a780da20afc3535c4243d7907ca628'],
   ['321_voice_recordings_legal_hold_index', 'd76d4dfc8b243cbb41c97635409f9d53c076d1f5b59110141a9f767e4a9c9952'],
   ['324_seeded_price_baseline', '19a3806bcb2f0be4cc31345f6c06d8a2b2a780da20afc3535c4243d7907ca628'],
+  // U1 reply-gap — call_transcript_turns.transport / reply timing columns + 2 NOT VALID CHECKs + partial index.
+  ['326_call_transcript_turns_reply_timing', 'bad452623ef0091588b40ccd2f8408de9935ee9ceb5d1fdae8386ef11acfe65b'],
 ];
 
 function hashMigration(value: string): string {
