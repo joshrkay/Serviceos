@@ -193,6 +193,71 @@ First response:
 4. For offline / per-call latency forensics, use the voice-quality eval harness
    (`ai/voice-quality/audio-timings.ts`) and Twilio's per-call diagnostics.
 
+### 4a. `voice_reply_gap_p95` (warning)
+
+| | |
+|---|---|
+| Measures | P95 of `voice_reply_gap_ms{anchor="last_word"}` — the caller's LAST WORD → the first REAL (non-filler) reply frame as Twilio acked the mark behind it, i.e. what the caller waited, not when the reply was enqueued (`mediastream-adapter.ts`; plan U1, D-043). `anchor="stt_final"` samples (a final that carried no word timing) are measured from a later anchor and are excluded from this p95. |
+| Threshold | `SLO_REPLY_GAP_P95_MS` (default `1500`) |
+| Sample floor | `SLO_REPLY_GAP_MIN_SAMPLE` (default `30`) last-word-anchored replies |
+
+Same in-process caveat and `PROCESS_ROLE=all` gate as rule 4 (the histogram
+lives in the voice process; split topologies skip the in-process rule and use
+the Prometheus query below). Buckets match `voice_turn_latency_ms`.
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le) (rate(voice_reply_gap_ms_bucket{anchor="last_word"}[10m]))
+) > 1500
+```
+
+First response:
+1. Confirm it is live, not cumulative drift: run the query above over a recent
+   window (the in-process value is cumulative since boot).
+2. Compare with the owner-facing 7-day number (Settings, Call quality, "Reply
+   gap": p50/p95 and p95 endpoint delay, read from `call_transcript_turns`).
+   A large `endpoint_delay_ms` means the wait is endpointing (Deepgram
+   `UtteranceEnd` guard), not generation; a small one points at the turn
+   (LLM gateway latency, `gateway_request_latency_ms`) or TTS first-byte.
+3. Check `voice_reply_unacked_total` (rule 4b): playout failures hide from this
+   p95 because only acked replies are in it.
+4. Check `voice_realtime` health (`telephony/realtime-health-circuit.ts`) and the
+   single-process capacity number in D-043: a p95 that climbs with concurrent
+   calls is the replica trigger, see `docs/runbooks/voice-capacity.md`.
+
+### 4b. `voice_reply_unacked_rate` (warning)
+
+| | |
+|---|---|
+| Measures | `voice_reply_unacked_total` (all reasons) ÷ (acked replies in `voice_reply_gap_ms` + unacked). A reply is unacked when its first real frame was enqueued but Twilio never acked the mark behind it: `clear_echo` (the mark came back as a barge-in clear), `ack_timeout` (no ack within 5 s), `stream_closed` (the stream ended first). These are the turns where the caller heard a long delay or nothing, so a p95 over acked replies alone would look healthier as they multiply. |
+| Threshold | `SLO_REPLY_UNACKED_RATE_MAX` (default `0.01`, i.e. 1 %) |
+| Sample floor | `SLO_REPLY_GAP_MIN_SAMPLE` (default `30`) replies with a first real frame enqueued |
+
+Gated to `PROCESS_ROLE=all` like rule 4a. Prometheus equivalent:
+
+```promql
+sum(rate(voice_reply_unacked_total[10m]))
+  /
+(sum(rate(voice_reply_unacked_total[10m])) + sum(rate(voice_reply_gap_ms_count[10m]))) > 0.01
+```
+
+First response:
+1. Split by `reason`. `ack_timeout` dominant: Twilio playout or the media
+   stream is stalling (Twilio status page, Twilio Debugger for the callSids).
+   `clear_echo` dominant: barge-in gating is cutting replies (U2 territory,
+   check false barge-ins). `stream_closed` dominant: streams are dropping
+   mid-reply (deploy drain, `voice_drain_abandoned_calls_total`, network).
+2. Per-call detail is in `call_transcript_turns.reply_unacked_reason` for the
+   tenant; the owner card shows the same rate as "replies that never played".
+
+**Retiring rule 4.** `voice_turn_latency_p95` (STT-final to first enqueued
+chunk) stays untouched and runs beside 4a/4b for seven days after realtime goes
+default-on (D-043). It is retired (rule, `SLO_TURN_LATENCY_*` knobs, the
+`getTurnLatencySnapshot` dep) once, over that window, 4a and 4b have run on
+production traffic with no unexplained breach and the seven-day reply-gap
+numbers on the quality card agree with the Prometheus query.
+
 ### 5. `voice_graded_pass_rate_7d` (warning)
 
 | | |

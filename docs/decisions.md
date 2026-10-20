@@ -1803,7 +1803,7 @@ chunk — when Twilio played it, not when it was enqueued. A reply whose mark is
 null and is **counted, never dropped**, so the SLO is the p95 of acked gaps **and** the
 unacked-reply rate: **p95 ≤ 1,500 ms and unacked ≤ 1 %**, both held for **seven days**, before
 the old `voice_turn_latency_p95` rule is retired. Until then the new `voice_reply_gap_p95` rule
-(U1 item in `workers/slo-monitor.ts`, not yet landed as of this entry) runs beside the old
+(now in `workers/slo-monitor.ts`, with its companion `voice_reply_unacked_rate`) runs beside the old
 one; a rate above 1 % fails the gate however good the p95 looks, since the
 p95 only describes replies that played. Gather turns record no gap and are reported as the
 share of calls that ran degraded, so a degraded tenant never shows an artificially good

@@ -28,11 +28,27 @@ interface GradedCall {
   callEndedAt: string;
   outcome: string | null;
 }
+/** Mirrors `latency` on GET /api/voice/quality (U1, D-043): the 7-day reply gap. */
+interface LatencySummary {
+  sampleTurns: number;
+  p50ReplyGapMs: number | null;
+  p95ReplyGapMs: number | null;
+  p95EndpointDelayMs: number | null;
+  unacked: {
+    rate: number | null;
+    total: number;
+    byReason: { clear_echo: number; ack_timeout: number; stream_closed: number };
+  };
+  gatherShare: { calls: number | null; turns: number | null };
+  enough: boolean;
+}
 interface CallQuality {
   windows: { last7d: QualityWindow; last30d: QualityWindow };
   gate: { passRateMin: number };
   quota: { sampleRatePct: number; dailyCap: number; gradedToday: number };
   recent: GradedCall[];
+  /** Null/absent when the server has no reply-gap reader; the row is then hidden. */
+  latency?: LatencySummary | null;
 }
 
 /** A started pass grades up to the daily cap × judge calls; refetch once it has had time to land. */
@@ -40,6 +56,68 @@ const REFETCH_AFTER_GRADING_MS = 15_000;
 
 function pct(rate: number): string {
   return `${Math.round(rate * 100)}%`;
+}
+
+/** "850 ms" under a second, "1.4 s" above; a missing number is a dash, never 0. */
+function formatMs(ms: number | null): string {
+  if (ms === null) return '—';
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
+
+function pctOrDash(rate: number | null): string {
+  return rate === null ? '—' : pct(rate);
+}
+
+function Tile({ label, value, testId }: { label: string; value: string; testId: string }) {
+  return (
+    <div className="rounded-lg bg-slate-50 px-3 py-2 min-w-0" data-testid={testId}>
+      <p className="text-xs text-slate-400 break-words">{label}</p>
+      <p className="text-sm text-slate-800 mt-0.5">{value}</p>
+    </div>
+  );
+}
+
+/**
+ * The 7-day reply gap: how long callers waited between their last word and the
+ * AI's first audible answer, on calls where it could be measured. Gather calls
+ * carry no gap, so the share that ran degraded is always stated rather than
+ * letting a degraded account look fast.
+ */
+function ReplyGapRow({ latency }: { latency: LatencySummary }) {
+  const degradedCalls = latency.gatherShare.calls;
+  return (
+    <div className="mt-3 border-t border-slate-100 pt-3" data-testid="reply-gap-row">
+      <p className="text-xs font-medium text-slate-600">Reply gap</p>
+      <p className="text-xs text-slate-400 mt-0.5">
+        Last 7 days, from when the caller stopped speaking to the first answer they heard
+      </p>
+      {latency.enough ? (
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <Tile label="Typical reply" value={formatMs(latency.p50ReplyGapMs)} testId="reply-gap-p50" />
+          <Tile label="Slowest 1 in 20" value={formatMs(latency.p95ReplyGapMs)} testId="reply-gap-p95" />
+          <Tile
+            label="Wait before the AI starts"
+            value={formatMs(latency.p95EndpointDelayMs)}
+            testId="reply-gap-endpoint"
+          />
+          <Tile
+            label="Replies that never played"
+            value={pctOrDash(latency.unacked.rate)}
+            testId="reply-gap-unacked"
+          />
+        </div>
+      ) : (
+        <p className="mt-2 text-xs text-slate-500" data-testid="reply-gap-not-enough">
+          Not enough calls yet
+        </p>
+      )}
+      {degradedCalls !== null && degradedCalls > 0 && (
+        <p className="mt-2 text-xs text-amber-700" data-testid="reply-gap-degraded">
+          Unmeasured on {pct(degradedCalls)} of calls
+        </p>
+      )}
+    </div>
+  );
 }
 
 /** The line the owner reads first for one graded call: why it failed, else why it passed. */
@@ -57,7 +135,8 @@ function headlineRationale(call: GradedCall): string {
  * CI harness uses, passed in the last 7 / 30 days against the 85% launch gate,
  * and the last graded calls with the judge's one-line reason. The owner can
  * start a grading pass now; it runs in the background under the tenant's
- * daily cap.
+ * daily cap. Beneath the pass rates, the 7-day reply gap (U1) says how long
+ * callers waited for the AI's first answer.
  */
 export function CallQualityCard() {
   const [quality, setQuality] = useState<CallQuality | null>(null);
@@ -149,6 +228,8 @@ export function CallQualityCard() {
           </span>
         )}
       </div>
+
+      {quality.latency && <ReplyGapRow latency={quality.latency} />}
 
       {quality.recent.length > 0 && (
         <ul className="mt-3 border-t border-slate-100 divide-y divide-slate-100">
