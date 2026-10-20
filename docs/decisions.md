@@ -1816,7 +1816,9 @@ TTFA gate), produced by `npm run loadtest:voice-realtime`
 (`ai/voice-quality/audio/twilio-stream-emulator.ts`, the same client and the same TTFA stop
 point as Layer 2 — first inbound `media` frame after the caller's audio is fully delivered)
 against ONE process, swept upward until p95 breaches on two consecutive levels; the report's
-`replicaTrigger` is the highest level that still passed. **Replica trigger: TBD — to be
+`replicaTrigger` is the highest level that passed below that confirmed breach pair (an isolated
+breach that recovers is not the trigger; if max is reached with no pair, it is the highest
+passing level overall). **Replica trigger: TBD — to be
 filled from the first staging run of `loadtest/voice-realtime-concurrency.ts`; until then the
 trigger is 10 concurrent realtime calls per replica — a placeholder, not a measurement:
 `docs/runbooks/voice-capacity.md` states no per-instance figure for realtime calls (its

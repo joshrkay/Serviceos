@@ -4,7 +4,8 @@
  *
  * Drives N emulated Twilio Media Streams against ONE API process and records
  * the N at which p95 time-to-first-audio (TTFA) crosses a threshold (default
- * 800 ms). That N is the "replica trigger" docs/decisions.md D-043 records.
+ * 800 ms). The highest passing N before that confirmed crossing is the
+ * "replica trigger" docs/decisions.md D-043 records.
  *
  * Each emulated call is a `TwilioStreamEmulator`
  * (packages/api/src/ai/voice-quality/audio/twilio-stream-emulator.ts) — the
@@ -23,6 +24,14 @@
  * cap). Collect every TTFA sample for the level → p50/p95/p99, errors, dropped
  * streams. Stop early once p95 > threshold on two consecutive levels (a level
  * with no sample at all counts as breached).
+ *
+ * Capacity result — derived from the CONFIRMED breach pair only, never from the
+ * first breach seen: when the sweep stops on two consecutive breaching levels,
+ * `firstBreachAt` is the first level of that final pair and `replicaTrigger` is
+ * the highest passing level below it (null if none). When the sweep reaches
+ * `max` with no such pair, `firstBreachAt` is null and `replicaTrigger` is the
+ * highest passing level overall; an isolated breach (breach/pass/…) stays in
+ * the per-level rows but is not a trigger, and `stopReason` says so.
  *
  * Caller audio: `--fixture` (16 kHz or 8 kHz mono PCM16, raw or WAV) — needed
  * when the target runs a real STT, which transcribes nothing from a tone.
@@ -142,16 +151,22 @@ export interface VoiceConcurrencyReport {
     note?: string;
   };
   levels: LevelRow[];
-  /** First concurrency whose p95 breached the threshold; null when none did. */
+  /**
+   * First level of the confirmed breach pair (the two consecutive breaching
+   * levels that stopped the sweep); null when the sweep ended at `max` without
+   * one — an isolated breach does not count.
+   */
   firstBreachAt: number | null;
   /**
-   * The highest concurrency that still passed before the first breach — the
-   * replica trigger. Null when the first level already breached. When no level
-   * breached it is the last level run (max reached).
+   * The replica trigger: with a confirmed pair, the highest passing level below
+   * `firstBreachAt` (null when none passed); without one, the highest passing
+   * level overall (a lower bound — capacity is at least this).
    */
   replicaTrigger: number | null;
   /** Why the sweep ended. */
   stoppedBecause: 'two_consecutive_breaches' | 'max_reached';
+  /** Human-readable stop reason, including any isolated breaches ignored. */
+  stopReason: string;
 }
 
 // ─── Caller audio ────────────────────────────────────────────────────────────
@@ -378,10 +393,22 @@ export async function runVoiceConcurrency(o: VoiceConcurrencyOptions): Promise<V
     }
   }
 
-  const firstBreach = levels.find((l) => l.breached) ?? null;
-  const firstBreachAt = firstBreach ? firstBreach.concurrency : null;
-  const passedBeforeBreach = levels.filter((l) => !l.breached && (firstBreachAt === null || l.concurrency < firstBreachAt));
-  const replicaTrigger = passedBeforeBreach.length ? passedBeforeBreach[passedBeforeBreach.length - 1].concurrency : null;
+  // Derive the capacity result from the confirmed breach pair (the last two
+  // levels when the sweep stopped on two consecutive breaches), not the first
+  // breach seen: an earlier isolated breach that later recovered is not a trigger.
+  const confirmed = stoppedBecause === 'two_consecutive_breaches';
+  const firstBreachAt = confirmed ? levels[levels.length - 2].concurrency : null;
+  const passing = levels.filter((l) => !l.breached && (firstBreachAt === null || l.concurrency < firstBreachAt));
+  const replicaTrigger = passing.length ? passing[passing.length - 1].concurrency : null;
+  const isolated = levels
+    .filter((l) => l.breached && (firstBreachAt === null || l.concurrency < firstBreachAt))
+    .map((l) => l.concurrency);
+  const isolatedNote = isolated.length
+    ? ` Isolated breach${isolated.length > 1 ? 'es' : ''} at N=${isolated.join(', ')} recovered and ${isolated.length > 1 ? 'are' : 'is'} not the trigger.`
+    : '';
+  const stopReason = confirmed
+    ? `p95 breached on two consecutive levels (N=${firstBreachAt}, N=${levels[levels.length - 1].concurrency}).${isolatedNote}`
+    : `reached max N=${levels[levels.length - 1].concurrency} without two consecutive breaching levels.${isolatedNote}`;
 
   const report: VoiceConcurrencyReport = {
     url: o.url,
@@ -393,16 +420,22 @@ export async function runVoiceConcurrency(o: VoiceConcurrencyOptions): Promise<V
     firstBreachAt,
     replicaTrigger,
     stoppedBecause,
+    stopReason,
   };
   if (o.out) writeFileSync(o.out, JSON.stringify(report, null, 2));
   return report;
 }
 
 export function summaryLine(r: VoiceConcurrencyReport): string {
-  const trigger = r.replicaTrigger === null ? 'none (first level already breached)' : String(r.replicaTrigger);
-  return r.firstBreachAt === null
-    ? `p95 TTFA never crossed ${r.config.thresholdMs} ms up to N=${r.levels[r.levels.length - 1].concurrency} (max reached); replica trigger = ${trigger} (≥ this)`
-    : `p95 TTFA crossed ${r.config.thresholdMs} ms at N=${r.firstBreachAt}; replica trigger = ${trigger}`;
+  const top = r.levels[r.levels.length - 1].concurrency;
+  const isolated = r.stopReason.includes('Isolated') ? ' (isolated breach(es) recovered; not the trigger)' : '';
+  if (r.firstBreachAt === null) {
+    return r.replicaTrigger === null
+      ? `no confirmed breach (two consecutive levels) up to N=${top} (max reached) but no level passed either; replica trigger = none${isolated}`
+      : `no confirmed breach (two consecutive levels) up to N=${top} (max reached); replica trigger = ${r.replicaTrigger} (≥ this)${isolated}`;
+  }
+  const trigger = r.replicaTrigger === null ? 'none (no level passed before the confirmed breach)' : String(r.replicaTrigger);
+  return `p95 TTFA crossed ${r.config.thresholdMs} ms on two consecutive levels starting at N=${r.firstBreachAt}; replica trigger = ${trigger}${isolated}`;
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────

@@ -239,10 +239,20 @@ streams, one printed line. The sweep stops early once p95 > `--threshold` on
 or when `--max` is reached. A single stream failure never aborts the run; it
 is counted.
 
+The capacity result comes from the **confirmed** breach pair that stopped the
+sweep, not from the first breach seen. Stopped on two consecutive breaches:
+`firstBreachAt` = the first level of that final pair, `replicaTrigger` = the
+highest passing level below it (null if none). Reached `--max` with no such
+pair: `firstBreachAt` = null and `replicaTrigger` = the highest passing level
+overall (a lower bound). An isolated breach that recovered (e.g. breach / pass /
+breach / breach at N=3/5/7/9 → `firstBreachAt` 7, `replicaTrigger` 5; or a
+single breach followed by passes through max) stays in the per-level rows but
+is never the trigger; `stopReason` and the summary line say so.
+
 ### Self-check (no app, no docker, no network)
 
 ```bash
-npm run loadtest:voice-realtime:selfcheck     # < 15 s, in-process ws stub
+npm run loadtest:voice-realtime:selfcheck     # < 30 s, in-process ws stub
 ```
 
 ### Running it against a live stack
@@ -304,10 +314,12 @@ when a trigger was found or `--max` was reached cleanly; 1 on a harness error
 JSON (`--out`, default `voice-realtime-concurrency-report.json`): `levels[]`
 rows (`concurrency`, `streamsOpened`, `streamsDropped`, `turnsAttempted`,
 `samples`, `noReply`, `errors`, `ttfaMs {p50,p95,p99,max,mean} | null`,
-`breached`, `durationMs`), `firstBreachAt` (first N whose p95 breached; null
-when none did), `replicaTrigger` (the highest N that still passed **before**
-the first breach; null when the first level already breached; the last level
-run when nothing breached), `stoppedBecause`, and `fixture` (source, duration,
+`breached`, `durationMs`), `firstBreachAt` (first N of the confirmed
+two-consecutive-breach pair that stopped the sweep; null when the sweep ended
+at max without one), `replicaTrigger` (with a confirmed pair, the highest N that
+passed below it, null if none; without one, the highest N that passed overall),
+`stoppedBecause`, `stopReason` (human-readable, names any isolated breaches
+ignored), and `fixture` (source, duration,
 and the stand-in note when no `--fixture` was given).
 
 **Where the number goes:** `docs/decisions.md` **D-043** ("Replica trigger:")
