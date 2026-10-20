@@ -7956,6 +7956,7 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_invoices_live_payment_link
       ON invoices (tenant_id, id)
       WHERE stripe_payment_link_id IS NOT NULL AND status IN ('open', 'partially_paid');
+  `,
   // PRIV-2 — the Twilio-hosted copy of each inbound recording. The recording
   // webhook and the voicemail route delete it once our storage and our row
   // hold the audio, stamping `twilio_deleted_at`; the retention sweep retries
