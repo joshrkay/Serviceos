@@ -3,7 +3,6 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
-import { describe, expect, it, vi } from 'vitest';
 import { ONBOARDING_METROS } from '@ai-service-os/shared';
 import { expectAllTapTargets } from '../../../test-utils/tap-target';
 import { plumbingCleDraft, withDraft } from './__fixtures__';
@@ -45,7 +44,7 @@ describe('ReadyScreen', () => {
 
   it('in the shell, on a browser that can listen, says the owner can tap or say "first" or "second"', () => {
     withMicrophone();
-    setup(plumbingCleDraft, { inShell: true });
+    setup();
     expect(
       screen.getByText('Each choice is two options. Tap the one that sounds right, or say "first" or "second". Nothing is saved until you say so.'),
     ).toBeInTheDocument();

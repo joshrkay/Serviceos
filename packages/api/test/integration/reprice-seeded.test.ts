@@ -1,5 +1,5 @@
 /**
- * Postgres integration — the seeded-price baseline (migration 318, U6).
+ * Postgres integration — the seeded-price baseline (migration 324, U6).
  *
  * A re-run of setup may move a price only while the owner has not touched it.
  * That is decided per row from positive provenance the seeder writes in the
@@ -51,7 +51,7 @@ interface Line {
   seededCatalogItemId?: string;
 }
 
-describe('Postgres integration — seeded-price baseline (318)', () => {
+describe('Postgres integration — seeded-price baseline (324)', () => {
   let pool: Pool;
   let catalogRepo: PgCatalogItemRepository;
   let templateRepo: PgEstimateTemplateRepository;
