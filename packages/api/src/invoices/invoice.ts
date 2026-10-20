@@ -10,7 +10,7 @@ import { AuditRepository, createAuditEvent, createAuditEventBestEffort } from '.
 import { ValidationError } from '../shared/errors';
 import { INVOICE_LIST_SORT, type InvoiceSortField } from '@ai-service-os/shared';
 import { compareByListSort } from '../shared/list-sort';
-import { SettingsRepository, getNextInvoiceNumber } from '../settings/settings';
+import { SettingsRepository, getNextInvoiceNumber, type PaymentCollectionMode } from '../settings/settings';
 import { buildOriginationMetadata } from '../leads/attribution-metadata';
 import { RefreshJobMoneyStateDeps, refreshJobMoneyStateSafe } from '../jobs/job-money-state';
 import { cancelInvoicePaymentIntents, deactivateInvoicePaymentLink } from './invoice-payment-link';
@@ -49,6 +49,13 @@ export interface Invoice {
   stripePaymentLinkId?: string;
   /** Stripe-hosted checkout URL returned with the payment link. */
   stripePaymentLinkUrl?: string;
+  /**
+   * S5a-3 (U8, migration 322) — when a payment-link cleanup claimed the
+   * CURRENT link for deactivation (the durable per-link claim). Written only
+   * by the cleanup claim; every write of the link columns resets it, so it
+   * never outlives the link it claimed. Not settable through `update`.
+   */
+  cleanupClaimedAt?: Date;
   /** Inherits from `job.originatingLeadId` at creation; preserves source attribution. */
   originatingLeadId?: string;
   /** P21-001 — set when this invoice is a milestone of an invoice_schedules row. */
@@ -128,7 +135,7 @@ export interface InvoiceListResult {
  */
 export type InvoiceUpdate = Omit<
   Partial<Invoice>,
-  'stripePaymentLinkId' | 'stripePaymentLinkUrl'
+  'stripePaymentLinkId' | 'stripePaymentLinkUrl' | 'cleanupClaimedAt'
 > & {
   stripePaymentLinkId?: string | null;
   stripePaymentLinkUrl?: string | null;
@@ -136,6 +143,15 @@ export type InvoiceUpdate = Omit<
 
 export const DEFAULT_INVOICE_LIMIT = 50;
 export const MAX_INVOICE_LIMIT = 200;
+
+/**
+ * S5a-4 (U8) — the guarded attach's answer: the stored invoice, or why the
+ * link was refused. `not_payable` is the P0-9 guard (status, balance or
+ * another link); `mode_not_pay_link` is the owner's collect-on-site policy.
+ */
+export type AttachPaymentLinkResult =
+  | { ok: true; invoice: Invoice }
+  | { ok: false; reason: 'not_payable' | 'mode_not_pay_link' };
 
 export interface InvoiceRepository {
   create(invoice: Invoice): Promise<Invoice>;
@@ -267,22 +283,27 @@ export interface InvoiceRepository {
     now: Date,
   ): Promise<Invoice | null>;
   /**
-   * P0-9 (mint leg) — persist a freshly minted payment link ONLY while the
-   * invoice is still payable, still owes exactly the balance the link was
-   * priced at, and carries no other link. Minting spans a slow Stripe call:
-   * a void or a credit can land between the mint-time read and the persist,
-   * and an unguarded write would then attach a live link (priced at the
-   * OLD balance) to a dead or repriced invoice — the unapplied-capture path
-   * again, from the other side. Returns null when the guard loses; the
-   * caller must deactivate the link it just minted.
+   * P0-9 (mint leg) + S5a-4 (U8) — persist a freshly minted payment link
+   * ONLY while the invoice is still payable, still owes exactly the balance
+   * the link was priced at, carries no other link, AND the tenant's
+   * `payment_collection_mode` is still `pay_link`. Minting spans a slow
+   * Stripe call: a void, a credit or the owner's switch to "Collect on the
+   * spot" can land between the mint-time read and this persist. In Postgres
+   * the mode is re-read under the shared per-tenant payment-mode lock
+   * (`paymentModeLockKey`), which the settings write takes exclusively, so
+   * a switch either waits for this attach to commit (and its cleanup then
+   * finds the link) or is seen by it. A refusal names its reason; on either
+   * refusal the caller must deactivate the link it just minted. A THROW
+   * (the mode read included) is an unreadable mode: nothing is stored and
+   * the caller fails closed, never treating it as `pay_link`.
    */
-  setPaymentLinkIfPayable(
+  attachPaymentLink(
     tenantId: string,
     id: string,
     link: { linkId: string; linkUrl: string },
     expectedAmountDueCents: number,
     now: Date,
-  ): Promise<Invoice | null>;
+  ): Promise<AttachPaymentLinkResult>;
   /**
    * P0-9 — clear the payment-link columns ONLY while they still hold
    * `expectedLinkId` (single compare-and-swap UPDATE). Deactivation flows
@@ -296,6 +317,21 @@ export interface InvoiceRepository {
     id: string,
     expectedLinkId: string,
   ): Promise<boolean>;
+  /**
+   * S5a-3 (U8) — one page of the tenant's invoices that can still capture
+   * money through a hosted link: status `open`/`partially_paid` AND a stored
+   * `stripe_payment_link_id`. Ordered by id; `afterId` is the keyset cursor
+   * (null = first page); `limit` is clamped to [1, 500]. The payment-mode
+   * cleanup and the daily reconciliation sweep page through it.
+   */
+  findOpenWithPaymentLink(tenantId: string, afterId: string | null, limit: number): Promise<Invoice[]>;
+  /**
+   * S5a-3 (U8) — drop the cleanup claim marker (`cleanup_claimed_at`) ONLY
+   * while the row still holds `linkId`, so a failed deactivation hands the
+   * link back to the next pass without ever un-claiming a different link.
+   * Returns true when a row matched.
+   */
+  releaseCleanupClaim(tenantId: string, id: string, linkId: string): Promise<boolean>;
   /** Look up by unauthenticated view token — no tenant isolation needed (token is the secret). */
   findByViewToken?(token: string): Promise<Invoice | null>;
   /**
@@ -304,6 +340,15 @@ export interface InvoiceRepository {
    * to avoid the read-modify-write race when concurrent requests arrive.
    */
   incrementViewCount?(tenantId: string, id: string): Promise<void>;
+}
+
+/** S5a-3 — the cleanup page size bound (plan: 500-row pages). */
+const MAX_CLEANUP_PAGE_SIZE = 500;
+
+/** Clamp a caller's page size to an integer in [1, MAX_CLEANUP_PAGE_SIZE]. */
+export function clampCleanupPageSize(limit: number): number {
+  if (!Number.isFinite(limit)) return MAX_CLEANUP_PAGE_SIZE;
+  return Math.min(MAX_CLEANUP_PAGE_SIZE, Math.max(1, Math.floor(limit)));
 }
 
 export const INVOICE_STATUS_TRANSITIONS: Record<InvoiceStatus, InvoiceStatus[]> = {
@@ -717,8 +762,23 @@ const INVOICE_SORT_ACCESSORS: Record<InvoiceSortField, (i: Invoice) => Date | nu
   customer: () => undefined,
 };
 
+export interface InMemoryInvoiceRepositoryOptions {
+  /**
+   * S5a-4 — the in-memory stand-in for the attach's own read of
+   * `payment_collection_mode` (Pg reads it under the payment-mode lock).
+   * Default: every tenant is `pay_link`. A lookup that throws makes the
+   * attach throw, as an unreadable settings row does in Pg.
+   */
+  modeLookup?: (tenantId: string) => Promise<PaymentCollectionMode>;
+}
+
 export class InMemoryInvoiceRepository implements InvoiceRepository {
   private invoices: Map<string, Invoice> = new Map();
+  private readonly modeLookup: (tenantId: string) => Promise<PaymentCollectionMode>;
+
+  constructor(options: InMemoryInvoiceRepositoryOptions = {}) {
+    this.modeLookup = options.modeLookup ?? (async () => 'pay_link');
+  }
 
   async create(invoice: Invoice): Promise<Invoice> {
     this.invoices.set(invoice.id, { ...invoice, lineItems: [...invoice.lineItems] });
@@ -801,6 +861,8 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     const updated: Invoice = { ...i, ...rest };
     if (stripePaymentLinkId !== undefined) {
       updated.stripePaymentLinkId = stripePaymentLinkId ?? undefined;
+      // S5a-3 — the cleanup claim belongs to the link it claimed (Pg parity).
+      updated.cleanupClaimedAt = undefined;
     }
     if (stripePaymentLinkUrl !== undefined) {
       updated.stripePaymentLinkUrl = stripePaymentLinkUrl ?? undefined;
@@ -984,27 +1046,31 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
     return { ...updated, lineItems: [...updated.lineItems] };
   }
 
-  async setPaymentLinkIfPayable(
+  async attachPaymentLink(
     tenantId: string,
     id: string,
     link: { linkId: string; linkUrl: string },
     expectedAmountDueCents: number,
     now: Date,
-  ): Promise<Invoice | null> {
+  ): Promise<AttachPaymentLinkResult> {
+    // Mirror the Pg order: the mode first (a throw propagates — the caller's
+    // unreadable case), then the payable / balance / no-other-link guard.
+    const mode = await this.modeLookup(tenantId);
+    if (mode !== 'pay_link') return { ok: false, reason: 'mode_not_pay_link' };
     const i = this.invoices.get(id);
-    if (!i || i.tenantId !== tenantId) return null;
-    // Mirror the Pg WHERE guard: payable, unchanged balance, no other link.
-    if (i.status !== 'open' && i.status !== 'partially_paid') return null;
-    if (i.amountDueCents !== expectedAmountDueCents) return null;
-    if (i.stripePaymentLinkId !== undefined) return null;
+    if (!i || i.tenantId !== tenantId) return { ok: false, reason: 'not_payable' };
+    if (i.status !== 'open' && i.status !== 'partially_paid') return { ok: false, reason: 'not_payable' };
+    if (i.amountDueCents !== expectedAmountDueCents) return { ok: false, reason: 'not_payable' };
+    if (i.stripePaymentLinkId !== undefined) return { ok: false, reason: 'not_payable' };
     const updated: Invoice = {
       ...i,
       stripePaymentLinkId: link.linkId,
       stripePaymentLinkUrl: link.linkUrl,
+      cleanupClaimedAt: undefined,
       updatedAt: now,
     };
     this.invoices.set(id, updated);
-    return { ...updated, lineItems: [...updated.lineItems] };
+    return { ok: true, invoice: { ...updated, lineItems: [...updated.lineItems] } };
   }
 
   async clearPaymentLinkIfMatches(
@@ -1019,8 +1085,44 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
       ...i,
       stripePaymentLinkId: undefined,
       stripePaymentLinkUrl: undefined,
+      cleanupClaimedAt: undefined,
       updatedAt: new Date(),
     });
+    return true;
+  }
+
+  async findOpenWithPaymentLink(tenantId: string, afterId: string | null, limit: number): Promise<Invoice[]> {
+    const pageSize = clampCleanupPageSize(limit);
+    return Array.from(this.invoices.values())
+      .filter(
+        (i) =>
+          i.tenantId === tenantId &&
+          (i.status === 'open' || i.status === 'partially_paid') &&
+          i.stripePaymentLinkId !== undefined &&
+          (afterId === null || i.id > afterId),
+      )
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .slice(0, pageSize)
+      .map((i) => ({ ...i, lineItems: [...i.lineItems] }));
+  }
+
+  /**
+   * S5a-5 — the in-memory claimer's marker write (Pg writes it on the claim
+   * transaction's own client, so it is not an interface method). Applies only
+   * while the row still holds `linkId`.
+   */
+  markCleanupClaimed(tenantId: string, id: string, linkId: string, at: Date): boolean {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId || i.stripePaymentLinkId !== linkId) return false;
+    this.invoices.set(id, { ...i, cleanupClaimedAt: at });
+    return true;
+  }
+
+  async releaseCleanupClaim(tenantId: string, id: string, linkId: string): Promise<boolean> {
+    const i = this.invoices.get(id);
+    if (!i || i.tenantId !== tenantId) return false;
+    if (i.stripePaymentLinkId !== linkId) return false;
+    this.invoices.set(id, { ...i, cleanupClaimedAt: undefined });
     return true;
   }
 

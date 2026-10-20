@@ -1,4 +1,4 @@
-import { Proposal, ProposalRepository, missingFieldsFor, actionClassForProposalType, createProposal, isScheduleProposalType } from './proposal';
+import { Proposal, ProposalRepository, ProposalStatus, missingFieldsFor, actionClassForProposalType, createProposal, isScheduleProposalType } from './proposal';
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
 import { isProposalExpired } from '../workers/proposal-expiry-worker';
 import { validateProposalPayload } from './contracts';
@@ -257,6 +257,9 @@ export async function approveProposalsBatch(
   return { approved, failed };
 }
 
+/** The only statuses lifecycle.ts lets `approved` be reached from: approve's write precondition. */
+const APPROVABLE_FROM: ProposalStatus[] = ['draft', 'ready_for_review'];
+
 export async function approveProposal(
   proposalRepo: ProposalRepository,
   tenantId: string,
@@ -372,7 +375,14 @@ export async function approveProposal(
 
   // D9 undo window: stamp `approvedAt` on the persisted row so the
   // executor and undoProposal can agree on when the window opened.
-  const updated = await proposalRepo.updateStatus(tenantId, proposalId, 'approved', {
+  //
+  // CONDITIONAL write (S4, plan U9): the row was read above and the transition
+  // checked in memory, so another transaction may have moved it since. The
+  // onboarding whole-draft reset expires a still-`draft` member; an
+  // unconditional write would flip that `expired` row back to `approved` and
+  // the worker would run a change the owner reset. The write lands only while
+  // the row is still in a status `approved` is reachable from (lifecycle.ts).
+  const updated = await proposalRepo.updateStatusIf(tenantId, proposalId, APPROVABLE_FROM, 'approved', {
     approvedAt: transitioned.approvedAt,
     // The execution worker normally attributes work to proposal.createdBy —
     // the DRAFTER. For anything where the approver is the one exercising
@@ -394,7 +404,10 @@ export async function approveProposal(
       : {}),
   });
   if (!updated) {
-    throw new NotFoundError('Proposal', proposalId);
+    // Gone, or moved on after our read: answer what the lifecycle would have.
+    const current = await proposalRepo.findById(tenantId, proposalId);
+    if (!current) throw new NotFoundError('Proposal', proposalId);
+    throw new ConflictError(`Cannot transition proposal from '${current.status}' to 'approved'`);
   }
 
   // D2-1c — audit-log the approval through the existing helper. The

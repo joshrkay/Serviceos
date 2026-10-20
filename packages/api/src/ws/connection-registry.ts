@@ -27,6 +27,11 @@ export const DEFAULT_REGISTRY_CONFIG: ConnectionRegistryConfig = {
   perTenantMax: 50,
 };
 
+/** Registry surface for realtime phone calls (Twilio Media Streams). The
+ *  media-streams adapter acquires under it; the /voice route counts under it
+ *  to send a tenant already at the cap to Gather (LCR-06). */
+export const TWILIO_MEDIA_STREAMS_SURFACE = 'twilio_media_streams';
+
 /** Default lease TTL — long enough that the client-gateway heartbeat refreshes
  *  it comfortably; surfaces without a refresh (telephony) pass a longer TTL. */
 export const DEFAULT_LEASE_TTL_MS = 90_000;

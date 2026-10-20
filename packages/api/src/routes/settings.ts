@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import type { Queue } from '../queues/queue';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission, requireRole } from '../middleware/auth';
 import { updateSettingsSchema } from '../shared/contracts';
@@ -338,6 +339,12 @@ export function createSettingsRouter(
    * user id (or 500 on the FK for an id naming nobody).
    */
   memberDeps?: { userRepo: Pick<UserRepository, 'findById'> },
+  /**
+   * S5a-5 (U8) — the app queue. A PUT that switches payment_collection_mode
+   * to "Collect on the spot" enqueues the pay-link cleanup in the settings
+   * write's own (request) transaction; `updateSettings` attaches the hook.
+   */
+  paymentModeDeps?: { queue: Queue },
 ): Router {
   const router = Router();
 
@@ -576,6 +583,7 @@ export function createSettingsRouter(
         // racing a rotation in another tab.
         const result = await updateSettings(req.auth!.tenantId, parsed, settingsRepo, {
           preserveVoiceApprovalPin: true,
+          ...(paymentModeDeps ? { paymentModeQueue: paymentModeDeps.queue } : {}),
         });
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });

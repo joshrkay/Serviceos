@@ -7944,6 +7944,19 @@ export const MIGRATIONS = {
       WHERE pci_detected AND audio_purged_at IS NULL AND purged_at IS NULL AND legal_hold = false;
   `,
 
+  // "Pick, don't build" onboarding (S5a / U8) — the durable per-link claim of
+  // the payment-mode cleanup: when a cleanup claimed the invoice's CURRENT
+  // pay link for deactivation. Nullable; every write of the link columns sets
+  // it back to NULL, so it never outlives the link it claimed. The partial
+  // index serves the cleanup and the daily sweep, which page through a
+  // tenant's invoices that can still capture money through a hosted link.
+  // RLS on invoices (025) covers the new column.
+  '325_invoices_cleanup_claimed_at': `
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS cleanup_claimed_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_invoices_live_payment_link
+      ON invoices (tenant_id, id)
+      WHERE stripe_payment_link_id IS NOT NULL AND status IN ('open', 'partially_paid');
+  `,
   // PRIV-2 — the Twilio-hosted copy of each inbound recording. The recording
   // webhook and the voicemail route delete it once our storage and our row
   // hold the audio, stamping `twilio_deleted_at`; the retention sweep retries
@@ -7961,6 +7974,108 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_voice_recordings_twilio_copy_due
       ON voice_recordings (twilio_delete_attempted_at NULLS FIRST, created_at)
       WHERE twilio_deleted_at IS NULL AND recording_url IS NOT NULL AND legal_hold = false;
+  `,
+
+  // PRIV-1 — the retention sweep strips the prompt and reply content from an
+  // ai_runs row once it is past the tenant's recording_retention_days, and
+  // stamps `content_purged_at`. The row is kept (proposals, supervisor_reviews,
+  // document_revisions and estimate_provenance FK it; the spend report reads
+  // its model, tokens and cost). The partial index keeps the sweep's per-tenant
+  // (tenant_id, created_at) probe off the rows already purged, so its cost does
+  // not grow with history. RLS rides the existing ai_runs policy (migration
+  // 008). Additive and idempotent; nullable with no default, so the ALTER is
+  // metadata-only.
+  '316_ai_runs_content_purged_at': `
+    ALTER TABLE ai_runs
+      ADD COLUMN IF NOT EXISTS content_purged_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_ai_runs_content_purge_due
+      ON ai_runs (tenant_id, created_at)
+      WHERE content_purged_at IS NULL;
+  `,
+
+
+  // "Pick, don't build" onboarding, re-run pricing (U6). Positive, per-row
+  // provenance for what a setup re-run may reprice: the pack seeder stamps
+  // its two headline items with seed_key ('<packId>:visit' | '<packId>:labor',
+  // so a renamed item is still found by its role) and the baseline price it
+  // wrote, in the same INSERT as the row; any later price write clears the
+  // baseline in the same UPDATE as the price (PgCatalogItemRepository.update).
+  // A NULL baseline is the owner's. NO backfill: rows seeded before this
+  // migration have no proof of who set their price and stay the owner's.
+  // The template-line half (seededUnitPriceCents, seededCatalogItemId) is
+  // two keys inside estimate_templates.line_item_templates, no DDL.
+  // The same migration adds the tenant_settings forwarding columns (the
+  // owner's existing business line and its confirm/probe stamps, bound to
+  // the line by forwarding_generation); the CHECK is NOT VALID per
+  // docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md.
+  '318_seeded_price_baseline': `
+    ALTER TABLE catalog_items
+      ADD COLUMN IF NOT EXISTS seed_key TEXT,
+      ADD COLUMN IF NOT EXISTS seeded_unit_price_cents INTEGER;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_items_tenant_seed_key
+      ON catalog_items (tenant_id, seed_key)
+      WHERE seed_key IS NOT NULL AND archived_at IS NULL;
+
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS forwarding_confirmed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS forwarding_verified_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS forwarding_source_number TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_carrier TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_generation INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS forwarding_probe_generation INTEGER,
+      ADD COLUMN IF NOT EXISTS forwarding_probe_at TIMESTAMPTZ;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_forwarding_carrier_check,
+      ADD CONSTRAINT tenant_settings_forwarding_carrier_check
+        CHECK (forwarding_carrier IS NULL
+               OR forwarding_carrier IN ('verizon', 'att', 'tmobile', 'other')) NOT VALID;
+  `,
+  // PRIV-1 (review round 2) — the ai_runs content purge honours legal hold:
+  // a run within a day of a same-tenant held recording is kept. This partial
+  // index serves that probe (tenant, time window over the few held rows), so
+  // the per-run NOT EXISTS stays an index lookup. RLS rides the existing
+  // voice_recordings policy (migration 007). Additive and idempotent.
+  '321_voice_recordings_legal_hold_index': `
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_legal_hold
+      ON voice_recordings (tenant_id, created_at)
+      WHERE legal_hold;
+  `,
+
+  // "Pick, don't build" onboarding, re-run pricing (U6). Positive, per-row
+  // provenance for what a setup re-run may reprice: the pack seeder stamps
+  // its two headline items with seed_key ('<packId>:visit' | '<packId>:labor',
+  // so a renamed item is still found by its role) and the baseline price it
+  // wrote, in the same INSERT as the row; any later price write clears the
+  // baseline in the same UPDATE as the price (PgCatalogItemRepository.update).
+  // A NULL baseline is the owner's. NO backfill: rows seeded before this
+  // migration have no proof of who set their price and stay the owner's.
+  // The template-line half (seededUnitPriceCents, seededCatalogItemId) is
+  // two keys inside estimate_templates.line_item_templates, no DDL.
+  // The same migration adds the tenant_settings forwarding columns (the
+  // owner's existing business line and its confirm/probe stamps, bound to
+  // the line by forwarding_generation); the CHECK is NOT VALID per
+  // docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md.
+  '324_seeded_price_baseline': `
+    ALTER TABLE catalog_items
+      ADD COLUMN IF NOT EXISTS seed_key TEXT,
+      ADD COLUMN IF NOT EXISTS seeded_unit_price_cents INTEGER;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_items_tenant_seed_key
+      ON catalog_items (tenant_id, seed_key)
+      WHERE seed_key IS NOT NULL AND archived_at IS NULL;
+
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS forwarding_confirmed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS forwarding_verified_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS forwarding_source_number TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_carrier TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_generation INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS forwarding_probe_generation INTEGER,
+      ADD COLUMN IF NOT EXISTS forwarding_probe_at TIMESTAMPTZ;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_forwarding_carrier_check,
+      ADD CONSTRAINT tenant_settings_forwarding_carrier_check
+        CHECK (forwarding_carrier IS NULL
+               OR forwarding_carrier IN ('verizon', 'att', 'tmobile', 'other')) NOT VALID;
   `,
 };
 

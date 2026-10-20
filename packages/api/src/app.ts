@@ -195,6 +195,8 @@ import { reportHandlerWrittenServerErrors } from './monitoring/report-server-res
 import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
+import { createDemoCallsRouter } from './demo/routes';
+import { loadDemoConfig } from './demo/config';
 import { recordSweepSuccess, sweepLastSuccessMs } from './monitoring/sweep-heartbeats';
 import { PgPlatformSloRepository } from './monitoring/pg-platform-slo';
 // #1602 — production call-quality grading (nightly sampler + owner surface).
@@ -251,6 +253,11 @@ import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { PgTenantUsageRepository } from './admin/pg-tenant-usage';
 import { processMessage, type QueueMessage } from './queues/queue';
 import { createProvisionTwilioWorker } from './workers/provision-twilio';
+import { createDeactivatePaymentLinksWorker } from './workers/deactivate-payment-links';
+import {
+  createInMemoryPaymentLinkClaimer,
+  createPgPaymentLinkClaimer,
+} from './invoices/payment-mode-change';
 import { runOrphanedNumberSweep } from './workers/orphaned-number-sweep';
 import {
   createA2pRegistrationWorker,
@@ -361,7 +368,7 @@ import { PgCustomerLoader } from './reputation/match-customer';
 import { createCredentialResolver, getTenantTwilioCreds } from './integrations/credentials';
 import { checkOutboundConsent, type OutboundConsentContext } from './voice/outbound-consent';
 import { StripeDuesCollector, DuesInvoiceOps } from './agreements/dues-collector';
-import { issueInvoice } from './invoices/invoice';
+import { InMemoryInvoiceRepository, issueInvoice } from './invoices/invoice';
 import { recordPayment } from './invoices/payment';
 import { createAgreementsRouter } from './routes/agreements';
 import { createMaintenanceContractsRouter } from './routes/maintenance-contracts';
@@ -441,6 +448,7 @@ import { createEvaluationRouter } from './routes/evaluation';
 import { PgShadowComparisonStore } from './ai/evaluation/pg-shadow-comparison';
 import { InMemoryShadowComparisonStore } from './ai/evaluation/shadow-comparison';
 import { createTtsProvider, assertTtsProviderSupportsMediaStreams } from './ai/tts/tts-provider';
+import { TtsClipCache, ttsClipCacheBytesFromEnv } from './ai/tts/clip-cache';
 import { createTtsHealthCheck } from './ai/tts/tts-health';
 import { InAppVoiceAdapter } from './ai/agents/customer-calling/inapp-adapter';
 import { VoiceSessionStore } from './ai/agents/customer-calling/voice-session-store';
@@ -1659,6 +1667,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
       ? undefined
       : 'dev-one-tap-approve-secret');
+  // U7 (S6-3) — the demo call's lease-token secret (also keys the visitor's
+  // phone hash). Read the same way: explicit in prod / staging (unset there
+  // closes the demo module: 503 DEMO_DISABLED), a fixed dev fallback elsewhere.
+  const demoLeaseTokenSecret =
+    process.env.DEMO_LEASE_TOKEN_SECRET ??
+    (config.NODE_ENV === 'prod' || config.NODE_ENV === 'staging'
+      ? undefined
+      : 'dev-demo-lease-token-secret');
   const oneTapApiBaseUrl = (
     process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000'
   ).replace(/\/+$/, '');
@@ -2127,6 +2143,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     paymentRepo,
     // P0-9 — record_payment execution kills a link its credit made stale.
     paymentLinkCleanup: { provider: paymentLinkProvider, connectAccountResolver },
+    // S5a-5 (U8) — onboarding_voice_policy enqueues the pay-link cleanup in
+    // its settings transaction when it switches to "Collect on the spot".
+    queue,
     invoiceDeliveryProvider,
     estimateDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
@@ -2644,7 +2663,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // `supervisor_annotate` ran 26,894 times and completed ZERO times, and
     // estimate executions terminal-failed for weeks with `execution_error`
     // NULL. This sweep reads `ai_runs` (non-completion rate per task_type over
-    // a settled window, behind a volume floor) and `proposals` (stuck in
+    // a settled window, behind a volume floor; OBS-4: the same rate per
+    // tenant AND task behind its own floor, so one tenant's outage is not
+    // diluted by healthy tenants, plus platform-wide window spend so a
+    // completing runaway loop pages) and `proposals` (stuck in
     // `executing`; `execution_failed` with no reason) every 10 minutes and
     // pages through the SAME alertOperator seam as the SLO monitor above —
     // Sentry error event always, owner-class operator SMS when ALERT_SMS_TO is
@@ -2672,6 +2694,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             failureMonitorRepo
               ? failureMonitorRepo.taskRunCounts(windowStart, windowEnd)
               : Promise.resolve([]),
+          getTenantTaskRunCounts: (windowStart, windowEnd) =>
+            failureMonitorRepo
+              ? failureMonitorRepo.tenantTaskRunCounts(windowStart, windowEnd)
+              : Promise.resolve([]),
           getProposalExecutionCounts: (stalledBefore, failedSince) =>
             failureMonitorRepo
               ? failureMonitorRepo.proposalExecutionCounts(stalledBefore, failedSince)
@@ -2690,6 +2716,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             maxTaskAlerts: config.FAILURE_MONITOR_MAX_TASK_ALERTS,
             proposalStaleMin: config.FAILURE_MONITOR_PROPOSAL_STALE_MIN,
             proposalLookbackHours: config.FAILURE_MONITOR_PROPOSAL_LOOKBACK_HOURS,
+            tenantMinRuns: config.FAILURE_MONITOR_TENANT_MIN_RUNS,
+            spendMaxCents: config.FAILURE_MONITOR_SPEND_MAX_CENTS,
           },
           logger: failureMonitorLogger,
         });
@@ -3073,6 +3101,33 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     feedbackSendWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  // S5a-5 (U8) — retire live pay links after a switch to "Collect on the
+  // spot". The job row is written in the settings transaction; this handler
+  // claims one link at a time under the per-tenant cleanup mutex and the
+  // payment-mode lock, then deactivates it at Stripe outside any lock.
+  // Registered unconditionally: Postgres claims with a pool, the in-memory
+  // claim over the in-memory invoice repository without one.
+  const paymentLinkClaimer = pool
+    ? createPgPaymentLinkClaimer(pool, queue)
+    : invoiceRepo instanceof InMemoryInvoiceRepository
+      ? createInMemoryPaymentLinkClaimer({ invoiceRepo, settingsRepo, queue })
+      : null;
+  if (paymentLinkClaimer) {
+    const deactivatePaymentLinksWorker = createDeactivatePaymentLinksWorker({
+      claimNext: paymentLinkClaimer,
+      invoiceRepo,
+      provider: paymentLinkProvider,
+      connectAccountResolver,
+      settingsRepo,
+      userRepo,
+      auditRepo,
+    });
+    workerRegistry.set(
+      deactivatePaymentLinksWorker.type,
+      deactivatePaymentLinksWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+  }
+
   if (pool) {
     const provisionTwilioWorker = createProvisionTwilioWorker({ pool });
     workerRegistry.set(
@@ -3230,6 +3285,32 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // `feedback_response.submitted` with the synthetic public:<tokenHash>
   // actor required by CLAUDE.md "all mutations emit audit events".
   app.use('/public/feedback', createPublicFeedbackRouter(feedbackRequestRepo, feedbackResponseRepo, settingsRepo, auditRepo));
+
+  // U7 (S6-3) — pre-signup demo call start, `POST /public/demo/calls`. Under
+  // the `/public` per-IP limiter (above); the visitor's one-call-a-day
+  // allowance is the second layer. Always mounted so a switched-off or
+  // misconfigured module answers 503 DEMO_DISABLED: the kill switch
+  // (DEMO_CALLS_ENABLED) is read per request, the DEMO_* numbers once here.
+  // Budget-crossing pages need their own operator seam: the SLO monitor's
+  // exists only on worker replicas.
+  const demoLogger = createLogger({ service: 'demo-call', environment: process.env.NODE_ENV || 'development' });
+  app.use(
+    '/public/demo',
+    createDemoCallsRouter({
+      pool: pool ?? null,
+      config: loadDemoConfig(process.env, demoLogger),
+      leaseTokenSecret: demoLeaseTokenSecret,
+      publicApiUrl: process.env.PUBLIC_API_URL,
+      alert: createAlertOperator({
+        sentry: sentryClient,
+        delivery: messageDelivery,
+        alertSmsTo: config.ALERT_SMS_TO,
+        cooldownMs: config.SLO_ALERT_COOLDOWN_MIN * 60 * 1000,
+        logger: demoLogger,
+      }),
+      logger: demoLogger,
+    }),
+  );
 
   // Public lead intake — embedded marketing-page form posts here.
   // Tenant identified by UUID in the URL. The outer `/public` limiter
@@ -4490,6 +4571,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // in-memory dev, in which case the global flag alone decides.
       ...(tenantFeatureFlags ? { tenantFeatureFlags } : {}),
       realtimeCircuit: realtimeHealthCircuit,
+      // LCR-06 — the same registry the media-streams adapter acquires from,
+      // so a tenant already at its realtime cap is answered on Gather.
+      connectionRegistry,
       realtimePrerequisitesMet: () => {
         const c = realtimeCapabilities();
         return c.sttEnabled && c.ttsEnabled;
@@ -4548,6 +4632,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
           ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
           AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+          NODE_ENV: process.env.NODE_ENV,
         }),
       }),
       // §10 onboarding voice gates — only wired when both pool and auditRepo
@@ -4648,6 +4733,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // filler clips and live TTS speak with one voice.
       ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
       AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+      NODE_ENV: process.env.NODE_ENV,
     });
     // P0 voice-output fail-fast: Twilio Media Streams requires raw PCM16
     // audio (mediastream-adapter.ts encodes it to mu-law itself via
@@ -5001,6 +5087,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // a degrade so /voice/gather-fallback bridges the call instead.
             setPendingTransferTwiml: twilioAdapter.setPendingTransferTwiml.bind(twilioAdapter),
             takePendingTransferTwiml: twilioAdapter.takePendingTransferTwiml.bind(twilioAdapter),
+            // LCR-02: the voicemail <Record> a silence / failed-turn ladder cap
+            // offers, delivered through the same REST hand-off as a <Dial>.
+            ladderVoicemailTwiml: (session, kind) => twilioAdapter.buildLadderVoicemailTwiml(session, kind),
             // F6b: Wire the shared whisper cache so the MediaStream adapter
             // stores whisper TwiML after handleEscalateWithContext runs.
             whisperCache: sharedWhisperCache,
@@ -6011,6 +6100,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       { dunningConfigRepo },
       // #1463 — backupSupervisorUserId must name an active tenant member.
       { userRepo },
+      // S5a-5 (U8) — a PUT that switches to "Collect on the spot" enqueues
+      // the pay-link cleanup in the request's own transaction.
+      { queue },
     ),
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
@@ -6068,7 +6160,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
     ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
     AI_PROVIDER_API_KEY: config.AI_PROVIDER_API_KEY,
+    NODE_ENV: process.env.NODE_ENV,
   });
+  // S3-1 — one per-process clip cache for POST /tts (bounded by
+  // VOICE_TTS_CLIP_CACHE_BYTES): the onboarding lines are static per trade
+  // and voice, so the second owner on a voice pays nothing.
+  const ttsClipCache = new TtsClipCache({ maxBytes: ttsClipCacheBytesFromEnv(process.env) });
   app.use(
     '/api/voice',
     createVoiceRouter(voiceRepo, queue, transcribeAudio, auditRepo, voiceLogger, {
@@ -6079,6 +6176,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       storage: storageProvider,
       jobRepo,
       ...(inAppTtsProvider ? { tts: inAppTtsProvider } : {}),
+      // S3-1 — the tenant's chosen voice and the clip cache behind POST /tts.
+      settingsRepo,
+      clipCache: ttsClipCache,
     }),
   );
 

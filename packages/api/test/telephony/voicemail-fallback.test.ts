@@ -70,4 +70,24 @@ describe('buildVoicemailTwiml', () => {
     );
     expect(xml).not.toContain('From=');
   });
+  it('LCR-02 — speaks a mid-call prompt (escaped) in the given voice instead of the greeting', () => {
+    const xml = buildVoicemailTwiml({
+      shopName: 'Ortega HVAC',
+      recordingStatusCallback: 'https://api.example.com/api/telephony/voicemail-status',
+      prompt: "I haven't been able to hear you. Leave a message <after> the tone.",
+      voice: 'Polly.Mia-Neural',
+    });
+    expect(xml).toContain(
+      '<Say voice="Polly.Mia-Neural">I haven&apos;t been able to hear you. Leave a message &lt;after&gt; the tone.</Say>',
+    );
+    expect(xml).not.toContain('Thanks for calling');
+    expect(xml).toContain('<Record maxLength="120"');
+  });
+
+  it('keeps the greeting byte-identical and Polly.Joanna when no prompt or voice is given', () => {
+    const xml = buildVoicemailTwiml({ shopName: 'Ortega HVAC', recordingStatusCallback: '/vm' });
+    expect(xml).toContain(
+      `<Say voice="Polly.Joanna">Thanks for calling Ortega HVAC. We're not available right now. Please leave a message after the tone.</Say>`,
+    );
+  });
 });

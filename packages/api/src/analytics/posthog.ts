@@ -261,6 +261,9 @@ export type VoiceErrorKind =
   // WS3 — the pre-connect health circuit was open, so a new inbound call was
   // steered to Gather instead of the realtime (Media Streams) path.
   | 'realtime_circuit_open'
+  // LCR-06 — the tenant already had its cap of live realtime calls, so a new
+  // inbound call was steered to Gather instead of a refused Media Stream.
+  | 'tenant_connection_cap'
   // WS7 — a LIVE realtime call was steered to Gather mid-call via the REST
   // redirect (Deepgram/transport failure recovered without dead air).
   | 'degraded_to_gather'

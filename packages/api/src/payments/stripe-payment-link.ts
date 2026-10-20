@@ -1,4 +1,6 @@
+import { createLogger } from '../logging/logger';
 import {
+  DeactivateLinkOptions,
   InvoicePaymentIntentSummary,
   PaymentLinkProvider,
   PaymentLinkRequest,
@@ -19,6 +21,11 @@ export interface StripeConfig {
 // fetch has NO default timeout: a stalled Stripe upstream would otherwise pin
 // the calling request (portal payment-link generation) until TCP gives up.
 const STRIPE_REQUEST_TIMEOUT_MS = 10_000;
+
+const logger = createLogger({
+  service: 'stripe-payment-link',
+  environment: process.env.NODE_ENV || 'dev',
+});
 
 export class StripePaymentLinkProvider implements PaymentLinkProvider {
   private readonly config: StripeConfig;
@@ -89,7 +96,11 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
     };
   }
 
-  async deactivateLink(linkId: string, stripeAccountId?: string): Promise<void> {
+  async deactivateLink(
+    linkId: string,
+    stripeAccountId?: string,
+    options?: DeactivateLinkOptions,
+  ): Promise<void> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.config.apiKey}`,
       'Content-Type': 'application/x-www-form-urlencoded',
@@ -97,12 +108,32 @@ export class StripePaymentLinkProvider implements PaymentLinkProvider {
     if (stripeAccountId?.trim()) {
       headers['Stripe-Account'] = stripeAccountId.trim();
     }
-    const res = await fetch(`https://api.stripe.com/v1/payment_links/${linkId}`, {
-      method: 'POST',
-      headers,
-      body: new URLSearchParams({ active: 'false' }),
-      signal: AbortSignal.timeout(STRIPE_REQUEST_TIMEOUT_MS),
-    });
+    const post = (form: Record<string, string>) =>
+      fetch(`https://api.stripe.com/v1/payment_links/${linkId}`, {
+        method: 'POST',
+        headers,
+        body: new URLSearchParams(form),
+        signal: AbortSignal.timeout(STRIPE_REQUEST_TIMEOUT_MS),
+      });
+
+    // S5a-3 (U8) — the inactive message rides in the SAME update as
+    // active=false, so the link never dies without its explanation. The calls
+    // pin no Stripe API version (account default): if the account's version
+    // refuses the field, retry ONCE without it (owner decision §5.3) — killing
+    // the link matters more than its hosted page's wording.
+    const message = options?.inactiveMessage?.trim();
+    let res = await post(message ? { active: 'false', inactive_message: message } : { active: 'false' });
+    if (!res.ok && message && res.status === 400) {
+      const body = await res.text();
+      if (!body.includes('inactive_message')) {
+        throw new Error(`Stripe deactivation failed (${res.status}): ${body}`);
+      }
+      logger.warn('Stripe refused inactive_message; deactivating the payment link without it', {
+        linkId,
+        status: res.status,
+      });
+      res = await post({ active: 'false' });
+    }
 
     if (!res.ok) {
       const body = await res.text();

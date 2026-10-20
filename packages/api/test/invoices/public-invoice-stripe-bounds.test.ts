@@ -77,7 +77,7 @@ describe('PublicInvoiceService.getOrCreateCheckoutUrl — Stripe calls bounded a
       ),
     );
     // A void/credit landed while Stripe was minting: the guarded persist loses.
-    vi.spyOn(invoiceRepo, 'setPaymentLinkIfPayable').mockResolvedValueOnce(null);
+    vi.spyOn(invoiceRepo, 'attachPaymentLink').mockResolvedValueOnce({ ok: false, reason: 'not_payable' });
 
     const outcome = await settleWithin(service.getOrCreateCheckoutUrl(VIEW_TOKEN), 10_000);
 
