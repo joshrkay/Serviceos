@@ -16,7 +16,10 @@
  * caller's audio is fully delivered (the emulator's synthetic
  * `transcript_received`), stop = the first inbound `media` frame. A turn that
  * gets no reply frame within `--reply-timeout` is counted as `noReply`, not as
- * a 0 ms sample.
+ * a 0 ms sample. Replied means the emulator found a first frame at/after the
+ * turn's transcript timestamp (`ttfaMs > 0`); a previous turn's late reply that
+ * lands during the next caller fixture is stale, so that next turn is `noReply`
+ * unless it gets its own post-transcript frame.
  *
  * Sweep: for N = start, start+step, … ≤ max: open N streams (unique CallSids),
  * each sends `--turns` utterances with `--pause` ms between them, bounded by a
@@ -296,8 +299,16 @@ async function runStream(
       out.turnsAttempted++;
       try {
         const result = await emulator.sendCallerUtterance(audio);
-        if (result.numFrames === 0) out.noReply++;
-        else out.ttfaMs.push(result.ttfaMs);
+        // Replied only when the emulator found a first frame AT/AFTER this
+        // turn's transcript timestamp: its `ttfaMs` is `firstReply.ts -
+        // transcriptReceivedTs`, and 0 exactly when no such frame exists.
+        // `numFrames` is NOT evidence of a reply — it also counts stale frames
+        // retained from a previous turn's timed-out reply that landed while this
+        // turn's caller fixture was still streaming (the emulator resets its
+        // buffer at the start of each `sendCallerUtterance`, but a late frame
+        // arrives after that reset). Counting those would add a 0 ms sample.
+        if (Number.isFinite(result.ttfaMs) && result.ttfaMs > 0) out.ttfaMs.push(result.ttfaMs);
+        else out.noReply++;
       } catch {
         // Socket closed mid-turn (server shed the call, etc.): the stream is
         // gone, so count it dropped and stop driving it.

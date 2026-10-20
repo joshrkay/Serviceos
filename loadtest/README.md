@@ -228,7 +228,10 @@ collect the agent's reply frames → `stop`). TTFA uses the Layer 2 definition
 (the emulator's synthetic `transcript_received`), **stop** = the first inbound
 `media` frame, so production, Layer 2 and this sweep agree on the stop point.
 A turn that gets no reply frame within `--reply-timeout` counts as `noReply`,
-never as a 0 ms sample.
+never as a 0 ms sample. A turn counts as replied only when a reply frame arrived
+after that turn's own transcript timestamp (`ttfaMs > 0`); a previous turn's late
+reply landing during the next caller fixture is stale and never makes that turn a
+sample.
 
 Sweep: for N = `--start`, +`--step`, … ≤ `--max`, open N streams (CallSids
 `<--callsid-prefix><N>_<i>`), each sends `--turns` utterances with `--pause`

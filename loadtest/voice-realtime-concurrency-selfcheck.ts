@@ -19,7 +19,10 @@
  * from the CallSid), so breach/pass/breach/breach at N=3/5/7/9 must report
  * firstBreachAt=7 / replicaTrigger=5, and an isolated breach followed by
  * passes through max must report firstBreachAt=null / replicaTrigger=top
- * passing level. Proves the TOOLING (emulator import
+ * passing level. Two late-reply sweeps pin the stale-frame rule: turn 1's reply lands after
+ * the reply timeout, during turn 2's caller fixture; turn 1 must be `noReply`, and turn 2 is
+ * a sample only if it gets its own post-transcript frame (never a 0 ms sample from the stale
+ * frame). Proves the TOOLING (emulator import
  * chain, sweep, percentiles, stop rule, report) without booting the API —
  * runs in CI with no docker or network, in well under 30 s.
  *
@@ -31,6 +34,7 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import {
   DEFAULT_OPTIONS,
+  formatLevel,
   runVoiceConcurrency,
   summaryLine,
   type VoiceConcurrencyOptions,
@@ -43,15 +47,26 @@ const SILENT_FRAME = Buffer.alloc(160, 0xff).toString('base64');
 /** Per-level reply delay (ms) for the level-shaped scenarios, selected by URL path; default 40–80 ms. */
 type LevelDelay = (concurrency: number) => number;
 
-function startStubServer(): Promise<{ wss: WebSocketServer; url: string; levelDelays: Map<string, LevelDelay> }> {
+/** Per-eot-index reply delay (ms) for the late-reply scenarios, selected by URL path. */
+type TurnDelay = (turnIndex: number) => number;
+
+function startStubServer(): Promise<{
+  wss: WebSocketServer;
+  url: string;
+  levelDelays: Map<string, LevelDelay>;
+  turnDelays: Map<string, TurnDelay>;
+}> {
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   let turnCounter = 0;
   const levelDelays = new Map<string, LevelDelay>();
+  const turnDelays = new Map<string, TurnDelay>();
   wss.on('connection', (ws: WebSocket, req) => {
     const silent = (req.url ?? '').startsWith('/silent');
     let streamSid = '';
     let level: number | null = null;
     const levelDelay = levelDelays.get(req.url ?? '') ?? null;
+    const turnDelay = turnDelays.get(req.url ?? '') ?? null;
+    let eotCount = 0;
     ws.on('message', (raw) => {
       let msg: { event?: string; streamSid?: string; start?: { callSid?: string }; mark?: { name?: string } };
       try {
@@ -64,8 +79,12 @@ function startStubServer(): Promise<{ wss: WebSocketServer; url: string; levelDe
       if (msg.event === 'start') level = Number(/_(\d+)_\d+$/.exec(msg.start?.callSid ?? '')?.[1] ?? NaN);
       if (msg.event === 'mark' && msg.mark?.name?.startsWith('eot-') && !silent) {
         // 40–80 ms so the percentiles are not all one number.
-        const delay =
-          levelDelay && level !== null && Number.isFinite(level) ? levelDelay(level) : 40 + (turnCounter++ % 5) * 10;
+        const eotIndex = eotCount++;
+        const delay = turnDelay
+          ? turnDelay(eotIndex)
+          : levelDelay && level !== null && Number.isFinite(level)
+            ? levelDelay(level)
+            : 40 + (turnCounter++ % 5) * 10;
         setTimeout(() => {
           if (ws.readyState !== ws.OPEN) return;
           ws.send(JSON.stringify({ event: 'media', streamSid, media: { payload: SILENT_FRAME } }));
@@ -87,6 +106,7 @@ function startStubServer(): Promise<{ wss: WebSocketServer; url: string; levelDe
         wss,
         url: `ws://127.0.0.1:${addr.port}/api/telephony/stream`,
         levelDelays,
+        turnDelays,
       });
     });
   });
@@ -94,7 +114,7 @@ function startStubServer(): Promise<{ wss: WebSocketServer; url: string; levelDe
 
 async function main(): Promise<void> {
   const t0 = Date.now();
-  const { wss, url, levelDelays } = await startStubServer();
+  const { wss, url, levelDelays, turnDelays } = await startStubServer();
 
   const tiny: VoiceConcurrencyOptions = {
     ...DEFAULT_OPTIONS,
@@ -122,6 +142,23 @@ async function main(): Promise<void> {
   // Each shaped scenario has its own URL path so the two sweeps can run in parallel.
   levelDelays.set('/pair', (n) => (n === 5 ? 40 : 300)); // breach / pass / breach / breach at N = 3 / 5 / 7 / 9
   levelDelays.set('/isolated', (n) => (n === 5 ? 300 : 40)); // isolated breach at N=5, then pass through max
+  // Late-reply scenarios (2 turns, 300 ms reply timeout, 1.5 s caller fixture): turn 1's reply
+  // arrives 1000 ms after its eot — after the timeout, while turn 2's fixture is still streaming.
+  // /late-recovers: turn 2 then replies promptly (own frame, ~100 ms).
+  // /late-stale: turn 2 never replies in time, so the stale frame is the only one the emulator holds.
+  turnDelays.set('/late-recovers', (i) => (i === 0 ? 1000 : 100));
+  turnDelays.set('/late-stale', (i) => (i === 0 ? 1000 : 6000));
+  const late: VoiceConcurrencyOptions = {
+    ...tiny,
+    start: 1,
+    max: 1,
+    turns: 2,
+    holdSeconds: 10,
+    replyTimeoutMs: 300,
+    callSidPrefix: 'CA_SELFCHECK_LATE_',
+  };
+  let lateRecovers: VoiceConcurrencyReport;
+  let lateStale: VoiceConcurrencyReport;
   try {
     passing = await runVoiceConcurrency(tiny);
     breaching = await runVoiceConcurrency({ ...tiny, thresholdMs: 1 });
@@ -130,6 +167,10 @@ async function main(): Promise<void> {
       url: url.replace('/api/telephony/stream', '/silent'),
       replyTimeoutMs: 300,
     });
+    [lateRecovers, lateStale] = await Promise.all([
+      runVoiceConcurrency({ ...late, url: url.replace('/api/telephony/stream', '/late-recovers') }),
+      runVoiceConcurrency({ ...late, url: url.replace('/api/telephony/stream', '/late-stale') }),
+    ]);
     [confirmedPair, isolated] = await Promise.all([
       runVoiceConcurrency({ ...shaped, url: url.replace('/api/telephony/stream', '/pair') }),
       runVoiceConcurrency({ ...shaped, url: url.replace('/api/telephony/stream', '/isolated') }),
@@ -163,6 +204,9 @@ async function main(): Promise<void> {
     ['isolated: ran to max, row at N=5 breached only', isolated.stoppedBecause === 'max_reached' && isolated.levels.map((l) => `${l.concurrency}:${l.breached}`).join(' ') === '3:false 5:true 7:false 9:false'],
     ['isolated: firstBreachAt null, replicaTrigger = top passing level (9)', isolated.firstBreachAt === null && isolated.replicaTrigger === 9],
     ['isolated: stopReason says the isolated breach is not the trigger', isolated.stopReason.includes('Isolated breach at N=5') && isolated.stopReason.includes('not the trigger')],
+    ['late reply: turn 1 noReply, turn 2 sampled by its own post-transcript frame (1 sample, 1 noReply)', lateRecovers.levels[0]?.turnsAttempted === 2 && lateRecovers.levels[0]?.samples === 1 && lateRecovers.levels[0]?.noReply === 1],
+    ['late reply: the only sample is turn 2\'s own ~100 ms TTFA, never 0', (lateRecovers.levels[0]?.ttfaMs?.p95 ?? 0) >= 30 && (lateRecovers.levels[0]?.ttfaMs?.p95 ?? 0) <= 500 && (lateRecovers.levels[0]?.ttfaMs?.max ?? 0) > 0],
+    ['late reply, stale frame only: both turns noReply, no 0 ms sample, level breached', lateStale.levels[0]?.turnsAttempted === 2 && lateStale.levels[0]?.samples === 0 && lateStale.levels[0]?.noReply === 2 && lateStale.levels[0]?.ttfaMs === null && lateStale.levels[0]?.breached === true],
     ['finished in < 30 s', elapsedMs < 30_000],
   ];
 
@@ -175,6 +219,8 @@ async function main(): Promise<void> {
       `  silent:    ${summaryLine(silent)}\n` +
       `  pair:      ${summaryLine(confirmedPair)}\n` +
       `  isolated:  ${summaryLine(isolated)}\n` +
+      `  late-recovers: ${formatLevel(lateRecovers.levels[0])}\n` +
+      `  late-stale:    ${formatLevel(lateStale.levels[0])}\n` +
       `  ${(elapsedMs / 1000).toFixed(1)} s wall clock\n`,
   );
 
