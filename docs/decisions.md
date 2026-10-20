@@ -1815,7 +1815,7 @@ TTFA gate), produced by `npm run loadtest:voice-realtime`
 (`loadtest/voice-realtime-concurrency.ts`): N emulated Twilio Media Streams
 (`ai/voice-quality/audio/twilio-stream-emulator.ts`, the same client and the same TTFA stop
 point as Layer 2 — first inbound `media` frame after the caller's audio is fully delivered)
-against ONE process, swept upward until p95 breaches on two consecutive levels; the report's
+against ONE process, swept upward until the censored p95 (timed-out, errored and dropped turns count at the reply timeout, so fast survivors cannot mask them) breaches on two consecutive levels; the report's
 `replicaTrigger` is the highest level that passed below that confirmed breach pair (an isolated
 breach that recovers is not the trigger; if max is reached with no pair, it is the highest
 passing level overall). **Replica trigger: TBD — to be

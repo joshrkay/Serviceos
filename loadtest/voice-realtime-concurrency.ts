@@ -24,9 +24,20 @@
  * Sweep: for N = start, start+step, … ≤ max: open N streams (unique CallSids),
  * each sends `--turns` utterances with `--pause` ms between them, bounded by a
  * `--hold` wall-clock cap per level (a stream starts no new turn after the
- * cap). Collect every TTFA sample for the level → p50/p95/p99, errors, dropped
- * streams. Stop early once p95 > threshold on two consecutive levels (a level
- * with no sample at all counts as breached).
+ * cap). Collect every TTFA sample for the level → p50/p95/p99 (measured over
+ * real replies, informational), errors, dropped streams.
+ *
+ * Breach rule — the DECISION number is `p95CensoredMs`, NOT `ttfaMs.p95`.
+ * Surviving samples alone would let 99 timed-out turns plus one fast reply pass,
+ * so the decision runs on a CENSORED sample set: every turn that produced no
+ * post-transcript reply (`noReply`), every turn that threw, and every turn a
+ * dropped stream never got to run (`o.turns - turnsAttempted`; all `o.turns` for
+ * a stream that failed to open) contributes one censored value = the reply
+ * timeout (floored at threshold + 1 so a timeout at or below the threshold can
+ * never pass). `p95CensoredMs` = p95 of `samples ∪ censored`; a level breaches
+ * when it exceeds the threshold, which happens as soon as the censored share
+ * exceeds 5 %. A level with no real sample at all is always a breach. Stop early
+ * once a level breaches on two consecutive levels.
  *
  * Capacity result — derived from the CONFIRMED breach pair only, never from the
  * first breach seen: when the sweep stops on two consecutive breaching levels,
@@ -133,9 +144,19 @@ export interface LevelRow {
   noReply: number;
   /** Turns that threw (socket closed mid-turn, etc.). */
   errors: number;
-  /** TTFA percentiles (ms); null when the level produced no sample. */
+  /**
+   * Turns with no measured TTFA that the breach decision counts as the censored
+   * value: `noReply` + `errors` + turns dropped/failed-to-open streams never ran.
+   */
+  censored: number;
+  /** TTFA percentiles (ms) over REAL replies only — informational, does not drive `breached`. */
   ttfaMs: { p50: number; p95: number; p99: number; max: number; mean: number } | null;
-  /** p95 > threshold, or no sample at all. */
+  /**
+   * p95 of real samples ∪ censored values (each censored turn = max(reply
+   * timeout, threshold + 1)); null when the level has neither. THIS drives `breached`.
+   */
+  p95CensoredMs: number | null;
+  /** `p95CensoredMs` > threshold, or no real sample at all. */
   breached: boolean;
   /** Wall-clock the level took (ms). */
   durationMs: number;
@@ -262,6 +283,8 @@ interface StreamOutcome {
   ttfaMs: number[];
   noReply: number;
   errors: number;
+  /** Turns this stream was expected to run but a drop / failed open prevented. */
+  skippedByDrop: number;
 }
 
 const sleep = (ms: number): Promise<void> =>
@@ -275,7 +298,7 @@ async function runStream(
   audio: Buffer,
   deadline: number,
 ): Promise<StreamOutcome> {
-  const out: StreamOutcome = { opened: false, dropped: false, turnsAttempted: 0, ttfaMs: [], noReply: 0, errors: 0 };
+  const out: StreamOutcome = { opened: false, dropped: false, turnsAttempted: 0, ttfaMs: [], noReply: 0, errors: 0, skippedByDrop: 0 };
   // One bus per stream: the emulator records its synthetic transcript_received
   // there; nothing reads it back, so the log stays tiny.
   const emulator = new TwilioStreamEmulator({
@@ -289,6 +312,7 @@ async function runStream(
     out.opened = true;
   } catch {
     out.dropped = true;
+    out.skippedByDrop = o.turns;
     await emulator.hangup().catch(() => {});
     return out;
   }
@@ -314,6 +338,7 @@ async function runStream(
         // gone, so count it dropped and stop driving it.
         out.errors++;
         out.dropped = true;
+        out.skippedByDrop = Math.max(0, o.turns - out.turnsAttempted);
         break;
       }
     }
@@ -347,16 +372,27 @@ export async function runLevel(
           max: Math.round(ttfa[ttfa.length - 1]),
           mean: Math.round(ttfa.reduce((a, b) => a + b, 0) / ttfa.length),
         };
+  // Censored set: no-reply, errored and dropped-stream turns all count at the
+  // reply timeout (floored above the threshold) so they cannot be hidden by the
+  // surviving fast samples.
+  const noReply = streams.reduce((a, s) => a + s.noReply, 0);
+  const errors = streams.reduce((a, s) => a + s.errors, 0);
+  const censored = streams.reduce((a, s) => a + s.noReply + s.errors + s.skippedByDrop, 0);
+  const censoredValueMs = Math.max(o.replyTimeoutMs, o.thresholdMs + 1);
+  const withCensored = [...ttfa, ...Array.from({ length: censored }, () => censoredValueMs)].sort((a, b) => a - b);
+  const p95CensoredMs = withCensored.length === 0 ? null : Math.round(percentile(withCensored, 95));
   return {
     concurrency,
     streamsOpened: streams.filter((s) => s.opened).length,
     streamsDropped: streams.filter((s) => s.dropped).length,
     turnsAttempted: streams.reduce((a, s) => a + s.turnsAttempted, 0),
     samples: ttfa.length,
-    noReply: streams.reduce((a, s) => a + s.noReply, 0),
-    errors: streams.reduce((a, s) => a + s.errors, 0),
+    noReply,
+    errors,
+    censored,
     ttfaMs: stats,
-    breached: stats === null || stats.p95 > o.thresholdMs,
+    p95CensoredMs,
+    breached: stats === null || p95CensoredMs === null || p95CensoredMs > o.thresholdMs,
     durationMs: Math.round(performance.now() - t0),
   };
 }
@@ -366,9 +402,10 @@ export async function runLevel(
 export function formatLevel(row: LevelRow): string {
   const t = row.ttfaMs;
   const pct = t ? `p50 ${t.p50}  p95 ${t.p95}  p99 ${t.p99} ms` : 'p50 —  p95 —  p99 — (no sample)';
+  const decisive = `  p95cens ${row.p95CensoredMs ?? '—'}  censored ${row.censored}`;
   return (
     `N=${String(row.concurrency).padStart(3)}  ${pct}  samples ${row.samples}/${row.turnsAttempted}` +
-    `  noReply ${row.noReply}  errors ${row.errors}  dropped ${row.streamsDropped}/${row.concurrency}` +
+    `${decisive}  noReply ${row.noReply}  errors ${row.errors}  dropped ${row.streamsDropped}/${row.concurrency}` +
     `  ${(row.durationMs / 1000).toFixed(1)}s  ${row.breached ? 'BREACH' : 'ok'}`
   );
 }
@@ -383,7 +420,7 @@ export async function runVoiceConcurrency(o: VoiceConcurrencyOptions): Promise<V
 
   process.stdout.write(
     `voice realtime concurrency: ${o.url}\n` +
-      `  N = ${o.start} → ${o.max} step ${o.step} · ${o.turns} turns/stream · hold cap ${o.holdSeconds}s · threshold p95 TTFA ≤ ${o.thresholdMs} ms\n` +
+      `  N = ${o.start} → ${o.max} step ${o.step} · ${o.turns} turns/stream · hold cap ${o.holdSeconds}s · threshold censored-p95 TTFA ≤ ${o.thresholdMs} ms (timed-out/errored/dropped turns count at the reply timeout)\n` +
       `  caller audio: ${fixture.source} (${fixture.durationMs} ms)${fixture.note ? ' — STAND-IN' : ''}\n`,
   );
 
@@ -418,7 +455,7 @@ export async function runVoiceConcurrency(o: VoiceConcurrencyOptions): Promise<V
     ? ` Isolated breach${isolated.length > 1 ? 'es' : ''} at N=${isolated.join(', ')} recovered and ${isolated.length > 1 ? 'are' : 'is'} not the trigger.`
     : '';
   const stopReason = confirmed
-    ? `p95 breached on two consecutive levels (N=${firstBreachAt}, N=${levels[levels.length - 1].concurrency}).${isolatedNote}`
+    ? `censored p95 breached on two consecutive levels (N=${firstBreachAt}, N=${levels[levels.length - 1].concurrency}).${isolatedNote}`
     : `reached max N=${levels[levels.length - 1].concurrency} without two consecutive breaching levels.${isolatedNote}`;
 
   const report: VoiceConcurrencyReport = {
@@ -440,13 +477,16 @@ export async function runVoiceConcurrency(o: VoiceConcurrencyOptions): Promise<V
 export function summaryLine(r: VoiceConcurrencyReport): string {
   const top = r.levels[r.levels.length - 1].concurrency;
   const isolated = r.stopReason.includes('Isolated') ? ' (isolated breach(es) recovered; not the trigger)' : '';
+  // The decisive level: the first level of the confirmed breach pair, else the top level swept.
+  const at = r.levels.find((l) => l.concurrency === (r.firstBreachAt ?? top)) ?? r.levels[r.levels.length - 1];
+  const evidence = ` [N=${at.concurrency}: censored p95 ${at.p95CensoredMs ?? '—'} ms, ${at.censored} censored turn(s)]`;
   if (r.firstBreachAt === null) {
     return r.replicaTrigger === null
-      ? `no confirmed breach (two consecutive levels) up to N=${top} (max reached) but no level passed either; replica trigger = none${isolated}`
-      : `no confirmed breach (two consecutive levels) up to N=${top} (max reached); replica trigger = ${r.replicaTrigger} (≥ this)${isolated}`;
+      ? `no confirmed breach (two consecutive levels) up to N=${top} (max reached) but no level passed either; replica trigger = none${isolated}${evidence}`
+      : `no confirmed breach (two consecutive levels) up to N=${top} (max reached); replica trigger = ${r.replicaTrigger} (≥ this)${isolated}${evidence}`;
   }
   const trigger = r.replicaTrigger === null ? 'none (no level passed before the confirmed breach)' : String(r.replicaTrigger);
-  return `p95 TTFA crossed ${r.config.thresholdMs} ms on two consecutive levels starting at N=${r.firstBreachAt}; replica trigger = ${trigger}${isolated}`;
+  return `censored p95 TTFA (timeouts/errors/drops counted at the reply timeout) crossed ${r.config.thresholdMs} ms on two consecutive levels starting at N=${r.firstBreachAt}; replica trigger = ${trigger}${isolated}${evidence}`;
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────

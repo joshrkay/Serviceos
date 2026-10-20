@@ -236,11 +236,24 @@ sample.
 Sweep: for N = `--start`, +`--step`, … ≤ `--max`, open N streams (CallSids
 `<--callsid-prefix><N>_<i>`), each sends `--turns` utterances with `--pause`
 between them, capped by `--hold` seconds of wall clock per level (no new turn
-starts after the cap). Per level: p50/p95/p99 TTFA, `noReply`, errors, dropped
-streams, one printed line. The sweep stops early once p95 > `--threshold` on
-**two consecutive levels** (a level with no sample at all counts as breached)
-or when `--max` is reached. A single stream failure never aborts the run; it
-is counted.
+starts after the cap). Per level: p50/p95/p99 TTFA over the real replies
+(informational), the **censored p95** (`p95CensoredMs`, the decision number),
+`censored`, `noReply`, errors, dropped streams, one printed line. A single
+stream failure never aborts the run; it is counted.
+
+**Breach rule (what drives the decision).** A level breaches on its
+**censored p95**, not on the p95 of the surviving samples — otherwise 99
+timed-out turns plus one 100 ms reply would pass. Every turn with no
+post-transcript reply within `--reply-timeout` (`noReply`), every turn that
+threw (`errors`), and every turn a dropped stream never got to run (all
+`--turns` for a stream that failed to open) is a **censored** turn counted at
+the reply timeout (floored at `--threshold` + 1, so a timeout at or below the
+threshold can never pass). `p95CensoredMs` = p95 of real samples ∪ censored
+values; the level breaches when it exceeds `--threshold`, which happens as soon
+as the censored share exceeds 5 %. A level with no real sample at all always
+breaches. The printed `p50/p95/p99` stay measured over real replies only. The
+sweep stops early once a level breaches on **two consecutive levels**, or when
+`--max` is reached.
 
 The capacity result comes from the **confirmed** breach pair that stopped the
 sweep, not from the first breach seen. Stopped on two consecutive breaches:
@@ -308,7 +321,7 @@ npx tsx loadtest/voice-realtime-concurrency.ts \
 ```
 
 Prints one line per level and the summary
-`p95 TTFA crossed <threshold> ms at N=<n>; replica trigger = <trigger>`. Exit 0
+`censored p95 TTFA … crossed <threshold> ms … at N=<n>; replica trigger = <trigger> [N=<n>: censored p95 <ms> ms, <c> censored turn(s)]`. Exit 0
 when a trigger was found or `--max` was reached cleanly; 1 on a harness error
 (unreadable fixture, or no stream could open at the first level).
 
@@ -316,8 +329,8 @@ when a trigger was found or `--max` was reached cleanly; 1 on a harness error
 
 JSON (`--out`, default `voice-realtime-concurrency-report.json`): `levels[]`
 rows (`concurrency`, `streamsOpened`, `streamsDropped`, `turnsAttempted`,
-`samples`, `noReply`, `errors`, `ttfaMs {p50,p95,p99,max,mean} | null`,
-`breached`, `durationMs`), `firstBreachAt` (first N of the confirmed
+`samples`, `noReply`, `errors`, `censored`, `ttfaMs {p50,p95,p99,max,mean} | null`
+(real replies only), `p95CensoredMs` (drives `breached`), `breached`, `durationMs`), `firstBreachAt` (first N of the confirmed
 two-consecutive-breach pair that stopped the sweep; null when the sweep ended
 at max without one), `replicaTrigger` (with a confirmed pair, the highest N that
 passed below it, null if none; without one, the highest N that passed overall),
@@ -346,7 +359,7 @@ store is needed, not the point at which a replica can simply be added.
 | `--hold` | `20` | Wall-clock cap per level (s); no new turn starts after it |
 | `--threshold` | `800` | p95 TTFA threshold (ms) |
 | `--pause` | `500` | Pause between a stream's turns (ms) |
-| `--reply-timeout` | `10000` | Wait for a turn's first reply frame before counting `noReply` (ms) |
+| `--reply-timeout` | `10000` | Wait for a turn's first reply frame before counting `noReply`; also the value a censored (timed-out/errored/dropped) turn contributes to the breach p95 (ms) |
 | `--silence` | `500` | Inbound silence that ends the agent's reply (ms) |
 | `--stagger` | `20` | Stagger between stream openings within a level (ms) |
 | `--callsid-prefix` | `CA_LOADTEST_` | CallSid = `<prefix><N>_<i>` — seed the harness store with these |

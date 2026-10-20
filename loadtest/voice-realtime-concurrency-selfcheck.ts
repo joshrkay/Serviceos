@@ -22,7 +22,10 @@
  * passing level. Two late-reply sweeps pin the stale-frame rule: turn 1's reply lands after
  * the reply timeout, during turn 2's caller fixture; turn 1 must be `noReply`, and turn 2 is
  * a sample only if it gets its own post-transcript frame (never a 0 ms sample from the stale
- * frame). Proves the TOOLING (emulator import
+ * frame). Two censored-p95 sweeps pin the breach rule: at N=10 (reply timeout 300 ms,
+ * threshold 150 ms) a level where 1 turn replies fast and 9 time out must BREACH (timed-out turns
+ * count as the reply timeout, so surviving fast samples cannot hide them) and an all-fast level must
+ * pass. Proves the TOOLING (emulator import
  * chain, sweep, percentiles, stop rule, report) without booting the API —
  * runs in CI with no docker or network, in well under 30 s.
  *
@@ -45,7 +48,7 @@ import {
 const SILENT_FRAME = Buffer.alloc(160, 0xff).toString('base64');
 
 /** Per-level reply delay (ms) for the level-shaped scenarios, selected by URL path; default 40–80 ms. */
-type LevelDelay = (concurrency: number) => number;
+type LevelDelay = (concurrency: number, streamIndex: number) => number;
 
 /** Per-eot-index reply delay (ms) for the late-reply scenarios, selected by URL path. */
 type TurnDelay = (turnIndex: number) => number;
@@ -64,6 +67,7 @@ function startStubServer(): Promise<{
     const silent = (req.url ?? '').startsWith('/silent');
     let streamSid = '';
     let level: number | null = null;
+    let streamIndex = 0;
     const levelDelay = levelDelays.get(req.url ?? '') ?? null;
     const turnDelay = turnDelays.get(req.url ?? '') ?? null;
     let eotCount = 0;
@@ -76,14 +80,18 @@ function startStubServer(): Promise<{
       }
       if (msg.event === 'start' && typeof msg.streamSid === 'string') streamSid = msg.streamSid;
       // CallSid is `<prefix><N>_<i>` — recover the sweep level N.
-      if (msg.event === 'start') level = Number(/_(\d+)_\d+$/.exec(msg.start?.callSid ?? '')?.[1] ?? NaN);
+      if (msg.event === 'start') {
+        const m = /_(\d+)_(\d+)$/.exec(msg.start?.callSid ?? '');
+        level = Number(m?.[1] ?? NaN);
+        streamIndex = Number(m?.[2] ?? 0);
+      }
       if (msg.event === 'mark' && msg.mark?.name?.startsWith('eot-') && !silent) {
         // 40–80 ms so the percentiles are not all one number.
         const eotIndex = eotCount++;
         const delay = turnDelay
           ? turnDelay(eotIndex)
           : levelDelay && level !== null && Number.isFinite(level)
-            ? levelDelay(level)
+            ? levelDelay(level, streamIndex)
             : 40 + (turnCounter++ % 5) * 10;
         setTimeout(() => {
           if (ws.readyState !== ws.OPEN) return;
@@ -157,6 +165,23 @@ async function main(): Promise<void> {
     replyTimeoutMs: 300,
     callSidPrefix: 'CA_SELFCHECK_LATE_',
   };
+  // Censored-p95 scenarios (N=10, 1 turn each, reply timeout 300 ms, threshold 150 ms):
+  // /mostly-timeouts: stream 0 replies in 100 ms, streams 1-9 reply after the timeout (9 of 10 turns censored)
+  // /all-fast: every stream replies in 40 ms.
+  levelDelays.set('/mostly-timeouts', (_n, i) => (i === 0 ? 100 : 6000));
+  levelDelays.set('/all-fast', () => 40);
+  const censoring: VoiceConcurrencyOptions = {
+    ...tiny,
+    start: 10,
+    max: 10,
+    turns: 1,
+    holdSeconds: 5,
+    replyTimeoutMs: 300,
+    thresholdMs: 150,
+    callSidPrefix: 'CA_SELFCHECK_CENS_',
+  };
+  let mostlyTimeouts: VoiceConcurrencyReport;
+  let allFast: VoiceConcurrencyReport;
   let lateRecovers: VoiceConcurrencyReport;
   let lateStale: VoiceConcurrencyReport;
   try {
@@ -170,6 +195,10 @@ async function main(): Promise<void> {
     [lateRecovers, lateStale] = await Promise.all([
       runVoiceConcurrency({ ...late, url: url.replace('/api/telephony/stream', '/late-recovers') }),
       runVoiceConcurrency({ ...late, url: url.replace('/api/telephony/stream', '/late-stale') }),
+    ]);
+    [mostlyTimeouts, allFast] = await Promise.all([
+      runVoiceConcurrency({ ...censoring, url: url.replace('/api/telephony/stream', '/mostly-timeouts') }),
+      runVoiceConcurrency({ ...censoring, url: url.replace('/api/telephony/stream', '/all-fast') }),
     ]);
     [confirmedPair, isolated] = await Promise.all([
       runVoiceConcurrency({ ...shaped, url: url.replace('/api/telephony/stream', '/pair') }),
@@ -207,7 +236,12 @@ async function main(): Promise<void> {
     ['late reply: turn 1 noReply, turn 2 sampled by its own post-transcript frame (1 sample, 1 noReply)', lateRecovers.levels[0]?.turnsAttempted === 2 && lateRecovers.levels[0]?.samples === 1 && lateRecovers.levels[0]?.noReply === 1],
     ['late reply: the only sample is turn 2\'s own ~100 ms TTFA, never 0', (lateRecovers.levels[0]?.ttfaMs?.p95 ?? 0) >= 30 && (lateRecovers.levels[0]?.ttfaMs?.p95 ?? 0) <= 500 && (lateRecovers.levels[0]?.ttfaMs?.max ?? 0) > 0],
     ['late reply, stale frame only: both turns noReply, no 0 ms sample, level breached', lateStale.levels[0]?.turnsAttempted === 2 && lateStale.levels[0]?.samples === 0 && lateStale.levels[0]?.noReply === 2 && lateStale.levels[0]?.ttfaMs === null && lateStale.levels[0]?.breached === true],
-    ['finished in < 30 s', elapsedMs < 30_000],
+    ['censored: 1 fast reply + 9 timeouts → 1 sample, 9 noReply, 9 censored', mostlyTimeouts.levels[0]?.samples === 1 && mostlyTimeouts.levels[0]?.noReply === 9 && mostlyTimeouts.levels[0]?.censored === 9],
+    ['censored: measured p95 over real replies is fast (informational) but the level BREACHES on the censored p95 (= reply timeout)', (mostlyTimeouts.levels[0]?.ttfaMs?.p95 ?? 9999) < 150 && mostlyTimeouts.levels[0]?.p95CensoredMs === 300 && mostlyTimeouts.levels[0]?.breached === true],
+    ['censored: summary line carries the censored evidence', summaryLine(mostlyTimeouts).includes('censored p95 300 ms, 9 censored turn(s)')],
+    ['censored: all-fast level passes with zero censored, censored p95 = measured p95', allFast.levels[0]?.samples === 10 && allFast.levels[0]?.censored === 0 && allFast.levels[0]?.breached === false && allFast.levels[0]?.p95CensoredMs === allFast.levels[0]?.ttfaMs?.p95],
+    ['silent: every turn censored; value floored at threshold + 1 because the 300 ms timeout is below the 800 ms threshold', silent.levels.every((l) => l.censored === l.concurrency && l.p95CensoredMs === DEFAULT_OPTIONS.thresholdMs + 1)],
+    ['finished in < 35 s', elapsedMs < 35_000],
   ];
 
   const failed = checks.filter(([, ok]) => !ok);
@@ -219,6 +253,8 @@ async function main(): Promise<void> {
       `  silent:    ${summaryLine(silent)}\n` +
       `  pair:      ${summaryLine(confirmedPair)}\n` +
       `  isolated:  ${summaryLine(isolated)}\n` +
+      `  mostly-timeouts: ${formatLevel(mostlyTimeouts.levels[0])}\n` +
+      `  all-fast:        ${formatLevel(allFast.levels[0])}\n` +
       `  late-recovers: ${formatLevel(lateRecovers.levels[0])}\n` +
       `  late-stale:    ${formatLevel(lateStale.levels[0])}\n` +
       `  ${(elapsedMs / 1000).toFixed(1)} s wall clock\n`,
