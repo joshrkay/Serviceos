@@ -8,7 +8,7 @@
  * read back through `createPgLatencySummaryReader`.
  *
  * Seed for tenant A: eight calls. Six realtime calls carry 12 acked gaps
- * (600..1700 ms) and 2 unacked replies (ack_timeout, clear_echo); two Gather
+ * (600..1700 ms), 1 acked-but-gapless reply and 2 unacked replies (ack_timeout, clear_echo); two Gather
  * calls carry 3 turns. Agent turns, a turn with no transport (pre-migration
  * shape) and a gap older than the window are noise the summary must ignore.
  *
@@ -119,6 +119,32 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     });
   }
 
+  /** An acked reply whose gap was not anchored at the caller's last word (STT-final fallback): first_audio_at, no reply_gap_ms. */
+  async function realtimeAckedGaplessTurn(
+    tenant: TestTenant,
+    call: { callSid: string; sessionId: string },
+    turnIndex: number,
+  ): Promise<void> {
+    await repo.recordTurn({
+      tenantId: tenant.tenantId,
+      ...call,
+      turnIndex,
+      speaker: 'caller',
+      text: `gapless line ${turnIndex}`,
+      sttFinalAt: new Date('2026-10-20T10:10:00.000Z'),
+      transport: 'realtime',
+    });
+    const firstAudioAt = new Date('2026-10-20T10:10:01.000Z');
+    await repo.markReplyAudio({
+      tenantId: tenant.tenantId,
+      ...call,
+      turnIndex,
+      firstAudibleAt: firstAudioAt,
+      firstAudioEnqueuedAt: new Date(firstAudioAt.getTime() - 50),
+      firstAudioAt,
+    });
+  }
+
   async function gatherTurn(
     tenant: TestTenant,
     call: { callSid: string; sessionId: string },
@@ -150,6 +176,9 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     // Two unacked replies, on calls that already have acked turns.
     await realtimeUnackedTurn(tenantA, realtimeCalls[0]!, 2, 'ack_timeout');
     await realtimeUnackedTurn(tenantA, realtimeCalls[1]!, 2, 'clear_echo');
+    // One acked reply with no anchored gap: it is a reply attempt (denominator)
+    // but not a percentile sample.
+    await realtimeAckedGaplessTurn(tenantA, realtimeCalls[3]!, 2);
     // Noise the summary must not count: an agent turn, and a caller turn with
     // no transport (the pre-migration shape).
     await repo.recordTurn({
@@ -189,15 +218,16 @@ describe('Postgres integration — voice quality latency summary (U1)', () => {
     // Gaps 600..1700 step 100: p50 = 1150, p95 = 1600 + 0.45 * 100.
     expect(s.p50ReplyGapMs).toBe(1150);
     expect(s.p95ReplyGapMs).toBe(1645);
-    // 2 unacked of the 14 realtime turns that attempted a reply.
+    // 2 unacked of the 15 realtime turns that attempted a reply: 12 acked with a
+    // gap, 1 acked without one (counts here, not in the percentile sample), 2 unacked.
     expect(s.unacked.total).toBe(2);
-    expect(s.unacked.rate).toBeCloseTo(2 / 14, 10);
+    expect(s.unacked.rate).toBeCloseTo(2 / 15, 10);
     expect(s.unacked.byReason).toEqual({ clear_echo: 1, ack_timeout: 1, stream_closed: 0 });
 
-    // 2 of 8 calls and 3 of 17 caller turns ran on Gather; agent turns, the
+    // 2 of 8 calls and 3 of 18 caller turns ran on Gather; agent turns, the
     // transport-less row and the month-old call are not in either figure.
     expect(s.gatherShare.calls).toBeCloseTo(2 / 8, 10);
-    expect(s.gatherShare.turns).toBeCloseTo(3 / 17, 10);
+    expect(s.gatherShare.turns).toBeCloseTo(3 / 18, 10);
     expect(s.enough).toBe(true);
   });
 

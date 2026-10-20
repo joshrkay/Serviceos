@@ -9,7 +9,7 @@
  *     first real reply frame was acked (`reply_gap_ms IS NOT NULL`). Gather
  *     turns never carry a gap and are not estimated.
  *   - the unacked rate: realtime turns whose reply never played, over all
- *     realtime turns with a reply attempt (an acked gap or an unacked reason).
+ *     realtime turns with a reply attempt (an acked first frame or an unacked reason).
  *     A percentile over acked turns alone would look healthier as playout
  *     failures multiply, so the rate is returned beside it.
  *   - the Gather share, by calls (a call is degraded if any turn ran on
@@ -148,7 +148,7 @@ class PgLatencySummaryReader extends PgBaseRepository implements LatencySummaryR
            COUNT(*) FILTER (WHERE transport = 'realtime' AND reply_unacked_reason = 'ack_timeout')    AS unacked_ack_timeout,
            COUNT(*) FILTER (WHERE transport = 'realtime' AND reply_unacked_reason = 'stream_closed')  AS unacked_stream_closed,
            COUNT(*) FILTER (WHERE transport = 'realtime'
-                              AND (reply_gap_ms IS NOT NULL OR reply_unacked_reason IS NOT NULL))     AS reply_attempts,
+                              AND (first_audio_at IS NOT NULL OR reply_unacked_reason IS NOT NULL))   AS reply_attempts,
            COUNT(DISTINCT session_id) FILTER (WHERE transport = 'gather')                              AS gather_calls,
            COUNT(DISTINCT session_id)                                                                  AS calls,
            COUNT(*) FILTER (WHERE transport = 'gather')                                                AS gather_turns,
