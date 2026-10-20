@@ -28,6 +28,16 @@ export interface InvoicePaymentIntentSummary {
   amount?: number;
 }
 
+/** Options for `PaymentLinkProvider.deactivateLink`. */
+export interface DeactivateLinkOptions {
+  /**
+   * S5a-3 (U8) — the customer-facing text the dead link's hosted page shows
+   * (Stripe's Payment Link `inactive_message`, ≤500 chars), set in the same
+   * update as `active: false`.
+   */
+  inactiveMessage?: string;
+}
+
 export interface PaymentLinkProvider {
   generateLink(request: PaymentLinkRequest): Promise<PaymentLinkResult>;
   /**
@@ -35,7 +45,7 @@ export interface PaymentLinkProvider {
    * link was minted as a Connect direct charge, `stripeAccountId` must carry
    * the same account the mint used — Stripe scopes the link to that account.
    */
-  deactivateLink(linkId: string, stripeAccountId?: string): Promise<void>;
+  deactivateLink(linkId: string, stripeAccountId?: string, options?: DeactivateLinkOptions): Promise<void>;
   /**
    * P0-1 completion — optional PaymentIntent capability, carried on the same
    * provider so the existing void-path wiring (transitionInvoiceStatus →
@@ -69,6 +79,8 @@ export function validatePaymentLinkRequest(request: PaymentLinkRequest): string[
 // Mock provider for testing
 export class MockPaymentLinkProvider implements PaymentLinkProvider {
   private links: Map<string, PaymentLinkResult & { active: boolean }> = new Map();
+  /** Every deactivation in call order, so test fakes can assert scope and message. */
+  readonly deactivations: Array<{ linkId: string; stripeAccountId?: string; inactiveMessage?: string }> = [];
 
   async generateLink(request: PaymentLinkRequest): Promise<PaymentLinkResult> {
     const errors = validatePaymentLinkRequest(request);
@@ -86,7 +98,8 @@ export class MockPaymentLinkProvider implements PaymentLinkProvider {
     return result;
   }
 
-  async deactivateLink(linkId: string): Promise<void> {
+  async deactivateLink(linkId: string, stripeAccountId?: string, options?: DeactivateLinkOptions): Promise<void> {
+    this.deactivations.push({ linkId, stripeAccountId, inactiveMessage: options?.inactiveMessage });
     const link = this.links.get(linkId);
     if (link) link.active = false;
   }

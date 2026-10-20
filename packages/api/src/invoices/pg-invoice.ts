@@ -8,10 +8,14 @@ import {
   InvoiceRepository,
   InvoiceStatus,
   InvoiceUpdate,
+  type AttachPaymentLinkResult,
   DEFAULT_INVOICE_LIMIT,
   MAX_INVOICE_LIMIT,
+  clampCleanupPageSize,
 } from './invoice';
 import { LineItem } from '../shared/billing-engine';
+import { PAYMENT_MODE_READ_SQL, paymentModeLockKey } from './payment-collection-mode';
+import { LIVE_PAYMENT_LINK_PREDICATE } from './payment-mode-change';
 import { mapLineItemRow, mapDocumentTotalsRow } from '../shared/document-row-mappers';
 import { INVOICE_LIST_SORT, type InvoiceSortField } from '@ai-service-os/shared';
 import { sqlOrderBy, customerNameViaJobSql } from '../shared/list-sort';
@@ -306,6 +310,9 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       if (updates.stripePaymentLinkId !== undefined) {
         setClauses.push(`stripe_payment_link_id = $${paramIndex++}`);
         values.push(updates.stripePaymentLinkId);
+        // S5a-3 — the cleanup claim belongs to the link it claimed: any write
+        // of the link id drops it in the same statement (migration 322).
+        setClauses.push('cleanup_claimed_at = NULL');
       }
       if (updates.stripePaymentLinkUrl !== undefined) {
         setClauses.push(`stripe_payment_link_url = $${paramIndex++}`);
@@ -566,34 +573,81 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
   }
 
   /**
-   * P0-9 (mint leg) — guarded link persist: the payable-status, exact-balance
-   * and no-existing-link predicates live in the UPDATE itself, so a link
-   * minted concurrently with a void/credit (or with another mint) can never
-   * be attached to an invoice it no longer prices. Null → the caller must
-   * deactivate the link it just minted.
+   * P0-9 (mint leg) + S5a-4 (U8) — guarded link persist under the shared
+   * per-tenant payment-mode lock. Three statements, in this order:
+   *
+   *   1. `pg_advisory_xact_lock_shared(hashtext('payment_mode:<tenant>'))` —
+   *      a statement of its own, so statement 2's READ COMMITTED snapshot is
+   *      taken AFTER the grant. Shared, so concurrent checkouts of one tenant
+   *      never queue on each other; the settings write that names
+   *      `payment_collection_mode` takes the same key EXCLUSIVELY, so it
+   *      either waits for this attach to commit (its cleanup then finds the
+   *      link) or commits first (and statement 2 sees its value) — whether
+   *      or not a settings row existed before, because the key exists for
+   *      every tenant where a row may not.
+   *   2. The mode: `COALESCE(stored, 'pay_link')` — a missing row and an
+   *      unset key are both the D-039/D-040 default.
+   *   3. The guarded UPDATE: payable status, exact balance, no other link,
+   *      and the mode predicate again as belt and braces.
+   *
+   * All three run inside a SAVEPOINT. On the operator route this method
+   * runs on the request-scoped client (pg-base.ts), whose transaction ends
+   * only at the response; a refusal or a throw therefore rolls back to the
+   * savepoint, which RELEASES the lock taken inside it (so the caller's
+   * follow-up Stripe deactivation never runs under it) and leaves the
+   * request transaction usable for the caller's audit rows and CAS clear.
+   * Only a stored link keeps the lock, until the commit that publishes it.
    */
-  async setPaymentLinkIfPayable(
+  async attachPaymentLink(
     tenantId: string,
     id: string,
     link: { linkId: string; linkUrl: string },
     expectedAmountDueCents: number,
     now: Date,
-  ): Promise<Invoice | null> {
+  ): Promise<AttachPaymentLinkResult> {
     return this.withTenantTransaction(tenantId, async (client) => {
-      const { rows } = await client.query<{ id: string }>(
-        `UPDATE invoices
-         SET stripe_payment_link_id = $3,
-             stripe_payment_link_url = $4,
-             updated_at = $5
-         WHERE id = $2 AND tenant_id = $1
-           AND status IN ('open', 'partially_paid')
-           AND amount_due_cents = $6
-           AND stripe_payment_link_id IS NULL
-         RETURNING id`,
-        [tenantId, id, link.linkId, link.linkUrl, now, expectedAmountDueCents],
-      );
-      if (rows.length === 0) return null;
-      return this.findByIdWithClient(client, tenantId, id);
+      await client.query('SAVEPOINT attach_payment_link');
+      let result: AttachPaymentLinkResult;
+      try {
+        await client.query('SELECT pg_advisory_xact_lock_shared(hashtext($1))', [paymentModeLockKey(tenantId)]);
+        const { rows: modeRows } = await client.query<{ mode: string }>(PAYMENT_MODE_READ_SQL, [tenantId]);
+        if (modeRows[0]?.mode !== 'pay_link') {
+          result = { ok: false, reason: 'mode_not_pay_link' };
+        } else {
+          const { rows } = await client.query<{ id: string }>(
+            `UPDATE invoices
+             SET stripe_payment_link_id = $3,
+                 stripe_payment_link_url = $4,
+                 cleanup_claimed_at = NULL,
+                 updated_at = $5
+             WHERE id = $2 AND tenant_id = $1
+               AND status IN ('open', 'partially_paid')
+               AND amount_due_cents = $6
+               AND stripe_payment_link_id IS NULL
+               AND COALESCE(
+                 (SELECT payment_collection_mode FROM tenant_settings WHERE tenant_id = $1),
+                 'pay_link'
+               ) = 'pay_link'
+             RETURNING id`,
+            [tenantId, id, link.linkId, link.linkUrl, now, expectedAmountDueCents],
+          );
+          const invoice = rows.length > 0 ? await this.findByIdWithClient(client, tenantId, id) : null;
+          result = invoice ? { ok: true, invoice } : { ok: false, reason: 'not_payable' };
+        }
+      } catch (err) {
+        await client
+          .query('ROLLBACK TO SAVEPOINT attach_payment_link')
+          .then(() => client.query('RELEASE SAVEPOINT attach_payment_link'))
+          .catch(() => undefined);
+        throw err;
+      }
+      if (result.ok) {
+        await client.query('RELEASE SAVEPOINT attach_payment_link');
+      } else {
+        await client.query('ROLLBACK TO SAVEPOINT attach_payment_link');
+        await client.query('RELEASE SAVEPOINT attach_payment_link');
+      }
+      return result;
     });
   }
 
@@ -612,10 +666,47 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         `UPDATE invoices
          SET stripe_payment_link_id = NULL,
              stripe_payment_link_url = NULL,
+             cleanup_claimed_at = NULL,
              updated_at = NOW()
          WHERE id = $2 AND tenant_id = $1
            AND stripe_payment_link_id = $3`,
         [tenantId, id, expectedLinkId],
+      );
+      return (rowCount ?? 0) > 0;
+    });
+  }
+
+  /**
+   * S5a-3 (U8) — keyset page of the tenant's invoices that can still capture
+   * money through a hosted link (served by migration 322's partial index).
+   */
+  async findOpenWithPaymentLink(tenantId: string, afterId: string | null, limit: number): Promise<Invoice[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM invoices
+          WHERE tenant_id = $1
+            AND ${LIVE_PAYMENT_LINK_PREDICATE}
+            AND ($2::uuid IS NULL OR id > $2::uuid)
+          ORDER BY id
+          LIMIT $3`,
+        [tenantId, afterId, clampCleanupPageSize(limit)],
+      );
+      return this.mapRowsToInvoices(client, tenantId, rows);
+    });
+  }
+
+  /**
+   * S5a-3 (U8) — drop the cleanup claim marker only while the row still
+   * holds `linkId` (CAS on the link id). The link columns are untouched.
+   */
+  async releaseCleanupClaim(tenantId: string, id: string, linkId: string): Promise<boolean> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE invoices
+            SET cleanup_claimed_at = NULL
+          WHERE id = $2 AND tenant_id = $1
+            AND stripe_payment_link_id = $3`,
+        [tenantId, id, linkId],
       );
       return (rowCount ?? 0) > 0;
     });
@@ -770,6 +861,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       viewCount: row.view_count !== undefined && row.view_count !== null ? Number(row.view_count) : undefined,
       stripePaymentLinkId: row.stripe_payment_link_id ?? undefined,
       stripePaymentLinkUrl: row.stripe_payment_link_url ?? undefined,
+      cleanupClaimedAt: row.cleanup_claimed_at ? new Date(row.cleanup_claimed_at) : undefined,
       originatingLeadId: row.originating_lead_id ?? undefined,
       scheduleId: row.schedule_id ?? undefined,
       milestoneIndex:

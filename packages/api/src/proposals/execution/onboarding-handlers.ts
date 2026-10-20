@@ -26,6 +26,8 @@ import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers'
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { SettingsRepository, resolveBootstrapAiModel, type TenantSettings, type EscalationSettings } from '../../settings/settings';
 import { onboardingVoicePolicyPayloadSchema, bookingHoursFromPreset } from '../contracts/onboarding';
+import type { Queue } from '../../queues/queue';
+import { paymentModeChangeHook } from '../../invoices/payment-mode-change';
 import { PackActivationRepository } from '../../settings/pack-activation';
 import {
   activatePackWithSeed,
@@ -718,6 +720,12 @@ export class OnboardingVoicePolicyExecutionHandler implements ExecutionHandler {
   constructor(
     private readonly settingsRepo: SettingsRepository | undefined,
     private readonly auditRepo: AuditRepository,
+    /**
+     * S5a-5 (U8) — the app queue: a switch to "Collect on the spot" enqueues
+     * the pay-link cleanup in the settings write's own transaction. Absent →
+     * the write still lands; the daily reconciliation sweep is the backstop.
+     */
+    private readonly queue?: Queue,
   ) {}
 
   isFullyWired(): boolean {
@@ -754,7 +762,12 @@ export class OnboardingVoicePolicyExecutionHandler implements ExecutionHandler {
         } as EscalationSettings;
       }
 
-      await this.settingsRepo.update(context.tenantId, updates, { preserveVoiceApprovalPin: true });
+      await this.settingsRepo.update(context.tenantId, updates, {
+        preserveVoiceApprovalPin: true,
+        ...(this.queue && updates.paymentCollectionMode !== undefined
+          ? { afterWrite: paymentModeChangeHook(this.queue) }
+          : {}),
+      });
       await this.auditRepo.create(
         createAuditEvent({
           tenantId: context.tenantId,
