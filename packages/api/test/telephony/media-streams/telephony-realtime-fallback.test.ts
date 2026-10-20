@@ -28,6 +28,7 @@ vi.mock('../../../src/analytics/posthog', () => ({
 }));
 
 import { createTelephonyRouter } from '../../../src/routes/telephony';
+import { InMemoryConnectionRegistry } from '../../../src/ws/connection-registry';
 
 beforeEach(() => {
   recordVoiceErrorMock.mockClear();
@@ -210,11 +211,88 @@ describe('WS3 /voice realtime-vs-Gather decision matrix', () => {
   });
 });
 
+// ─── LCR-06 — a tenant already at its realtime connection cap gets Gather,
+// not a <Stream> whose socket the adapter would refuse (silence, then a
+// hang-up). Real registry, filled to the live default cap. ────────────────
+describe('LCR-06 /voice — per-tenant realtime connection cap', () => {
+  async function registryWith(open: number): Promise<InMemoryConnectionRegistry> {
+    const registry = new InMemoryConnectionRegistry();
+    for (let i = 0; i < open; i++) {
+      await registry.acquire('twilio_media_streams', 'tenant-1');
+    }
+    return registry;
+  }
+
+  it('tenant at the cap (50 live realtime calls) → Gather (flag never consulted) + voice_error', async () => {
+    const isEnabled = vi.fn().mockResolvedValue(true);
+    const { app, handleInbound, handleInboundForStream } = mountRouter({
+      mediaStreamsEnabled: true,
+      tenantFeatureFlags: { isEnabledForTenantWithDefault: isEnabled },
+      realtimePrerequisitesMet: READY_PREREQ,
+      realtimeCircuit: CLOSED_CIRCUIT,
+      connectionRegistry: await registryWith(50),
+    });
+    const res = await signedVoicePost(app, VOICE_PARAMS);
+    expect(res.status).toBe(200);
+    expect(handleInbound).toHaveBeenCalledTimes(1);
+    expect(handleInboundForStream).not.toHaveBeenCalled();
+    expect(isEnabled).not.toHaveBeenCalled();
+    expect(recordVoiceErrorMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorKind: 'tenant_connection_cap',
+        channel: 'gather',
+        callSid: 'CA-ws3',
+        tenantId: 'tenant-1',
+      }),
+    );
+  });
+
+  it('tenant one below the cap (49) → Stream', async () => {
+    const { app, handleInbound, handleInboundForStream } = mountRouter({
+      mediaStreamsEnabled: true,
+      realtimePrerequisitesMet: READY_PREREQ,
+      realtimeCircuit: CLOSED_CIRCUIT,
+      connectionRegistry: await registryWith(49),
+    });
+    const res = await signedVoicePost(app, VOICE_PARAMS);
+    expect(res.status).toBe(200);
+    expect(handleInboundForStream).toHaveBeenCalledTimes(1);
+    expect(handleInbound).not.toHaveBeenCalled();
+  });
+
+  it('another tenant at the cap does not divert this tenant → Stream', async () => {
+    const registry = new InMemoryConnectionRegistry();
+    for (let i = 0; i < 50; i++) await registry.acquire('twilio_media_streams', 'tenant-other');
+    const { app, handleInboundForStream } = mountRouter({
+      mediaStreamsEnabled: true,
+      connectionRegistry: registry,
+    });
+    const res = await signedVoicePost(app, VOICE_PARAMS);
+    expect(res.status).toBe(200);
+    expect(handleInboundForStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('cap count throws → Gather (fail toward the proven path)', async () => {
+    const { app, handleInbound, handleInboundForStream } = mountRouter({
+      mediaStreamsEnabled: true,
+      connectionRegistry: { count: vi.fn().mockRejectedValue(new Error('redis down')) },
+    });
+    const res = await signedVoicePost(app, VOICE_PARAMS);
+    expect(res.status).toBe(200);
+    expect(handleInbound).toHaveBeenCalledTimes(1);
+    expect(handleInboundForStream).not.toHaveBeenCalled();
+  });
+});
+
 // ─── OBS — the handleInbound catch never 5xxs by design (graceful hangup
 // TwiML so Twilio doesn't retry), which makes it invisible to recordApiError.
+// ─── OBS — the handleInbound catch never 5xxs by design (voicemail
+// TwiML — a 5xx is never retried by Twilio), which makes it invisible to recordApiError.
 // voice_error(inbound_handler_failed) is the only backend signal for it. ────
 describe('WS3/OBS voice_error — inbound handler failure', () => {
-  it('adapter.handleInbound throws → still 200s graceful hangup TwiML, and fires voice_error', async () => {
+  // LCR-04 — the caller now leaves a voicemail instead of hearing "try again
+  // later" and a hang-up.
+  it('adapter.handleInbound throws → still 200s, with voicemail TwiML, and fires voice_error', async () => {
     const handleInbound = vi.fn().mockRejectedValue(new Error('adapter boom'));
     const handleInboundForStream = vi.fn();
     const { app } = mountRouter({
@@ -228,7 +306,8 @@ describe('WS3/OBS voice_error — inbound handler failure', () => {
     const res = await signedVoicePost(app, VOICE_PARAMS);
 
     expect(res.status).toBe(200);
-    expect(res.text).toContain('technical difficulties');
+    expect(res.text).toContain('<Record');
+    expect(res.text).not.toContain('try again later');
     // OBS — fired after the graceful hangup TwiML is already queued above.
     expect(recordVoiceErrorMock).toHaveBeenCalledWith(
       expect.objectContaining({

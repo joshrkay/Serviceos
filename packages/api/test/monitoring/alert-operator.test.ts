@@ -15,7 +15,7 @@ import {
 import type { SentryClient } from '../../src/monitoring/sentry';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
 import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
-import { metricsRegistry } from '../../src/monitoring/metrics';
+import { metricsRegistry, sloAlertsSentTotal } from '../../src/monitoring/metrics';
 import type { Logger } from '../../src/logging/logger';
 
 const noopLogger: Logger = {
@@ -52,6 +52,36 @@ const alert: OperatorAlert = {
 const HOUR = 60 * 60 * 1000;
 
 describe('createAlertOperator — channel fan-out', () => {
+  it('labels slo_alerts_sent_total with metricRule when given, while rule stays the cooldown key', async () => {
+    sloAlertsSentTotal.reset();
+    const sentry = fakeSentry();
+    const op = createAlertOperator({ sentry, delivery: null, cooldownMs: HOUR, logger: noopLogger });
+    const perTenant = (tenant: string): OperatorAlert => ({
+      severity: 'critical',
+      rule: `ai_task_failure_rate:classify_intent:${tenant}`,
+      metricRule: 'ai_task_failure_rate_tenant:classify_intent',
+      summary: `tenant ${tenant} failing`,
+    });
+    await op(perTenant('tenant-one'));
+    await op(perTenant('tenant-two'));
+    // Cooldown is per full rule: both tenants page.
+    expect(sentry.captureMessage).toHaveBeenCalledTimes(2);
+    const series = (await sloAlertsSentTotal.get()).values;
+    expect(series.map((v) => [v.labels.rule, v.labels.channel, v.value])).toEqual([
+      ['ai_task_failure_rate_tenant:classify_intent', 'sentry', 2],
+    ]);
+  });
+
+  it('labels slo_alerts_sent_total with the rule when no metricRule is given', async () => {
+    sloAlertsSentTotal.reset();
+    const op = createAlertOperator({ sentry: fakeSentry(), delivery: null, cooldownMs: HOUR, logger: noopLogger });
+    await op(alert);
+    const series = (await sloAlertsSentTotal.get()).values;
+    expect(series.map((v) => [v.labels.rule, v.labels.channel, v.value])).toEqual([
+      ['queue_staleness', 'sentry', 1],
+    ]);
+  });
+
   it('always captures an error-level Sentry message', async () => {
     const sentry = fakeSentry();
     const op = createAlertOperator({

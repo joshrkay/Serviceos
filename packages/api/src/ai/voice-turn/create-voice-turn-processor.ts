@@ -56,6 +56,7 @@ import {
 import { currentTenantContext } from '../../middleware/tenant-context';
 import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
+import { redactCardNumbers } from '../privacy/pan-redact';
 import {
   classifyIntent,
   isLookupIntent,
@@ -5824,6 +5825,13 @@ export function createVoiceTurnProcessor(
     tenantId,
     transcriptAppended = false,
   }): Promise<SideEffect[]> => {
+    // PRIV-3 — a recited card number is scrubbed where the caller's words
+    // enter the turn: the FSM events built from `speechResult` (their
+    // `utterance` feeds the complaint callback transcript, lastUtterance and
+    // the proposal payload fallbacks), held utterances and every task handler
+    // see `[card number]`, never the digits. A voice-approval challenge is a
+    // short code, never a 13–19 digit run, so its comparison is unaffected.
+    speechResult = redactCardNumbers(speechResult);
     // Note: `processCallerUtterance` historically took `sessionId` and
     // looked up the session via the store. The mediastream adapter
     // already resolves the session before invoking us, so we accept it

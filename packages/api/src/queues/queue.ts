@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import type { PoolClient } from 'pg';
 import { Logger } from '../logging/logger';
 import { createHash } from 'crypto';
 
@@ -129,6 +130,21 @@ export interface Queue {
     idempotencyKey?: string,
     options?: SendOptions,
   ): Promise<string>;
+  /**
+   * S5a-3 (U8) — enqueue on the CALLER's client, inside the caller's open
+   * transaction: the row commits or rolls back with the caller's writes (the
+   * payment-mode switch writes its cleanup job in the settings transaction).
+   * Same `ON CONFLICT (idempotency_key) DO NOTHING` dedupe as `send`; no
+   * BEGIN/COMMIT of its own. PgQueue bootstraps its tables on its OWN
+   * connection first, never inside the caller's transaction.
+   */
+  sendOn<T>(
+    client: PoolClient,
+    type: string,
+    payload: T,
+    idempotencyKey: string,
+    options?: SendOptions,
+  ): Promise<string>;
   receive<T>(): Promise<QueueMessage<T> | null>;
   /**
    * Scale-to-1000 (P3): atomically claim up to `max` visible messages in one
@@ -237,6 +253,17 @@ export class InMemoryQueue implements Queue {
       visibleAt: Date.now() + delayMs,
     });
     return id;
+  }
+
+  /** No transaction to join in memory: a plain send (same dedupe, same delay). */
+  async sendOn<T>(
+    _client: PoolClient,
+    type: string,
+    payload: T,
+    idempotencyKey: string,
+    options?: SendOptions,
+  ): Promise<string> {
+    return this.send(type, payload, idempotencyKey, options);
   }
 
   async receive<T>(): Promise<QueueMessage<T> | null> {

@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { _resetOnboardingStatusCacheForTests } from '../../../hooks/useOnboardingStatus';
 import type { OnboardingStatusResponse } from '../../../types/onboarding';
 import { expectAllTapTargets } from '../../../test-utils/tap-target';
-import { plumbingCleDraft } from './__fixtures__';
+import { plumbingCleDraft, withChoices } from './__fixtures__';
 import { PLANS, json, statusAt } from './__fixtures__/after';
 
 const track = vi.hoisted(() => ({ trackFunnel: vi.fn(), track: vi.fn() }));
@@ -38,11 +38,17 @@ const phoneDone: Patch = { phone: { status: 'done', metadata: { phoneNumber: NUM
 
 let world: { status: OnboardingStatusResponse };
 let requests: string[];
-let routes: Record<string, (() => Response | Promise<Response>) | undefined>;
+/** Every request with the JSON body it carried, for the version checks. */
+let sent: Array<{ call: string; body: unknown }>;
+let routes: Record<string, ((body?: unknown) => Response | Promise<Response>) | undefined>;
+/** The lines Rivet asked the voice route to say, in order. */
+let spokenTexts: string[];
 
 function stub(status: OnboardingStatusResponse, extra: typeof routes = {}) {
   world = { status };
   requests = [];
+  sent = [];
+  spokenTexts = [];
   routes = {
     'GET /api/onboarding/status': () => json(200, world.status),
     'GET /api/onboarding/draft': () => json(200, { draft: approved }),
@@ -55,6 +61,8 @@ function stub(status: OnboardingStatusResponse, extra: typeof routes = {}) {
       world.status = statusAt(null, { ...phoneDone, test_call: { status: 'skipped' } });
       return json(200, { ok: true });
     },
+    // A keyless environment: no voice is configured, so Rivet's lines stay on screen (S3-3 falls back).
+    'POST /api/voice/tts': () => json(501, { error: 'NOT_CONFIGURED', message: 'Speech synthesis is not configured' }),
     'POST /api/voice/go-live': () => {
       world.status = { ...world.status, voiceAgentLive: true };
       return json(200, { ok: true });
@@ -66,9 +74,12 @@ function stub(status: OnboardingStatusResponse, extra: typeof routes = {}) {
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const call = `${init?.method ?? 'GET'} ${String(input)}`;
       requests.push(call);
+      const body: unknown = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
+      sent.push({ call, body });
+      if (call === 'POST /api/voice/tts' && typeof init?.body === 'string') spokenTexts.push((JSON.parse(init.body) as { text: string }).text);
       const handler = routes[call];
       if (!handler) throw new Error(`unexpected request ${call}`);
-      return Promise.resolve(handler());
+      return Promise.resolve(handler(body));
     }),
   );
 }
@@ -273,13 +284,14 @@ describe('ConversationShell after "That\'s right"', () => {
 
       expect(retries()).toHaveLength(1);
       expect(statusReads()).toBeGreaterThan(before);
-      expect(heading()).toHaveTextContent('One of your changes was undone.');
+      expect(heading()).toHaveTextContent('Part of your setup was taken back.');
       expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
     });
 
     it('on a 409 where the status still says failed, or any other error, shows one plain line and lets the owner tap again', async () => {
       stub(savedAs('failed'), {
-        'POST /api/onboarding/draft/retry': () => json(409, { error: 'CONFLICT', message: 'DRAFT_RETRY_UNSAFE: not safe to retry' }),
+        'POST /api/onboarding/draft/retry': () =>
+          json(409, { error: 'CONFLICT', message: 'DRAFT_RETRY_FAILED: the change could not be queued again' }),
       });
       renderShell();
       await settle();
@@ -317,7 +329,7 @@ describe('ConversationShell after "That\'s right"', () => {
 
       world.status = savedAs('stopped');
       await nextPoll();
-      expect(heading()).toHaveTextContent('One of your changes was undone.');
+      expect(heading()).toHaveTextContent('Part of your setup was taken back.');
       expect(heading()).toHaveFocus();
     });
 
@@ -373,12 +385,12 @@ describe('ConversationShell after "That\'s right"', () => {
       expect(screen.queryByText("Something didn't save.")).not.toBeInTheDocument();
     });
 
-    it('says one change was undone and offers the step-by-step setup as the only action, never a retry', async () => {
+    it('against an API with no way-out hint, says part of the setup was taken back and offers the step-by-step setup as the only action, never a retry', async () => {
       stub(savedAs('stopped'));
       const { container } = renderShell();
       await settle();
 
-      expect(heading()).toHaveTextContent('One of your changes was undone.');
+      expect(heading()).toHaveTextContent('Part of your setup was taken back.');
       expect(screen.getByText(/can't finish setup from here/)).toBeInTheDocument();
       expectFrame(3, 65, 'Not finished');
       expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
@@ -404,6 +416,370 @@ describe('ConversationShell after "That\'s right"', () => {
       await tick(25_000);
       expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
       expect(requests.some((r) => r.includes('/draft/retry'))).toBe(false);
+    });
+  });
+
+  describe('Undo, Try again and Start over', () => {
+    const IDS = approved.proposalIds;
+    /** Every answer staged (greeting is the owner's own), so the read-back is where an editable draft opens. */
+    const answered = withChoices(plumbingCleDraft, {
+      greeting: { option: 'b' },
+      trip_fee_and_rate: { option: 'a' },
+      booking_posture: { option: 'a' },
+      payment_collection_mode: { option: 'a' },
+      booking_hours: { option: 'a' },
+      emergency_target: { option: 'a' },
+      after_hours_mode: { option: 'a' },
+    });
+    const OWN_GREETING = "Thanks for calling Walsh Plumbing. What's going on today?";
+    let current: OnboardingDraft;
+    const approvedAt = (version: number): OnboardingDraft => ({
+      ...answered,
+      status: 'approved',
+      version,
+      proposalIds: IDS,
+      approvedAt: '2026-10-18T10:05:00.000Z',
+    });
+    const editableAt = (version: number): OnboardingDraft => ({ ...answered, version });
+    type DraftBlock = NonNullable<OnboardingStatusResponse['draft']>;
+    /** The status as the API derives it for the draft the server holds now. */
+    const statusNow = (over: Partial<DraftBlock> = {}, step: Parameters<typeof statusAt>[0] = 'identity') =>
+      statusAt(step, {}, { draft: { status: current.status, choicesAnswered: 7, version: current.version, ...over } });
+    const conflict = (message: string, details?: object) => json(409, { error: 'CONFLICT', message, ...(details ? { details } : {}) });
+    const versionOf = (path: string) => sent.filter((r) => r.call === `POST /api/onboarding/draft/${path}`).map((r) => (r.body as { expectedVersion?: number }).expectedVersion);
+    const undoButton = () => screen.queryByRole('button', { name: 'Undo' });
+    const READBACK = "Here's what I've got. Tap anything to change it.";
+
+    /** The draft routes, answering like the real ones against `current`. */
+    function draftRoutes(): typeof routes {
+      return {
+        'GET /api/onboarding/draft': () => json(200, { draft: current }),
+        'POST /api/onboarding/draft/approve': () => {
+          current = approvedAt(current.version + 1);
+          world.status = statusNow({ execution: 'pending', undoable: true });
+          return json(200, { draft: current, proposalIds: IDS, approvedNow: true });
+        },
+        'POST /api/onboarding/draft/undo': (body) => {
+          const v = (body as { expectedVersion: number }).expectedVersion;
+          if (current.status !== 'approved') return conflict('DRAFT_NOT_APPROVED: the draft has not been approved');
+          if (v !== current.version) return conflict(`VERSION_CONFLICT: expected ${v}, found ${current.version}; re-read the draft`);
+          current = editableAt(current.version + 1);
+          world.status = statusNow();
+          return json(200, { draft: current });
+        },
+        'POST /api/onboarding/draft/reset': (body) => {
+          const v = (body as { expectedVersion: number }).expectedVersion;
+          if (v !== current.version) return conflict(`VERSION_CONFLICT: expected ${v}, found ${current.version}; re-read the draft`);
+          current = editableAt(current.version + 1);
+          world.status = statusNow();
+          return json(200, { draft: current });
+        },
+        'POST /api/onboarding/draft/retry': (body) => {
+          const v = (body as { expectedVersion: number }).expectedVersion;
+          if (v !== current.version) return conflict(`VERSION_CONFLICT: expected ${v}, found ${current.version}; re-read the draft`);
+          current = approvedAt(current.version + 1);
+          world.status = statusNow({ execution: 'pending', undoable: true });
+          return json(200, { draft: current, retriedProposalIds: IDS, undoable: true });
+        },
+      };
+    }
+
+    /** From the read-back of an answered draft, through "That's right", to the saving window. */
+    async function approveFromReadback() {
+      current = editableAt(7);
+      stub(statusNow(), draftRoutes());
+      const view = renderShell();
+      await settle();
+      expect(heading()).toHaveTextContent(READBACK);
+      fireEvent.click(screen.getByRole('button', { name: "That's right" }));
+      await settle();
+      return view;
+    }
+
+    /** An approved draft the shell finds on load, with the status the API derives for it. */
+    async function openOn(draft: OnboardingDraft, over: Partial<DraftBlock>, extra: typeof routes = {}) {
+      current = draft;
+      stub(statusNow(over), { ...draftRoutes(), ...extra });
+      const view = renderShell();
+      await settle();
+      return view;
+    }
+
+    function expectPlainWords() {
+      const text = document.body.textContent;
+      for (const word of [/approved/i, /undone/i, /409/, /proposal/i, /\bAI\b/, /verify/i]) expect(text, String(word)).not.toMatch(word);
+    }
+
+    describe('Undo during the saving window', () => {
+      it('shows right after "That\'s right", before any poll, posts the version approve returned, and lands on the read-back with the answers intact', async () => {
+        const { container } = await approveFromReadback();
+        expect(heading()).toHaveTextContent('Saving your choices.');
+        expect(screen.getByText("Tap Undo if that's not right.")).toBeInTheDocument();
+        expect(undoButton()).not.toBeNull();
+        expect(undoButton()!.className).toMatch(/w-full/);
+        expectAllTapTargets(container, 'the saving window with Undo');
+        expectPlainWords();
+        const before = requests.length;
+
+        fireEvent.click(undoButton()!);
+        await settle();
+        expect(versionOf('undo')).toEqual([8]);
+        expect(heading()).toHaveTextContent(READBACK);
+        expect(screen.getByText(OWN_GREETING)).toBeInTheDocument();
+        expect(screen.queryByText('This changed in another window.')).not.toBeInTheDocument();
+        expect(requests.slice(before)).toEqual(['POST /api/onboarding/draft/undo']);
+        expect(fired('v3_undo')).toHaveLength(1);
+
+        // The owner can change their mind back: the second approval goes through from the version undo returned.
+        fireEvent.click(screen.getByRole('button', { name: "That's right" }));
+        await settle();
+        expect(versionOf('approve')).toEqual([7, 9]);
+        expect(heading()).toHaveTextContent('Saving your choices.');
+      });
+
+      it('drops the button on the poll that says the window has closed, with nothing tapped and nothing sent', async () => {
+        await approveFromReadback();
+        // The first poll, inside the window: still undoable.
+        await nextPoll();
+        expect(undoButton()).not.toBeNull();
+        // The hint is a second early: by the next look the API says no.
+        world.status = statusNow({ execution: 'pending', undoable: false });
+        const before = requests.length;
+        await tick(1_500);
+        // The shell polls on its own; it sends nothing else.
+        await nextPoll();
+        expect(undoButton()).toBeNull();
+        expect(requests.slice(before).every((r) => r === 'GET /api/onboarding/status')).toBe(true);
+      });
+
+      for (const [name, message] of [
+        ['the window closed', "UNDO_WINDOW_CLOSED: It's too late to undo this."],
+        ['part of it is being saved', "DRAFT_UNDO_REFUSED: This can't be undone all at once any more, because part of it is being saved right now."],
+      ] as const) {
+        it(`a tap on a stale hint (${name}) asks the status again, drops the button and keeps waiting`, async () => {
+          await approveFromReadback();
+          routes['POST /api/onboarding/draft/undo'] = () => {
+            world.status = statusNow({ execution: 'executing', undoable: false });
+            return conflict(message);
+          };
+          const reads = requests.filter((r) => r === 'GET /api/onboarding/status').length;
+          fireEvent.click(undoButton()!);
+          await settle();
+          expect(requests.filter((r) => r === 'GET /api/onboarding/status').length).toBeGreaterThan(reads);
+          expect(undoButton()).toBeNull();
+          expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+          expect(heading()).toHaveTextContent(/Saving your choices|Getting your shop ready/);
+          expect(versionOf('undo')).toHaveLength(1);
+          await tick(5_000);
+          expect(heading()).toHaveTextContent('Getting your shop ready.');
+          expect(undoButton()).toBeNull();
+        });
+      }
+
+      it('another window undid it first: re-reads, opens the read-back it left, says so in one line, and does not undo again', async () => {
+        await approveFromReadback();
+        // The other window's undo, then its re-approval and undo again: this screen's version is two behind.
+        current = editableAt(current.version + 1);
+        world.status = statusNow();
+        fireEvent.click(undoButton()!);
+        await settle();
+        expect(versionOf('undo')).toHaveLength(1);
+        expect(heading()).toHaveTextContent(READBACK);
+        expect(screen.getByText('This changed in another window.')).toBeInTheDocument();
+        expect(fired('v3_undo')).toHaveLength(0);
+      });
+    });
+
+    describe('Try again', () => {
+      it('posts the version the status block holds, and after a retry of the whole set offers Undo again, posting v + 1', async () => {
+        await openOn(approvedAt(4), { execution: 'failed', recovery: 'reset', undoable: false });
+        expect(heading()).toHaveTextContent("Something didn't save.");
+        fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+        await settle();
+        expect(versionOf('retry')).toEqual([4]);
+        expect(fired('v3_retry')).toEqual([[ 'v3_retry', expect.anything(), { retried_count: 2, undoable: true } ]]);
+        // A fresh window for the whole set: the saving screen, with Undo.
+        expect(heading()).toHaveTextContent('Saving your choices.');
+        fireEvent.click(undoButton()!);
+        await settle();
+        expect(versionOf('undo')).toEqual([5]);
+        expect(heading()).toHaveTextContent(READBACK);
+      });
+
+      it('after a retry of the whole set, the window closes by itself: the poll that says so drops Undo', async () => {
+        await openOn(approvedAt(4), { execution: 'failed', recovery: 'reset' });
+        fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+        await settle();
+        expect(undoButton()).not.toBeNull();
+        await tick(2_000);
+        // 4 s after the retry the hint (a second early) says no; the next poll carries it.
+        world.status = statusNow({ execution: 'pending', undoable: false });
+        await tick(1_000);
+        expect(undoButton()).toBeNull();
+        expect(versionOf('undo')).toEqual([]);
+      });
+
+      it('after a retry of only the failed change, offers no Undo and waits, then moves on once both are live', async () => {
+        await openOn(approvedAt(4), { execution: 'failed', recovery: 'settings' }, {
+          'POST /api/onboarding/draft/retry': () => {
+            current = approvedAt(5);
+            world.status = statusNow({ execution: 'executing', undoable: false });
+            return json(200, { draft: current, retriedProposalIds: [IDS[1]], undoable: false });
+          },
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+        await settle();
+        expect(undoButton()).toBeNull();
+        expect(heading()).toHaveTextContent('Getting your shop ready.');
+        expect(within(document.querySelector('header') as HTMLElement).getByText('Saving')).toBeInTheDocument();
+        world.status = statusNow({ execution: 'executed', undoable: false }, 'billing');
+        await nextPoll();
+        expect(heading()).toHaveTextContent(/start your free trial/);
+      });
+
+      it('offers Start over beside Try again only while the reset can run', async () => {
+        const view = await openOn(approvedAt(4), { execution: 'failed', recovery: 'reset' });
+        expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Start over' })).toBeInTheDocument();
+        expectAllTapTargets(view.container, 'failed, with Start over');
+        expectPlainWords();
+        view.unmount();
+
+        _resetOnboardingStatusCacheForTests();
+        await openOn(approvedAt(4), { execution: 'failed', recovery: 'settings' });
+        expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Start over' })).not.toBeInTheDocument();
+      });
+
+      it('answered "not safe to retry" (the sibling was taken back from the inbox), re-reads and shows Start over, and does not retry again', async () => {
+        await openOn(approvedAt(4), { execution: 'failed', recovery: 'reset' }, {
+          'POST /api/onboarding/draft/retry': () => {
+            world.status = statusNow({ execution: 'stopped', recovery: 'reset', undoable: false });
+            return conflict('DRAFT_RETRY_UNSAFE: Retrying could leave your setup half saved.');
+          },
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+        await settle();
+        expect(heading()).toHaveTextContent('Part of your setup was taken back.');
+        expect(screen.getByRole('button', { name: 'Start over' })).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        expect(versionOf('retry')).toHaveLength(1);
+      });
+
+      it('another window retried first: a poll replaces the version the screen holds, so Start over posts the new one', async () => {
+        await openOn(approvedAt(4), { execution: 'failed', recovery: 'reset' });
+        // The other window's retry moved the draft on, and that retry failed again.
+        current = approvedAt(5);
+        world.status = statusNow({ execution: 'failed', recovery: 'reset' });
+        await nextPoll();
+        fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+        await settle();
+        expect(versionOf('reset')).toEqual([5]);
+        expect(heading()).toHaveTextContent(READBACK);
+      });
+
+      it('a stale version answers "changed in another window": the screen follows the status and says so, without trying again', async () => {
+        await openOn(approvedAt(4), { execution: 'failed', recovery: 'reset' }, {
+          'POST /api/onboarding/draft/retry': () => {
+            // Another window's retry landed first and is now saving.
+            current = approvedAt(5);
+            world.status = statusNow({ execution: 'pending', undoable: false });
+            return conflict('VERSION_CONFLICT: expected 4, found 5; re-read the draft');
+          },
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+        await settle();
+        expect(versionOf('retry')).toHaveLength(1);
+        expect(heading()).toHaveTextContent('Getting your shop ready.');
+        expect(screen.getByText('This changed in another window.')).toBeInTheDocument();
+        expect(fired('v3_retry')).toHaveLength(0);
+      });
+    });
+
+    describe('Start over and Settings', () => {
+      it('a stopped set that can start over: Start over posts the version and lands on the read-back with the answers intact', async () => {
+        const { container } = await openOn(approvedAt(6), { execution: 'stopped', recovery: 'reset' });
+        expect(heading()).toHaveTextContent('Part of your setup was taken back.');
+        expect(screen.getByText(/Start over to set it up again/)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('link', { name: /Settings/ })).not.toBeInTheDocument();
+        expectAllTapTargets(container, 'stopped, with Start over');
+        expectPlainWords();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+        await settle();
+        expect(versionOf('reset')).toEqual([6]);
+        expect(heading()).toHaveTextContent(READBACK);
+        expect(screen.getByText(OWN_GREETING)).toBeInTheDocument();
+        expect(fired('v3_reset')).toHaveLength(1);
+      });
+
+      it('a stopped set part of which went through: points at Settings and never offers Start over', async () => {
+        const { container } = await openOn(approvedAt(6), { execution: 'stopped', recovery: 'settings' });
+        expect(heading()).toHaveTextContent('Part of your setup already went through.');
+        const settings = screen.getByRole('link', { name: 'Finish in Settings' });
+        expect(settings).toHaveAttribute('href', '/settings');
+        expect(screen.queryByRole('button', { name: 'Start over' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+        expectAllTapTargets(container, 'stopped, Settings');
+        expectPlainWords();
+        await tick(10_000);
+        expect(versionOf('reset')).toEqual([]);
+      });
+
+      for (const [name, refusal] of [
+        ['part of it is already saved', conflict("DRAFT_RESET_REFUSED: Part of your setup is already saved, so it can't start over from here.", { reason: 'applied', statuses: ['executed', 'undone'] })],
+        ['its window closed', conflict("UNDO_WINDOW_CLOSED: It's too late to start over.")],
+      ] as const) {
+        it(`a Start over refused because ${name} swaps in the Settings copy, even while a cached status still offers it, and never a second Start over`, async () => {
+          await openOn(approvedAt(6), { execution: 'stopped', recovery: 'reset' }, {
+            // The server's status still says reset for a moment (its hint runs a second early only one way).
+            'POST /api/onboarding/draft/reset': () => refusal.clone(),
+          });
+          fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+          await settle();
+          expect(heading()).toHaveTextContent('Part of your setup already went through.');
+          expect(screen.getByRole('link', { name: 'Finish in Settings' })).toBeInTheDocument();
+          expect(screen.queryByRole('button', { name: 'Start over' })).not.toBeInTheDocument();
+          await nextPoll();
+          expect(screen.queryByRole('button', { name: 'Start over' })).not.toBeInTheDocument();
+          expect(versionOf('reset')).toHaveLength(1);
+        });
+      }
+
+      it('a Start over refused because part of it is being saved right now waits, then follows the status', async () => {
+        await openOn(approvedAt(6), { execution: 'stopped', recovery: 'reset' }, {
+          'POST /api/onboarding/draft/reset': () =>
+            conflict("DRAFT_RESET_REFUSED: Part of your setup is being saved right now, so it can't start over yet.", { reason: 'executing', statuses: ['executing', 'undone'] }),
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+        await settle();
+        expect(heading()).toHaveTextContent('Getting your shop ready.');
+        expect(versionOf('reset')).toHaveLength(1);
+        // It landed: the next poll says part of the setup went through.
+        world.status = statusNow({ execution: 'stopped', recovery: 'settings' });
+        await nextPoll();
+        expect(heading()).toHaveTextContent('Part of your setup already went through.');
+        expect(versionOf('reset')).toHaveLength(1);
+      });
+
+      it('a Start over from a stale tab ("changed in another window") follows the status and says so, without starting over again', async () => {
+        await openOn(approvedAt(6), { execution: 'stopped', recovery: 'reset' }, {
+          'POST /api/onboarding/draft/reset': () => {
+            // The other window already started over and approved again.
+            current = approvedAt(8);
+            world.status = statusNow({ execution: 'pending', undoable: false });
+            return conflict('VERSION_CONFLICT: expected 6, found 8; re-read the draft');
+          },
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Start over' }));
+        await settle();
+        expect(versionOf('reset')).toHaveLength(1);
+        expect(heading()).toHaveTextContent('Getting your shop ready.');
+        expect(screen.getByText('This changed in another window.')).toBeInTheDocument();
+        expect(fired('v3_reset')).toHaveLength(0);
+      });
     });
   });
 
@@ -437,6 +813,8 @@ describe('ConversationShell after "That\'s right"', () => {
     expect(heading()).toHaveTextContent("Here's your number.");
     expect(screen.getByText('(216) 555-0180')).toBeInTheDocument();
     expect(fired('v3_number_ready')).toHaveLength(1);
+    // Rivet says each heading as it appears (the wait for the number is not a line of its own).
+    expect(spokenTexts).toEqual(['Last thing before your number: start your free trial.', "Here's your number."]);
 
     world.status = statusAt('ai_check', { ...phoneDone, ai_check: { status: 'current', metadata: { verifying: true } } });
     await nextPoll();

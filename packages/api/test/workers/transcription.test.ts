@@ -16,6 +16,7 @@ function makeVoiceRepo(): VoiceRepository {
     create: vi.fn(),
     findById: vi.fn(),
     updateStatus: vi.fn().mockResolvedValue(null),
+    markCardNumberDetected: vi.fn().mockResolvedValue(undefined),
   } as unknown as VoiceRepository;
 }
 
@@ -464,5 +465,54 @@ describe('voicemailRouterEnqueueAllowed — U9 owner gate (router enqueue test)'
       gateLogger,
     );
     expect(allowed).toBe(false);
+  });
+});
+
+describe('createTranscriptionWorker — card numbers (PRIV-3)', () => {
+  it('stores a voicemail transcript with a recited card number replaced', async () => {
+    const voiceRepo = makeVoiceRepo();
+    const transcriptionProvider: TranscriptionProvider = {
+      transcribe: vi.fn().mockResolvedValue({
+        transcript: 'Hi, please charge my card 4111 1111 1111 1111 for the visit.',
+        metadata: {},
+      }),
+    };
+    const worker = createTranscriptionWorker(voiceRepo, transcriptionProvider, {});
+    await worker.handle(makeMessage(), logger);
+    expect(voiceRepo.updateStatus).toHaveBeenCalledWith(
+      'tenant-1',
+      'rec-1',
+      'completed',
+      expect.objectContaining({
+        transcript: 'Hi, please charge my card [card number] for the visit.',
+      }),
+    );
+  });
+
+  it('flags the recording for the prompt audio purge when the transcript carried a card number', async () => {
+    const voiceRepo = makeVoiceRepo();
+    const transcriptionProvider: TranscriptionProvider = {
+      transcribe: vi.fn().mockResolvedValue({
+        transcript: 'Hi, please charge my card 4111 1111 1111 1111 for the visit.',
+        metadata: {},
+      }),
+    };
+    const worker = createTranscriptionWorker(voiceRepo, transcriptionProvider, {});
+    await worker.handle(makeMessage(), logger);
+    expect(voiceRepo.markCardNumberDetected).toHaveBeenCalledTimes(1);
+    expect(voiceRepo.markCardNumberDetected).toHaveBeenCalledWith('tenant-1', 'rec-1');
+  });
+
+  it('does not flag a voicemail with no card number', async () => {
+    const voiceRepo = makeVoiceRepo();
+    const transcriptionProvider: TranscriptionProvider = {
+      transcribe: vi.fn().mockResolvedValue({
+        transcript: 'Hi, call me back on 602 555 0199 about the visit.',
+        metadata: {},
+      }),
+    };
+    const worker = createTranscriptionWorker(voiceRepo, transcriptionProvider, {});
+    await worker.handle(makeMessage(), logger);
+    expect(voiceRepo.markCardNumberDetected).not.toHaveBeenCalled();
   });
 });

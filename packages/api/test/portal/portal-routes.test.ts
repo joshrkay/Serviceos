@@ -445,12 +445,19 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
     expect(res.body.invoices[0].amountDueCents).toBe(10000);
   });
 
-  it('rolls back the Stripe link when persisting the URL to the invoice fails', async () => {
+  // S5a-4 (U8) — the portal persists through the guarded attach. A throw from
+  // it is an unreadable payment mode: the fresh link dies at once through the
+  // audited deactivation, whose compare-and-swap clear also removes it from
+  // the row if the throw hid a commit — so a dead link is never left stored
+  // and served — and the row shows the pay-in-person label.
+  function recordingProvider(prefix: string) {
     const generated: string[] = [];
     const deactivated: string[] = [];
-    const provider = {
+    return {
+      generated,
+      deactivated,
       async generateLink() {
-        const linkId = `plink_test_${generated.length + 1}`;
+        const linkId = `${prefix}_${generated.length + 1}`;
         generated.push(linkId);
         return {
           linkId,
@@ -462,106 +469,82 @@ describe('P10-001 GET /api/public/portal/:token/estimates|invoices|jobs', () => 
         deactivated.push(linkId);
       },
     };
+  }
 
+  it('deactivates the fresh link when the attach throws, and serves no pay link', async () => {
+    const provider = recordingProvider('plink_test');
     const failingInvoiceRepo = new InMemoryInvoiceRepository();
-    failingInvoiceRepo.update = async () => {
+    failingInvoiceRepo.attachPaymentLink = async () => {
       throw new Error('simulated DB outage');
     };
 
     const h = await build({ paymentLinkProvider: provider, invoiceRepoOverride: failingInvoiceRepo });
     const token = await mintToken(h);
-    await seedJobAndDocs(h);
+    const { invoiceId } = await seedJobAndDocs(h);
     const res = await request(h.app).get(`/api/public/portal/${token}/invoices`);
 
     expect(res.status).toBe(200);
-    expect(res.body.invoices[0].payNowUrl).toBeNull();
-    expect(generated).toHaveLength(1);
-    expect(deactivated).toEqual(generated);
+    expect(res.body.invoices[0]).toMatchObject({ payNowUrl: null, collectOnSite: true });
+    expect(provider.generated).toHaveLength(1);
+    expect(provider.deactivated).toEqual(provider.generated);
+    const audit = await h.auditRepo.findByEntity(TENANT, 'invoice', invoiceId);
+    expect(audit.find((e) => e.eventType === 'invoice.payment_link_deactivated')?.metadata).toEqual({
+      stripePaymentLinkId: provider.generated[0],
+      reason: 'payment_mode_changed_during_checkout',
+    });
+    expect(audit.find((e) => e.eventType === 'invoice.payment_mode_unavailable')?.metadata).toMatchObject({
+      surface: 'portal',
+    });
   });
 
-  it('does NOT deactivate when update throws but the invoice actually has the URL persisted (commit-but-response-timeout)', async () => {
-    const generated: string[] = [];
-    const deactivated: string[] = [];
-    const provider = {
-      async generateLink() {
-        const linkId = 'plink_committed_then_threw';
-        generated.push(linkId);
-        return {
-          linkId,
-          linkUrl: `https://checkout.stripe.com/pay/${linkId}`,
-          providerReference: `stripe_${linkId}`,
-        };
-      },
-      async deactivateLink(linkId: string) {
-        deactivated.push(linkId);
-      },
-    };
-
+  it('an attach that committed but threw: the link is deactivated AND cleared from the row, so it is never served dead', async () => {
+    const provider = recordingProvider('plink_committed_then_threw');
     const repo = new InMemoryInvoiceRepository();
-    let updateCalls = 0;
-    const originalUpdate = repo.update.bind(repo);
-    repo.update = async (tenantId, id, updates) => {
-      updateCalls += 1;
-      await originalUpdate(tenantId, id, updates);
+    const originalAttach = repo.attachPaymentLink.bind(repo);
+    repo.attachPaymentLink = async (...args) => {
+      await originalAttach(...args);
       throw new Error('response timed out after commit');
     };
 
     const h = await build({ paymentLinkProvider: provider, invoiceRepoOverride: repo });
     const token = await mintToken(h);
-    await seedJobAndDocs(h);
+    const { invoiceId } = await seedJobAndDocs(h);
     const res = await request(h.app).get(`/api/public/portal/${token}/invoices`);
 
     expect(res.status).toBe(200);
-    expect(updateCalls).toBe(1);
-    expect(res.body.invoices[0].payNowUrl).toContain('plink_committed_then_threw');
-    expect(deactivated).toEqual([]);
+    expect(res.body.invoices[0].payNowUrl).toBeNull();
+    expect(provider.deactivated).toEqual(provider.generated);
+    const stored = await repo.findById(TENANT, invoiceId);
+    expect(stored?.stripePaymentLinkId).toBeUndefined();
+    expect(stored?.stripePaymentLinkUrl).toBeUndefined();
   });
 
-  it('does NOT deactivate when both update and the re-read throw (DB genuinely degraded)', async () => {
-    const generated: string[] = [];
-    const deactivated: string[] = [];
-    const provider = {
-      async generateLink() {
-        const linkId = 'plink_db_down';
-        generated.push(linkId);
-        return {
-          linkId,
-          linkUrl: `https://checkout.stripe.com/pay/${linkId}`,
-          providerReference: `stripe_${linkId}`,
-        };
-      },
-      async deactivateLink(linkId: string) {
-        deactivated.push(linkId);
-      },
-    };
-
+  it('an attach that committed but threw, and the clear also fails: the failed clear is audited as actionable', async () => {
+    const provider = recordingProvider('plink_db_down');
     const repo = new InMemoryInvoiceRepository();
-    repo.update = async () => {
+    const originalAttach = repo.attachPaymentLink.bind(repo);
+    repo.attachPaymentLink = async (...args) => {
+      await originalAttach(...args);
       throw new Error('DB write failed');
     };
-    repo.findById = async () => {
-      throw new Error('DB read also failed');
+    repo.clearPaymentLinkIfMatches = async () => {
+      throw new Error('DB clear failed');
     };
 
     const h = await build({ paymentLinkProvider: provider, invoiceRepoOverride: repo });
     const token = await mintToken(h);
-    await seedJobAndDocs(h);
-    let findByIdCalls = 0;
-    repo.findById = async () => {
-      findByIdCalls += 1;
-      if (findByIdCalls === 1) {
-        return null;
-      }
-      throw new Error('DB read failed during rollback');
-    };
-    repo.findById = async () => {
-      throw new Error('DB read failed during rollback');
-    };
-
+    const { invoiceId } = await seedJobAndDocs(h);
     const res = await request(h.app).get(`/api/public/portal/${token}/invoices`);
+
     expect(res.status).toBe(200);
     expect(res.body.invoices[0].payNowUrl).toBeNull();
-    expect(deactivated).toEqual([]);
+    expect(provider.deactivated).toEqual(provider.generated);
+    const audit = await h.auditRepo.findByEntity(TENANT, 'invoice', invoiceId);
+    expect(audit.find((e) => e.eventType === 'invoice.payment_link_clear_failed')?.metadata).toMatchObject({
+      stripePaymentLinkId: provider.generated[0],
+      reason: 'payment_mode_changed_during_checkout',
+      error: 'DB clear failed',
+    });
   });
 
   it('lists jobs scoped to the customer', async () => {

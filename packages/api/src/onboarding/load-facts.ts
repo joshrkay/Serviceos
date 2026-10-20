@@ -1,8 +1,9 @@
 import type { Pool } from 'pg';
 import type { SettingsRepository } from '../settings/settings';
-import type { OnboardingFacts } from './derive-status';
+import type { DraftProposalsFact, OnboardingFacts } from './derive-status';
 import { currentTenantContext } from '../middleware/tenant-context';
 import { toPhoneLineView, type TwilioIntegrationRow } from './phone-line';
+import { classifyProvisioningFailure } from './provisioning-failure';
 import { effectiveBufferMinutes } from '../scheduling/booking-availability';
 
 const VALID_SUBSCRIPTION_STATUSES = new Set(['trialing', 'active', 'past_due', 'canceled', 'incomplete']);
@@ -85,16 +86,21 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
   // Execution state of an approved draft: the status of each proposal it lists.
   // One extra query, and only once the draft is approved, so the polled status
   // endpoint stays cheap for every tenant that is still choosing (or has no draft).
-  let draftProposals: { expected: number; statuses: string[] } | undefined;
+  // `approved_at` rides beside the status so the undo-window hints (undoable,
+  // recovery) can be derived; neither ever leaves the server raw.
+  let draftProposals: DraftProposalsFact | undefined;
   if (draftRow?.status === 'approved' && draftRow.expected > 0) {
-    const proposalsRes = await db.query<{ status: string }>(
-      `SELECT p.status FROM proposals p
+    const proposalsRes = await db.query<{ status: string; approved_at: Date | null }>(
+      `SELECT p.status, p.approved_at FROM proposals p
          WHERE p.tenant_id=$1
            AND p.id IN (SELECT jsonb_array_elements_text(d.proposal_ids)::uuid
                           FROM onboarding_drafts d WHERE d.tenant_id=$1)`,
       [tenantId]
     );
-    draftProposals = { expected: draftRow.expected, statuses: proposalsRes.rows.map((r) => r.status) };
+    draftProposals = {
+      expected: draftRow.expected,
+      members: proposalsRes.rows.map((r) => ({ status: r.status, approvedAt: r.approved_at })),
+    };
   }
 
   const tenant = tenantRes.rows[0];
@@ -102,7 +108,8 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
   const activePackCount = packsRes.rows[0]?.n ?? 0;
   const settingsPacks = settings?.activeVerticalPacks?.length ?? 0;
 
-  const twilioLine = toPhoneLineView(integRes.rows[0]);
+  const twilioRow = integRes.rows[0];
+  const twilioLine = toPhoneLineView(twilioRow);
   return {
     tenantId,
     tenantExists: !!tenant,
@@ -133,6 +140,8 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
     twilioPhoneNumber: twilioLine.phoneNumber,
     twilioLineState: integRes.rows[0] ? twilioLine.state : null,
     twilioPendingNumber: twilioLine.pendingNumber,
+    // The status carries the code, never the recorded text.
+    twilioFailureCode: twilioRow?.status === 'failed' ? classifyProvisioningFailure(twilioRow.last_error) : null,
     subscription: {
       stripeSubscriptionId: tenant?.stripe_subscription_id ?? null,
       status: normalizeSubscriptionStatus(tenant?.subscription_status),

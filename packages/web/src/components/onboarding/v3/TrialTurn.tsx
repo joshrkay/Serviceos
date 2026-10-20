@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useRivetLine } from '../../../hooks/useRivetVoice';
 import { useApiClient } from '../../../lib/apiClient';
 import { Button, OptionCard, Spinner } from '../../ui';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
@@ -13,11 +14,14 @@ export interface TrialTurnProps {
 
 type Plans = { state: 'loading' } | { state: 'ready'; plans: BillingPlan[] } | { state: 'unavailable'; message: string };
 
+const TRIAL_LINE = 'Last thing before your number: start your free trial.';
+
 /**
  * Start the free trial: the real plans, one tap to the payment page. The trial
  * is how the number gets paid for, so there is no way around this turn.
  */
 export function TrialTurn({ notice, onCheckoutRequested }: TrialTurnProps) {
+  useRivetLine('trial', TRIAL_LINE);
   const apiFetch = useApiClient();
   const [plans, setPlans] = useState<Plans>({ state: 'loading' });
   // Bumped by "Try again" to ask for the plans a second time.
@@ -89,7 +93,7 @@ export function TrialTurn({ notice, onCheckoutRequested }: TrialTurnProps) {
   return (
     <>
       <SpeakerLine />
-      <RivetHeading>Last thing before your number: start your free trial.</RivetHeading>
+      <RivetHeading>{TRIAL_LINE}</RivetHeading>
       <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">
         It&apos;s free for 14 days, and you can cancel any time in Settings.
       </p>

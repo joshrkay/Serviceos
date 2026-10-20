@@ -44,6 +44,7 @@ import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import { createVoiceRouter } from '../../src/routes/voice';
 import { PgVoiceRepository } from '../../src/voice/pg-voice';
 import { recordInboundCall } from '../../src/voice/voice-service';
+import { buildVoicemailStorageKey } from '../../src/telephony/voicemail-status-route';
 import { PgQueue } from '../../src/queues/pg-queue';
 import type { QueueMessage } from '../../src/queues/queue';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
@@ -247,7 +248,7 @@ describe('Postgres integration — #1231 transcription retry keeps voicemail tex
       recordingUrl: `https://api.twilio.com/2010-04-01/Accounts/AC1231/Recordings/RE${callSid}`,
       durationSeconds: 14,
       storageBucket: 'serviceos-recordings',
-      storageKey: `${tenant.tenantId}/${callSid}-voicemail.mp3`,
+      storageKey: buildVoicemailStorageKey(tenant.tenantId, callSid, `RE${callSid}`),
       sizeBytes: 4096,
       contentType: 'audio/mpeg',
       createdBy: 'voicemail_webhook',
