@@ -19,6 +19,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, closeSharedTestDb, createTestTenant, type TestTenant } from './shared';
 import { PgCallTranscriptTurnRepository } from '../../src/voice/pg-call-transcript-turn';
+import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 
 interface TurnTimingRow {
   turn_index: number;
@@ -279,6 +280,77 @@ describe('Postgres integration — call_transcript_turns reply timing (U1)', () 
       ).toBe(0);
       const [row] = await readTiming(tenant.tenantId, callSid);
       expect(row.first_audio_at).toBeNull();
+    });
+  });
+
+  describe('through VoiceSessionStore with the real repository', () => {
+    it('a realtime caller turn then the reply stamp lands every column on the row', async () => {
+      const store = new VoiceSessionStore({ startInterval: false, callTranscriptTurnRepo: repo });
+      try {
+        const callSid = newCallSid();
+        const session = store.create(tenant.tenantId, 'telephony', { callSid });
+        const lastWordAt = new Date('2026-10-20T11:00:00.000Z');
+        const sttFinalAt = new Date('2026-10-20T11:00:01.000Z');
+        const firstAudioAt = new Date('2026-10-20T11:00:02.250Z');
+
+        store.appendTranscript(session.id, { speaker: 'agent', text: 'Thanks for calling.' });
+        store.beginCallerTurnTiming(session.id, { transport: 'realtime', sttFinalAt, lastWordAt });
+        store.appendTranscript(session.id, { speaker: 'caller', text: 'my AC is broken' });
+        const anchor = session.replyTiming!;
+        expect(anchor.turnIndex).toBe(1);
+
+        // Stamped straight away: the update chains behind the (possibly pending) insert.
+        await store.markReplyAudio(session.id, {
+          turnIndex: anchor.turnIndex,
+          firstAudioEnqueuedAt: new Date('2026-10-20T11:00:02.100Z'),
+        });
+        await store.markReplyAudio(session.id, {
+          turnIndex: anchor.turnIndex,
+          firstAudioAt,
+          firstAudibleAt: firstAudioAt,
+          replyGapMs: firstAudioAt.getTime() - lastWordAt.getTime(),
+        });
+
+        const rows = await readTiming(tenant.tenantId, callSid);
+        expect(rows.map((r) => r.turn_index)).toEqual([0, 1]);
+        expect(rows[0].transport).toBeNull();
+        expect(rows[1].transport).toBe('realtime');
+        expect(rows[1].last_word_at?.toISOString()).toBe(lastWordAt.toISOString());
+        expect(rows[1].stt_final_at?.toISOString()).toBe(sttFinalAt.toISOString());
+        expect(rows[1].endpoint_delay_ms).toBe(1000);
+        expect(rows[1].first_audio_enqueued_at?.toISOString()).toBe('2026-10-20T11:00:02.100Z');
+        expect(rows[1].first_audio_at?.toISOString()).toBe(firstAudioAt.toISOString());
+        expect(rows[1].first_audible_at?.toISOString()).toBe(firstAudioAt.toISOString());
+        expect(rows[1].reply_gap_ms).toBe(2250);
+        expect(rows[1].reply_unacked_reason).toBeNull();
+      } finally {
+        store.dispose();
+      }
+    });
+
+    it('a Gather caller turn records transport and stt_final_at only, never a gap', async () => {
+      const store = new VoiceSessionStore({ startInterval: false, callTranscriptTurnRepo: repo });
+      try {
+        const callSid = newCallSid();
+        const session = store.create(tenant.tenantId, 'telephony', { callSid });
+        const sttFinalAt = new Date('2026-10-20T12:00:00.000Z');
+
+        store.beginCallerTurnTiming(session.id, { transport: 'gather', sttFinalAt });
+        store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
+        // Let the fire-and-forget insert settle through the retained promise.
+        await session.pendingTurnPersist.get(0);
+
+        const [row] = await readTiming(tenant.tenantId, callSid);
+        expect(row.transport).toBe('gather');
+        expect(row.stt_final_at?.toISOString()).toBe(sttFinalAt.toISOString());
+        expect(row.last_word_at).toBeNull();
+        expect(row.endpoint_delay_ms).toBeNull();
+        expect(row.first_audio_at).toBeNull();
+        expect(row.first_audible_at).toBeNull();
+        expect(row.reply_gap_ms).toBeNull();
+      } finally {
+        store.dispose();
+      }
     });
   });
 });

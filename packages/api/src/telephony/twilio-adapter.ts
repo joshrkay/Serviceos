@@ -2338,6 +2338,12 @@ export class TwilioGatherAdapter {
     //    call as caller speech and classify/summarize it as a spoken
     //    no-intent call instead of a silent one.
     if (opts.speechResult.trim().length > 0) {
+      // U1 — Gather has no stream clock: only the webhook receipt is known, so
+      // the row records transport + stt_final_at and never a reply gap.
+      this.deps.store.beginCallerTurnTiming(opts.sessionId, {
+        transport: 'gather',
+        sttFinalAt: new Date(),
+      });
       this.deps.store.appendTranscript(opts.sessionId, {
         speaker: 'caller',
         // #850 — see the sibling append above.
