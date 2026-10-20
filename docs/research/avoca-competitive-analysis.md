@@ -92,11 +92,11 @@ underserved by Avoca's enterprise pricing.
 | Emergency escalation | ✅ escalate-to-human skill + escalation context | `ai/skills/escalate-to-human.ts`, `ai/agents/customer-calling/escalation-*` | core (no-heat / burst-pipe calls) | — |
 | "CRM Synced" | ✅ n/a — Serviceos *is* the CRM | — | — | — |
 | Simple Scheduler (self-service booking) | ✅ public booking page + portal booking | `routes/public-booking.ts`, `web/src/components/customer/BookingPage.tsx` | core | — |
-| Speed-to-lead "<15s" | ✅ partial — auto-SMS, opt-in, web/marketplace/portal leads only | `leads/speed-to-lead.ts` | high | — |
+| Speed-to-lead "<15s" | ❌ **built but not wired** — `sendSpeedToLeadResponse` is called only from tests; `createLead` just pushes the owner; setting defaults off and the settings PUT strips it | `leads/speed-to-lead.ts:109`, `leads/lead-service.ts`, `settings/pg-settings.ts:164` | high | #1738 |
 | Google LSA direct integration | ❌ no code | — | **high** — LSA is a primary paid lead source for small HVAC/plumbing | #1738 |
 | Outbound multi-channel SMS + call drips | ❌ one-shot segmented **email** campaigns only | `marketing/campaign.ts` | **high** — seasonal tune-ups, maintenance-plan renewals, unsold estimates fill slow weeks | #1735 |
 | Web Chat on the customer's site | ❌ `webchat` channel value only; no widget or public route | `db/schema.ts:1800`, `voice/voice-session.ts:9` | medium | #1737 |
-| Live call scoring + CSR coaching | ❌ `ai/voice-quality/` is an **offline** eval harness; no live-call scoring or coaching UI | `ai/voice-quality/` | medium — few human CSRs to coach; the value is the owner reviewing/correcting **AI** calls (the flywheel) | #1736 |
+| Live call scoring + CSR coaching | 🟡 **sampled** live grading exists (#1602: nightly, 20% of eligible inbound calls, ≤20/day/tenant, LLM-judged subset of rubric); no owner review/correction UI, no corrections→corpus loop, no coaching | `voice/quality/grade-voice-session.ts`, `workers/voice-quality-grading-worker.ts` | medium — few human CSRs to coach; the value is the owner reviewing/correcting **AI** calls (the flywheel) | #1736 |
 | ServiceTitan (Certified App) / Housecall Pro / FieldRoutes | ❌ ServiceTitan appears only in code comments | — | low — ServiceTitan skews larger operators; Serviceos is the FSM for this segment (HCP/Jobber matter as migration sources) | §8 Tier 2 #4 |
 | Human-in-the-loop / Responder | ⚠️ warm transfer exists in code; Avoca's backstop is a managed human team (a service, not software) | voice-parity Feature 7 | medium — transfer to owner's cell is the realistic backstop | — |
 
@@ -104,14 +104,27 @@ underserved by Avoca's enterprise pricing.
 AI-call review/correction loop (#1736, owner-facing, not CSR coaching) → web chat (#1737).
 
 **Changes vs. the June analysis:**
-- Speed-to-lead is no longer "stubbed" — the SMS first-response shipped (Story 15.2).
-  The outbound **dialer + drip** half of Nurture is still missing (#1735).
+- Speed-to-lead: the SMS first-response module exists (Story 15.2) but is **not called
+  from any production path** and cannot be enabled via settings — still effectively absent.
+  The outbound **dialer + drip** half of Nurture is also missing (#1735).
 - Human backstop is better than "on-call dial only": warm transfer with a context SMS
   before connect (see `voice-feature-parity-tracker.md` row 11). No managed CSR queue.
 - Live homepage now says **"1,000+"** service businesses (June: 800+) and lists **13
   verticals** (adds energy/fuel delivery, junk removal, movers, dealership auto repair).
 - Homepage result stats rendered as "0%" / "0x" in the fetch — likely client-side
   counters that never loaded; not usable as figures.
+
+### Workflow quality review (2026-10-19, `origin/main` @ `ff2308c7c`)
+
+Read-only code review of the workflows marked ✅ above, judged against Avoca's claims for the
+small-shop segment. Code reading only — nothing was run.
+
+| Workflow | Verdict vs. Avoca | Main reasons |
+|---|---|---|
+| Inbound call → booking | **Weaker** | Default is capture → owner approves (`autonomous_booking_enabled` defaults FALSE, `db/schema.ts:5848`). Autonomous lane also needs an existing job, a verified repeat caller and English. Holds check only the **customer's** conflicts, never tech availability (`ai/scheduling/place-hold.ts:327-333`), so overlapping holds are possible for a 1–3 tech shop. Layer-2 latency gate only runs on `release/*` pushes, and none exist. Strengths: honest spoken outcomes, conservative 18-gate lane, real-PG booking + tech double-assign proofs, production latency SLO. |
+| Emergency + escalation | **Stronger** on detection/life-safety, **weaker** on a live human | Keyword layer before the LLM + LLM intents, E1/E2/E3 tiers, Spanish, 911/evacuate script, E1 never books, multi-channel owner alert. Gaps: phrasings like "my pipe burst", "AC not working", "water heater leaking" rely on the LLM. Vulnerability/seasonal rules are not on in production. Page-retry ladder only for keyword-detected E2s. Re-dial after no-answer drops context. E1 script is unreviewed placeholder copy. No managed human backstop. |
+| SMS + speed-to-lead | **Weaker** | Inbound capture, STOP/DNC/consent and dropped-call recovery are solid with real-PG tests. But no autonomous SMS replies (owner-drafted only), speed-to-lead is unwired, no plain missed-call text-back, delivery status callbacks ignored, no pre-10DLC fallback. **Bug candidate:** plain START handler (`app.ts:3846`, `overwrite: true`, keywords START/UNSTOP/YES) appears to replace the YES opt-in + owner-approval composite registered earlier (~`app.ts:1960`). That would break owner "YES" approvals by SMS. |
+| Self-service booking | **Weaker** | Safe: timezone refusal, server re-validation, advisory-lock race protection, real-PG + e2e tests. But every booking is pending owner approval. Public page treats the whole shop as one calendar (no tech) and shows ≤6 slots. ZIP allowlist only. `frame-ancestors 'none'` blocks embedding. Errors collapse to "Something went wrong". |
 
 **Still unknown:** Avoca's actual runtime behavior (latency, call handling, scoring
 quality) — would need recorded test calls to their demo line.
@@ -228,11 +241,11 @@ ships the closed correction loop first and gets call volume.
 | Customer web portal (estimate approval, pay, booking, feedback) | ✅ wired | mobile-enforced (≥44px, 320px) |
 | Async workers + webhook base | ✅ wired | pg-boss; dedup'd webhook handler |
 | Google Calendar | 🟡 one-way (system→cal) | reverse sync stubbed |
-| **Outbound calling / callback AI** | 🔴 stubbed | `callback` proposal is capture-class, operator-initiated; **no autonomous dialer** · *2026-10-19: still no dialer/drip (#1735); speed-to-lead SMS shipped — §1b* |
+| **Outbound calling / callback AI** | 🔴 stubbed | `callback` proposal is capture-class, operator-initiated; **no autonomous dialer** · *2026-10-19: still no dialer/drip (#1735); speed-to-lead module exists but is unwired — §1b* |
 | **Voicemail-to-action** | 🔴 dormant | recorded, not converted to proposal |
 | **QuickBooks/Xero sync** | 🔴 dormant | provisioning done; sync gated off |
 | **Third-party FSM/CRM (ServiceTitan/HCP/Jobber)** | 🔴 none | internal CRM only |
-| **Conversation coaching / QA scoring** | 🔴 stubbed | FSM + voice-quality graders exist; business logic incomplete · *2026-10-19: still offline-only (#1736)* |
+| **Conversation coaching / QA scoring** | 🔴 stubbed | FSM + voice-quality graders exist; business logic incomplete · *2026-10-19: sampled live grading exists (#1602); no owner review/correction loop (#1736)* |
 | **Human live-agent backstop** | 🟡 partial | *2026-10-19:* warm transfer + context SMS (voice-parity Feature 7); no managed CSR queue |
 
 ---
@@ -246,8 +259,8 @@ ships the closed correction loop first and gets call volume.
 | **Pricing/quote accuracy** | knowledge-base price list (no hard grounding claim) | ✅ **hard catalog grounding, never guesses** | **Serviceos advantage** |
 | **Human-approval / audit gate** | auto-books autonomously | ✅ **never-auto-execute, confidence-gated, audited, 5s undo** | **Serviceos advantage (trust/compliance)** |
 | Ambiguity handling | implied | ✅ **explicit entity resolver → one-tap clarification** | **Serviceos advantage** |
-| Outbound / speed-to-lead / nurture | ✅ Nurture, <15s, drip | 🟡 speed-to-lead SMS shipped; no dialer/drip (#1735) | **Avoca** |
-| QA / call scoring / coaching | ✅ Coach (AI+human, rubric) | 🔴 graders exist, not productized (#1736) | **Avoca (you have the parts)** |
+| Outbound / speed-to-lead / nurture | ✅ Nurture, <15s, drip | 🔴 speed-to-lead module unwired; no dialer/drip (#1735) | **Avoca** |
+| QA / call scoring / coaching | ✅ Coach (AI+human, rubric) | 🟡 sampled live grading (#1602); no owner review/correction (#1736) | **Avoca (you have the parts)** |
 | **Closed-loop correction flywheel** | ✅ corrections feed back | 🔴 transcripts captured, no loop | **Avoca — strategic gap** |
 | Human backstop on hard calls | ✅ managed CSR team | 🟡 warm transfer w/ context; no managed team | **Avoca** |
 | Multilingual / code-switching | ✅ | ⚪ unverified | **Avoca (assume gap)** |

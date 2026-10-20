@@ -82,9 +82,9 @@ Legend: ✅ at parity · 🟡 partial / unverified · 🔴 gap. "Corpus" = eval 
 | 14 | **Multilingual beyond Spanish / code-switch** | only en/es | 🔴 | — | **🔴 gap** |
 | 15 | **Emergency vs. routine triage** (Avoca's HVAC-native claim) | `emergency-page-retry`, `emergency_dispatch` intent | 🔴 no triage corpus | 9,11 | **🔴 gap** |
 | 16 | **Sub-2-second answer latency** | **`gradeCallerExperience`: TTFA P95 ≤800ms + lookup→speak P95 ≤2s**, aggregated cross-script in `buildLayer2Report` with a launch gate; rendered in PR-comment markdown | L2 corpus | 3 | **✅ benchmark exists (stricter than Avoca <2s); ensure L2 runs in CI** |
-| 17 | **Outbound voice (Nurture / Speed-to-Lead)** | only `call_me_back` (reactive); no proactive dialer/drip · speed-to-lead **SMS** shipped (`leads/speed-to-lead.ts`) | 🔴 | — | **🔴 gap — #1735** |
+| 17 | **Outbound voice (Nurture / Speed-to-Lead)** | only `call_me_back` (reactive); no proactive dialer/drip · speed-to-lead SMS module exists (`leads/speed-to-lead.ts`) but is **unwired** (test-only caller) | 🔴 | — | **🔴 gap — #1735** |
 | 18 | **Objection handling on calls** | not modeled as a graded skill | 🔴 | 12 | **🔴 gap** |
-| 19 | **CSR call scoring / coaching** (Avoca Coach) | graders grade the **AI**, not productized for **human** CSR calls; no live-call scoring | grader infra ✅ (reusable) | reuse 9–12 | **🔴 product gap — #1736** (small-shop framing: owner reviews/corrects AI calls) |
+| 19 | **CSR call scoring / coaching** (Avoca Coach) | graders grade the **AI**, not productized for **human** CSR calls; **sampled** live grading exists (#1602, `voice/quality/grade-voice-session.ts`) but no owner review/correction loop | grader infra ✅ (reusable) | reuse 9–12 | **🔴 product gap — #1736** (small-shop framing: owner reviews/corrects AI calls) |
 | 20 | **FSM write-back accuracy** (ServiceTitan/HCP) | internal CRM only; no FSM integration | 🔴 | 10 | **🔴 gap (see analysis §8)** |
 
 **Non-voice gaps from the 2026-10-19 refresh** (tracked outside this matrix; see
