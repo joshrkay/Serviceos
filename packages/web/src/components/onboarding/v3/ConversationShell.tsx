@@ -358,7 +358,7 @@ function Conversation() {
         <ReadyScreen
           draft={draft}
           onMakeItMine={makeItMine}
-          onKeepAsIs={() => goTo({ screen: 'readback' })}
+          onKeepAsIs={keepAsIs}
           onChangeMetro={(metro) => void changeCity(metro)}
           changingMetro={changingMetro}
           error={attempt === 'metro' ? error : null}

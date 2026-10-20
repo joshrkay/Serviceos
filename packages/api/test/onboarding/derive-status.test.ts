@@ -488,6 +488,9 @@ describe('deriveOnboardingStatus — the phone step\'s failure code (S5b-1)', ()
   it('no other step gains a failureCode', () => {
     const r = deriveOnboardingStatus(billingDoneFacts({ twilioStatus: 'failed', twilioFailureCode: 'provider_error' }));
     for (const s of r.steps.filter((x) => x.id !== 'phone')) expect(s).not.toHaveProperty('failureCode');
+  });
+});
+
 /**
  * S4 (U9) — the two derived hints on the status draft block. Both are computed
  * on a FIXED clock (deriveOnboardingStatus's second argument), one second ahead
