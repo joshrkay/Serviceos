@@ -1572,6 +1572,20 @@ export class InMemorySettingsRepository implements SettingsRepository {
     return { ...updated };
   }
 
+  /**
+   * S5a-6 (U8) — the in-memory twin of the reconciliation sweep's Postgres
+   * enumerator (`listCollectOnSiteTenantIds`): the tenants whose STORED
+   * choice is `mode`, sorted by tenant id. An unset key is not listed under
+   * either mode (D-039/D-040: unset means the `pay_link` default, and a
+   * tenant that never chose holds nothing for the sweep to retire).
+   */
+  async listTenantIdsByPaymentCollectionMode(mode: PaymentCollectionMode): Promise<string[]> {
+    return Array.from(this.settings.values())
+      .filter((s) => s.paymentCollectionMode === mode)
+      .map((s) => s.tenantId)
+      .sort();
+  }
+
   async incrementEstimateNumber(tenantId: string): Promise<number> {
     const s = this.settings.get(tenantId);
     if (!s) throw new ValidationError('Settings not found');
