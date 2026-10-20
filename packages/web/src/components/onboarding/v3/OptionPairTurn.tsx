@@ -1,7 +1,10 @@
 import { useContext, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { Mic } from 'lucide-react';
 import type { AssembledOnboardingChoice, OnboardingOptionKey, StagedOnboardingChoice } from '@ai-service-os/shared';
-import { RivetVoiceContext, useRivetLine } from '../../../hooks/useRivetVoice';
+import { RivetVoiceContext, useRivetLine, useRivetListening } from '../../../hooks/useRivetVoice';
 import { Button, OptionCard } from '../../ui';
+import { cn } from '../../ui/utils';
+import { withoutListeningPromise } from './listening-copy';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
 import { spokenLines } from './turns';
 import { TypeInsteadFields } from './TypeInsteadFields';
@@ -25,8 +28,8 @@ export interface OptionPairTurnProps {
   /** Owner-facing, one line each. */
   error: string | null;
   notice: string | null;
-  /** "Next": the owner picked one of the two. */
-  onPick: (option: OnboardingOptionKey) => void;
+  /** "Next": the owner picked one of the two (or said which, out loud: then at once, with `via` 'voice'). */
+  onPick: (option: OnboardingOptionKey, via?: 'voice') => void;
   /** "Type instead", on the two turns that have it. Absent elsewhere, and then there is no such control. */
   onTypeInstead?: (override: TypedOverride) => void;
   /** Opened from the read-back: the button reads "Save" and the shell returns there. */
@@ -37,7 +40,13 @@ export interface OptionPairTurnProps {
  * One this-or-that choice. The owner selects a card, then taps Next, so a
  * mis-tap is recoverable. Nothing is saved until the shell stages the answer.
  * Inside the shell Rivet says the question when the turn opens, and tapping a
- * card plays what Rivet would say ("Tap one to hear it").
+ * card plays what Rivet would say ("Tap one to hear it"). When Rivet can
+ * listen, the turn listens too: the mic is live, what the owner is saying fills
+ * the transcript card, and "first", "the second one" or words from a label pick
+ * that card at once with `Heard: "…"` under it (the read-back is where it is
+ * changed). A miss says what was heard and how to answer; quiet for 6 s stops
+ * the mic with "Take your time". Where nothing listens there is no mic and no
+ * banner: the cards and Next are the turn.
  */
 export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, onTypeInstead, editing }: OptionPairTurnProps) {
   const kind = onTypeInstead ? typedKind(choice.settingKey) : null;
@@ -49,8 +58,36 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
   const voice = useContext(RivetVoiceContext);
   const lines = useMemo(() => spokenLines(choice), [choice]);
   useRivetLine(choice.settingKey, choice.question, lines);
+  const [heard, setHeard] = useState<{ key: OnboardingOptionKey; text: string } | null>(null);
+  const [missed, setMissed] = useState<{ text: string; count: number } | null>(null);
+  const [resumedAfterQuiet, setResumedAfterQuiet] = useState(false);
+  // An answer was sent from this turn: stop listening until it fails (the shell moves on when it saves),
+  // so the moment between "saved" and the next turn never opens another socket.
+  const [sent, setSent] = useState(false);
+  useEffect(() => {
+    if (!busy && (error || notice)) setSent(false);
+  }, [busy, error, notice]);
+  const listen = useRivetListening(voice, {
+    turn: choice.settingKey,
+    options: choice.options,
+    enabled: !busy && !typing && !sent,
+    onMatch: (key, text) => {
+      setSelected(key);
+      setHeard({ key, text });
+      setMissed(null);
+      setSent(true);
+      onPick(key, 'voice');
+    },
+    onNoMatch: (text) => {
+      setHeard(null);
+      setMissed((m) => ({ text, count: (m?.count ?? 0) + 1 }));
+    },
+  });
+  const supportLine = listen.available ? choice.supportLine : withoutListeningPromise(choice.supportLine);
+
   const pick = (key: OnboardingOptionKey) => {
     setSelected(key);
+    if (heard && heard.key !== key) setHeard(null);
     const line = choice.options.find((o) => o.key === key)?.rivetLine;
     if (voice && line) void voice.speak(line, { turn: choice.settingKey, with: lines });
   };
@@ -70,7 +107,21 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
     // The greeting's options are what Rivet says, so the line would repeat the label under it.
     rivetLine: o.rivetLine === o.label ? undefined : o.rivetLine,
     mostShops: o.key === choice.mostShops,
+    heard: heard?.key === o.key ? heard.text : undefined,
   }));
+
+  const showsQuiet = listen.quiet && !resumedAfterQuiet;
+  const transcriptLine = listen.partial
+    ? listen.partial
+    : missed
+      ? `I heard “${missed.text}”. Tap one, or say first or second.${missed.count >= 2 ? ' For example, say “first”.' : ''}`
+      : showsQuiet
+        ? "Take your time. Tap the mic when you're ready."
+        : '';
+  const tapMic = () => {
+    if (listen.quiet) setResumedAfterQuiet(true);
+    listen.toggle();
+  };
 
   const changeTyped = (field: TypedField, value: string) => {
     setTyped((v) => ({ ...v, [field]: value }));
@@ -82,9 +133,13 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
     if (busy) return;
     if (typing && kind && onTypeInstead) {
       const result = typedAnswer(kind, typed);
-      if (result.override) onTypeInstead(result.override);
+      if (result.override) {
+        setSent(true);
+        onTypeInstead(result.override);
+      }
       else setTypedErrors(result.errors);
     } else if (selected) {
+      setSent(true);
       onPick(selected);
     }
   };
@@ -93,7 +148,7 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
     <form noValidate onSubmit={submit} className="flex flex-1 flex-col">
       <SpeakerLine />
       <RivetHeading ref={heading}>{choice.question}</RivetHeading>
-      {choice.supportLine ? <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">{choice.supportLine}</p> : null}
+      {supportLine ? <p className="mt-3 text-base leading-[1.45] text-secondary-foreground">{supportLine}</p> : null}
 
       {typing && kind ? (
         <TypeInsteadFields kind={kind} choice={choice} values={typed} errors={typedErrors} onChange={changeTyped} />
@@ -104,6 +159,47 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
       <div className="min-h-6 flex-1" />
 
       <div className="flex flex-col gap-2.5">
+        {listen.available && !typing ? (
+          <>
+            <p
+              data-testid="rivet-transcript"
+              role="status"
+              aria-live="polite"
+              className={cn(
+                'break-words text-center text-[15px] leading-[1.45]',
+                transcriptLine ? 'rounded-2xl border border-border bg-card px-4 py-3 text-foreground' : 'sr-only',
+              )}
+            >
+              {transcriptLine}
+            </p>
+            <div className="flex flex-col items-center gap-1.5">
+              <button
+                type="button"
+                aria-label="Answer out loud"
+                aria-pressed={listen.listening}
+                onClick={tapMic}
+                disabled={busy}
+                className={cn(
+                  'relative flex size-[76px] min-h-11 min-w-11 items-center justify-center rounded-full border-2 transition-colors',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-1 disabled:opacity-60',
+                  listen.listening ? 'border-success bg-success/10 text-success' : 'border-foreground/20 bg-card text-foreground',
+                )}
+              >
+                {listen.listening ? (
+                  <span
+                    data-halo
+                    aria-hidden="true"
+                    className="absolute inset-0 animate-ping rounded-full bg-success/20 motion-reduce:animate-none"
+                  />
+                ) : null}
+                <Mic aria-hidden="true" size={30} className="relative" />
+              </button>
+              <span className={cn('text-sm font-medium', listen.listening ? 'text-success' : 'text-muted-foreground')}>
+                {listen.listening ? 'Listening' : 'Tap the mic to answer out loud'}
+              </span>
+            </div>
+          </>
+        ) : null}
         {error ? (
           <p role="alert" className="text-center text-sm text-destructive">
             {error}

@@ -61,7 +61,9 @@ const placeFor = (target: TurnTarget): Place => (target.screen === 'turn' ? { sc
  * same frame (AfterApproval). Only an explicit re-run of setup opens the
  * sidebar shell. Rivet speaks each screen's line in the tenant's voice
  * (useRivetVoice): the taps that start the conversation unlock the audio, and
- * the next turn's lines are fetched while the current one plays.
+ * the next turn's lines are fetched while the current one plays. Rivet listens
+ * too: "Make it mine" asks for the microphone once for the pass, and a spoken
+ * "first" or "second" saves through the same stage call as a tap.
  */
 export function ConversationShell() {
   const [params] = useSearchParams();
@@ -177,6 +179,8 @@ function Conversation() {
   const makeItMine = () => {
     // Inside the tap, before anything is awaited: iOS lets the element play later only if it played here.
     voice.unlock('make_it_mine');
+    // Then the microphone, once for the whole pass (one permission prompt), still inside the tap.
+    voice.openMic();
     if (draft) goTo(placeFor(makeItMineTarget(draft)));
   };
 
@@ -196,8 +200,11 @@ function Conversation() {
     goTo({ screen: 'turn', key, editing: true });
   };
 
-  /** Stage the owner's answer; move on only when it is saved. A failure stays here and the turn shows why. */
-  const answer = async (turn: CoreTurn, choice: StagedOnboardingChoice) => {
+  /**
+   * Stage the owner's answer; move on only when it is saved. A failure stays here and the turn shows why.
+   * A spoken "first"/"second" comes through here too, as the same option a tap would stage.
+   */
+  const answer = async (turn: CoreTurn, choice: StagedOnboardingChoice, via?: 'voice') => {
     if (!draft || staging) return;
     setStaging(true);
     setAttempt(turn.settingKey);
@@ -206,7 +213,7 @@ function Conversation() {
     const tapped = 'option' in choice;
     trackFunnel('v3_choice_made', funnelContext, {
       choice_key: turn.settingKey,
-      answer_mode: tapped ? 'tap' : 'type',
+      answer_mode: via === 'voice' && tapped ? 'voice' : tapped ? 'tap' : 'type',
       option: tapped ? choice.option : 'override',
       is_most_shops: tapped && choice.option === turn.mostShops,
     });
@@ -294,6 +301,12 @@ function Conversation() {
           status={status}
           saving={saving}
           changeCount={draft?.proposalIds.length ?? 0}
+          draftVersion={draft?.version ?? 0}
+          onUndo={undoApproval}
+          onRetry={retrySave}
+          onReset={startOver}
+          recovering={recovering}
+          notice={attempt === 'after' ? notice : null}
           packId={draft?.packId ?? null}
           userId={userId}
         />
@@ -342,11 +355,10 @@ function Conversation() {
       )}
       {screen === 'answer_as' && <AnswerAsScreen onSubmit={startDraft} initial={answers ?? undefined} cellProblem={cellProblem} />}
       {screen === 'ready' && draft && (
-        <ReadyScreen draft={draft} onMakeItMine={makeItMine} onKeepAsIs={keepAsIs} />
         <ReadyScreen
           draft={draft}
           onMakeItMine={makeItMine}
-          onKeepAsIs={() => goTo({ screen: 'readback' })}
+          onKeepAsIs={keepAsIs}
           onChangeMetro={(metro) => void changeCity(metro)}
           changingMetro={changingMetro}
           error={attempt === 'metro' ? error : null}
@@ -363,7 +375,7 @@ function Conversation() {
           error={attempt === currentTurn.settingKey ? error : null}
           notice={attempt === currentTurn.settingKey || attempt === 'metro' ? notice : null}
           editing={editing}
-          onPick={(option) => void answer(currentTurn, { option })}
+          onPick={(option, via) => void answer(currentTurn, { option }, via)}
           onTypeInstead={typedKind(currentTurn.settingKey) ? (override) => void answer(currentTurn, { override }) : undefined}
         />
       )}
