@@ -45,6 +45,11 @@ function deps(overrides: Partial<DemoCallServiceDeps> = {}): DemoCallServiceDeps
     leaseTokenSecret: 'secret',
     publicApiUrl: 'https://api.example.test',
     alert: async () => undefined,
+    resetter: {
+      resetAndRelease: async () => {
+        throw new Error('no lease may be ended');
+      },
+    },
     fetchImpl: async () => {
       throw new Error('no request may be made');
     },
@@ -62,6 +67,7 @@ describe('startDemoCall — refusals that write nothing', () => {
     ['no lease token secret', { leaseTokenSecret: undefined }],
     ['no public API URL', { publicApiUrl: undefined }],
     ['no database', { pool: null }],
+    ['no lease resetter (no database or a closed config)', { resetter: null }],
   ] as Array<[string, Partial<DemoCallServiceDeps>]>)('%s → disabled, the database untouched', async (_l, o) => {
     const d = deps(o);
     const out = await startDemoCall(input, d);
