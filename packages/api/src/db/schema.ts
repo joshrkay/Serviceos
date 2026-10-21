@@ -8156,6 +8156,20 @@ export const MIGRATIONS = {
       ON service_locations (geocode_attempts, updated_at)
       WHERE geocode_status = 'pending' AND is_archived = false;
   `,
+
+  // Dispatch FR-2 phase 2 — skill tags, so the feasibility skill gate
+  // (scheduling/feasibility.ts) has something to compare. Until now the wired
+  // SkillMatcher was a stub and every check read 'none_configured'.
+  //   users.skills         — tags a technician holds (owner-edited)
+  //   jobs.required_skills — tags a job needs (owner/dispatcher-edited)
+  // Both hold canonical tags (@ai-service-os/shared skill-tags); empty = none. No
+  // CHECK: shape and count are enforced at the request boundary.
+  '328_skill_tags': `
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS skills TEXT[] NOT NULL DEFAULT '{}';
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS required_skills TEXT[] NOT NULL DEFAULT '{}';
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

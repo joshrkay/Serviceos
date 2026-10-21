@@ -18,7 +18,7 @@ import {
 } from '../../src/proposals/proposal';
 import { InMemoryAppointmentRepository, createAppointment } from '../../src/appointments/appointment';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { Role } from '../../src/auth/rbac';
@@ -80,7 +80,7 @@ async function buildSchedulingAppWithRole(role: Role) {
     workingHoursRepo: { findByTechnician: async () => [] } as any,
     unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
     travelTimeProvider: new HaversineFallbackProvider(),
-    skillMatcher: new StubSkillMatcher(),
+    skillMatcher: noSkillConstraints(),
   };
   const app = express();
   app.use(express.json());

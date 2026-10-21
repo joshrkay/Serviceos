@@ -404,6 +404,39 @@ describe('CreateAppointmentExecutionHandler — availability preconditions', () 
     );
     expect(result.success).toBe(true);
   });
+
+  it('rejects a technician missing a required skill (Dispatch FR-2), creating nothing', async () => {
+    const appointmentRepo = new InMemoryAppointmentRepository();
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const skillRepos = {
+      ...(availabilityRepos as object),
+      skillMatcher: {
+        requiredSkillsForJob: async () => ['gas_certified'],
+        skillsForTechnician: async () => ['hvac'],
+      },
+    } as never;
+    const handler = new CreateAppointmentExecutionHandler(
+      appointmentRepo, assignmentRepo, { enqueue: async () => {} },
+      undefined, undefined, skillRepos,
+    );
+    // Tuesday, inside the modeled hours — only the skill gap blocks it.
+    const result = await handler.execute(
+      makeProposal({
+        jobId: '11111111-1111-4111-8111-111111111111',
+        scheduledStart: '2026-04-21T14:00:00Z',
+        scheduledEnd: '2026-04-21T15:00:00Z',
+        timezone: 'UTC',
+        technicianId: techId,
+      }),
+      context,
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/gas_certified/);
+    const appts = await appointmentRepo.findByDateRange(
+      tenantId, new Date('2026-04-19T00:00:00Z'), new Date('2026-04-22T00:00:00Z'),
+    );
+    expect(appts).toHaveLength(0);
+  });
 });
 
 // Codex (PR #741): a payload without `timezone` must resolve the TENANT zone

@@ -55,6 +55,8 @@ function mapRow(row: Record<string, unknown>): Job {
     reviewRequestSentAt: row.review_request_sent_at
       ? new Date(row.review_request_sent_at as string)
       : undefined,
+    // Dispatch FR-2 phase 2 — migration 328, NOT NULL DEFAULT '{}'.
+    requiredSkills: Array.isArray(row.required_skills) ? (row.required_skills as string[]) : [],
     createdBy: row.created_by as string,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
@@ -354,6 +356,8 @@ export class PgJobRepository extends PgBaseRepository implements JobRepository {
         // Migration 214 — stamped by the review-request sweep once the 24h
         // review request has been handled (enqueued or suppressed).
         reviewRequestSentAt: 'review_request_sent_at',
+        // Dispatch FR-2 phase 2. Migration 328.
+        requiredSkills: 'required_skills',
         updatedAt: 'updated_at',
       };
 

@@ -628,6 +628,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['326_call_transcript_turns_reply_timing', 'bad452623ef0091588b40ccd2f8408de9935ee9ceb5d1fdae8386ef11acfe65b'],
   // Dispatch FR-2 phase 1 — service_locations geocode status/attempts/geocoded_at + 1 NOT VALID CHECK + partial index.
   ['327_service_locations_geocode_status', '8de7949551f27df07e557b82ce08edab52d318b0034fe46fce0230330c248c78'],
+  // Dispatch FR-2 phase 2 — users.skills + jobs.required_skills (TEXT[], no CHECK).
+  ['328_skill_tags', '7b58a5e30ea28966566996c314b41b155333fe55ce687e8463eabf92ad7261ea'],
 ];
 
 function hashMigration(value: string): string {

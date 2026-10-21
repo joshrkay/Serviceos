@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { checkFeasibility } from '../../src/scheduling/feasibility';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
-import { SkillMatcher, StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { RepoSkillMatcher, SkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
+import { InMemoryJobRepository } from '../../src/jobs/job';
+import { InMemoryUserRepository } from '../../src/users/user';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
 import { Appointment } from '../../src/appointments/appointment';
 
@@ -29,11 +32,11 @@ function deps(matcher: SkillMatcher): FeasibilityDependencies {
 }
 
 describe('checkFeasibility — skill match sub-check', () => {
-  it('produces no issue when StubSkillMatcher is wired (required=[])', async () => {
+  it('produces no issue when the job requires no skills (required=[])', async () => {
     const r = await checkFeasibility(
       { tenantId: 't-1', appointment: appt(), proposedTechnicianId: 'tech-1',
         proposedScheduledStart: appt().scheduledStart, proposedScheduledEnd: appt().scheduledEnd },
-      deps(new StubSkillMatcher()),
+      deps(noSkillConstraints()),
     );
     expect(r.warnings.some((w) => w.check === 'skill_match')).toBe(false);
   });
@@ -70,7 +73,7 @@ describe('checkFeasibility — skill-constraint outcome is explicit, never silen
     const r = await checkFeasibility(
       { tenantId: 't-1', appointment: appt(), proposedTechnicianId: 'tech-1',
         proposedScheduledStart: appt().scheduledStart, proposedScheduledEnd: appt().scheduledEnd },
-      deps(new StubSkillMatcher()),
+      deps(noSkillConstraints()),
     );
     // Feasible, yes — but the report says WHY the skill gate was clean.
     expect(r.feasible).toBe(true);
@@ -109,7 +112,7 @@ describe('checkFeasibility — skill-constraint outcome is explicit, never silen
     const r = await checkFeasibility(
       { tenantId: 't-1', appointment: appt(), proposedTechnicianId: undefined,
         proposedScheduledStart: appt().scheduledStart, proposedScheduledEnd: appt().scheduledEnd },
-      deps(new StubSkillMatcher()),
+      deps(noSkillConstraints()),
     );
     // #909/A11: no assigned technician is not a blocking conflict — but the
     // report must not claim the skill gate passed either.
@@ -138,5 +141,48 @@ describe('checkFeasibility — skill-constraint outcome is explicit, never silen
     expect(a.feasible).toBe(true);
     expect(b.skillConstraints).toBe('evaluated');
     expect(b.feasible).toBe(false);
+  });
+});
+
+/**
+ * Dispatch FR-2 phase 2 — the wired RepoSkillMatcher end to end: tags written
+ * on the job and the technician, in any casing, reach the blocking gate.
+ */
+describe('checkFeasibility — RepoSkillMatcher over job/user repositories', () => {
+  async function setup(required: string[], held: string[]) {
+    const jobRepo = new InMemoryJobRepository();
+    const userRepo = new InMemoryUserRepository();
+    await jobRepo.create({
+      id: 'j-1', tenantId: 't-1', customerId: 'c-1', locationId: 'l-1', jobNumber: 'J-1',
+      summary: 'Furnace', status: 'new', priority: 'normal', requiredSkills: required,
+      createdBy: 'u-1', createdAt: new Date(), updatedAt: new Date(),
+    } as any);
+    await userRepo.create({
+      id: 'tech-1', tenantId: 't-1', email: 't@example.com', role: 'technician', skills: held,
+    } as any);
+    return deps(new RepoSkillMatcher(jobRepo, userRepo));
+  }
+  const input = () => ({
+    tenantId: 't-1', appointment: appt(), proposedTechnicianId: 'tech-1',
+    proposedScheduledStart: appt().scheduledStart, proposedScheduledEnd: appt().scheduledEnd,
+  });
+
+  it('blocks a technician who lacks a tag the job requires', async () => {
+    const r = await checkFeasibility(input(), await setup(['gas_certified', 'hvac'], ['hvac']));
+    expect(r.feasible).toBe(false);
+    expect(r.skillConstraints).toBe('evaluated');
+    expect((r.blocking.find((w) => w.check === 'skill_match')?.metadata as any).missingSkills)
+      .toEqual(['gas_certified']);
+  });
+
+  it('passes when the technician holds every required tag, matching on canonical form', async () => {
+    const r = await checkFeasibility(input(), await setup(['Gas Certified'], ['gas_certified', 'hvac']));
+    expect(r.feasible).toBe(true);
+    expect(r.skillConstraints).toBe('evaluated');
+  });
+
+  it("reports 'none_configured' for a job with no required tags", async () => {
+    const r = await checkFeasibility(input(), await setup([], ['hvac']));
+    expect(r.skillConstraints).toBe('none_configured');
   });
 });
