@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   MAX_SUGGESTION_CANDIDATES,
+  overlapMinutes,
   TechnicianSuggestion,
   rankSuggestions,
   suggestTechnicians,
@@ -15,7 +16,7 @@ import { User } from '../../src/users/user';
 
 const s = (over: Partial<TechnicianSuggestion>): TechnicianSuggestion => ({
   technicianId: 't', name: 'T', feasible: true, reasons: [], warningCount: 0,
-  travelFromPrevSeconds: null, travelEstimateSource: null, isCurrent: false,
+  travelFromPrevSeconds: null, travelEstimateSource: null, isCurrent: false, overlaps: [],
   ...over,
 });
 
@@ -90,6 +91,16 @@ describe('technicianDisplayName', () => {
   });
 });
 
+describe('overlapMinutes', () => {
+  const at = (h: number, m = 0) => new Date(Date.UTC(2026, 4, 17, h, m));
+  it('counts shared minutes, zero when the windows only touch or are apart', () => {
+    expect(overlapMinutes({ start: at(10), end: at(11) }, { start: at(10, 30), end: at(12) })).toBe(30);
+    expect(overlapMinutes({ start: at(10), end: at(11) }, { start: at(9), end: at(12) })).toBe(60);
+    expect(overlapMinutes({ start: at(10), end: at(11) }, { start: at(11), end: at(12) })).toBe(0);
+    expect(overlapMinutes({ start: at(10), end: at(11) }, { start: at(13), end: at(14) })).toBe(0);
+  });
+});
+
 describe('toSuggestion', () => {
   it('lists blocking reasons before warnings and carries the drive', () => {
     const result: FeasibilityResult = {
@@ -103,6 +114,7 @@ describe('toSuggestion', () => {
     expect(toSuggestion(user('t1'), result, true)).toEqual({
       technicianId: 't1', name: 't1', feasible: false, reasons: ['Overlaps', 'Tight drive'],
       warningCount: 1, travelFromPrevSeconds: 900, travelEstimateSource: 'google', isCurrent: true,
+      overlaps: [],
     });
   });
 });
@@ -121,8 +133,12 @@ describe('suggestTechnicians', () => {
     expect(out[1].reasons.join(' ')).toMatch(/hvac/);
   });
 
-  it('flags a tech already booked over the window as infeasible', async () => {
-    const other = appt({ id: 'a-other' });
+  it('flags a tech already booked over the window as infeasible, with the clashing times', async () => {
+    const other = appt({
+      id: 'a-other', jobId: 'j-other',
+      scheduledStart: new Date('2026-05-17T09:30:00Z'),
+      scheduledEnd: new Date('2026-05-17T10:30:00Z'),
+    });
     const out = await suggestTechnicians(
       deps({
         assignmentRepo: {
@@ -130,10 +146,16 @@ describe('suggestTechnicians', () => {
             id === 'busy' ? [{ appointmentId: 'a-other', technicianId: 'busy', isPrimary: true }] : [],
         } as any,
         appointmentRepo: { findById: async (_t: string, id: string) => (id === 'a-other' ? other : null) } as any,
+        jobRepo: { findById: async (_t: string, id: string) => (id === 'j-other' ? { summary: 'Boiler service' } : null) } as any,
       }),
       { tenantId: 't-1', appointment: appt(), candidates: [user('busy', { firstName: 'Al' }), user('free', { firstName: 'Bo' })] },
     );
     expect(out.map((r) => [r.technicianId, r.feasible])).toEqual([['free', true], ['busy', false]]);
+    expect(out[1].overlaps).toEqual([{
+      appointmentId: 'a-other', jobSummary: 'Boiler service',
+      scheduledStart: '2026-05-17T09:30:00.000Z', scheduledEnd: '2026-05-17T10:30:00.000Z', overlapMinutes: 30,
+    }]);
+    expect(out[0].overlaps).toEqual([]);
   });
 
   it('skips non-technicians and inactive members, and marks the current assignee', async () => {

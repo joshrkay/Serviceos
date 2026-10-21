@@ -1,5 +1,16 @@
 import React, { useCallback, useState } from 'react';
 import { apiFetch } from '../../utils/api-fetch';
+import { useTenantTimezone } from '../../hooks/useTenantTimezone';
+import { formatTimeInTenantTz } from '../../utils/formatInTenantTz';
+
+/** Mirrors `SuggestionOverlap` in api src/scheduling/suggest-technicians.ts. */
+export interface SuggestionOverlap {
+  appointmentId: string;
+  jobSummary: string | null;
+  scheduledStart: string;
+  scheduledEnd: string;
+  overlapMinutes: number;
+}
 
 /** Mirrors `TechnicianSuggestion` in api src/scheduling/suggest-technicians.ts. */
 export interface TechnicianSuggestion {
@@ -11,6 +22,7 @@ export interface TechnicianSuggestion {
   travelFromPrevSeconds: number | null;
   travelEstimateSource: 'google' | 'haversine' | 'unknown' | null;
   isCurrent: boolean;
+  overlaps: SuggestionOverlap[];
 }
 
 /** How many ranked techs the card shows; the rest are a drag away. */
@@ -20,6 +32,40 @@ export function travelLabel(s: Pick<TechnicianSuggestion, 'travelFromPrevSeconds
   if (s.travelFromPrevSeconds === null) return 'No earlier visit to drive from';
   const minutes = Math.max(1, Math.round(s.travelFromPrevSeconds / 60));
   return `${minutes} min from previous visit`;
+}
+
+/** "Overlaps by 30 min: Boiler service, 1:30 PM–3:00 PM" in the tenant's timezone. */
+export function overlapLabel(o: SuggestionOverlap, timezone: string): string {
+  const window = `${formatTimeInTenantTz(o.scheduledStart, timezone)}–${formatTimeInTenantTz(o.scheduledEnd, timezone)}`;
+  return `Overlaps by ${o.overlapMinutes} min: ${o.jobSummary ?? 'another visit'}, ${window}`;
+}
+
+/** Blocked only because of clashing visits (not skills, hours or time off). */
+function bookedOnly(s: TechnicianSuggestion): boolean {
+  return !s.feasible && s.overlaps.length > 0 && s.reasons.length === s.overlaps.length;
+}
+
+function OverlapAlerts({ booked, timezone }: { booked: TechnicianSuggestion[]; timezone: string }) {
+  if (booked.length === 0) return null;
+  return (
+    <ul className="mt-1 flex flex-col gap-1" data-testid="suggest-techs-overlaps">
+      {booked.slice(0, SHOWN_SUGGESTIONS).map((s) => (
+        <li
+          key={s.technicianId}
+          role="alert"
+          className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+          data-testid="suggest-techs-overlap"
+        >
+          <span className="block text-sm font-medium break-words">{s.name} is booked</span>
+          {s.overlaps.map((o) => (
+            <span key={o.appointmentId} className="block break-words">
+              {overlapLabel(o, timezone)}
+            </span>
+          ))}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export interface SuggestedTechniciansProps {
@@ -41,6 +87,7 @@ type State =
  * board, which confirms it as a reassign_appointment proposal.
  */
 export function SuggestedTechnicians({ appointmentId, onPick }: SuggestedTechniciansProps) {
+  const timezone = useTenantTimezone();
   const [state, setState] = useState<State>({ kind: 'idle' });
 
   const load = useCallback(async () => {
@@ -89,37 +136,44 @@ export function SuggestedTechnicians({ appointmentId, onPick }: SuggestedTechnic
   }
 
   const feasible = state.suggestions.filter((s) => s.feasible && !s.isCurrent);
+  const booked = state.suggestions.filter((s) => bookedOnly(s) && !s.isCurrent);
   if (feasible.length === 0) {
-    const firstBlocked = state.suggestions.find((s) => !s.feasible);
+    const firstBlocked = state.suggestions.find((s) => !s.feasible && !bookedOnly(s));
     return (
-      <p className="mt-1 text-xs text-muted-foreground" data-testid="suggest-techs-none">
-        No technician can take this visit at its current time
-        {firstBlocked?.reasons[0] ? ` (${firstBlocked.name}: ${firstBlocked.reasons[0]})` : ''}.
-      </p>
+      <div className="mt-1">
+        <p className="text-xs text-muted-foreground" data-testid="suggest-techs-none">
+          No technician is free for this visit at its current time
+          {booked.length === 0 && firstBlocked?.reasons[0] ? ` (${firstBlocked.name}: ${firstBlocked.reasons[0]})` : ''}.
+        </p>
+        <OverlapAlerts booked={booked} timezone={timezone} />
+      </div>
     );
   }
 
   return (
-    <ul className="mt-1 flex flex-col gap-1" data-testid="suggest-techs-list">
-      {feasible.slice(0, SHOWN_SUGGESTIONS).map((s, i) => (
-        <li key={s.technicianId}>
-          <button
-            type="button"
-            className="flex min-h-11 w-full flex-col items-start justify-center rounded-md border border-border px-3 py-1 text-left hover:bg-muted"
-            onClick={() => onPick(appointmentId, s.technicianId, s.name)}
-            data-testid="suggest-techs-pick"
-          >
-            <span className="text-sm font-medium break-words">
-              {i === 0 ? 'Suggested: ' : ''}
-              {s.name}
-            </span>
-            <span className="text-xs text-muted-foreground">
-              {travelLabel(s)}
-              {s.warningCount > 0 ? ` · ${s.warningCount} warning${s.warningCount === 1 ? '' : 's'}` : ''}
-            </span>
-          </button>
-        </li>
-      ))}
-    </ul>
+    <div className="mt-1">
+      <ul className="flex flex-col gap-1" data-testid="suggest-techs-list">
+        {feasible.slice(0, SHOWN_SUGGESTIONS).map((s, i) => (
+          <li key={s.technicianId}>
+            <button
+              type="button"
+              className="flex min-h-11 w-full flex-col items-start justify-center rounded-md border border-border px-3 py-1 text-left hover:bg-muted"
+              onClick={() => onPick(appointmentId, s.technicianId, s.name)}
+              data-testid="suggest-techs-pick"
+            >
+              <span className="text-sm font-medium break-words">
+                {i === 0 ? 'Suggested: ' : ''}
+                {s.name}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {travelLabel(s)}
+                {s.warningCount > 0 ? ` · ${s.warningCount} warning${s.warningCount === 1 ? '' : 's'}` : ''}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      <OverlapAlerts booked={booked} timezone={timezone} />
+    </div>
   );
 }

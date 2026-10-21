@@ -4,6 +4,17 @@ import { isActiveMember } from '../users/tenant-member';
 import { checkFeasibility } from './feasibility';
 import type { FeasibilityDependencies, FeasibilityResult } from './feasibility-types';
 
+/** A visit already on the tech's calendar that clashes with this one. */
+export interface SuggestionOverlap {
+  appointmentId: string;
+  /** The clashing visit's job summary, when its job still exists. */
+  jobSummary: string | null;
+  scheduledStart: string;
+  scheduledEnd: string;
+  /** Minutes the two windows share. */
+  overlapMinutes: number;
+}
+
 /**
  * Dispatch FR-2 phase 3 — which technician should take this visit?
  *
@@ -31,6 +42,8 @@ export interface TechnicianSuggestion {
   travelEstimateSource: 'google' | 'haversine' | 'unknown' | null;
   /** True for the technician already assigned as primary. */
   isCurrent: boolean;
+  /** Clashing visits with their times, so the board can say when, not just that. */
+  overlaps: SuggestionOverlap[];
 }
 
 export function technicianDisplayName(user: Pick<User, 'firstName' | 'lastName' | 'email'>): string {
@@ -42,6 +55,7 @@ export function toSuggestion(
   user: Pick<User, 'id' | 'firstName' | 'lastName' | 'email'>,
   result: FeasibilityResult,
   isCurrent: boolean,
+  overlaps: SuggestionOverlap[] = [],
 ): TechnicianSuggestion {
   return {
     technicianId: user.id,
@@ -52,7 +66,42 @@ export function toSuggestion(
     travelFromPrevSeconds: result.travelTime?.fromPrevSeconds ?? null,
     travelEstimateSource: result.travelTime?.estimateSource ?? null,
     isCurrent,
+    overlaps,
   };
+}
+
+export function overlapMinutes(a: { start: Date; end: Date }, b: { start: Date; end: Date }): number {
+  const shared = Math.min(a.end.getTime(), b.end.getTime()) - Math.max(a.start.getTime(), b.start.getTime());
+  return Math.max(0, Math.round(shared / 60_000));
+}
+
+async function loadOverlaps(
+  deps: FeasibilityDependencies,
+  tenantId: string,
+  appointment: Appointment,
+  result: FeasibilityResult,
+): Promise<SuggestionOverlap[]> {
+  const ids = result.blocking
+    .filter((i) => i.check === 'overlap' && i.conflictingEntityId)
+    .map((i) => i.conflictingEntityId!);
+  const rows = await Promise.all(
+    ids.map(async (id) => {
+      const other = await deps.appointmentRepo.findById(tenantId, id);
+      if (!other) return null;
+      const job = other.jobId ? await deps.jobRepo.findById(tenantId, other.jobId) : null;
+      return {
+        appointmentId: other.id,
+        jobSummary: job?.summary ?? null,
+        scheduledStart: other.scheduledStart.toISOString(),
+        scheduledEnd: other.scheduledEnd.toISOString(),
+        overlapMinutes: overlapMinutes(
+          { start: appointment.scheduledStart, end: appointment.scheduledEnd },
+          { start: other.scheduledStart, end: other.scheduledEnd },
+        ),
+      };
+    }),
+  );
+  return rows.filter((r): r is SuggestionOverlap => r !== null);
 }
 
 /**
@@ -100,7 +149,8 @@ export async function suggestTechnicians(
         },
         deps,
       );
-      return toSuggestion(tech, result, tech.id === input.currentTechnicianId);
+      const overlaps = await loadOverlaps(deps, input.tenantId, input.appointment, result);
+      return toSuggestion(tech, result, tech.id === input.currentTechnicianId, overlaps);
     }),
   );
   return rankSuggestions(suggestions);
