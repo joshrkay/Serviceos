@@ -311,15 +311,34 @@ export async function getLocation(
   return repository.findById(tenantId, id);
 }
 
+/**
+ * The fields a caller may change on a location. PUT /api/locations/:id passes
+ * the raw request body, so anything else (geocode state, customerId,
+ * isPrimary, isArchived) is dropped here rather than reaching the repository.
+ */
+const UPDATABLE_LOCATION_FIELDS = [
+  'label', 'street1', 'street2', 'city', 'state', 'postalCode', 'country',
+  'latitude', 'longitude', 'accessNotes', 'addressType', 'serviceTypes',
+] as const satisfies readonly (keyof UpdateLocationInput)[];
+
+export function pickLocationUpdate(body: Record<string, unknown>): UpdateLocationInput {
+  const out: Record<string, unknown> = {};
+  for (const f of UPDATABLE_LOCATION_FIELDS) {
+    if (f in body) out[f] = body[f];
+  }
+  return out as UpdateLocationInput;
+}
+
 export async function updateLocation(
   tenantId: string,
   id: string,
-  input: UpdateLocationInput,
+  rawInput: UpdateLocationInput,
   repository: LocationRepository,
   auditRepo?: AuditRepository,
   actorId?: string,
   actorRole?: string,
 ): Promise<ServiceLocation | null> {
+  const input = pickLocationUpdate(rawInput as Record<string, unknown>);
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
 

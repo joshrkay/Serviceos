@@ -5,6 +5,7 @@ import {
   geocodeResetFor,
   updateLocation,
   type ServiceLocation,
+  type UpdateLocationInput,
 } from '../../src/locations/location';
 
 const TENANT = '00000000-0000-0000-0000-000000000001';
@@ -64,6 +65,28 @@ describe('location writes carry geocode status', () => {
     const base = { tenantId: TENANT, customerId: 'c-1', street1: '1 Main St', city: 'P', state: 'AZ', postalCode: '85004' };
     expect((await createLocation(base, repo)).geocodeStatus).toBe('pending');
     expect((await createLocation({ ...base, latitude: 1, longitude: 2 }, repo)).geocodeStatus).toBe('ok');
+  });
+
+  it('updateLocation ignores geocode state and ownership fields sent by a client', async () => {
+    const repo = new InMemoryLocationRepository();
+    await repo.create({ ...placed(), latitude: undefined, longitude: undefined, geocodeStatus: 'pending' });
+    const body = {
+      label: 'Rental',
+      geocodeStatus: 'ok',
+      geocodeAttempts: 99,
+      customerId: 'someone-else',
+      isArchived: true,
+      isPrimary: false,
+    } as unknown as UpdateLocationInput;
+    const updated = await updateLocation(TENANT, 'loc-1', body, repo);
+    expect(updated).toMatchObject({
+      label: 'Rental',
+      geocodeStatus: 'pending',
+      geocodeAttempts: 0,
+      customerId: 'c-1',
+      isArchived: false,
+      isPrimary: true,
+    });
   });
 
   it('updateLocation with a new street drops the stale pin', async () => {
