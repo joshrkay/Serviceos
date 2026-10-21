@@ -129,7 +129,7 @@ async function locationCoordsFor(
   return coordsOfLocation(deps, tenantId, locationId);
 }
 
-/** `unplaceable` is true when the geocode sweep gave up on the address, so waiting will not fill it in. */
+/** `unplaceable` is true when the geocoder answered that the address does not exist, so waiting will not fill it in. */
 interface LocationCoords {
   coords: LatLng | null;
   unplaceable?: boolean;

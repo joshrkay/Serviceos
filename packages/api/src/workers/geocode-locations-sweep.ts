@@ -6,7 +6,7 @@
  * tenants, asks the geocoder for each address, and writes the outcome:
  *   found      → latitude/longitude, status `ok`
  *   not_found  → status `failed` (the provider looked; the address is not real)
- *   throw      → attempts + 1; `failed` once MAX_GEOCODE_ATTEMPTS is reached
+ *   throw      → attempts + 1, row stays `pending`
  *
  * One mechanism covers create, edit, and backfill: new rows default to
  * `pending` (migration 327), an address edit resets to `pending`
@@ -16,11 +16,13 @@
  * The provider call happens with no transaction open. The write is guarded on
  * the row still being `pending` with the SAME address the sweep geocoded, so
  * an owner who edits the address mid-lookup never gets the old house's pin.
- * A lookup that THROWS ends the batch after recording that row's attempt: a
- * throw usually means the provider is down or the key is refused, and burning
- * the whole batch's attempts on an outage would mark real addresses `failed`.
- * Rows are taken least-retried first, so an outage spreads single attempts
- * across rows instead of exhausting any one. A write that fails is logged and
+ Only a definitive `not_found` makes a row `failed`. A throw is never
+ * terminal: it usually means the provider is down, the quota is spent, or the
+ * key has no Geocoding API enabled, and none of those says anything about the
+ * address, so the row must still be retried once the provider recovers. A
+ * throw also ends the batch after recording that row's attempt, so an outage
+ * costs one provider call per tick. Rows are taken least-retried first, so a
+ * row that keeps erroring sinks behind fresh ones instead of blocking them. A write that fails is logged and
  * counted; the batch goes on. A failing enumerator fails the pass, so the
  * leader tick records no heartbeat.
  */
@@ -36,9 +38,6 @@ export const GEOCODE_SWEEP_TICK_MS = 5 * 60_000;
 /** Locations per tick: 12/min sustained, well under the provider's rate limits. */
 export const GEOCODE_SWEEP_BATCH_SIZE = 60;
 
-/** Transient failures before a row is given up on as `failed`. */
-export const MAX_GEOCODE_ATTEMPTS = 5;
-
 export interface PendingLocation {
   id: string;
   tenantId: string;
@@ -49,16 +48,15 @@ export interface PendingLocation {
 export type GeocodeOutcome =
   | { kind: 'found'; latitude: number; longitude: number }
   | { kind: 'not_found' }
-  | { kind: 'retry' }
-  | { kind: 'gave_up' };
+  | { kind: 'retry' };
 
 /** Pure: what to write for one lookup. `result` is null when the geocoder threw. */
-export function decideGeocodeOutcome(result: GeocodeResult | null, attemptsSoFar: number): GeocodeOutcome {
+export function decideGeocodeOutcome(result: GeocodeResult | null): GeocodeOutcome {
   if (result?.kind === 'found') {
     return { kind: 'found', latitude: result.coords.latitude, longitude: result.coords.longitude };
   }
   if (result?.kind === 'not_found') return { kind: 'not_found' };
-  return attemptsSoFar + 1 >= MAX_GEOCODE_ATTEMPTS ? { kind: 'gave_up' } : { kind: 'retry' };
+  return { kind: 'retry' };
 }
 
 /**
@@ -133,11 +131,9 @@ export async function writeGeocodeOutcome(
       extra = [outcome.latitude, outcome.longitude];
       break;
     case 'not_found':
-    case 'gave_up':
       sql = `UPDATE service_locations
-                SET geocode_status = 'failed', geocode_attempts = geocode_attempts + $9, geocoded_at = NOW()
+                SET geocode_status = 'failed', geocoded_at = NOW()
              ${SAME_PENDING_ADDRESS}`;
-      extra = [outcome.kind === 'gave_up' ? 1 : 0];
       break;
     case 'retry':
       sql = `UPDATE service_locations
@@ -162,7 +158,6 @@ export interface GeocodeSweepResult {
   found: number;
   notFound: number;
   retried: number;
-  gaveUp: number;
   /** The address changed between the read and the write; the next tick picks the new one up. */
   superseded: number;
   failed: number;
@@ -175,7 +170,6 @@ export async function runGeocodeSweep(deps: GeocodeSweepDeps): Promise<GeocodeSw
     found: 0,
     notFound: 0,
     retried: 0,
-    gaveUp: 0,
     superseded: 0,
     failed: 0,
   };
@@ -194,7 +188,7 @@ export async function runGeocodeSweep(deps: GeocodeSweepDeps): Promise<GeocodeSw
         });
         lookup = null;
       }
-      const outcome = decideGeocodeOutcome(lookup, loc.attempts);
+      const outcome = decideGeocodeOutcome(lookup);
       const written = await deps.writeOutcome(loc, outcome);
       if (!written) {
         result.superseded++;
@@ -203,8 +197,7 @@ export async function runGeocodeSweep(deps: GeocodeSweepDeps): Promise<GeocodeSw
       }
       if (outcome.kind === 'found') result.found++;
       else if (outcome.kind === 'not_found') result.notFound++;
-      else if (outcome.kind === 'retry') result.retried++;
-      else result.gaveUp++;
+      else result.retried++;
       if (lookup === null) break;
     } catch (err) {
       result.failed++;

@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
-  MAX_GEOCODE_ATTEMPTS,
   decideGeocodeOutcome,
   runGeocodeSweep,
   type GeocodeOutcome,
@@ -28,18 +27,16 @@ function pending(id: string, attempts = 0): PendingLocation {
 
 describe('decideGeocodeOutcome', () => {
   it('writes coordinates for found and fails not_found straight away', () => {
-    expect(decideGeocodeOutcome({ kind: 'found', coords: { latitude: 1, longitude: 2 } }, 0)).toEqual({
+    expect(decideGeocodeOutcome({ kind: 'found', coords: { latitude: 1, longitude: 2 } })).toEqual({
       kind: 'found',
       latitude: 1,
       longitude: 2,
     });
-    expect(decideGeocodeOutcome({ kind: 'not_found' }, 0)).toEqual({ kind: 'not_found' });
+    expect(decideGeocodeOutcome({ kind: 'not_found' })).toEqual({ kind: 'not_found' });
   });
 
-  it('retries a thrown lookup until the last allowed attempt, then gives up', () => {
-    expect(decideGeocodeOutcome(null, 0)).toEqual({ kind: 'retry' });
-    expect(decideGeocodeOutcome(null, MAX_GEOCODE_ATTEMPTS - 2)).toEqual({ kind: 'retry' });
-    expect(decideGeocodeOutcome(null, MAX_GEOCODE_ATTEMPTS - 1)).toEqual({ kind: 'gave_up' });
+  it('never makes a thrown lookup terminal: a provider outage says nothing about the address', () => {
+    expect(decideGeocodeOutcome(null)).toEqual({ kind: 'retry' });
   });
 });
 
@@ -92,11 +89,11 @@ describe('runGeocodeSweep', () => {
     expect(result).toMatchObject({ notFound: 1, retried: 1 });
   });
 
-  it('gives up on a row at its last attempt', async () => {
-    const h = harness([pending('a', MAX_GEOCODE_ATTEMPTS - 1)], () => new Error('timeout'));
+  it('keeps retrying a row however many times the provider has failed it', async () => {
+    const h = harness([pending('a', 50)], () => new Error('google status=REQUEST_DENIED'));
     const result = await runGeocodeSweep(h.deps);
-    expect(h.writes[0][1]).toEqual({ kind: 'gave_up' });
-    expect(result.gaveUp).toBe(1);
+    expect(h.writes[0][1]).toEqual({ kind: 'retry' });
+    expect(result.retried).toBe(1);
   });
 
   it('counts a guarded write that missed as superseded, not as success', async () => {

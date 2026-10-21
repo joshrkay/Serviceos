@@ -8130,8 +8130,9 @@ export const MIGRATIONS = {
   // travel-time feasibility check ended in 'missing_coords'. The geocode
   // sweep (workers/geocode-locations-sweep.ts) fills them:
   //   geocode_status   — 'pending' (needs a lookup), 'ok' (coords present),
-  //                      'failed' (address not found, or retries exhausted)
-  //   geocode_attempts — transient-failure count; resets on address change
+  //                      'failed' (the provider answered: no such address)
+  //   geocode_attempts — transient-failure count (never terminal; orders the
+  //                      sweep least-retried first); resets on address change
   //   geocoded_at      — when the last terminal outcome was written
   // Rows that already carry coordinates are 'ok' (idempotent on replay: it
   // only touches pending rows that have both coordinates). CHECK is NOT VALID
