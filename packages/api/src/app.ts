@@ -370,6 +370,13 @@ import {
   listCollectOnSiteTenantIds,
   runPaymentLinkReconciliationSweep,
 } from './workers/payment-link-reconciliation-sweep';
+import {
+  GEOCODE_SWEEP_TICK_MS,
+  listPendingLocations,
+  runGeocodeSweep,
+  writeGeocodeOutcome,
+} from './workers/geocode-locations-sweep';
+import { createGeocoder } from './locations/geocoder';
 import { runOverageSettlementReconciliation } from './workers/overage-settlement-reconciliation';
 import { runClerkMetadataBackfillSweep } from './workers/clerk-metadata-backfill-sweep';
 import { runVoiceCostReconciliationSweep } from './workers/voice-cost-reconciliation';
@@ -2546,6 +2553,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // S5a-6 — daily pay-link reconciliation sweep (collect-on-site tenants
     // that still hold a live link). DISTINCT key.
     paymentLinkReconciliation: 590034,
+    // Dispatch FR-2 — service-location geocode sweep. DISTINCT key.
+    geocodeLocations: 590035,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -7668,6 +7677,33 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       });
     }, 60 * 60_000));
   }
+
+  // Dispatch FR-2 phase 1 — geocode sweep. Fills service_locations
+  // latitude/longitude so travel-time feasibility checks stop ending in
+  // 'missing_coords'. Needs Postgres and GOOGLE_MAPS_API_KEY; without either
+  // it is not scheduled and rows stay 'pending'.
+  const geocoder = createGeocoder(process.env);
+  if (shouldRunWorkers && pool && geocoder) {
+    const geocodeSweepLogger = createLogger({
+      service: 'geocode-locations-sweep',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.geocodeLocations, async () => {
+        await runGeocodeSweep({
+          listPending: (limit) => listPendingLocations(pool, limit),
+          writeOutcome: (loc, outcome) => writeGeocodeOutcome(pool, loc, outcome),
+          geocoder,
+          logger: geocodeSweepLogger,
+        });
+      }).catch((err) => {
+        geocodeSweepLogger.error('Geocode sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, GEOCODE_SWEEP_TICK_MS));
+  }
+
   // P8-009: in-app voice session adapter. Reuses the LLM gateway, the
   // unified TTS provider, and the existing proposal/audit/oncall repos.
   // The voiceSessionStore is shared with the Twilio adapter (created above).
