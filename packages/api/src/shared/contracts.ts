@@ -470,17 +470,20 @@ export const delayAcknowledgmentSchema = z.object({
 
 export type DelayAcknowledgment = z.infer<typeof delayAcknowledgmentSchema>;
 
+/** One cap for note content on create AND update, so a note the API accepts can always be edited again. */
+export const NOTE_CONTENT_MAX_CHARS = 20_000;
+
 export const createNoteSchema = z.object({
   entityType: z.enum(['customer', 'location', 'job', 'estimate', 'invoice']),
   entityId: z.string().min(1),
-  content: z.string().min(1),
+  content: z.string().min(1).max(NOTE_CONTENT_MAX_CHARS),
   isPinned: z.boolean().optional(),
 });
 
 /** Body for `PUT /api/notes/:id` — content only, and it must be a string. */
 export const updateNoteSchema = z
   .object({
-    content: z.string().min(1).max(20_000),
+    content: z.string().min(1).max(NOTE_CONTENT_MAX_CHARS),
   })
   .strict();
 
