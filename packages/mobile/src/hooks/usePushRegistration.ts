@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useAuth } from '@clerk/clerk-expo';
+import { useAuth } from '@clerk/expo';
 import { useApiClient } from '../lib/useApiClient';
 import { pushRegistrationKey, registerForPush, type RegisterPushResult } from '../push/registerForPush';
 import {

@@ -8,7 +8,7 @@
  * excluded from unit coverage and spike-verified on device.
  */
 
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from 'expo-audio';
 import type { AssistantAudioPlayer } from './useAssistantSession';
 

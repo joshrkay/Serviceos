@@ -54,7 +54,6 @@ export default defineConfig({
         'src/jobs/nativeJobPhotoDeps.ts',
         'src/location/nativeLocationDeps.ts',
         'src/lib/env.ts',
-        'src/lib/tokenCache.ts',
         'src/calls/callbackStorage.ts',
         'src/theme/tokens.d.ts',
         'app/_layout.tsx',
@@ -94,7 +93,9 @@ export default defineConfig({
       'react-dom': path.resolve(__dirname, '../../node_modules/react-dom'),
       // expo-audio / expo-file-system have react-native-only package entries
       // that don't resolve under the jsdom env the hook test uses. They are
-      // mocked per test, so alias them to resolve-time stubs.
+      // mocked per test, so alias them to resolve-time stubs. The app imports
+      // the promise API from `expo-file-system/legacy` (SDK 54+ moved it
+      // there); the bare entry stays aliased so nothing resolves the native one.
       'expo-audio': path.resolve(__dirname, './test/stubs/expo-audio.ts'),
       // `expo/fetch` streaming is native-only; the assistant transport that
       // uses it is device-only (excluded from coverage). Stubbed so screen
@@ -102,9 +103,11 @@ export default defineConfig({
       'expo/fetch': path.resolve(__dirname, './test/stubs/expo-fetch.ts'),
       'expo-camera': path.resolve(__dirname, './test/stubs/expo-camera.ts'),
       'expo-crypto': path.resolve(__dirname, './test/stubs/expo-crypto.ts'),
+      'expo-file-system/legacy': path.resolve(__dirname, './test/stubs/expo-file-system.ts'),
       'expo-file-system': path.resolve(__dirname, './test/stubs/expo-file-system.ts'),
       'expo-secure-store': path.resolve(__dirname, './test/stubs/expo-secure-store.ts'),
-      '@clerk/clerk-expo': path.resolve(__dirname, './test/stubs/clerk-clerk-expo.ts'),
+      '@clerk/expo/legacy': path.resolve(__dirname, './test/stubs/clerk-expo.ts'),
+      '@clerk/expo': path.resolve(__dirname, './test/stubs/clerk-expo.ts'),
       // react-native + expo-router don't resolve under jsdom in the root-only
       // lane. Screen tests render against host-DOM stubs (and mock useRouter).
       'react-native': path.resolve(__dirname, './test/stubs/react-native.ts'),
