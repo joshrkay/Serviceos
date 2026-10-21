@@ -52,6 +52,16 @@ describe('geocodeResetFor', () => {
     },
   );
 
+  it('treats a pin completed one coordinate at a time as the caller\'s', () => {
+    const halfPinned = { ...placed(), longitude: undefined, geocodeStatus: 'pending' as const };
+    expect(geocodeResetFor(halfPinned, { longitude: -112.1 }).geocodeStatus).toBe('ok');
+  });
+
+  it('does not merge a stored coordinate into a pin for a new address', () => {
+    const reset = geocodeResetFor(placed(), { street1: '9 Elm St', latitude: 1 });
+    expect(reset.geocodeStatus).toBe('pending');
+  });
+
   it('trusts coordinates the caller supplies, even with a new address', () => {
     const reset = geocodeResetFor(placed(), { street1: '9 Elm St', latitude: 1, longitude: 2 });
     expect(reset.geocodeStatus).toBe('ok');

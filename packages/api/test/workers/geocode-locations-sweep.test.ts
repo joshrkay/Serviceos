@@ -117,6 +117,24 @@ describe('runGeocodeSweep', () => {
     expect(result).toMatchObject({ failed: 1, notFound: 1 });
   });
 
+  it('stops the batch when both the lookup and its retry write fail', async () => {
+    const rows = [pending('a'), pending('b')];
+    const h = harness(rows, () => new Error('timeout'));
+    const lookups: string[] = [];
+    const geocoder: Geocoder = {
+      geocode: async (a) => {
+        lookups.push(a.street1);
+        throw new Error('timeout');
+      },
+    };
+    const writeOutcome = async () => {
+      throw new Error('connection reset');
+    };
+    const result = await runGeocodeSweep({ ...h.deps, geocoder, writeOutcome });
+    expect(lookups).toHaveLength(1);
+    expect(result.failed).toBe(1);
+  });
+
   it('asks the enumerator for at most the batch size', async () => {
     const listPending = vi.fn(async () => []);
     await runGeocodeSweep({ ...harness([], () => ({ kind: 'not_found' })).deps, listPending, batchSize: 7 });

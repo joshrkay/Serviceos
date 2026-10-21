@@ -175,8 +175,8 @@ export async function runGeocodeSweep(deps: GeocodeSweepDeps): Promise<GeocodeSw
   };
 
   for (const loc of pending) {
+    let lookup: GeocodeResult | null = null;
     try {
-      let lookup: GeocodeResult | null;
       try {
         lookup = await deps.geocoder.geocode(loc.address);
       } catch (err) {
@@ -201,11 +201,14 @@ export async function runGeocodeSweep(deps: GeocodeSweepDeps): Promise<GeocodeSw
       if (lookup === null) break;
     } catch (err) {
       result.failed++;
-      deps.logger.error('Geocode sweep: location failed; continuing', {
+      deps.logger.error('Geocode sweep: location failed', {
         tenantId: loc.tenantId,
         locationId: loc.id,
         error: err instanceof Error ? err.message : String(err),
       });
+      // The lookup itself threw too: the provider is still the likely cause,
+      // so the outage rule (one provider call per tick) holds here as well.
+      if (lookup === null) break;
     }
   }
 

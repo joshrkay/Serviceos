@@ -278,7 +278,10 @@ const GEOCODED_ADDRESS_FIELDS = ['street1', 'street2', 'city', 'state', 'postalC
 
 /**
  * Dispatch FR-2 — the geocode fields an update must write. Caller-supplied
- * coordinates win and mark the row `ok`. Otherwise a changed address clears
+ * coordinates win and mark the row `ok`: both in this update when the address
+ * also changed, otherwise this update's value merged with the stored one (so
+ * a pin set one coordinate at a time is still the caller's, and the sweep
+ * never overwrites it). Otherwise a changed address clears
  * the old coordinates (they now point at the wrong house) and queues the row
  * for the geocode sweep. An update that leaves the address alone changes
  * nothing here.
@@ -287,12 +290,20 @@ export function geocodeResetFor(
   existing: ServiceLocation,
   input: UpdateLocationInput,
 ): Partial<ServiceLocation> {
-  if (hasCoordinates(input)) {
-    return { geocodeStatus: 'ok', geocodeAttempts: 0, geocodedAt: new Date() };
-  }
   const addressChanged = GEOCODED_ADDRESS_FIELDS.some(
     (f) => input[f] !== undefined && (input[f] ?? '').trim() !== (existing[f] ?? '').trim(),
   );
+  const touchesCoordinates = input.latitude !== undefined || input.longitude !== undefined;
+  const pinned = addressChanged
+    ? hasCoordinates(input)
+    : touchesCoordinates &&
+      hasCoordinates({
+        latitude: input.latitude ?? existing.latitude,
+        longitude: input.longitude ?? existing.longitude,
+      });
+  if (pinned) {
+    return { geocodeStatus: 'ok', geocodeAttempts: 0, geocodedAt: new Date() };
+  }
   if (!addressChanged) return {};
   return {
     latitude: undefined,
