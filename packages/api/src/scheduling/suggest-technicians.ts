@@ -147,7 +147,7 @@ export interface SuggestTechniciansResult {
   suggestions: TechnicianSuggestion[];
   /** Active technicians in the tenant. */
   totalTechnicians: number;
-  /** True when only the first MAX_SUGGESTION_CANDIDATES were checked — not an exhaustive answer. */
+  /** True when only the first MAX_SUGGESTION_CANDIDATES non-assigned techs were checked — not an exhaustive answer. */
   truncated: boolean;
 }
 
@@ -157,7 +157,13 @@ export async function suggestTechnicians(
 ): Promise<SuggestTechniciansResult> {
   const assigned = new Set(input.assignedTechnicianIds ?? []);
   const active = input.candidates.filter((u) => u.role === 'technician' && isActiveMember(u));
-  const technicians = active.slice(0, MAX_SUGGESTION_CANDIDATES);
+  // The cap bounds the people who could take the visit; techs already on it
+  // are checked on top (a crew is small) so they never crowd out a candidate.
+  const others = active.filter((u) => !assigned.has(u.id));
+  const technicians = [
+    ...others.slice(0, MAX_SUGGESTION_CANDIDATES),
+    ...active.filter((u) => assigned.has(u.id)),
+  ];
   // Same tz resolution as checkFeasibility's working-hours check.
   const timezone = deps.timezone ?? input.appointment.timezone ?? 'UTC';
   const suggestions = await Promise.all(
@@ -182,6 +188,6 @@ export async function suggestTechnicians(
   return {
     suggestions: rankSuggestions(suggestions),
     totalTechnicians: active.length,
-    truncated: active.length > technicians.length,
+    truncated: others.length > MAX_SUGGESTION_CANDIDATES,
   };
 }

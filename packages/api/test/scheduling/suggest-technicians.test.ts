@@ -232,6 +232,27 @@ describe('suggestTechnicians', () => {
     expect(res).toMatchObject({ totalTechnicians: MAX_SUGGESTION_CANDIDATES + 5, truncated: true });
   });
 
+  it('does not let techs already on the visit use up the cap', async () => {
+    // Crew member first in the roster, then exactly one more than the cap of others.
+    const candidates = [user('crew'), ...Array.from({ length: MAX_SUGGESTION_CANDIDATES + 1 }, (_, i) => user(`t${i}`))];
+    const res = await suggestTechnicians(deps(), {
+      tenantId: 't-1', appointment: appt(), candidates, assignedTechnicianIds: ['crew'],
+    });
+    const open = res.suggestions.filter((s) => !s.isCurrent);
+    expect(open).toHaveLength(MAX_SUGGESTION_CANDIDATES);
+    expect(res.suggestions.find((s) => s.technicianId === 'crew')?.isCurrent).toBe(true);
+    expect(res).toMatchObject({ totalTechnicians: MAX_SUGGESTION_CANDIDATES + 2, truncated: true });
+  });
+
+  it('is not partial when only techs already on the visit push the roster past the cap', async () => {
+    const candidates = [user('crew'), ...Array.from({ length: MAX_SUGGESTION_CANDIDATES }, (_, i) => user(`t${i}`))];
+    const res = await suggestTechnicians(deps(), {
+      tenantId: 't-1', appointment: appt(), candidates, assignedTechnicianIds: ['crew'],
+    });
+    expect(res.suggestions).toHaveLength(MAX_SUGGESTION_CANDIDATES + 1);
+    expect(res.truncated).toBe(false);
+  });
+
   it('is exhaustive when the roster fits', async () => {
     const res = await suggestTechnicians(deps(), { tenantId: 't-1', appointment: appt(), candidates: [user('a')] });
     expect(res).toMatchObject({ totalTechnicians: 1, truncated: false });
