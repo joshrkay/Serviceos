@@ -162,7 +162,7 @@ export function SuggestedTechnicians({ appointmentId, onPick }: SuggestedTechnic
   const feasible = state.suggestions.filter((s) => s.feasible && !s.isCurrent);
   const booked = state.suggestions.filter((s) => bookedOnly(s) && !s.isCurrent);
   if (feasible.length === 0) {
-    const firstBlocked = state.suggestions.find((s) => !s.feasible && !bookedOnly(s));
+    const firstBlocked = state.suggestions.find((s) => !s.feasible && !s.isCurrent && !bookedOnly(s));
     return (
       <div className="mt-1">
         <p className="text-xs text-muted-foreground" data-testid="suggest-techs-none">
