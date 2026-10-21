@@ -41,6 +41,31 @@ describe('GoogleGeocoder', () => {
     expect(url.searchParams.get('components')).toBe('country:US');
   });
 
+  it('keeps a partial match that still lands on a house', async () => {
+    const g = new GoogleGeocoder({
+      apiKey: 'k',
+      fetch: fakeFetch(200, {
+        status: 'OK',
+        results: [{ partial_match: true, geometry: { location: { lat: 1, lng: 2 }, location_type: 'ROOFTOP' } }],
+      }),
+    });
+    await expect(g.geocode(ADDRESS)).resolves.toEqual({ kind: 'found', coords: { latitude: 1, longitude: 2 } });
+  });
+
+  it.each(['APPROXIMATE', 'GEOMETRIC_CENTER', undefined])(
+    'rejects a partial match that fell back to %s precision as not_found',
+    async (locationType) => {
+      const g = new GoogleGeocoder({
+        apiKey: 'k',
+        fetch: fakeFetch(200, {
+          status: 'OK',
+          results: [{ partial_match: true, geometry: { location: { lat: 1, lng: 2 }, location_type: locationType } }],
+        }),
+      });
+      await expect(g.geocode(ADDRESS)).resolves.toEqual({ kind: 'not_found' });
+    },
+  );
+
   it('treats ZERO_RESULTS as not_found', async () => {
     const g = new GoogleGeocoder({ apiKey: 'k', fetch: fakeFetch(200, { status: 'ZERO_RESULTS', results: [] }) });
     await expect(g.geocode(ADDRESS)).resolves.toEqual({ kind: 'not_found' });

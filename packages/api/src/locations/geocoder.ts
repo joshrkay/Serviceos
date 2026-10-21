@@ -34,6 +34,27 @@ export function formatAddressForGeocoding(a: GeocodableAddress): string {
 
 const GEOCODE_TIMEOUT_MS = 10_000;
 
+/** Google location_type values precise enough to pin a house (vs. a street centroid or a whole town). */
+const STREET_LEVEL_PRECISION = new Set(['ROOFTOP', 'RANGE_INTERPOLATED']);
+
+interface GoogleGeocodeResult {
+  partial_match?: boolean;
+  geometry?: { location?: { lat?: number; lng?: number }; location_type?: string };
+}
+
+/**
+ * A partial match is Google guessing at an address it could not match in
+ * full. Kept when it still lands on a house (a "St" vs "Street" or missing
+ * zip difference); rejected when it fell back to a street centroid or a whole
+ * locality, which is what a misspelled or nonexistent street produces. That
+ * pin would silently skew drive times, so it becomes `not_found` and the owner
+ * sees the "check it for typos" note instead.
+ */
+export function isTrustworthyMatch(r: GoogleGeocodeResult): boolean {
+  if (!r.partial_match) return true;
+  return STREET_LEVEL_PRECISION.has(r.geometry?.location_type ?? '');
+}
+
 export interface GoogleGeocoderOptions {
   apiKey: string;
   fetch?: typeof fetch;
@@ -59,13 +80,12 @@ export class GoogleGeocoder implements Geocoder {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?${params.toString()}`;
     const resp = await this.fetchImpl(url, { signal: AbortSignal.timeout(GEOCODE_TIMEOUT_MS) });
     if (!resp.ok) throw new Error(`http ${resp.status}`);
-    const body = (await resp.json()) as {
-      status: string;
-      results?: Array<{ geometry?: { location?: { lat?: number; lng?: number } } }>;
-    };
+    const body = (await resp.json()) as { status: string; results?: GoogleGeocodeResult[] };
     if (body.status === 'ZERO_RESULTS') return { kind: 'not_found' };
     if (body.status !== 'OK') throw new Error(`google status=${body.status}`);
-    const loc = body.results?.[0]?.geometry?.location;
+    const first = body.results?.[0];
+    if (first && !isTrustworthyMatch(first)) return { kind: 'not_found' };
+    const loc = first?.geometry?.location;
     if (typeof loc?.lat !== 'number' || typeof loc.lng !== 'number') {
       throw new Error('no location in response');
     }
