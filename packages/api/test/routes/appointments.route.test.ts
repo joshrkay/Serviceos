@@ -660,6 +660,24 @@ describe('#1279 — appointment technician assignment routes', () => {
     expect(res.status).toBe(409);
     expect(await assignmentRepo.findByAppointment(TENANT, id)).toHaveLength(0);
   });
+
+  it('PUT /:id time move → 409 when the retained primary now lacks a required skill (Dispatch FR-2)', async () => {
+    const { app, jobRepo, jobId } = await buildApp(true);
+    const created = await request(app).post('/api/appointments').send({
+      jobId, scheduledStart: window.start, scheduledEnd: window.end, timezone: 'UTC', technicianId: TECH,
+    });
+    expect(created.status).toBe(201);
+    await jobRepo.update(TENANT, jobId, { requiredSkills: ['gas_certified'] });
+    const later = tomorrowIso(48, 50);
+    const moved = await request(app).put(`/api/appointments/${created.body.id}`).send({
+      scheduledStart: later.start, scheduledEnd: later.end,
+    });
+    expect(moved.status).toBe(409);
+    expect(moved.body.message).toContain('gas_certified');
+    // A non-time edit is not a re-assignment and is left alone.
+    const noted = await request(app).put(`/api/appointments/${created.body.id}`).send({ notes: 'gate code 1234' });
+    expect(noted.status).toBe(200);
+  });
 });
 
 describe('PUT /api/appointments/:id — strict body allowlist (T4-F07, hardening sweep 2026-10)', () => {

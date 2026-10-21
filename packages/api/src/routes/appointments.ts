@@ -39,7 +39,7 @@ import {
 import { UserRepository } from '../users/user';
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
-import type { SkillMatcher } from '../scheduling/skill-matcher';
+import { SkillMatcher, assertTechnicianHoldsRequiredSkills } from '../scheduling/skill-matcher';
 import { ensurePrimaryTechnician } from '../jobs/job-appointment-sync';
 import { requireActiveTechnician } from '../users/tenant-member';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
@@ -486,6 +486,25 @@ export function createAppointmentRouter(
           ...(rest.arrivalWindowStart ? { arrivalWindowStart: new Date(rest.arrivalWindowStart) } : {}),
           ...(rest.arrivalWindowEnd ? { arrivalWindowEnd: new Date(rest.arrivalWindowEnd) } : {}),
         };
+
+        // Dispatch FR-2 — a time move keeps the current primary, so re-check
+        // the skill rule for them (the job's requirements or the tech's
+        // skills may have changed since assignment), as the job-schedule and
+        // proposal reschedule paths do.
+        const skillMatcher = options?.assignment?.skillMatcher;
+        if (skillMatcher && (updates.scheduledStart || updates.scheduledEnd)) {
+          const current = await appointmentRepo.findById(req.auth!.tenantId, routeParam(req, 'id'));
+          if (current?.jobId) {
+            const primary = (
+              await options.assignment!.assignmentRepo.findByAppointment(req.auth!.tenantId, current.id)
+            ).find((a) => a.isPrimary);
+            if (primary) {
+              await assertTechnicianHoldsRequiredSkills(
+                req.auth!.tenantId, primary.technicianId, current.jobId, skillMatcher,
+              );
+            }
+          }
+        }
 
         const result = await updateAppointment(
           req.auth!.tenantId,
