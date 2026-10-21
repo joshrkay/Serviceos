@@ -5462,6 +5462,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     settingsRepo,
     workingHoursRepo,
     unavailableBlockRepo,
+    skillMatcher,
   }, {
     appointmentRepo,
     assignmentRepo,

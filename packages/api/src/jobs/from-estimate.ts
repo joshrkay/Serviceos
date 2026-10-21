@@ -47,6 +47,7 @@ import {
 import { SettingsRepository } from '../settings/settings';
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
+import { SkillMatcher, missingSkills } from '../scheduling/skill-matcher';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { NotFoundError, ConflictError, ValidationError } from '../shared/errors';
 import { isValidTenantId } from '../db/schema';
@@ -72,6 +73,8 @@ export interface ConvertEstimateToScheduledJobDeps {
   /** F2 — assignment refuses windows outside modeled tech hours / during time-off. */
   workingHoursRepo?: WorkingHoursRepository;
   unavailableBlockRepo?: UnavailableBlockRepository;
+  /** Dispatch FR-2 — only technicians holding the job's required skills are picked or assigned. */
+  skillMatcher?: SkillMatcher;
 }
 
 export interface ConvertEstimateToScheduledJobInput {
@@ -119,6 +122,7 @@ interface ChosenSlot {
 async function chooseTechnicianAndSlot(
   deps: ConvertEstimateToScheduledJobDeps,
   input: ConvertEstimateToScheduledJobInput,
+  jobId: string,
 ): Promise<ChosenSlot> {
   const { tenantId } = input;
   const durationMin = input.durationMin ?? DEFAULT_DURATION_MIN;
@@ -141,11 +145,36 @@ async function chooseTechnicianAndSlot(
 
   // Candidate set: an explicit technician, otherwise every ACTIVE technician
   // (#1463 — a suspended member is never auto-picked).
-  const candidates: User[] = input.technicianId
+  let candidates: User[] = input.technicianId
     ? [await requireActiveTechnician(deps.userRepo, tenantId, input.technicianId)]
     : (await deps.userRepo.findByTenant(tenantId, { role: 'technician' })).filter(isActiveMember);
   if (candidates.length === 0) {
     throw new ConflictError('No technicians available to schedule this job');
+  }
+
+  // Dispatch FR-2 — the job (an estimate's existing job can already carry
+  // required skills) is only offered to technicians who hold them, the same
+  // rule the assignTechnician guard applies. Screened HERE, before the
+  // estimate is accepted, so a skill gap never strands it accepted-but-unscheduled.
+  if (deps.skillMatcher) {
+    const matcher = deps.skillMatcher;
+    const required = await matcher.requiredSkillsForJob(tenantId, jobId);
+    if (required.length > 0) {
+      const qualified: User[] = [];
+      for (const tech of candidates) {
+        if (missingSkills(required, await matcher.skillsForTechnician(tenantId, tech.id)).length === 0) {
+          qualified.push(tech);
+        }
+      }
+      if (qualified.length === 0) {
+        throw new ConflictError(
+          input.technicianId
+            ? `Technician is missing required skill(s): ${missingSkills(required, await matcher.skillsForTechnician(tenantId, input.technicianId)).join(', ')}`
+            : `No technician holds the required skill(s): ${required.join(', ')}`,
+        );
+      }
+      candidates = qualified;
+    }
   }
 
   // Operator pinned an exact start: assign the first candidate free at that
@@ -302,7 +331,7 @@ export async function convertEstimateToScheduledJob(
   //    estimate is accepted — rather than leaving it accepted-but-unscheduled
   //    with no retry path (these are permanent validation conflicts, not
   //    transient later-step failures).
-  const chosen = await chooseTechnicianAndSlot(deps, input);
+  const chosen = await chooseTechnicianAndSlot(deps, input, job.id);
 
   // 5. Validate the appointment payload the SAME way createAppointment will
   //    (timezone in the supported set, duration <= 24h, time ordering) BEFORE
@@ -380,6 +409,7 @@ export async function convertEstimateToScheduledJob(
         actorRole: input.actorRole,
         workingHoursRepo: deps.workingHoursRepo,
         unavailableBlockRepo: deps.unavailableBlockRepo,
+        skillMatcher: deps.skillMatcher,
       },
     );
   } catch (err) {
