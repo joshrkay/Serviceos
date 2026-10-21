@@ -149,6 +149,7 @@ import {
   loadPageContext,
   pointsAtPageRecord,
   pageUnavailableReply,
+  pageNoteTargetKind,
   mergePageContextIds,
   pageLookupIds,
   pageContextNote,
@@ -1306,6 +1307,8 @@ interface PreDraftResolution {
   ambiguousRefKeys: string[];
   /** The keys the operator's open page filled (`mergePageContextIds`). */
   pageFilledKeys?: string[];
+  /** Entities the open page implies, e.g. a note's target kind (`pageNoteTargetKind`). */
+  pageEntities?: Record<string, string>;
 }
 
 const NO_PRE_DRAFT_RESOLUTION: PreDraftResolution = { ids: {}, ambiguousRefKeys: [] };
@@ -1816,7 +1819,13 @@ async function resolvePreDraftIds(
     ambiguousRefKeys: fromWords.ambiguousRefKeys,
     page,
   });
-  return { ids: merged.ids, ambiguousRefKeys: merged.ambiguousRefKeys, pageFilledKeys: merged.filledKeys };
+  const noteTargetKind = pageNoteTargetKind({ intent, entities, text: operatorText, page, filledKeys: merged.filledKeys });
+  return {
+    ids: merged.ids,
+    ambiguousRefKeys: merged.ambiguousRefKeys,
+    pageFilledKeys: merged.filledKeys,
+    ...(noteTargetKind ? { pageEntities: { noteTargetKind } } : {}),
+  };
 }
 
 async function resolvePreDraftIdsFromWords(
@@ -4046,7 +4055,7 @@ async function generateAssistantReply(
             // log_mileage would have silently drafted a plain, wrong-
             // category log_expense once dispatched.
             intent: segClass.intentType,
-            existingEntities: { ...segEntities, ...segVerifiedIds },
+            existingEntities: { ...segEntities, ...segPreDraft.pageEntities, ...segVerifiedIds },
             // Task 15 quality-review fix (C1/C2) — `context.customerId` is
             // threaded ONLY for the CHAT_CONTEXT_CUSTOMER_ID_INTENTS
             // allowlist (see that constant's doc comment for why this is
@@ -4342,7 +4351,7 @@ async function generateAssistantReply(
           // Task 15 (2026-08-07 tradesperson plan) / Task 11 parity — see the
           // identical comment on the chain-segment `.handle()` call above.
           intent: classification.intentType,
-          existingEntities: { ...extractedEntities, ...verifiedIds },
+          existingEntities: { ...extractedEntities, ...preDraft.pageEntities, ...verifiedIds },
           // Task 15 quality-review fix (C1/C2) — see the identical comment +
           // CHAT_CONTEXT_CUSTOMER_ID_INTENTS doc comment on the
           // chain-segment `.handle()` call above: this is an explicit

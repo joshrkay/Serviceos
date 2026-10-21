@@ -254,6 +254,41 @@ const POINTS_AT_PAGE_RECORD_RE: Readonly<Record<PageEntityType, RegExp>> = {
   appointment: /\b(?:this|that|the same)\s+(?:appointment|visit|booking)\b/i,
 };
 
+/** The note target a document or customer page stands for. A job or appointment page keeps the job default. */
+const NOTE_TARGET_BY_PAGE: Partial<Record<PageEntityType, 'customer' | 'invoice' | 'estimate'>> = {
+  customer: 'customer',
+  invoice: 'invoice',
+  estimate: 'estimate',
+};
+
+export interface PageNoteTargetInput {
+  intent: string;
+  entities: Record<string, unknown> | undefined;
+  text: string;
+  page: { context: Pick<PageContext, 'entityType'> };
+  /** The keys the page filled (`mergePageContextIds`). */
+  filledKeys: readonly string[];
+}
+
+/**
+ * The note target kind for "add a note: they disputed this charge" spoken on
+ * an invoice, estimate or customer page. The note handler defaults to the job,
+ * and a document page also fills its job, so without this the note lands on
+ * the job while the reply says the open invoice was used. Only when the page
+ * filled the record itself, the classifier named no kind, and the words do not
+ * point past the page ("this job", or "her" on a document). Pure.
+ */
+export function pageNoteTargetKind(input: PageNoteTargetInput): string | undefined {
+  const { intent, entities, text, page, filledKeys } = input;
+  if (intent !== 'add_note') return undefined;
+  const named = entities?.noteTargetKind;
+  if (typeof named === 'string' && named.trim().length > 0) return undefined;
+  const kind = NOTE_TARGET_BY_PAGE[page.context.entityType];
+  if (!kind || !filledKeys.includes(`${kind}Id`)) return undefined;
+  if (POINTS_AT_JOB_RE.test(text) || (kind !== 'customer' && POINTS_AT_CUSTOMER_RE.test(text))) return undefined;
+  return kind;
+}
+
 /** The lookup that asks about a page's own record. */
 const DOCUMENT_LOOKUP_BY_TYPE: Partial<Record<PageEntityType, string>> = {
   job: 'lookup_jobs',
@@ -297,15 +332,24 @@ export function pageLookupIds(input: PageLookupInput): PageLookupIds {
   // and job too, since a document page expands to both.
   const pointsAtPage = POINTS_AT_PAGE_RECORD_RE[page.context.entityType].test(text);
 
+  // A record the operator named outright ("Maria Alvarez", "the Khan
+  // install") is theirs to resolve, even in a question that also says "this".
   const out: PageLookupIds = {};
   if (
     page.ids.customerId &&
     CUSTOMER_SCOPED_LOOKUP_INTENTS.has(intent as IntentType) &&
+    !isExplicitReference(entities?.customerName) &&
     (pointsAtPage || points('customerName', POINTS_AT_CUSTOMER_RE))
   ) {
     out.customerId = page.ids.customerId;
   }
-  if (page.ids.jobId && (pointsAtPage || points('jobReference', POINTS_AT_JOB_RE))) out.jobId = page.ids.jobId;
+  if (
+    page.ids.jobId &&
+    !isExplicitReference(entities?.jobReference) &&
+    (pointsAtPage || points('jobReference', POINTS_AT_JOB_RE))
+  ) {
+    out.jobId = page.ids.jobId;
+  }
   // Only a question about that kind of record reads it by number: "what
   // invoices are on this job?" lists the job's invoices, not the job's status.
   if (page.documentNumber && pointsAtPage && DOCUMENT_LOOKUP_BY_TYPE[page.context.entityType] === intent) {

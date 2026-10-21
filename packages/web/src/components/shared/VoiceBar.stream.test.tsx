@@ -5,7 +5,7 @@
  * falls back to record-then-transcribe.
  */
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { VoiceBar } from './VoiceBar';
 
@@ -130,6 +130,32 @@ describe('VoiceBar — live words', () => {
     expect(params.get('q')).toBe('add a note: gate code 4471');
     expect(params.get('ctx')).toBe(`job:${JOB}`);
     expect(params.get('via')).toBe('voice');
+  });
+
+  it('keeps the record that was on screen when the mic opened, even after moving pages', async () => {
+    const OTHER = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    function GoElsewhere() {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate(`/jobs/${OTHER}`)}>go elsewhere</button>;
+    }
+    render(
+      <MemoryRouter initialEntries={[`/jobs/${JOB}`]}>
+        <Routes>
+          <Route path="*" element={<><VoiceBar /><GoElsewhere /><Where /></>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByTestId('voice-example-hint'));
+    await screen.findByText('Listening…');
+    fireEvent.click(screen.getByRole('button', { name: 'go elsewhere' }));
+    expect(screen.getByTestId('where').textContent).toBe(`/jobs/${OTHER}`);
+    fake.finalText = 'add a note: gate code 4471';
+    fireEvent.click(screen.getByRole('button', { name: 'Done talking' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toContain('/assistant?'));
+    const params = new URLSearchParams(screen.getByTestId('where').textContent!.split('?')[1]);
+    expect(params.get('ctx')).toBe(`job:${JOB}`);
   });
 
   it('sends a detailed create to the assistant instead of opening a blank form', async () => {

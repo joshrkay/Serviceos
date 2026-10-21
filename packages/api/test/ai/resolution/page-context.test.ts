@@ -8,6 +8,7 @@ import {
   pageLookupIds,
   pageUnavailableReply,
   pointsAtPageRecord,
+  pageNoteTargetKind,
   type PageContextRepos,
 } from '../../../src/ai/resolution/page-context';
 
@@ -220,6 +221,15 @@ describe('pageLookupIds', () => {
     expect(lookup({ text: `invoices for ${OTHER} and her` })).toEqual({});
   });
 
+  it('keeps a named customer even when the question also says "this job"', () => {
+    expect(
+      lookup({
+        entities: { customerName: 'Maria Alvarez', jobReference: 'this job' },
+        text: 'what invoices does Maria Alvarez have on this job?',
+      }),
+    ).toEqual({ jobId: JOB });
+  });
+
   it('fills the customer only for customer-scoped lookups', () => {
     expect(lookup({ intent: 'lookup_my_day', text: "what's on my day, is she first?" })).toEqual({});
   });
@@ -268,5 +278,32 @@ describe('pageLookupIds on a document page', () => {
 
   it('a question that does not point at the invoice leaves it alone', () => {
     expect(pageLookupIds({ intent: 'lookup_invoices', entities: {}, text: 'what invoices are open?', page: invoicePage })).toEqual({});
+  });
+});
+
+describe('pageNoteTargetKind', () => {
+  const target = (over: Partial<Parameters<typeof pageNoteTargetKind>[0]>) =>
+    pageNoteTargetKind({
+      intent: 'add_note',
+      entities: { noteBody: 'customer disputed this charge' },
+      text: 'add a note: customer disputed this charge',
+      page: { context: { entityType: 'invoice' } },
+      filledKeys: ['invoiceId', 'jobId', 'customerId'],
+      ...over,
+    });
+
+  it('targets the document or customer on screen', () => {
+    expect(target({})).toBe('invoice');
+    expect(target({ page: { context: { entityType: 'estimate' } }, filledKeys: ['estimateId', 'jobId'] })).toBe('estimate');
+    expect(target({ page: { context: { entityType: 'customer' } }, filledKeys: ['customerId'], text: 'note: she prefers mornings' })).toBe('customer');
+  });
+
+  it('leaves the job default alone where the page or the words say so', () => {
+    expect(target({ page: { context: { entityType: 'job' } }, filledKeys: ['jobId', 'customerId'] })).toBeUndefined();
+    expect(target({ text: 'add a note to this job: gate code' })).toBeUndefined();
+    expect(target({ text: 'add a note for her: call after 5' })).toBeUndefined();
+    expect(target({ entities: { noteTargetKind: 'customer' } })).toBeUndefined();
+    expect(target({ filledKeys: ['jobId'] })).toBeUndefined();
+    expect(target({ intent: 'update_job' })).toBeUndefined();
   });
 });

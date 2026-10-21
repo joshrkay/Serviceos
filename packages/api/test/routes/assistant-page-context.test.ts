@@ -348,3 +348,40 @@ describe('dropHandledJobStatus', () => {
     expect(p.payload).toHaveProperty('status', 'x');
   });
 });
+
+describe('chat: a note spoken on a document page goes on that document', () => {
+  const INVOICE_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const invoices = {
+    findById: async (tenantId: string, id: string) =>
+      tenantId === TENANT && id === INVOICE_ID ? { id, jobId: JOB, invoiceNumber: 'INV-0042' } : null,
+  } as unknown as InvoiceRepository;
+
+  it('targets the open invoice, not its job', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      scriptedGateway('add_note', { noteBody: 'customer disputed this charge' }),
+      resolver(notFound),
+      proposalRepo,
+      undefined,
+      invoices,
+    );
+    const res = await chat(app, 'add a note: customer disputed this charge', { entityType: 'invoice', entityId: INVOICE_ID });
+    expect(res.status).toBe(200);
+    const [draft] = await proposalRepo.findByTenant(TENANT);
+    expect(draft.payload).toMatchObject({ targetKind: 'invoice', targetId: INVOICE_ID });
+  });
+
+  it('still puts it on the job when the words say "this job"', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      scriptedGateway('add_note', { noteBody: 'gate code 4471' }),
+      resolver(notFound),
+      proposalRepo,
+      undefined,
+      invoices,
+    );
+    await chat(app, 'add a note to this job: gate code 4471', { entityType: 'invoice', entityId: INVOICE_ID });
+    const [draft] = await proposalRepo.findByTenant(TENANT);
+    expect(draft.payload).toMatchObject({ targetKind: 'job', targetId: JOB });
+  });
+});

@@ -5,7 +5,7 @@ import { apiFetch } from '../../utils/api-fetch';
 import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
 import { useTTS } from '../../hooks/useTTS';
 import { dictationSupported, useDeepgramDictation } from '../../hooks/useDeepgramDictation';
-import { assistantHandoffUrl, pageContextFromPath } from '../../lib/page-context';
+import { assistantHandoffUrl, pageContextFromPath, type PageContext } from '../../lib/page-context';
 import { pickExamples } from './voice-examples';
 
 type BarPhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'sending';
@@ -154,6 +154,9 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   // stream token or the mic checks it afterwards, so an attempt the user
   // already stopped can never open the mic later.
   const attemptRef = useRef(0);
+  // The record on screen when the mic opened: moving to another page while
+  // talking must not attach what you said to that page's record.
+  const pageAtStartRef = useRef<PageContext | null>(null);
   const streamFinalRef = useRef<string | null>(null);
   const dictation = useDeepgramDictation({
     onFinal: (text) => { streamFinalRef.current = text; },
@@ -356,6 +359,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
     setTranscript('');
     attemptRef.current += 1;
     const attempt = attemptRef.current;
+    pageAtStartRef.current = pageContextFromPath(pathname);
 
     if (dictationSupported()) {
       captureModeRef.current = 'stream';
@@ -379,7 +383,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
       // record the clip and transcribe it after.
     }
     await startBatchRecording();
-  }, [dictation, startBatchRecording]);
+  }, [dictation, startBatchRecording, pathname]);
 
   useEffect(() => {
     if (phase !== 'listening') return;
@@ -411,7 +415,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
 
   function handleSend() {
     if (!transcript.trim()) return;
-    const pageContext = pageContextFromPath(pathname);
+    const pageContext = pageAtStartRef.current;
 
     // Check for voice navigation commands first
     const command = matchVoiceCommand(transcript.trim());
