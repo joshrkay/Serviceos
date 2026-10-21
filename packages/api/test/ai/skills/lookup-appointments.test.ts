@@ -146,6 +146,14 @@ describe('P11-001 — lookupAppointments skill', () => {
     );
     expect(upcoming.summary).toMatch(/^This visit is .* for AC repair\.$/);
 
+    // A visit on a canceled job is still the visit on screen.
+    await jobRepo.update('tenant-1', job.id, { status: 'canceled' });
+    const onCanceledJob = await lookupAppointments(
+      { tenantId: 'tenant-1', customerId: 'cust-1', appointmentId: second.id },
+      { jobRepo, appointmentRepo },
+    );
+    expect(onCanceledJob.summary).toMatch(/was canceled\.$/);
+
     const missing = await lookupAppointments(
       { tenantId: 'tenant-1', customerId: 'cust-1', appointmentId: 'nope' },
       { jobRepo, appointmentRepo },

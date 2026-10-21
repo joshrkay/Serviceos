@@ -16,6 +16,7 @@ import { InMemoryLocationRepository, type ServiceLocation } from '../../../src/l
 import { InMemoryUserRepository } from '../../../src/users/user';
 import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
 import { InMemoryEstimateRepository, createEstimate } from '../../../src/estimates/estimate';
+import { InMemoryInvoiceRepository, createInvoice } from '../../../src/invoices/invoice';
 
 const TENANT = 'tenant-1604-inapp';
 const TZ = 'America/New_York';
@@ -205,6 +206,57 @@ describe('dispatchAssistantLookup — the record on screen (page context)', () =
     expect(reply?.outcome).toBe('answered');
     expect(reply?.message.content).not.toContain('EST-FURNACE');
     expect(reply?.message.content).toContain('one estimate — EST-WH');
+  });
+
+  it('a balance asked on an invoice or job page is that record\'s, not the customer\'s whole balance', async () => {
+    const d = await deps();
+    const jobRepo = d.shared.jobRepo as InMemoryJobRepository;
+    const FURNACE = 'd0000000-0000-4000-8000-000000001607';
+    await jobRepo.create({
+      id: FURNACE, tenantId: TENANT, customerId: 'cust-keller', locationId: 'loc-keller',
+      jobNumber: 'JOB-0003', summary: 'Furnace tune-up', status: 'scheduled', priority: 'normal', createdBy: 'u1',
+      createdAt: SEEDED, updatedAt: SEEDED,
+    } as Job);
+    const invoiceRepo = new InMemoryInvoiceRepository();
+    const openInvoice = async (jobId: string, invoiceNumber: string, cents: number) => {
+      const inv = await createInvoice(
+        {
+          tenantId: TENANT, jobId, invoiceNumber, createdBy: 'u1',
+          lineItems: [{ id: 'li', description: 'Work', quantity: 1, unitPriceCents: cents, totalCents: cents, sortOrder: 0, taxable: false }],
+        },
+        invoiceRepo,
+      );
+      await invoiceRepo.update(TENANT, inv.id, { status: 'open', amountDueCents: cents });
+    };
+    await openInvoice(JOB_KELLER, 'INV-0101', 40000);
+    await openInvoice(FURNACE, 'INV-0102', 9000);
+    const ask = (message: string, page: { customerId: string; jobId: string; documentNumber?: string }) =>
+      dispatchAssistantLookup(
+        { tenantId: TENANT, userId: MIKE_CLERK, intent: 'lookup_balance', extractedEntities: {}, message, page },
+        { ...d, answers: { ...d.answers, invoiceRepo, resolveMemberRole: async () => 'owner' } },
+      );
+
+    const onInvoice = await ask('what does this invoice owe me?', {
+      customerId: 'cust-keller', jobId: JOB_KELLER, documentNumber: 'INV-0101',
+    });
+    expect(onInvoice?.message.content).toContain('INV-0101 is open with $400.00 due.');
+    expect(onInvoice?.message.content).not.toContain('490');
+
+    // The balance answer links its customer by uuid, so this half uses one.
+    const OWNER = 'c0000000-0000-4000-8000-000000001608';
+    const BOILER = 'd0000000-0000-4000-8000-000000001609';
+    for (const [id, jobNumber] of [[BOILER, 'JOB-0004'], ['d0000000-0000-4000-8000-000000001610', 'JOB-0005']] as const) {
+      await jobRepo.create({
+        id, tenantId: TENANT, customerId: OWNER, locationId: 'loc-keller', jobNumber, summary: 'Boiler work',
+        status: 'scheduled', priority: 'normal', createdBy: 'u1', createdAt: SEEDED, updatedAt: SEEDED,
+      } as Job);
+    }
+    await openInvoice(BOILER, 'INV-0103', 9000);
+    await openInvoice('d0000000-0000-4000-8000-000000001610', 'INV-0104', 25000);
+    const onJob = await ask('what does this job owe?', { customerId: OWNER, jobId: BOILER });
+    expect(onJob?.outcome).toBe('answered');
+    expect(onJob?.message.content).toContain('$90');
+    expect(onJob?.message.content).not.toContain('$340');
   });
 
   it('"when is this appointment?" on a past visit\'s page answers for that visit, not the next one', async () => {

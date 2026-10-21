@@ -354,7 +354,11 @@ export function pageLookupIds(input: PageLookupInput): PageLookupIds {
   }
   // Only a question about that kind of record reads it by number: "what
   // invoices are on this job?" lists the job's invoices, not the job's status.
-  if (page.documentNumber && pointsAtPage && DOCUMENT_LOOKUP_BY_TYPE[page.context.entityType] === intent) {
+  // "What does this invoice owe?" is a balance question about that invoice.
+  const readsPageDocument =
+    DOCUMENT_LOOKUP_BY_TYPE[page.context.entityType] === intent ||
+    (page.context.entityType === 'invoice' && intent === 'lookup_balance');
+  if (page.documentNumber && pointsAtPage && readsPageDocument) {
     out.documentNumber = page.documentNumber;
   }
   // A visit has no number, so its own id stands in: "when is this

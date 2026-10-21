@@ -515,7 +515,7 @@ export async function executeLookupAnswer(
     switch (intent) {
       case 'lookup_balance': {
         if (!shared.jobRepo || !deps.invoiceRepo) return { kind: 'unsupported' };
-        const r = await lookupBalance(sharedInput, {
+        const r = await lookupBalance({ ...sharedInput, ...jobScope }, {
           jobRepo: shared.jobRepo,
           invoiceRepo: deps.invoiceRepo,
           ...events,

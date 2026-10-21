@@ -195,6 +195,24 @@ describe('VoiceBar — live words', () => {
     );
   });
 
+  it('returns to idle when Done is pressed before the fallback recorder opened the microphone', async () => {
+    fake.startResult = 'unavailable';
+    let grantMic: (v: unknown) => void = () => {};
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockImplementationOnce(
+      () => new Promise<MediaStream>((r) => { grantMic = r as (v: unknown) => void; }),
+    );
+    renderBar();
+    fireEvent.click(screen.getByTestId('voice-example-hint'));
+    await waitFor(() => expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledWith({ audio: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done talking' }));
+
+    expect(await screen.findByText('No audio captured. Please retry.')).toBeTruthy();
+    expect(screen.queryByText('Listening…')).toBeNull();
+    // The late microphone is discarded, and the bar stays idle.
+    await act(async () => grantMic({ getTracks: () => [] }));
+    expect(screen.queryByText('Listening…')).toBeNull();
+  });
+
   it('falls back to record-then-transcribe when live transcription is unavailable', async () => {
     fake.startResult = 'unavailable';
     renderBar();

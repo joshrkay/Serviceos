@@ -18,6 +18,8 @@ import { formatCents } from './spoken-format';
 export interface LookupBalanceInput {
   tenantId: string;
   customerId: string;
+  /** Only this job's invoices: the job the operator pointed at ("what does this job owe?"). */
+  jobId?: string;
   timezone?: string;
   sessionId?: string;
   /** P11-002: spoken-summary language. Defaults to 'en'. */
@@ -92,6 +94,7 @@ export async function lookupBalance(
     jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId, {
       includeArchived: true,
     });
+    if (input.jobId) jobs = jobs.filter((job) => job.id === input.jobId);
   } catch (err) {
     const message = t('lookup.balance.error', lang);
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });

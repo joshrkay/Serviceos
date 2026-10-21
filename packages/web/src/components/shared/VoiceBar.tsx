@@ -262,8 +262,16 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
       );
       return;
     }
+    if (stoppingRef.current) return;
     const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state !== 'recording' || stoppingRef.current) return;
+    if (!recorder || recorder.state !== 'recording') {
+      // Done before the fallback recorder opened the microphone: that start is
+      // discarded, so say nothing was captured rather than stay on "Listening…".
+      setError('No audio captured. Please retry.');
+      setCanRetry(true);
+      setPhase('idle');
+      return;
+    }
 
     stoppingRef.current = true;
     setPhase('transcribing');

@@ -123,7 +123,12 @@ export async function lookupAppointments(
     if (!deps.jobRepo.findByCustomer) {
       throw new Error('JobRepository.findByCustomer is required for voice lookups');
     }
-    jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId);
+    // The visit on screen may belong to a canceled job; it must still be found.
+    jobs = await deps.jobRepo.findByCustomer(
+      input.tenantId,
+      input.customerId,
+      input.appointmentId ? { includeArchived: true } : undefined,
+    );
     if (input.jobId) jobs = jobs.filter((job) => job.id === input.jobId);
   } catch (err) {
     const message = t('lookup.appointments.error', lang);

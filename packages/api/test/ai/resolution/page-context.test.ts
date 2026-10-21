@@ -259,6 +259,13 @@ describe('pageLookupIds on a document page', () => {
     });
   });
 
+  it('"what does this invoice owe?" reads that invoice by its number', () => {
+    const invoicePage = { ids: { invoiceId: OTHER, jobId: JOB, customerId: CUSTOMER }, documentNumber: 'INV-0042', context: { entityType: 'invoice' as const } };
+    expect(
+      pageLookupIds({ intent: 'lookup_balance', entities: {}, text: 'what does this invoice owe me?', page: invoicePage }),
+    ).toEqual({ customerId: CUSTOMER, jobId: JOB, documentNumber: 'INV-0042' });
+  });
+
   it('"when is this appointment?" on an appointment page reads that exact visit', () => {
     const appointmentPage = { ids: { appointmentId: OTHER, jobId: JOB, customerId: CUSTOMER }, context: { entityType: 'appointment' as const } };
     expect(
