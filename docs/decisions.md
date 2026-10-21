@@ -1895,6 +1895,22 @@ online" to "found, reviewed, and answered".
 18. **Search before create, always:** match the business on Google first and offer claim (request
     admin rights) / connect / create — never create a location that may already exist on Maps.
 
+**Amended 2026-10-21 (grilling round 3, owner accepted all recommendations).**
+19. **Ship order:** (1) Get-found checklist + presence-path question + review link (auto/manual) +
+    call routing modes; (2) Google match/claim/connect/create, location picker, walkthrough, flagged
+    API create; (3) tenant slug + Business page renderer + subdomain, then connected domains;
+    (4) Web chat transport, widget + widget key, `webchat` lead source, metering.
+20. **Checklist by presence path:** *own website* → Google profile, review link, call routing, Web
+    chat snippet (no Business page); *Google only* → Google profile, review link, call routing, with a
+    quiet Business page as the profile's website and Web chat's home; *neither* → Business page (+
+    optional connected domain), Google profile, review link, call routing. Changing the path
+    re-derives the checklist.
+21. **Completion is detected, never ticked:** each item is derived from facts (profile connected and
+    verified, review link set, a call forwarded from the owner's existing number arrived, the snippet
+    loaded from their origin, domain DNS verified). Items can be skipped into a hidden row.
+22. **Nudges:** the existing digest names the next open item at most once a week; no new email
+    series; the 24 h setup reminder stays onboarding-only.
+
 **Alternatives rejected.** A multi-page site builder (a separate product); domain resale (renewal
 liability and billing for little v1 value); deep-link-only Google setup (the friction this exists to
 remove); porting in v1 (weeks of carrier paperwork, the most failure modes); lead-form-only chat
