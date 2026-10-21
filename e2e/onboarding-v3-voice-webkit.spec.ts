@@ -16,8 +16,12 @@ import { test, expect, type Page, type Request } from '@playwright/test';
  * a 429 from the per-user clip budget (a fast pass in a fresh process) never
  * blocks a tap. On WebKit (iOS Safari's engine, project onboarding-v3-webkit,
  * E2E_V3_WEBKIT=1): an owner who reloads on Ready hears nothing until a tap,
- * the tap unlocks playback, and the browser can record audio/mp4 (what the
- * live transcription stream is sent from iOS).
+ * and the tap unlocks playback. Playwright's WebKit build does not enforce
+ * iOS's gesture rule for playback (and on Linux has no MediaRecorder at all),
+ * so that test emulates the rule at `play()` — refused until the first pointer
+ * or key event on the page — and proves the shell's own behaviour under it.
+ * That iOS really refuses, and really records audio/mp4 for the live
+ * transcription stream, is a device run (the web verify skill, owner action).
  *
  * Listening (S3-5): the lane has no transcription key, so whether the browser
  * refuses the microphone (Chromium's --deny-permission-prompts) or grants it
@@ -166,6 +170,32 @@ async function watchVoiceAndFunnel(page: Page): Promise<void> {
   });
 }
 
+/**
+ * iOS Safari's autoplay rule, for an engine that does not apply it: `play()` is refused with
+ * NotAllowedError until the owner's first pointer or key event on this page (a reload starts
+ * over). Installed after `watchVoiceAndFunnel`, so a refused play never reaches its watcher.
+ */
+async function requireGestureForPlayback(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    let activated = false;
+    const activate = () => {
+      activated = true;
+    };
+    for (const type of ['pointerdown', 'mousedown', 'touchstart', 'keydown']) {
+      window.addEventListener(type, activate, { capture: true, passive: true });
+    }
+    const play = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function gatedPlay(this: HTMLMediaElement) {
+      if (!activated) {
+        return Promise.reject(
+          new DOMException('The request is not allowed by the user agent or the platform in the current context.', 'NotAllowedError'),
+        );
+      }
+      return play.call(this);
+    };
+  });
+}
+
 const v3Events = (page: Page, event: string) =>
   page.evaluate((name) => (window as unknown as Watched).__v3Events.filter((e) => e.event === name).map((e) => e.props), event);
 const audioPlays = (page: Page) => page.evaluate(() => [...(window as unknown as Watched).__audio.plays]);
@@ -303,12 +333,11 @@ for (const vp of viewports) {
 test.describe('v3 voice on WebKit (iOS Safari) at 390x844', () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
-  test('an owner who reloads on Ready hears nothing until a tap, the tap unlocks Rivet, and the browser records audio/mp4', { tag: '@webkit' }, async ({
-    page,
-  }) => {
+  test('an owner who reloads on Ready hears nothing until a tap, and the tap unlocks Rivet', { tag: '@webkit' }, async ({ page }) => {
     test.setTimeout(90_000);
     await signInAsFreshOwner(page, 'webkit_reload');
     await watchVoiceAndFunnel(page);
+    await requireGestureForPlayback(page);
     await startShop(page);
 
     // A returning owner lands on Ready with no tap on this page: Ready's line is refused by autoplay,
@@ -323,9 +352,6 @@ test.describe('v3 voice on WebKit (iOS Safari) at 390x844', () => {
     await makeItMineAndHearRivet(page);
     await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[0] })).toBeVisible();
     await expect(page.getByRole('alert')).toHaveCount(0);
-
-    // What iOS sends the live transcription stream; a WebKit that drops it fails the lane.
-    expect(await page.evaluate(() => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('audio/mp4'))).toBe(true);
   });
 });
 

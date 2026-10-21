@@ -73,6 +73,12 @@ export default defineConfig({
       grepInvert: /@webkit/,
       use: {
         ...devices['Desktop Chrome'],
+        // Full Chromium (new headless), not Playwright's default headless shell: the shell answers
+        // getUserMedia with NotSupportedError whether or not the permission is granted, so the
+        // listening tests saw "unavailable" instead of a refused mic / a real token mint. The full
+        // build refuses with NotAllowedError and hands over the fake device when granted, as a
+        // phone does. `npx playwright install chromium` installs both builds.
+        ...(process.env.QA_CHROMIUM_PATH ? {} : { channel: 'chromium' as const }),
         launchOptions: {
           ...(process.env.QA_CHROMIUM_PATH ? { executablePath: process.env.QA_CHROMIUM_PATH } : {}),
           // A fake microphone, so a test that grants the permission can open one (S3-5). A test that does not
@@ -85,7 +91,8 @@ export default defineConfig({
     ...(process.env.E2E_V3_WEBKIT === '1'
       ? [
           {
-            // iOS Safari's engine: autoplay only after a gesture, and audio/mp4 recording.
+            // iOS Safari's engine. Playwright's build plays without a gesture and (on Linux) has no
+            // MediaRecorder, so the voice spec emulates the gesture rule at play() for its WebKit test.
             name: 'onboarding-v3-webkit',
             testMatch: ['onboarding-v3-voice-webkit.spec.ts'],
             grepInvert: /@chromium/,
