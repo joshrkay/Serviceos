@@ -39,7 +39,7 @@ import {
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
-import type { SkillMatcher } from '../scheduling/skill-matcher';
+import { SkillMatcher, assertTechnicianHoldsRequiredSkills } from '../scheduling/skill-matcher';
 import { SettingsRepository } from '../settings/settings';
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import { requireActiveTechnician } from '../users/tenant-member';
@@ -380,6 +380,11 @@ export async function syncJobSchedule(
           { start: scheduledStart, end: scheduledEnd, timezone: existing.timezone },
           deps,
         );
+        // Dispatch FR-2 — likewise the skill rule: the job's required skills
+        // (or the tech's) may have changed since the original assignment.
+        if (deps.skillMatcher) {
+          await assertTechnicianHoldsRequiredSkills(tenantId, currentPrimary.technicianId, jobId, deps.skillMatcher);
+        }
       }
 
       const updated = await deps.appointmentRepo.update(tenantId, existing.id, {

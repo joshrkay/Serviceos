@@ -346,4 +346,15 @@ describe('direct schedule / reassign enforce required skills (Dispatch FR-2)', (
     expect(res.status).toBe(409);
     expect(res.body.message).toContain('gas_certified');
   });
+
+  it('POST /:id/schedule re-checks a RETAINED technician after the job gains a required skill', async () => {
+    const { app } = build(users());
+    const res0 = await request(app).post('/api/jobs').send(baseJob);
+    const jobId = res0.body.id as string;
+    expect((await request(app).post(`/api/jobs/${jobId}/schedule`).send({ scheduledStart: START_ISO, technicianId: TECH_1 })).status).toBe(200);
+    await request(app).put(`/api/jobs/${jobId}`).send({ requiredSkills: ['gas_certified'] });
+    const res = await request(app).post(`/api/jobs/${jobId}/schedule`).send({ scheduledStart: '2030-07-02T15:00:00.000Z' });
+    expect(res.status).toBe(409);
+    expect(res.body.message).toContain('gas_certified');
+  });
 });
