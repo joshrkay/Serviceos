@@ -150,6 +150,7 @@ describe('GET /api/dispatch/appointments/:id/suggested-technicians', () => {
     const res = await request(app).get(`/api/dispatch/appointments/${APPT_ID}/suggested-technicians`);
     expect(res.status).toBe(200);
     expect(res.body.appointmentId).toBe(APPT_ID);
+    expect(res.body).toMatchObject({ totalTechnicians: 2, truncated: false });
     expect(res.body.suggestions.map((s: any) => s.technicianId)).toEqual(['tech-a', 'tech-b']);
     expect(res.body.suggestions[1]).toMatchObject({ name: 'Bo', feasible: true, isCurrent: true });
   });

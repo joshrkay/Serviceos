@@ -139,14 +139,21 @@ export interface SuggestTechniciansInput {
   assignedTechnicianIds?: readonly string[];
 }
 
+export interface SuggestTechniciansResult {
+  suggestions: TechnicianSuggestion[];
+  /** Active technicians in the tenant. */
+  totalTechnicians: number;
+  /** True when only the first MAX_SUGGESTION_CANDIDATES were checked — not an exhaustive answer. */
+  truncated: boolean;
+}
+
 export async function suggestTechnicians(
   deps: FeasibilityDependencies,
   input: SuggestTechniciansInput,
-): Promise<TechnicianSuggestion[]> {
+): Promise<SuggestTechniciansResult> {
   const assigned = new Set(input.assignedTechnicianIds ?? []);
-  const technicians = input.candidates
-    .filter((u) => u.role === 'technician' && isActiveMember(u))
-    .slice(0, MAX_SUGGESTION_CANDIDATES);
+  const active = input.candidates.filter((u) => u.role === 'technician' && isActiveMember(u));
+  const technicians = active.slice(0, MAX_SUGGESTION_CANDIDATES);
   const suggestions = await Promise.all(
     technicians.map(async (tech) => {
       const result = await checkFeasibility(
@@ -163,5 +170,9 @@ export async function suggestTechnicians(
       return toSuggestion(tech, result, assigned.has(tech.id), overlaps);
     }),
   );
-  return rankSuggestions(suggestions);
+  return {
+    suggestions: rankSuggestions(suggestions),
+    totalTechnicians: active.length,
+    truncated: active.length > technicians.length,
+  };
 }

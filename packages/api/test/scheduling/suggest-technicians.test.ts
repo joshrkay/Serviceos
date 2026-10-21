@@ -143,7 +143,7 @@ describe('suggestTechnicians', () => {
       requiredSkillsForJob: async () => ['hvac'],
       skillsForTechnician: async (_t, id) => (id === 'qualified' ? ['hvac'] : []),
     };
-    const out = await suggestTechnicians(deps({ skillMatcher: matcher }), {
+    const { suggestions: out } = await suggestTechnicians(deps({ skillMatcher: matcher }), {
       tenantId: 't-1', appointment: appt(),
       candidates: [user('unqualified', { firstName: 'Aaron' }), user('qualified', { firstName: 'Zoe' })],
     });
@@ -157,7 +157,7 @@ describe('suggestTechnicians', () => {
       scheduledStart: new Date('2026-05-17T09:30:00Z'),
       scheduledEnd: new Date('2026-05-17T10:30:00Z'),
     });
-    const out = await suggestTechnicians(
+    const { suggestions: out } = await suggestTechnicians(
       deps({
         assignmentRepo: {
           findByTechnician: async (_t: string, id: string) =>
@@ -177,7 +177,7 @@ describe('suggestTechnicians', () => {
   });
 
   it('skips non-technicians and inactive members, and marks everyone already on the visit', async () => {
-    const out = await suggestTechnicians(deps(), {
+    const { suggestions: out } = await suggestTechnicians(deps(), {
       tenantId: 't-1', appointment: appt(), assignedTechnicianIds: ['cur', 'crew'],
       candidates: [
         user('cur'),
@@ -190,9 +190,15 @@ describe('suggestTechnicians', () => {
     expect(out.map((r) => [r.technicianId, r.isCurrent])).toEqual([['crew', true], ['cur', true]]);
   });
 
-  it('checks at most MAX_SUGGESTION_CANDIDATES technicians', async () => {
+  it('checks at most MAX_SUGGESTION_CANDIDATES technicians and says the answer is partial', async () => {
     const candidates = Array.from({ length: MAX_SUGGESTION_CANDIDATES + 5 }, (_, i) => user(`t${i}`));
-    const out = await suggestTechnicians(deps(), { tenantId: 't-1', appointment: appt(), candidates });
-    expect(out).toHaveLength(MAX_SUGGESTION_CANDIDATES);
+    const res = await suggestTechnicians(deps(), { tenantId: 't-1', appointment: appt(), candidates });
+    expect(res.suggestions).toHaveLength(MAX_SUGGESTION_CANDIDATES);
+    expect(res).toMatchObject({ totalTechnicians: MAX_SUGGESTION_CANDIDATES + 5, truncated: true });
+  });
+
+  it('is exhaustive when the roster fits', async () => {
+    const res = await suggestTechnicians(deps(), { tenantId: 't-1', appointment: appt(), candidates: [user('a')] });
+    expect(res).toMatchObject({ totalTechnicians: 1, truncated: false });
   });
 });

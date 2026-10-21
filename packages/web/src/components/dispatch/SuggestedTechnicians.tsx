@@ -85,7 +85,13 @@ type State =
   | { kind: 'idle' }
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
-  | { kind: 'loaded'; suggestions: TechnicianSuggestion[] };
+  | { kind: 'loaded'; suggestions: TechnicianSuggestion[]; partialNote: string | null };
+
+/** The API checks a bounded number of techs; say so rather than imply the answer covers everyone. */
+export function partialNote(checked: number, total: number | undefined, truncated: boolean | undefined): string | null {
+  if (!truncated || !total) return null;
+  return `Checked ${checked} of ${total} technicians.`;
+}
 
 /**
  * Dispatch FR-2 phase 3 — "who should take this?" for an unassigned visit.
@@ -104,8 +110,17 @@ export function SuggestedTechnicians({ appointmentId, onPick }: SuggestedTechnic
         `/api/dispatch/appointments/${encodeURIComponent(appointmentId)}/suggested-technicians`,
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as { suggestions?: TechnicianSuggestion[] };
-      setState({ kind: 'loaded', suggestions: json.suggestions ?? [] });
+      const json = (await res.json()) as {
+        suggestions?: TechnicianSuggestion[];
+        totalTechnicians?: number;
+        truncated?: boolean;
+      };
+      const suggestions = json.suggestions ?? [];
+      setState({
+        kind: 'loaded',
+        suggestions,
+        partialNote: partialNote(suggestions.length, json.totalTechnicians, json.truncated),
+      });
     } catch (err) {
       setState({
         kind: 'error',
@@ -149,9 +164,11 @@ export function SuggestedTechnicians({ appointmentId, onPick }: SuggestedTechnic
     return (
       <div className="mt-1">
         <p className="text-xs text-muted-foreground" data-testid="suggest-techs-none">
-          No technician is free for this visit at its current time
+          {state.partialNote ? 'None of the technicians checked is' : 'No technician is'} free for this visit at
+          its current time
           {booked.length === 0 && firstBlocked?.reasons[0] ? ` (${firstBlocked.name}: ${firstBlocked.reasons[0]})` : ''}.
         </p>
+        {state.partialNote && <PartialNote text={state.partialNote} />}
         <OverlapAlerts booked={booked} timezone={timezone} />
       </div>
     );
@@ -181,6 +198,15 @@ export function SuggestedTechnicians({ appointmentId, onPick }: SuggestedTechnic
         ))}
       </ul>
       <OverlapAlerts booked={booked} timezone={timezone} />
+      {state.partialNote && <PartialNote text={state.partialNote} />}
     </div>
+  );
+}
+
+function PartialNote({ text }: { text: string }) {
+  return (
+    <p className="mt-1 text-xs text-muted-foreground" data-testid="suggest-techs-partial">
+      {text} Drag the visit to a lane to pick someone else.
+    </p>
   );
 }

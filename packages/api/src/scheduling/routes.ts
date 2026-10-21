@@ -164,7 +164,7 @@ export function createSchedulingRouter(
           userRepo.findByTenant(tenantId, { role: 'technician' }),
           deps.assignmentRepo.findByAppointment(tenantId, appointment.id),
         ]);
-        const suggestions = await suggestTechnicians(deps, {
+        const result = await suggestTechnicians(deps, {
           tenantId,
           appointment,
           candidates,
@@ -172,7 +172,7 @@ export function createSchedulingRouter(
           // with their own existing row (no_double_booking).
           assignedTechnicianIds: assignments.map((a) => a.technicianId),
         });
-        res.json({ appointmentId: appointment.id, suggestions });
+        res.json({ appointmentId: appointment.id, ...result });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

@@ -18,11 +18,11 @@ const sug = (over: Partial<TechnicianSuggestion>): TechnicianSuggestion => ({
   ...over,
 });
 
-function respondWith(suggestions: TechnicianSuggestion[], ok = true) {
+function respondWith(suggestions: TechnicianSuggestion[], ok = true, extra: Record<string, unknown> = {}) {
   global.fetch = vi.fn().mockResolvedValue({
     ok,
     status: ok ? 200 : 500,
-    json: () => Promise.resolve({ suggestions }),
+    json: () => Promise.resolve({ suggestions, ...extra }),
   }) as unknown as typeof fetch;
 }
 
@@ -105,6 +105,24 @@ describe('SuggestedTechnicians', () => {
     const none = await screen.findByTestId('suggest-techs-none');
     expect(none).not.toHaveTextContent('a-other');
     expect(screen.getByTestId('suggest-techs-overlap')).toHaveTextContent('Overlaps by 30 min');
+  });
+
+  it('says the answer is partial when the API only checked part of the team', async () => {
+    respondWith([sug({ technicianId: 'x', name: 'Xi', feasible: false, reasons: ['Outside working hours'] })], true, {
+      totalTechnicians: 30, truncated: true,
+    });
+    render(<SuggestedTechnicians appointmentId="appt-1" onPick={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('suggest-techs-button'));
+    expect(await screen.findByTestId('suggest-techs-none')).toHaveTextContent('None of the technicians checked is free');
+    expect(screen.getByTestId('suggest-techs-partial')).toHaveTextContent('Checked 1 of 30 technicians.');
+  });
+
+  it('adds no partial note when every technician was checked', async () => {
+    respondWith([sug({ technicianId: 'a', name: 'Ann' })], true, { totalTechnicians: 1, truncated: false });
+    render(<SuggestedTechnicians appointmentId="appt-1" onPick={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('suggest-techs-button'));
+    await screen.findByTestId('suggest-techs-list');
+    expect(screen.queryByTestId('suggest-techs-partial')).toBeNull();
   });
 
   it('overlapLabel falls back when the clashing job is gone', () => {
