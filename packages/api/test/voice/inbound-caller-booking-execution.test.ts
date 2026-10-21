@@ -72,7 +72,7 @@ import {
   InMemoryCatalogItemRepository,
   createCatalogItem,
 } from '../../src/catalog/catalog-item';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
 import type { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
 import type {
@@ -624,7 +624,7 @@ async function approveAndExecute(
       findByTechnicianAndDateRange: async () => [],
     } as unknown as FeasibilityDependencies['unavailableBlockRepo'],
     travelTimeProvider: new HaversineFallbackProvider(),
-    skillMatcher: new StubSkillMatcher(),
+    skillMatcher: noSkillConstraints(),
   };
 
   const handlers = createExecutionHandlerRegistry({

@@ -162,17 +162,14 @@ async function skillMatchIssues(
   // read required skills from — say so rather than query with an empty id.
   if (!input.appointment.jobId) return { issues: [], constraints: 'not_evaluated' };
   const required = await deps.skillMatcher.requiredSkillsForJob(input.tenantId, input.appointment.jobId);
-  // The wired matcher is StubSkillMatcher, so this is today's normal path.
-  // `none_configured` says so out loud; it is NOT the same claim as
-  // "skills were checked and the technician holds them".
+  // A job with no required skills. `none_configured` says so out loud; it is
+  // NOT the same claim as "skills were checked and the technician holds them".
   if (required.length === 0) return { issues: [], constraints: 'none_configured' };
   const held = await deps.skillMatcher.skillsForTechnician(input.tenantId, input.proposedTechnicianId);
   const missing = required.filter((s) => !held.includes(s));
   if (missing.length === 0) return { issues: [], constraints: 'evaluated' };
   // Contract #12/#13: "holds required skill for service type if skills are
-  // modeled" is a precondition → blocking. Vacuously clean while the wired
-  // matcher is the stub (requiredSkillsForJob returns []); the moment a real
-  // skills model lands, this gate enforces it with no further change.
+  // modeled" is a precondition → blocking.
   return {
     issues: [{
       check: 'skill_match' as const,

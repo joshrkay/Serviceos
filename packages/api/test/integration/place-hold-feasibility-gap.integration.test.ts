@@ -33,7 +33,7 @@ import { PgUnavailableBlockRepository } from '../../src/availability/pg-unavaila
 import { assignTechnician } from '../../src/appointments/assignment';
 import { checkFeasibility } from '../../src/scheduling/feasibility';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { TravelTimeProvider } from '../../src/scheduling/travel-time/provider';
 import { placeAppointmentHold } from '../../src/ai/scheduling/place-hold';
 
@@ -187,7 +187,7 @@ describe('Postgres integration — back-to-back travel warning vs. the productio
       workingHoursRepo: new PgWorkingHoursRepository(pool),
       unavailableBlockRepo: new PgUnavailableBlockRepository(pool),
       travelTimeProvider,
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
   }
 

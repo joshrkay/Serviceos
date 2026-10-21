@@ -10,7 +10,8 @@ import {
   reassignJobSchema,
   unscheduleJobSchema,
 } from '../shared/contracts';
-import { toErrorResponse, ValidationError } from '../shared/errors';
+import { ForbiddenError, toErrorResponse, ValidationError } from '../shared/errors';
+import { hasPermission, Role } from '../auth/rbac';
 import { uuidSchema } from '../shared/validation';
 import { syncJobSchedule, JobAppointmentSyncDeps } from '../jobs/job-appointment-sync';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
@@ -621,6 +622,12 @@ export function createJobRouter(
         // Strict allowlist (hardening sweep 2026-10): the repository writes
         // every key it recognises, so the body must never reach it raw.
         const input = updateJobSchema.parse(req.body ?? {});
+        // Dispatch FR-2 phase 2 — required skills gate who may be dispatched,
+        // so they follow `jobs:assign` (owners, dispatchers), not the wider
+        // `jobs:update` a technician also holds.
+        if (input.requiredSkills !== undefined && !hasPermission(req.auth!.role as Role, 'jobs:assign')) {
+          throw new ForbiddenError('Only owners and dispatchers can change a job\'s required skills');
+        }
         const result = await updateJob(
           req.auth!.tenantId,
           routeParam(req, 'id'),

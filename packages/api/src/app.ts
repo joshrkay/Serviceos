@@ -535,7 +535,7 @@ import { assertVoiceHandlersWired } from './proposals/execution/wiring-assertion
 import { resolveInvoiceDeliveryProvider } from './proposals/execution/invoice-delivery-factory';
 import { resolveEstimateDeliveryProvider } from './proposals/execution/estimate-delivery-factory';
 import { createTravelTimeProvider } from './scheduling/travel-time/factory';
-import { StubSkillMatcher } from './scheduling/skill-matcher';
+import { RepoSkillMatcher } from './scheduling/skill-matcher';
 import { createSchedulingRouter } from './scheduling/routes';
 import type { FeasibilityDependencies } from './scheduling/feasibility-types';
 import { createDiffAnalysisWorker } from './ai/diff-analysis';
@@ -1360,7 +1360,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // /api/me mounts. Pg-backed mode still builds its service later.
   const inMemoryUserModeService = pool ? null : new InMemoryUserModeService();
   const travelTimeProvider     = createTravelTimeProvider(process.env);
-  const skillMatcher           = new StubSkillMatcher();
+  const skillMatcher           = new RepoSkillMatcher(jobRepo, userRepo);
   // Threaded into the execution-handler deps bag below and into
   // lookupAnswerDeps (shared by the recorded-memo worker + assistant chat),
   // mirroring expenseRepo / agreementRepo.

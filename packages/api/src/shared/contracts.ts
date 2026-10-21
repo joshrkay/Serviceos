@@ -4,6 +4,7 @@ import './zod-messages';
 import { accountTypeSchema, catalogUnitSchema } from '@ai-service-os/shared';
 import { CUSTOMER_SOURCES } from '../customers/customer';
 import { AFTER_HOURS_VOICE_MODES, EMERGENCY_TARGETS, PAYMENT_COLLECTION_MODES } from '../settings/settings';
+import { skillTagsSchema } from './skill-tags';
 
 export const tenantIdHeader = 'x-tenant-id';
 export const correlationIdHeader = 'x-correlation-id';
@@ -273,6 +274,9 @@ export const updateJobSchema = z
     summary: z.string().min(1).max(500).optional(),
     problemDescription: z.string().max(5000).optional(),
     priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
+    // Dispatch FR-2 phase 2 — the route additionally requires `jobs:assign`
+    // for this key, since it decides who may be dispatched.
+    requiredSkills: skillTagsSchema.optional(),
   })
   .strict();
 

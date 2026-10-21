@@ -38,7 +38,7 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgWorkingHoursRepository } from '../../src/availability/pg-working-hours';
 import { PgUnavailableBlockRepository } from '../../src/availability/pg-unavailable-block';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
 import { ReassignAppointmentTaskHandler } from '../../src/ai/tasks/voice-extended-tasks';
@@ -90,7 +90,7 @@ describe(provesExecution('reassign_appointment') + 'Integration — voice reassi
       workingHoursRepo: new PgWorkingHoursRepository(pool),
       unavailableBlockRepo: new PgUnavailableBlockRepository(pool),
       travelTimeProvider: new HaversineFallbackProvider(),
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
   }
 

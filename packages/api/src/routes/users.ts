@@ -1,6 +1,7 @@
 import type { SeatUsageReader } from '../users/seat-limit';
 import { Router, Response } from 'express';
 import { z } from 'zod';
+import { skillTagsSchema } from '../shared/skill-tags';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
@@ -30,6 +31,8 @@ const updateUserSchema = z.object({
   firstName: z.string().trim().max(200).optional(),
   lastName: z.string().trim().max(200).optional(),
   canFieldServe: z.boolean().optional(),
+  // Dispatch FR-2 phase 2 — the tags the feasibility skill gate checks.
+  skills: skillTagsSchema.optional(),
 });
 
 const inviteUserSchema = z.object({

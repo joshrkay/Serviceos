@@ -4,7 +4,7 @@ import request from 'supertest';
 import { createSchedulingRouter } from '../../src/scheduling/routes';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
 import { Appointment } from '../../src/appointments/appointment';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
 
 function fakeAuth(req: any, _res: any, next: any) {
@@ -23,7 +23,7 @@ function makeApp(appts: Appointment[], technicians: { id: string; role: string }
     workingHoursRepo: { findByTechnician: async () => [] } as any,
     unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
     travelTimeProvider: new HaversineFallbackProvider(),
-    skillMatcher: new StubSkillMatcher(),
+    skillMatcher: noSkillConstraints(),
   };
   const userRepo = {
     findById: async (_t: string, id: string) => technicians.find((u) => u.id === id) ?? null,

@@ -12,9 +12,10 @@
  * (jobs have no scheduled_at column); the chosen technician is also
  * denormalized onto job.assignedTechnicianId via syncJobAssignment.
  *
- * Tech selection is skill+availability based. SkillMatcher is currently a stub
- * (returns no required skills), so selection degrades to "first technician with
- * an open slot"; an operator can override technician and/or start time.
+ * Tech selection is availability based: the job is created here, so it carries
+ * no required skills yet (they are set later on the job), and selection is
+ * "first technician with an open slot"; an operator can override technician
+ * and/or start time.
  */
 import { EstimateRepository, Estimate, transitionEstimateStatus } from '../estimates/estimate';
 import { Job, JobRepository, getJob } from './job';
@@ -139,8 +140,7 @@ async function chooseTechnicianAndSlot(
   };
 
   // Candidate set: an explicit technician, otherwise every ACTIVE technician
-  // (#1463 — a suspended member is never auto-picked). (Skill narrowing is a
-  // no-op until a real SkillMatcher exists.)
+  // (#1463 — a suspended member is never auto-picked).
   const candidates: User[] = input.technicianId
     ? [await requireActiveTechnician(deps.userRepo, tenantId, input.technicianId)]
     : (await deps.userRepo.findByTenant(tenantId, { role: 'technician' })).filter(isActiveMember);
