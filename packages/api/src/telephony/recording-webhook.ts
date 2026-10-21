@@ -178,6 +178,13 @@ export async function fetchRecordingBytes(
     const bodyText = await res.text().catch(() => '');
     throw new Error(`Twilio recording fetch failed ${res.status}: ${bodyText.slice(0, 200)}`);
   }
+  // Second layer behind the URL shape check: a recording is audio. Anything
+  // else (JSON from an API resource, an HTML error page) is never buffered or
+  // stored as one.
+  const contentType = res.headers.get('content-type');
+  if (contentType && !contentType.toLowerCase().startsWith('audio/')) {
+    throw new Error(`Twilio recording fetch returned non-audio content-type: ${contentType.slice(0, 60)}`);
+  }
   const contentLength = Number(res.headers.get('content-length'));
   if (Number.isFinite(contentLength) && contentLength > MAX_RECORDING_BYTES) {
     throw new Error(`Twilio recording too large to buffer: ${contentLength} bytes`);

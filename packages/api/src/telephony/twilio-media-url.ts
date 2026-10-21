@@ -15,9 +15,25 @@
  * addressed through the regional `api.<region>.twilio.com` hosts), so the
  * allowlist is `https:` + `twilio.com` or any of its subdomains — nothing a
  * tenant can point elsewhere.
+ *
+ * Host alone is not enough (Cursor security review on #1744): the same
+ * credential is valid for EVERY `api.twilio.com` resource, so a path such as
+ * `/2010-04-01/Accounts.json?.mp3` would turn the fetcher into a confused
+ * deputy that reads account metadata (which can include auth tokens) and
+ * stores the response as a "recording". The path must therefore be exactly
+ * one of the two media resource shapes Twilio hands out in webhooks, and the
+ * URL may carry no query string or fragment:
+ *
+ *   /2010-04-01/Accounts/{AccountSid}/Recordings/{RecordingSid}[.mp3|.wav]
+ *   /2010-04-01/Accounts/{AccountSid}/Messages/{MessageSid}/Media/{MediaSid}
  */
 
 const TWILIO_APEX = 'twilio.com';
+
+const SID = '[A-Za-z0-9]+';
+const MEDIA_PATH = new RegExp(
+  `^/2010-04-01/Accounts/${SID}/(?:Recordings/${SID}(?:\.(?:mp3|wav))?|Messages/${SID}/Media/${SID})$`,
+);
 
 export function isTwilioMediaUrl(value: string): boolean {
   let url: URL;
@@ -28,8 +44,10 @@ export function isTwilioMediaUrl(value: string): boolean {
   }
   if (url.protocol !== 'https:') return false;
   if (url.username || url.password) return false;
+  if (url.search || url.hash) return false;
   const host = url.hostname.toLowerCase();
-  return host === TWILIO_APEX || host.endsWith(`.${TWILIO_APEX}`);
+  if (host !== TWILIO_APEX && !host.endsWith(`.${TWILIO_APEX}`)) return false;
+  return MEDIA_PATH.test(url.pathname);
 }
 
 /**
@@ -44,6 +62,6 @@ export function assertTwilioMediaUrl(value: string, what: string): void {
     } catch {
       // keep the placeholder
     }
-    throw new Error(`${what} is not a Twilio URL (host: ${host}); refusing to send credentials`);
+    throw new Error(`${what} is not a Twilio media URL (host: ${host}); refusing to send credentials`);
   }
 }

@@ -82,7 +82,7 @@ function ctx(overrides: Partial<InboundSmsContext> = {}): InboundSmsContext {
     fromE164: TECH_PHONE,
     body: '',
     messageSid: 'SM-mms-1',
-    media: [{ url: 'https://api.twilio.com/media/ME1', contentType: 'image/jpeg' }],
+    media: [{ url: 'https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/MM1/Media/ME1', contentType: 'image/jpeg' }],
     ...overrides,
   };
 }
@@ -132,7 +132,7 @@ describe('ingestInboundMms (RV-050)', () => {
     const result = await ingestInboundMms(ctx(), deps);
     expect(result).toEqual({ outcome: 'stored', stored: 1, skipped: 0 });
 
-    expect(fetchMedia).toHaveBeenCalledWith(TENANT, 'https://api.twilio.com/media/ME1');
+    expect(fetchMedia).toHaveBeenCalledWith(TENANT, 'https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/MM1/Media/ME1');
     expect(storage.putObject).toHaveBeenCalledTimes(1);
 
     const attachments = await attachmentRepo.listByEntity(TENANT, 'job', JOB_ID);
@@ -269,7 +269,7 @@ describe('dispatcher media integration (RV-050)', () => {
       tenantId: TENANT,
       fromPhone: TECH_PHONE,
       messageSid: 'SM-mms-1',
-      mediaItems: [{ url: 'https://api.twilio.com/media/ME1', contentType: 'image/jpeg' }],
+      mediaItems: [{ url: 'https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/MM1/Media/ME1', contentType: 'image/jpeg' }],
     });
     expect(idempotencyKey).toBe(mmsIngestIdempotencyKey('SM-mms-1'));
   });
@@ -338,7 +338,7 @@ describe('createTwilioMediaFetcher (RV-050)', () => {
       fetchFn,
     );
 
-    const fetched = await fetcher(TENANT, 'https://api.twilio.com/media/ME1');
+    const fetched = await fetcher(TENANT, 'https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/MM1/Media/ME1');
     expect(fetched).not.toBeNull();
     expect(fetched!.contentType).toBe('image/jpeg');
 
@@ -352,7 +352,7 @@ describe('createTwilioMediaFetcher (RV-050)', () => {
     const resolve = vi.fn(async () => ({ accountSid: 'AC123', authToken: 'super-secret' }));
     const fetcher = createTwilioMediaFetcher(resolve, fetchFn);
     await expect(fetcher(TENANT, 'https://attacker.example/steal')).rejects.toThrow(
-      /MediaUrl is not a Twilio URL/,
+      /MediaUrl is not a Twilio media URL/,
     );
     expect(resolve).not.toHaveBeenCalled();
     expect(fetchFn).not.toHaveBeenCalled();
@@ -364,7 +364,7 @@ describe('createTwilioMediaFetcher (RV-050)', () => {
       async () => ({ accountSid: 'AC123', authToken: 'tok' }),
       fetchFn,
     );
-    await expect(fetcher(TENANT, 'https://api.twilio.com/media/ME1')).rejects.toThrow(
+    await expect(fetcher(TENANT, 'https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/MM1/Media/ME1')).rejects.toThrow(
       /^Twilio media fetch failed 302$/,
     );
     const [, init] = (fetchFn as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -374,7 +374,7 @@ describe('createTwilioMediaFetcher (RV-050)', () => {
   it('returns null when the tenant has no Twilio credentials (item skipped)', async () => {
     const fetchFn = vi.fn() as unknown as typeof fetch;
     const fetcher = createTwilioMediaFetcher(async () => null, fetchFn);
-    expect(await fetcher(TENANT, 'https://api.twilio.com/media/ME1')).toBeNull();
+    expect(await fetcher(TENANT, 'https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/MM1/Media/ME1')).toBeNull();
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
@@ -384,7 +384,7 @@ describe('createTwilioMediaFetcher (RV-050)', () => {
       async () => ({ accountSid: 'AC123', authToken: 'super-secret' }),
       fetchFn,
     );
-    await expect(fetcher(TENANT, 'https://api.twilio.com/media/ME1')).rejects.toThrow(
+    await expect(fetcher(TENANT, 'https://api.twilio.com/2010-04-01/Accounts/AC1/Messages/MM1/Media/ME1')).rejects.toThrow(
       /^Twilio media fetch failed 404$/,
     );
   });
