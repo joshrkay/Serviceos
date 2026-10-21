@@ -65,6 +65,7 @@ import {
   assignTechnician,
   assertTechnicianAvailability,
 } from '../../appointments/assignment';
+import { SkillMatcher, assertTechnicianHoldsRequiredSkills } from '../../scheduling/skill-matcher';
 import { InvoiceRepository } from '../../invoices/invoice';
 import { DunningEventRepository } from '../../invoices/dunning-config';
 import {
@@ -404,6 +405,8 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     private readonly availabilityRepos?: {
       workingHoursRepo?: import('../../availability/working-hours').WorkingHoursRepository;
       unavailableBlockRepo?: import('../../availability/unavailable-block').UnavailableBlockRepository;
+      /** Dispatch FR-2 — the assignment refuses a technician missing a required skill. */
+      skillMatcher?: SkillMatcher;
     },
     /** Tenant-timezone fallback for payloads that omit `timezone`. */
     private readonly settingsRepo?: Pick<SettingsRepository, 'findByTenant'>,
@@ -624,6 +627,13 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
             { start: scheduledStart, end: scheduledEnd, timezone },
             this.availabilityRepos,
           );
+          // Dispatch FR-2 — same early rejection for a missing required skill
+          // (assignTechnician re-checks; this just avoids create-then-compensate).
+          if (this.availabilityRepos.skillMatcher) {
+            await assertTechnicianHoldsRequiredSkills(
+              context.tenantId, payload.technicianId, targetJobId, this.availabilityRepos.skillMatcher,
+            );
+          }
         } catch (err) {
           return {
             success: false,
@@ -685,6 +695,7 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
           auditRepo: this.auditRepo,
           workingHoursRepo: this.availabilityRepos?.workingHoursRepo,
           unavailableBlockRepo: this.availabilityRepos?.unavailableBlockRepo,
+          skillMatcher: this.availabilityRepos?.skillMatcher,
         });
       } catch (err) {
         // Atomicity guard: the pre-flight feasibility check above is subject

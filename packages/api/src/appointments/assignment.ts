@@ -11,6 +11,7 @@ import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { notifyTechnicianAssignmentChange } from './assignment-notifications';
 import { isRuntimeTimezone, localDateKey } from '../shared/timezone';
+import { SkillMatcher, assertTechnicianHoldsRequiredSkills } from '../scheduling/skill-matcher';
 
 /**
  * Optional dependencies for `assignTechnician`.
@@ -42,6 +43,13 @@ export interface AssignTechnicianDeps {
    */
   workingHoursRepo?: WorkingHoursRepository;
   unavailableBlockRepo?: UnavailableBlockRepository;
+  /**
+   * Dispatch FR-2: when supplied alongside `appointmentRepo`, a technician
+   * missing one of the job's required skills is refused (ConflictError,
+   * 409) — the same blocking rule the feasibility gate applies, enforced on
+   * the direct assign / reassign / schedule routes too.
+   */
+  skillMatcher?: SkillMatcher;
 }
 
 /** Weekday (0=Sun..6=Sat) of an instant in an IANA timezone. */
@@ -244,6 +252,10 @@ export async function assignTechnician(
         { start: target.scheduledStart, end: target.scheduledEnd, timezone: target.timezone },
         deps,
       );
+
+      if (deps.skillMatcher && target.jobId) {
+        await assertTechnicianHoldsRequiredSkills(input.tenantId, input.technicianId, target.jobId, deps.skillMatcher);
+      }
     }
   }
 

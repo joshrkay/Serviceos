@@ -40,6 +40,12 @@ export interface User {
    */
   mobileNumber?: string;
   /**
+   * Dispatch FR-2 phase 2 (migration 328) — canonical skill tags
+   * (@ai-service-os/shared skill-tags) the feasibility skill gate checks against a job's
+   * `requiredSkills`. Optional in TS for fixtures; the Pg layer always maps it.
+   */
+  skills?: string[];
+  /**
    * 16D soft-delete stamp (migration 093). Non-null means the account is
    * deleted: auth rejects it (authorization-loader) and repository reads
    * exclude it. Rows are retained — never purged — for audit and billing.
@@ -68,6 +74,8 @@ export interface UpdateUserInput {
   firstName?: string;
   lastName?: string;
   canFieldServe?: boolean;
+  /** Canonical tags only — the route normalizes through `skillTagsSchema`. */
+  skills?: string[];
 }
 
 export interface UserRepository {
@@ -405,6 +413,7 @@ export class InMemoryUserRepository implements UserRepository {
       firstName: updates.firstName ?? u.firstName,
       lastName: updates.lastName ?? u.lastName,
       canFieldServe: updates.canFieldServe ?? u.canFieldServe,
+      skills: updates.skills ?? u.skills,
       updatedAt: new Date(),
     };
     this.users.set(id, next);

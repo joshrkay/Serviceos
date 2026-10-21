@@ -5,7 +5,7 @@ import { InMemoryAppointmentRepository, createAppointment } from '../../../src/a
 import { InMemoryAssignmentRepository, assignTechnician } from '../../../src/appointments/assignment';
 import { InMemoryDispatchAnalyticsRepository } from '../../../src/dispatch/analytics';
 import { FeasibilityDependencies } from '../../../src/scheduling/feasibility-types';
-import { StubSkillMatcher } from '../../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../../src/scheduling/travel-time/haversine-fallback';
 
 describe('P6-012 — Execution for reassignment proposals', () => {
@@ -267,7 +267,7 @@ describe('P6-012 — Execution for reassignment proposals', () => {
       workingHoursRepo: { findByTechnician: async () => [] } as any,
       unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
       travelTimeProvider: new HaversineFallbackProvider(),
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
     const handlerWithFeasibility = new ReassignAppointmentExecutionHandler(
       appointmentRepo, localAssignmentRepo, undefined, feasibilityDeps,
@@ -314,7 +314,7 @@ describe('P6-012 — Execution for reassignment proposals', () => {
       workingHoursRepo,
       unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
       travelTimeProvider: new HaversineFallbackProvider(),
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
     const handlerWithFeasibility = new ReassignAppointmentExecutionHandler(
       appointmentRepo, localAssignmentRepo, undefined, feasibilityDeps,

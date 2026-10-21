@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { checkFeasibility } from '../../src/scheduling/feasibility';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
 import { Appointment } from '../../src/appointments/appointment';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
 
 function mkAppt(over: Partial<Appointment> = {}): Appointment {
@@ -36,7 +36,7 @@ function depsWith(siblings: Appointment[], technicianId: string): FeasibilityDep
     workingHoursRepo: { findByTechnician: async () => [] } as any,
     unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
     travelTimeProvider: new HaversineFallbackProvider(),
-    skillMatcher: new StubSkillMatcher(),
+    skillMatcher: noSkillConstraints(),
   };
 }
 

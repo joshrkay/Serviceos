@@ -789,3 +789,90 @@ describe('PUT /api/jobs/:id — strict body allowlist (hardening sweep 2026-10)'
     expect(res.body.priority).toBe('high');
   });
 });
+
+describe('PUT /api/jobs/:id — requiredSkills (Dispatch FR-2 phase 2)', () => {
+  function appAs(role: 'owner' | 'dispatcher' | 'technician', jobRepo: InMemoryJobRepository): Express {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER_ID,
+        sessionId: 'session-skills',
+        tenantId: TEST_TENANT_ID,
+        role,
+      };
+      next();
+    });
+    const ownership: TenantOwnership = {
+      async requireExists() {},
+      async requireExistsAndLoad() {
+        return undefined;
+      },
+    };
+    app.use(
+      '/api/jobs',
+      createJobRouter(
+        jobRepo,
+        new InMemoryJobTimelineRepository(),
+        new InMemoryAuditRepository(),
+        ownership,
+        new InMemoryQueue(),
+        new NoopFeedbackDispatcher(),
+      ),
+    );
+    return app;
+  }
+
+  async function seedJob(jobRepo: InMemoryJobRepository): Promise<string> {
+    const job = {
+      id: '0b3c1f5e-6a7d-4e8f-9a0b-1c2d3e4f5a6b',
+      tenantId: TEST_TENANT_ID,
+      customerId: 'cust-1',
+      locationId: 'loc-1',
+      jobNumber: 'JOB-1',
+      summary: 'Furnace swap',
+      status: 'new',
+      priority: 'normal',
+      createdBy: TEST_USER_ID,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as Job;
+    await jobRepo.create(job);
+    return job.id;
+  }
+
+  it.each(['owner', 'dispatcher'] as const)('lets a %s set required skills, stored in canonical form', async (role) => {
+    const jobRepo = new InMemoryJobRepository();
+    const id = await seedJob(jobRepo);
+    const res = await request(appAs(role, jobRepo))
+      .put(`/api/jobs/${id}`)
+      .send({ requiredSkills: ['Gas Certified', 'hvac', 'HVAC'] });
+    expect(res.status).toBe(200);
+    expect(res.body.requiredSkills).toEqual(['gas_certified', 'hvac']);
+    expect((await jobRepo.findById(TEST_TENANT_ID, id))?.requiredSkills).toEqual(['gas_certified', 'hvac']);
+  });
+
+  it('refuses a technician with 403 and leaves the tags unchanged', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const id = await seedJob(jobRepo);
+    await jobRepo.update(TEST_TENANT_ID, id, { requiredSkills: ['gas_certified'] });
+    const res = await request(appAs('technician', jobRepo)).put(`/api/jobs/${id}`).send({ requiredSkills: [] });
+    expect(res.status).toBe(403);
+    expect((await jobRepo.findById(TEST_TENANT_ID, id))?.requiredSkills).toEqual(['gas_certified']);
+  });
+
+  it('still lets a technician edit ordinary fields', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const id = await seedJob(jobRepo);
+    const res = await request(appAs('technician', jobRepo)).put(`/api/jobs/${id}`).send({ summary: 'Edited' });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects a tag that cannot be normalized with 400', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const id = await seedJob(jobRepo);
+    const res = await request(appAs('owner', jobRepo)).put(`/api/jobs/${id}`).send({ requiredSkills: ['R&D'] });
+    expect(res.status).toBe(400);
+    expect((await jobRepo.findById(TEST_TENANT_ID, id))?.requiredSkills).toBeUndefined();
+  });
+});
