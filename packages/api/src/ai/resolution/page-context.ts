@@ -248,6 +248,13 @@ const POINTS_AT_PAGE_RECORD_RE: Readonly<Record<PageEntityType, RegExp>> = {
   appointment: /\b(?:this|that|the same)\s+(?:appointment|visit|booking)\b/i,
 };
 
+/** The lookup that asks about a page's own record. */
+const DOCUMENT_LOOKUP_BY_TYPE: Partial<Record<PageEntityType, string>> = {
+  job: 'lookup_jobs',
+  invoice: 'lookup_invoices',
+  estimate: 'lookup_estimates',
+};
+
 export interface PageLookupInput {
   intent: string;
   entities: Record<string, unknown> | undefined;
@@ -293,7 +300,11 @@ export function pageLookupIds(input: PageLookupInput): PageLookupIds {
     out.customerId = page.ids.customerId;
   }
   if (page.ids.jobId && (pointsAtPage || points('jobReference', POINTS_AT_JOB_RE))) out.jobId = page.ids.jobId;
-  if (page.documentNumber && pointsAtPage) out.documentNumber = page.documentNumber;
+  // Only a question about that kind of record reads it by number: "what
+  // invoices are on this job?" lists the job's invoices, not the job's status.
+  if (page.documentNumber && pointsAtPage && DOCUMENT_LOOKUP_BY_TYPE[page.context.entityType] === intent) {
+    out.documentNumber = page.documentNumber;
+  }
   return out;
 }
 

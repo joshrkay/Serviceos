@@ -224,6 +224,16 @@ describe('pageLookupIds on a document page', () => {
     ).toEqual({ customerId: CUSTOMER, jobId: JOB });
   });
 
+  it('a question about another kind of record does not read the page by its number', () => {
+    const jobDocPage = { ids: { jobId: JOB, customerId: CUSTOMER }, documentNumber: 'JOB-0081', context: { entityType: 'job' as const } };
+    expect(
+      pageLookupIds({ intent: 'lookup_invoices', entities: {}, text: 'what invoices are on this job?', page: jobDocPage }),
+    ).toEqual({ customerId: CUSTOMER, jobId: JOB });
+    expect(
+      pageLookupIds({ intent: 'lookup_jobs', entities: {}, text: "what's the status of this job?", page: jobDocPage }),
+    ).toEqual({ customerId: CUSTOMER, jobId: JOB, documentNumber: 'JOB-0081' });
+  });
+
   it('a question that does not point at the invoice leaves it alone', () => {
     expect(pageLookupIds({ intent: 'lookup_invoices', entities: {}, text: 'what invoices are open?', page: invoicePage })).toEqual({});
   });
