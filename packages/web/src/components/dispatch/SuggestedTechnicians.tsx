@@ -49,7 +49,9 @@ export function overlapLabel(o: SuggestionOverlap, timezone: string): string {
 
 /** Blocked only because of clashing visits (not skills, hours or time off). */
 function bookedOnly(s: TechnicianSuggestion): boolean {
-  return !s.feasible && s.overlaps.length > 0 && s.reasons.length === s.overlaps.length;
+  // `reasons` is blocking reasons then warnings; only the blocking ones must all be clashes.
+  const blockingCount = s.reasons.length - s.warningCount;
+  return !s.feasible && s.overlaps.length > 0 && blockingCount === s.overlaps.length;
 }
 
 function OverlapAlerts({ booked, timezone }: { booked: TechnicianSuggestion[]; timezone: string }) {

@@ -125,6 +125,19 @@ describe('SuggestedTechnicians', () => {
     expect(screen.queryByTestId('suggest-techs-partial')).toBeNull();
   });
 
+  it('still alerts on a booked tech who also has a non-blocking travel warning', async () => {
+    respondWith([
+      sug({
+        technicianId: 'e', name: 'Eve', feasible: false, warningCount: 1, overlaps: [clash],
+        reasons: ['Overlaps with appointment a-other', 'Tight drive to next visit'],
+      }),
+    ]);
+    render(<SuggestedTechnicians appointmentId="appt-1" onPick={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('suggest-techs-button'));
+    expect(await screen.findByTestId('suggest-techs-overlap')).toHaveTextContent('Overlaps by 30 min: Boiler service');
+    expect(screen.getByTestId('suggest-techs-none')).not.toHaveTextContent('a-other');
+  });
+
   it('overlapLabel falls back when the clashing job is gone', () => {
     expect(overlapLabel({ ...clash, jobSummary: null }, 'America/New_York')).toBe(
       'Overlaps by 30 min: another visit, 1:30 PM–3:00 PM',
