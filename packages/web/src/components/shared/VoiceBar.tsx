@@ -247,7 +247,6 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   const stopListening = useCallback(async () => {
     if (captureModeRef.current === 'stream') {
       captureModeRef.current = null;
-      streamFinalRef.current = null;
       dictation.stop();
       settleStreamedTranscript(
         streamFinalRef.current ?? liveTextRef.current,
@@ -345,6 +344,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
 
     if (dictationSupported()) {
       captureModeRef.current = 'stream';
+      streamFinalRef.current = null;
       setPhase('listening');
       const started = await dictation.start();
       if (started === 'connecting') return;

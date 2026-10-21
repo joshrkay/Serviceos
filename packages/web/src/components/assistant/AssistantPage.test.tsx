@@ -1093,7 +1093,7 @@ describe('VoiceBar hand-off — the record on screen rides along', () => {
     await waitFor(() => expect(chatBodies()).toHaveLength(1));
     fireEvent.click(screen.getByRole('button', { name: 'Remove page context' }));
 
-    const box = screen.getByPlaceholderText(/./, { selector: 'textarea' });
+    const box = document.querySelector('textarea') as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: 'what is on today' } });
     fireEvent.keyDown(box, { key: 'Enter' });
     await waitFor(() => expect(chatBodies()).toHaveLength(2));
