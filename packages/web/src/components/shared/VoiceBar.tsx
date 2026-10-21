@@ -308,8 +308,11 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
     const attempt = attemptRef.current;
     const mimeType = getSupportedAudioMimeType();
     if (!mimeType) {
+      // A live start that fell back here already shows the listening controls.
+      captureModeRef.current = null;
       setError('This browser does not support a compatible recording format.');
       setCanRetry(true);
+      setPhase('idle');
       return;
     }
 

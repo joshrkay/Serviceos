@@ -1183,6 +1183,20 @@ export function contractGateMissingFields(
 }
 
 /**
+ * The technician job screen sets status with its own buttons
+ * (`jobStatusHandled`), so a job edit drafted from that screen must not
+ * re-apply a status the tech left unticked. Strips `status` from an
+ * `update_job` draft, in place, and keeps every other edit (priority, title,
+ * description). Returns true when nothing is left to change, so the caller
+ * drops the draft instead of persisting an empty edit.
+ */
+export function dropHandledJobStatus(proposal: Proposal): boolean {
+  if (proposal.proposalType !== 'update_job') return false;
+  delete proposal.payload.status;
+  return !CHAT_JOB_EDIT_FIELDS.some((f) => proposal.payload[f] !== undefined);
+}
+
+/**
  * Apply the gate to a freshly drafted proposal, in place.
  *
  * Two effects, both load-bearing:
@@ -3596,19 +3610,6 @@ async function generateAssistantReply(
       guardIntent = classification.intentType;
       guardConfidence = classification.confidence;
 
-      if (jobStatusHandled && classification.intentType === 'update_job') {
-        return {
-          taskType: 'assistant.update_job.status_handled',
-          model: 'intent-classifier',
-          usage: classifierUsage,
-          message: {
-            role: 'assistant' as const,
-            content: "Your status buttons set the job's status, so I left it as it is.",
-            reasoning: 'Job edits are not drafted from the technician job screen, which sets status itself.',
-          },
-        };
-      }
-
       // ── Lookup path ────────────────────────────────────────────────
       // Runs BEFORE the chain split and both dispatch maps: a lookup is a
       // read-only question with one answer, and the chain splitter would
@@ -3977,8 +3978,6 @@ async function generateAssistantReply(
           }
           // UB-A3 — thread the applicable standing instructions (≤5, keyed
           // on this segment's classified intent) into the drafting handler.
-          // Same rule as the single-intent path: the job screen owns status.
-          if (jobStatusHandled && segClass.intentType === 'update_job') continue;
           const segStandingInstructions = selectInjectedStandingInstructions(
             activeStandingInstructions,
             segClass.intentType,
@@ -4073,6 +4072,8 @@ async function generateAssistantReply(
           stampVerifiedIds(proposal, segVerifiedIds);
           applyVerifiedIdsToPayload(proposal, segVerifiedIds);
           dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
+          // Same rule as the single-intent path: the job screen owns status.
+          if (jobStatusHandled && dropHandledJobStatus(proposal)) continue;
           // Same contract gate the single-intent path applies — a chained
           // step is no more approvable than a standalone one.
           applyContractGate(proposal);
@@ -4363,6 +4364,18 @@ async function generateAssistantReply(
           extractedEntities,
           proposal.sourceContext,
         );
+        if (jobStatusHandled && dropHandledJobStatus(proposal)) {
+          return {
+            taskType: 'assistant.update_job.status_handled',
+            model: 'intent-classifier',
+            usage: classifierUsage,
+            message: {
+              role: 'assistant' as const,
+              content: "Your status buttons set the job's status, so I left it as it is.",
+              reasoning: 'The technician job screen sets status itself; nothing else on the job was asked to change.',
+            },
+          };
+        }
         // The contract gate, BEFORE the resolution loop below on purpose: the
         // gate is what tells that loop which references to go and resolve, so
         // gating a booking on `customerId` here is exactly what lets the

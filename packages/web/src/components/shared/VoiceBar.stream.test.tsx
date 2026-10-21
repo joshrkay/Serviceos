@@ -177,6 +177,20 @@ describe('VoiceBar — live words', () => {
     expect(screen.getByText('Listening…')).toBeTruthy();
   });
 
+  it('returns to idle when the fallback recorder has no supported format', async () => {
+    fake.startResult = 'unavailable';
+    const supported = vi.spyOn(FakeMediaRecorder, 'isTypeSupported').mockReturnValue(false);
+    try {
+      renderBar();
+      fireEvent.click(screen.getByTestId('voice-example-hint'));
+      expect(await screen.findByText(/compatible recording format/)).toBeTruthy();
+      expect(screen.queryByText('Listening…')).toBeNull();
+      expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+    } finally {
+      supported.mockRestore();
+    }
+  });
+
   it('falls back when the socket is refused before it opens', async () => {
     renderBar();
     fireEvent.click(screen.getByTestId('voice-example-hint'));

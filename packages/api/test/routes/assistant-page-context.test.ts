@@ -10,7 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import express, { type Request, type Response, type NextFunction } from 'express';
 import request from 'supertest';
-import { createAssistantRouter } from '../../src/routes/assistant';
+import { createAssistantRouter, dropHandledJobStatus } from '../../src/routes/assistant';
 import { InMemoryProposalRepository, missingFieldsFor } from '../../src/proposals/proposal';
 import { approveProposal } from '../../src/proposals/actions';
 import type { AuthenticatedRequest } from '../../src/middleware/auth';
@@ -35,12 +35,17 @@ const OTHER_CUSTOMER = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 const JOB = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
 const APPOINTMENT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
-function scriptedGateway(intentType: string, extractedEntities: Record<string, unknown>): LLMGateway {
+function scriptedGateway(
+  intentType: string,
+  extractedEntities: Record<string, unknown>,
+  // Extra top-level keys, read by a drafting handler that shares this gateway.
+  draft: Record<string, unknown> = {},
+): LLMGateway {
   return {
     complete: vi.fn(
       async () =>
         ({
-          content: JSON.stringify({ intentType, confidence: 0.95, reasoning: 'test', extractedEntities }),
+          content: JSON.stringify({ intentType, confidence: 0.95, reasoning: 'test', extractedEntities, ...draft }),
           model: 'mock',
           provider: 'mock',
           tokenUsage: { input: 1, output: 1, total: 2 },
@@ -284,5 +289,43 @@ describe('chat: the technician job screen owns the job status', () => {
     expect(res.status).toBe(200);
     expect(res.body.message.content).toContain("Your status buttons set the job's status");
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  it('keeps the other job edits and drops only the status', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      scriptedGateway('update_job', { jobReference: 'this job' }, { status: 'completed', priority: 'high' }),
+      resolver(notFound),
+      proposalRepo,
+    );
+    const res = await chat(app, 'done here, and mark this job high priority', { entityType: 'job', entityId: JOB }, { jobStatusHandled: true });
+    expect(res.status).toBe(200);
+    const [proposal] = await proposalRepo.findByTenant(TENANT);
+    expect(proposal?.proposalType).toBe('update_job');
+    expect(proposal?.payload.priority).toBe('high');
+    expect(proposal?.payload).not.toHaveProperty('status');
+  });
+});
+
+describe('dropHandledJobStatus', () => {
+  const draft = (proposalType: string, payload: Record<string, unknown>) =>
+    ({ proposalType, payload }) as unknown as Parameters<typeof dropHandledJobStatus>[0];
+
+  it('drops a status-only job edit', () => {
+    const p = draft('update_job', { jobId: JOB, status: 'completed' });
+    expect(dropHandledJobStatus(p)).toBe(true);
+    expect(p.payload).not.toHaveProperty('status');
+  });
+
+  it('keeps a job edit that changes something besides status', () => {
+    const p = draft('update_job', { jobId: JOB, status: 'completed', description: 'Replaced capacitor' });
+    expect(dropHandledJobStatus(p)).toBe(false);
+    expect(p.payload).toEqual({ jobId: JOB, description: 'Replaced capacitor' });
+  });
+
+  it('leaves other proposal types alone', () => {
+    const p = draft('add_note', { jobId: JOB, status: 'x' });
+    expect(dropHandledJobStatus(p)).toBe(false);
+    expect(p.payload).toHaveProperty('status', 'x');
   });
 });
