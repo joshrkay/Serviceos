@@ -144,6 +144,14 @@ import {
 // loop, and the answer turn's re-resolve fallback — asks the question and
 // matches the answer with the address on it, with no per-call-site change.
 import { withCustomerAddressHints } from '../ai/resolution/customer-address-hint';
+import {
+  pageContextSchema,
+  loadPageContext,
+  mergePageContextIds,
+  pageContextNote,
+  type PageContext,
+  type LoadedPageContext,
+} from '../ai/resolution/page-context';
 // Phase 12 supervisor gate (commit 1 of the followup-autoapprove-default
 // fix) — mirrors workers/voice-action-router.ts's use of the SAME function:
 // resolve tenant-wide supervisor presence once per turn and thread it onto
@@ -406,6 +414,10 @@ const assistantChatRequestSchema = z.object({
   // resolved tenant-scoped (files/chat-image-attachments.ts) and handed to
   // the draft_estimate handler as image parts.
   attachments: z.array(z.object({ fileId: z.string() })).optional(),
+  // The detail page the turn started on, so "this job" / "her" resolve to it.
+  // Re-read tenant-scoped before use — see ai/resolution/page-context.ts. A
+  // malformed one is dropped, never a reason to refuse the operator's turn.
+  pageContext: pageContextSchema.optional().catch(undefined),
 });
 
 /**
@@ -1271,6 +1283,8 @@ interface PreDraftResolution {
    * loop that already knows how to ask ONE question and match the answer.
    */
   ambiguousRefKeys: string[];
+  /** The keys the operator's open page filled (`mergePageContextIds`). */
+  pageFilledKeys?: string[];
 }
 
 const NO_PRE_DRAFT_RESOLUTION: PreDraftResolution = { ids: {}, ambiguousRefKeys: [] };
@@ -1763,6 +1777,28 @@ async function findJobByLiteralNumber(
  * rather than drafting a job for one customer onto another's estimate.
  */
 async function resolvePreDraftIds(
+  deps: Pick<AssistantRouterDeps, 'entityResolver' | 'jobRepo' | 'invoiceRepo'>,
+  tenantId: string,
+  intent: string,
+  registryKey: string | undefined,
+  entities: Record<string, unknown> | undefined,
+  operatorText: string,
+  page?: LoadedPageContext,
+): Promise<PreDraftResolution> {
+  const fromWords = await resolvePreDraftIdsFromWords(deps, tenantId, intent, registryKey, entities, operatorText);
+  if (!page) return fromWords;
+  const merged = mergePageContextIds({
+    intent,
+    entities,
+    text: operatorText,
+    resolvedIds: fromWords.ids,
+    ambiguousRefKeys: fromWords.ambiguousRefKeys,
+    page,
+  });
+  return { ids: merged.ids, ambiguousRefKeys: merged.ambiguousRefKeys, pageFilledKeys: merged.filledKeys };
+}
+
+async function resolvePreDraftIdsFromWords(
   deps: Pick<AssistantRouterDeps, 'entityResolver' | 'jobRepo' | 'invoiceRepo'>,
   tenantId: string,
   intent: string,
@@ -3236,6 +3272,7 @@ async function generateAssistantReply(
   // #1173 — the turn's photo attachments (`assistantChatRequestSchema
   // .attachments`, #1144), resolved tenant-scoped below.
   attachments?: ReadonlyArray<{ fileId: string }>,
+  pageContext?: PageContext,
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   // #1201 — an API caller can send a photo with BLANK text (the web client
@@ -3340,6 +3377,11 @@ async function generateAssistantReply(
         }
       }
       const timezoneContext = tenantTimezone ? { timezone: tenantTimezone } : {};
+
+      // The page the operator spoke from, re-read tenant-scoped. Only the
+      // drafting paths consult it (resolvePreDraftIds); undefined when the
+      // client sent none or the record is not this tenant's.
+      const openPage = pageContext ? await loadPageContext(deps, tenantId, pageContext) : undefined;
 
       // Phase 12 supervisor gate — mirrors workers/voice-action-router.ts's
       // identical call, but LAZY (minor fix, post-C1 review): read-only
@@ -3920,6 +3962,7 @@ async function generateAssistantReply(
               registryKey,
               segEntities,
               segment,
+              openPage,
             )).ids,
           };
           // I3 — resolved once (memoized) and reused across every segment.
@@ -4182,7 +4225,12 @@ async function generateAssistantReply(
           registryKey,
           extractedEntities,
           lastUserText,
+          openPage,
         );
+        // Said out loud whenever the open page filled a reference, so a wrong
+        // pick is visible on the card's own turn.
+        const usedPage = openPage && preDraft.pageFilledKeys?.length ? openPage : undefined;
+        const pageNote = usedPage ? `\n\n${pageContextNote(usedPage)}` : '';
         // #1499 — a create-and-send reroute that named its job by NUMBER
         // bills that job; a name the resolver verified still wins.
         const verifiedIds = { ...(createAndSend?.job ?? {}), ...preDraft.ids };
@@ -4248,6 +4296,12 @@ async function generateAssistantReply(
         // drafting run's).
         Object.assign(proposal, withClassifierRun(proposal, classification.aiRunId));
         stampVerifiedIds(proposal, verifiedIds);
+        if (usedPage) {
+          proposal.sourceContext = {
+            ...(proposal.sourceContext ?? {}),
+            pageContext: { ...usedPage.context, filledKeys: preDraft.pageFilledKeys },
+          };
+        }
         applyVerifiedIdsToPayload(proposal, verifiedIds);
         dropUnverifiedIds(
           proposal.payload,
@@ -4385,9 +4439,10 @@ async function generateAssistantReply(
             usage: { input: 0, output: 0, total: 0 },
             message: {
               role: 'assistant' as const,
-              content: clarification
-                ? `Updated — ${card.title}.\n\n${clarification}`
-                : `Updated — ${card.title}. ${proposalReplySuffix(card.status)}`,
+              content:
+                (clarification
+                  ? `Updated — ${card.title}.\n\n${clarification}`
+                  : `Updated — ${card.title}. ${proposalReplySuffix(card.status)}`) + pageNote,
               reasoning:
                 'Correction of the draft still awaiting review on this thread — rewrote it in place rather than leaving two approvable cards for one job.',
               proposal: card,
@@ -4427,7 +4482,8 @@ async function generateAssistantReply(
                 undraftedCompoundSteps(lastUserText, [proposal.proposalType], {
                   skipFamilies: createAndSend ? ['send'] : [],
                 }),
-              ),
+              ) +
+              pageNote,
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },
@@ -4911,6 +4967,7 @@ export function createAssistantRouter(rawDeps: AssistantRouterDeps): Router {
           (req.auth as { mode?: Mode } | undefined)?.mode,
           // #1173 — the turn's photo references, resolved tenant-scoped inside.
           parsed.attachments,
+          parsed.pageContext,
         );
 
         // Story 3.11 — persist the turn so the conversation survives reload and

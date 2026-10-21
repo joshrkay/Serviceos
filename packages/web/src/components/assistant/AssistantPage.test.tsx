@@ -1053,3 +1053,59 @@ describe('#1384 — ?q= auto-submit under React StrictMode', () => {
     expect(chatPosts()).toHaveLength(1);
   });
 });
+
+describe('VoiceBar hand-off — the record on screen rides along', () => {
+  const JOB = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const chatBodies = () =>
+    mockedApiFetch.mock.calls
+      .filter(([url]) => String(url).includes('/api/assistant/chat'))
+      .map(([, init]) => JSON.parse(String((init as RequestInit).body)));
+
+  function renderHandoff(search: string) {
+    return render(
+      <MemoryRouter initialEntries={[`/assistant?${search}`]}>
+        <AssistantPage />
+      </MemoryRouter>,
+    );
+  }
+
+  it('sends the page context and voice mode, and shows a removable chip', async () => {
+    mockedApiFetch.mockResolvedValue(jsonResponse({ message: { content: 'ok' }, conversationId: 'c1' }));
+    renderHandoff(`q=add+a+note&ctx=job:${JOB}&via=voice`);
+
+    const chip = screen.getByTestId('assistant-page-context-chip');
+    expect(chip.textContent).toContain('About the job you were viewing');
+    await waitFor(() => expect(chatBodies()).toHaveLength(1));
+    expect(chatBodies()[0]).toMatchObject({
+      pageContext: { entityType: 'job', entityId: JOB },
+      inputMode: 'voice',
+    });
+
+    const remove = screen.getByRole('button', { name: 'Remove page context' });
+    expect(remove.className).toContain('size-11');
+    fireEvent.click(remove);
+    expect(screen.queryByTestId('assistant-page-context-chip')).toBeNull();
+  });
+
+  it('stops sending the context once the chip is removed', async () => {
+    mockedApiFetch.mockResolvedValue(jsonResponse({ message: { content: 'ok' }, conversationId: 'c1' }));
+    renderHandoff(`q=add+a+note&ctx=job:${JOB}`);
+    await waitFor(() => expect(chatBodies()).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove page context' }));
+
+    const box = screen.getByPlaceholderText(/./, { selector: 'textarea' });
+    fireEvent.change(box, { target: { value: 'what is on today' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    await waitFor(() => expect(chatBodies()).toHaveLength(2));
+    expect(chatBodies()[1].pageContext).toBeUndefined();
+    expect(chatBodies()[0].inputMode).toBeUndefined();
+  });
+
+  it('ignores a malformed context', async () => {
+    mockedApiFetch.mockResolvedValue(jsonResponse({ message: { content: 'ok' }, conversationId: 'c1' }));
+    renderHandoff('q=hello&ctx=job:nope');
+    await waitFor(() => expect(chatBodies()).toHaveLength(1));
+    expect(screen.queryByTestId('assistant-page-context-chip')).toBeNull();
+    expect(chatBodies()[0].pageContext).toBeUndefined();
+  });
+});
