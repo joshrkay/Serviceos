@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { requireAuth, requireTenant } from '../middleware/auth';
+import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
 import { validate } from '../shared/validation';
 import { UserRepository } from '../users/user';
@@ -144,13 +144,15 @@ export function createSchedulingRouter(
    * technician checked against the visit's own window and ranked: feasible
    * first, then the shortest known drive from their previous visit. Read-only
    * (no audit event); the board turns a pick into a reassign_appointment
-   * proposal. Auth matches check-feasibility, which reveals the same facts
-   * one technician at a time.
+   * proposal. Dispatch-only (dispatch:view): it lists the whole technician
+   * roster and the clashing visits' job summaries, and fans out a travel
+   * lookup per tech, none of which a technician needs.
    */
   router.get(
     '/appointments/:id/suggested-technicians',
     requireAuth,
     requireTenant,
+    requirePermission('dispatch:view'),
     notFoundOnMalformedId('Appointment not found'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {

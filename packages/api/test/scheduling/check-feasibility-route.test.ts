@@ -8,7 +8,7 @@ import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
 
 function fakeAuth(req: any, _res: any, next: any) {
-  req.auth = { tenantId: 't-1', userId: 'u-1', role: 'dispatcher' };
+  req.auth = { tenantId: 't-1', userId: 'u-1', role: req.headers['x-test-role'] ?? 'dispatcher' };
   next();
 }
 
@@ -161,6 +161,15 @@ describe('GET /api/dispatch/appointments/:id/suggested-technicians', () => {
     expect(res.status).toBe(200);
     const byId = Object.fromEntries(res.body.suggestions.map((s: any) => [s.technicianId, s.isCurrent]));
     expect(byId).toEqual({ 'tech-a': false, 'tech-c': true });
+  });
+
+  it('refuses a technician: the roster and clashing job summaries are dispatch-only', async () => {
+    const app = suggestApp([appt({ id: APPT_ID })], [tech('tech-a', 'Al')]);
+    const res = await request(app)
+      .get(`/api/dispatch/appointments/${APPT_ID}/suggested-technicians`)
+      .set('x-test-role', 'technician');
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('FORBIDDEN');
   });
 
   it('returns 404 for an unknown appointment', async () => {
