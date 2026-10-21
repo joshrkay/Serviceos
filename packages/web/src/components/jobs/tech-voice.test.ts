@@ -44,14 +44,13 @@ describe('sendTechVoiceUpdate', () => {
         { status: 200 },
       ),
     );
-    const out = await sendTechVoiceUpdate(apiFetch, 'job-1', 'used a capacitor and two hours labor');
+    const out = await sendTechVoiceUpdate(apiFetch, 'job-1', 'used a capacitor and two hours labor', false);
     expect(apiFetch).toHaveBeenCalledWith('/api/assistant/chat', expect.objectContaining({ method: 'POST' }));
     const body = JSON.parse((apiFetch.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
     expect(body).toEqual({
       messages: [{ role: 'user', content: 'used a capacitor and two hours labor' }],
       inputMode: 'voice',
       pageContext: { entityType: 'job', entityId: 'job-1' },
-      jobStatusHandled: true,
     });
     expect(out).toEqual({
       ok: true,
@@ -59,6 +58,16 @@ describe('sendTechVoiceUpdate', () => {
       draft: { id: 'p1', title: 'Invoice', proposalType: 'draft_invoice' },
     });
     expect(needsFieldNote(out)).toBe(true);
+  });
+
+  it('leaves status to the screen only when the screen offered one', async () => {
+    const body = async (statusOffered: boolean) => {
+      const apiFetch = fetcher(new Response(JSON.stringify({ message: { content: 'ok' } }), { status: 200 }));
+      await sendTechVoiceUpdate(apiFetch, 'job-1', 'all done here', statusOffered);
+      return JSON.parse((apiFetch.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    };
+    expect(await body(true)).toMatchObject({ jobStatusHandled: true });
+    expect(await body(false)).not.toHaveProperty('jobStatusHandled');
   });
 
   it('does not save the words twice when the assistant already approved them as a note', async () => {
@@ -73,6 +82,7 @@ describe('sendTechVoiceUpdate', () => {
       ),
       'job-1',
       'note: gate code 4471',
+      false,
     );
     expect(needsFieldNote(out)).toBe(false);
   });
@@ -89,14 +99,15 @@ describe('sendTechVoiceUpdate', () => {
       ),
       'job-1',
       'note: gate code 4471',
+      false,
     );
     expect(needsFieldNote(out)).toBe(true);
   });
 
   it('reports a failure on an error status, an empty reply or a network error', async () => {
-    expect(await sendTechVoiceUpdate(fetcher(new Response('{}', { status: 500 })), 'j', 'x')).toEqual({ ok: false });
-    expect(await sendTechVoiceUpdate(fetcher(new Response('{"message":{}}', { status: 200 })), 'j', 'x')).toEqual({ ok: false });
-    expect(await sendTechVoiceUpdate(fetcher(new Error('offline')), 'j', 'x')).toEqual({ ok: false });
+    expect(await sendTechVoiceUpdate(fetcher(new Response('{}', { status: 500 })), 'j', 'x', false)).toEqual({ ok: false });
+    expect(await sendTechVoiceUpdate(fetcher(new Response('{"message":{}}', { status: 200 })), 'j', 'x', false)).toEqual({ ok: false });
+    expect(await sendTechVoiceUpdate(fetcher(new Error('offline')), 'j', 'x', false)).toEqual({ ok: false });
     expect(needsFieldNote({ ok: false })).toBe(true);
   });
 });

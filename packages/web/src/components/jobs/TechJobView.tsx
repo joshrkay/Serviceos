@@ -80,6 +80,8 @@ interface VoiceResult {
   durationSeconds: number;
   /** Ticked on the confirm card; unticked means leave the status alone. */
   statusUpdate?: TechStatus;
+  /** The confirm card offered a status for these words, ticked or not. */
+  statusOffered: boolean;
 }
 
 // ─── Status flow ───────────────────────────────────────────────────────────────
@@ -256,6 +258,7 @@ function VoiceHero({
       await onResult({
         transcript: text,
         durationSeconds: seconds,
+        statusOffered: suggested !== undefined,
         ...(suggested && applyStatus ? { statusUpdate: suggested } : {}),
       });
     } finally {
@@ -849,7 +852,12 @@ export function TechJobView({
   async function handleVoiceResult(result: VoiceResult) {
     if (result.statusUpdate) await applyVoiceStatus(result.statusUpdate);
 
-    const outcome: TechVoiceOutcome = await sendTechVoiceUpdate(apiFetch, id, result.transcript);
+    const outcome: TechVoiceOutcome = await sendTechVoiceUpdate(
+      apiFetch,
+      id,
+      result.transcript,
+      result.statusOffered,
+    );
     let noteFailed = false;
     if (needsFieldNote(outcome)) {
       const savedId = await saveNoteToApi(result.transcript, 'voice');

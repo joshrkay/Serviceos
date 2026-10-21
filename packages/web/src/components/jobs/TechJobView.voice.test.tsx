@@ -112,8 +112,9 @@ describe('TechJobView voice update', () => {
       messages: [{ role: 'user', content: 'used a 45/5 capacitor and two hours labor' }],
       inputMode: 'voice',
       pageContext: { entityType: 'job', entityId: 'j1' },
-      jobStatusHandled: true,
     });
+    // No status was offered, so the assistant may still read one from the words.
+    expect(JSON.parse((init as RequestInit).body as string)).not.toHaveProperty('jobStatusHandled');
     // The words are kept as the field note, and nothing invented a parts list.
     expect(posts('/api/notes')).toHaveLength(1);
     expect(screen.queryByText('Materials & Parts')).toBeNull();
@@ -149,6 +150,20 @@ describe('TechJobView voice update', () => {
     await screen.findByTestId('tech-voice-reply');
     expect(calls((p) => p.includes('/transition'))).toHaveLength(0);
     expect(screen.queryByText('Job complete!')).toBeNull();
+    // The unticked choice is the tech's: the assistant must not complete it either.
+    const [[, init]] = posts('/api/assistant/chat');
+    expect(JSON.parse((init as RequestInit).body as string)).toMatchObject({ jobStatusHandled: true });
+  });
+
+  it('lets the assistant draft a status the screen did not recognize', async () => {
+    routes({ transcript: 'set this job to completed' });
+    await speak();
+    await screen.findByRole('textbox', { name: 'What you said' });
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Send to Rivet/ }));
+    await screen.findByTestId('tech-voice-reply');
+    const [[, init]] = posts('/api/assistant/chat');
+    expect(JSON.parse((init as RequestInit).body as string)).not.toHaveProperty('jobStatusHandled');
   });
 
   it('applies a ticked "complete" through the job transition', async () => {

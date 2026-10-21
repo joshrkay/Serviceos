@@ -52,6 +52,13 @@ export async function sendTechVoiceUpdate(
   apiFetch: (url: string, init?: RequestInit) => Promise<Response>,
   jobId: string,
   transcript: string,
+  /**
+   * The screen offered a status for these words (ticked or not). Only then is
+   * status the tech's call: words the screen did not recognize as a status
+   * ("set this job to completed") stay with the assistant, so they draft a
+   * status change for approval instead of being dropped.
+   */
+  statusOffered: boolean,
 ): Promise<TechVoiceOutcome> {
   try {
     const res = await apiFetch('/api/assistant/chat', {
@@ -61,9 +68,10 @@ export async function sendTechVoiceUpdate(
         messages: [{ role: 'user', content: transcript }],
         inputMode: 'voice',
         pageContext: { entityType: 'job', entityId: jobId },
-        // Status is the tech's call on this screen (the tick box), never the
-        // assistant's: an unticked "all done" must not complete the job.
-        jobStatusHandled: true,
+        // When the screen offered a status, it is the tech's call (the tick
+        // box), never the assistant's: an unticked "all done" must not
+        // complete the job.
+        ...(statusOffered ? { jobStatusHandled: true } : {}),
       }),
     });
     if (!res.ok) return { ok: false };
