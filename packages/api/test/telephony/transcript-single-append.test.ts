@@ -67,7 +67,7 @@ async function makeHarness(callSid: string) {
     appendSpy.mock.calls
       .filter(([, entry]) => entry.speaker === 'caller')
       .map(([, entry]) => entry.text);
-  return { store, gateway, adapter, session, callerLines };
+  return { store, gateway, adapter, session, callerLines, appendSpy };
 }
 
 describe('#859 — one transcript append per caller utterance', () => {
@@ -145,5 +145,43 @@ describe('#859 — one transcript append per caller utterance', () => {
     });
 
     expect(callerLines()).toEqual([]);
+  });
+
+  it('U1: processCallerUtterance stamps the final\'s own timing on its caller line', async () => {
+    const { adapter, session, appendSpy } = await makeHarness('CA-ms-timing');
+    const callerTiming = {
+      transport: 'realtime' as const,
+      sttFinalAt: new Date(2_000),
+      lastWordAt: new Date(1_200),
+    };
+
+    await adapter.processCallerUtterance({
+      sessionId: session.id,
+      callSid: 'CA-ms-timing',
+      speechResult: 'my water heater is leaking',
+      tenantId: 'tenant-abc',
+      callerTiming,
+    });
+
+    const entry = appendSpy.mock.calls.map(([, e]) => e).find((e) => e.speaker === 'caller');
+    expect(entry?.timing).toBe(callerTiming);
+  });
+
+  it('U1: Gather stamps the caller line with transport gather and the webhook-receipt STT-final', async () => {
+    const { adapter, session, appendSpy } = await makeHarness('CA-gather-timing');
+    const before = Date.now();
+
+    await adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-gather-timing',
+      speechResult: 'my water heater is leaking',
+      confidence: 0.95,
+      tenantId: 'tenant-abc',
+    });
+
+    const entry = appendSpy.mock.calls.map(([, e]) => e).find((e) => e.speaker === 'caller');
+    expect(entry?.timing).toMatchObject({ transport: 'gather' });
+    expect(entry?.timing?.sttFinalAt.getTime()).toBeGreaterThanOrEqual(before);
+    expect(entry?.timing?.lastWordAt).toBeUndefined();
   });
 });

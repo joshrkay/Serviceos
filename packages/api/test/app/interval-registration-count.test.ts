@@ -65,8 +65,14 @@ import { resetConfig } from '../../src/shared/config';
  * (`SWEEP_LOCK.voiceQualityGrading`, `createVoiceQualityGradingWorker().handle()`
  * every 30 min, gated to the nightly hour inside the worker) — one more
  * leader-gated, `shouldRunWorkers`-only interval; web/voice stay at zero.
+ * 25 → 26 (S5a-6, U8): the daily payment-link reconciliation sweep
+ * (`SWEEP_LOCK.paymentLinkReconciliation`, `runPaymentLinkReconciliationSweep`
+ * on an hourly tick gated to the 03:00 UTC hour) — one more leader-gated,
+ * `shouldRunWorkers`-only interval. It registers in a hermetic boot because
+ * its enumerator falls back to the in-memory settings repository; web/voice
+ * stay at zero.
  */
-const EXPECTED_WORKER_INTERVALS_HERMETIC = 25;
+const EXPECTED_WORKER_INTERVALS_HERMETIC = 26;
 
 describe('characterization — background interval registration', () => {
   const originalDatabaseUrl = process.env.DATABASE_URL;

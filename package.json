@@ -97,7 +97,9 @@
     "loadtest:http": "tsx loadtest/http-load.ts",
     "loadtest:http:selfcheck": "tsx loadtest/http-load-selfcheck.ts",
     "loadtest:mixed": "tsx loadtest/mixed-1000.ts",
-    "loadtest:mixed:selfcheck": "tsx loadtest/mixed-1000-selfcheck.ts"
+    "loadtest:mixed:selfcheck": "tsx loadtest/mixed-1000-selfcheck.ts",
+    "loadtest:voice-realtime": "tsx loadtest/voice-realtime-concurrency.ts",
+    "loadtest:voice-realtime:selfcheck": "tsx loadtest/voice-realtime-concurrency-selfcheck.ts"
   },
   "devDependencies": {
     "@clerk/testing": "^2.2.46",
@@ -120,12 +122,12 @@
   },
   "overrides": {
     "axios": "^1.20.0",
-    "brace-expansion@2": "2.1.4",
+    "brace-expansion@2": "2.1.7",
     "dockerode": {
       "uuid": "^11.1.1"
     },
     "ip-address": "^10.4.0",
     "nanoid@3": "3.3.18",
-    "undici@7": "7.29.0"
+    "undici@7": "7.30.1"
   }
 }

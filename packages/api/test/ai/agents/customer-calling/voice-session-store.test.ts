@@ -78,7 +78,8 @@ describe('VoiceSessionStore', () => {
         if (opts.reject) throw opts.reject;
         return input as never;
       });
-      return { repo: { recordTurn }, recordTurn };
+      const markReplyAudio = vi.fn(async () => 1);
+      return { repo: { recordTurn, markReplyAudio }, recordTurn };
     }
 
     it('persists each appended turn keyed by tenant + callSid + sessionId with the append-time index', async () => {
@@ -167,6 +168,430 @@ describe('VoiceSessionStore', () => {
       const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
       store.appendTranscript(session.id, { speaker: 'agent', text: 'hi' });
       expect(store.get(session.id)?.transcript).toEqual(['agent: hi']);
+    });
+  });
+
+  // ── U1: caller-turn timing + reply-audio stamps ───────────────────────────
+
+  describe('reply-gap timing (U1)', () => {
+    const CALL_SID = 'CA00000000000000000000000000000002';
+    const settle = () =>
+      new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+
+    /** Append a caller line carrying a unique turn key, as the realtime adapter does. */
+    const appendKeyed = (store: VoiceSessionStore, sessionId: string, turnKey: string): void =>
+      store.appendTranscript(sessionId, {
+        speaker: 'caller',
+        text: `line ${turnKey}`,
+        timing: { transport: 'realtime', turnKey, sttFinalAt: new Date(1) },
+      });
+
+    function timedRepo(opts: { markResult?: number; recordGate?: Promise<void> } = {}) {
+      const order: string[] = [];
+      const recordTurn = vi.fn(async (input: unknown) => {
+        if (opts.recordGate) await opts.recordGate;
+        order.push('recordTurn');
+        return input as never;
+      });
+      const markReplyAudio = vi.fn(async (_input: unknown) => {
+        order.push('markReplyAudio');
+        return opts.markResult ?? 1;
+      });
+      return { repo: { recordTurn, markReplyAudio }, recordTurn, markReplyAudio, order };
+    }
+
+    it('stamps the timing carried on a CALLER append only, computing endpointDelayMs', async () => {
+      const { repo, recordTurn } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      const lastWordAt = new Date(1_000);
+      const sttFinalAt = new Date(1_850);
+
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'hi' });
+      // A timing on an agent line is ignored: only caller rows are stamped.
+      store.appendTranscript(session.id, {
+        speaker: 'agent',
+        text: 'one moment',
+        timing: { transport: 'realtime', sttFinalAt: new Date(7) },
+      });
+      store.appendTranscript(session.id, {
+        speaker: 'caller',
+        text: 'my AC is broken',
+        timing: { transport: 'realtime', sttFinalAt, lastWordAt },
+      });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'and it is hot' });
+      await settle();
+
+      const inputs = recordTurn.mock.calls.map(([input]) => input as Record<string, unknown>);
+      expect(inputs[0]).not.toHaveProperty('transport');
+      expect(inputs[1]).not.toHaveProperty('sttFinalAt');
+      expect(inputs[2]).toMatchObject({
+        speaker: 'caller',
+        transport: 'realtime',
+        sttFinalAt,
+        lastWordAt,
+        endpointDelayMs: 850,
+      });
+      // The next caller append carried no timing, so its row has none.
+      expect(inputs[3]).not.toHaveProperty('transport');
+      expect(inputs[3]).not.toHaveProperty('endpointDelayMs');
+    });
+
+    it('a Gather turn carries transport and sttFinalAt but no last word or endpoint delay', async () => {
+      const { repo, recordTurn } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      const sttFinalAt = new Date(5_000);
+
+      store.appendTranscript(session.id, {
+        speaker: 'caller',
+        text: 'hello',
+        timing: { transport: 'gather', sttFinalAt },
+      });
+      await settle();
+
+      const input = recordTurn.mock.calls[0][0] as Record<string, unknown>;
+      expect(input).toMatchObject({ transport: 'gather', sttFinalAt });
+      expect(input).not.toHaveProperty('lastWordAt');
+      expect(input).not.toHaveProperty('endpointDelayMs');
+    });
+
+    it('a caller append with no timing records none of the new fields', async () => {
+      const { repo, recordTurn } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
+      await settle();
+      expect(Object.keys(recordTurn.mock.calls[0][0] as object).sort()).toEqual(
+        ['callSid', 'sessionId', 'speaker', 'tenantId', 'text', 'turnIndex'],
+      );
+      expect(store.peek(session.id)?.replyTimings).toEqual([]);
+    });
+
+    it('exposes the reply anchors of the recent caller turns and retains only the last few promises', async () => {
+      const { repo } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      const sttFinalAt = new Date(2_000);
+      const lastWordAt = new Date(1_200);
+
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'hi' });
+      store.appendTranscript(session.id, {
+        speaker: 'caller',
+        text: 'first',
+        timing: { transport: 'realtime', sttFinalAt, lastWordAt },
+      });
+      expect(store.peek(session.id)?.replyTimings).toEqual([{ turnIndex: 1, sttFinalAt, lastWordAt }]);
+      expect([...store.peek(session.id)!.pendingTurnPersist.keys()]).toEqual([1]);
+
+      // Five more caller turns: only the last four anchors / promises survive.
+      for (let i = 0; i < 5; i++) {
+        store.appendTranscript(session.id, { speaker: 'agent', text: 'ok' });
+        store.appendTranscript(session.id, {
+          speaker: 'caller',
+          text: `more ${i}`,
+          timing: { transport: 'realtime', sttFinalAt: new Date(9_000 + i) },
+        });
+      }
+      const kept = store.peek(session.id)!;
+      expect(kept.replyTimings.map((t) => t.turnIndex)).toEqual([5, 7, 9, 11]);
+      expect([...kept.pendingTurnPersist.keys()]).toEqual([5, 7, 9, 11]);
+      await settle();
+    });
+
+    it('finals that append out of arrival order: each row carries its OWN timing', async () => {
+      const { repo, recordTurn } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      // "habla español" arrived first but waits behind the session lock in
+      // switchLanguage(); the later final's turn queues and appends before it.
+      const switchFinal = { transport: 'realtime' as const, sttFinalAt: new Date(1_000), lastWordAt: new Date(800) };
+      const laterFinal = { transport: 'realtime' as const, sttFinalAt: new Date(1_500), lastWordAt: new Date(1_400) };
+
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'one moment' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'my AC is broken', timing: laterFinal });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'habla español', timing: switchFinal });
+      await settle();
+
+      const callerRows = recordTurn.mock.calls
+        .map(([input]) => input as Record<string, unknown>)
+        .filter((i) => i.speaker === 'caller');
+      expect(callerRows[0]).toMatchObject({
+        turnIndex: 1,
+        text: 'my AC is broken',
+        sttFinalAt: laterFinal.sttFinalAt,
+        lastWordAt: laterFinal.lastWordAt,
+        endpointDelayMs: 100,
+      });
+      expect(callerRows[1]).toMatchObject({
+        turnIndex: 2,
+        text: 'habla español',
+        sttFinalAt: switchFinal.sttFinalAt,
+        lastWordAt: switchFinal.lastWordAt,
+        endpointDelayMs: 200,
+      });
+      expect(store.peek(session.id)?.replyTimings).toEqual([
+        { turnIndex: 1, sttFinalAt: laterFinal.sttFinalAt, lastWordAt: laterFinal.lastWordAt },
+        { turnIndex: 2, sttFinalAt: switchFinal.sttFinalAt, lastWordAt: switchFinal.lastWordAt },
+      ]);
+    });
+
+    it('markReplyAudio chains behind a still-pending recordTurn, never racing the INSERT', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { repo, markReplyAudio, order } = timedRepo({ recordGate: gate });
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, {
+        speaker: 'caller',
+        text: 'hello',
+        timing: { transport: 'realtime', turnKey: 'k0', sttFinalAt: new Date(1) },
+      });
+
+      const stamped = store.markReplyAudio(session.id, { turnKey: 'k0', firstAudioAt: new Date(2), replyGapMs: 900 });
+      await settle();
+      expect(markReplyAudio).not.toHaveBeenCalled();
+
+      release();
+      await stamped;
+      expect(order).toEqual(['recordTurn', 'markReplyAudio']);
+      expect(markReplyAudio).toHaveBeenCalledWith({
+        tenantId: 'tenant-a',
+        callSid: CALL_SID,
+        sessionId: session.id,
+        turnIndex: 0,
+        firstAudioAt: new Date(2),
+        replyGapMs: 900,
+      });
+    });
+
+    it('markReplyAudio stamps immediately when the insert settled long ago (retained promise)', async () => {
+      const { repo, markReplyAudio } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      appendKeyed(store, session.id, 'k0');
+      await settle();
+      await store.markReplyAudio(session.id, { turnKey: 'k0', firstAudibleAt: new Date(3) });
+      expect(markReplyAudio).toHaveBeenCalledTimes(1);
+    });
+
+    it('markReplyAudio stamps by the row id recordTurn returned, not the (possibly renumbered) index', async () => {
+      const recordTurn = vi.fn(async (input: unknown) => ({ ...(input as object), id: 'row-uuid-1' }) as never);
+      const markReplyAudio = vi.fn(async (_input: unknown) => 1);
+      const store = newStore({ callTranscriptTurnRepo: { recordTurn, markReplyAudio } });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      appendKeyed(store, session.id, 'k0');
+
+      await store.markReplyAudio(session.id, { turnKey: 'k0', firstAudioAt: new Date(2) });
+      expect(markReplyAudio).toHaveBeenCalledWith({
+        tenantId: 'tenant-a',
+        id: 'row-uuid-1',
+        callSid: CALL_SID,
+        sessionId: session.id,
+        turnIndex: 0,
+        firstAudioAt: new Date(2),
+      });
+    });
+
+    it('a failed insert resolves no id: the stamp falls back to the mid-call key', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const recordTurn = vi.fn(async () => {
+          throw new Error('insert failed');
+        });
+        const markReplyAudio = vi.fn(async (_input: unknown) => 0);
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        try {
+          const store = newStore({ callTranscriptTurnRepo: { recordTurn, markReplyAudio } as never });
+          const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+          appendKeyed(store, session.id, 'k0');
+          await store.markReplyAudio(session.id, { turnKey: 'k0', firstAudioAt: new Date(2) });
+          expect(markReplyAudio.mock.calls[0][0]).not.toHaveProperty('id');
+          expect(markReplyAudio.mock.calls[0][0]).toMatchObject({ callSid: CALL_SID, turnIndex: 0 });
+        } finally {
+          warnSpy.mockRestore();
+        }
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('an in-app session or an unknown session is a silent no-op', async () => {
+      const { repo, markReplyAudio } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      await expect(store.markReplyAudio('missing', { turnKey: 'k0' })).resolves.toBeUndefined();
+      const inapp = store.create('tenant-a', 'inapp');
+      await store.markReplyAudio(inapp.id, { turnKey: 'k0', firstAudioAt: new Date() });
+      expect(markReplyAudio).not.toHaveBeenCalled();
+      expect(inapp.pendingReplyStamps.size).toBe(0); // nothing to retain for a session that never persists
+    });
+
+    it('a zero-row update increments voice_reply_stamp_lost_total and logs the key', async () => {
+      const { voiceReplyStampLostTotal } = await import('../../../../src/monitoring/metrics');
+      voiceReplyStampLostTotal.reset();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const { repo } = timedRepo({ markResult: 0 });
+        const store = newStore({ callTranscriptTurnRepo: repo });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        appendKeyed(store, session.id, 'k0');
+        await store.markReplyAudio(session.id, { turnKey: 'k0', firstAudioAt: new Date() });
+
+        const snap = await voiceReplyStampLostTotal.get();
+        expect(snap.values[0].value).toBe(1);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy.mock.calls[0][1]).toMatchObject({ callSid: CALL_SID, turnIndex: 0 });
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('a rejecting markReplyAudio never rejects into the caller', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const repo = {
+          recordTurn: vi.fn(async (input: unknown) => input as never),
+          markReplyAudio: vi.fn(async () => {
+            throw new Error('db down');
+          }),
+        };
+        const store = newStore({ callTranscriptTurnRepo: repo as never });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        appendKeyed(store, session.id, 'k0');
+        await expect(store.markReplyAudio(session.id, { turnKey: 'k0', firstAudioAt: new Date() })).resolves.toBeUndefined();
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('resolves a stamp to the row carrying its key, whatever index that row took', async () => {
+      const { repo, markReplyAudio } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'hi' });
+      appendKeyed(store, session.id, 'ka');
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'ok' });
+      appendKeyed(store, session.id, 'kb');
+
+      await store.markReplyAudio(session.id, { turnKey: 'kb', firstAudioAt: new Date(2) });
+      await store.markReplyAudio(session.id, { turnKey: 'ka', firstAudioAt: new Date(3) });
+      expect(markReplyAudio.mock.calls.map(([i]) => (i as { turnIndex: number }).turnIndex)).toEqual([3, 1]);
+      expect(session.pendingReplyStamps.size).toBe(0);
+    });
+
+    it('retains a stamp whose caller row is not appended yet and writes it, merged, when the row appears', async () => {
+      const { repo, markReplyAudio, order } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+
+      // Both arrive before the row exists (a filler ack, then the first-real enqueue).
+      await store.markReplyAudio(session.id, { turnKey: 'late', firstAudibleAt: new Date(10) });
+      await store.markReplyAudio(session.id, {
+        turnKey: 'late',
+        firstAudibleAt: new Date(99), // a later duplicate loses: first stamp for a field wins
+        firstAudioEnqueuedAt: new Date(20),
+      });
+      await settle();
+      expect(markReplyAudio).not.toHaveBeenCalled();
+      expect(session.pendingReplyStamps.get('late')).toHaveLength(2);
+
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'hi' });
+      appendKeyed(store, session.id, 'late');
+      await settle();
+
+      expect(order).toEqual(['recordTurn', 'recordTurn', 'markReplyAudio']); // chained behind the INSERT
+      expect(markReplyAudio).toHaveBeenCalledTimes(1);
+      expect(markReplyAudio).toHaveBeenCalledWith({
+        tenantId: 'tenant-a',
+        callSid: CALL_SID,
+        sessionId: session.id,
+        turnIndex: 1,
+        firstAudibleAt: new Date(10),
+        firstAudioEnqueuedAt: new Date(20),
+      });
+      expect(session.pendingReplyStamps.size).toBe(0);
+
+      // Once the row exists a stamp goes straight through.
+      await store.markReplyAudio(session.id, { turnKey: 'late', firstAudioAt: new Date(30), replyGapMs: 700 });
+      expect(markReplyAudio).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps retained stamps per key: another key\'s row flushes only its own', async () => {
+      const { repo, markReplyAudio } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      await store.markReplyAudio(session.id, { turnKey: 'kb', firstAudibleAt: new Date(2) });
+
+      appendKeyed(store, session.id, 'ka');
+      await settle();
+      expect(markReplyAudio).not.toHaveBeenCalled();
+      expect([...session.pendingReplyStamps.keys()]).toEqual(['kb']);
+
+      appendKeyed(store, session.id, 'kb');
+      await settle();
+      expect(markReplyAudio).toHaveBeenCalledWith(expect.objectContaining({ turnIndex: 1, firstAudibleAt: new Date(2) }));
+    });
+
+    it('drops the oldest key\'s stamps beyond the last four keys, warning once for it', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        const { repo, markReplyAudio } = timedRepo();
+        const store = newStore({ callTranscriptTurnRepo: repo });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        const { voiceReplyStampLostTotal } = await import('../../../../src/monitoring/metrics');
+        voiceReplyStampLostTotal.reset();
+
+        for (const key of ['k1', 'k2', 'k3', 'k4']) {
+          await store.markReplyAudio(session.id, { turnKey: key, firstAudibleAt: new Date(1) });
+        }
+        // A second stamp for an already-held key does not count as a newer key.
+        await store.markReplyAudio(session.id, { turnKey: 'k1', firstAudioEnqueuedAt: new Date(2) });
+        expect(warnSpy).not.toHaveBeenCalled();
+        expect([...session.pendingReplyStamps.keys()]).toEqual(['k1', 'k2', 'k3', 'k4']);
+
+        await store.markReplyAudio(session.id, { turnKey: 'k5', firstAudibleAt: new Date(1) });
+        expect([...session.pendingReplyStamps.keys()]).toEqual(['k2', 'k3', 'k4', 'k5']);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy.mock.calls[0][1]).toMatchObject({ callSid: CALL_SID, turnKey: 'k1' });
+        // "a row was deleted underneath" is a different failure: its counter stays untouched.
+        expect((await voiceReplyStampLostTotal.get()).values.every((v) => v.value === 0)).toBe(true);
+
+        // The dropped key's row appearing later flushes nothing; a held key still flushes.
+        appendKeyed(store, session.id, 'k1');
+        appendKeyed(store, session.id, 'k2');
+        await settle();
+        expect(markReplyAudio).toHaveBeenCalledTimes(1);
+        expect(markReplyAudio).toHaveBeenCalledWith(expect.objectContaining({ turnIndex: 1 }));
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('delete clears the retained reply stamps', async () => {
+      const { repo } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      await store.markReplyAudio(session.id, { turnKey: 'k1', firstAudibleAt: new Date(1) });
+      expect(session.pendingReplyStamps.size).toBe(1);
+      store.delete(session.id);
+      expect(session.pendingReplyStamps.size).toBe(0);
+    });
+
+    it('delete clears the retained persist promises', async () => {
+      const { repo } = timedRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'hello' });
+      const map = session.pendingTurnPersist;
+      expect(map.size).toBe(1);
+      store.delete(session.id);
+      expect(map.size).toBe(0);
+      await settle();
     });
   });
 });
