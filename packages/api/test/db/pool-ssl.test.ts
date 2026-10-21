@@ -38,40 +38,37 @@ describe('buildPgSsl', () => {
 describe('prepareDsn — the DSN cannot override buildPgSsl() (Codex review, #1744)', () => {
   // pg merges parse(connectionString) OVER the config object, so a stray
   // `?sslmode=require` would replace a verified `ssl` with
-  // `{ rejectUnauthorized: false }`. The keys are stripped at the source.
+  // `{ rejectUnauthorized: false }`, and `?sslmode=disable` would make it
+  // plaintext. Every ssl key is stripped at the source; only DB_SSL / DB_SSL_CA
+  // decide.
   it('leaves a DSN without a query string untouched', () => {
-    expect(prepareDsn('postgres://u:p@db.internal:5432/app')).toEqual({
-      connectionString: 'postgres://u:p@db.internal:5432/app',
-      sslDisabled: false,
-    });
+    expect(prepareDsn('postgres://u:p@db.internal:5432/app')).toBe('postgres://u:p@db.internal:5432/app');
   });
 
   it.each([
     'sslmode=require',
+    'sslmode=no-verify',
     'sslmode=verify-full&sslrootcert=/tmp/ca.pem',
     'sslcert=/tmp/c.pem&sslkey=/tmp/k.pem',
     'ssl=true',
     'ssl=1',
-  ])('strips %s and keeps TLS governed by DB_SSL / DB_SSL_CA', (query) => {
-    expect(prepareDsn(`postgres://u:p@db.internal:5432/app?${query}`)).toEqual({
-      connectionString: 'postgres://u:p@db.internal:5432/app',
-      sslDisabled: false,
-    });
+    'sslmode=disable',
+    'ssl=0',
+  ])('strips %s so TLS stays governed by DB_SSL / DB_SSL_CA', (query) => {
+    expect(prepareDsn(`postgres://u:p@db.internal:5432/app?${query}`)).toBe(
+      'postgres://u:p@db.internal:5432/app',
+    );
   });
 
   it('keeps unrelated query parameters (PgBouncer / socket options)', () => {
     expect(
       prepareDsn('postgres://u:p@db.internal:6432/app?sslmode=require&application_name=api&pgbouncer=true'),
-    ).toEqual({
-      connectionString: 'postgres://u:p@db.internal:6432/app?application_name=api&pgbouncer=true',
-      sslDisabled: false,
-    });
+    ).toBe('postgres://u:p@db.internal:6432/app?application_name=api&pgbouncer=true');
   });
 
-  it.each(['sslmode=disable', 'ssl=0'])('%s is honoured as plain TCP (same as DB_SSL=false)', (query) => {
-    expect(prepareDsn(`postgres://u:p@localhost:5432/app?${query}`)).toEqual({
-      connectionString: 'postgres://u:p@localhost:5432/app',
-      sslDisabled: true,
-    });
+  it('a DSN sslmode=disable cannot downgrade a deployment that set DB_SSL_CA', () => {
+    const dsn = prepareDsn('postgres://u:p@db.internal:5432/app?sslmode=disable');
+    expect(dsn).not.toMatch(/ssl/);
+    expect(buildPgSsl({ DB_SSL_CA: CA }, vi.fn())).toEqual({ rejectUnauthorized: true, ca: CA });
   });
 });

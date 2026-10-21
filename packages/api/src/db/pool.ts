@@ -41,22 +41,21 @@ export function resetPgSslWarningForTests(): void {
  * (pg/lib/connection-parameters.js), so any of these in `DATABASE_URL` would
  * silently REPLACE the `ssl` object from `buildPgSsl()` — e.g. `?sslmode=require`
  * downgrades a verified connection to `{ rejectUnauthorized: false }` even with
- * `DB_SSL_CA` set. `prepareDsn` strips them so the env contract stays
- * authoritative; `sslmode=disable` is the one value we honour (plain TCP, the
- * same as `DB_SSL=false`), because it is explicit and cannot weaken anything.
+ * `DB_SSL_CA` set, and `?sslmode=disable` would turn it into plaintext.
+ * `prepareDsn` strips them all so the env contract (`DB_SSL`, `DB_SSL_CA`) is
+ * the only thing that decides TLS; plaintext is `DB_SSL=false`, nothing else.
  */
 const DSN_SSL_KEYS = ['ssl', 'sslmode', 'sslrootcert', 'sslcert', 'sslkey'] as const;
 
-export function prepareDsn(url: string): { connectionString: string; sslDisabled: boolean } {
+export function prepareDsn(url: string): string {
   const qIdx = url.indexOf('?');
-  if (qIdx === -1) return { connectionString: url, sslDisabled: false };
+  if (qIdx === -1) return url;
 
   const params = new URLSearchParams(url.slice(qIdx + 1));
-  const sslDisabled = params.get('sslmode') === 'disable' || params.get('ssl') === '0';
   for (const key of DSN_SSL_KEYS) params.delete(key);
 
   const query = params.toString();
-  return { connectionString: query ? `${url.slice(0, qIdx)}?${query}` : url.slice(0, qIdx), sslDisabled };
+  return query ? `${url.slice(0, qIdx)}?${query}` : url.slice(0, qIdx);
 }
 
 /**
@@ -105,10 +104,9 @@ export function createPool(): Pool {
   let config: PoolConfig;
 
   if (databaseUrl) {
-    const dsn = prepareDsn(databaseUrl);
     config = {
-      connectionString: dsn.connectionString,
-      ssl: dsn.sslDisabled ? false : buildPgSsl(),
+      connectionString: prepareDsn(databaseUrl),
+      ssl: buildPgSsl(),
       max: parseInt(process.env.DB_MAX_CONNECTIONS || '20', 10),
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
@@ -158,10 +156,9 @@ export function createDirectPool(): Pool | null {
   const url = process.env.DATABASE_DIRECT_URL;
   if (!url) return null;
 
-  const dsn = prepareDsn(url);
   const pool = new Pool({
-    connectionString: dsn.connectionString,
-    ssl: dsn.sslDisabled ? false : buildPgSsl(),
+    connectionString: prepareDsn(url),
+    ssl: buildPgSsl(),
     // Small — only the session-lock holders and the LISTEN client use it.
     max: parseInt(process.env.DB_DIRECT_MAX_CONNECTIONS || '10', 10),
     idleTimeoutMillis: 30000,
