@@ -457,6 +457,47 @@ describe('P6-025 — DispatchBoard drag-and-drop wires schedule proposals', () =
     expect(body.payload.fromTechnicianId).toBeUndefined();
   });
 
+  it('FR-2 phase 3 — picking a suggested tech confirms, then proposes reassign_appointment to that tech', async () => {
+    global.fetch = vi.fn((url: string) =>
+      Promise.resolve(
+        url.includes('/suggested-technicians')
+          ? {
+              ok: true,
+              json: () =>
+                Promise.resolve({
+                  suggestions: [
+                    { technicianId: 'tech-2', name: 'Alice Park', feasible: true, reasons: [], warningCount: 0,
+                      travelFromPrevSeconds: 600, travelEstimateSource: 'google', isCurrent: false },
+                  ],
+                }),
+            }
+          : { ok: true, json: () => Promise.resolve({ id: 'proposal-xyz' }), text: () => Promise.resolve('') },
+      ),
+    ) as unknown as typeof fetch;
+
+    render(<DispatchBoard />);
+    fireEvent.click(screen.getByTestId('suggest-techs-button'));
+    fireEvent.click(await screen.findByTestId('suggest-techs-pick'));
+
+    // Intent, not execution: nothing is proposed until the dialog is confirmed.
+    expect(screen.getByTestId('confirm-proposal-dialog')).toHaveTextContent('Assign to Alice Park (suggested)');
+    expect((global.fetch as any).mock.calls.some((c: any[]) => c[0] === '/api/proposals')).toBe(false);
+    fireEvent.click(screen.getByTestId('confirm-proposal-confirm'));
+
+    await waitFor(() =>
+      expect((global.fetch as any).mock.calls.some((c: any[]) => c[0] === '/api/proposals')).toBe(true),
+    );
+    const call = (global.fetch as any).mock.calls.find((c: any[]) => c[0] === '/api/proposals');
+    const body = JSON.parse(call[1].body);
+    expect(body.proposalType).toBe('reassign_appointment');
+    expect(body.payload).toMatchObject({
+      appointmentId: 'unassigned-1',
+      toTechnicianId: 'tech-2',
+      reason: 'Assigned from dispatch board technician suggestion',
+    });
+    expect(body.payload.fromTechnicianId).toBeUndefined();
+  });
+
   it('error — failed proposal POST surfaces an error toast and keeps the dialog open so the user can retry without re-dragging', async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
