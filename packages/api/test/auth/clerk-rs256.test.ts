@@ -7,6 +7,7 @@ import {
   clerkFrontendApiFromPubKey,
   verifyClerkSession,
   verifyRs256Token,
+  parseAuthorizedParties,
 } from '../../src/auth/clerk';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,6 +114,45 @@ describe('P0-033 — verifyClerkSession RS256 verification', () => {
       expect(result.sid).toBe('sess_rs256');
       expect(result.tenant_id).toBe('tenant_rs256');
       expect(result.role).toBe('owner');
+    });
+
+    it('azp — enforced only when an allowlist is given (hardening sweep 2026-10)', async () => {
+      const key = generateTestKey('kid-azp');
+      const resolver = new StubResolver([makeJwksKey(key)]);
+      const token = signRs256(defaultPayload({ azp: 'https://app.example.test' }), key);
+      const base = { pubKey: TEST_PUB_KEY, resolver, host: TEST_HOST };
+
+      // No allowlist → historic behaviour, azp ignored.
+      await expect(verifyRs256Token(token, base)).resolves.toMatchObject({ sub: 'user_rs256' });
+      await expect(verifyRs256Token(token, { ...base, authorizedParties: [] })).resolves.toBeTruthy();
+
+      // Allowlisted origin → accepted.
+      await expect(
+        verifyRs256Token(token, {
+          ...base,
+          authorizedParties: ['https://staging.example.test', 'https://app.example.test'],
+        }),
+      ).resolves.toMatchObject({ sub: 'user_rs256' });
+
+      // Sibling origin → rejected.
+      await expect(
+        verifyRs256Token(token, { ...base, authorizedParties: ['https://other.example.test'] }),
+      ).rejects.toThrow('Token authorized party (azp) not allowed');
+
+      // Token with no azp at all → rejected once an allowlist exists.
+      const noAzp = signRs256(defaultPayload(), key);
+      await expect(
+        verifyRs256Token(noAzp, { ...base, authorizedParties: ['https://app.example.test'] }),
+      ).rejects.toThrow('Token authorized party (azp) not allowed');
+    });
+
+    it('parseAuthorizedParties — comma list, trimmed, empties dropped', () => {
+      expect(parseAuthorizedParties(undefined)).toEqual([]);
+      expect(parseAuthorizedParties('')).toEqual([]);
+      expect(parseAuthorizedParties(' https://a.test , ,https://b.test ')).toEqual([
+        'https://a.test',
+        'https://b.test',
+      ]);
     });
 
     it('RS256 — wrong signature rejected', async () => {
