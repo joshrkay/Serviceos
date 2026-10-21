@@ -185,12 +185,10 @@ describe('PATCH /api/users/:id — Tier 4 Team members (PR 2)', () => {
     const skillEditGuard = {
       appointmentRepo: {
         findByJob: async () => [],
-        findById: async () => ({ id: 'appt-1', jobId: 'job-gas', status: 'scheduled' }) as never,
+        listWithMeta: async (_t: string, o?: { status?: string }) =>
+          ({ data: o?.status === 'scheduled' ? [{ id: 'appt-1', jobId: 'job-gas', status: 'scheduled' }] : [], total: 0 }) as never,
       },
-      assignmentRepo: {
-        findByAppointment: async () => [],
-        findByTechnician: async () => [{ appointmentId: 'appt-1', technicianId: techId }] as never,
-      },
+      assignmentRepo: { findByAppointment: async () => [] },
       skillMatcher: {
         requiredSkillsForJob: async () => ['gas_certified'],
         skillsForTechnician: async () => [],

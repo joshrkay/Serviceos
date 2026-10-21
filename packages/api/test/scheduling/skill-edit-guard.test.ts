@@ -35,8 +35,8 @@ describe('skill edit guards', () => {
   }
 
   beforeEach(() => {
-    appointmentRepo = new InMemoryAppointmentRepository();
     assignmentRepo = new InMemoryAssignmentRepository();
+    appointmentRepo = new InMemoryAppointmentRepository(assignmentRepo);
     for (const k of Object.keys(skills)) delete skills[k];
     for (const k of Object.keys(required)) delete required[k];
   });
@@ -71,5 +71,12 @@ describe('skill edit guards', () => {
       assertTechnicianSkillEditKeepsVisitsQualified(deps(), T, 'tech-1', ['hvac', 'gas_certified']),
     ).resolves.toBeUndefined();
     await expect(assertTechnicianSkillEditKeepsVisitsQualified(deps(), T, 'tech-2', [])).resolves.toBeUndefined();
+  });
+
+  it("a technician's completed visits do not block removing a skill", async () => {
+    required['job-1'] = ['gas_certified'];
+    const appt = await visit('job-1', 'tech-1');
+    await appointmentRepo.update(T, appt.id, { status: 'completed' });
+    await expect(assertTechnicianSkillEditKeepsVisitsQualified(deps(), T, 'tech-1', [])).resolves.toBeUndefined();
   });
 });

@@ -1,4 +1,5 @@
-import type { AppointmentRepository, AppointmentStatus } from '../appointments/appointment';
+import type { Appointment, AppointmentRepository, AppointmentStatus } from '../appointments/appointment';
+import { MAX_APPOINTMENT_LIMIT } from '../appointments/appointment';
 import type { AssignmentRepository } from '../appointments/assignment';
 import { ConflictError } from '../shared/errors';
 import { normalizeSkillTags } from '@ai-service-os/shared';
@@ -10,11 +11,12 @@ import { SkillMatcher, missingSkills } from './skill-matcher';
  * active visit would break the rule; the fix is to reassign first. Finished,
  * canceled and no-show visits are history and are not re-judged.
  */
-const ACTIVE: ReadonlySet<AppointmentStatus> = new Set(['scheduled', 'confirmed', 'in_progress']);
+const ACTIVE_STATUSES: readonly AppointmentStatus[] = ['scheduled', 'confirmed', 'in_progress'];
+const ACTIVE: ReadonlySet<AppointmentStatus> = new Set(ACTIVE_STATUSES);
 
 export interface SkillEditGuardDeps {
-  appointmentRepo: Pick<AppointmentRepository, 'findByJob' | 'findById'>;
-  assignmentRepo: Pick<AssignmentRepository, 'findByAppointment' | 'findByTechnician'>;
+  appointmentRepo: Pick<AppointmentRepository, 'findByJob' | 'listWithMeta'>;
+  assignmentRepo: Pick<AssignmentRepository, 'findByAppointment'>;
   skillMatcher: SkillMatcher;
 }
 
@@ -41,6 +43,32 @@ export async function assertJobSkillEditKeepsAssigneesQualified(
   }
 }
 
+/**
+ * A technician's ACTIVE visits only — a filtered, paged query per status
+ * (Pg: one EXISTS-on-assignments query each), never a walk over their whole
+ * assignment history.
+ */
+async function activeVisitsForTechnician(
+  appointmentRepo: SkillEditGuardDeps['appointmentRepo'],
+  tenantId: string,
+  technicianId: string,
+): Promise<Appointment[]> {
+  if (!appointmentRepo.listWithMeta) {
+    throw new Error('skill edit guard needs AppointmentRepository.listWithMeta');
+  }
+  const visits: Appointment[] = [];
+  for (const status of ACTIVE_STATUSES) {
+    for (let offset = 0; ; offset += MAX_APPOINTMENT_LIMIT) {
+      const page = await appointmentRepo.listWithMeta(tenantId, {
+        technicianId, status, limit: MAX_APPOINTMENT_LIMIT, offset,
+      });
+      visits.push(...page.data);
+      if (page.data.length < MAX_APPOINTMENT_LIMIT) break;
+    }
+  }
+  return visits;
+}
+
 /** A technician's new skills against the required skills of their active visits. */
 export async function assertTechnicianSkillEditKeepsVisitsQualified(
   deps: SkillEditGuardDeps,
@@ -49,10 +77,11 @@ export async function assertTechnicianSkillEditKeepsVisitsQualified(
   skills: readonly string[],
 ): Promise<void> {
   const held = normalizeSkillTags([...skills]);
-  for (const assignment of await deps.assignmentRepo.findByTechnician(tenantId, technicianId)) {
-    const appt = await deps.appointmentRepo.findById(tenantId, assignment.appointmentId);
-    if (!appt?.jobId || !ACTIVE.has(appt.status)) continue;
-    const missing = missingSkills(await deps.skillMatcher.requiredSkillsForJob(tenantId, appt.jobId), held);
+  const jobIds = new Set(
+    (await activeVisitsForTechnician(deps.appointmentRepo, tenantId, technicianId)).map((a) => a.jobId).filter(Boolean),
+  );
+  for (const jobId of jobIds) {
+    const missing = missingSkills(await deps.skillMatcher.requiredSkillsForJob(tenantId, jobId), held);
     if (missing.length > 0) {
       throw new ConflictError(
         `This technician is assigned to an upcoming visit that needs: ${missing.join(', ')}. Reassign it first.`,

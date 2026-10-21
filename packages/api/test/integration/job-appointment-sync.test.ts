@@ -19,6 +19,10 @@ import { PgLocationRepository } from '../../src/locations/pg-location';
 import { getJob } from '../../src/jobs/job';
 import { ConflictError } from '../../src/shared/errors';
 import { RepoSkillMatcher } from '../../src/scheduling/skill-matcher';
+import {
+  assertJobSkillEditKeepsAssigneesQualified,
+  assertTechnicianSkillEditKeepsVisitsQualified,
+} from '../../src/scheduling/skill-edit-guard';
 import { getDispatchBoardData, DispatchBoardData } from '../../src/dispatch/board-query';
 import {
   JobAppointmentSyncDeps,
@@ -292,5 +296,22 @@ describe('Postgres integration — job-appointment sync', () => {
     const res = await syncJobSchedule(skillDeps, scheduleInput(jobId, T10, skilled));
     const primaries = (await assignmentRepo.findByAppointment(tenantId, res.appointment!.id)).filter((a) => a.isPrimary);
     expect(primaries.map((a) => a.technicianId)).toEqual([skilled]);
+  });
+
+  it('Dispatch FR-2 — skill-edit guards read active visits from real Pg (listWithMeta technician+status)', async () => {
+    const jobId = await newJob('Gas job (edit guard)');
+    const tech = await newTech();
+    await pool.query('UPDATE users SET skills = $1 WHERE id = $2', [['gas_certified'], tech]);
+    await syncJobSchedule(deps, scheduleInput(jobId, T14, tech));
+    const guardDeps = { appointmentRepo, assignmentRepo, skillMatcher: new RepoSkillMatcher(jobRepo, deps.userRepo) };
+
+    // Job side: a requirement the scheduled tech holds is fine; one they lack is refused.
+    await expect(assertJobSkillEditKeepsAssigneesQualified(guardDeps, tenantId, jobId, ['gas_certified'])).resolves.toBeUndefined();
+    await expect(assertJobSkillEditKeepsAssigneesQualified(guardDeps, tenantId, jobId, ['electrical'])).rejects.toBeInstanceOf(ConflictError);
+
+    // Tech side: removing the skill an active visit needs is refused.
+    await jobRepo.update(tenantId, jobId, { requiredSkills: ['gas_certified'] });
+    await expect(assertTechnicianSkillEditKeepsVisitsQualified(guardDeps, tenantId, tech, [])).rejects.toBeInstanceOf(ConflictError);
+    await expect(assertTechnicianSkillEditKeepsVisitsQualified(guardDeps, tenantId, tech, ['gas_certified'])).resolves.toBeUndefined();
   });
 });
