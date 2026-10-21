@@ -1838,3 +1838,37 @@ and the card renders whenever there are enough such attempts, so a window where 
 failed shows 100 % rather than "not enough calls"; `voice_turn_latency_ms` keeps its
 "first audible, filler included" meaning and is not reused for the SLO. The number in (3) is
 replaced, with the run date and instance size, by whoever runs the first staging sweep.
+
+---
+## D-044 — "Get found online": we host a generated Business page, connect (never sell) domains, create the Google profile via API, and add Web chat as a fourth surface
+
+**Date:** 2026-10-21
+**Status:** Accepted (owner decision 2026-10-21, grilling round 1)
+
+**Context.** A tradesperson signing up often has no website, no Google Business Profile, a
+hand-pasted (or missing) review link, and calls that ring a personal mobile. The product already
+connects an *existing* Google profile, polls reviews, texts post-job review requests, provisions a
+Twilio number, and serves `/intake` and `/book` pages — but nothing walks the owner from "nothing
+online" to "found, reviewed, and answered".
+
+**Decision.**
+1. **Business page, hosted by us.** One generated page per tenant built from settings already held
+   (services, service area, hours, rating, Call / Book / Web chat), on a product-owned subdomain.
+   No multi-page builder. Tenants with their own website get embed snippets instead.
+2. **Connected domains only.** The owner buys a domain elsewhere; we show the DNS records, verify,
+   and issue TLS. We never register, resell or renew domains.
+3. **Google profile created via the API** (pre-filled from settings) when the owner has none, then
+   the owner completes Google's verification; a guided deep-link walkthrough is the fallback when
+   the API refuses.
+4. **Call routing modes:** forward all, forward when unanswered, or the Rivet number alone, with
+   carrier codes, an off code, and a live test call. Porting is deferred.
+5. **Web chat is a full AI surface** on the same turn pipeline as the phone, actor-less like an
+   unidentified caller; bookings stay proposals (D-004).
+6. **Where it lives:** one presence-path question in onboarding; everything else in a
+   post-activation Get-found checklist that never gates activation or `isComplete`.
+7. **Review link auto-filled** from the connected Google profile; manual paste stays as an override.
+
+**Alternatives rejected.** A multi-page site builder (a separate product); domain resale (renewal
+liability and billing for little v1 value); deep-link-only Google setup (the friction this exists to
+remove); porting in v1 (weeks of carrier paperwork, the most failure modes); lead-form-only chat
+(the owner asked for the chatbot); adding the steps to onboarding (delays voice going live).

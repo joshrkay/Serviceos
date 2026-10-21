@@ -128,3 +128,31 @@ Terms for how the product states what it can prove about itself. The PRD's
 - **Unlit-able** — a capability no surface can switch on at all, as opposed
   to one that is merely off by default or lacks an owner-facing control. It
   caps at 4 regardless of how well it is tested.
+
+## Online presence (D-044)
+
+Terms for how a tenant's customers find and reach them outside the product.
+
+- **Web chat** — the unauthenticated chat a tenant's *customers* use on the
+  tenant's public web presence; a fourth surface beside phone, memo and chat.
+  It has no actor, so like an unidentified caller it answers only the
+  customer's own records and tenant-public lookups, and anything that writes
+  is a proposal. _Avoid_: chat, chatbot, site chat (bare "chat" is the
+  operator's in-app chat).
+- **Business page** — the one-page public site the product generates from a
+  tenant's own settings and serves on a product-owned subdomain or a
+  connected custom domain. _Avoid_: website (a tenant's own site, built
+  elsewhere), landing page, microsite.
+- **Connected domain** — a domain the owner bought elsewhere and pointed at
+  their Business page; the product never registers or renews domains.
+  _Avoid_: custom domain purchase, reseller domain.
+- **Presence path** — the owner's one answer to "do you have a website?":
+  *own website*, *Google only*, or *neither*. It decides which items the
+  Get-found checklist shows.
+- **Get-found checklist** — the post-activation setup list (Business page,
+  Google Business Profile, review link, call routing, Web chat). Separate
+  from onboarding steps; it never gates activation.
+  _Avoid_: onboarding steps, setup steps.
+- **Call routing mode** — how calls to the owner's existing number reach the
+  AI: *forward all*, *forward when unanswered*, or *Rivet number only*.
+  Porting is not a mode.
