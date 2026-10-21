@@ -128,3 +128,21 @@ Terms for how the product states what it can prove about itself. The PRD's
 - **Unlit-able** — a capability no surface can switch on at all, as opposed
   to one that is merely off by default or lacks an owner-facing control. It
   caps at 4 regardless of how well it is tested.
+
+## Getting found online (D-044)
+
+- **Tenant site** — the one-page public website we host for a tenant, built
+  from tenant settings, on a subdomain of the domain reserved for tenant sites.
+  _Avoid_: landing page, microsite, website builder.
+- **Connected domain** — a domain the owner already owns and points at their
+  tenant site. We verify it and serve HTTPS; we never sell or renew it.
+  _Avoid_: custom domain purchase.
+- **Google listing** — the one Google Business Profile location a tenant has
+  connected. Its review link and website are derived from it.
+  _Avoid_: GBP account (an account can hold many locations).
+- **Forwarding mode** — how the owner's existing number reaches the AI:
+  *missed calls only* (default) or *all calls*. Porting is not a mode.
+- **Forwarding check** — a call from our line to the owner's business number
+  that passes when it arrives back on our number.
+- **Get found online checklist** — the derived home-page checklist of
+  web-presence setup. Separate from onboarding steps, which gate activation.
