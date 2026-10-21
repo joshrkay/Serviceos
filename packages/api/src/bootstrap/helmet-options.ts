@@ -10,8 +10,11 @@ import helmet from 'helmet';
  *
  * Production behaviour:
  *   - CSP whitelists the production frontend's external deps: Clerk
- *     (auth UI + JS), Stripe Elements, Twilio Voice JS SDK, Sentry browser
- *     SDK.
+ *     (auth UI + JS), Stripe Elements, Deepgram dictation, PostHog, Pendo,
+ *     signed storage URLs. Twilio Voice JS and the Sentry browser SDK were
+ *     removed in the 2026-10 hardening sweep — the web app imports neither,
+ *     and the nginx edge (packages/web/security-headers.conf) never listed
+ *     them, so the two CSPs now match.
  *   - HSTS = 1 year, includeSubDomains, preload=false (preload list
  *     submission must be a deliberate human action).
  *   - X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy
@@ -44,8 +47,6 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               // Clerk sign-up bot protection (Cloudflare Turnstile).
               'https://challenges.cloudflare.com',
               'https://*.protect.clerk.com',
-              'https://sdk.twilio.com',
-              'https://media.twiliocdn.com',
               // PostHog analytics: posthog-js lazy-loads optional modules
               // (surveys, web-vitals, exception capture) from the assets host.
               'https://us-assets.i.posthog.com',
@@ -73,8 +74,6 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               'https://clerk.com',
               'https://*.clerk.accounts.dev',
               'https://*.protect.clerk.com:*',
-              'wss://*.twilio.com',
-              'https://*.twilio.com',
               // Live voice dictation streams mic audio from the browser
               // straight to Deepgram's realtime STT WebSocket (see the web
               // useDeepgramDictation hook — it opens wss://api.deepgram.com/v1/
@@ -83,8 +82,6 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               // assistant's conversation/dictation mode fails with "Lost the
               // dictation connection. Please try again."
               'wss://api.deepgram.com',
-              'https://*.ingest.sentry.io',
-              'https://*.ingest.us.sentry.io',
               // PostHog analytics (US cloud): event ingestion + remote config.
               // Without these, posthog-js is silently blocked by CSP in prod
               // and no browser events reach PostHog even with the key set.

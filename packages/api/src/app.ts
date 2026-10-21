@@ -786,11 +786,16 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // Never let a readiness log crash boot.
   }
 
-  // Swagger UI — no auth required.
+  // Swagger UI — no auth required, dev/staging only.
   // Mounted BEFORE helmet() so the CSP below doesn't break swagger-ui-express
-  // (which injects inline scripts/styles to render). The /api-docs surface is
-  // already public + read-only; the security trade-off is acceptable.
-  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
+  // (which injects inline scripts/styles to render). Hardening sweep 2026-10:
+  // not mounted in production — an unauthenticated route map of the whole
+  // API is reconnaissance for free, and the UI cannot carry a Clerk bearer on
+  // page load so gating it behind requireAuth would just break it. Staging
+  // and local dev keep it.
+  if (!(process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod')) {
+    app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
+  }
 
   // D1-3 — helmet hardening. Adds CSP / HSTS / X-Frame-Options / nosniff /
   // referrer-policy headers the security audit (docs/pre-launch-hardening-

@@ -58,6 +58,9 @@ describe('bodiless requests keep the Express 4 req.body contract (#1555)', () =>
       .set('Authorization', auth);
 
     expect(res.status).toBe(400);
-    expect(res.body).toEqual({ error: 'VALIDATION_ERROR', message: 'content is required' });
+    // Hardening sweep 2026-10: the route now validates through a strict Zod
+    // schema, so the body is the standard Zod 400 shape naming `content`.
+    expect(res.body).toMatchObject({ error: 'VALIDATION_ERROR' });
+    expect(res.body.details?.fields?.content).toBeDefined();
   });
 });
