@@ -19,6 +19,7 @@ import type { EntityResolver, EntityResolverResult } from '../../src/ai/resoluti
 import type { CustomerRepository } from '../../src/customers/customer';
 import type { JobRepository } from '../../src/jobs/job';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
+import type { InvoiceRepository } from '../../src/invoices/invoice';
 import type { AssistantLookupDeps } from '../../src/ai/orchestration/lookup-dispatch';
 import { InMemoryJobRepository, createJob } from '../../src/jobs/job';
 import {
@@ -76,6 +77,7 @@ function buildApp(
   entityResolver: EntityResolver,
   proposalRepo: InMemoryProposalRepository,
   lookups?: AssistantLookupDeps,
+  invoiceRepo?: InvoiceRepository,
 ) {
   const app = express();
   app.use(express.json());
@@ -94,6 +96,7 @@ function buildApp(
       jobRepo,
       appointmentRepo,
       ...(lookups ? { lookups } : {}),
+      ...(invoiceRepo ? { invoiceRepo } : {}),
     }),
   );
   return app;
@@ -222,5 +225,52 @@ describe('chat: a lookup about "this customer" reads the open page', () => {
     expect(res.body.message.content).toContain('Furnace tune-up');
     expect(res.body.message.content).toContain('Ana Garcia');
     expect(lookupResolver.resolve).not.toHaveBeenCalled();
+  });
+});
+
+describe('chat: the unpaid-invoices shortcut leaves "this customer" to the lookup path', () => {
+  const invoiceRepo = () => ({ findByTenant: vi.fn(async () => []) }) as unknown as InvoiceRepository;
+
+  it('a question about the customer on screen is not answered tenant-wide', async () => {
+    const invoices = invoiceRepo();
+    const app = buildApp(
+      scriptedGateway('lookup_invoices', { customerName: 'this customer' }),
+      resolver(notFound),
+      new InMemoryProposalRepository(),
+      undefined,
+      invoices,
+    );
+    const res = await chat(app, 'which invoices for this customer are unpaid?', { entityType: 'customer', entityId: CUSTOMER });
+    expect(res.status).toBe(200);
+    expect(res.body.taskType).not.toBe('assistant.query.unpaid_invoices');
+    expect(invoices.findByTenant).not.toHaveBeenCalled();
+  });
+
+  it('a business-wide question on the same page still takes the shortcut', async () => {
+    const invoices = invoiceRepo();
+    const app = buildApp(scriptedGateway('unknown', {}), resolver(notFound), new InMemoryProposalRepository(), undefined, invoices);
+    const res = await chat(app, 'which invoices are unpaid?', { entityType: 'customer', entityId: CUSTOMER });
+    expect(res.body.taskType).toBe('assistant.query.unpaid_invoices');
+    expect(invoices.findByTenant).toHaveBeenCalled();
+  });
+});
+
+describe('chat: a chained request records and says when the open page filled a step', () => {
+  it('stamps each page-filled step and adds the note to the chain reply', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      scriptedGateway('add_note', { noteContent: 'gate code 4471' }),
+      resolver(notFound),
+      proposalRepo,
+    );
+    const res = await chat(app, 'add a note gate code 4471, then add a note dog in the yard', { entityType: 'job', entityId: JOB });
+    expect(res.status).toBe(200);
+    const drafts = await proposalRepo.findByTenant(TENANT);
+    expect(drafts.length).toBeGreaterThanOrEqual(1);
+    for (const draft of drafts) {
+      expect(draft.sourceContext?.pageContext).toMatchObject({ entityType: 'job', entityId: JOB });
+    }
+    expect(res.body.taskType).toBe('assistant.chain');
+    expect(res.body.message.content).toContain('I used the job you had open: Ana Garcia – AC not cooling.');
   });
 });

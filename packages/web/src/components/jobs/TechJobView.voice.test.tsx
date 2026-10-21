@@ -160,6 +160,34 @@ describe('TechJobView voice update', () => {
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ status: 'completed' });
   });
 
+  it('follows the edited words: fixing "all done" to "waiting on parts" never completes the job', async () => {
+    routes({ transcript: "all done here, system's cooling" });
+    await speak();
+    expect(await screen.findByText(/Also mark the job/)).toHaveTextContent('Complete');
+    fireEvent.change(screen.getByRole('textbox', { name: 'What you said' }), {
+      target: { value: 'not done, waiting on parts' },
+    });
+    expect(screen.getByText(/Also mark the job/)).toHaveTextContent('Waiting');
+    fireEvent.click(screen.getByRole('button', { name: /Send to Rivet/ }));
+    await screen.findByTestId('tech-voice-reply');
+    for (const [, init] of calls((p) => p.includes('/transition'))) {
+      expect(JSON.parse((init as RequestInit).body as string).status).not.toBe('completed');
+    }
+  });
+
+  it('drops the suggestion when the edited words no longer name a status', async () => {
+    routes({ transcript: "all done here, system's cooling" });
+    await speak();
+    await screen.findByRole('checkbox');
+    fireEvent.change(screen.getByRole('textbox', { name: 'What you said' }), {
+      target: { value: 'replaced the capacitor' },
+    });
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Send to Rivet/ }));
+    await screen.findByTestId('tech-voice-reply');
+    expect(calls((p) => p.includes('/transition'))).toHaveLength(0);
+  });
+
   it('saves nothing when transcription fails, and says so', async () => {
     routes({ transcribeStatus: 502 });
     await speak();

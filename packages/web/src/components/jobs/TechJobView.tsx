@@ -237,6 +237,17 @@ function VoiceHero({
     if (mr.state !== 'inactive') mr.stop();
   }
 
+  // The suggestion always follows the words being sent: fixing "all done" to
+  // "not done, waiting on parts" must not still complete the job.
+  function editTranscript(value: string) {
+    setTranscript(value);
+    const next = suggestTechStatus(value);
+    if (next !== suggested) {
+      setSuggested(next);
+      setApplyStatus(true);
+    }
+  }
+
   async function confirm() {
     const text = transcript.trim();
     if (!text || sending) return;
@@ -317,7 +328,7 @@ function VoiceHero({
         <span className="text-xs text-muted-foreground">What you said (edit if needed)</span>
         <Textarea
           value={transcript}
-          onChange={(e) => setTranscript(e.target.value)}
+          onChange={(e) => editTranscript(e.target.value)}
           aria-label="What you said"
           rows={3}
           className="text-sm"

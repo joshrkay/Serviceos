@@ -3423,7 +3423,17 @@ async function generateAssistantReply(
       // QA-2026-06-05 (AST-05): deterministic read-only query — answer from
       // data, never propose. Runs before classification so phrasing variance
       // in the classifier can't turn a question into a mutation proposal.
-      if (deps.invoiceRepo && UNPAID_QUERY_RE.test(lastUserText)) {
+      //
+      // "Which invoices for this customer are unpaid?" on a customer page is
+      // about that customer, and this tenant-wide answer cannot scope to one.
+      // A question pointing at the record on screen goes on to the classifier
+      // and the lookup path, which reads the page (pageLookupIds).
+      const pointsAtPage =
+        !!openPage &&
+        Object.keys(
+          pageLookupIds({ intent: 'lookup_invoices', entities: {}, text: lastUserText, page: openPage }),
+        ).length > 0;
+      if (deps.invoiceRepo && UNPAID_QUERY_RE.test(lastUserText) && !pointsAtPage) {
         const content = await answerUnpaidInvoicesQuery(deps.invoiceRepo, tenantId, lastUserText);
         return {
           taskType: 'assistant.query.unpaid_invoices',
@@ -3862,6 +3872,8 @@ async function generateAssistantReply(
         // format, so switching it is safe.
         const chainId = uuidv4();
         const chainCards: AssistantProposal[] = [];
+        // Set when the open page filled an id on any step, for the reply note.
+        let chainUsedPage = false;
         // #1499 — every step the operator asked for that produced no card.
         // The reply names each one; a silent drop reads as "done".
         const undraftedSegments: string[] = [];
@@ -3965,17 +3977,18 @@ async function generateAssistantReply(
           // literal job UUID in THIS segment names that job and its customer
           // (#1276B). Keyed on the segment's own text, not the whole turn: a
           // UUID in the other half of "X, then Y" is not this step's job.
+          const segPreDraft = await resolvePreDraftIds(
+            deps,
+            tenantId,
+            segClass.intentType,
+            registryKey,
+            segEntities,
+            segment,
+            openPage,
+          );
           const segVerifiedIds = {
             ...(segCreateAndSend?.job ?? {}),
-            ...(await resolvePreDraftIds(
-              deps,
-              tenantId,
-              segClass.intentType,
-              registryKey,
-              segEntities,
-              segment,
-              openPage,
-            )).ids,
+            ...segPreDraft.ids,
           };
           // I3 — resolved once (memoized) and reused across every segment.
           const segTenantThresholdOverride = await getTenantThresholdOverride();
@@ -4071,7 +4084,13 @@ async function generateAssistantReply(
           proposal.sourceContext = {
             ...(proposal.sourceContext ?? {}),
             chainStep: chainCards.length + 1,
+            // Same provenance the single-intent path records: which ids this
+            // step took from the page the operator spoke on.
+            ...(openPage && segPreDraft.pageFilledKeys?.length
+              ? { pageContext: { ...openPage.context, filledKeys: segPreDraft.pageFilledKeys } }
+              : {}),
           };
+          if (segPreDraft.pageFilledKeys?.length) chainUsedPage = true;
           // #909 — the same post-draft resolution the single-intent path
           // runs, so a chained "reschedule the Miller job, then text them"
           // gets its ids resolved too and the two halves of THIS route can't
@@ -4147,6 +4166,7 @@ async function generateAssistantReply(
           chainTypes.push(proposal.proposalType);
           chainVerifiedCustomers.push(verifiedCustomerOf(proposal));
         }
+        const chainPageNote = chainUsedPage && openPage ? `\n\n${pageContextNote(openPage)}` : '';
         if (chainCards.length === 1) {
           // Only one segment produced a proposal — return it directly so the
           // single-intent path doesn't mint a duplicate.
@@ -4158,7 +4178,8 @@ async function generateAssistantReply(
               role: 'assistant' as const,
               content:
                 `${chainCards[0].title}. ${proposalReplySuffix(chainCards[0].status)}` +
-                undraftedStepsNote(undraftedSegments),
+                undraftedStepsNote(undraftedSegments) +
+                chainPageNote,
               proposal: chainCards[0],
             },
           };
@@ -4175,7 +4196,8 @@ async function generateAssistantReply(
                 chainCards.map((c, i) => `${i + 1}) ${c.title}`).join('; ') +
                 '. Capture steps run after approval windows; money steps wait for your approval.' +
                 (chainTypes.includes('send_invoice') ? LINKED_SEND_UNLOCK_NOTE : '') +
-                undraftedStepsNote(undraftedSegments),
+                undraftedStepsNote(undraftedSegments) +
+                chainPageNote,
               proposal: chainCards[0],
             },
           };
