@@ -109,7 +109,7 @@ describe('toSuggestion', () => {
     const unmeasured: FeasibilityResult = {
       ...clean,
       info: [{ check: 'travel_time', severity: 'info', message: 'missing coordinates', metadata: { kind: 'fromPrev' } }],
-      travelTime: { fromPrevSeconds: null, toNextSeconds: null, estimateSource: 'unknown', degraded: false },
+      travelTime: { fromPrevSeconds: null, prevEndsAt: new Date(), toNextSeconds: null, estimateSource: 'unknown', degraded: false },
     };
     expect(toSuggestion(user('t1'), unmeasured, false).travelUnverified).toBe(true);
     expect(toSuggestion(user('t1'), clean, false).travelUnverified).toBe(false);
@@ -126,7 +126,7 @@ describe('toSuggestion', () => {
       blocking: [{ check: 'overlap', severity: 'blocking', message: 'Overlaps' }],
       warnings: [{ check: 'travel_time', severity: 'warning', message: 'Tight drive' }],
       info: [],
-      travelTime: { fromPrevSeconds: 900, toNextSeconds: null, estimateSource: 'google', degraded: false },
+      travelTime: { fromPrevSeconds: 900, prevEndsAt: null, toNextSeconds: null, estimateSource: 'google', degraded: false },
       skillConstraints: 'none_configured',
     };
     expect(toSuggestion(user('t1'), result, true)).toEqual({
@@ -174,6 +174,41 @@ describe('suggestTechnicians', () => {
       scheduledStart: '2026-05-17T09:30:00.000Z', scheduledEnd: '2026-05-17T10:30:00.000Z', overlapMinutes: 30,
     }]);
     expect(out[0].overlaps).toEqual([]);
+  });
+
+  it('ranks only a same-day previous visit as "closest"; yesterday evening counts as no earlier visit', async () => {
+    // Target 08:00 New York (12:00Z). Ann's previous visit ended 17:00 NY the
+    // day before; Bo's ended 07:00 NY the same morning.
+    const target = appt({
+      timezone: 'America/New_York', jobId: 'j-target',
+      scheduledStart: new Date('2026-05-17T12:00:00Z'), scheduledEnd: new Date('2026-05-17T13:00:00Z'),
+    });
+    const prior: Record<string, Appointment> = {
+      'a-ann': appt({ id: 'a-ann', jobId: 'j-ann', scheduledStart: new Date('2026-05-16T20:00:00Z'), scheduledEnd: new Date('2026-05-16T21:00:00Z') }),
+      'a-bo': appt({ id: 'a-bo', jobId: 'j-bo', scheduledStart: new Date('2026-05-17T10:00:00Z'), scheduledEnd: new Date('2026-05-17T11:00:00Z') }),
+    };
+    const loc = { 'j-target': 'l-t', 'j-ann': 'l-ann', 'j-bo': 'l-bo' } as Record<string, string>;
+    const coords = { 'l-t': [40.0, -73.0], 'l-ann': [40.001, -73.0], 'l-bo': [40.2, -73.0] } as Record<string, number[]>;
+    const { suggestions } = await suggestTechnicians(
+      deps({
+        assignmentRepo: {
+          findByTechnician: async (_t: string, id: string) =>
+            [{ appointmentId: id === 'ann' ? 'a-ann' : 'a-bo', technicianId: id, isPrimary: true }],
+        } as any,
+        appointmentRepo: { findById: async (_t: string, id: string) => prior[id] ?? null } as any,
+        jobRepo: { findById: async (_t: string, id: string) => ({ id, locationId: loc[id], summary: id }) } as any,
+        locationRepo: {
+          findById: async (_t: string, id: string) => ({ id, latitude: coords[id][0], longitude: coords[id][1] }),
+        } as any,
+      }),
+      { tenantId: 't-1', appointment: target, candidates: [user('ann', { firstName: 'Ann' }), user('bo', { firstName: 'Bo' })] },
+    );
+    const byId = Object.fromEntries(suggestions.map((s) => [s.technicianId, s]));
+    expect(byId.ann.travelFromPrevSeconds).toBeNull();
+    expect(byId.ann.travelUnverified).toBe(false);
+    expect(byId.bo.travelFromPrevSeconds).toBeGreaterThan(0);
+    // Bo is farther in miles, but Ann's "drive" was from yesterday — Bo ranks first.
+    expect(suggestions.map((s) => s.technicianId)).toEqual(['bo', 'ann']);
   });
 
   it('skips non-technicians and inactive members, and marks everyone already on the visit', async () => {

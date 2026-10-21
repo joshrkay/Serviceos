@@ -1,6 +1,7 @@
 import type { Appointment } from '../appointments/appointment';
 import type { User } from '../users/user';
 import { isActiveMember } from '../users/tenant-member';
+import { localDateKey } from '../shared/timezone';
 import { checkFeasibility } from './feasibility';
 import type { FeasibilityDependencies, FeasibilityResult } from './feasibility-types';
 
@@ -61,6 +62,8 @@ export function toSuggestion(
   result: FeasibilityResult,
   isCurrent: boolean,
   overlaps: SuggestionOverlap[] = [],
+  /** False when the preceding visit was on an earlier day — not a drive from "today's" previous stop. */
+  prevIsSameDay = true,
 ): TechnicianSuggestion {
   return {
     technicianId: user.id,
@@ -68,9 +71,10 @@ export function toSuggestion(
     feasible: result.feasible,
     reasons: [...result.blocking, ...result.warnings].map((i) => i.message),
     warningCount: result.warnings.length,
-    travelFromPrevSeconds: result.travelTime?.fromPrevSeconds ?? null,
+    travelFromPrevSeconds: prevIsSameDay ? (result.travelTime?.fromPrevSeconds ?? null) : null,
     travelEstimateSource: result.travelTime?.estimateSource ?? null,
     travelUnverified:
+      prevIsSameDay &&
       (result.travelTime?.fromPrevSeconds ?? null) === null &&
       result.info.some((i) => i.check === 'travel_time' && i.metadata?.kind === 'fromPrev'),
     isCurrent,
@@ -154,6 +158,8 @@ export async function suggestTechnicians(
   const assigned = new Set(input.assignedTechnicianIds ?? []);
   const active = input.candidates.filter((u) => u.role === 'technician' && isActiveMember(u));
   const technicians = active.slice(0, MAX_SUGGESTION_CANDIDATES);
+  // Same tz resolution as checkFeasibility's working-hours check.
+  const timezone = deps.timezone ?? input.appointment.timezone ?? 'UTC';
   const suggestions = await Promise.all(
     technicians.map(async (tech) => {
       const result = await checkFeasibility(
@@ -167,7 +173,10 @@ export async function suggestTechnicians(
         deps,
       );
       const overlaps = await loadOverlaps(deps, input.tenantId, input.appointment, result);
-      return toSuggestion(tech, result, assigned.has(tech.id), overlaps);
+      const prevEndsAt = result.travelTime?.prevEndsAt ?? null;
+      const prevIsSameDay =
+        !prevEndsAt || localDateKey(prevEndsAt, timezone) === localDateKey(input.appointment.scheduledStart, timezone);
+      return toSuggestion(tech, result, assigned.has(tech.id), overlaps, prevIsSameDay);
     }),
   );
   return {

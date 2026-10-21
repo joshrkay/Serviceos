@@ -207,7 +207,7 @@ async function travelTimeIssues(
   const next = siblings.find((a) => a.scheduledStart >= input.proposedScheduledEnd) ?? null;
 
   const summary: TravelTimeSummary = {
-    fromPrevSeconds: null, toNextSeconds: null,
+    fromPrevSeconds: null, prevEndsAt: prev?.scheduledEnd ?? null, toNextSeconds: null,
     estimateSource: 'unknown', degraded: false,
   };
   const issues: FeasibilityIssue[] = [];
