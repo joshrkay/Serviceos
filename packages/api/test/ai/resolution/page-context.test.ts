@@ -6,6 +6,8 @@ import {
   pageContextNote,
   pageContextSchema,
   pageLookupIds,
+  pageUnavailableReply,
+  pointsAtPageRecord,
   type PageContextRepos,
 } from '../../../src/ai/resolution/page-context';
 
@@ -155,9 +157,39 @@ describe('loadPageContext', () => {
     expect(await loadPageContext(throwing, TENANT, { entityType: 'customer', entityId: CUSTOMER })).toBeUndefined();
   });
 
-  it('rejects a malformed context at the schema', () => {
+  it('rejects an unknown page type or an empty id at the schema', () => {
     expect(pageContextSchema.safeParse({ entityType: 'lead', entityId: JOB }).success).toBe(false);
-    expect(pageContextSchema.safeParse({ entityType: 'job', entityId: 'nope' }).success).toBe(false);
+    expect(pageContextSchema.safeParse({ entityType: 'job', entityId: '' }).success).toBe(false);
+  });
+
+  it('keeps a bad id past the schema so the route can say it could not open it', async () => {
+    expect(pageContextSchema.safeParse({ entityType: 'job', entityId: 'nope' }).success).toBe(true);
+    expect(await loadPageContext(repos, TENANT, { entityType: 'job', entityId: 'nope' })).toBeUndefined();
+  });
+});
+
+describe('pointsAtPageRecord', () => {
+  it('matches words pointing at the record on screen, or its customer', () => {
+    expect(pointsAtPageRecord('job', 'which estimates are on this job?')).toBe(true);
+    expect(pointsAtPageRecord('job', 'change her phone')).toBe(true);
+    expect(pointsAtPageRecord('invoice', 'is this invoice paid?')).toBe(true);
+    expect(pointsAtPageRecord('customer', 'what does she owe?')).toBe(true);
+    // An invoice page names its job, so "this job" points at it too.
+    expect(pointsAtPageRecord('invoice', 'which estimates are on this job?')).toBe(true);
+  });
+
+  it('ignores a question that does not point at the page', () => {
+    expect(pointsAtPageRecord('job', "what's on today's schedule?")).toBe(false);
+    expect(pointsAtPageRecord('invoice', 'which estimates are still open?')).toBe(false);
+    expect(pointsAtPageRecord('customer', 'which estimates are on this job?')).toBe(false);
+  });
+});
+
+describe('pageUnavailableReply', () => {
+  it('says it could not open the record and asks which one', () => {
+    expect(pageUnavailableReply('job')).toBe(
+      "I couldn't open the job you were viewing, so I can't tell which job you mean. Which one is it?",
+    );
   });
 });
 

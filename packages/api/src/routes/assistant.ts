@@ -147,6 +147,8 @@ import { withCustomerAddressHints } from '../ai/resolution/customer-address-hint
 import {
   pageContextSchema,
   loadPageContext,
+  pointsAtPageRecord,
+  pageUnavailableReply,
   mergePageContextIds,
   pageLookupIds,
   pageContextNote,
@@ -3403,6 +3405,25 @@ async function generateAssistantReply(
       // pageLookupIds; undefined when the client sent none or the record is
       // not this tenant's.
       const openPage = pageContext ? await loadPageContext(deps, tenantId, pageContext) : undefined;
+      if (pageContext && !openPage) {
+        logger.warn('assistant/chat: the page record could not be loaded', {
+          tenantId,
+          entityType: pageContext.entityType,
+          entityId: pageContext.entityId,
+        });
+        if (pointsAtPageRecord(pageContext.entityType, lastUserText)) {
+          return {
+            taskType: 'assistant.page_context.unavailable',
+            model: 'page-context',
+            usage: { input: 0, output: 0, total: 0 },
+            message: {
+              role: 'assistant' as const,
+              content: pageUnavailableReply(pageContext.entityType),
+              reasoning: 'The words point at the record on screen, which could not be read; asking instead of guessing.',
+            },
+          };
+        }
+      }
 
       // Phase 12 supervisor gate — mirrors workers/voice-action-router.ts's
       // identical call, but LAZY (minor fix, post-C1 review): read-only

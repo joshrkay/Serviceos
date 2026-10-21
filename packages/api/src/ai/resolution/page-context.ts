@@ -33,10 +33,15 @@ import type { IntentType } from '../orchestration/intent-classifier';
 export const PAGE_ENTITY_TYPES = ['job', 'customer', 'estimate', 'invoice', 'appointment'] as const;
 export type PageEntityType = (typeof PAGE_ENTITY_TYPES)[number];
 
+// The id is checked in loadPageContext, not here: a context the schema drops
+// is one the route never hears about, and "this job" would then quietly mean
+// every job. Kept bounded so a junk body stays cheap.
 export const pageContextSchema = z.object({
   entityType: z.enum(PAGE_ENTITY_TYPES),
-  entityId: z.string().uuid(),
+  entityId: z.string().trim().min(1).max(200),
 });
+
+const isUuid = (value: string): boolean => z.string().uuid().safeParse(value).success;
 export type PageContext = z.infer<typeof pageContextSchema>;
 
 /** The page's record, verified, as the payload ids it can fill. */
@@ -70,6 +75,7 @@ export async function loadPageContext(
 ): Promise<LoadedPageContext | undefined> {
   try {
     const { entityType, entityId } = context;
+    if (!isUuid(entityId)) return undefined;
     if (entityType === 'customer') {
       const customer = await repos.customerRepo?.findById(tenantId, entityId);
       if (!customer) return undefined;
@@ -315,6 +321,30 @@ const NOUN_BY_TYPE: Record<PageEntityType, string> = {
   invoice: 'invoice',
   appointment: 'appointment',
 };
+
+/**
+ * True when the words point at the record on screen or at what it expands
+ * to: "this invoice" on an invoice page, "her" on any page, and "this job" on
+ * any page but a customer's (a document page names its job). Pure.
+ */
+export function pointsAtPageRecord(entityType: PageEntityType, text: string): boolean {
+  return (
+    POINTS_AT_PAGE_RECORD_RE[entityType].test(text) ||
+    POINTS_AT_CUSTOMER_RE.test(text) ||
+    (entityType !== 'customer' && POINTS_AT_JOB_RE.test(text))
+  );
+}
+
+/**
+ * The answer when the words point at the page but its record could not be
+ * read (deleted, another tenant's, a bad id, or a failed read). Asks rather
+ * than answering for every record, which is what "this job" would otherwise
+ * quietly become.
+ */
+export function pageUnavailableReply(entityType: PageEntityType): string {
+  const noun = NOUN_BY_TYPE[entityType];
+  return `I couldn't open the ${noun} you were viewing, so I can't tell which ${noun} you mean. Which one is it?`;
+}
 
 /** The reply line that makes a screen-context pick visible. */
 export function pageContextNote(page: LoadedPageContext): string {

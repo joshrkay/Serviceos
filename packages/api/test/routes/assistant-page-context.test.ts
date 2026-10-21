@@ -186,22 +186,41 @@ describe('chat: the open page answers "this one"', () => {
     );
     const res = await chat(app, 'change her phone to 480-555-0188', { entityType: 'customer', entityId: OTHER_CUSTOMER });
     expect(res.status).toBe(200);
-    const [draft] = await proposalRepo.findByTenant(TENANT);
-    expect(draft.payload.customerId).toBeUndefined();
-    expect(res.body.message.content).not.toContain('you had open');
+    // Never drafted against the foreign id, and asked rather than guessed.
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+    expect(res.body.message.content).toContain("couldn't open the customer you were viewing");
   });
 
-  it('drops a malformed page context instead of refusing the turn', async () => {
+  it('says so when the page it points at cannot be opened, instead of guessing', async () => {
     const proposalRepo = new InMemoryProposalRepository();
     const app = buildApp(
       scriptedGateway('update_customer', { customerName: 'her', updatedPhone: '480-555-0188' }),
       resolver(notFound),
       proposalRepo,
     );
-    const res = await chat(app, 'change her phone to 480-555-0188', { entityType: 'job', entityId: 'not-a-uuid' });
+    for (const entityId of ['not-a-uuid', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee']) {
+      const res = await chat(app, 'change her phone to 480-555-0188', { entityType: 'job', entityId });
+      expect(res.status).toBe(200);
+      expect(res.body.message.content).toBe(
+        "I couldn't open the job you were viewing, so I can't tell which job you mean. Which one is it?",
+      );
+    }
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
+  it('answers as usual when the words do not point at a page it cannot open', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(
+      scriptedGateway('update_customer', { customerName: 'Ana Garcia', updatedPhone: '480-555-0188' }),
+      resolver(notFound),
+      proposalRepo,
+    );
+    const res = await chat(app, 'change Ana Garcia phone to 480-555-0188', {
+      entityType: 'job',
+      entityId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    });
     expect(res.status).toBe(200);
-    const [draft] = await proposalRepo.findByTenant(TENANT);
-    expect(draft.payload.customerId).toBeUndefined();
+    expect(res.body.message.content).not.toContain("couldn't open");
   });
 });
 
