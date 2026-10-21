@@ -37,6 +37,11 @@ function app(overrides: Partial<DemoCallServiceDeps> = {}) {
     leaseTokenSecret: 'secret',
     publicApiUrl: 'https://api.example.test',
     alert: async () => undefined,
+    resetter: {
+      resetAndRelease: async () => {
+        throw new Error('no lease may be ended');
+      },
+    },
     fetchImpl: async () => {
       throw new Error('no request may be made');
     },

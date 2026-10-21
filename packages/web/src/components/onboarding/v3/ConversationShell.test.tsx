@@ -46,6 +46,7 @@ const REFUSED_CELL = 'That does not look like a US cell number. Include the 10-d
 interface Server {
   draft: OnboardingDraft | null;
   status: object;
+  streamToken?: number;
   /** Forced outcomes for the next staged choices, in order; after that the stub behaves. */
   stageFaults?: StageFault[];
   /** Forced outcomes for the next creates of the draft, in order; after that the stub behaves. */
@@ -66,7 +67,7 @@ interface Server {
 interface Request {
   method: string;
   path: string;
-  body: { choice?: unknown; version?: number; items?: string[]; text?: string } | undefined;
+  body: { choice?: unknown; version?: number; items?: string[]; text?: string; metro?: string } | undefined;
 }
 
 const TTS_ERRORS = {
@@ -86,7 +87,6 @@ function ttsAnswer(path: string, method: string, body: Request['body']): Respons
   if (mode !== 'ok') return json(mode, TTS_ERRORS[mode]);
   if (path === '/api/voice/tts/batch') return json(200, { clips: body!.items!.map((text, i) => ({ text, ...clipFor(text, i) })) });
   return json(200, clipFor(body!.text!, 0));
-  body: { choice?: unknown; version?: number; metro?: string } | undefined;
 }
 
 let server: Server;

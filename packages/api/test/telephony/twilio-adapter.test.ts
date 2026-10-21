@@ -11,7 +11,7 @@ import {
   renderTtsText,
   TTS_COPY,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
-  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  ttsCopy,
 } from '../../src/ai/agents/customer-calling/tts-copy';
 import { EMERGENCY_SAFETY_LINE } from '../../src/ai/agents/customer-calling/emergency-detector';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -1488,6 +1488,10 @@ describe('TwilioGatherAdapter.handleGather', () => {
     });
 
     it('two consecutive low-Confidence turns hand off gracefully instead of looping', async () => {
+      // LCR-02 — the cap dispatches the FSM's system_failure; this suite's
+      // adapter wires no on-call rotation, so nothing is parked and the caller
+      // is offered a voicemail instead of a "connect you" line + hang-up
+      // (the <Dial> path is pinned in gather-ladder-cap-lcr02.test.ts).
       const xml1 = await adapter.handleGather({
         sessionId,
         callSid: 'CA-gx',
@@ -1512,11 +1516,10 @@ describe('TwilioGatherAdapter.handleGather', () => {
 
       // The classifier never ran for either low-confidence turn.
       expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-      expect(xml2).toContain(
-        xmlEscape(renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en')),
-      );
-      expect(xml2).toContain('<Hangup');
+      expect(xml2).toContain(xmlEscape(ttsCopy('handoff_unavailable_voicemail', 'en')));
+      expect(xml2).toContain('<Record');
       expect(xml2).not.toContain('<Gather');
+      expect(session?.machine.currentState).toBe('escalating');
       expect(session?.ended).toBe(true);
       expect(session?.terminalOutcome).toBeDefined();
     });
@@ -1609,7 +1612,9 @@ describe('TwilioGatherAdapter.handleGather', () => {
       );
     });
 
-    it('two consecutive silent turns escalate gracefully and end the session', async () => {
+    it('two consecutive silent turns offer a voicemail, page nobody and end the session', async () => {
+      // LCR-02 — a silent line is never escalated (pocket dials and dead lines
+      // would page staff); the caller is offered a voicemail instead.
       const xml1 = await adapter.handleGather({
         sessionId,
         callSid: 'CA-gx',
@@ -1628,17 +1633,19 @@ describe('TwilioGatherAdapter.handleGather', () => {
       });
 
       expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-      expect(xml2).toContain(
-        xmlEscape(renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en')),
-      );
-      expect(xml2).toContain('<Hangup');
+      expect(xml2).toContain(xmlEscape(ttsCopy('silence_voicemail', 'en')));
+      expect(xml2).toContain('<Record');
       expect(xml2).not.toContain('<Gather');
       const session = await store.get(sessionId);
+      expect(session?.machine.currentState).not.toBe('escalating');
       expect(session?.ended).toBe(true);
+      expect(session?.terminalReason).toBe('silence_max_retries');
       expect(session?.terminalOutcome).toBeDefined();
     });
 
     it('mixed ladder: a silent turn then a low-Confidence turn terminate at combined streak 2', async () => {
+      // LCR-02 — the capping strike is the low-Confidence one, so the FSM
+      // escalates; nothing is parked in this suite → the no-handoff voicemail.
       await adapter.handleGather({
         sessionId,
         callSid: 'CA-gx',
@@ -1656,12 +1663,11 @@ describe('TwilioGatherAdapter.handleGather', () => {
       });
 
       expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-      expect(xml2).toContain(
-        xmlEscape(renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en')),
-      );
-      expect(xml2).toContain('<Hangup');
+      expect(xml2).toContain(xmlEscape(ttsCopy('handoff_unavailable_voicemail', 'en')));
+      expect(xml2).toContain('<Record');
       const session = await store.get(sessionId);
       expect(session?.ended).toBe(true);
+      expect(session?.terminalReason).toBe('low_stt_confidence_max_retries');
     });
 
     it('a confident turn between silences resets the streak — third turn reprompts, not escalates', async () => {

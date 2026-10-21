@@ -53,7 +53,9 @@ const ADD_CHECK_RE = /ADD CONSTRAINT\s+([a-z_][a-z0-9_]*)\s+CHECK\b/g;
 // 40 → 44 (U7, migration 317_demo_calls): demo_tenant_leases_state_check,
 // demo_calls_status_check, demo_calls_reserved_cents_check,
 // demo_call_budget_non_negative_check, all NOT VALID.
-const EXPECTED_CHECK_CONSTRAINT_SITES = 44; // +1: 288_payments_card_present_method (NOT VALID); +1: 294_tenant_settings_e1_reviewers (NOT VALID); +1: 299_tenant_settings_business_address (NOT VALID); +1: 308_oauth_states_google_business_provider (NOT VALID)
+// 45 → 46: 324_seeded_price_baseline repeats 318_seeded_price_baseline's tenant_settings_forwarding_carrier_check (same name, NOT VALID). Both are on main.
+// 46 → 48 (U1 reply-gap, migration 326_call_transcript_turns_reply_timing): call_transcript_turns_transport_check, call_transcript_turns_reply_unacked_reason_check, both NOT VALID.
+const EXPECTED_CHECK_CONSTRAINT_SITES = 48; // +2: 326_call_transcript_turns_reply_timing (NOT VALID); +1: 288_payments_card_present_method (NOT VALID); +1: 294_tenant_settings_e1_reviewers (NOT VALID); +1: 299_tenant_settings_business_address (NOT VALID); +1: 308_oauth_states_google_business_provider (NOT VALID); +1: 324_seeded_price_baseline (NOT VALID)
 
 interface CheckSite {
   name: string;

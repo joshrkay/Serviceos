@@ -73,6 +73,25 @@ terms float.
   changes a proposal, an outcome or billing. The 7-day graded pass rate is the
   production counterpart of the Layer 2 launch gate (SLO
   `voice_graded_pass_rate_7d`).
+- **Reply gap** (U1, D-043) — what the caller waited: from their last word to
+  the first REAL (non-filler) reply frame Twilio acked, stored per caller turn
+  as `call_transcript_turns.reply_gap_ms`. Measured on the realtime transport
+  only; Gather turns carry none
+  (`telephony/media-streams/mediastream-adapter.ts`, `voice/quality/latency-summary.ts`).
+- **Last word (anchor)** — the instant the caller stopped speaking, from
+  Deepgram's own word timing converted to wall clock at the first sample
+  forwarded to that Deepgram session (not the stream's `start` frame). With no
+  word timing the sample falls back to the STT-final anchor and is kept out of
+  `reply_gap_ms` (`voice_reply_gap_ms{anchor}` labels the two populations).
+- **Unacked reply** — a reply whose first real frame was enqueued but whose
+  mark Twilio never acked: `clear_echo`, `ack_timeout` or `stream_closed`
+  (`REPLY_UNACKED_REASONS`). It keeps `reply_gap_ms` null and is counted, so
+  the unacked rate sits beside the percentile it would otherwise flatter.
+- **Replica trigger** — the concurrency at which one API process's p95
+  time-to-first-audio crosses 800 ms, measured by
+  `loadtest/voice-realtime-concurrency.ts`. Call state lives in one process's
+  memory, so reaching it means a larger instance or a shared session store,
+  not another replica (D-043, `docs/runbooks/voice-capacity.md`).
 
 ## The evidence ladder (D-031, D-032)
 

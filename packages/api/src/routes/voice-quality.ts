@@ -6,7 +6,10 @@
  *                                  SLO monitor alerts on, today's grading
  *                                  spend against the tenant's cap, and the
  *                                  last 10 graded calls with per-criterion
- *                                  pass/fail + the judge's rationale.
+ *                                  pass/fail + the judge's rationale, plus
+ *                                  (U1, D-043) `latency`: the 7-day reply-gap
+ *                                  summary read from call_transcript_turns
+ *                                  (null when no reader is wired).
  *   POST /api/voice/quality/grade  on-demand trigger. `{}` ACCEPTS (202) and
  *                                  runs this tenant's sampling pass detached
  *                                  from the request — up to cap × judge calls
@@ -31,6 +34,7 @@ import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { tenantContextStore } from '../middleware/tenant-context';
 import type { VoiceSessionGrader } from '../voice/quality/grade-voice-session';
+import type { LatencySummaryReader } from '../voice/quality/latency-summary';
 import type {
   VoiceQualityWindow,
   VoiceSessionGrade,
@@ -57,6 +61,8 @@ export interface VoiceQualityRouterDeps {
   logger?: RouteLogger;
   /** Defaults to the Layer 2 gate; app.ts passes the SLO threshold so the two agree. */
   passRateMin?: number;
+  /** U1 — reply-gap summary reader. Absent (in-memory dev): `latency` is null in the response. */
+  latencySummary?: LatencySummaryReader;
   now?: () => Date;
 }
 
@@ -127,16 +133,20 @@ export function createVoiceQualityRouter(deps: VoiceQualityRouterDeps): Router {
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
       const tenantId = req.auth!.tenantId;
       const at = now();
-      // Sequential: under the request transaction all three reads share the
+      // Sequential: under the request transaction all four reads share the
       // request's one pg client, which must not see concurrent queries.
       const summary = await deps.store.summary(tenantId, at);
       const quota = await deps.store.quota(tenantId);
       const gradedToday = await deps.store.countGradedSince(tenantId, startOfUtcDay(at));
+      const latency = deps.latencySummary
+        ? await deps.latencySummary.read(tenantId)
+        : null;
       res.json({
         windows: { last7d: windowJson(summary.last7d), last30d: windowJson(summary.last30d) },
         gate: { passRateMin },
         quota: { ...quota, gradedToday },
         recent: summary.recent.map(gradeJson),
+        latency,
       });
     }),
   );

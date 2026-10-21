@@ -351,3 +351,16 @@ describe('P0-009 — Async job processing with SQS', () => {
     });
   });
 });
+
+describe('S5a-3 — InMemoryQueue.sendOn is a plain send (no transaction to join)', () => {
+  it('enqueues, honours delaySeconds, and dedupes on the idempotency key; the client is ignored', async () => {
+    const queue = new InMemoryQueue();
+    const client = {} as import('pg').PoolClient;
+    await queue.sendOn(client, 'deactivate_payment_links', { tenantId: 't1' }, 'k-1');
+    await queue.sendOn(client, 'deactivate_payment_links', { tenantId: 't1', dup: true }, 'k-1');
+    await queue.sendOn(client, 'deactivate_payment_links', { tenantId: 't1', pass: 2 }, 'k-2', { delaySeconds: 120 });
+    const batch = await queue.receiveBatch<{ tenantId: string }>(10);
+    expect(batch.map((m) => [m.idempotencyKey, m.payload])).toEqual([['k-1', { tenantId: 't1' }]]);
+    expect(await queue.depth()).toEqual({ pending: 1, deadLetter: 0 });
+  });
+});

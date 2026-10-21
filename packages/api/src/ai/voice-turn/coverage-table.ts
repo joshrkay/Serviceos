@@ -390,14 +390,14 @@ export const COVERAGE_TABLE: Readonly<Record<IntentFamilyId, CoverageRow>> = {
       module:
         'telephony/twilio-adapter.ts#runLowSttConfidenceGatherLadder (+ maybeHandleLowSttConfidenceGather, A3)',
       notes:
-        'Empty SpeechResult (actionOnEmptyResult) and low acoustic Confidence share ONE streak (T2-F03), capped at MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS → escalation copy + graceful end_session.',
+        'Empty SpeechResult (actionOnEmptyResult) and low acoustic Confidence share ONE streak (T2-F03), capped at MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS. LCR-02: a low-Confidence cap dispatches system_failure (parked <Dial> / no-one-available message / voicemail); a silence cap takes a voicemail and pages nobody.',
     },
     media_streams: {
       status: 'reachable',
       module:
         'telephony/media-streams/mediastream-adapter.ts (A3 final-confidence gate + recoverFromLowSttConfidence + T2-F05 silence-reprompt timer)',
       notes:
-        'The silence timer gives pending approval/consent dialogues first crack via TwilioGatherAdapter#handlePendingDialogueSilence; speechTurn\'s own empty-utterance branch dispatches confidence_low.',
+        'The silence timer gives pending approval/consent dialogues first crack via TwilioGatherAdapter#handlePendingDialogueSilence; speechTurn\'s own empty-utterance branch dispatches confidence_low. LCR-02: the cap is split by cause like Gather\'s — low confidence / a failing turn pipeline → system_failure delivered through the realtime hand-off; silence → voicemail over REST, never a page.',
     },
     inapp: {
       status: 'n/a',

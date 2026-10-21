@@ -447,8 +447,8 @@ describe('Postgres integration — migration corpus replays over a populated dat
     ]);
   });
 
-  it('rows written before 318 keep no seed provenance through the migration and the next replay (318)', async () => {
-    // Back to the pre-318 shape: the columns 318 adds do not exist yet, so
+  it('rows written before 324 keep no seed provenance through the migration and the next replay (324)', async () => {
+    // Back to the pre-324 shape: the columns 324 adds do not exist yet, so
     // production rows written then carry nothing that could become a baseline.
     await pool.query(`ALTER TABLE catalog_items DROP COLUMN IF EXISTS seed_key, DROP COLUMN IF EXISTS seeded_unit_price_cents`);
     await pool.query(
@@ -515,7 +515,7 @@ describe('Postgres integration — migration corpus replays over a populated dat
       });
     }
 
-    // Deploy N+1 applies 318 over them; deploy N+2 replays it.
+    // Deploy N+1 applies 324 over them; deploy N+2 replays it.
     await deploy(pool);
     await expectNoProvenance();
     await deploy(pool);

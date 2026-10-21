@@ -70,6 +70,11 @@ import { createAuditEvent } from '../audit/audit';
 import { isValidTenantId } from '../db/schema';
 import { recordVoiceError } from '../analytics/posthog';
 import { isCredentialFailure, type TtsHealthCheck, type TtsHealthState } from '../ai/tts/tts-health';
+import {
+  DEFAULT_REGISTRY_CONFIG,
+  TWILIO_MEDIA_STREAMS_SURFACE,
+  type ConnectionRegistry,
+} from '../ws/connection-registry';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -207,6 +212,14 @@ export interface TelephonyRouterDeps {
    * recordSuccess. Unwired → treated as always-closed (no extra gating).
    */
   realtimeCircuit?: { isOpen(): boolean };
+  /**
+   * LCR-06 — the per-tenant connection registry the media-streams adapter
+   * acquires its slot from (app.ts passes the SAME instance to both). A tenant
+   * already at the cap gets Gather instead of a `<Stream>` whose socket the
+   * adapter would refuse. Unwired → no cap gate (the adapter still enforces
+   * the cap and degrades the overflow leg to Gather itself).
+   */
+  connectionRegistry?: Pick<ConnectionRegistry, 'count'>;
   /**
    * WS3 — realtime prerequisites probe. Returns false when the realtime path
    * can't physically work (STT/TTS not configured), so the /voice branch
@@ -1425,6 +1438,7 @@ function buildCallbackGatherTwiml(opts: {
  *
  *   (a) realtime prerequisites present (STT + TTS configured), AND
  *   (b) the pre-connect health circuit is not open, AND
+ *   (b2) the tenant is below its realtime connection cap (LCR-06), AND
  *   (c) the per-tenant `voice_realtime` flag is enabled (default ON).
  *
  * Any gate failing — including a flag-read throw — returns false so the caller
@@ -1475,6 +1489,37 @@ async function shouldUseRealtimeStream(opts: {
       tenantId,
     });
     return false;
+  }
+
+  // (b2) LCR-06 — per-tenant realtime connection cap. The adapter refuses a
+  // socket over the cap, so a tenant already at it gets Gather here. This is
+  // a pre-check (count-then-acquire races between concurrent /voice requests
+  // are caught by the adapter, which degrades that leg to Gather). Runs before
+  // the flag read; a count error fails toward Gather like every other gate.
+  if (deps.connectionRegistry) {
+    let open: number;
+    try {
+      open = await deps.connectionRegistry.count(TWILIO_MEDIA_STREAMS_SURFACE, tenantId);
+    } catch (err) {
+      logger.warn('telephony/voice: connection count failed → Gather fallback', {
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+    if (open >= DEFAULT_REGISTRY_CONFIG.perTenantMax) {
+      logger.warn('telephony/voice: tenant at realtime connection cap → Gather fallback', {
+        callSid,
+        open,
+      });
+      recordVoiceError({
+        errorKind: 'tenant_connection_cap',
+        channel: 'gather',
+        callSid,
+        tenantId,
+      });
+      return false;
+    }
   }
 
   // (c) per-tenant flag (default ON). Fail toward Gather on a read error.

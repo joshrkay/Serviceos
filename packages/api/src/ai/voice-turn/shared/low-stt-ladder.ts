@@ -15,10 +15,12 @@
  *     is never blocked on absent data (Twilio omits `Confidence` for some
  *     valid recognitions; Deepgram defaults it to 1);
  *   - strike 1 … N-1 reprompts with {@link LOW_STT_CONFIDENCE_REPROMPT_COPY};
- *   - strike N ({@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS}) speaks the SAME
- *     escalation line VOX-35c uses and ends the session with
- *     {@link LOW_STT_LADDER_TERMINAL_REASON} — the line itself is the problem
- *     (noise, crosstalk, a bad connection), not a one-off blip;
+ *   - strike N ({@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS}) ends the ladder
+ *     by the CAPPING strike's cause (LCR-02): low confidence → the FSM's
+ *     `system_failure`, whose `notify_oncall` parks a `<Dial>`, the
+ *     no-one-available message, or nothing ({@link parkedHandoffKind});
+ *     silence (a pocket dial, a dead line) → a voicemail or a call-us-back
+ *     line, never a page. No terminal line promises an undeliverable transfer;
  *   - a good (dispatched) turn clears the streak (the callers own that).
  * Silence and low confidence share ONE streak, so a caller alternating the
  * two still terminates at N.
@@ -29,7 +31,8 @@ import {
   renderTtsText,
   sessionLanguage,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
-  SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  HANDOFF_UNAVAILABLE_COPY,
+  SILENCE_CLOSING_COPY,
 } from '../../agents/customer-calling/tts-copy';
 import { recordVoiceError, type VoiceErrorChannel } from '../../../analytics/posthog';
 
@@ -62,38 +65,65 @@ export const MIN_STT_CONFIDENCE = ((): number => {
  */
 export const MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS = 2;
 
-/** The `end_session` reason (and `voice_sessions.terminal_reason`) at the cap. */
+/** The FSM `system_failure` reason (and terminal reason) at a low-confidence cap. */
 export const LOW_STT_LADDER_TERMINAL_REASON = 'low_stt_confidence_max_retries' as const;
+
+/** LCR-02 — the `end_session` / `voice_sessions.ended_reason` at a silence cap. */
+export const SILENCE_LADDER_TERMINAL_REASON = 'silence_max_retries' as const;
 
 /** True only for a real, finite confidence below the floor. */
 export function isLowSttConfidence(confidence: number | undefined): boolean {
   return typeof confidence === 'number' && Number.isFinite(confidence) && confidence < MIN_STT_CONFIDENCE;
 }
 
-export interface LowSttLadderStep {
-  /** The cap was reached on this strike: speak the escalation line and end. */
-  escalate: boolean;
-  /** The catalog key to speak (localized by the caller's renderer). */
-  copy: string;
-  errorKind: 'low_stt_confidence' | 'low_stt_confidence_repeated';
-}
+/** Why this strike happened: the caller said nothing, or said something we could not hear well. */
+export type LowSttStrikeCause = 'silence' | 'low_confidence';
 
-/** The ladder's decision for the `streak`-th consecutive strike (1-based). */
-export function lowSttLadderStep(streak: number): LowSttLadderStep {
-  return streak >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS
-    ? { escalate: true, copy: SPEECH_TURN_FAILURE_ESCALATION_COPY, errorKind: 'low_stt_confidence_repeated' }
-    : { escalate: false, copy: LOW_STT_CONFIDENCE_REPROMPT_COPY, errorKind: 'low_stt_confidence' };
-}
+/** Which voicemail prompt a host's `<Record>` speaks (see `TwilioGatherAdapter.buildLadderVoicemailTwiml`). */
+export type LadderVoicemailKind = 'silence' | 'no_handoff';
 
-/** The side effects a step speaks, rendered in the session's language. */
-export function lowSttLadderEffects(session: Pick<VoiceSession, 'language'>, step: LowSttLadderStep): SideEffect[] {
-  const effects: SideEffect[] = [
-    { type: 'tts_play', payload: { text: renderTtsText(step.copy, {}, sessionLanguage(session)) } },
-  ];
-  if (step.escalate) {
-    effects.push({ type: 'end_session', payload: { reason: LOW_STT_LADDER_TERMINAL_REASON } });
+type Repeated = 'low_stt_confidence_repeated';
+/**
+ * reprompt: ask again (`copy` is the catalog key). system_failure: dispatch
+ * the FSM's `system_failure` with `reason`. silence_close: offer a voicemail
+ * where the host can deliver one, else speak `copy` and end with `reason`.
+ */
+export type LowSttLadderStep =
+  | { kind: 'reprompt'; copy: string; errorKind: 'low_stt_confidence' }
+  | { kind: 'system_failure'; reason: typeof LOW_STT_LADDER_TERMINAL_REASON; errorKind: Repeated }
+  | { kind: 'silence_close'; copy: string; reason: typeof SILENCE_LADDER_TERMINAL_REASON; errorKind: Repeated };
+
+/** The ladder's decision for the `streak`-th consecutive strike (1-based), keyed on the capping strike's cause. */
+export function lowSttLadderStep(streak: number, cause: LowSttStrikeCause): LowSttLadderStep {
+  if (streak < MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS) {
+    return { kind: 'reprompt', copy: LOW_STT_CONFIDENCE_REPROMPT_COPY, errorKind: 'low_stt_confidence' };
   }
-  return effects;
+  return cause === 'silence'
+    ? {
+        kind: 'silence_close',
+        copy: SILENCE_CLOSING_COPY,
+        reason: SILENCE_LADDER_TERMINAL_REASON,
+        errorKind: 'low_stt_confidence_repeated',
+      }
+    : { kind: 'system_failure', reason: LOW_STT_LADDER_TERMINAL_REASON, errorKind: 'low_stt_confidence_repeated' };
+}
+
+/**
+ * What `notify_oncall` parked for the next TwiML response: a `<Dial>` (a
+ * transfer is really being made — the only case the "connect you" line may be
+ * spoken), the no-one-available message, or nothing at all.
+ */
+export function parkedHandoffKind(twiml: string | undefined): 'dial' | 'message' | 'none' {
+  if (!twiml) return 'none';
+  return /<Dial[\s>]/.test(twiml) ? 'dial' : 'message';
+}
+
+/**
+ * A cap whose `notify_oncall` parked nothing, on a host that cannot take a
+ * voicemail: say honestly that nobody could be reached, then end.
+ */
+export function noHandoffCloseEffects(session: Pick<VoiceSession, 'language'>, reason: string): SideEffect[] {
+  return [ttsLine(session, HANDOFF_UNAVAILABLE_COPY), { type: 'end_session', payload: { reason } }];
 }
 
 /**
@@ -117,18 +147,38 @@ export function clearLowSttStreak(streak: LowSttStreak, session: VoiceSession): 
 /**
  * Bump the session's streak, decide the step and build its effects. At the
  * cap the streak is cleared so a later call (should the session somehow
- * continue) starts a fresh ladder. The caller finalizes the terminated
- * session (when `step.escalate`) and renders the effects.
+ * continue) starts a fresh ladder. The effects are:
+ *   - reprompt → the reprompt line;
+ *   - silence_close → the call-us-back line + `end_session` (a host that can
+ *     deliver a voicemail replaces them with its `<Record>`);
+ *   - system_failure → the FSM dispatch's own effects (audit, the "connect
+ *     you" line, `notify_oncall`); the host executes them and then decides
+ *     from {@link parkedHandoffKind} what the caller actually gets.
+ * The caller renders the effects and finalizes a terminated session.
  */
 export function runLowSttConfidenceLadder(
   session: VoiceSession,
   streak: LowSttStreak,
+  cause: LowSttStrikeCause,
 ): { effects: SideEffect[]; step: LowSttLadderStep } {
   const strikes = (streak.get(session) ?? 0) + 1;
-  const step = lowSttLadderStep(strikes);
-  if (step.escalate) streak.delete(session);
-  else streak.set(session, strikes);
-  return { effects: lowSttLadderEffects(session, step), step };
+  const step = lowSttLadderStep(strikes, cause);
+  if (step.kind === 'reprompt') {
+    streak.set(session, strikes);
+    return { effects: [ttsLine(session, step.copy)], step };
+  }
+  streak.delete(session);
+  if (step.kind === 'silence_close') {
+    return {
+      effects: [ttsLine(session, step.copy), { type: 'end_session', payload: { reason: step.reason } }],
+      step,
+    };
+  }
+  return { effects: session.machine.dispatch({ type: 'system_failure', reason: step.reason }), step };
+}
+
+function ttsLine(session: Pick<VoiceSession, 'language'>, copy: string): SideEffect {
+  return { type: 'tts_play', payload: { text: renderTtsText(copy, {}, sessionLanguage(session)) } };
 }
 
 /** OBS — the `voice_error` row for a step; IDs only, fired after the step is rendered. */

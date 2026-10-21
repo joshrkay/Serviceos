@@ -1,4 +1,5 @@
 import type { SeatUsageReader } from '../../users/seat-limit';
+import type { Queue } from '../../queues/queue';
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import {
@@ -1338,6 +1339,13 @@ export function createExecutionHandlerRegistry(deps?: {
   // RV-141 — emergency_dispatch owner page. Optional; absent → the handler
   // degrades per its own per-dep guards (job-only / passthrough).
   emergencySmsSender?: EmergencySmsSender;
+  /**
+   * S5a-5 (U8) — the app queue: an approved onboarding_voice_policy that
+   * switches payment_collection_mode to "Collect on the spot" enqueues the
+   * pay-link cleanup in its own settings transaction. Absent → no enqueue
+   * (the daily reconciliation sweep is the backstop).
+   */
+  queue?: Queue;
   // RV-086 — send_estimate_nudge. sendService drives the actual re-send;
   // dispatchRepo backs the 48h cooldown check. Absent → degraded behavior
   // documented on the handler.
@@ -1651,7 +1659,7 @@ export function createExecutionHandlerRegistry(deps?: {
     // "Pick, don't build" onboarding — one proposal for the choices the five
     // onboarding_* proposals above do not cover (greeting, book-or-hold,
     // after-hours mode, emergency target, payment mode, booking hours).
-    new OnboardingVoicePolicyExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
+    new OnboardingVoicePolicyExecutionHandler(deps?.settingsRepo, requiredAuditRepo, deps?.queue),
     // B1.18 — update_brand_voice: writes through the SAME versioned
     // read→cool-down-check→merge→bump path the Brand-Voice Configurator
     // sheet uses (never re-implemented here — see brand-voice-handler.ts).

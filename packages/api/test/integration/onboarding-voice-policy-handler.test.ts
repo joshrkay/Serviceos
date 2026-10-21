@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { OnboardingVoicePolicyExecutionHandler } from '../../src/proposals/execution/onboarding-handlers';
 import type { Proposal } from '../../src/proposals/proposal';
 import type { ExecutionContext } from '../../src/proposals/execution/handlers';
+import { paymentModeLockKey } from '../../src/invoices/payment-collection-mode';
+import { PgQueue } from '../../src/queues/pg-queue';
 
 describe('onboarding_voice_policy handler against real tenant_settings', () => {
   let pool: Pool;
@@ -102,5 +104,134 @@ describe('onboarding_voice_policy handler against real tenant_settings', () => {
     await expect(
       pool.query(`UPDATE tenant_settings SET payment_collection_mode = 'cash_only' WHERE tenant_id = $1`, [tenant.tenantId]),
     ).rejects.toThrow(/payment_collection_mode/);
+  });
+});
+
+describe('S5a-4 — the onboarding policy write and the payment-mode lock (real Postgres, statement spy)', () => {
+  let pool: Pool;
+  let spyPool: Pool;
+  const log: Array<{ text: string; values: unknown[] }> = [];
+  let tenant: { tenantId: string; userId: string };
+  let handler: OnboardingVoicePolicyExecutionHandler;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    // A dedicated pool whose clients record every promise-style statement, so
+    // the shared pool is untouched.
+    spyPool = new Pool({ connectionString: process.env.TEST_DB_URL, max: 2 });
+    spyPool.on('connect', (client: PoolClient) => {
+      const original = client.query.bind(client) as (...args: unknown[]) => Promise<unknown>;
+      (client as unknown as { query: unknown }).query = (...args: unknown[]) => {
+        if (typeof args[args.length - 1] !== 'function') {
+          const cfg = args[0];
+          log.push({
+            text: (typeof cfg === 'string' ? cfg : String((cfg as { text?: string })?.text ?? '')).trim(),
+            values: (Array.isArray(args[1]) ? args[1] : []) as unknown[],
+          });
+        }
+        return original(...args);
+      };
+    });
+    handler = new OnboardingVoicePolicyExecutionHandler(new PgSettingsRepository(spyPool), new PgAuditRepository(pool));
+  });
+
+  beforeEach(async () => {
+    tenant = await createTestTenant(pool);
+  });
+
+  afterAll(async () => {
+    await spyPool.end();
+  });
+
+  const ctx = (): ExecutionContext => ({ tenantId: tenant.tenantId, executedBy: tenant.userId, executedByRole: 'owner' });
+  const execute = (payload: Record<string, unknown>) =>
+    handler.execute(
+      { id: crypto.randomUUID(), tenantId: tenant.tenantId, proposalType: 'onboarding_voice_policy', status: 'approved', payload, summary: 'voice policy' } as Proposal,
+      ctx(),
+    );
+  const updatedAt = async () =>
+    (await pool.query<{ updated_at: Date }>('SELECT updated_at FROM tenant_settings WHERE tenant_id = $1', [tenant.tenantId])).rows[0]
+      ?.updated_at;
+
+  it('a payment_collection_mode payload takes the exclusive payment-mode lock before touching tenant_settings, and moves updated_at', async () => {
+    expect((await execute({ voiceGreeting: 'Hello there' })).success).toBe(true);
+    const before = await updatedAt();
+    await new Promise((r) => { setTimeout(r, 20); });
+
+    const from = log.length;
+    expect((await execute({ paymentCollectionMode: 'collect_on_site' })).success).toBe(true);
+    const mine = log.slice(from);
+    const iLock = mine.findIndex((s) => /pg_advisory_xact_lock\(hashtext\(\$1\)\)/.test(s.text));
+    const iSettings = mine.findIndex((s) => /tenant_settings/.test(s.text));
+    expect(iLock).toBeGreaterThanOrEqual(0);
+    expect(iLock).toBeLessThan(iSettings);
+    expect(mine[iLock].values).toEqual([paymentModeLockKey(tenant.tenantId)]);
+
+    const after = await updatedAt();
+    expect(after.getTime()).toBeGreaterThan(before.getTime());
+  });
+
+  it('a payload without the key takes no lock and leaves updated_at unchanged', async () => {
+    expect((await execute({ paymentCollectionMode: 'pay_link' })).success).toBe(true);
+    const before = await updatedAt();
+    await new Promise((r) => { setTimeout(r, 20); });
+
+    const from = log.length;
+    expect((await execute({ voiceGreeting: 'Walsh Plumbing, how can I help?' })).success).toBe(true);
+    expect(log.slice(from).some((s) => /pg_advisory/.test(s.text))).toBe(false);
+    expect((await updatedAt()).getTime()).toBe(before.getTime());
+  });
+});
+
+describe('S5a-5 — approving "Collect on the spot" commits the pay-link cleanup job with the settings row (real Postgres)', () => {
+  let pool: Pool;
+  let queue: PgQueue;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    queue = new PgQueue(pool);
+  });
+
+  afterAll(async () => {
+    await pool.query(`DELETE FROM _queue_messages WHERE type = 'deactivate_payment_links'`);
+    await closeSharedTestDb();
+  });
+
+  async function jobs(tenantId: string) {
+    const { rows } = await pool.query<{ payload: { tenantId: string; pass: number }; idempotency_key: string }>(
+      `SELECT payload, idempotency_key FROM _queue_messages
+        WHERE type = 'deactivate_payment_links' AND payload->>'tenantId' = $1`,
+      [tenantId],
+    );
+    return rows;
+  }
+
+  it('collect_on_site over pay_link leaves exactly one deactivate_payment_links row keyed by the committed updated_at; re-approving the same choice adds none', async () => {
+    const tenant = await createTestTenant(pool);
+    const handler = new OnboardingVoicePolicyExecutionHandler(new PgSettingsRepository(pool), new PgAuditRepository(pool), queue);
+    const execute = (payload: Record<string, unknown>) =>
+      handler.execute(
+        { id: crypto.randomUUID(), tenantId: tenant.tenantId, proposalType: 'onboarding_voice_policy', status: 'approved', payload, summary: 'voice policy' } as unknown as Proposal,
+        { tenantId: tenant.tenantId, executedBy: tenant.userId, executedByRole: 'owner' },
+      );
+
+    expect((await execute({ paymentCollectionMode: 'pay_link' })).success).toBe(true);
+    expect(await jobs(tenant.tenantId)).toEqual([]);
+
+    expect((await execute({ paymentCollectionMode: 'collect_on_site' })).success).toBe(true);
+    const { rows } = await pool.query<{ payment_collection_mode: string; updated_at: Date }>(
+      'SELECT payment_collection_mode, updated_at FROM tenant_settings WHERE tenant_id = $1',
+      [tenant.tenantId],
+    );
+    expect(rows[0].payment_collection_mode).toBe('collect_on_site');
+    expect(await jobs(tenant.tenantId)).toEqual([
+      {
+        payload: { tenantId: tenant.tenantId, pass: 1 },
+        idempotency_key: `deactivate-payment-links:${tenant.tenantId}:${rows[0].updated_at.toISOString()}`,
+      },
+    ]);
+
+    expect((await execute({ paymentCollectionMode: 'collect_on_site' })).success).toBe(true);
+    expect(await jobs(tenant.tenantId)).toHaveLength(1);
   });
 });

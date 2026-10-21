@@ -6,6 +6,9 @@
  *
  * Shared-DB rule: every case owns a fresh trade string (so its pool is only
  * the demo tenants it created), fresh phone hashes and a far-future UTC day.
+ *
+ * S6-4 adds the end of a lease: the callback-versus-reaper race on the real
+ * claim, and the reaper's two sweeps (expired leases, stale resets).
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { randomInt, randomUUID } from 'crypto';
@@ -17,6 +20,11 @@ import { loadDemoConfig } from '../../src/demo/config';
 import { DEMO_CALL_ALLOWANCE_SCOPE } from '../../src/demo/call-budget';
 import { DEMO_PLATFORM_TENANT_ID } from '../../src/demo/platform-tenant';
 import { withTenantSession } from '../../src/db/rls-runtime-role';
+import { createDemoLeaseResetter, claimLease, type DemoResetHooks } from '../../src/demo/reset';
+import { buildDemoFixtureDeps } from '../../src/demo/fixture';
+import { DevStorageProvider } from '../../src/files/storage-provider';
+import { runDemoLeaseReaperSweep } from '../../src/workers/demo-lease-reaper';
+import { createPoolSlotTenant } from './demo-pool-tenant';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const BASE_DAY_MS = Date.UTC(2200, 0, 1) + randomInt(0, 2_000_000) * DAY_MS;
@@ -263,5 +271,107 @@ describe('Postgres integration — demo tenant leases (S6-3)', () => {
       expect(await writesFor(reqs[busy[0].idx].phoneHash)).toEqual({ leases: 0, calls: 0, allowance: 0 });
       await releaseAll(trade);
     }
+  });
+
+  // ── S6-4: ending a lease (plan "Isolation (callback vs reaper race)",
+  // "Isolation (expired lease reclaimed)"). Pool-slot-shaped tenants seeded
+  // from the fixture, so the reset's re-seed can run; the reaper is driven
+  // with a limit of one and leases that expired in 2000, so on a shared
+  // database this file's leases sort first.
+  describe('ending a lease (S6-4)', () => {
+    const fixtureDeps = () => buildDemoFixtureDeps(pool);
+
+    function resetterWith(hooks: DemoResetHooks = {}) {
+      return createDemoLeaseResetter({
+        pool,
+        settings: { resetBatchRows: 1000, resetDrainSeconds: 1 },
+        alert: async () => undefined,
+        storage: new DevStorageProvider({ bucket: 'demo-bucket', publicUrlBase: 'http://localhost/storage-dev' }),
+        fixtureDeps: fixtureDeps(),
+        heartbeatMs: 3_600_000,
+        drainPollMs: 20,
+        hooks,
+      });
+    }
+
+    async function leaseOn(tenantId: string, expiresAt: string): Promise<string> {
+      const { rows } = await pool.query<{ id: string }>(
+        `INSERT INTO demo_tenant_leases (tenant_id, visitor_phone_hash, expires_at) VALUES ($1, $2, $3::timestamptz) RETURNING id`,
+        [tenantId, `end-lease-${randomUUID()}`, expiresAt],
+      );
+      return rows[0].id;
+    }
+
+    async function leaseEvents(leaseId: string): Promise<string[]> {
+      const { rows } = await pool.query<{ event_type: string }>(
+        `SELECT event_type FROM audit_events WHERE tenant_id = $1 AND entity_id = $2 ORDER BY created_at`,
+        [DEMO_PLATFORM_TENANT_ID, leaseId],
+      );
+      return rows.map((r) => r.event_type);
+    }
+
+    it('callback vs reaper race: in either order, exactly one claim wins, the reset runs once and the lease releases once (looped)', async () => {
+      const tenant = await createPoolSlotTenant(pool, { seed: fixtureDeps() });
+      for (let i = 0; i < 6; i += 1) {
+        // Expired, so the reaper's claim is allowed too.
+        const leaseId = await leaseOn(tenant.tenantId, new Date(Date.now() - 1_000).toISOString());
+        let resets = 0;
+        const hooks: DemoResetHooks = {
+          beforeStep: async (s) => {
+            if (s.name === 'queue_cancel') resets += 1;
+          },
+        };
+        const callback = () => resetterWith(hooks).resetAndRelease(leaseId, { source: 'callback' });
+        const reaper = () => resetterWith(hooks).resetAndRelease(leaseId, { source: 'reaper' });
+        const outs = i % 2 === 0 ? await Promise.all([callback(), reaper()]) : await Promise.all([reaper(), callback()]);
+        expect(outs.map((o) => o.kind).sort()).toEqual(['not_claimed', 'released']);
+        expect(resets).toBe(1);
+        const { rows } = await pool.query(`SELECT state FROM demo_tenant_leases WHERE id = $1`, [leaseId]);
+        expect(rows[0].state).toBe('released');
+        expect(await leaseEvents(leaseId)).toEqual(['demo_lease_reset_started', 'demo_lease_released']);
+      }
+    });
+
+    it('expired lease reclaimed: the reaper resets and releases an active lease past expires_at, and leaves a live one alone', async () => {
+      const expiredTenant = await createPoolSlotTenant(pool, { seed: fixtureDeps() });
+      const liveTenant = await createPoolSlotTenant(pool, { seed: fixtureDeps() });
+      const expired = await leaseOn(expiredTenant.tenantId, '2000-01-01T00:00:00Z');
+      const live = await leaseOn(liveTenant.tenantId, new Date(Date.now() + 70_000).toISOString());
+
+      // The reaper's claim re-checks expiry: a lease renewed after the sweep read is not claimed.
+      expect(await claimLease(pool, live, 'reaper')).toBeNull();
+
+      const swept = await runDemoLeaseReaperSweep({ pool, resetter: resetterWith(), limit: 1 });
+      expect(swept.expired).toEqual([{ kind: 'released', leaseId: expired, tenantId: expiredTenant.tenantId }]);
+      const { rows } = await pool.query<{ id: string; state: string }>(
+        `SELECT id, state FROM demo_tenant_leases WHERE id = ANY($1::uuid[]) ORDER BY id`,
+        [[expired, live]],
+      );
+      expect(Object.fromEntries(rows.map((r) => [r.id, r.state]))).toEqual({ [expired]: 'released', [live]: 'active' });
+      await pool.query(`UPDATE demo_tenant_leases SET state = 'released', released_at = now() WHERE id = $1`, [live]);
+    });
+
+    it('a reset whose heartbeat went stale is taken over by the reaper and finished; a fresh one is left alone', async () => {
+      const deadTenant = await createPoolSlotTenant(pool, { seed: fixtureDeps() });
+      const aliveTenant = await createPoolSlotTenant(pool, { seed: fixtureDeps() });
+      const dead = await leaseOn(deadTenant.tenantId, new Date(Date.now() + 70_000).toISOString());
+      const alive = await leaseOn(aliveTenant.tenantId, new Date(Date.now() + 70_000).toISOString());
+      // Two claims whose resetters never run: one died long ago, one is "still beating".
+      const deadClaim = await claimLease(pool, dead, 'callback');
+      const aliveClaim = await claimLease(pool, alive, 'callback');
+      expect(deadClaim && aliveClaim).toBeTruthy();
+      await pool.query(`UPDATE demo_tenant_leases SET reset_heartbeat_at = '2000-01-01T00:00:00Z' WHERE id = $1`, [dead]);
+
+      const swept = await runDemoLeaseReaperSweep({ pool, resetter: resetterWith(), limit: 1 });
+      expect(swept.takenOver).toEqual([{ kind: 'released', leaseId: dead, tenantId: deadTenant.tenantId }]);
+      const { rows } = await pool.query<{ state: string; reset_token: string }>(`SELECT state, reset_token FROM demo_tenant_leases WHERE id = $1`, [dead]);
+      expect(rows[0].state).toBe('released');
+      expect(rows[0].reset_token).not.toBe(deadClaim!.token);
+      expect(await leaseEvents(dead)).toEqual(['demo_lease_reset_started', 'demo_lease_reset_taken_over', 'demo_lease_released']);
+
+      const left = await pool.query<{ state: string; reset_token: string }>(`SELECT state, reset_token FROM demo_tenant_leases WHERE id = $1`, [alive]);
+      expect(left.rows[0]).toEqual({ state: 'resetting', reset_token: aliveClaim!.token });
+      expect(await resetterWith().continueReset(alive, aliveClaim!.token)).toMatchObject({ kind: 'released' });
+    });
   });
 });

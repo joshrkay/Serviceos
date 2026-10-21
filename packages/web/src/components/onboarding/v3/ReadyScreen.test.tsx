@@ -2,8 +2,7 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
-import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
-import { describe, expect, it, vi } from 'vitest';
+import { RivetVoiceContext, type RivetVoice } from '../../../hooks/useRivetVoice';
 import { ONBOARDING_METROS } from '@ai-service-os/shared';
 import { expectAllTapTargets } from '../../../test-utils/tap-target';
 import { plumbingCleDraft, withDraft } from './__fixtures__';
@@ -13,8 +12,22 @@ function setup(draft = plumbingCleDraft, over: Partial<ReadyScreenProps> = {}) {
   const onMakeItMine = vi.fn();
   const onKeepAsIs = vi.fn();
   const onChangeMetro = vi.fn();
+  const voice: RivetVoice = {
+    unlock: vi.fn(),
+    speak: vi.fn(),
+    prefetch: vi.fn(),
+    stop: vi.fn(),
+    speaking: false,
+    openMic: vi.fn(),
+    input: 'off',
+    stream: null,
+    keytermsOff: false,
+    noteInput: vi.fn(),
+  };
   const view = render(
-    <ReadyScreen draft={draft} onMakeItMine={onMakeItMine} onKeepAsIs={onKeepAsIs} onChangeMetro={onChangeMetro} changingMetro={false} notice={null} error={null} {...over} />,
+    <RivetVoiceContext.Provider value={voice}>
+    <ReadyScreen draft={draft} onMakeItMine={onMakeItMine} onKeepAsIs={onKeepAsIs} onChangeMetro={onChangeMetro} changingMetro={false} notice={null} error={null} {...over} />
+    </RivetVoiceContext.Provider>,
   );
   return { onMakeItMine, onKeepAsIs, onChangeMetro, container: view.container };
 }
@@ -45,7 +58,7 @@ describe('ReadyScreen', () => {
 
   it('in the shell, on a browser that can listen, says the owner can tap or say "first" or "second"', () => {
     withMicrophone();
-    setup(plumbingCleDraft, { inShell: true });
+    setup();
     expect(
       screen.getByText('Each choice is two options. Tap the one that sounds right, or say "first" or "second". Nothing is saved until you say so.'),
     ).toBeInTheDocument();

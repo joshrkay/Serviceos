@@ -192,17 +192,26 @@ import { createInteractionsRouter } from './routes/interactions';
 import { initSentry, setSentryClient } from './monitoring/sentry';
 import { captureServerError, redactedRoute } from './monitoring/capture-server-error';
 import { reportHandlerWrittenServerErrors } from './monitoring/report-server-responses';
-import { dbPoolConnections, pgQueueDepth, voiceTurnLatencyMs } from './monitoring/metrics';
+import {
+  dbPoolConnections,
+  pgQueueDepth,
+  voiceReplyGapMs,
+  voiceReplyUnackedTotal,
+  voiceTurnLatencyMs,
+} from './monitoring/metrics';
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
 import { createDemoCallsRouter } from './demo/routes';
-import { loadDemoConfig } from './demo/config';
+import { isDemoCallsEnabled, loadDemoConfig } from './demo/config';
+import { createDemoLeaseResetter } from './demo/reset';
+import { scheduleDemoLeaseReaper } from './workers/demo-lease-reaper';
 import { recordSweepSuccess, sweepLastSuccessMs } from './monitoring/sweep-heartbeats';
 import { PgPlatformSloRepository } from './monitoring/pg-platform-slo';
 // #1602 — production call-quality grading (nightly sampler + owner surface).
 import { createVoiceSessionGrader } from './voice/quality/grade-voice-session';
 import { InMemoryVoiceSessionGradeStore } from './voice/quality/voice-session-grade-store';
 import { PgVoiceSessionGradeStore } from './voice/quality/pg-voice-session-grade-store';
+import { createPgLatencySummaryReader } from './voice/quality/latency-summary';
 import {
   createVoiceQualityGradingWorker,
   VOICE_QUALITY_GRADING_INTERVAL_MS,
@@ -211,6 +220,7 @@ import {
   runSloMonitor,
   SLO_MONITOR_INTERVAL_MS,
   estimateTurnLatencyP95,
+  snapshotReplyGap,
 } from './workers/slo-monitor';
 import { PgFailureMonitorRepository } from './monitoring/pg-failure-monitor';
 import {
@@ -230,7 +240,11 @@ import { createCustomerGroupRouter } from './routes/customer-groups';
 import { createStandingInstructionRouter } from './routes/standing-instructions';
 import { runBatchInvoiceSweep } from './workers/batch-invoice-worker';
 import { createPaymentLinkProvider } from './payments/payment-link-provider';
-import { resolveEscalationSettings, createSettingsOwnerPhoneResolver } from './settings/settings';
+import {
+  resolveEscalationSettings,
+  createSettingsOwnerPhoneResolver,
+  InMemorySettingsRepository,
+} from './settings/settings';
 import { InMemoryAuditRepository, createAuditEvent } from './audit/audit';
 import { LookupEventService } from './lookup-events/lookup-event-service';
 import { TrainingAssetRedactionService } from './verticals/training-asset-redaction';
@@ -253,6 +267,11 @@ import { createAdminTenantsRouter } from './routes/admin-tenants';
 import { PgTenantUsageRepository } from './admin/pg-tenant-usage';
 import { processMessage, type QueueMessage } from './queues/queue';
 import { createProvisionTwilioWorker } from './workers/provision-twilio';
+import { createDeactivatePaymentLinksWorker } from './workers/deactivate-payment-links';
+import {
+  createInMemoryPaymentLinkClaimer,
+  createPgPaymentLinkClaimer,
+} from './invoices/payment-mode-change';
 import { runOrphanedNumberSweep } from './workers/orphaned-number-sweep';
 import {
   createA2pRegistrationWorker,
@@ -345,6 +364,12 @@ import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
 import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
 import { runTrialReminderSweep } from './workers/trial-reminder-sweep';
 import { runDunningSweep } from './workers/dunning-sweep';
+import {
+  PAYMENT_LINK_RECONCILIATION_TICK_MS,
+  isPaymentLinkReconciliationHour,
+  listCollectOnSiteTenantIds,
+  runPaymentLinkReconciliationSweep,
+} from './workers/payment-link-reconciliation-sweep';
 import { runOverageSettlementReconciliation } from './workers/overage-settlement-reconciliation';
 import { runClerkMetadataBackfillSweep } from './workers/clerk-metadata-backfill-sweep';
 import { runVoiceCostReconciliationSweep } from './workers/voice-cost-reconciliation';
@@ -363,7 +388,7 @@ import { PgCustomerLoader } from './reputation/match-customer';
 import { createCredentialResolver, getTenantTwilioCreds } from './integrations/credentials';
 import { checkOutboundConsent, type OutboundConsentContext } from './voice/outbound-consent';
 import { StripeDuesCollector, DuesInvoiceOps } from './agreements/dues-collector';
-import { issueInvoice } from './invoices/invoice';
+import { InMemoryInvoiceRepository, issueInvoice } from './invoices/invoice';
 import { recordPayment } from './invoices/payment';
 import { createAgreementsRouter } from './routes/agreements';
 import { createMaintenanceContractsRouter } from './routes/maintenance-contracts';
@@ -2138,6 +2163,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     paymentRepo,
     // P0-9 — record_payment execution kills a link its credit made stale.
     paymentLinkCleanup: { provider: paymentLinkProvider, connectAccountResolver },
+    // S5a-5 (U8) — onboarding_voice_policy enqueues the pay-link cleanup in
+    // its settings transaction when it switches to "Collect on the spot".
+    queue,
     invoiceDeliveryProvider,
     estimateDeliveryProvider,
     analyticsRepo: dispatchAnalyticsRepo,
@@ -2508,6 +2536,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     orphanedNumberSweep: 590031,
     // #1602 — nightly production call-quality grading sampler. DISTINCT key.
     voiceQualityGrading: 590032,
+    // U7 (S6-4) — demo lease reaper (expired leases, stale resets). DISTINCT key.
+    demoLeaseReaper: 590033,
+    // S5a-6 — daily pay-link reconciliation sweep (collect-on-site tenants
+    // that still hold a live link). DISTINCT key.
+    paymentLinkReconciliation: 590034,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -2622,6 +2655,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
               return null;
             }
           },
+          // U1 (D-043) — reply-gap + unacked snapshot, same role gate and
+          // failure-soft read as the turn-latency snapshot above.
+          getReplyGapSnapshot: async () => {
+            try {
+              const [gap, unacked] = await Promise.all([
+                voiceReplyGapMs.get(),
+                voiceReplyUnackedTotal.get(),
+              ]);
+              return snapshotReplyGap(gap.values, unacked.values);
+            } catch {
+              return null;
+            }
+          },
           // #1602 — 7-day production graded pass rate (voice_session_grades,
           // cross-tenant). In-memory dev: zero counts, below the sample floor.
           getGradedPassRate: (windowStart) =>
@@ -2638,6 +2684,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             turnLatencyMinSample: config.SLO_TURN_LATENCY_MIN_SAMPLE,
             gradedPassRateMin: config.SLO_VOICE_GRADED_PASS_MIN,
             gradedPassRateMinSample: config.SLO_VOICE_GRADED_MIN_SAMPLE,
+            replyGapP95Ms: config.SLO_REPLY_GAP_P95_MS,
+            replyUnackedRateMax: config.SLO_REPLY_UNACKED_RATE_MAX,
+            replyGapMinSample: config.SLO_REPLY_GAP_MIN_SAMPLE,
           },
           logger: sloLogger,
         });
@@ -3093,6 +3142,33 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     feedbackSendWorker as import('./queues/queue').WorkerHandler<unknown>
   );
 
+  // S5a-5 (U8) — retire live pay links after a switch to "Collect on the
+  // spot". The job row is written in the settings transaction; this handler
+  // claims one link at a time under the per-tenant cleanup mutex and the
+  // payment-mode lock, then deactivates it at Stripe outside any lock.
+  // Registered unconditionally: Postgres claims with a pool, the in-memory
+  // claim over the in-memory invoice repository without one.
+  const paymentLinkClaimer = pool
+    ? createPgPaymentLinkClaimer(pool, queue)
+    : invoiceRepo instanceof InMemoryInvoiceRepository
+      ? createInMemoryPaymentLinkClaimer({ invoiceRepo, settingsRepo, queue })
+      : null;
+  if (paymentLinkClaimer) {
+    const deactivatePaymentLinksWorker = createDeactivatePaymentLinksWorker({
+      claimNext: paymentLinkClaimer,
+      invoiceRepo,
+      provider: paymentLinkProvider,
+      connectAccountResolver,
+      settingsRepo,
+      userRepo,
+      auditRepo,
+    });
+    workerRegistry.set(
+      deactivatePaymentLinksWorker.type,
+      deactivatePaymentLinksWorker as import('./queues/queue').WorkerHandler<unknown>
+    );
+  }
+
   if (pool) {
     const provisionTwilioWorker = createProvisionTwilioWorker({ pool });
     workerRegistry.set(
@@ -3258,24 +3334,51 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // (DEMO_CALLS_ENABLED) is read per request, the DEMO_* numbers once here.
   // Budget-crossing pages need their own operator seam: the SLO monitor's
   // exists only on worker replicas.
+  // U7 (S6-4) — one resetter ends every lease: the start service's no-call
+  // path here, and the reaper below (expired leases, stale resets).
   const demoLogger = createLogger({ service: 'demo-call', environment: process.env.NODE_ENV || 'development' });
+  const demoConfig = loadDemoConfig(process.env, demoLogger);
+  const demoAlert = createAlertOperator({
+    sentry: sentryClient,
+    delivery: messageDelivery,
+    alertSmsTo: config.ALERT_SMS_TO,
+    cooldownMs: config.SLO_ALERT_COOLDOWN_MIN * 60 * 1000,
+    logger: demoLogger,
+  });
+  const demoResetter =
+    pool && demoConfig.open
+      ? createDemoLeaseResetter({
+          pool,
+          settings: demoConfig.settings,
+          alert: demoAlert,
+          storage: storageProvider,
+          logger: demoLogger,
+        })
+      : null;
   app.use(
     '/public/demo',
     createDemoCallsRouter({
       pool: pool ?? null,
-      config: loadDemoConfig(process.env, demoLogger),
+      config: demoConfig,
       leaseTokenSecret: demoLeaseTokenSecret,
       publicApiUrl: process.env.PUBLIC_API_URL,
-      alert: createAlertOperator({
-        sentry: sentryClient,
-        delivery: messageDelivery,
-        alertSmsTo: config.ALERT_SMS_TO,
-        cooldownMs: config.SLO_ALERT_COOLDOWN_MIN * 60 * 1000,
-        logger: demoLogger,
-      }),
+      alert: demoAlert,
+      resetter: demoResetter,
       logger: demoLogger,
     }),
   );
+  // The lease reaper: leader-gated, every 30 s, registered only on worker
+  // replicas with a database while the demo call is switched on.
+  scheduleDemoLeaseReaper({
+    shouldRunWorkers,
+    pool: pool ?? null,
+    resetter: demoResetter,
+    isEnabled: isDemoCallsEnabled,
+    lockKey: SWEEP_LOCK.demoLeaseReaper,
+    runAsLeader,
+    registerInterval,
+    logger: demoLogger,
+  });
 
   // Public lead intake — embedded marketing-page form posts here.
   // Tenant identified by UUID in the URL. The outer `/public` limiter
@@ -4536,6 +4639,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // in-memory dev, in which case the global flag alone decides.
       ...(tenantFeatureFlags ? { tenantFeatureFlags } : {}),
       realtimeCircuit: realtimeHealthCircuit,
+      // LCR-06 — the same registry the media-streams adapter acquires from,
+      // so a tenant already at its realtime cap is answered on Gather.
+      connectionRegistry,
       realtimePrerequisitesMet: () => {
         const c = realtimeCapabilities();
         return c.sttEnabled && c.ttsEnabled;
@@ -4992,12 +5098,13 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // at start() and never re-armed by media frames (the audio-idle
             // timer is, so it never fires on a live call).
             maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
-            speechTurn: async ({ session, speechResult, callSid, tenantId }) =>
+            speechTurn: async ({ session, speechResult, callSid, tenantId, callerTiming }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
                 callSid,
                 speechResult,
                 tenantId,
+                ...(callerTiming ? { callerTiming } : {}),
               }),
             // RV-130 (CRITICAL) — greeting + recording-disclosure bootstrap
             // once Deepgram opens. initializeStreamSession speaks the
@@ -5049,6 +5156,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // a degrade so /voice/gather-fallback bridges the call instead.
             setPendingTransferTwiml: twilioAdapter.setPendingTransferTwiml.bind(twilioAdapter),
             takePendingTransferTwiml: twilioAdapter.takePendingTransferTwiml.bind(twilioAdapter),
+            // LCR-02: the voicemail <Record> a silence / failed-turn ladder cap
+            // offers, delivered through the same REST hand-off as a <Dial>.
+            ladderVoicemailTwiml: (session, kind) => twilioAdapter.buildLadderVoicemailTwiml(session, kind),
             // F6b: Wire the shared whisper cache so the MediaStream adapter
             // stores whisper TwiML after handleEscalateWithContext runs.
             whisperCache: sharedWhisperCache,
@@ -6059,6 +6169,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       { dunningConfigRepo },
       // #1463 — backupSupervisorUserId must name an active tenant member.
       { userRepo },
+      // S5a-5 (U8) — a PUT that switches to "Collect on the spot" enqueues
+      // the pay-link cleanup in the request's own transaction.
+      { queue },
     ),
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
@@ -6174,6 +6287,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       auditRepo,
       logger: voiceQualityLogger,
       passRateMin: config.SLO_VOICE_GRADED_PASS_MIN,
+      // U1 (D-043) — the 7-day reply-gap summary from call_transcript_turns.
+      // In-memory dev: no table, `latency` stays null and the card hides the row.
+      ...(pool ? { latencySummary: createPgLatencySummaryReader(pool) } : {}),
     }),
   );
   if (shouldRunWorkers) {
@@ -7481,6 +7597,44 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         });
       });
     }, 60 * 60_000));
+  }
+
+  // S5a-6 (U8) — daily payment-link reconciliation sweep. The backstop for
+  // what the switch's own cleanup job cannot see (a job lost or dead-lettered,
+  // links that predate the "Collect on the spot" choice): once a day it lists
+  // the collect-on-site tenants and enqueues a `deactivate_payment_links`
+  // pass-1 job for each one still holding a live link, keyed per UTC day. It
+  // takes no lock; the job's claim re-reads the mode. Hourly tick, gated to
+  // the 03:00 UTC hour (a 24 h interval resets on every redeploy). The
+  // enumerator follows the cleanup claimer: Postgres with a pool, the
+  // in-memory settings repository without one.
+  if (shouldRunWorkers) {
+    const paymentLinkSweepLogger = createLogger({
+      service: 'payment-link-reconciliation-sweep',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const listCollectOnSiteTenants: (() => Promise<string[]>) | null = pool
+      ? () => listCollectOnSiteTenantIds(pool)
+      : settingsRepo instanceof InMemorySettingsRepository
+        ? () => settingsRepo.listTenantIdsByPaymentCollectionMode('collect_on_site')
+        : null;
+    if (listCollectOnSiteTenants) {
+      registerInterval(setInterval(() => {
+        if (!isPaymentLinkReconciliationHour(new Date())) return;
+        void runAsLeader(SWEEP_LOCK.paymentLinkReconciliation, async () => {
+          await runPaymentLinkReconciliationSweep({
+            listCollectOnSiteTenantIds: listCollectOnSiteTenants,
+            invoiceRepo,
+            queue,
+            logger: paymentLinkSweepLogger,
+          });
+        }).catch((err) => {
+          paymentLinkSweepLogger.error('Payment-link reconciliation sweep failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }, PAYMENT_LINK_RECONCILIATION_TICK_MS));
+    }
   }
 
   // Billing resilience (Part B) — overage settlement reconciliation: retries

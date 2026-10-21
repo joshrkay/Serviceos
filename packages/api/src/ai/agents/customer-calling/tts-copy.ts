@@ -163,6 +163,24 @@ export const TTS_COPY = {
     en: "I'm sorry, I wasn't able to connect you to a team member. Please try calling again in a few minutes.",
     es: 'Lo siento, no pude comunicarle con un miembro del equipo. Por favor, vuelva a llamar en unos minutos.',
   },
+  // LCR-02 — the silence ladder's cap: the line is silent (nobody may be
+  // there), so nobody is paged. The voicemail <Record> follows this line.
+  silence_voicemail: {
+    en: "I haven't been able to hear you. If you still need help, please leave a message after the tone.",
+    es: 'No he podido escucharle. Si todavía necesita ayuda, por favor deje un mensaje después del tono.',
+  },
+  // LCR-02 — the silence cap when no voicemail can be delivered on this leg:
+  // the caller is asked to call back; nothing else is promised.
+  silence_closing: {
+    en: "I haven't been able to hear you, so I'll end the call here. Please call us back when you're ready.",
+    es: 'No he podido escucharle, así que voy a terminar la llamada. Por favor, llámenos de nuevo cuando pueda.',
+  },
+  // LCR-02 — the low-confidence / failed-turn cap paged on-call but nothing
+  // could be dialed: the voicemail <Record> follows this line.
+  handoff_unavailable_voicemail: {
+    en: "I'm sorry, I wasn't able to connect you to a team member. Please leave a message after the tone.",
+    es: 'Lo siento, no pude comunicarle con un miembro del equipo. Por favor, deje un mensaje después del tono.',
+  },
   low_stt_confidence_reprompt: {
     en: "I didn't quite catch that — could you say that again?",
     es: 'No alcancé a escuchar bien eso — ¿podría repetirlo, por favor?',
@@ -640,6 +658,8 @@ export const SPEECH_TURN_FAILURE_ESCALATION_COPY = TTS_COPY.speech_turn_failure_
  * immediately before the call ends. The alternative is silence.
  */
 export const HANDOFF_UNAVAILABLE_COPY = TTS_COPY.handoff_unavailable.en;
+/** LCR-02 — the silence cap's closing line when no voicemail can be delivered. */
+export const SILENCE_CLOSING_COPY = TTS_COPY.silence_closing.en;
 
 /**
  * A3 — spoken when a FINAL transcript's STT acoustic confidence (Deepgram
@@ -650,11 +670,10 @@ export const HANDOFF_UNAVAILABLE_COPY = TTS_COPY.handoff_unavailable.en;
  * itself flagging the audio as likely mis-heard (nothing broke — the words
  * probably weren't the ones acted on). Acting on a misheard transcript risks
  * the wrong intent (e.g. "cancel" heard from "confirm"), so the caller is
- * asked to repeat rather than having the turn dispatched. The repeated-low-
- * confidence hand-off reuses {@link SPEECH_TURN_FAILURE_ESCALATION_COPY} —
- * "trouble completing that" reads naturally for "I can't reliably hear you"
- * too, and keeping one escalation line avoids a second string to translate
- * and keep in sync.
+ * asked to repeat rather than having the turn dispatched. LCR-02 — the
+ * repeated-low-confidence cap dispatches the FSM's `system_failure`, whose
+ * {@link SPEECH_TURN_FAILURE_ESCALATION_COPY} is spoken only when a transfer
+ * was actually parked.
  */
 export const LOW_STT_CONFIDENCE_REPROMPT_COPY = TTS_COPY.low_stt_confidence_reprompt.en;
 

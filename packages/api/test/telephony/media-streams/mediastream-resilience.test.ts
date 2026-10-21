@@ -925,3 +925,112 @@ describe('WS16a mediastream resilience — pre-establishment closes never vote',
     expect(circuit.recordSuccess).not.toHaveBeenCalled();
   });
 });
+
+describe('LCR-06 mediastream — a caller over the per-tenant connection cap moves to Gather', () => {
+  it('cap reached + redirect accepted → caller continues on Gather (close 1000), not a silent hang-up', async () => {
+    store.create('tenant-cap2', 'telephony', { callSid: 'CA-cap2' });
+    const ws = new FakeWs();
+    const circuit = makeCircuit();
+    const auditRepo = new InMemoryAuditRepository();
+    const createSpy = vi.spyOn(auditRepo, 'create');
+    const restRedirect = vi.fn().mockResolvedValue(true);
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: okStreamingProvider(),
+        speechTurn: async () => [],
+        realtimeCircuit: circuit,
+        auditRepo,
+        restRedirect,
+        finalizeOnClose,
+        connectionRegistry: new InMemoryConnectionRegistry({ perTenantMax: 0 }),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(START_FRAME('CA-cap2', 'MZ-cap2'));
+    await flush();
+    await flush();
+
+    expect(restRedirect).toHaveBeenCalledWith({ callSid: 'CA-cap2', accountSid: 'AC' });
+    expect(ws.closeCode).toBe(1000);
+    expect(ws.closeReason).toBe('degraded_to_gather');
+    const degraded = createSpy.mock.calls.find(
+      (c) => c[0].eventType === 'voice.realtime.degraded_to_gather',
+    )?.[0];
+    expect(degraded?.tenantId).toBe('tenant-cap2');
+    expect(degraded?.metadata).toEqual(
+      expect.objectContaining({ reason: 'tenant_connection_cap', surface: 'twilio_media_streams' }),
+    );
+    // The call is live on Gather: no terminal stamp, and a capped leg never
+    // opened the transport, so it casts no circuit vote.
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+    expect(circuit.recordFailure).not.toHaveBeenCalled();
+    expect(circuit.recordSuccess).not.toHaveBeenCalled();
+    expect(store.findByCallSid('CA-cap2')).toBeDefined();
+  });
+
+  it('cap reached + redirect refused → today’s 1013 close, and no terminal stamp', async () => {
+    store.create('tenant-cap3', 'telephony', { callSid: 'CA-cap3' });
+    const ws = new FakeWs();
+    const restRedirect = vi.fn().mockResolvedValue(false);
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: okStreamingProvider(),
+        speechTurn: async () => [],
+        restRedirect,
+        finalizeOnClose,
+        connectionRegistry: new InMemoryConnectionRegistry({ perTenantMax: 0 }),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(START_FRAME('CA-cap3', 'MZ-cap3'));
+    await flush();
+    await flush();
+
+    expect(restRedirect).toHaveBeenCalledTimes(1);
+    expect(ws.closeCode).toBe(1013);
+    expect(ws.closeReason).toBe('tenant_connection_cap');
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+  });
+
+  it('cap reached + socket closes while the redirect is in flight + redirect refused → no terminal stamp', async () => {
+    store.create('tenant-cap4', 'telephony', { callSid: 'CA-cap4' });
+    const ws = new FakeWs();
+    let resolveRedirect: (v: boolean) => void = () => {};
+    const restRedirect = vi.fn(
+      () =>
+        new Promise<boolean>((r) => {
+          resolveRedirect = r;
+        }),
+    );
+    const finalizeOnClose = vi.fn();
+    const adapter = new TwilioMediaStreamAdapter(
+      {
+        store,
+        streamingProvider: okStreamingProvider(),
+        speechTurn: async () => [],
+        restRedirect,
+        finalizeOnClose,
+        connectionRegistry: new InMemoryConnectionRegistry({ perTenantMax: 0 }),
+      },
+      ws,
+    );
+    adapter.start();
+    ws.inboundJson(START_FRAME('CA-cap4', 'MZ-cap4'));
+    await flush();
+    expect(restRedirect).toHaveBeenCalledTimes(1);
+    // Twilio drops the socket mid-redirect; the close is settled once the
+    // redirect result is in.
+    ws.fire('close');
+    resolveRedirect(false);
+    await flush();
+    await flush();
+
+    expect(finalizeOnClose).not.toHaveBeenCalled();
+  });
+});
