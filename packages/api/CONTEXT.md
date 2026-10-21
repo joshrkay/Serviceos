@@ -138,7 +138,8 @@ Terms for how the product states what it can prove about itself. The PRD's
   tenant site. We verify it and serve HTTPS; we never sell or renew it.
   _Avoid_: custom domain purchase.
 - **Google listing** — the one Google Business Profile location a tenant has
-  connected. Its review link and website are derived from it.
+  connected. Its review link is read from it; the website and booking link
+  are written to it, only through an owner-approved card.
   _Avoid_: GBP account (an account can hold many locations).
 - **Forwarding mode** — how the owner's existing number reaches the AI:
   *missed calls only* (default) or *all calls*. Porting is not a mode.

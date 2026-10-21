@@ -1892,5 +1892,8 @@ Google profiles on the owner's behalf (Google does not allow third-party verific
 in v1 (weeks of carrier paperwork); an AI web chatbot in v1 (needs its own abuse and cost model).
 
 **Consequences.** Ops must buy the tenant-site domain and point a wildcard record at the
-deploy. Every checklist item is derived, so a tenant who disconnects Google or turns forwarding
-off sees the item reopen rather than a stale tick.
+deploy. Every checklist item is derived, so a tenant who disconnects Google or unpublishes their
+site sees the item reopen rather than a stale tick. Forwarding is the exception: turning it off at
+the carrier sends us nothing, so the forwarding check is a point-in-time proof. The forwarding item
+shows the date of the last passing check, reopens when the owner changes carrier or forwarding mode
+in the app, and offers a re-check; detecting carrier-side changes is not promised.
