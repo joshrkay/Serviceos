@@ -168,7 +168,7 @@ export function SuggestedTechnicians({ appointmentId, onPick }: SuggestedTechnic
         <p className="text-xs text-muted-foreground" data-testid="suggest-techs-none">
           {state.partialNote ? 'None of the technicians checked is' : 'No technician is'} free for this visit at
           its current time
-          {booked.length === 0 && firstBlocked?.reasons[0] ? ` (${firstBlocked.name}: ${firstBlocked.reasons[0]})` : ''}.
+          {firstBlocked?.reasons[0] ? ` (${firstBlocked.name}: ${firstBlocked.reasons[0]})` : ''}.
         </p>
         {state.partialNote && <PartialNote text={state.partialNote} />}
         <OverlapAlerts booked={booked} timezone={timezone} />

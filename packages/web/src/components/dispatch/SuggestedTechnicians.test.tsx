@@ -138,6 +138,17 @@ describe('SuggestedTechnicians', () => {
     expect(screen.getByTestId('suggest-techs-none')).not.toHaveTextContent('a-other');
   });
 
+  it('names a non-overlap blocker alongside the booked alerts when nobody is free', async () => {
+    respondWith([
+      sug({ technicianId: 'e', name: 'Eve', feasible: false, reasons: ['Overlaps with appointment a-other'], overlaps: [clash] }),
+      sug({ technicianId: 'c', name: 'Cal', feasible: false, reasons: ['Technician is missing required skill(s): hvac'] }),
+    ]);
+    render(<SuggestedTechnicians appointmentId="appt-1" onPick={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('suggest-techs-button'));
+    expect(await screen.findByTestId('suggest-techs-none')).toHaveTextContent('Cal: Technician is missing required skill(s): hvac');
+    expect(screen.getByTestId('suggest-techs-overlap')).toHaveTextContent('Eve is booked');
+  });
+
   it('overlapLabel falls back when the clashing job is gone', () => {
     expect(overlapLabel({ ...clash, jobSummary: null }, 'America/New_York')).toBe(
       'Overlaps by 30 min: another visit, 1:30 PM–3:00 PM',
