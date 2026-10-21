@@ -19,6 +19,8 @@ import type { EntityResolver, EntityResolverResult } from '../../src/ai/resoluti
 import type { CustomerRepository } from '../../src/customers/customer';
 import type { JobRepository } from '../../src/jobs/job';
 import type { AppointmentRepository } from '../../src/appointments/appointment';
+import type { AssistantLookupDeps } from '../../src/ai/orchestration/lookup-dispatch';
+import { InMemoryJobRepository, createJob } from '../../src/jobs/job';
 import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
@@ -69,7 +71,12 @@ const appointmentRepo = {
   findByJob: async () => [],
 } as unknown as AppointmentRepository;
 
-function buildApp(gateway: LLMGateway, entityResolver: EntityResolver, proposalRepo: InMemoryProposalRepository) {
+function buildApp(
+  gateway: LLMGateway,
+  entityResolver: EntityResolver,
+  proposalRepo: InMemoryProposalRepository,
+  lookups?: AssistantLookupDeps,
+) {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -86,6 +93,7 @@ function buildApp(gateway: LLMGateway, entityResolver: EntityResolver, proposalR
       customerRepo,
       jobRepo,
       appointmentRepo,
+      ...(lookups ? { lookups } : {}),
     }),
   );
   return app;
@@ -185,5 +193,34 @@ describe('chat: the open page answers "this one"', () => {
     expect(res.status).toBe(200);
     const [draft] = await proposalRepo.findByTenant(TENANT);
     expect(draft.payload.customerId).toBeUndefined();
+  });
+});
+
+describe('chat: a lookup about "this customer" reads the open page', () => {
+  it('answers "what jobs does this customer have?" for the customer on screen', async () => {
+    const lookupJobs = new InMemoryJobRepository();
+    await createJob(
+      { tenantId: TENANT, customerId: CUSTOMER, locationId: 'loc-1', summary: 'Furnace tune-up', createdBy: USER } as never,
+      lookupJobs,
+    );
+    const lookupResolver = resolver(notFound);
+    const lookups: AssistantLookupDeps = {
+      answers: {},
+      shared: { jobRepo: lookupJobs, appointmentRepo, proposalRepo: new InMemoryProposalRepository(), customerRepo },
+      entityResolver: lookupResolver,
+      tenantTimezoneResolver: async () => 'America/Phoenix',
+    };
+    const app = buildApp(
+      scriptedGateway('lookup_jobs', { customerName: 'this customer' }),
+      resolver(notFound),
+      new InMemoryProposalRepository(),
+      lookups,
+    );
+    const res = await chat(app, 'what jobs does this customer have?', { entityType: 'customer', entityId: CUSTOMER });
+    expect(res.status).toBe(200);
+    expect(res.body.model).toBe('data-lookup');
+    expect(res.body.message.content).toContain('Furnace tune-up');
+    expect(res.body.message.content).toContain('Ana Garcia');
+    expect(lookupResolver.resolve).not.toHaveBeenCalled();
   });
 });

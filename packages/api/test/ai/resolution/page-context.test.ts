@@ -5,6 +5,7 @@ import {
   mergePageContextIds,
   pageContextNote,
   pageContextSchema,
+  pageLookupIds,
   type PageContextRepos,
 } from '../../../src/ai/resolution/page-context';
 
@@ -156,5 +157,39 @@ describe('loadPageContext', () => {
   it('rejects a malformed context at the schema', () => {
     expect(pageContextSchema.safeParse({ entityType: 'lead', entityId: JOB }).success).toBe(false);
     expect(pageContextSchema.safeParse({ entityType: 'job', entityId: 'nope' }).success).toBe(false);
+  });
+});
+
+describe('pageLookupIds', () => {
+  const lookup = (over: Partial<Parameters<typeof pageLookupIds>[0]>) =>
+    pageLookupIds({ intent: 'lookup_invoices', entities: {}, text: 'what invoices are open?', page: jobPage, ...over });
+
+  it('fills the customer when the question points at them', () => {
+    expect(lookup({ entities: { customerName: 'this customer' }, text: 'what invoices does this customer have?' })).toEqual({
+      customerId: CUSTOMER,
+    });
+    expect(lookup({ intent: 'lookup_balance', text: 'what does she owe?' })).toEqual({ customerId: CUSTOMER });
+  });
+
+  it('leaves a question with a tenant-wide reading alone', () => {
+    expect(lookup({})).toEqual({});
+  });
+
+  it('never replaces a named customer, a document number or a literal id', () => {
+    expect(lookup({ entities: { customerName: 'Maria Alvarez' }, text: 'what invoices does Maria Alvarez have?' })).toEqual({});
+    expect(lookup({ text: 'what is the status of INV-0042 for her?' })).toEqual({});
+    expect(lookup({ text: `invoices for ${OTHER} and her` })).toEqual({});
+  });
+
+  it('fills the customer only for customer-scoped lookups', () => {
+    expect(lookup({ intent: 'lookup_my_day', text: "what's on my day, is she first?" })).toEqual({});
+  });
+
+  it('fills the job when the question points at this job', () => {
+    expect(lookup({ intent: 'lookup_jobs', entities: { jobReference: 'this job' }, text: "what's the status of this job?" })).toEqual({
+      jobId: JOB,
+    });
+    expect(lookup({ intent: 'lookup_jobs', text: 'status of this job?' })).toEqual({ jobId: JOB });
+    expect(lookup({ intent: 'lookup_jobs', entities: { jobReference: 'the Patel job' }, text: 'status of the Patel job?' })).toEqual({});
   });
 });

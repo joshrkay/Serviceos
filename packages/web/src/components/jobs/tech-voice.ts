@@ -78,8 +78,10 @@ export async function sendTechVoiceUpdate(
 
 /**
  * Whether the tech's words still need saving as a job note. They do unless
- * the assistant itself drafted them as a note, which would save them twice.
+ * the assistant drafted them as a note that is already approved and on its
+ * way to the job. A pending note draft has no card on this screen to approve
+ * it, so skipping the save would leave the job without the note.
  */
 export function needsFieldNote(outcome: TechVoiceOutcome): boolean {
-  return !(outcome.ok && outcome.draft?.proposalType === 'add_note');
+  return !(outcome.ok && outcome.draft?.proposalType === 'add_note' && outcome.draft.status === 'Approved');
 }

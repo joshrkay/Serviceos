@@ -60,11 +60,13 @@ describe('sendTechVoiceUpdate', () => {
     expect(needsFieldNote(out)).toBe(true);
   });
 
-  it('does not save the words twice when the assistant drafted them as a note', async () => {
+  it('does not save the words twice when the assistant already approved them as a note', async () => {
     const out = await sendTechVoiceUpdate(
       fetcher(
         new Response(
-          JSON.stringify({ message: { content: 'Note drafted.', proposal: { id: 'p2', title: 'Note', proposalType: 'add_note' } } }),
+          JSON.stringify({
+            message: { content: 'Note added.', proposal: { id: 'p2', title: 'Note', proposalType: 'add_note', status: 'Approved' } },
+          }),
           { status: 200 },
         ),
       ),
@@ -72,6 +74,22 @@ describe('sendTechVoiceUpdate', () => {
       'note: gate code 4471',
     );
     expect(needsFieldNote(out)).toBe(false);
+  });
+
+  it('still saves the words when the note draft is only pending, since nothing here approves it', async () => {
+    const out = await sendTechVoiceUpdate(
+      fetcher(
+        new Response(
+          JSON.stringify({
+            message: { content: 'Note drafted.', proposal: { id: 'p3', title: 'Note', proposalType: 'add_note', status: 'Pending' } },
+          }),
+          { status: 200 },
+        ),
+      ),
+      'job-1',
+      'note: gate code 4471',
+    );
+    expect(needsFieldNote(out)).toBe(true);
   });
 
   it('reports a failure on an error status, an empty reply or a network error', async () => {

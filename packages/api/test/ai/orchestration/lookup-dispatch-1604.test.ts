@@ -131,3 +131,24 @@ describe('dispatchAssistantLookup — lookup_next_job (#1604)', () => {
     expect(JSON.stringify(reply)).not.toContain('Mill Lane');
   });
 });
+
+describe('dispatchAssistantLookup — the record on screen (page context)', () => {
+  it('"what jobs does this customer have?" on Keller\'s page answers for Keller without resolving the words', async () => {
+    const d = await deps();
+    const reply = await dispatchAssistantLookup(
+      {
+        tenantId: TENANT,
+        userId: MIKE_CLERK,
+        intent: 'lookup_jobs',
+        extractedEntities: { customerName: 'this customer' },
+        message: 'what jobs does this customer have?',
+        page: { customerId: 'cust-keller' },
+      },
+      d,
+    );
+    expect(reply?.outcome).toBe('answered');
+    expect(reply?.resolvedCustomer?.id).toBe('cust-keller');
+    expect(reply?.message.content).toMatch(/Keller/);
+    expect(d.entityResolver.resolve).not.toHaveBeenCalled();
+  });
+});

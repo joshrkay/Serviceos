@@ -246,6 +246,13 @@ export interface DispatchAssistantLookupInput {
    * language and omits it (English).
    */
   language?: SessionLanguage;
+  /**
+   * Verified ids of the record the operator had open and pointed at ("this
+   * customer", "her"), from `pageLookupIds`. They stand in for the matching
+   * free-text reference, which would otherwise resolve "this customer" as a
+   * name and find nothing.
+   */
+  page?: { customerId?: string; jobId?: string };
 }
 
 /** Lookups that read the schedule for one day. */
@@ -319,10 +326,12 @@ export async function dispatchAssistantLookup(
   const entities = input.extractedEntities ?? {};
 
   try {
+    const pageCustomerId = input.page?.customerId;
+    const pageJobId = input.page?.jobId;
     const customerReference =
-      typeof entities.customerName === 'string' ? entities.customerName : undefined;
+      !pageCustomerId && typeof entities.customerName === 'string' ? entities.customerName : undefined;
     const jobReference =
-      typeof entities.jobReference === 'string' ? entities.jobReference : undefined;
+      !pageJobId && typeof entities.jobReference === 'string' ? entities.jobReference : undefined;
     // Task 10 (2026-08-07 tradesperson plan) — lookup_crew_schedule /
     // lookup_timesheets name a crew member the SAME way reassign_appointment
     // does (targetTechnicianName); dateTimeDescription is the raw spoken
@@ -374,9 +383,14 @@ export async function dispatchAssistantLookup(
     // "What appointments do we have tomorrow?" names no customer: it is a
     // question about the schedule, answered by the ONE schedule lookup.
     const executedIntent: IntentType =
-      intent === 'lookup_appointments' && !customerReference ? 'lookup_my_day' : intent;
+      intent === 'lookup_appointments' && !customerReference && !pageCustomerId ? 'lookup_my_day' : intent;
 
-    if (executedIntent === intent && CUSTOMER_SCOPED_LOOKUP_INTENTS.has(intent) && !customerReference) {
+    if (
+      executedIntent === intent &&
+      CUSTOMER_SCOPED_LOOKUP_INTENTS.has(intent) &&
+      !customerReference &&
+      !pageCustomerId
+    ) {
       const tenantWide = await answerTenantWideLookup(
         { tenantId, actorId: userId, intent, ...(input.message ? { message: input.message } : {}) },
         deps,
@@ -393,7 +407,7 @@ export async function dispatchAssistantLookup(
      */
     let unresolvedReference = false;
 
-    let customerId: string | undefined;
+    let customerId: string | undefined = pageCustomerId;
     /** The matched customer's own display text — see `resolvedCustomer`. */
     let customerLabel: string | undefined;
     if (customerReference) {
@@ -412,7 +426,7 @@ export async function dispatchAssistantLookup(
       } else unresolvedReference = true;
     }
 
-    let jobId: string | undefined;
+    let jobId: string | undefined = pageJobId;
     if (jobReference) {
       const resolved = await resolveLookupReference(deps.entityResolver, tenantId, jobReference, 'job');
       if (resolved.kind === 'ambiguous') {

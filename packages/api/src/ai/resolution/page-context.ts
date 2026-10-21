@@ -27,6 +27,8 @@ import type { InvoiceRepository } from '../../invoices/invoice';
 import type { EstimateRepository } from '../../estimates/estimate';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import { findDocumentNumbers } from './document-number';
+import { CUSTOMER_SCOPED_LOOKUP_INTENTS } from '../orchestration/classifier-profile';
+import type { IntentType } from '../orchestration/intent-classifier';
 
 export const PAGE_ENTITY_TYPES = ['job', 'customer', 'estimate', 'invoice', 'appointment'] as const;
 export type PageEntityType = (typeof PAGE_ENTITY_TYPES)[number];
@@ -223,6 +225,48 @@ export function mergePageContextIds(input: PageContextMergeInput): PageContextMe
     ambiguousRefKeys: ambiguousRefKeys.filter((key) => !filledKeys.includes(key)),
     filledKeys,
   };
+}
+
+/** Words in a question that point at the customer on screen without naming one. */
+const POINTS_AT_CUSTOMER_RE =
+  /\b(?:(?:this|that|the same)\s+(?:customer|client|guy|lady)|she|he|they|her|him|them|his|their)\b/i;
+const POINTS_AT_JOB_RE = /\b(?:this|that|the same)\s+job\b/i;
+
+export interface PageLookupInput {
+  intent: string;
+  entities: Record<string, unknown> | undefined;
+  text: string;
+  page: Pick<LoadedPageContext, 'ids'>;
+}
+
+/**
+ * The page ids a read-only lookup may use: "what invoices does this customer
+ * have?" on Garcia's page is about Garcia. Stricter than drafting: a lookup
+ * that names no record has a tenant-wide reading ("what invoices are open?"),
+ * so the page fills a key only when the operator pointed at it, either in the
+ * extracted reference ("this job") or in their words ("what does she owe?").
+ * A named record, a document number or a literal UUID always wins. Pure.
+ */
+export function pageLookupIds(input: PageLookupInput): { customerId?: string; jobId?: string } {
+  const { intent, entities, text, page } = input;
+  if (findDocumentNumbers(text).length > 0 || LITERAL_UUID_RE.test(text)) return {};
+
+  const points = (field: string, re: RegExp): boolean => {
+    const value = entities?.[field];
+    if (typeof value === 'string' && value.trim().length > 0) return isDeicticReference(value);
+    return re.test(text);
+  };
+
+  const out: { customerId?: string; jobId?: string } = {};
+  if (
+    page.ids.customerId &&
+    CUSTOMER_SCOPED_LOOKUP_INTENTS.has(intent as IntentType) &&
+    points('customerName', POINTS_AT_CUSTOMER_RE)
+  ) {
+    out.customerId = page.ids.customerId;
+  }
+  if (page.ids.jobId && points('jobReference', POINTS_AT_JOB_RE)) out.jobId = page.ids.jobId;
+  return out;
 }
 
 const NOUN_BY_TYPE: Record<PageEntityType, string> = {

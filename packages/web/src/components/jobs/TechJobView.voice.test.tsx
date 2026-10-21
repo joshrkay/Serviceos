@@ -164,18 +164,36 @@ describe('TechJobView voice update', () => {
     expect(posts('/api/assistant/chat')).toHaveLength(0);
   });
 
-  it('does not save the note twice when the assistant drafted it as a note', async () => {
+  it('does not save the note twice when the assistant already approved it as a note', async () => {
     routes({
       transcript: 'note: customer prefers mornings',
       chat: {
         status: 200,
-        body: { message: { content: 'Note drafted.', proposal: { id: 'p2', title: 'Note', proposalType: 'add_note' } } },
+        body: {
+          message: { content: 'Note added.', proposal: { id: 'p2', title: 'Note', proposalType: 'add_note', status: 'Approved' } },
+        },
       },
     });
     await speak();
     fireEvent.click(await screen.findByRole('button', { name: /Send to Rivet/ }));
     await screen.findByTestId('tech-voice-reply');
     expect(posts('/api/notes')).toHaveLength(0);
+  });
+
+  it('saves the note when the assistant only drafted it, because this screen has no card to approve it', async () => {
+    routes({
+      transcript: 'note: customer prefers mornings',
+      chat: {
+        status: 200,
+        body: {
+          message: { content: 'Note drafted.', proposal: { id: 'p2', title: 'Note', proposalType: 'add_note', status: 'Pending' } },
+        },
+      },
+    });
+    await speak();
+    fireEvent.click(await screen.findByRole('button', { name: /Send to Rivet/ }));
+    await screen.findByTestId('tech-voice-reply');
+    expect(posts('/api/notes')).toHaveLength(1);
   });
 
   it('keeps the words as a note when the assistant is unavailable', async () => {

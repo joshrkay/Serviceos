@@ -148,6 +148,7 @@ import {
   pageContextSchema,
   loadPageContext,
   mergePageContextIds,
+  pageLookupIds,
   pageContextNote,
   type PageContext,
   type LoadedPageContext,
@@ -3378,9 +3379,10 @@ async function generateAssistantReply(
       }
       const timezoneContext = tenantTimezone ? { timezone: tenantTimezone } : {};
 
-      // The page the operator spoke from, re-read tenant-scoped. Only the
-      // drafting paths consult it (resolvePreDraftIds); undefined when the
-      // client sent none or the record is not this tenant's.
+      // The page the operator spoke from, re-read tenant-scoped. The drafting
+      // paths consult it in resolvePreDraftIds and the lookup path through
+      // pageLookupIds; undefined when the client sent none or the record is
+      // not this tenant's.
       const openPage = pageContext ? await loadPageContext(deps, tenantId, pageContext) : undefined;
 
       // Phase 12 supervisor gate — mirrors workers/voice-action-router.ts's
@@ -3599,6 +3601,16 @@ async function generateAssistantReply(
             message: lastUserText,
             ...(classification.extractedEntities
               ? { extractedEntities: classification.extractedEntities as Record<string, unknown> }
+              : {}),
+            ...(openPage
+              ? {
+                  page: pageLookupIds({
+                    intent: classification.intentType,
+                    entities: classification.extractedEntities as Record<string, unknown> | undefined,
+                    text: lastUserText,
+                    page: openPage,
+                  }),
+                }
               : {}),
           },
           deps.lookups,
