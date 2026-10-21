@@ -180,6 +180,30 @@ describe('PATCH /api/users/:id — Tier 4 Team members (PR 2)', () => {
     const res = await request(app).patch(`/api/users/${techId}`).send({ skills: ['hvac'] });
     expect(res.status).toBe(403);
   });
+
+  it('refuses removing a skill the technician needs for an active visit (409, reassign first)', async () => {
+    const skillEditGuard = {
+      appointmentRepo: {
+        findByJob: async () => [],
+        findById: async () => ({ id: 'appt-1', jobId: 'job-gas', status: 'scheduled' }) as never,
+      },
+      assignmentRepo: {
+        findByAppointment: async () => [],
+        findByTechnician: async () => [{ appointmentId: 'appt-1', technicianId: techId }] as never,
+      },
+      skillMatcher: {
+        requiredSkillsForJob: async () => ['gas_certified'],
+        skillsForTechnician: async () => [],
+      },
+    };
+    const app = buildApp(repo, 'owner', { skillEditGuard });
+    const blocked = await request(app).patch(`/api/users/${techId}`).send({ skills: ['hvac'] });
+    expect(blocked.status).toBe(409);
+    expect(blocked.body.message).toMatch(/gas_certified.*Reassign/);
+    expect((await repo.findById(TENANT, techId))?.skills).toBeUndefined();
+    const ok = await request(app).patch(`/api/users/${techId}`).send({ skills: ['Gas Certified', 'hvac'] });
+    expect(ok.status).toBe(200);
+  });
 });
 
 describe('POST/GET /api/users/invitations — Tier 4 Team members (PR 3)', () => {

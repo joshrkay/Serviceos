@@ -347,14 +347,29 @@ describe('direct schedule / reassign enforce required skills (Dispatch FR-2)', (
     expect(res.body.message).toContain('gas_certified');
   });
 
-  it('POST /:id/schedule re-checks a RETAINED technician after the job gains a required skill', async () => {
-    const { app } = build(users());
+  // The skills edits refuse to create this mismatch, so seed it straight in
+  // the repo (pre-existing data) — the reschedule must still catch it.
+  it('POST /:id/schedule re-checks a RETAINED technician against the job\'s required skills', async () => {
+    const { app, jobRepo } = build(users());
     const res0 = await request(app).post('/api/jobs').send(baseJob);
     const jobId = res0.body.id as string;
     expect((await request(app).post(`/api/jobs/${jobId}/schedule`).send({ scheduledStart: START_ISO, technicianId: TECH_1 })).status).toBe(200);
-    await request(app).put(`/api/jobs/${jobId}`).send({ requiredSkills: ['gas_certified'] });
+    await jobRepo.update(TENANT, jobId, { requiredSkills: ['gas_certified'] });
     const res = await request(app).post(`/api/jobs/${jobId}/schedule`).send({ scheduledStart: '2030-07-02T15:00:00.000Z' });
     expect(res.status).toBe(409);
     expect(res.body.message).toContain('gas_certified');
+  });
+
+  it('PUT /:id refuses a new required skill the scheduled technician lacks (reassign first)', async () => {
+    const { app } = build(users());
+    const res0 = await request(app).post('/api/jobs').send(baseJob);
+    const jobId = res0.body.id as string;
+    await request(app).post(`/api/jobs/${jobId}/schedule`).send({ scheduledStart: START_ISO, technicianId: TECH_1 });
+    const put = await request(app).put(`/api/jobs/${jobId}`).send({ requiredSkills: ['gas_certified'] });
+    expect(put.status).toBe(409);
+    expect(put.body.message).toMatch(/reassign/i);
+
+    expect((await request(app).post(`/api/jobs/${jobId}/reassign`).send({ technicianId: GAS_TECH })).status).toBe(200);
+    expect((await request(app).put(`/api/jobs/${jobId}`).send({ requiredSkills: ['gas_certified'] })).status).toBe(200);
   });
 });

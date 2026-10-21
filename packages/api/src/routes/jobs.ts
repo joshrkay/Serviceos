@@ -21,6 +21,7 @@ import { AssignmentRepository } from '../appointments/assignment';
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import type { SkillMatcher } from '../scheduling/skill-matcher';
+import { assertJobSkillEditKeepsAssigneesQualified } from '../scheduling/skill-edit-guard';
 import { UserRepository } from '../users/user';
 import {
   convertEstimateToScheduledJob,
@@ -631,6 +632,20 @@ export function createJobRouter(
         // `jobs:update` a technician also holds.
         if (input.requiredSkills !== undefined && !hasPermission(req.auth!.role as Role, 'jobs:assign')) {
           throw new ForbiddenError('Only owners and dispatchers can change a job\'s required skills');
+        }
+        // …and must not strand a visit already dispatched to a tech who
+        // lacks a newly required skill (409 — reassign first).
+        if (input.requiredSkills !== undefined && scheduleSyncDeps?.skillMatcher) {
+          await assertJobSkillEditKeepsAssigneesQualified(
+            {
+              appointmentRepo: scheduleSyncDeps.appointmentRepo,
+              assignmentRepo: scheduleSyncDeps.assignmentRepo,
+              skillMatcher: scheduleSyncDeps.skillMatcher,
+            },
+            req.auth!.tenantId,
+            routeParam(req, 'id'),
+            input.requiredSkills,
+          );
         }
         const result = await updateJob(
           req.auth!.tenantId,

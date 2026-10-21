@@ -5732,6 +5732,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         clerkSecretKey: process.env.CLERK_SECRET_KEY,
         // Account deletion purges the user's push tokens server-side.
         deviceTokenRepo,
+        skillEditGuard: { appointmentRepo, assignmentRepo, skillMatcher },
       },
       // D2-1c — audit-log user role / name edits + invitations.
       auditRepo,
