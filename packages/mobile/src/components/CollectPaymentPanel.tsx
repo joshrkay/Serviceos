@@ -64,7 +64,7 @@ export function CollectPaymentPanel({
     <View className="mt-4 space-y-3 rounded-2xl border border-border bg-card p-4" data-testid="collect-payment-panel">
       <Text className="text-base font-semibold text-foreground">Collect on site</Text>
       <Text className="text-sm text-muted-foreground">
-        Charge {formatMoneyCents(amountDueCents)} with tap to pay or a reader.
+        Charge {formatMoneyCents(amountDueCents)} with a card reader.
       </Text>
 
       <Pressable

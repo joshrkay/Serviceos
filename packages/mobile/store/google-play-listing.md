@@ -19,7 +19,7 @@ See also `app-review-notes.md` for reviewer walkthrough + demo accounts.
 |---|---|
 | App name | **Rivet: AI for Home Services** (≤30 chars) |
 | Short description | **Your AI dispatcher: answer calls, quote jobs, get paid — approve in a tap.** (≤80 chars) |
-| Package name | `com.serviceos.app` (kept — package names cannot change after first Play release) |
+| Package name | `com.therivetapp.app` (D-044; package names cannot change after the first Play upload) |
 | Category | Business |
 | Tags | Productivity, Tools |
 | Price | Free |
@@ -60,7 +60,7 @@ Built for the 1–3 truck shop with no office.
 | App icon | 512×512 PNG (Play) / 1024×1024 in `assets/icon.png` for Expo |
 | Feature graphic | 1024×500 PNG — "Your AI dispatcher" + Rivet mark |
 | Adaptive icon | `assets/adaptive-icon.png` (wired in `app.json`) |
-| Notification icon | `assets/notification-icon.png` (white silhouette; tint `#1F5FD6`) |
+| Notification icon | `assets/notification-icon.png` (white silhouette; tint `#F5811E`) |
 | Phone screenshots | ≥2 (target 5–6), 16:9 or 9:16, see plan below |
 
 ### Screenshot plan
@@ -83,8 +83,8 @@ Declare:
 - **Photos and videos** — job photos captured with the camera.
 - **Audio files** — voice actions and field voice notes (microphone).
 - **Location** — precise location while the technician Today surface is
-  open (field GPS) and for Tap to Pay / Stripe Terminal. Not collected
-  continuously in the background.
+  open (field GPS) and when connecting Stripe Terminal readers. Not
+  collected continuously in the background.
 - **Messages / customer content** — handled to draft quotes and summaries.
 - **Identifiers** — account/user ID.
 - **App info and performance** — crash diagnostics where the platform
@@ -97,7 +97,7 @@ No data sold. No data shared for third-party advertising. Users can delete
 their account **in-app** (Settings → Delete account), which permanently
 revokes access; business records created for the workspace are retained for
 bookkeeping/audit per the Privacy Policy at /privacy. Support:
-support@rivet.ai.
+info@therivetapp.com.
 
 ## Permissions (binary)
 
@@ -105,7 +105,7 @@ Declared / requested via Expo plugins in `app.json`:
 
 - Microphone — voice actions and field voice notes.
 - Camera — job photos (barcode scanning disabled).
-- Location (when in use) — tech GPS + Tap to Pay / Terminal.
+- Location (when in use) — tech GPS + Terminal readers.
 - Bluetooth — Stripe Terminal readers.
 - Notifications — approvals, job updates, digests.
 
@@ -114,7 +114,7 @@ Declared / requested via Expo plugins in `app.json`:
 | Field | Value |
 |---|---|
 | Website | https://therivetapp.com |
-| Support email | support@rivet.ai |
+| Support email | info@therivetapp.com |
 | Privacy Policy | https://therivetapp.com/privacy |
 
 ---
@@ -127,8 +127,10 @@ Declared / requested via Expo plugins in `app.json`:
       (`REPLACE_WITH_PLAY_SERVICE_ACCOUNT.json`) and keep `track: internal`.
 - [ ] Production `EXPO_PUBLIC_API_URL` + `EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY`
       on EAS (see `eas.env.example` — no secrets in repo).
-- [ ] Real Rivet mark / feature graphic before public listing (scaffold
-      PNGs are present for builds).
+- [x] Rivet mark in `assets/*.png` (`scripts/generate-brand-assets.py`).
+- [ ] Feature graphic (1024×500) before public listing.
+- [ ] Play Console foreground-service declaration for media playback (see
+      `docs/mobile/RELEASE-RUNBOOK.md`).
 - [ ] Real screenshots captured.
-- [ ] Privacy Policy + support live at the URLs above.
+- [x] Privacy Policy and support (`/contact`) live at the URLs above.
 - [ ] Dual demo accounts provisioned for review (see `app-review-notes.md`).

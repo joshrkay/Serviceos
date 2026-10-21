@@ -7,7 +7,7 @@
 # technician), so the honest answer is the empty-day line from
 # ai/skills/lookup-my-day.ts. With a TTS key configured the same turn is also
 # spoken; CI is keyless, so the screenshot is the device proof.
-appId: com.serviceos.app
+appId: com.therivetapp.app
 name: "#1603 — technician asks the Assistant for the next job"
 tags:
   - issue-1603

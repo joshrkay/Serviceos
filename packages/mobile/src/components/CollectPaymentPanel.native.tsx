@@ -32,7 +32,7 @@ function CollectPaymentFallback({
     <View className="mt-4 space-y-3 rounded-2xl border border-border bg-card p-4" data-testid="collect-payment-panel">
       <Text className="text-base font-semibold text-foreground">Collect on site</Text>
       <Text className="text-sm text-muted-foreground">
-        Charge {formatMoneyCents(amountDueCents)} with tap to pay or a reader.
+        Charge {formatMoneyCents(amountDueCents)} with a card reader.
       </Text>
       <Text className="text-sm text-muted-foreground" testID="collect-payment-message">
         {reason}
@@ -47,8 +47,12 @@ function CollectPaymentFallback({
 }
 
 /**
- * Native Terminal collect — Tap to Pay via Stripe Terminal SDK.
- * Requires an EAS build with the Terminal config plugin (not Expo Go).
+ * Native Terminal collect — a Stripe smart reader registered to the tenant's
+ * Terminal location, discovered over the internet (`easyConnect`). Tap to Pay
+ * is deliberately absent from v1: on iOS it needs Apple's proximity-reader
+ * distribution entitlement and on Android Stripe's access grant, neither of
+ * which the store build has yet (docs/decisions.md D-044). Requires an EAS
+ * build with the Terminal config plugin (not Expo Go).
  */
 function NativeCollectBody({
   client,
@@ -85,12 +89,12 @@ function NativeCollectBody({
 
       if (!connectedReader) {
         const { error: connectError } = await easyConnect({
-          discoveryMethod: 'tapToPay',
+          discoveryMethod: 'internet',
           locationId: prepared.connection.locationId,
           simulated: SIMULATED,
         });
         if (connectError) {
-          setMessage(connectError.message || 'Could not connect Tap to Pay');
+          setMessage(connectError.message || 'Could not connect a card reader');
           return;
         }
       }
@@ -148,7 +152,7 @@ function NativeCollectBody({
     <View className="mt-4 space-y-3 rounded-2xl border border-border bg-card p-4" data-testid="collect-payment-panel">
       <Text className="text-base font-semibold text-foreground">Collect on site</Text>
       <Text className="text-sm text-muted-foreground">
-        Charge {formatMoneyCents(amountDueCents)} with tap to pay or a reader.
+        Charge {formatMoneyCents(amountDueCents)} with a card reader.
       </Text>
 
       <Pressable

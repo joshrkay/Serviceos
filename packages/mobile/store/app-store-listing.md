@@ -23,7 +23,7 @@ See also `app-review-notes.md` for App Review walkthrough + demo accounts.
 |---|---|
 | App name | **Rivet: AI for Home Services** (30-char limit — fallback: "Rivet — AI Dispatcher") |
 | Subtitle | **Answer calls. Quote. Get paid.** (30-char limit) |
-| Bundle ID | `com.serviceos.app` (kept; user-invisible — changing after release is disruptive) |
+| Bundle ID | `com.therivetapp.app` (D-044; permanent once the App Store Connect record exists) |
 | Primary category | Business |
 | Secondary category | Productivity |
 | Price | Free (subscription managed on the web) |
@@ -72,7 +72,7 @@ got a dedicated office manager and a 20-truck fleet.
 | Field | Value |
 |---|---|
 | Marketing URL | https://therivetapp.com |
-| Support URL | https://therivetapp.com/download |
+| Support URL | https://therivetapp.com/contact |
 | Privacy Policy URL | https://therivetapp.com/privacy |
 
 ## App Privacy ("nutrition label") — data collected and linked to the user
@@ -83,9 +83,8 @@ Declare in App Store Connect → App Privacy:
 - **User content** — voice audio, job photos, messages, customer/job records
   (app functionality).
 - **Location** — precise location when the technician Today surface is open
-  (field GPS) and when enabling Tap to Pay / Stripe Terminal readers. Not
-  used for continuous background tracking (`isIosBackgroundLocationEnabled`
-  is false).
+  (field GPS) and when connecting Stripe Terminal readers. Not used for
+  continuous background tracking (`isIosBackgroundLocationEnabled` is false).
 - **Identifiers** — user/account ID (app functionality).
 - **Diagnostics** — crash/performance data from the platform where available.
 
@@ -97,8 +96,8 @@ Permissions the binary requests (see `app.json`):
 
 - **Microphone** — voice actions and field voice notes.
 - **Camera** — job photos (barcode scanning disabled).
-- **Location (when in use)** — tech GPS while Today is open + Tap to Pay /
-  Terminal.
+- **Location (when in use)** — tech GPS while Today is open + Terminal
+  readers.
 - **Bluetooth / local network** — Stripe Terminal card readers.
 - **Notifications** — approvals, job updates, end-of-day digest.
 
@@ -127,9 +126,10 @@ Caption each with the value, e.g. "Approve a quote in one tap",
 - [ ] **Apple Developer Program** membership + App Store Connect app record
       + Apple Team ID wired into `eas.json` `submit.production.ios`
       (`REPLACE_WITH_*` placeholders).
-- [ ] Real Rivet mark replacing placeholder `assets/*.png` before public
-      store screenshots (scaffold PNGs are present for builds).
+- [x] Rivet mark in `assets/*.png` (generated from the marketing-site mark by
+      `scripts/generate-brand-assets.py`; a designer's final artwork is a
+      drop-in replacement).
 - [ ] Real screenshots captured at all required device sizes.
-- [ ] Privacy Policy + Support pages live at the URLs above.
+- [x] Privacy Policy (`/privacy`) and Support (`/contact`) pages live at the URLs above.
 - [ ] Dual demo accounts provisioned for App Review (see
       `app-review-notes.md`).

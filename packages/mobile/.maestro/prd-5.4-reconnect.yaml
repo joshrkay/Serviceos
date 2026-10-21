@@ -3,7 +3,7 @@
 # drains. The harness then asserts the journal is empty, the local audio is
 # deleted, and exactly one voice_recordings row carries the key it recorded in
 # phase A (read from the real Postgres the API writes to).
-appId: com.serviceos.app
+appId: com.therivetapp.app
 name: PRD 5.4 C — reconnect flushes the journal
 tags:
   - prd-5.4

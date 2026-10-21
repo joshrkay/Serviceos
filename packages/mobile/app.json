@@ -9,11 +9,11 @@
     "icon": "./assets/icon.png",
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.serviceos.app",
+      "bundleIdentifier": "com.therivetapp.app",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "UIBackgroundModes": ["audio"],
-        "NSLocationWhenInUseUsageDescription": "Allow Rivet to use your location for field tracking while Today is open and to enable Tap to Pay and nearby card readers.",
+        "NSLocationWhenInUseUsageDescription": "Allow Rivet to use your location for field tracking while Today is open and to connect card readers.",
         "NSBluetoothAlwaysUsageDescription": "Allow Rivet to connect to Stripe Terminal card readers.",
         "NSBluetoothPeripheralUsageDescription": "Allow Rivet to connect to Stripe Terminal card readers.",
         "NSLocalNetworkUsageDescription": "Allow Rivet to discover Stripe Terminal readers on your network.",
@@ -21,10 +21,10 @@
       }
     },
     "android": {
-      "package": "com.serviceos.app",
+      "package": "com.therivetapp.app",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#030213"
+        "backgroundColor": "#14181D"
       },
       "permissions": [
         "android.permission.ACCESS_FINE_LOCATION",
@@ -56,14 +56,14 @@
           "isIosBackgroundLocationEnabled": false,
           "locationAlwaysAndWhenInUsePermission": false,
           "locationAlwaysPermission": false,
-          "locationWhenInUsePermission": "Allow Rivet to use your location for field tracking while Today is open and to enable Tap to Pay and nearby card readers."
+          "locationWhenInUsePermission": "Allow Rivet to use your location for field tracking while Today is open and to connect card readers."
         }
       ],
       [
         "expo-notifications",
         {
           "icon": "./assets/notification-icon.png",
-          "color": "#1F5FD6",
+          "color": "#F5811E",
           "sounds": [],
           "mode": "production"
         }
@@ -72,11 +72,10 @@
         "@stripe/stripe-terminal-react-native",
         {
           "bluetoothBackgroundMode": true,
-          "locationWhenInUsePermission": "Allow Rivet to use your location to enable Tap to Pay and card readers.",
+          "locationWhenInUsePermission": "Allow Rivet to use your location to connect card readers.",
           "bluetoothPeripheralPermission": "Allow Rivet to connect to Stripe Terminal card readers.",
           "bluetoothAlwaysUsagePermission": "Allow Rivet to connect to Stripe Terminal card readers.",
           "localNetworkUsagePermission": "Allow Rivet to discover Stripe Terminal readers on your network.",
-          "tapToPayCheck": true,
           "appDelegate": true
         }
       ],
@@ -98,7 +97,7 @@
         "expo-splash-screen",
         {
           "image": "./assets/splash.png",
-          "backgroundColor": "#030213",
+          "backgroundColor": "#14181D",
           "resizeMode": "contain",
           "imageWidth": 200
         }
