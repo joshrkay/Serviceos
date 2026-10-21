@@ -1868,6 +1868,33 @@ online" to "found, reviewed, and answered".
    post-activation Get-found checklist that never gates activation or `isComplete`.
 7. **Review link auto-filled** from the connected Google profile; manual paste stays as an override.
 
+**Amended 2026-10-21 (grilling round 2, owner accepted all recommendations).**
+8. **Listing number (NAP):** when forwarding, the owner's existing number stays on the Google profile
+   and Business page; the Rivet number is listed only in *Rivet number only* mode. We never change a
+   verified profile's phone without the owner's say-so (it can trigger re-verification).
+9. **Business page content:** generated from settings plus owner-owned headline, logo, up to 6
+   photos, and an AI-drafted "about" blurb that is a proposal the owner approves.
+10. **Web chat hand-off:** what it cannot finish becomes a lead plus an inbox conversation and an owner
+    notification; the reply goes out by SMS. No live owner-typed chat in v1.
+11. **Web chat scope:** business questions, lead capture and booking proposals only; no own-record
+    lookups (no SMS OTP identity) in v1 — the portal links cover those.
+12. **Metering:** Web chat conversations count against the same usage caps as calls; the Business
+    page, connected domain, Google setup and call routing are included.
+13. **Hosting:** Business pages are server-rendered (indexable, fast on mobile) by a small renderer
+    service on `<slug>.therivetapp.com`; connected domains point at the same service. TLS for both via
+    Cloudflare for SaaS custom hostnames (new vendor; ~$0.10/hostname/mo after 100).
+14. **Tenant slug:** a unique slug column generated from the business name, owner-editable after
+    setup; a changed slug redirects for 90 days. Existing `/intake` and `/book` keep the tenant UUID.
+15. **Web chat identity:** the phone number is asked lazily (to book, on hand-off, or after ~3
+    messages), then the lead/customer is found or created by phone exactly as for a caller.
+16. **Web chat origins:** the widget API is open to any origin, keyed by a public per-tenant widget
+    key, rate-limited per IP and per tenant, credential-less (no cookies).
+17. **Google API access is a precondition, not an assumption:** the guided walkthrough ships first;
+    API create/verify sits behind a flag until Google approves the project's Business Profile API
+    access (quota is 0 until then). Video verification cannot run through the API.
+18. **Search before create, always:** match the business on Google first and offer claim (request
+    admin rights) / connect / create — never create a location that may already exist on Maps.
+
 **Alternatives rejected.** A multi-page site builder (a separate product); domain resale (renewal
 liability and billing for little v1 value); deep-link-only Google setup (the friction this exists to
 remove); porting in v1 (weeks of carrier paperwork, the most failure modes); lead-form-only chat

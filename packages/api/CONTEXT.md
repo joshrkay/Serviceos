@@ -153,6 +153,12 @@ Terms for how a tenant's customers find and reach them outside the product.
   Google Business Profile, review link, call routing, Web chat). Separate
   from onboarding steps; it never gates activation.
   _Avoid_: onboarding steps, setup steps.
+- **Widget key** — the public, per-tenant key a Web chat embed carries to
+  name its tenant. Not a secret and not an identity; it grants only what an
+  anonymous visitor may do. _Avoid_: API key, tenant token.
+- **Tenant slug** — the tenant's public, human-readable name in URLs (the
+  Business page subdomain). Owner-editable; the tenant id stays the internal
+  key. _Avoid_: handle, subdomain.
 - **Call routing mode** — how calls to the owner's existing number reach the
   AI: *forward all*, *forward when unanswered*, or *Rivet number only*.
   Porting is not a mode.
