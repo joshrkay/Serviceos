@@ -156,7 +156,7 @@ const REFERENCE_FIELDS_BY_KEY: Readonly<Record<string, readonly string[]>> = {
 
 /** Words that point at a record without naming one. */
 const DEICTIC_REFERENCE_RE =
-  /^(?:(?:this|that|the|current|same)\s+(?:one|job|customer|client|invoice|bill|estimate|quote|appointment|visit|booking|guy|lady|house|place)|it|here|them|they|him|her|this|that|our customer|a customer|customer)$/i;
+  /^(?:(?:this|that|the|current|same)\s+(?:one|job|customer|client|invoice|bill|estimate|quote|appointment|visit|booking|guy|lady|house|place)|it|here|them|they|their|theirs|him|his|he|her|hers|she|this|that|our customer|a customer|customer)$/i;
 
 /** A reference that points rather than names ("this job", "them"). */
 export function isDeicticReference(value: string): boolean {
@@ -308,6 +308,8 @@ export interface PageLookupIds {
   jobId?: string;
   /** The page record's own number, for "is this invoice paid?" on that invoice. */
   documentNumber?: string;
+  /** The visit on screen, for "when is this appointment?" on that visit. */
+  appointmentId?: string;
 }
 
 /**
@@ -354,6 +356,11 @@ export function pageLookupIds(input: PageLookupInput): PageLookupIds {
   // invoices are on this job?" lists the job's invoices, not the job's status.
   if (page.documentNumber && pointsAtPage && DOCUMENT_LOOKUP_BY_TYPE[page.context.entityType] === intent) {
     out.documentNumber = page.documentNumber;
+  }
+  // A visit has no number, so its own id stands in: "when is this
+  // appointment?" is about that visit, not the customer's next one.
+  if (page.ids.appointmentId && pointsAtPage && intent === 'lookup_appointments') {
+    out.appointmentId = page.ids.appointmentId;
   }
   return out;
 }

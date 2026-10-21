@@ -252,7 +252,7 @@ export interface DispatchAssistantLookupInput {
    * free-text reference, which would otherwise resolve "this customer" as a
    * name and find nothing.
    */
-  page?: { customerId?: string; jobId?: string; documentNumber?: string };
+  page?: { customerId?: string; jobId?: string; documentNumber?: string; appointmentId?: string };
 }
 
 /** Lookups that read the schedule for one day. */
@@ -470,6 +470,7 @@ export async function dispatchAssistantLookup(
         ...(customerId ? { customerId } : {}),
         ...(jobId ? { jobId } : {}),
         ...(pageJobId ? { listJobId: pageJobId } : {}),
+        ...(input.page?.appointmentId ? { listAppointmentId: input.page.appointmentId } : {}),
         ...(customerReference ? { customerReference } : {}),
         ...(jobReference ? { jobReference } : {}),
         ...(technicianId ? { technicianId } : {}),

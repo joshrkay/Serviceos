@@ -366,11 +366,9 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
       streamFinalRef.current = null;
       setPhase('listening');
       const started = await dictation.start();
-      if (attemptRef.current !== attempt) {
-        // Stopped or cancelled while the stream was starting.
-        if (started === 'connecting') dictation.stop();
-        return;
-      }
+      // Stopped or cancelled while the stream was starting: the hook has
+      // already released what that start opened.
+      if (attemptRef.current !== attempt || started === 'cancelled') return;
       if (started === 'connecting') return;
       captureModeRef.current = null;
       if (started === 'denied') {

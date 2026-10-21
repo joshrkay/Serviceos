@@ -242,13 +242,33 @@ describe('VoiceBar — live words', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     const stopsBefore = fake.stop.mock.calls.length;
 
-    await act(async () => resolveStart('connecting'));
-    // The late socket is closed straight away, and the bar stays idle.
-    expect(fake.stop.mock.calls.length).toBe(stopsBefore + 1);
+    // The hook releases what the stale start opened and reports it cancelled;
+    // the bar must not stop the hook again, and stays idle.
+    await act(async () => resolveStart('cancelled'));
+    expect(fake.stop.mock.calls.length).toBe(stopsBefore);
     expect(screen.queryByText('Listening…')).toBeNull();
   });
 
-  it('leaving the page while the stream is still starting closes it and never opens the recorder', async () => {
+  it('a stale start finishing late does not stop the retry that replaced it', async () => {
+    let resolveFirst: (r: string) => void = () => {};
+    fake.start.mockImplementationOnce(() => new Promise<string>((r) => { resolveFirst = r; }));
+    renderBar();
+    fireEvent.click(screen.getByTestId('voice-example-hint'));
+    await screen.findByText('Listening…');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    // Retry: this start connects.
+    fireEvent.click(screen.getByTestId('voice-example-hint'));
+    await screen.findByText('Listening…');
+    const stopsBefore = fake.stop.mock.calls.length;
+
+    await act(async () => resolveFirst('cancelled'));
+    expect(fake.stop.mock.calls.length).toBe(stopsBefore);
+    expect(screen.getByText('Listening…')).toBeTruthy();
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it('leaving the page while the stream is still starting never opens the recorder', async () => {
     let resolveStart: (r: string) => void = () => {};
     fake.start.mockImplementation(() => new Promise<string>((r) => { resolveStart = r; }));
     const view = renderBar();
@@ -257,8 +277,8 @@ describe('VoiceBar — live words', () => {
     view.unmount();
     const stopsBefore = fake.stop.mock.calls.length;
 
-    await act(async () => resolveStart('connecting'));
-    expect(fake.stop.mock.calls.length).toBe(stopsBefore + 1);
+    await act(async () => resolveStart('cancelled'));
+    expect(fake.stop.mock.calls.length).toBe(stopsBefore);
     expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
   });
 

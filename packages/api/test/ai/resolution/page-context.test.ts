@@ -106,7 +106,7 @@ describe('mergePageContextIds', () => {
 });
 
 describe('isDeicticReference', () => {
-  it.each(['this job', 'That invoice.', 'them', 'her', 'the customer', 'this one'])('%s points', (ref) => {
+  it.each(['this job', 'That invoice.', 'them', 'her', 'the customer', 'this one', 'she', 'he', 'his', 'their'])('%s points', (ref) => {
     expect(isDeicticReference(ref)).toBe(true);
   });
   it.each(['Garcia', 'the Garcia job', 'this Garcia job', 'INV-0042'])('%s names', (ref) => {
@@ -259,11 +259,15 @@ describe('pageLookupIds on a document page', () => {
     });
   });
 
-  it('"when is this appointment?" on an appointment page reads that customer\'s appointments', () => {
+  it('"when is this appointment?" on an appointment page reads that exact visit', () => {
     const appointmentPage = { ids: { appointmentId: OTHER, jobId: JOB, customerId: CUSTOMER }, context: { entityType: 'appointment' as const } };
     expect(
       pageLookupIds({ intent: 'lookup_appointments', entities: {}, text: 'when is this appointment?', page: appointmentPage }),
-    ).toEqual({ customerId: CUSTOMER, jobId: JOB });
+    ).toEqual({ customerId: CUSTOMER, jobId: JOB, appointmentId: OTHER });
+    // Asking about the customer's visits generally is not about this one.
+    expect(
+      pageLookupIds({ intent: 'lookup_appointments', entities: {}, text: 'when is her next visit?', page: appointmentPage }),
+    ).toEqual({ customerId: CUSTOMER });
   });
 
   it('a question about another kind of record does not read the page by its number', () => {

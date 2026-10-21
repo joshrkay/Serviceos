@@ -25,6 +25,12 @@ export interface LookupAppointmentsInput {
   customerId: string;
   /** Only this job's records: the job on screen, or one the operator named and the resolver verified. */
   jobId?: string;
+  /**
+   * The one visit the operator had open and asked about ("when is this
+   * appointment?"). Answers for that visit whatever its date or status, and
+   * says so when it can't be found.
+   */
+  appointmentId?: string;
   /** Inclusive lower bound — defaults to now. */
   dateFrom?: Date;
   /** Inclusive upper bound — defaults to no upper bound. */
@@ -139,6 +145,46 @@ export async function lookupAppointments(
   );
 
   const jobById = new Map(jobs.map((j) => [j.id, j] as const));
+
+  if (input.appointmentId) {
+    const visit = apptLists.flat().find((a) => a.id === input.appointmentId);
+    const job = visit ? jobById.get(visit.jobId) : undefined;
+    if (!visit || !job) {
+      const summary = t('lookup.appointments.this_visit_missing', lang);
+      await recordEvent({ resultStatus: 'none', resultCount: 0, summary });
+      return { status: 'none', summary, data: { appointments: [] } };
+    }
+    const key =
+      visit.status === 'canceled' || visit.status === 'no_show'
+        ? 'lookup.appointments.this_visit_canceled'
+        : visit.status === 'completed' || visit.scheduledStart.getTime() < dateFrom.getTime()
+          ? 'lookup.appointments.this_visit_past'
+          : 'lookup.appointments.this_visit_upcoming';
+    const summary = t(key, lang, {
+      when: formatWhen(visit.scheduledStart, input.timezone, lang),
+      summary: job.summary,
+    });
+    await recordEvent({ resultStatus: 'found', resultCount: 1, summary });
+    return {
+      status: 'found',
+      summary,
+      data: {
+        appointments: [
+          {
+            appointmentId: visit.id,
+            jobId: visit.jobId,
+            jobNumber: job.jobNumber,
+            jobSummary: job.summary,
+            scheduledStart: visit.scheduledStart,
+            scheduledEnd: visit.scheduledEnd,
+            technicianId: job.assignedTechnicianId,
+            status: visit.status,
+          },
+        ],
+      },
+    };
+  }
+
   const items: LookupAppointmentsItem[] = [];
   for (const list of apptLists) {
     for (const a of list) {

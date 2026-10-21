@@ -16,6 +16,10 @@ export const en = {
     'Your next appointment is {{when}} for {{summary}}. You also have one more on {{others}}.',
   'lookup.appointments.multiple_many':
     'Your next appointment is {{when}} for {{summary}}. You also have appointments on {{others}}.',
+  'lookup.appointments.this_visit_upcoming': 'This visit is {{when}} for {{summary}}.',
+  'lookup.appointments.this_visit_past': 'This visit was {{when}} for {{summary}}.',
+  'lookup.appointments.this_visit_canceled': 'This visit, {{when}} for {{summary}}, was canceled.',
+  'lookup.appointments.this_visit_missing': "I couldn't find the visit you were viewing.",
 
   // ── Lookup: balance ──────────────────────────────────────────────────
   'lookup.balance.error':

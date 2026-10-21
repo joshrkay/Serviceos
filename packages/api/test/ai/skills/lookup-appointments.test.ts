@@ -119,4 +119,37 @@ describe('P11-001 — lookupAppointments skill', () => {
     if (result.status !== 'found') return;
     expect(result.data.appointments.map((x) => x.jobId)).toEqual([a.id]);
   });
+  it('appointmentId answers for that one visit, including a canceled one', async () => {
+    const soon = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const later = new Date(Date.now() + 72 * 60 * 60 * 1000);
+    const job = await seedJobAndAppointment({ summary: 'AC repair', scheduledStart: soon });
+    const [first] = await appointmentRepo.findByJob('tenant-1', job.id);
+    const second = await createAppointment(
+      {
+        tenantId: 'tenant-1', jobId: job.id, scheduledStart: later,
+        scheduledEnd: new Date(later.getTime() + 60 * 60 * 1000), timezone: 'America/Los_Angeles', createdBy: 'u-1',
+      },
+      appointmentRepo,
+    );
+    await appointmentRepo.update('tenant-1', second.id, { status: 'canceled' });
+
+    const canceled = await lookupAppointments(
+      { tenantId: 'tenant-1', customerId: 'cust-1', appointmentId: second.id },
+      { jobRepo, appointmentRepo },
+    );
+    expect(canceled.status).toBe('found');
+    expect(canceled.summary).toMatch(/^This visit, .* for AC repair, was canceled\.$/);
+
+    const upcoming = await lookupAppointments(
+      { tenantId: 'tenant-1', customerId: 'cust-1', appointmentId: first.id },
+      { jobRepo, appointmentRepo },
+    );
+    expect(upcoming.summary).toMatch(/^This visit is .* for AC repair\.$/);
+
+    const missing = await lookupAppointments(
+      { tenantId: 'tenant-1', customerId: 'cust-1', appointmentId: 'nope' },
+      { jobRepo, appointmentRepo },
+    );
+    expect(missing).toMatchObject({ status: 'none', summary: "I couldn't find the visit you were viewing." });
+  });
 });

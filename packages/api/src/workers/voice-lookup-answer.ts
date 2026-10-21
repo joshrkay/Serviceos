@@ -272,6 +272,8 @@ export interface ExecuteLookupInput {
    * from context the operator did not point at.
    */
   listJobId?: string;
+  /** The one visit the operator had open and asked about ("when is this appointment?"). */
+  listAppointmentId?: string;
   /** The spoken customer reference, when one was extracted. */
   customerReference?: string;
   /** The spoken job reference, when one was extracted (D3). */
@@ -696,11 +698,19 @@ export async function executeLookupAnswer(
       case 'lookup_appointments': {
         if (!shared.jobRepo || !shared.appointmentRepo) return { kind: 'unsupported' };
         // #1331 — "upcoming" is relative to the caller's clock (input.now).
-        const r = await lookupAppointments({ ...sharedInput, ...jobScope, dateFrom: input.now }, {
-          jobRepo: shared.jobRepo,
-          appointmentRepo: shared.appointmentRepo,
-          ...events,
-        });
+        const r = await lookupAppointments(
+          {
+            ...sharedInput,
+            ...jobScope,
+            ...(input.listAppointmentId ? { appointmentId: input.listAppointmentId } : {}),
+            dateFrom: input.now,
+          },
+          {
+            jobRepo: shared.jobRepo,
+            appointmentRepo: shared.appointmentRepo,
+            ...events,
+          },
+        );
         if (r.status === 'error') return { kind: 'failed', error: r.data.error };
         const appts = r.status === 'found' ? r.data.appointments : [];
         const rows = appts

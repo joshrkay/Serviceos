@@ -206,4 +206,36 @@ describe('dispatchAssistantLookup — the record on screen (page context)', () =
     expect(reply?.message.content).not.toContain('EST-FURNACE');
     expect(reply?.message.content).toContain('one estimate — EST-WH');
   });
+
+  it('"when is this appointment?" on a past visit\'s page answers for that visit, not the next one', async () => {
+    const d = await deps();
+    const appointmentRepo = d.shared.appointmentRepo as InMemoryAppointmentRepository;
+    await appointmentRepo.create({
+      id: 'appt-keller-past', tenantId: TENANT, jobId: JOB_KELLER, timezone: TZ, status: 'completed',
+      holdPendingApproval: false, createdBy: 'u1', createdAt: SEEDED, updatedAt: SEEDED,
+      scheduledStart: new Date('2026-06-05T14:00:00.000Z'), scheduledEnd: new Date('2026-06-05T16:00:00.000Z'),
+    } as Appointment);
+    const ask = (appointmentId: string) =>
+      dispatchAssistantLookup(
+        {
+          tenantId: TENANT,
+          userId: MIKE_CLERK,
+          intent: 'lookup_appointments',
+          extractedEntities: {},
+          message: 'when is this appointment?',
+          page: { customerId: 'cust-keller', jobId: JOB_KELLER, appointmentId },
+        },
+        { ...d, answers: { ...d.answers, resolveMemberRole: async () => 'owner' } },
+      );
+
+    const past = await ask('appt-keller-past');
+    expect(past?.outcome).toBe('answered');
+    expect(past?.message.content).toContain('This visit was Friday, June 5');
+    expect(past?.message.content).not.toContain('June 11');
+
+    // A visit that is gone says so, rather than answering with the customer's next one.
+    const missing = await ask('appt-gone');
+    expect(missing?.message.content).toContain("I couldn't find the visit you were viewing.");
+    expect(missing?.message.content).not.toContain('June 11');
+  });
 });
