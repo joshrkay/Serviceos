@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { checkFeasibility } from '../../src/scheduling/feasibility';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
 import { Appointment } from '../../src/appointments/appointment';
@@ -235,5 +235,43 @@ describe('checkFeasibility — no assigned technician (#909/A11, 2026-08-31 live
     expect(calls.findByTechnicianWorkingHours).toBeGreaterThan(0);
     expect(calls.findByTechnicianAndDateRange).toBeGreaterThan(0);
     expect(calls.skillsForTechnician).toBeGreaterThan(0);
+  });
+});
+
+describe('checkFeasibility — calendar reads', () => {
+  it('reads only the assignments whose denormalised window touches the proposal, not every historical visit', async () => {
+    const target = {
+      id: 'a-target', tenantId: 't-1', jobId: 'j-1',
+      scheduledStart: new Date('2026-05-17T10:00:00Z'), scheduledEnd: new Date('2026-05-17T11:00:00Z'),
+      timezone: 'UTC', status: 'scheduled' as const, holdPendingApproval: false,
+      createdBy: 'u', createdAt: new Date(), updatedAt: new Date(),
+    };
+    const clash = { ...target, id: 'a-clash', scheduledStart: new Date('2026-05-17T10:30:00Z'), scheduledEnd: new Date('2026-05-17T11:30:00Z') };
+    const history = Array.from({ length: 50 }, (_, i) => ({
+      appointmentId: `old-${i}`, technicianId: 'tech-1', isPrimary: true,
+      scheduledStart: new Date(Date.UTC(2025, 0, 1 + i, 9)), scheduledEnd: new Date(Date.UTC(2025, 0, 1 + i, 10)),
+    }));
+    const findById = vi.fn(async (_t: string, id: string) => (id === 'a-clash' ? clash : null));
+    const r = await checkFeasibility(
+      { tenantId: 't-1', appointment: target, proposedTechnicianId: 'tech-1',
+        proposedScheduledStart: target.scheduledStart, proposedScheduledEnd: target.scheduledEnd },
+      {
+        assignmentRepo: { findByTechnician: async () => [
+          ...history,
+          { appointmentId: 'a-clash', technicianId: 'tech-1', isPrimary: true,
+            scheduledStart: clash.scheduledStart, scheduledEnd: clash.scheduledEnd },
+        ] } as any,
+        appointmentRepo: { findById } as any,
+        jobRepo: { findById: async () => null } as any,
+        locationRepo: { findById: async () => null } as any,
+        workingHoursRepo: { findByTechnician: async () => [] } as any,
+        unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
+        travelTimeProvider: new HaversineFallbackProvider(),
+        skillMatcher: noSkillConstraints(),
+      },
+    );
+    expect(r.blocking.some((i) => i.check === 'overlap' && i.conflictingEntityId === 'a-clash')).toBe(true);
+    // Overlap + travel each read the calendar once; neither touches the 50 old visits.
+    expect(findById.mock.calls.every(([, id]) => id === 'a-clash')).toBe(true);
   });
 });
