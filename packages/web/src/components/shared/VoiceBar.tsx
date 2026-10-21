@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { Mic, X, Send, Sparkles } from 'lucide-react';
-import { useNavigate } from 'react-router';
+import { useLocation, useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
 import { useTTS } from '../../hooks/useTTS';
+import { dictationSupported, useDeepgramDictation } from '../../hooks/useDeepgramDictation';
+import { assistantHandoffUrl, pageContextFromPath } from '../../lib/page-context';
 import { pickExamples } from './voice-examples';
 
 type BarPhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'sending';
@@ -133,6 +135,7 @@ interface VoiceBarProps {
 
 export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function VoiceBar({ variant = 'mobile' }, ref) {
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const [phase, setPhase] = useState<BarPhase>('idle');
   const [transcript, setTranscript] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -142,6 +145,28 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   const streamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const { speak } = useTTS({ rate: 1.05 });
+
+  // Live words while you talk: the same Deepgram stream conversation mode
+  // uses. When the browser or the server cannot stream, the bar falls back to
+  // recording the clip and transcribing it after you stop.
+  const captureModeRef = useRef<'stream' | 'batch' | null>(null);
+  const streamFinalRef = useRef<string | null>(null);
+  const dictation = useDeepgramDictation({
+    onFinal: (text) => { streamFinalRef.current = text; },
+    onClose: ({ opened }) => {
+      if (captureModeRef.current !== 'stream') return;
+      captureModeRef.current = null;
+      if (!opened) {
+        // Refused before it opened: record the old way instead.
+        void startBatchRecording();
+        return;
+      }
+      settleStreamedTranscript(liveTextRef.current, 'The live connection dropped. Please retry.');
+    },
+  });
+  const liveText = dictation.partial;
+  const liveTextRef = useRef('');
+  liveTextRef.current = liveText;
 
   // U7 — rotating "Try: …" discoverability hint (idle state). A few examples
   // are drawn once per mount and cycled with a short fade; users who prefer
@@ -207,7 +232,29 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
     return (completed.transcript || '').trim();
   }, []);
 
+  const settleStreamedTranscript = useCallback((text: string, emptyMessage: string) => {
+    const trimmed = text.trim();
+    if (trimmed) {
+      setTranscript(trimmed);
+      setPhase('transcript');
+    } else {
+      setError(emptyMessage);
+      setCanRetry(true);
+      setPhase('idle');
+    }
+  }, []);
+
   const stopListening = useCallback(async () => {
+    if (captureModeRef.current === 'stream') {
+      captureModeRef.current = null;
+      streamFinalRef.current = null;
+      dictation.stop();
+      settleStreamedTranscript(
+        streamFinalRef.current ?? liveTextRef.current,
+        "I didn't catch anything. Please retry.",
+      );
+      return;
+    }
     const recorder = mediaRecorderRef.current;
     if (!recorder || recorder.state !== 'recording' || stoppingRef.current) return;
 
@@ -251,13 +298,9 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
       };
       recorder.stop();
     });
-  }, [stopStream, uploadAndTranscribe]);
+  }, [stopStream, uploadAndTranscribe, dictation, settleStreamedTranscript]);
 
-  const startListening = useCallback(async () => {
-    setError(null);
-    setCanRetry(false);
-    setTranscript('');
-
+  const startBatchRecording = useCallback(async () => {
     const mimeType = getSupportedAudioMimeType();
     if (!mimeType) {
       setError('This browser does not support a compatible recording format.');
@@ -285,6 +328,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
       };
 
       recorder.start(1000);
+      captureModeRef.current = 'batch';
       setPhase('listening');
     } catch {
       setError('Microphone permission is required to record voice messages.');
@@ -293,6 +337,29 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
       stopStream();
     }
   }, [stopStream]);
+
+  const startListening = useCallback(async () => {
+    setError(null);
+    setCanRetry(false);
+    setTranscript('');
+
+    if (dictationSupported()) {
+      captureModeRef.current = 'stream';
+      setPhase('listening');
+      const started = await dictation.start();
+      if (started === 'connecting') return;
+      captureModeRef.current = null;
+      if (started === 'denied') {
+        setError('Microphone permission is required to record voice messages.');
+        setCanRetry(true);
+        setPhase('idle');
+        return;
+      }
+      // No live transcription here (not configured, refused, or failed):
+      // record the clip and transcribe it after.
+    }
+    await startBatchRecording();
+  }, [dictation, startBatchRecording]);
 
   useEffect(() => {
     if (phase !== 'listening') return;
@@ -322,6 +389,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
 
   function handleSend() {
     if (!transcript.trim()) return;
+    const pageContext = pageContextFromPath(pathname);
 
     // Check for voice navigation commands first
     const command = matchVoiceCommand(transcript.trim());
@@ -339,7 +407,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
     // Fall through to assistant
     setPhase('sending');
     setTimeout(() => {
-      navigate(`/assistant?q=${encodeURIComponent(transcript.trim())}`);
+      navigate(assistantHandoffUrl(transcript.trim(), pageContext, { spoken: true }));
       setPhase('idle');
       setTranscript('');
       setError(null);
@@ -348,6 +416,10 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   }
 
   function handleCancel() {
+    if (captureModeRef.current === 'stream') {
+      captureModeRef.current = null;
+      dictation.stop();
+    }
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state === 'recording') {
       recorder.stop();
@@ -375,7 +447,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
         <div className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
           {error}
           {canRetry && (
-            <button onClick={startListening} className="ml-2 underline text-red-800">Retry</button>
+            <button onClick={startListening} className="ml-2 min-h-11 px-2 underline text-red-800">Retry</button>
           )}
         </div>
       )}
@@ -422,20 +494,30 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
             <span className="size-2.5 rounded-full bg-white" style={{ animation: 'liveDot 1s ease-in-out infinite' }} />
           </span>
           <div className="flex-1 flex items-center gap-3 min-w-0">
-            <span className="text-sm text-blue-700 shrink-0">Listening…</span>
-            <div className="flex-1"><Waveform /></div>
+            {liveText ? (
+              <span data-testid="voice-live-text" aria-live="polite" className="flex-1 min-w-0 text-sm text-blue-900 break-words line-clamp-2">
+                {liveText}
+              </span>
+            ) : (
+              <>
+                <span className="text-sm text-blue-700 shrink-0">Listening…</span>
+                <div className="flex-1"><Waveform /></div>
+              </>
+            )}
           </div>
           <button
             onClick={() => { void stopListening(); }}
-            className="shrink-0 flex size-7 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+            aria-label="Done talking"
+            className="shrink-0 flex size-11 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700 transition-colors"
           >
-            <Send size={13} />
+            <Send size={15} />
           </button>
           <button
             onClick={handleCancel}
-            className="shrink-0 flex size-6 items-center justify-center rounded-full bg-blue-100 hover:bg-blue-200 transition-colors"
+            aria-label="Cancel"
+            className="shrink-0 flex size-11 items-center justify-center rounded-full bg-blue-100 hover:bg-blue-200 transition-colors"
           >
-            <X size={13} className="text-blue-600" />
+            <X size={15} className="text-blue-600" />
           </button>
           <style>{`
             @keyframes liveDot {
@@ -480,20 +562,23 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
               value={transcript}
               onChange={e => setTranscript(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleSend(); if (e.key === 'Escape') handleCancel(); }}
-              className="flex-1 text-sm text-slate-900 outline-none bg-transparent min-w-0"
+              aria-label="What you said"
+              className="flex-1 min-h-11 text-sm text-slate-900 outline-none bg-transparent min-w-0"
             />
             <button
               onClick={handleCancel}
-              className="shrink-0 p-1 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+              aria-label="Discard"
+              className="shrink-0 flex size-11 items-center justify-center rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
             >
-              <X size={14} />
+              <X size={15} />
             </button>
             <button
               onClick={handleSend}
               disabled={!transcript.trim()}
-              className="shrink-0 flex size-7 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 transition-colors"
+              aria-label="Send"
+              className="shrink-0 flex size-11 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 transition-colors"
             >
-              <Send size={13} />
+              <Send size={15} />
             </button>
           </div>
           <p className="text-xs text-slate-400 pl-1">Edit if needed, then tap <span className="text-blue-500">send</span></p>
