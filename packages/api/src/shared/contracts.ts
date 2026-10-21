@@ -1,10 +1,9 @@
 import { z } from 'zod';
 // #1561 — zod-3 issue wording for every contract message (side effect).
 import './zod-messages';
-import { accountTypeSchema, catalogUnitSchema } from '@ai-service-os/shared';
+import { accountTypeSchema, catalogUnitSchema, skillTagsSchema } from '@ai-service-os/shared';
 import { CUSTOMER_SOURCES } from '../customers/customer';
 import { AFTER_HOURS_VOICE_MODES, EMERGENCY_TARGETS, PAYMENT_COLLECTION_MODES } from '../settings/settings';
-import { skillTagsSchema } from './skill-tags';
 
 export const tenantIdHeader = 'x-tenant-id';
 export const correlationIdHeader = 'x-correlation-id';

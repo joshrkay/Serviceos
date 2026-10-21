@@ -41,7 +41,7 @@ export interface User {
   mobileNumber?: string;
   /**
    * Dispatch FR-2 phase 2 (migration 328) — canonical skill tags
-   * (shared/skill-tags.ts) the feasibility skill gate checks against a job's
+   * (@ai-service-os/shared skill-tags) the feasibility skill gate checks against a job's
    * `requiredSkills`. Optional in TS for fixtures; the Pg layer always maps it.
    */
   skills?: string[];

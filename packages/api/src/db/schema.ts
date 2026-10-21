@@ -8162,7 +8162,7 @@ export const MIGRATIONS = {
   // SkillMatcher was a stub and every check read 'none_configured'.
   //   users.skills         — tags a technician holds (owner-edited)
   //   jobs.required_skills — tags a job needs (owner/dispatcher-edited)
-  // Both hold canonical tags (shared/skill-tags.ts); empty means none. No
+  // Both hold canonical tags (@ai-service-os/shared skill-tags); empty = none. No
   // CHECK: shape and count are enforced at the request boundary.
   '328_skill_tags': `
     ALTER TABLE users

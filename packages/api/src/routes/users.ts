@@ -1,7 +1,7 @@
 import type { SeatUsageReader } from '../users/seat-limit';
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { skillTagsSchema } from '../shared/skill-tags';
+import { skillTagsSchema } from '@ai-service-os/shared';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';

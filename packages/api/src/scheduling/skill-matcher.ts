@@ -1,6 +1,6 @@
 import type { JobRepository } from '../jobs/job';
 import type { UserRepository } from '../users/user';
-import { normalizeSkillTags } from '../shared/skill-tags';
+import { normalizeSkillTags } from '@ai-service-os/shared';
 
 /**
  * Skill constraints for feasibility (4.9 / issue #1001; Dispatch FR-2 phase 2).

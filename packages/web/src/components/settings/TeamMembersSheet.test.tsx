@@ -390,3 +390,61 @@ describe('TeamMembersSheet — invite flow', () => {
     expect(screen.getByTestId('invite-dialog')).toBeInTheDocument();
   });
 });
+
+describe('TeamMembersSheet — technician skills (Dispatch FR-2 phase 2)', () => {
+  const tech = { id: 'u2', email: 'alex@example.com', role: 'technician', canFieldServe: false, skills: ['hvac'] };
+
+  beforeEach(() => {
+    apiFetchMock.mockReset();
+    toastSuccess.mockReset();
+    toastError.mockReset();
+  });
+
+  it('shows each member\'s skills', async () => {
+    mockUsersAndInvitations({ users: { body: { data: [tech] } } });
+    render(<TeamMembersSheet onClose={() => {}} />);
+    expect(await screen.findByTestId('team-member-skills-u2')).toHaveTextContent('hvac');
+    expect(screen.queryByTestId('team-member-edit-skills-u2')).not.toBeInTheDocument();
+  });
+
+  it('an owner edits skills through PATCH /api/users/:id and the row shows the saved list', async () => {
+    mockUsersAndInvitations({ users: { body: { data: [tech] } } });
+    render(<TeamMembersSheet onClose={() => {}} canEditRoles />);
+    await screen.findByTestId('team-members-list');
+
+    apiFetchMock.mockImplementationOnce(async () => jsonResponse({ ...tech, skills: ['hvac', 'gas_certified'] }));
+    fireEvent.click(screen.getByTestId('team-member-edit-skills-u2'));
+    fireEvent.change(screen.getByTestId('team-member-skills-u2-input'), { target: { value: 'Gas Certified' } });
+    fireEvent.click(screen.getByTestId('team-member-skills-u2-save'));
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith('Skills updated'));
+    expect(apiFetchMock).toHaveBeenCalledWith('/api/users/u2', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skills: ['hvac', 'gas_certified'] }),
+    });
+    expect(screen.getByTestId('team-member-skills-u2')).toHaveTextContent('gas_certified');
+    expect(screen.queryByTestId('team-member-skills-u2-editor')).not.toBeInTheDocument();
+  });
+
+  it('keeps the editor open and toasts the server message on failure', async () => {
+    mockUsersAndInvitations({ users: { body: { data: [tech] } } });
+    render(<TeamMembersSheet onClose={() => {}} canEditRoles />);
+    await screen.findByTestId('team-members-list');
+
+    apiFetchMock.mockImplementationOnce(async () =>
+      jsonResponse({ message: 'At most 20 skills' }, { ok: false, status: 400 }),
+    );
+    fireEvent.click(screen.getByTestId('team-member-edit-skills-u2'));
+    fireEvent.click(screen.getByTestId('team-member-skills-u2-save'));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith('At most 20 skills'));
+    expect(screen.getByTestId('team-member-skills-u2-editor')).toBeInTheDocument();
+  });
+
+  it('the Skills button is a ≥44px tap target', async () => {
+    mockUsersAndInvitations({ users: { body: { data: [tech] } } });
+    render(<TeamMembersSheet onClose={() => {}} canEditRoles />);
+    expect((await screen.findByTestId('team-member-edit-skills-u2')).className).toContain('min-h-11');
+  });
+});

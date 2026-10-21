@@ -127,7 +127,7 @@ export interface Job {
   reviewRequestSentAt?: Date;
   /**
    * Dispatch FR-2 phase 2 (migration 328) — canonical skill tags
-   * (shared/skill-tags.ts) a technician must hold to be assigned. Empty means
+   * (@ai-service-os/shared skill-tags) a technician must hold to be assigned. Empty means
    * no skill constraint (feasibility reports `none_configured`).
    */
   requiredSkills?: string[];

@@ -2,8 +2,10 @@ import { z } from 'zod';
 
 /**
  * Dispatch FR-2 phase 2 — skill tags. Technicians hold `users.skills`; a job
- * lists `jobs.required_skills`; the feasibility skill gate
- * (scheduling/skill-matcher.ts) compares the two in this canonical form.
+ * lists `jobs.required_skills`; the API's feasibility skill gate
+ * (packages/api/src/scheduling/skill-matcher.ts) compares the two in this
+ * canonical form. The web editor normalizes with the same function so what
+ * the owner sees is what gets stored.
  */
 export const MAX_SKILL_TAGS = 20;
 export const MAX_SKILL_TAG_LENGTH = 40;
