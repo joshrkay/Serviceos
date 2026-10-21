@@ -873,7 +873,7 @@ export function JobDetailView({
   const { data: apiJob, isLoading, error, refetch: refetchJob } = useDetailQuery<JobDetailResponse>('/api/jobs', id);
   // Dispatch FR-2 phase 2 — required skills follow jobs:assign (owners, dispatchers).
   const { me } = useMe();
-  const canEditRequiredSkills = me?.permissions.includes('jobs:assign') ?? false;
+  const canEditRequiredSkills = (me?.permissions ?? []).includes('jobs:assign');
   const { mutate: transitionJob } = useMutation<{ status: string; reason?: string }, JobDetailResponse>('POST', `/api/jobs/${id}/transition`);
 
   // Real linked documents / schedule, derived from the jobId-filtered lists

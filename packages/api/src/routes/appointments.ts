@@ -39,6 +39,7 @@ import {
 import { UserRepository } from '../users/user';
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
+import type { SkillMatcher } from '../scheduling/skill-matcher';
 import { ensurePrimaryTechnician } from '../jobs/job-appointment-sync';
 import { requireActiveTechnician } from '../users/tenant-member';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
@@ -69,6 +70,8 @@ interface AppointmentRouterOptions {
     userRepo: UserRepository;
     workingHoursRepo?: WorkingHoursRepository;
     unavailableBlockRepo?: UnavailableBlockRepository;
+    /** Dispatch FR-2 — assignment refuses a technician missing a required skill. */
+    skillMatcher?: SkillMatcher;
   };
   /**
    * #1402 — tenant settings read for the non-blocking outside-business-hours

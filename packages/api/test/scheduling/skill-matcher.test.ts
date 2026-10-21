@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { RepoSkillMatcher } from '../../src/scheduling/skill-matcher';
+import {
+  RepoSkillMatcher,
+  missingSkills,
+  assertTechnicianHoldsRequiredSkills,
+} from '../../src/scheduling/skill-matcher';
 
 /**
  * Dispatch FR-2 phase 2 — the wired matcher. Tag normalization is pinned in
@@ -38,5 +42,31 @@ describe('RepoSkillMatcher', () => {
     );
     expect(await bare.requiredSkillsForJob('t-1', 'j-1')).toEqual([]);
     expect(await bare.skillsForTechnician('t-1', 'u-1')).toEqual([]);
+  });
+});
+
+describe('missingSkills', () => {
+  it('returns the required skills not held, in required order', () => {
+    expect(missingSkills(['a', 'b', 'c'], ['b'])).toEqual(['a', 'c']);
+    expect(missingSkills(['a'], ['a', 'z'])).toEqual([]);
+    expect(missingSkills([], ['a'])).toEqual([]);
+  });
+});
+
+describe('assertTechnicianHoldsRequiredSkills', () => {
+  const matcher = (required: string[], held: string[]) => ({
+    requiredSkillsForJob: async () => required,
+    skillsForTechnician: async () => held,
+  });
+
+  it('throws a 409 naming the missing skills', async () => {
+    await expect(
+      assertTechnicianHoldsRequiredSkills('t-1', 'u-1', 'j-1', matcher(['gas_certified'], [])),
+    ).rejects.toMatchObject({ statusCode: 409, message: 'Technician is missing required skill(s): gas_certified' });
+  });
+
+  it('passes when the technician holds them, and when none are required', async () => {
+    await expect(assertTechnicianHoldsRequiredSkills('t-1', 'u-1', 'j-1', matcher(['hvac'], ['hvac']))).resolves.toBeUndefined();
+    await expect(assertTechnicianHoldsRequiredSkills('t-1', 'u-1', 'j-1', matcher([], []))).resolves.toBeUndefined();
   });
 });

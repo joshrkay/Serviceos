@@ -18,6 +18,7 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { getJob } from '../../src/jobs/job';
 import { ConflictError } from '../../src/shared/errors';
+import { RepoSkillMatcher } from '../../src/scheduling/skill-matcher';
 import { getDispatchBoardData, DispatchBoardData } from '../../src/dispatch/board-query';
 import {
   JobAppointmentSyncDeps,
@@ -278,5 +279,18 @@ describe('Postgres integration — job-appointment sync', () => {
     expect(res.appointment!.scheduledStart.toISOString()).toBe(new Date(T14).toISOString());
     const primaries = (await assignmentRepo.findByAppointment(tenantId, res.appointment!.id)).filter((a) => a.isPrimary);
     expect(primaries.map((a) => a.technicianId)).toEqual([techB]);
+  });
+
+  it('Dispatch FR-2 — refuses a tech missing a required skill (real columns), books one who holds it', async () => {
+    const jobId = await newJob('Gas job');
+    await jobRepo.update(tenantId, jobId, { requiredSkills: ['gas_certified'] });
+    const skilled = await newTech();
+    await pool.query('UPDATE users SET skills = $1 WHERE id = $2', [['gas_certified'], skilled]);
+    const skillDeps = { ...deps, skillMatcher: new RepoSkillMatcher(jobRepo, deps.userRepo) };
+
+    await expect(syncJobSchedule(skillDeps, scheduleInput(jobId, T10, techId))).rejects.toBeInstanceOf(ConflictError);
+    const res = await syncJobSchedule(skillDeps, scheduleInput(jobId, T10, skilled));
+    const primaries = (await assignmentRepo.findByAppointment(tenantId, res.appointment!.id)).filter((a) => a.isPrimary);
+    expect(primaries.map((a) => a.technicianId)).toEqual([skilled]);
   });
 });

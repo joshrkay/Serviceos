@@ -5468,6 +5468,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     userRepo,
     workingHoursRepo,
     unavailableBlockRepo,
+    skillMatcher,
     settingsRepo,
   }));
   app.use(
@@ -5634,7 +5635,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, {
       delayNotificationCoordinator,
       // #1279 — canonical appointment-level assignment writes.
-      assignment: { assignmentRepo, userRepo, workingHoursRepo, unavailableBlockRepo },
+      assignment: { assignmentRepo, userRepo, workingHoursRepo, unavailableBlockRepo, skillMatcher },
       // #1402 — outside-business-hours warning on create/reschedule.
       settingsRepo,
     }, auditRepo)

@@ -15,6 +15,7 @@ import { InMemoryAppointmentRepository } from '../../src/appointments/appointmen
 import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
+import { RepoSkillMatcher } from '../../src/scheduling/skill-matcher';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
@@ -528,7 +529,7 @@ describe('#1279 — appointment technician assignment routes', () => {
   const TECH = '0b7f6a64-2f0f-4c52-9d7b-0e6a4b6b1279';
   const OWNER_USER = '5f2b9b35-51c3-4a7a-8f6e-6d1a0c5c1279';
 
-  async function buildApp(withAssignment: boolean) {
+  async function buildApp(withAssignment: boolean, requiredSkills: string[] = []) {
     const { InMemoryUserRepository } = await import('../../src/users/user');
     const assignmentRepo = new InMemoryAssignmentRepository();
     const appointmentRepo = new InMemoryAppointmentRepository(assignmentRepo);
@@ -546,9 +547,11 @@ describe('#1279 — appointment technician assignment routes', () => {
       status: 'new',
       priority: 'normal',
       createdBy: OWNER_USER,
+      requiredSkills,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+    const skillMatcher = new RepoSkillMatcher(jobRepo, userRepo);
     const app = express();
     app.use(express.json());
     app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -567,7 +570,7 @@ describe('#1279 — appointment technician assignment routes', () => {
         permissiveTenantOwnership(),
         jobRepo,
         new InMemoryJobTimelineRepository(),
-        withAssignment ? { assignment: { assignmentRepo, userRepo } } : undefined,
+        withAssignment ? { assignment: { assignmentRepo, userRepo, skillMatcher } } : undefined,
         new InMemoryAuditRepository(),
       ),
     );
@@ -639,6 +642,23 @@ describe('#1279 — appointment technician assignment routes', () => {
     const ok = await request(app).post(`/api/appointments/${id}/assignments`).send({ technicianId: TECH });
     expect(ok.status).toBe(200);
     expect(ok.body).toEqual({ appointmentId: id, technicianId: TECH });
+  });
+
+  it('create and POST /:id/assignments → 409 when the technician lacks a required skill (Dispatch FR-2)', async () => {
+    const { app, assignmentRepo, jobId } = await buildApp(true, ['gas_certified']);
+    const create = await request(app).post('/api/appointments').send({
+      jobId, scheduledStart: window.start, scheduledEnd: window.end, timezone: 'UTC', technicianId: TECH,
+    });
+    expect(create.status).toBe(409);
+    expect(create.body.message).toContain('gas_certified');
+
+    const created = await request(app).post('/api/appointments').send({
+      jobId, scheduledStart: window.start, scheduledEnd: window.end, timezone: 'UTC',
+    });
+    const id: string = created.body.id;
+    const res = await request(app).post(`/api/appointments/${id}/assignments`).send({ technicianId: TECH });
+    expect(res.status).toBe(409);
+    expect(await assignmentRepo.findByAppointment(TENANT, id)).toHaveLength(0);
   });
 });
 

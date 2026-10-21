@@ -39,6 +39,7 @@ import {
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
+import type { SkillMatcher } from '../scheduling/skill-matcher';
 import { SettingsRepository } from '../settings/settings';
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import { requireActiveTechnician } from '../users/tenant-member';
@@ -90,6 +91,8 @@ export interface JobAppointmentSyncDeps {
    */
   workingHoursRepo?: WorkingHoursRepository;
   unavailableBlockRepo?: UnavailableBlockRepository;
+  /** Dispatch FR-2 — assignment refuses a technician missing a required skill. */
+  skillMatcher?: SkillMatcher;
   /**
    * Resolves the tenant timezone when the caller omits one. Without it a
    * timezone-less schedule stores UTC, and the working-hours guard then
@@ -185,7 +188,7 @@ async function findCancelableAppointment(
  */
 export type PrimaryTechnicianDeps = Pick<
   JobAppointmentSyncDeps,
-  'appointmentRepo' | 'assignmentRepo' | 'userRepo' | 'auditRepo' | 'workingHoursRepo' | 'unavailableBlockRepo'
+  'appointmentRepo' | 'assignmentRepo' | 'userRepo' | 'auditRepo' | 'workingHoursRepo' | 'unavailableBlockRepo' | 'skillMatcher'
 >;
 
 /**
@@ -254,6 +257,7 @@ export async function ensurePrimaryTechnician(
       actorRole,
       workingHoursRepo: deps.workingHoursRepo,
       unavailableBlockRepo: deps.unavailableBlockRepo,
+      skillMatcher: deps.skillMatcher,
     },
   );
 }

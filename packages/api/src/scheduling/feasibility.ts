@@ -7,6 +7,7 @@ import { Appointment } from '../appointments/appointment';
 import { getDayOfWeekInTimezone } from '../appointments/time';
 import { localDateKey } from '../shared/timezone';
 import { LatLng } from './travel-time/provider';
+import { missingSkills } from './skill-matcher';
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -166,7 +167,7 @@ async function skillMatchIssues(
   // NOT the same claim as "skills were checked and the technician holds them".
   if (required.length === 0) return { issues: [], constraints: 'none_configured' };
   const held = await deps.skillMatcher.skillsForTechnician(input.tenantId, input.proposedTechnicianId);
-  const missing = required.filter((s) => !held.includes(s));
+  const missing = missingSkills(required, held);
   if (missing.length === 0) return { issues: [], constraints: 'evaluated' };
   // Contract #12/#13: "holds required skill for service type if skills are
   // modeled" is a precondition → blocking.
