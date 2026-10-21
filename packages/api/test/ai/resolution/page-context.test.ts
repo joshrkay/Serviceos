@@ -139,6 +139,7 @@ describe('loadPageContext', () => {
     const page = await loadPageContext(repos, TENANT, { entityType: 'invoice', entityId: INVOICE });
     expect(page?.ids).toEqual({ invoiceId: INVOICE, jobId: JOB, customerId: CUSTOMER });
     expect(page?.label).toBe('INV-0042 (Ana Garcia – AC not cooling)');
+    expect(page?.documentNumber).toBe('INV-0042');
   });
 
   it("returns nothing for another tenant's record", async () => {
@@ -162,7 +163,13 @@ describe('loadPageContext', () => {
 
 describe('pageLookupIds', () => {
   const lookup = (over: Partial<Parameters<typeof pageLookupIds>[0]>) =>
-    pageLookupIds({ intent: 'lookup_invoices', entities: {}, text: 'what invoices are open?', page: jobPage, ...over });
+    pageLookupIds({
+      intent: 'lookup_invoices',
+      entities: {},
+      text: 'what invoices are open?',
+      page: { ...jobPage, context: { entityType: 'job' } },
+      ...over,
+    });
 
   it('fills the customer when the question points at them', () => {
     expect(lookup({ entities: { customerName: 'this customer' }, text: 'what invoices does this customer have?' })).toEqual({
@@ -187,9 +194,37 @@ describe('pageLookupIds', () => {
 
   it('fills the job when the question points at this job', () => {
     expect(lookup({ intent: 'lookup_jobs', entities: { jobReference: 'this job' }, text: "what's the status of this job?" })).toEqual({
+      customerId: CUSTOMER,
       jobId: JOB,
     });
-    expect(lookup({ intent: 'lookup_jobs', text: 'status of this job?' })).toEqual({ jobId: JOB });
+    expect(lookup({ intent: 'lookup_my_day', text: 'is this job first today?' })).toEqual({ jobId: JOB });
     expect(lookup({ intent: 'lookup_jobs', entities: { jobReference: 'the Patel job' }, text: 'status of the Patel job?' })).toEqual({});
+  });
+});
+
+describe('pageLookupIds on a document page', () => {
+  const invoicePage = {
+    ids: { invoiceId: INVOICE, jobId: JOB, customerId: CUSTOMER },
+    documentNumber: 'INV-0042',
+    context: { entityType: 'invoice' as const },
+  };
+
+  it('"is this invoice paid?" on INV-0042 answers by that number, its job and its customer', () => {
+    expect(pageLookupIds({ intent: 'lookup_invoices', entities: {}, text: 'is this invoice paid?', page: invoicePage })).toEqual({
+      customerId: CUSTOMER,
+      jobId: JOB,
+      documentNumber: 'INV-0042',
+    });
+  });
+
+  it('"when is this appointment?" on an appointment page reads that customer\'s appointments', () => {
+    const appointmentPage = { ids: { appointmentId: OTHER, jobId: JOB, customerId: CUSTOMER }, context: { entityType: 'appointment' as const } };
+    expect(
+      pageLookupIds({ intent: 'lookup_appointments', entities: {}, text: 'when is this appointment?', page: appointmentPage }),
+    ).toEqual({ customerId: CUSTOMER, jobId: JOB });
+  });
+
+  it('a question that does not point at the invoice leaves it alone', () => {
+    expect(pageLookupIds({ intent: 'lookup_invoices', entities: {}, text: 'what invoices are open?', page: invoicePage })).toEqual({});
   });
 });

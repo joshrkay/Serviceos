@@ -37,6 +37,7 @@ function routes(opts: {
   transcript?: string;
   transcribeStatus?: number;
   chat?: { status: number; body: unknown };
+  notesStatus?: number;
 }) {
   mockFetcher.mockImplementation((path: string) => {
     if (path.includes('/transition')) return Promise.resolve(new Response('{}', { status: 200 }));
@@ -50,7 +51,10 @@ function routes(opts: {
       const chat = opts.chat ?? { status: 200, body: { message: { content: 'Noted.' } } };
       return Promise.resolve(new Response(JSON.stringify(chat.body), { status: chat.status }));
     }
-    if (path === '/api/notes') return Promise.resolve(new Response(JSON.stringify({ id: 'n-new' }), { status: 201 }));
+    if (path === '/api/notes') {
+      const status = opts.notesStatus ?? 201;
+      return Promise.resolve(new Response(JSON.stringify(status < 300 ? { id: 'n-new' } : {}), { status }));
+    }
     return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
   });
 }
@@ -202,6 +206,22 @@ describe('TechJobView voice update', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Send to Rivet/ }));
     expect(await screen.findByTestId('tech-voice-reply')).toHaveTextContent("Saved as a job note. Rivet couldn't draft");
     expect(posts('/api/notes')).toHaveLength(1);
+  });
+
+  it('does not claim the note saved when the assistant and the note save both fail', async () => {
+    routes({ transcript: 'compressor is short cycling', chat: { status: 503, body: {} }, notesStatus: 500 });
+    await speak();
+    fireEvent.click(await screen.findByRole('button', { name: /Send to Rivet/ }));
+    const reply = await screen.findByTestId('tech-voice-reply');
+    expect(reply).not.toHaveTextContent('Saved as a job note');
+    expect(reply).toHaveTextContent(`The job note didn't save, so please try again: "compressor is short cycling"`);
+  });
+
+  it('says the note did not save even when the assistant answered', async () => {
+    routes({ transcript: 'gate code 4471', notesStatus: 500 });
+    await speak();
+    fireEvent.click(await screen.findByRole('button', { name: /Send to Rivet/ }));
+    expect(await screen.findByTestId('tech-voice-reply')).toHaveTextContent("Noted. The job note didn't save");
   });
 
   it('keeps the confirm controls at a 44px tap target', async () => {

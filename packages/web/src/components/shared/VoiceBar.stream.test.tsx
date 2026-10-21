@@ -193,6 +193,34 @@ describe('VoiceBar — live words', () => {
     expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
   });
 
+  it('a start the user cancelled while it was still connecting never opens later', async () => {
+    let resolveStart: (r: string) => void = () => {};
+    fake.start.mockImplementation(() => new Promise<string>((r) => { resolveStart = r; }));
+    renderBar();
+    fireEvent.click(screen.getByTestId('voice-example-hint'));
+    await screen.findByText('Listening…');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    const stopsBefore = fake.stop.mock.calls.length;
+
+    await act(async () => resolveStart('connecting'));
+    // The late socket is closed straight away, and the bar stays idle.
+    expect(fake.stop.mock.calls.length).toBe(stopsBefore + 1);
+    expect(screen.queryByText('Listening…')).toBeNull();
+  });
+
+  it('a cancelled start does not fall back to the recorder when streaming turns out to be unavailable', async () => {
+    let resolveStart: (r: string) => void = () => {};
+    fake.start.mockImplementation(() => new Promise<string>((r) => { resolveStart = r; }));
+    renderBar();
+    fireEvent.click(screen.getByTestId('voice-example-hint'));
+    await screen.findByText('Listening…');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    await act(async () => resolveStart('unavailable'));
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+    expect(screen.queryByText('Listening…')).toBeNull();
+  });
+
   it('keeps every listening and transcript control at a 44px tap target', async () => {
     renderBar();
     fireEvent.click(screen.getByTestId('voice-example-hint'));

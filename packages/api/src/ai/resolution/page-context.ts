@@ -45,6 +45,8 @@ export interface LoadedPageContext {
   ids: Record<string, string>;
   /** What the operator sees it called, for the reply ("Garcia – AC not cooling"). */
   label: string;
+  /** The page record's own number (JOB-0081, INV-0042, EST-0007), when it has one. */
+  documentNumber?: string;
 }
 
 export interface PageContextRepos {
@@ -103,12 +105,18 @@ export async function loadPageContext(
     if (!job) {
       // A job page needs its job; a document page can still stand on its own id.
       if (entityType === 'job' || !documentLabel) return undefined;
-      return { context, ids, label: documentLabel };
+      return { context, ids, label: documentLabel, documentNumber: documentLabel };
     }
     ids = { ...ids, jobId: job.id, customerId: job.customerId };
     const customer = await repos.customerRepo?.findById(tenantId, job.customerId);
     const jobLabel = [customer?.displayName, job.summary].filter(Boolean).join(' – ') || job.jobNumber;
-    return { context, ids, label: documentLabel ? `${documentLabel} (${jobLabel})` : jobLabel };
+    const documentNumber = entityType === 'job' ? job.jobNumber : documentLabel;
+    return {
+      context,
+      ids,
+      label: documentLabel ? `${documentLabel} (${jobLabel})` : jobLabel,
+      ...(documentNumber ? { documentNumber } : {}),
+    };
   } catch {
     return undefined;
   }
@@ -231,23 +239,39 @@ export function mergePageContextIds(input: PageContextMergeInput): PageContextMe
 const POINTS_AT_CUSTOMER_RE =
   /\b(?:(?:this|that|the same)\s+(?:customer|client|guy|lady)|she|he|they|her|him|them|his|their)\b/i;
 const POINTS_AT_JOB_RE = /\b(?:this|that|the same)\s+job\b/i;
+/** Words that point at the page's own record, by the page's type. */
+const POINTS_AT_PAGE_RECORD_RE: Readonly<Record<PageEntityType, RegExp>> = {
+  customer: POINTS_AT_CUSTOMER_RE,
+  job: POINTS_AT_JOB_RE,
+  invoice: /\b(?:this|that|the same)\s+(?:invoice|bill)\b/i,
+  estimate: /\b(?:this|that|the same)\s+(?:estimate|quote)\b/i,
+  appointment: /\b(?:this|that|the same)\s+(?:appointment|visit|booking)\b/i,
+};
 
 export interface PageLookupInput {
   intent: string;
   entities: Record<string, unknown> | undefined;
   text: string;
-  page: Pick<LoadedPageContext, 'ids'>;
+  page: Pick<LoadedPageContext, 'ids' | 'documentNumber'> & { context: Pick<PageContext, 'entityType'> };
+}
+
+export interface PageLookupIds {
+  customerId?: string;
+  jobId?: string;
+  /** The page record's own number, for "is this invoice paid?" on that invoice. */
+  documentNumber?: string;
 }
 
 /**
  * The page ids a read-only lookup may use: "what invoices does this customer
- * have?" on Garcia's page is about Garcia. Stricter than drafting: a lookup
- * that names no record has a tenant-wide reading ("what invoices are open?"),
- * so the page fills a key only when the operator pointed at it, either in the
- * extracted reference ("this job") or in their words ("what does she owe?").
- * A named record, a document number or a literal UUID always wins. Pure.
+ * have?" on Garcia's page is about Garcia, and "is this invoice paid?" on
+ * INV-0042 is about INV-0042. Stricter than drafting: a lookup that names no
+ * record has a tenant-wide reading ("what invoices are open?"), so the page
+ * fills a key only when the operator pointed at it, either in the extracted
+ * reference ("this job") or in their words ("what does she owe?"). A named
+ * record, a document number or a literal UUID always wins. Pure.
  */
-export function pageLookupIds(input: PageLookupInput): { customerId?: string; jobId?: string } {
+export function pageLookupIds(input: PageLookupInput): PageLookupIds {
   const { intent, entities, text, page } = input;
   if (findDocumentNumbers(text).length > 0 || LITERAL_UUID_RE.test(text)) return {};
 
@@ -256,16 +280,20 @@ export function pageLookupIds(input: PageLookupInput): { customerId?: string; jo
     if (typeof value === 'string' && value.trim().length > 0) return isDeicticReference(value);
     return re.test(text);
   };
+  // Pointing at the record on screen ("this invoice") points at its customer
+  // and job too, since a document page expands to both.
+  const pointsAtPage = POINTS_AT_PAGE_RECORD_RE[page.context.entityType].test(text);
 
-  const out: { customerId?: string; jobId?: string } = {};
+  const out: PageLookupIds = {};
   if (
     page.ids.customerId &&
     CUSTOMER_SCOPED_LOOKUP_INTENTS.has(intent as IntentType) &&
-    points('customerName', POINTS_AT_CUSTOMER_RE)
+    (pointsAtPage || points('customerName', POINTS_AT_CUSTOMER_RE))
   ) {
     out.customerId = page.ids.customerId;
   }
-  if (page.ids.jobId && points('jobReference', POINTS_AT_JOB_RE)) out.jobId = page.ids.jobId;
+  if (page.ids.jobId && (pointsAtPage || points('jobReference', POINTS_AT_JOB_RE))) out.jobId = page.ids.jobId;
+  if (page.documentNumber && pointsAtPage) out.documentNumber = page.documentNumber;
   return out;
 }
 

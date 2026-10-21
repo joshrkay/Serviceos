@@ -150,6 +150,10 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   // uses. When the browser or the server cannot stream, the bar falls back to
   // recording the clip and transcribing it after you stop.
   const captureModeRef = useRef<'stream' | 'batch' | null>(null);
+  // Bumped by every start, stop and cancel. A start still waiting on its
+  // stream token or the mic checks it afterwards, so an attempt the user
+  // already stopped can never open the mic later.
+  const attemptRef = useRef(0);
   const streamFinalRef = useRef<string | null>(null);
   const dictation = useDeepgramDictation({
     onFinal: (text) => { streamFinalRef.current = text; },
@@ -245,6 +249,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   }, []);
 
   const stopListening = useCallback(async () => {
+    attemptRef.current += 1;
     if (captureModeRef.current === 'stream') {
       captureModeRef.current = null;
       dictation.stop();
@@ -300,6 +305,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   }, [stopStream, uploadAndTranscribe, dictation, settleStreamedTranscript]);
 
   const startBatchRecording = useCallback(async () => {
+    const attempt = attemptRef.current;
     const mimeType = getSupportedAudioMimeType();
     if (!mimeType) {
       setError('This browser does not support a compatible recording format.');
@@ -309,6 +315,10 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (attemptRef.current !== attempt) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       streamRef.current = stream;
       const recorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = recorder;
@@ -341,12 +351,19 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
     setError(null);
     setCanRetry(false);
     setTranscript('');
+    attemptRef.current += 1;
+    const attempt = attemptRef.current;
 
     if (dictationSupported()) {
       captureModeRef.current = 'stream';
       streamFinalRef.current = null;
       setPhase('listening');
       const started = await dictation.start();
+      if (attemptRef.current !== attempt) {
+        // Stopped or cancelled while the stream was starting.
+        if (started === 'connecting') dictation.stop();
+        return;
+      }
       if (started === 'connecting') return;
       captureModeRef.current = null;
       if (started === 'denied') {
@@ -416,6 +433,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   }
 
   function handleCancel() {
+    attemptRef.current += 1;
     if (captureModeRef.current === 'stream') {
       captureModeRef.current = null;
       dictation.stop();

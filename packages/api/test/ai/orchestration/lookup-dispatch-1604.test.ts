@@ -151,4 +151,22 @@ describe('dispatchAssistantLookup — the record on screen (page context)', () =
     expect(reply?.message.content).toMatch(/Keller/);
     expect(d.entityResolver.resolve).not.toHaveBeenCalled();
   });
+
+  it('"what\'s the status of this job?" on JOB-0001 answers from that job by its number', async () => {
+    const d = await deps();
+    const reply = await dispatchAssistantLookup(
+      {
+        tenantId: TENANT,
+        userId: MIKE_CLERK,
+        intent: 'lookup_jobs',
+        extractedEntities: { jobReference: 'this job' },
+        message: "what's the status of this job?",
+        page: { jobId: JOB_KELLER, documentNumber: 'JOB-0001' },
+      },
+      d,
+    );
+    expect(reply?.outcome).toBe('answered');
+    expect(reply?.message.content).toContain('JOB-0001');
+    expect(d.entityResolver.resolve).not.toHaveBeenCalled();
+  });
 });

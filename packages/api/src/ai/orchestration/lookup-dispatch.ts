@@ -252,7 +252,7 @@ export interface DispatchAssistantLookupInput {
    * free-text reference, which would otherwise resolve "this customer" as a
    * name and find nothing.
    */
-  page?: { customerId?: string; jobId?: string };
+  page?: { customerId?: string; jobId?: string; documentNumber?: string };
 }
 
 /** Lookups that read the schedule for one day. */
@@ -370,7 +370,11 @@ export async function dispatchAssistantLookup(
         tenantId,
         actorId: userId,
         intent,
-        entities,
+        // The record on screen answers by its own number ("is this invoice
+        // paid?" on INV-0042), exactly as if the operator had said it.
+        entities: input.page?.documentNumber
+          ? { ...entities, pageDocumentNumber: input.page.documentNumber }
+          : entities,
         ...(input.message ? { message: input.message } : {}),
       },
       deps,

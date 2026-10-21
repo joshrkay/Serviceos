@@ -839,14 +839,24 @@ export function TechJobView({
     if (result.statusUpdate) await applyVoiceStatus(result.statusUpdate);
 
     const outcome: TechVoiceOutcome = await sendTechVoiceUpdate(apiFetch, id, result.transcript);
+    let noteFailed = false;
     if (needsFieldNote(outcome)) {
       const savedId = await saveNoteToApi(result.transcript, 'voice');
-      setNotes(prev => [...prev, { id: savedId ?? `vn-${Date.now()}`, text: result.transcript, time: now(), source: 'voice' }]);
+      if (savedId) {
+        setNotes(prev => [...prev, { id: savedId, text: result.transcript, time: now(), source: 'voice' }]);
+      } else {
+        noteFailed = true;
+      }
     }
+    // Never claim a save that did not happen: a failed note keeps the words
+    // on screen so the tech can try again.
+    const unsaved = `The job note didn't save, so please try again: "${result.transcript}"`;
     setVoiceReply(
       outcome.ok
-        ? outcome.reply
-        : "Saved as a job note. Rivet couldn't draft anything from it right now.",
+        ? noteFailed ? `${outcome.reply} ${unsaved}` : outcome.reply
+        : noteFailed
+          ? `Rivet couldn't draft anything from it right now. ${unsaved}`
+          : "Saved as a job note. Rivet couldn't draft anything from it right now.",
     );
     setActivities(prev => [...prev, {
       id: `va-${Date.now()}`, type: 'voice',
