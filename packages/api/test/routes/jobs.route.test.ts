@@ -729,3 +729,63 @@ describe('PUT /api/jobs/:id — assignedTechnicianId is derived, never written d
     expect(res.body.summary).toBe('After');
   });
 });
+
+describe('PUT /api/jobs/:id — strict body allowlist (hardening sweep 2026-10)', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  async function createJob(): Promise<string> {
+    const created = await request(app).post('/api/jobs').send({
+      customerId: 'cust-1',
+      locationId: 'loc-1',
+      summary: 'Strict body',
+    });
+    expect(created.status).toBe(201);
+    return created.body.id as string;
+  }
+
+  it.each([
+    ['depositPaidCents', { depositPaidCents: 100000 }],
+    ['depositStatus', { depositStatus: 'paid' }],
+    ['moneyState', { moneyState: 'paid' }],
+    ['status (governed transition only)', { status: 'completed' }],
+    ['customerId', { customerId: 'cust-other' }],
+    ['depositStripePaymentLinkUrl', { depositStripePaymentLinkUrl: 'https://evil.example/pay' }],
+    ['completedAt', { completedAt: new Date().toISOString() }],
+  ])('rejects %s with 400 and writes nothing', async (_label, body) => {
+    const id = await createJob();
+    const res = await request(app).put(`/api/jobs/${id}`).send(body);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+
+    const after = await request(app).get(`/api/jobs/${id}`);
+    expect(after.body.summary).toBe('Strict body');
+    expect(after.body.status).toBe('new');
+    expect(after.body.depositPaidCents ?? 0).toBe(0);
+    expect(after.body.depositStatus).not.toBe('paid');
+    expect(after.body.moneyState).not.toBe('paid');
+    expect(after.body.customerId).toBe('cust-1');
+    expect(after.body.depositStripePaymentLinkUrl).toBeUndefined();
+    expect(after.body.completedAt).toBeUndefined();
+  });
+
+  it('rejects a non-string summary and a float-shaped priority', async () => {
+    const id = await createJob();
+    expect((await request(app).put(`/api/jobs/${id}`).send({ summary: 42 })).status).toBe(400);
+    expect((await request(app).put(`/api/jobs/${id}`).send({ priority: 'asap' })).status).toBe(400);
+  });
+
+  it('accepts the allowlisted fields together', async () => {
+    const id = await createJob();
+    const res = await request(app)
+      .put(`/api/jobs/${id}`)
+      .send({ summary: 'Edited', problemDescription: 'Leaking valve', priority: 'high' });
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toBe('Edited');
+    expect(res.body.problemDescription).toBe('Leaking valve');
+    expect(res.body.priority).toBe('high');
+  });
+});

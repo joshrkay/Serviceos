@@ -3,6 +3,39 @@ import { Pool, PoolConfig } from 'pg';
 const isProd = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
 
 /**
+ * Hardening sweep 2026-10 (audit T4-F13) — TLS settings for every pool.
+ *
+ * `DB_SSL=false` keeps plain TCP (local Postgres, testcontainers). Otherwise
+ * TLS is on, and the certificate is VERIFIED when `DB_SSL_CA` holds the
+ * provider's CA certificate (PEM; newlines may be escaped as `\n` the way
+ * Railway's variable editor stores them). Without a CA we keep the historic
+ * `rejectUnauthorized: false` so an existing deploy does not break, but warn
+ * once so the gap is visible instead of silent.
+ */
+export type PgSslSetting = false | { rejectUnauthorized: boolean; ca?: string };
+
+let warnedUnverifiedTls = false;
+
+export function buildPgSsl(
+  env: { DB_SSL?: string; DB_SSL_CA?: string } = process.env,
+  warn: (message: string) => void = (m) => process.stderr.write(`${m}\n`),
+): PgSslSetting {
+  if (env.DB_SSL === 'false') return false;
+  const ca = env.DB_SSL_CA?.replace(/\\n/g, '\n').trim();
+  if (ca) return { rejectUnauthorized: true, ca };
+  if (!warnedUnverifiedTls) {
+    warnedUnverifiedTls = true;
+    warn('pg: TLS certificate verification is OFF (set DB_SSL_CA to the provider CA to enable it)');
+  }
+  return { rejectUnauthorized: false };
+}
+
+/** Test-only: let the one-shot warning fire again. */
+export function resetPgSslWarningForTests(): void {
+  warnedUnverifiedTls = false;
+}
+
+/**
  * #1090 — keep a server-side connection kill off `uncaughtException`.
  *
  * `pool.on('error')` below only covers clients that are IDLE IN THE POOL:
@@ -50,7 +83,7 @@ export function createPool(): Pool {
   if (databaseUrl) {
     config = {
       connectionString: databaseUrl,
-      ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
+      ssl: buildPgSsl(),
       max: parseInt(process.env.DB_MAX_CONNECTIONS || '20', 10),
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
@@ -64,7 +97,7 @@ export function createPool(): Pool {
       database: process.env.DB_NAME || (isProd ? undefined : 'serviceos_dev'),
       user: process.env.DB_USER || (isProd ? undefined : 'serviceos'),
       password: process.env.DB_PASSWORD || (isProd ? undefined : ''),
-      ssl: isProd ? { rejectUnauthorized: false } : false,
+      ssl: isProd ? buildPgSsl() : false,
       max: parseInt(process.env.DB_MAX_CONNECTIONS || '10', 10),
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
@@ -102,7 +135,7 @@ export function createDirectPool(): Pool | null {
 
   const pool = new Pool({
     connectionString: url,
-    ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
+    ssl: buildPgSsl(),
     // Small — only the session-lock holders and the LISTEN client use it.
     max: parseInt(process.env.DB_DIRECT_MAX_CONNECTIONS || '10', 10),
     idleTimeoutMillis: 30000,

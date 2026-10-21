@@ -641,3 +641,64 @@ describe('#1279 — appointment technician assignment routes', () => {
     expect(ok.body).toEqual({ appointmentId: id, technicianId: TECH });
   });
 });
+
+describe('PUT /api/appointments/:id — strict body allowlist (T4-F07, hardening sweep 2026-10)', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  async function createAppointment(): Promise<string> {
+    const { start, end } = tomorrowIso(24, 26);
+    const created = await request(app).post('/api/appointments').send({
+      jobId: 'job-strict',
+      scheduledStart: start,
+      scheduledEnd: end,
+      timezone: 'UTC',
+    });
+    expect(created.status).toBe(201);
+    return created.body.id as string;
+  }
+
+  it.each([
+    ['jobId', { jobId: 'job-other' }],
+    ['holdPendingApproval', { holdPendingApproval: false }],
+    ['holdExpiryAt', { holdExpiryAt: new Date().toISOString() }],
+    ['idempotencyKey', { idempotencyKey: 'x' }],
+    ['tenantId', { tenantId: '22222222-2222-4222-8222-222222222222' }],
+  ])('rejects %s with 400 and writes nothing', async (_label, body) => {
+    const id = await createAppointment();
+    const res = await request(app).put(`/api/appointments/${id}`).send(body);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+
+    const after = await request(app).get(`/api/appointments/${id}`);
+    expect(after.body.jobId).toBe('job-strict');
+    expect(after.body.holdPendingApproval).toBe(false);
+  });
+
+  it('rejects a status outside the enum and a non-string notes', async () => {
+    const id = await createAppointment();
+    expect((await request(app).put(`/api/appointments/${id}`).send({ status: 'done' })).status).toBe(400);
+    expect((await request(app).put(`/api/appointments/${id}`).send({ notes: { x: 1 } })).status).toBe(400);
+  });
+
+  it('still accepts the fields the web and mobile clients send', async () => {
+    const id = await createAppointment();
+    const cancel = await request(app)
+      .put(`/api/appointments/${id}`)
+      .send({ status: 'canceled', notes: 'Customer no-show' });
+    expect(cancel.status).toBe(200);
+    expect(cancel.body.status).toBe('canceled');
+    expect(cancel.body.notes).toBe('Customer no-show');
+
+    const id2 = await createAppointment();
+    const { start, end } = tomorrowIso(30, 32);
+    const move = await request(app)
+      .put(`/api/appointments/${id2}`)
+      .send({ scheduledStart: start, scheduledEnd: end });
+    expect(move.status).toBe(200);
+    expect(new Date(move.body.scheduledStart).toISOString()).toBe(new Date(start).toISOString());
+  });
+});

@@ -97,3 +97,25 @@ describe('malformed :id never reaches Postgres as a raw uuid comparison (#882)',
     expect(res.body.error).toBe('NOT_FOUND');
   });
 });
+
+describe('PUT /api/notes/:id — content must be a non-empty string (hardening sweep 2026-10)', () => {
+  let app: Express;
+
+  beforeEach(() => {
+    app = buildPgLikeApp();
+  });
+
+  it.each([
+    ['object content', { content: { $set: 'x' } }],
+    ['numeric content', { content: 42 }],
+    ['empty content', { content: '' }],
+    ['missing content', {}],
+    ['unknown key', { content: 'ok', isPinned: true }],
+  ])('%s is a 400 VALIDATION_ERROR', async (_label, body) => {
+    const res = await request(app)
+      .put('/api/notes/11111111-1111-1111-1111-111111111111')
+      .send(body);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+});

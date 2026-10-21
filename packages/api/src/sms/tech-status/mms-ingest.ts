@@ -50,6 +50,7 @@ import {
 } from '../../files/file-service';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
 import { createLogger, type Logger } from '../../logging/logger';
+import { assertTwilioMediaUrl } from '../../telephony/twilio-media-url';
 
 const defaultLogger = createLogger({
   service: 'sms-mms-ingest',
@@ -236,13 +237,17 @@ export function createTwilioMediaFetcher(
   fetchFn: typeof fetch = fetch,
 ): MediaFetcher {
   return async (tenantId, url) => {
+    // Hardening sweep 2026-10 — `url` is the webhook's MediaUrlN and the
+    // request carries the tenant's subaccount token: Twilio hosts only, and
+    // no redirect off them.
+    assertTwilioMediaUrl(url, 'MediaUrl');
     const creds = await resolveCredentials(tenantId);
     if (!creds) return null;
     const basic = Buffer.from(`${creds.accountSid}:${creds.authToken}`).toString('base64');
     const res = await fetchFn(url, {
       method: 'GET',
       headers: { Authorization: `Basic ${basic}` },
-      redirect: 'follow',
+      redirect: 'manual',
     });
     if (!res.ok) {
       // Never echo the URL/credentials into the error.

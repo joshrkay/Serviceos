@@ -259,6 +259,51 @@ export const createJobSchema = z.object({
 });
 
 /**
+ * Body for `PUT /api/jobs/:id` — the generic job edit. `.strict()` so an
+ * unknown key is a 400, never a silent write: the repository's `update` maps
+ * 19 keys to columns (deposit cents, money_state, status, customer_id, the
+ * Stripe payment-link URL…) and used to receive `req.body` verbatim, which
+ * let any `jobs:update` holder — technicians included, who are deliberately
+ * denied `invoices:*` — set paid deposits or close a job without the governed
+ * transition. Status moves go through `POST /api/jobs/:id/transition`;
+ * technician assignment through `/reassign` or appointment assignments.
+ */
+export const updateJobSchema = z
+  .object({
+    summary: z.string().min(1).max(500).optional(),
+    problemDescription: z.string().max(5000).optional(),
+    priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
+  })
+  .strict();
+
+export type UpdateJobBody = z.infer<typeof updateJobSchema>;
+
+/**
+ * Body for `PUT /api/appointments/:id`. `.strict()` for the same reason as
+ * {@link updateJobSchema} (audit T4-F07): the repository also writes `jobId`,
+ * `holdPendingApproval`, `holdExpiryAt` and `idempotencyKey` when present, and
+ * none of those is a client-editable field. `running_late` is the virtual
+ * status the route turns into a delay notification rather than persisting;
+ * `delayMinutes` only means anything alongside it.
+ */
+export const updateAppointmentSchema = z
+  .object({
+    scheduledStart: z.string().datetime().optional(),
+    scheduledEnd: z.string().datetime().optional(),
+    arrivalWindowStart: z.string().datetime().optional(),
+    arrivalWindowEnd: z.string().datetime().optional(),
+    timezone: z.string().min(1).optional(),
+    notes: z.string().max(5000).optional(),
+    status: z
+      .enum(['scheduled', 'confirmed', 'in_progress', 'completed', 'canceled', 'no_show', 'running_late'])
+      .optional(),
+    delayMinutes: z.number().int().positive().optional(),
+  })
+  .strict();
+
+export type UpdateAppointmentBody = z.infer<typeof updateAppointmentSchema>;
+
+/**
  * Body for `POST /api/jobs/:id/schedule` — initial schedule OR reschedule of
  * an existing job (idempotent upsert of the canonical `job-schedule:` visit).
  */
@@ -431,6 +476,13 @@ export const createNoteSchema = z.object({
   content: z.string().min(1),
   isPinned: z.boolean().optional(),
 });
+
+/** Body for `PUT /api/notes/:id` — content only, and it must be a string. */
+export const updateNoteSchema = z
+  .object({
+    content: z.string().min(1).max(20_000),
+  })
+  .strict();
 
 export const createCatalogItemSchema = z.object({
   name: z.string().trim().min(1),

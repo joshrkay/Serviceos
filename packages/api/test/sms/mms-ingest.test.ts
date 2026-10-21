@@ -347,10 +347,34 @@ describe('createTwilioMediaFetcher (RV-050)', () => {
     expect((init as { headers: Record<string, string> }).headers.Authorization).toBe(expected);
   });
 
+  it('refuses a non-Twilio MediaUrl before resolving or sending credentials (hardening sweep 2026-10)', async () => {
+    const fetchFn = vi.fn() as unknown as typeof fetch;
+    const resolve = vi.fn(async () => ({ accountSid: 'AC123', authToken: 'super-secret' }));
+    const fetcher = createTwilioMediaFetcher(resolve, fetchFn);
+    await expect(fetcher(TENANT, 'https://attacker.example/steal')).rejects.toThrow(
+      /MediaUrl is not a Twilio URL/,
+    );
+    expect(resolve).not.toHaveBeenCalled();
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('never follows redirects (a 3xx off Twilio is a failed fetch)', async () => {
+    const fetchFn = vi.fn(async () => ({ ok: false, status: 302 })) as unknown as typeof fetch;
+    const fetcher = createTwilioMediaFetcher(
+      async () => ({ accountSid: 'AC123', authToken: 'tok' }),
+      fetchFn,
+    );
+    await expect(fetcher(TENANT, 'https://api.twilio.com/media/ME1')).rejects.toThrow(
+      /^Twilio media fetch failed 302$/,
+    );
+    const [, init] = (fetchFn as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect((init as RequestInit).redirect).toBe('manual');
+  });
+
   it('returns null when the tenant has no Twilio credentials (item skipped)', async () => {
     const fetchFn = vi.fn() as unknown as typeof fetch;
     const fetcher = createTwilioMediaFetcher(async () => null, fetchFn);
-    expect(await fetcher(TENANT, 'https://x')).toBeNull();
+    expect(await fetcher(TENANT, 'https://api.twilio.com/media/ME1')).toBeNull();
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
@@ -360,6 +384,8 @@ describe('createTwilioMediaFetcher (RV-050)', () => {
       async () => ({ accountSid: 'AC123', authToken: 'super-secret' }),
       fetchFn,
     );
-    await expect(fetcher(TENANT, 'https://x')).rejects.toThrow(/^Twilio media fetch failed 404$/);
+    await expect(fetcher(TENANT, 'https://api.twilio.com/media/ME1')).rejects.toThrow(
+      /^Twilio media fetch failed 404$/,
+    );
   });
 });

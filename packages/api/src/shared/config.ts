@@ -12,6 +12,8 @@ const configSchema = z.object({
     }),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1).optional(),
+  /** PEM CA certificate for Postgres TLS; when set, server certs are verified (T4-F13). */
+  DB_SSL_CA: z.string().min(1).optional(),
   DB_HOST: z.string().default('localhost'),
   DB_PORT: z.coerce.number().int().positive().default(5432),
   DB_NAME: z.string().optional(),
@@ -19,6 +21,8 @@ const configSchema = z.object({
   DB_PASSWORD: z.string().optional(),
   CLERK_SECRET_KEY: z.string().min(1).optional(),
   CLERK_PUBLISHABLE_KEY: z.string().min(1).optional(),
+  /** Comma-separated `azp` allowlist for Clerk session tokens; unset = not enforced. */
+  CLERK_AUTHORIZED_PARTIES: z.string().min(1).optional(),
   CLERK_WEBHOOK_SECRET: z.string().optional(),
   CLERK_JWKS_URL: z.string().url().optional(),
   // P0-033 — gate for the legacy HMAC-SHA256 dev path in `verifyClerkSession`.

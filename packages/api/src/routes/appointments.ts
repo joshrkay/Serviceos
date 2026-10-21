@@ -5,6 +5,7 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   createAppointmentSchema,
+  updateAppointmentSchema,
   delayAcknowledgmentSchema,
   setAppointmentTechnicianSchema,
 } from '../shared/contracts';
@@ -18,6 +19,7 @@ import {
   listAppointmentsWithMeta,
   AppointmentRepository,
   AppointmentStatus,
+  UpdateAppointmentInput,
   DEFAULT_APPOINTMENT_LIMIT,
   MAX_APPOINTMENT_LIMIT,
 } from '../appointments/appointment';
@@ -462,20 +464,25 @@ export function createAppointmentRouter(
         // so the next customer receives an SMS. Kept on PUT for backcompat
         // with dispatcher clients (e.g. AppointmentEdit's NotifyDelayDialog);
         // technicians use POST /:id/running-late below.
-        if (req.body?.status === 'running_late') {
-          const delayMinutes: number =
-            typeof req.body.delayMinutes === 'number' && req.body.delayMinutes > 0
-              ? req.body.delayMinutes
-              : 20;
-          await handleRunningLate(req, res, delayMinutes);
+        // Strict allowlist (audit T4-F07, hardening sweep 2026-10): the
+        // repository also honours jobId / holdPendingApproval / holdExpiryAt /
+        // idempotencyKey when present, so the body must never reach it raw.
+        const body = updateAppointmentSchema.parse(req.body ?? {});
+        if (body.status === 'running_late') {
+          await handleRunningLate(req, res, body.delayMinutes ?? 20);
           return;
         }
 
-        const updates = { ...req.body };
-        if (updates.scheduledStart) updates.scheduledStart = new Date(updates.scheduledStart);
-        if (updates.scheduledEnd) updates.scheduledEnd = new Date(updates.scheduledEnd);
-        if (updates.arrivalWindowStart) updates.arrivalWindowStart = new Date(updates.arrivalWindowStart);
-        if (updates.arrivalWindowEnd) updates.arrivalWindowEnd = new Date(updates.arrivalWindowEnd);
+        const { delayMinutes: _delayMinutes, status, ...rest } = body;
+        const updates: UpdateAppointmentInput = {
+          ...(rest.timezone !== undefined ? { timezone: rest.timezone } : {}),
+          ...(rest.notes !== undefined ? { notes: rest.notes } : {}),
+          ...(status !== undefined ? { status } : {}),
+          ...(rest.scheduledStart ? { scheduledStart: new Date(rest.scheduledStart) } : {}),
+          ...(rest.scheduledEnd ? { scheduledEnd: new Date(rest.scheduledEnd) } : {}),
+          ...(rest.arrivalWindowStart ? { arrivalWindowStart: new Date(rest.arrivalWindowStart) } : {}),
+          ...(rest.arrivalWindowEnd ? { arrivalWindowEnd: new Date(rest.arrivalWindowEnd) } : {}),
+        };
 
         const result = await updateAppointment(
           req.auth!.tenantId,

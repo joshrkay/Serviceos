@@ -5,6 +5,7 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   createJobSchema,
+  updateJobSchema,
   scheduleJobSchema,
   reassignJobSchema,
   unscheduleJobSchema,
@@ -617,10 +618,13 @@ export function createJobRouter(
             'assignedTechnicianId is derived from the appointment assignment — use POST /api/jobs/:id/reassign or POST /api/appointments/:id/assignments',
           );
         }
+        // Strict allowlist (hardening sweep 2026-10): the repository writes
+        // every key it recognises, so the body must never reach it raw.
+        const input = updateJobSchema.parse(req.body ?? {});
         const result = await updateJob(
           req.auth!.tenantId,
           routeParam(req, 'id'),
-          req.body,
+          input,
           jobRepo,
           req.auth!.userId,
           auditRepo,

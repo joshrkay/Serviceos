@@ -52,6 +52,7 @@ import type { StorageProvider } from '../files/file-service';
 import { recordInboundCall } from '../voice/voice-service';
 import type { TwilioCopyRemover } from './twilio-recording-deleter';
 import { createLogger } from '../logging/logger';
+import { assertTwilioMediaUrl } from './twilio-media-url';
 
 const logger = createLogger({
   service: 'telephony.recording-webhook',
@@ -157,12 +158,18 @@ export async function fetchRecordingBytes(
   recordingUrl: string,
   accountSid: string,
   authToken: string,
+  fetchFn: typeof fetch = fetch,
 ): Promise<Buffer> {
+  // Hardening sweep 2026-10 — the URL is caller-supplied (webhook body) and
+  // the request below carries the deployment's Twilio credential. Refuse any
+  // host that is not Twilio's, and never follow a redirect off it.
+  assertTwilioMediaUrl(recordingUrl, 'RecordingUrl');
   const url = recordingUrl.endsWith('.mp3') ? recordingUrl : `${recordingUrl}.mp3`;
   const basic = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
-  const res = await fetch(url, {
+  const res = await fetchFn(url, {
     method: 'GET',
     headers: { Authorization: `Basic ${basic}`, Accept: 'audio/mpeg' },
+    redirect: 'manual',
     signal: AbortSignal.timeout(MEDIA_TRANSFER_TIMEOUT_MS),
   });
   if (!res.ok) {
