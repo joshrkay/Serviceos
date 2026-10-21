@@ -23,6 +23,8 @@ import { t, type Language } from '../i18n/i18n';
 export interface LookupAppointmentsInput {
   tenantId: string;
   customerId: string;
+  /** Only this job's records: the job on screen, or one the operator named and the resolver verified. */
+  jobId?: string;
   /** Inclusive lower bound — defaults to now. */
   dateFrom?: Date;
   /** Inclusive upper bound — defaults to no upper bound. */
@@ -116,6 +118,7 @@ export async function lookupAppointments(
       throw new Error('JobRepository.findByCustomer is required for voice lookups');
     }
     jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId);
+    if (input.jobId) jobs = jobs.filter((job) => job.id === input.jobId);
   } catch (err) {
     const message = t('lookup.appointments.error', lang);
     await recordEvent({

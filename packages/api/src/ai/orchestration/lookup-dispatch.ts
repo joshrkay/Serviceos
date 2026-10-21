@@ -469,6 +469,7 @@ export async function dispatchAssistantLookup(
         actorId: userId,
         ...(customerId ? { customerId } : {}),
         ...(jobId ? { jobId } : {}),
+        ...(pageJobId ? { listJobId: pageJobId } : {}),
         ...(customerReference ? { customerReference } : {}),
         ...(jobReference ? { jobReference } : {}),
         ...(technicianId ? { technicianId } : {}),

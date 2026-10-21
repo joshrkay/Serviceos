@@ -265,6 +265,13 @@ export interface ExecuteLookupInput {
   customerId?: string;
   /** Verified (payload jobId) or resolver-verified job UUID (D3). */
   jobId?: string;
+  /**
+   * A verified job the question was explicitly about ("which estimates are on
+   * this job?" on that job's page). Narrows the invoice, estimate and
+   * appointment lists to it. Separate from `jobId`, which other surfaces set
+   * from context the operator did not point at.
+   */
+  listJobId?: string;
   /** The spoken customer reference, when one was extracted. */
   customerReference?: string;
   /** The spoken job reference, when one was extracted (D3). */
@@ -498,6 +505,9 @@ export async function executeLookupAnswer(
   // surface-appropriate UUID correlation key (memo recording id / chat
   // per-turn lookup session id).
   const sharedInput = { tenantId, customerId: customerId!, sessionId, timezone };
+  // "Which estimates are on this job?" narrows the invoice, estimate and
+  // appointment lists to the job the operator pointed at.
+  const jobScope = input.listJobId ? { jobId: input.listJobId } : {};
 
   try {
     switch (intent) {
@@ -530,7 +540,7 @@ export async function executeLookupAnswer(
 
       case 'lookup_invoices': {
         if (!shared.jobRepo || !deps.invoiceRepo) return { kind: 'unsupported' };
-        const r = await lookupInvoices(sharedInput, {
+        const r = await lookupInvoices({ ...sharedInput, ...jobScope }, {
           jobRepo: shared.jobRepo,
           invoiceRepo: deps.invoiceRepo,
           ...events,
@@ -599,7 +609,7 @@ export async function executeLookupAnswer(
 
       case 'lookup_estimates': {
         if (!shared.jobRepo || !deps.estimateRepo) return { kind: 'unsupported' };
-        const r = await lookupEstimates(sharedInput, {
+        const r = await lookupEstimates({ ...sharedInput, ...jobScope }, {
           jobRepo: shared.jobRepo,
           estimateRepo: deps.estimateRepo,
           ...events,
@@ -686,7 +696,7 @@ export async function executeLookupAnswer(
       case 'lookup_appointments': {
         if (!shared.jobRepo || !shared.appointmentRepo) return { kind: 'unsupported' };
         // #1331 — "upcoming" is relative to the caller's clock (input.now).
-        const r = await lookupAppointments({ ...sharedInput, dateFrom: input.now }, {
+        const r = await lookupAppointments({ ...sharedInput, ...jobScope, dateFrom: input.now }, {
           jobRepo: shared.jobRepo,
           appointmentRepo: shared.appointmentRepo,
           ...events,

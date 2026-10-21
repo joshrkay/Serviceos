@@ -51,6 +51,7 @@ describe('sendTechVoiceUpdate', () => {
       messages: [{ role: 'user', content: 'used a capacitor and two hours labor' }],
       inputMode: 'voice',
       pageContext: { entityType: 'job', entityId: 'job-1' },
+      jobStatusHandled: true,
     });
     expect(out).toEqual({
       ok: true,

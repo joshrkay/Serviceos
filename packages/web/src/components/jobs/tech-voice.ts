@@ -61,6 +61,9 @@ export async function sendTechVoiceUpdate(
         messages: [{ role: 'user', content: transcript }],
         inputMode: 'voice',
         pageContext: { entityType: 'job', entityId: jobId },
+        // Status is the tech's call on this screen (the tick box), never the
+        // assistant's: an unticked "all done" must not complete the job.
+        jobStatusHandled: true,
       }),
     });
     if (!res.ok) return { ok: false };

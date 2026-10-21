@@ -106,4 +106,17 @@ describe('P11-001 — lookupAppointments skill', () => {
     expect(rows[0].intent).toBe('lookup_appointments');
     expect(rows[0].sessionId).toBe('sess-1');
   });
+
+  it('narrows to one job when the question was about that job', async () => {
+    const future = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const a = await seedJobAndAppointment({ summary: 'AC repair', scheduledStart: future });
+    await seedJobAndAppointment({ summary: 'Water heater', scheduledStart: new Date(future.getTime() + 3600_000) });
+    const result = await lookupAppointments(
+      { tenantId: 'tenant-1', customerId: 'cust-1', jobId: a.id, timezone: 'America/Los_Angeles' },
+      { jobRepo, appointmentRepo, lookupEvents },
+    );
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') return;
+    expect(result.data.appointments.map((x) => x.jobId)).toEqual([a.id]);
+  });
 });

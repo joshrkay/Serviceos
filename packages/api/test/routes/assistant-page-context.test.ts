@@ -102,7 +102,7 @@ function buildApp(
   return app;
 }
 
-function chat(app: express.Express, content: string, pageContext?: unknown) {
+function chat(app: express.Express, content: string, pageContext?: unknown, extra: Record<string, unknown> = {}) {
   return request(app)
     .post('/api/assistant/chat')
     .send({
@@ -110,6 +110,7 @@ function chat(app: express.Express, content: string, pageContext?: unknown) {
       conversationId: CONVERSATION,
       inputMode: 'voice',
       ...(pageContext ? { pageContext } : {}),
+      ...extra,
     });
 }
 
@@ -272,5 +273,16 @@ describe('chat: a chained request records and says when the open page filled a s
     }
     expect(res.body.taskType).toBe('assistant.chain');
     expect(res.body.message.content).toContain('I used the job you had open: Ana Garcia – AC not cooling.');
+  });
+});
+
+describe('chat: the technician job screen owns the job status', () => {
+  it('drafts no job edit when the screen says it handled the status', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(scriptedGateway('update_job', { jobReference: 'this job' }), resolver(notFound), proposalRepo);
+    const res = await chat(app, "all done here, system's cooling", { entityType: 'job', entityId: JOB }, { jobStatusHandled: true });
+    expect(res.status).toBe(200);
+    expect(res.body.message.content).toContain("Your status buttons set the job's status");
+    expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
   });
 });

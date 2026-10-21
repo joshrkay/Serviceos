@@ -112,6 +112,7 @@ describe('TechJobView voice update', () => {
       messages: [{ role: 'user', content: 'used a 45/5 capacitor and two hours labor' }],
       inputMode: 'voice',
       pageContext: { entityType: 'job', entityId: 'j1' },
+      jobStatusHandled: true,
     });
     // The words are kept as the field note, and nothing invented a parts list.
     expect(posts('/api/notes')).toHaveLength(1);

@@ -15,6 +15,7 @@ import { InMemoryCustomerRepository, type Customer } from '../../../src/customer
 import { InMemoryLocationRepository, type ServiceLocation } from '../../../src/locations/location';
 import { InMemoryUserRepository } from '../../../src/users/user';
 import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { InMemoryEstimateRepository, createEstimate } from '../../../src/estimates/estimate';
 
 const TENANT = 'tenant-1604-inapp';
 const TZ = 'America/New_York';
@@ -168,5 +169,41 @@ describe('dispatchAssistantLookup — the record on screen (page context)', () =
     expect(reply?.outcome).toBe('answered');
     expect(reply?.message.content).toContain('JOB-0001');
     expect(d.entityResolver.resolve).not.toHaveBeenCalled();
+  });
+
+  it('"which estimates are on this job?" lists only that job\'s estimates, not the customer\'s other jobs', async () => {
+    const d = await deps();
+    const jobRepo = d.shared.jobRepo as InMemoryJobRepository;
+    await jobRepo.create({
+      id: 'd0000000-0000-4000-8000-000000001606', tenantId: TENANT, customerId: 'cust-keller', locationId: 'loc-keller',
+      jobNumber: 'JOB-0003', summary: 'Furnace tune-up', status: 'scheduled', priority: 'normal', createdBy: 'u1',
+      createdAt: SEEDED, updatedAt: SEEDED,
+    } as Job);
+    const estimateRepo = new InMemoryEstimateRepository();
+    const estimate = (jobId: string, estimateNumber: string) =>
+      createEstimate(
+        {
+          tenantId: TENANT, jobId, estimateNumber, createdBy: 'u1',
+          lineItems: [{ id: 'li', description: 'Work', quantity: 1, unitPriceCents: 1000, totalCents: 1000, sortOrder: 0, taxable: false }],
+        },
+        estimateRepo,
+      );
+    await estimate(JOB_KELLER, 'EST-WH');
+    await estimate('d0000000-0000-4000-8000-000000001606', 'EST-FURNACE');
+
+    const reply = await dispatchAssistantLookup(
+      {
+        tenantId: TENANT,
+        userId: MIKE_CLERK,
+        intent: 'lookup_estimates',
+        extractedEntities: {},
+        message: 'which estimates are on this job?',
+        page: { customerId: 'cust-keller', jobId: JOB_KELLER },
+      },
+      { ...d, answers: { ...d.answers, estimateRepo, resolveMemberRole: async () => 'owner' } },
+    );
+    expect(reply?.outcome).toBe('answered');
+    expect(reply?.message.content).not.toContain('EST-FURNACE');
+    expect(reply?.message.content).toContain('one estimate — EST-WH');
   });
 });

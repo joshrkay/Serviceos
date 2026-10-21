@@ -21,6 +21,8 @@ import { formatCents } from './spoken-format';
 export interface LookupInvoicesInput {
   tenantId: string;
   customerId: string;
+  /** Only this job's records: the job on screen, or one the operator named and the resolver verified. */
+  jobId?: string;
   /** P11-002: spoken-summary language. Defaults to 'en'. */
   language?: Language;
   /**
@@ -113,6 +115,7 @@ export async function lookupInvoices(
     jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId, {
       includeArchived: true,
     });
+    if (input.jobId) jobs = jobs.filter((job) => job.id === input.jobId);
   } catch (err) {
     const message = t('lookup.invoices.error', lang);
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });

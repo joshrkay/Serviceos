@@ -419,6 +419,10 @@ const assistantChatRequestSchema = z.object({
   // Re-read tenant-scoped before use — see ai/resolution/page-context.ts. A
   // malformed one is dropped, never a reason to refuse the operator's turn.
   pageContext: pageContextSchema.optional().catch(undefined),
+  // The technician job screen sets status with its own buttons (and its
+  // confirm card's tick box). A turn from there never drafts a job edit, so
+  // an unticked "mark it complete" stays unticked.
+  jobStatusHandled: z.boolean().optional().catch(undefined),
 });
 
 /**
@@ -3274,6 +3278,7 @@ async function generateAssistantReply(
   // .attachments`, #1144), resolved tenant-scoped below.
   attachments?: ReadonlyArray<{ fileId: string }>,
   pageContext?: PageContext,
+  jobStatusHandled?: boolean,
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   // #1201 — an API caller can send a photo with BLANK text (the web client
@@ -3590,6 +3595,19 @@ async function generateAssistantReply(
       classifierUsage = usageOf(classification.tokenUsage);
       guardIntent = classification.intentType;
       guardConfidence = classification.confidence;
+
+      if (jobStatusHandled && classification.intentType === 'update_job') {
+        return {
+          taskType: 'assistant.update_job.status_handled',
+          model: 'intent-classifier',
+          usage: classifierUsage,
+          message: {
+            role: 'assistant' as const,
+            content: "Your status buttons set the job's status, so I left it as it is.",
+            reasoning: 'Job edits are not drafted from the technician job screen, which sets status itself.',
+          },
+        };
+      }
 
       // ── Lookup path ────────────────────────────────────────────────
       // Runs BEFORE the chain split and both dispatch maps: a lookup is a
@@ -3959,6 +3977,8 @@ async function generateAssistantReply(
           }
           // UB-A3 — thread the applicable standing instructions (≤5, keyed
           // on this segment's classified intent) into the drafting handler.
+          // Same rule as the single-intent path: the job screen owns status.
+          if (jobStatusHandled && segClass.intentType === 'update_job') continue;
           const segStandingInstructions = selectInjectedStandingInstructions(
             activeStandingInstructions,
             segClass.intentType,
@@ -5002,6 +5022,7 @@ export function createAssistantRouter(rawDeps: AssistantRouterDeps): Router {
           // #1173 — the turn's photo references, resolved tenant-scoped inside.
           parsed.attachments,
           parsed.pageContext,
+          parsed.jobStatusHandled,
         );
 
         // Story 3.11 — persist the turn so the conversation survives reload and

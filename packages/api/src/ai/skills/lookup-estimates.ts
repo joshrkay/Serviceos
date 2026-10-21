@@ -22,6 +22,8 @@ import type {
 export interface LookupEstimatesInput {
   tenantId: string;
   customerId: string;
+  /** Only this job's records: the job on screen, or one the operator named and the resolver verified. */
+  jobId?: string;
   /** Max estimates returned (most recent first). Default 5. */
   limit?: number;
   timezone?: string;
@@ -146,6 +148,7 @@ export async function lookupEstimates(
     jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId, {
       includeArchived: true,
     });
+    if (input.jobId) jobs = jobs.filter((job) => job.id === input.jobId);
   } catch (err) {
     const message = "I'm having trouble pulling up your estimates right now.";
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });
