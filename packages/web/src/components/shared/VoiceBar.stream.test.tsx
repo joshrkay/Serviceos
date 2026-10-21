@@ -208,6 +208,20 @@ describe('VoiceBar — live words', () => {
     expect(screen.queryByText('Listening…')).toBeNull();
   });
 
+  it('leaving the page while the stream is still starting closes it and never opens the recorder', async () => {
+    let resolveStart: (r: string) => void = () => {};
+    fake.start.mockImplementation(() => new Promise<string>((r) => { resolveStart = r; }));
+    const view = renderBar();
+    fireEvent.click(screen.getByTestId('voice-example-hint'));
+    await screen.findByText('Listening…');
+    view.unmount();
+    const stopsBefore = fake.stop.mock.calls.length;
+
+    await act(async () => resolveStart('connecting'));
+    expect(fake.stop.mock.calls.length).toBe(stopsBefore + 1);
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+  });
+
   it('a cancelled start does not fall back to the recorder when streaming turns out to be unavailable', async () => {
     let resolveStart: (r: string) => void = () => {};
     fake.start.mockImplementation(() => new Promise<string>((r) => { resolveStart = r; }));

@@ -399,6 +399,8 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   }, [phase]);
 
   useEffect(() => () => {
+    // Leaving the page also cancels a start still waiting on its token or mic.
+    attemptRef.current += 1;
     const recorder = mediaRecorderRef.current;
     if (recorder?.state === 'recording') recorder.stop();
     stopStream();
