@@ -38,9 +38,13 @@ function routes(opts: {
   transcribeStatus?: number;
   chat?: { status: number; body: unknown };
   notesStatus?: number;
+  transitionStatus?: number;
 }) {
   mockFetcher.mockImplementation((path: string) => {
-    if (path.includes('/transition')) return Promise.resolve(new Response('{}', { status: 200 }));
+    if (path.includes('/transition')) {
+      const status = opts.transitionStatus ?? 200;
+      return Promise.resolve(new Response(JSON.stringify(status < 300 ? {} : { message: 'Cannot complete a scheduled job' }), { status }));
+    }
     if (path.startsWith('/api/jobs/')) return Promise.resolve(new Response(JSON.stringify(JOB), { status: 200 }));
     if (path === '/api/voice/transcribe') {
       return Promise.resolve(
@@ -174,6 +178,21 @@ describe('TechJobView voice update', () => {
     await waitFor(() => expect(calls((p) => p.includes('/transition'))).toHaveLength(1));
     const [[, init]] = calls((p) => p.includes('/transition'));
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ status: 'completed' });
+    await waitFor(() => expect(posts('/api/assistant/chat')).toHaveLength(1));
+    const [[, chat]] = posts('/api/assistant/chat');
+    expect(JSON.parse((chat as RequestInit).body as string)).toMatchObject({ jobStatusHandled: true });
+  });
+
+  it('leaves a ticked status to the assistant when the transition fails', async () => {
+    routes({ transcript: "all done here, system's cooling", transitionStatus: 409 });
+    await speak();
+    await screen.findByRole('checkbox');
+    fireEvent.click(screen.getByRole('button', { name: /Send to Rivet/ }));
+    await waitFor(() => expect(posts('/api/assistant/chat')).toHaveLength(1));
+    const [[, chat]] = posts('/api/assistant/chat');
+    expect(JSON.parse((chat as RequestInit).body as string)).not.toHaveProperty('jobStatusHandled');
+    // The failure is shown, not swallowed.
+    expect(await screen.findByText('Cannot complete a scheduled job')).toBeTruthy();
   });
 
   it('follows the edited words: fixing "all done" to "waiting on parts" never completes the job', async () => {

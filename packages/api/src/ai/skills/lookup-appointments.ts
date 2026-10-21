@@ -118,43 +118,29 @@ export async function lookupAppointments(
     }
   };
 
-  let jobs: Awaited<ReturnType<NonNullable<JobRepository['findByCustomer']>>>;
-  try {
-    if (!deps.jobRepo.findByCustomer) {
-      throw new Error('JobRepository.findByCustomer is required for voice lookups');
-    }
-    // The visit on screen may belong to a canceled job; it must still be found.
-    jobs = await deps.jobRepo.findByCustomer(
-      input.tenantId,
-      input.customerId,
-      input.appointmentId ? { includeArchived: true } : undefined,
-    );
-    if (input.jobId) jobs = jobs.filter((job) => job.id === input.jobId);
-  } catch (err) {
-    const message = t('lookup.appointments.error', lang);
-    await recordEvent({
-      resultStatus: 'error',
-      resultCount: 0,
-      summary: message,
-    });
-    return {
-      status: 'error',
-      summary: message,
-      data: { error: err instanceof Error ? err.message : String(err) },
-    };
-  }
-
-  // Per-job fan-out in parallel (latency budget).
-  const apptLists = await Promise.all(
-    jobs.map((j) => deps.appointmentRepo.findByJob(input.tenantId, j.id)),
-  );
-
-  const jobById = new Map(jobs.map((j) => [j.id, j] as const));
-
   if (input.appointmentId) {
-    const visit = apptLists.flat().find((a) => a.id === input.appointmentId);
-    const job = visit ? jobById.get(visit.jobId) : undefined;
-    if (!visit || !job) {
+    // Read the visit and its job directly: the customer's job list is capped
+    // and leaves out canceled jobs, and the visit on screen may be on either.
+    let visit: Appointment | null;
+    let job: Awaited<ReturnType<JobRepository['findById']>> = null;
+    try {
+      visit = await deps.appointmentRepo.findById(input.tenantId, input.appointmentId);
+      if (visit) job = await deps.jobRepo.findById(input.tenantId, visit.jobId);
+    } catch (err) {
+      const message = t('lookup.appointments.error', lang);
+      await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });
+      return {
+        status: 'error',
+        summary: message,
+        data: { error: err instanceof Error ? err.message : String(err) },
+      };
+    }
+    if (
+      !visit ||
+      !job ||
+      job.customerId !== input.customerId ||
+      (input.jobId !== undefined && job.id !== input.jobId)
+    ) {
       const summary = t('lookup.appointments.this_visit_missing', lang);
       await recordEvent({ resultStatus: 'none', resultCount: 0, summary });
       return { status: 'none', summary, data: { appointments: [] } };
@@ -189,6 +175,34 @@ export async function lookupAppointments(
       },
     };
   }
+
+  let jobs: Awaited<ReturnType<NonNullable<JobRepository['findByCustomer']>>>;
+  try {
+    if (!deps.jobRepo.findByCustomer) {
+      throw new Error('JobRepository.findByCustomer is required for voice lookups');
+    }
+    jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId);
+    if (input.jobId) jobs = jobs.filter((job) => job.id === input.jobId);
+  } catch (err) {
+    const message = t('lookup.appointments.error', lang);
+    await recordEvent({
+      resultStatus: 'error',
+      resultCount: 0,
+      summary: message,
+    });
+    return {
+      status: 'error',
+      summary: message,
+      data: { error: err instanceof Error ? err.message : String(err) },
+    };
+  }
+
+  // Per-job fan-out in parallel (latency budget).
+  const apptLists = await Promise.all(
+    jobs.map((j) => deps.appointmentRepo.findByJob(input.tenantId, j.id)),
+  );
+
+  const jobById = new Map(jobs.map((j) => [j.id, j] as const));
 
   const items: LookupAppointmentsItem[] = [];
   for (const list of apptLists) {

@@ -160,4 +160,27 @@ describe('P11-001 — lookupAppointments skill', () => {
     );
     expect(missing).toMatchObject({ status: 'none', summary: "I couldn't find the visit you were viewing." });
   });
+  it('appointmentId finds an old visit even when the customer has more jobs than the list returns', async () => {
+    const past = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000);
+    const oldJob = await seedJobAndAppointment({ summary: 'Original install', scheduledStart: past });
+    const [visit] = await appointmentRepo.findByJob('tenant-1', oldJob.id);
+    for (let i = 0; i < 205; i++) {
+      await createJob(
+        { tenantId: 'tenant-1', customerId: 'cust-1', locationId: 'loc-1', summary: `Visit ${i}`, createdBy: 'u-1' },
+        jobRepo,
+      );
+    }
+    const r = await lookupAppointments(
+      { tenantId: 'tenant-1', customerId: 'cust-1', appointmentId: visit.id },
+      { jobRepo, appointmentRepo },
+    );
+    expect(r.summary).toMatch(/^This visit was .* for Original install\.$/);
+
+    // Another customer's visit is not answered.
+    const other = await lookupAppointments(
+      { tenantId: 'tenant-1', customerId: 'cust-2', appointmentId: visit.id },
+      { jobRepo, appointmentRepo },
+    );
+    expect(other.summary).toBe("I couldn't find the visit you were viewing.");
+  });
 });

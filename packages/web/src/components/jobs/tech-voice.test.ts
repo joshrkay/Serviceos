@@ -60,10 +60,10 @@ describe('sendTechVoiceUpdate', () => {
     expect(needsFieldNote(out)).toBe(true);
   });
 
-  it('leaves status to the screen only when the screen offered one', async () => {
-    const body = async (statusOffered: boolean) => {
+  it('leaves status to the screen only when the screen settled it', async () => {
+    const body = async (statusHandled: boolean) => {
       const apiFetch = fetcher(new Response(JSON.stringify({ message: { content: 'ok' } }), { status: 200 }));
-      await sendTechVoiceUpdate(apiFetch, 'job-1', 'all done here', statusOffered);
+      await sendTechVoiceUpdate(apiFetch, 'job-1', 'all done here', statusHandled);
       return JSON.parse((apiFetch.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
     };
     expect(await body(true)).toMatchObject({ jobStatusHandled: true });

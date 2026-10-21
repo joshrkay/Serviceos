@@ -823,7 +823,8 @@ export function TechJobView({
 
   // A status the tech confirmed on the voice card: the same audited
   // transition the status buttons post, with the same error handling.
-  async function applyVoiceStatus(status: TechStatus) {
+  /** True when the job now has the status (applied, or already there). */
+  async function applyVoiceStatus(status: TechStatus): Promise<boolean> {
     setStatusError(null);
     const apiStatus = statusStep(status).apiStatus;
     // Skip when unchanged — the API rejects self-transitions (e.g. 'waiting'
@@ -842,21 +843,27 @@ export function TechJobView({
         setJobData({ ...jobData, status: apiStatus });
       } catch (err) {
         setStatusError(err instanceof Error ? err.message : 'Failed to update status');
-        return;
+        return false;
       }
     }
     setTechStatus(status);
     logStatusActivity(`Marked by voice: ${statusStep(status).label}`);
+    return true;
   }
 
   async function handleVoiceResult(result: VoiceResult) {
-    if (result.statusUpdate) await applyVoiceStatus(result.statusUpdate);
+    // Status is handled here only when the tech unticked it or it applied: a
+    // ticked status whose transition failed stays with the assistant, which
+    // can draft it for approval instead of dropping it.
+    const statusHandled = result.statusUpdate
+      ? await applyVoiceStatus(result.statusUpdate)
+      : result.statusOffered;
 
     const outcome: TechVoiceOutcome = await sendTechVoiceUpdate(
       apiFetch,
       id,
       result.transcript,
-      result.statusOffered,
+      statusHandled,
     );
     let noteFailed = false;
     if (needsFieldNote(outcome)) {
