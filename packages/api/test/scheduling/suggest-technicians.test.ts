@@ -16,7 +16,7 @@ import { User } from '../../src/users/user';
 
 const s = (over: Partial<TechnicianSuggestion>): TechnicianSuggestion => ({
   technicianId: 't', name: 'T', feasible: true, reasons: [], warningCount: 0,
-  travelFromPrevSeconds: null, travelEstimateSource: null, isCurrent: false, overlaps: [],
+  travelFromPrevSeconds: null, travelEstimateSource: null, travelUnverified: false, isCurrent: false, overlaps: [],
   ...over,
 });
 
@@ -102,6 +102,24 @@ describe('overlapMinutes', () => {
 });
 
 describe('toSuggestion', () => {
+  const clean: FeasibilityResult = {
+    feasible: true, blocking: [], warnings: [], info: [], travelTime: null, skillConstraints: 'none_configured',
+  };
+  it('marks an earlier visit whose drive could not be measured as unverified, not as no earlier visit', () => {
+    const unmeasured: FeasibilityResult = {
+      ...clean,
+      info: [{ check: 'travel_time', severity: 'info', message: 'missing coordinates', metadata: { kind: 'fromPrev' } }],
+      travelTime: { fromPrevSeconds: null, toNextSeconds: null, estimateSource: 'unknown', degraded: false },
+    };
+    expect(toSuggestion(user('t1'), unmeasured, false).travelUnverified).toBe(true);
+    expect(toSuggestion(user('t1'), clean, false).travelUnverified).toBe(false);
+    const nextOnly: FeasibilityResult = {
+      ...unmeasured,
+      info: [{ check: 'travel_time', severity: 'info', message: 'missing coordinates', metadata: { kind: 'toNext' } }],
+    };
+    expect(toSuggestion(user('t1'), nextOnly, false).travelUnverified).toBe(false);
+  });
+
   it('lists blocking reasons before warnings and carries the drive', () => {
     const result: FeasibilityResult = {
       feasible: false,
@@ -113,7 +131,7 @@ describe('toSuggestion', () => {
     };
     expect(toSuggestion(user('t1'), result, true)).toEqual({
       technicianId: 't1', name: 't1', feasible: false, reasons: ['Overlaps', 'Tight drive'],
-      warningCount: 1, travelFromPrevSeconds: 900, travelEstimateSource: 'google', isCurrent: true,
+      warningCount: 1, travelFromPrevSeconds: 900, travelEstimateSource: 'google', travelUnverified: false, isCurrent: true,
       overlaps: [],
     });
   });
@@ -158,18 +176,18 @@ describe('suggestTechnicians', () => {
     expect(out[0].overlaps).toEqual([]);
   });
 
-  it('skips non-technicians and inactive members, and marks the current assignee', async () => {
+  it('skips non-technicians and inactive members, and marks everyone already on the visit', async () => {
     const out = await suggestTechnicians(deps(), {
-      tenantId: 't-1', appointment: appt(), currentTechnicianId: 'cur',
+      tenantId: 't-1', appointment: appt(), assignedTechnicianIds: ['cur', 'crew'],
       candidates: [
         user('cur'),
+        user('crew'),
         user('disp', { role: 'dispatcher' }),
         user('gone', { deletedAt: new Date() }),
         user('susp', { status: 'suspended' }),
       ],
     });
-    expect(out.map((r) => r.technicianId)).toEqual(['cur']);
-    expect(out[0].isCurrent).toBe(true);
+    expect(out.map((r) => [r.technicianId, r.isCurrent])).toEqual([['crew', true], ['cur', true]]);
   });
 
   it('checks at most MAX_SUGGESTION_CANDIDATES technicians', async () => {

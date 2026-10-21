@@ -168,7 +168,9 @@ export function createSchedulingRouter(
           tenantId,
           appointment,
           candidates,
-          currentTechnicianId: assignments.find((a) => a.isPrimary)?.technicianId,
+          // Crew too: a crew member "reassigned" as primary would collide
+          // with their own existing row (no_double_booking).
+          assignedTechnicianIds: assignments.map((a) => a.technicianId),
         });
         res.json({ appointmentId: appointment.id, suggestions });
       } catch (err) {

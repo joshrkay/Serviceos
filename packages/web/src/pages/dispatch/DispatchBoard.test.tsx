@@ -467,7 +467,7 @@ describe('P6-025 — DispatchBoard drag-and-drop wires schedule proposals', () =
                 Promise.resolve({
                   suggestions: [
                     { technicianId: 'tech-2', name: 'Alice Park', feasible: true, reasons: [], warningCount: 0,
-                      travelFromPrevSeconds: 600, travelEstimateSource: 'google', isCurrent: false, overlaps: [] },
+                      travelFromPrevSeconds: 600, travelEstimateSource: 'google', travelUnverified: false, isCurrent: false, overlaps: [] },
                   ],
                 }),
             }

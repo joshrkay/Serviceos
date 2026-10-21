@@ -14,7 +14,7 @@ const clash: SuggestionOverlap = {
 
 const sug = (over: Partial<TechnicianSuggestion>): TechnicianSuggestion => ({
   technicianId: 't', name: 'T', feasible: true, reasons: [], warningCount: 0,
-  travelFromPrevSeconds: null, travelEstimateSource: null, isCurrent: false, overlaps: [],
+  travelFromPrevSeconds: null, travelEstimateSource: null, travelUnverified: false, isCurrent: false, overlaps: [],
   ...over,
 });
 
@@ -28,9 +28,13 @@ function respondWith(suggestions: TechnicianSuggestion[], ok = true) {
 
 describe('travelLabel', () => {
   it('rounds the drive to minutes, at least one, and names an unknown drive', () => {
-    expect(travelLabel({ travelFromPrevSeconds: 610 })).toBe('10 min from previous visit');
-    expect(travelLabel({ travelFromPrevSeconds: 5 })).toBe('1 min from previous visit');
-    expect(travelLabel({ travelFromPrevSeconds: null })).toBe('No earlier visit to drive from');
+    expect(travelLabel({ travelFromPrevSeconds: 610, travelUnverified: false })).toBe('10 min from previous visit');
+    expect(travelLabel({ travelFromPrevSeconds: 5, travelUnverified: false })).toBe('1 min from previous visit');
+    expect(travelLabel({ travelFromPrevSeconds: null, travelUnverified: false })).toBe('No earlier visit to drive from');
+    // An earlier visit exists but an address has no coordinates: say so, never "no earlier visit".
+    expect(travelLabel({ travelFromPrevSeconds: null, travelUnverified: true })).toBe(
+      'Drive time unknown (an address is not on the map)',
+    );
   });
 });
 

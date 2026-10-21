@@ -40,7 +40,12 @@ export interface TechnicianSuggestion {
   /** Drive from the tech's previous visit that day; null when not known. */
   travelFromPrevSeconds: number | null;
   travelEstimateSource: 'google' | 'haversine' | 'unknown' | null;
-  /** True for the technician already assigned as primary. */
+  /**
+   * True when there IS an earlier visit but the drive could not be measured
+   * (an address without coordinates) — not the same as having no earlier visit.
+   */
+  travelUnverified: boolean;
+  /** True for a technician already on this visit (primary or crew). */
   isCurrent: boolean;
   /** Clashing visits with their times, so the board can say when, not just that. */
   overlaps: SuggestionOverlap[];
@@ -65,6 +70,9 @@ export function toSuggestion(
     warningCount: result.warnings.length,
     travelFromPrevSeconds: result.travelTime?.fromPrevSeconds ?? null,
     travelEstimateSource: result.travelTime?.estimateSource ?? null,
+    travelUnverified:
+      (result.travelTime?.fromPrevSeconds ?? null) === null &&
+      result.info.some((i) => i.check === 'travel_time' && i.metadata?.kind === 'fromPrev'),
     isCurrent,
     overlaps,
   };
@@ -127,13 +135,15 @@ export interface SuggestTechniciansInput {
   appointment: Appointment;
   /** The tenant's users; filtered here to active technicians. */
   candidates: readonly User[];
-  currentTechnicianId?: string;
+  /** Everyone already on the visit — primary and crew. */
+  assignedTechnicianIds?: readonly string[];
 }
 
 export async function suggestTechnicians(
   deps: FeasibilityDependencies,
   input: SuggestTechniciansInput,
 ): Promise<TechnicianSuggestion[]> {
+  const assigned = new Set(input.assignedTechnicianIds ?? []);
   const technicians = input.candidates
     .filter((u) => u.role === 'technician' && isActiveMember(u))
     .slice(0, MAX_SUGGESTION_CANDIDATES);
@@ -150,7 +160,7 @@ export async function suggestTechnicians(
         deps,
       );
       const overlaps = await loadOverlaps(deps, input.tenantId, input.appointment, result);
-      return toSuggestion(tech, result, tech.id === input.currentTechnicianId, overlaps);
+      return toSuggestion(tech, result, assigned.has(tech.id), overlaps);
     }),
   );
   return rankSuggestions(suggestions);

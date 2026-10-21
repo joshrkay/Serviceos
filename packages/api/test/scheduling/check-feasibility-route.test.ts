@@ -106,12 +106,14 @@ describe('POST /api/dispatch/check-feasibility', () => {
 describe('GET /api/dispatch/appointments/:id/suggested-technicians', () => {
   const APPT_ID = '11111111-1111-4111-8111-111111111111';
 
-  function suggestApp(appts: Appointment[], users: any[], primaryTechId?: string) {
+  function suggestApp(appts: Appointment[], users: any[], primaryTechId?: string, crewTechId?: string) {
     const deps: FeasibilityDependencies = {
       assignmentRepo: {
         findByTechnician: async () => [],
-        findByAppointment: async () =>
-          primaryTechId ? [{ appointmentId: APPT_ID, technicianId: primaryTechId, isPrimary: true }] : [],
+        findByAppointment: async () => [
+          ...(primaryTechId ? [{ appointmentId: APPT_ID, technicianId: primaryTechId, isPrimary: true }] : []),
+          ...(crewTechId ? [{ appointmentId: APPT_ID, technicianId: crewTechId, isPrimary: false }] : []),
+        ],
       } as any,
       appointmentRepo: {
         findById: async (_t: string, id: string) => appts.find((a) => a.id === id) ?? null,
@@ -150,6 +152,14 @@ describe('GET /api/dispatch/appointments/:id/suggested-technicians', () => {
     expect(res.body.appointmentId).toBe(APPT_ID);
     expect(res.body.suggestions.map((s: any) => s.technicianId)).toEqual(['tech-a', 'tech-b']);
     expect(res.body.suggestions[1]).toMatchObject({ name: 'Bo', feasible: true, isCurrent: true });
+  });
+
+  it('marks a crew member with no primary as already on the visit, so the board never offers them', async () => {
+    const app = suggestApp([appt({ id: APPT_ID })], [tech('tech-a', 'Al'), tech('tech-c', 'Cy')], undefined, 'tech-c');
+    const res = await request(app).get(`/api/dispatch/appointments/${APPT_ID}/suggested-technicians`);
+    expect(res.status).toBe(200);
+    const byId = Object.fromEntries(res.body.suggestions.map((s: any) => [s.technicianId, s.isCurrent]));
+    expect(byId).toEqual({ 'tech-a': false, 'tech-c': true });
   });
 
   it('returns 404 for an unknown appointment', async () => {

@@ -21,6 +21,7 @@ export interface TechnicianSuggestion {
   warningCount: number;
   travelFromPrevSeconds: number | null;
   travelEstimateSource: 'google' | 'haversine' | 'unknown' | null;
+  travelUnverified: boolean;
   isCurrent: boolean;
   overlaps: SuggestionOverlap[];
 }
@@ -28,8 +29,14 @@ export interface TechnicianSuggestion {
 /** How many ranked techs the card shows; the rest are a drag away. */
 export const SHOWN_SUGGESTIONS = 3;
 
-export function travelLabel(s: Pick<TechnicianSuggestion, 'travelFromPrevSeconds'>): string {
-  if (s.travelFromPrevSeconds === null) return 'No earlier visit to drive from';
+export function travelLabel(
+  s: Pick<TechnicianSuggestion, 'travelFromPrevSeconds' | 'travelUnverified'>,
+): string {
+  if (s.travelFromPrevSeconds === null) {
+    return s.travelUnverified
+      ? 'Drive time unknown (an address is not on the map)'
+      : 'No earlier visit to drive from';
+  }
   const minutes = Math.max(1, Math.round(s.travelFromPrevSeconds / 60));
   return `${minutes} min from previous visit`;
 }
