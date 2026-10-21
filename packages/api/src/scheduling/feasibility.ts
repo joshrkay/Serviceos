@@ -122,22 +122,30 @@ async function locationCoordsFor(
   deps: FeasibilityDependencies,
   tenantId: string,
   jobId: string,
-): Promise<{ coords: LatLng | null }> {
+): Promise<LocationCoords> {
   const job = await deps.jobRepo.findById(tenantId, jobId);
   const locationId = (job as any)?.locationId as string | undefined;
   if (!locationId) return { coords: null };
   return coordsOfLocation(deps, tenantId, locationId);
 }
 
+/** `unplaceable` is true when the geocode sweep gave up on the address, so waiting will not fill it in. */
+interface LocationCoords {
+  coords: LatLng | null;
+  unplaceable?: boolean;
+}
+
 async function coordsOfLocation(
   deps: FeasibilityDependencies,
   tenantId: string,
   locationId: string,
-): Promise<{ coords: LatLng | null }> {
+): Promise<LocationCoords> {
   const loc = await deps.locationRepo.findById(tenantId, locationId);
   const lat = (loc as any)?.latitude;
   const lng = (loc as any)?.longitude;
-  if (typeof lat !== 'number' || typeof lng !== 'number') return { coords: null };
+  if (typeof lat !== 'number' || typeof lng !== 'number') {
+    return { coords: null, unplaceable: (loc as any)?.geocodeStatus === 'failed' };
+  }
   return { coords: { latitude: lat, longitude: lng } };
 }
 
@@ -211,12 +219,21 @@ async function travelTimeIssues(
     if (!neighbor) continue;
     const neighborCoords = await locationCoordsFor(deps, input.tenantId, neighbor.jobId);
     if (!target.coords || !neighborCoords.coords) {
+      // Dispatch FR-2 — an address the geocoder could not find will never get
+      // coordinates on its own; say so, so the owner fixes the address.
+      const unplaceable = Boolean(target.unplaceable || neighborCoords.unplaceable);
       issues.push({
         check: 'travel_time' as const,
         severity: 'info' as const,
-        message: 'Travel-time unverified — neighbor or target location is missing coordinates.',
+        message: unplaceable
+          ? 'Travel-time unverified — an address on this route could not be found on the map. Check it for typos.'
+          : 'Travel-time unverified — neighbor or target location is missing coordinates.',
         conflictingEntityId: neighbor.id,
-        metadata: { reason: 'missing_coords', neighborAppointmentId: neighbor.id, kind },
+        metadata: {
+          reason: unplaceable ? 'address_not_found' : 'missing_coords',
+          neighborAppointmentId: neighbor.id,
+          kind,
+        },
       });
       continue;
     }

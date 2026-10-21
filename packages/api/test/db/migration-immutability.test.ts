@@ -626,6 +626,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['324_seeded_price_baseline', '19a3806bcb2f0be4cc31345f6c06d8a2b2a780da20afc3535c4243d7907ca628'],
   // U1 reply-gap — call_transcript_turns.transport / reply timing columns + 2 NOT VALID CHECKs + partial index.
   ['326_call_transcript_turns_reply_timing', 'bad452623ef0091588b40ccd2f8408de9935ee9ceb5d1fdae8386ef11acfe65b'],
+  // Dispatch FR-2 phase 1 — service_locations geocode status/attempts/geocoded_at + 1 NOT VALID CHECK + partial index.
+  ['327_service_locations_geocode_status', '8de7949551f27df07e557b82ce08edab52d318b0034fe46fce0230330c248c78'],
 ];
 
 function hashMigration(value: string): string {

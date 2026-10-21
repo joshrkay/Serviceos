@@ -23,7 +23,7 @@ function mkAppt(over: Partial<Appointment> = {}): Appointment {
 function depsWithNeighbor(opts: {
   neighbor?: Appointment & { locationId?: string };
   targetLocationId?: string;
-  locations?: Record<string, { latitude?: number; longitude?: number }>;
+  locations?: Record<string, { latitude?: number; longitude?: number; geocodeStatus?: string }>;
   jobs?: Record<string, { locationId?: string }>;
   travelSeconds?: number;
 }): FeasibilityDependencies {
@@ -94,6 +94,28 @@ describe('checkFeasibility — travel-time sub-check', () => {
     );
     expect(r.warnings.some((w) => w.check === 'travel_time')).toBe(false);
     expect(r.info.some((i) => i.check === 'travel_time' && (i.metadata as any)?.reason === 'missing_coords')).toBe(true);
+  });
+
+  // Dispatch FR-2 — an address the geocode sweep gave up on is named as such.
+  it('says the address could not be found when the geocode sweep failed it', async () => {
+    const target = mkAppt({ jobId: 'j-target' });
+    const prev = mkAppt({
+      id: 'a-prev', jobId: 'j-prev',
+      scheduledStart: new Date('2026-05-17T08:00:00Z'),
+      scheduledEnd: new Date('2026-05-17T09:30:00Z'),
+    });
+    const r = await checkFeasibility(
+      { tenantId: 't-1', appointment: target, proposedTechnicianId: 'tech-1',
+        proposedScheduledStart: target.scheduledStart, proposedScheduledEnd: target.scheduledEnd },
+      depsWithNeighbor({
+        neighbor: prev,
+        jobs: { 'j-target': { locationId: 'L-target' }, 'j-prev': { locationId: 'L-prev' } },
+        locations: { 'L-target': SF, 'L-prev': { geocodeStatus: 'failed' } },
+      }),
+    );
+    const info = r.info.find((i) => i.check === 'travel_time');
+    expect((info?.metadata as any)?.reason).toBe('address_not_found');
+    expect(info?.message).toMatch(/could not be found on the map/);
   });
 
   // #1478 — a canceled visit is not a stop the technician drives from/to.

@@ -8124,6 +8124,37 @@ export const MIGRATIONS = {
       ON call_transcript_turns (tenant_id, started_at DESC)
       WHERE transport IS NOT NULL;
   `,
+
+  // Dispatch FR-2 phase 1 — geocoding state for service locations. latitude/
+  // longitude existed since 015 but nothing ever wrote them, so every
+  // travel-time feasibility check ended in 'missing_coords'. The geocode
+  // sweep (workers/geocode-locations-sweep.ts) fills them:
+  //   geocode_status   — 'pending' (needs a lookup), 'ok' (coords present),
+  //                      'failed' (address not found, or retries exhausted)
+  //   geocode_attempts — transient-failure count; resets on address change
+  //   geocoded_at      — when the last terminal outcome was written
+  // Rows that already carry coordinates are 'ok' (idempotent on replay: it
+  // only touches pending rows that have both coordinates). CHECK is NOT VALID
+  // per docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md.
+  // The partial index serves the sweep's pending-row scan.
+  '327_service_locations_geocode_status': `
+    ALTER TABLE service_locations
+      ADD COLUMN IF NOT EXISTS geocode_status TEXT NOT NULL DEFAULT 'pending',
+      ADD COLUMN IF NOT EXISTS geocode_attempts INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS geocoded_at TIMESTAMPTZ;
+    ALTER TABLE service_locations
+      DROP CONSTRAINT IF EXISTS service_locations_geocode_status_check,
+      ADD CONSTRAINT service_locations_geocode_status_check
+        CHECK (geocode_status IN ('pending', 'ok', 'failed')) NOT VALID;
+    UPDATE service_locations
+       SET geocode_status = 'ok'
+     WHERE geocode_status = 'pending'
+       AND latitude IS NOT NULL
+       AND longitude IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_service_locations_geocode_pending
+      ON service_locations (geocode_attempts, updated_at)
+      WHERE geocode_status = 'pending' AND is_archived = false;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
