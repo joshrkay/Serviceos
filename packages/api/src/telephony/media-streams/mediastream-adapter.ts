@@ -588,6 +588,14 @@ interface ReplyAnchor {
   turnKey: string;
   lastWordMs?: number;
   stamped: boolean;
+  /**
+   * True once a filler's first-audible mark was sent for this final. Lives on
+   * the anchor, not the adapter, so a filler still streaming for an earlier
+   * final can never mark (or suppress the marking of) a later one.
+   */
+  audibleMarked: boolean;
+  /** True once this final's branch finished having spoken nothing: nothing may be timed against it again. */
+  disarmed: boolean;
   /** The still-unanswered anchor this one displaced, restored if this final speaks nothing. */
   resume: ReplyAnchor | null;
 }
@@ -756,12 +764,6 @@ interface RuntimeState {
    * Bumping outboundTurnId cancels it the same way as post-answer fillers.
    */
   earlyFillerTurnId: number | null;
-  /**
-   * U1/U2 — true after early filler has contributed the turn's first-audible
-   * frame (so first-audio latency is measured once). Distinct from
-   * awaitingFirstAudioFrame which still tracks first REAL (non-filler) TTS.
-   */
-  earlyFillerFirstAudioObserved: boolean;
   /**
    * Consent ordering — per-TURN completion flag. Set true ONLY where a turn
    * finished playing its COMPLETE real (non-filler) TTS: the streaming loop
@@ -1275,7 +1277,6 @@ export class TwilioMediaStreamAdapter {
       fillerActive: false,
       earlyFillerTimer: null,
       earlyFillerTurnId: null,
-      earlyFillerFirstAudioObserved: false,
       turnRealAudioComplete: false,
       turnTtsUnavailable: false,
       turnAudioBytes: 0,
@@ -2210,7 +2211,9 @@ export class TwilioMediaStreamAdapter {
       turnKey,
       ...(lastWordMs !== undefined ? { lastWordMs } : {}),
       stamped: false,
-      resume: prior && !prior.stamped ? prior : null,
+      audibleMarked: false,
+      disarmed: false,
+      resume: prior && !prior.stamped && !prior.disarmed ? prior : null,
     };
     this.state.replyAnchor = replyAnchor;
     const callerTiming: CallerTurnTiming = {
@@ -2220,7 +2223,6 @@ export class TwilioMediaStreamAdapter {
       ...(lastWordMs !== undefined ? { lastWordAt: new Date(lastWordMs) } : {}),
     };
     this.state.awaitingFirstAudioFrame = true;
-    this.state.earlyFillerFirstAudioObserved = false;
 
     // UB-C1 trigger (b) — explicit language request ("hablo español" /
     // "switch to english"). Deterministic pre-scan; when it performs a
@@ -3425,6 +3427,9 @@ export class TwilioMediaStreamAdapter {
 
     const delayMs = this.deps.fillerDelayMs ?? 250;
     const lang = this.currentSpokenLanguage();
+    // The filler belongs to the final that armed it: captured now, because by
+    // the time its frames stream a later final may own `state.replyAnchor`.
+    const anchor = this.state.replyAnchor;
     const timer = setTimeout(() => {
       this.state.earlyFillerTimer = null;
       if (this.state.closed || this.state.ttsController) return;
@@ -3441,7 +3446,7 @@ export class TwilioMediaStreamAdapter {
       this.state.earlyFillerTurnId = turnId;
       this.state.agentSpeaking = true;
       this.state.fillerActive = true;
-      void this.streamPcmAsMedia(pcm, turnId, /* isFiller */ true).catch(() => undefined);
+      void this.streamPcmAsMedia(pcm, turnId, anchor, /* isFiller */ true).catch(() => undefined);
       if (this.state.session) {
         this.state.session.events.emit(
           VOICE_EVENT_CHANNEL,
@@ -3546,6 +3551,10 @@ export class TwilioMediaStreamAdapter {
     const delayMs = this.deps.fillerDelayMs ?? 250;
     const engine = this.deps.fillerEngine;
     const cache = this.deps.fillerCache;
+    // The reply this turn speaks is timed against the final that is current
+    // NOW (bound right before it speaks); a later final must not take over its
+    // filler or its real frames while they stream.
+    const anchor = this.state.replyAnchor;
 
     // Mutable local copy so we can rebind after filler-cancellation bump.
     let turnId = turnIdIn;
@@ -3588,7 +3597,7 @@ export class TwilioMediaStreamAdapter {
           this.state.fillerActive = true;
           // Best-effort emission — do not await; cancellation is handled
           // by cancelActiveFiller() when real audio arrives.
-          void this.streamPcmAsMedia(pcm, turnId, /* isFiller */ true).catch(() => undefined);
+          void this.streamPcmAsMedia(pcm, turnId, anchor, /* isFiller */ true).catch(() => undefined);
           if (this.state.session) {
             this.state.session.events.emit(
               VOICE_EVENT_CHANNEL,
@@ -3633,7 +3642,7 @@ export class TwilioMediaStreamAdapter {
             }
             if (chunk.pcm.length > 0) {
               streamedRealAudio = true;
-              await this.streamPcmAsMedia(chunk.pcm, turnId);
+              await this.streamPcmAsMedia(chunk.pcm, turnId, anchor);
             }
             if (chunk.isFinal) {
               sawFinalChunk = true;
@@ -3680,7 +3689,7 @@ export class TwilioMediaStreamAdapter {
           if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
             if (fillerTimer) clearTimeout(fillerTimer);
             cancelActiveFiller();
-            const recovered = await this.recoverTurnAfterStreamFailure(ttsProvider, text, lang, turnId);
+            const recovered = await this.recoverTurnAfterStreamFailure(ttsProvider, text, lang, turnId, anchor);
             if (!recovered) this.state.turnTtsUnavailable = true;
             // OBS — fired after the recovery attempt (buffered synth /
             // filler / dead-air-avoided) has already run; never alters it.
@@ -3717,7 +3726,7 @@ export class TwilioMediaStreamAdapter {
             { contentType: result.contentType, provider: result.provider, tenantId: this.state.tenantId ?? undefined },
           );
         } else if (turnId === this.state.outboundTurnId && this.state.agentSpeaking) {
-          await this.streamPcmAsMedia(result.audio, turnId);
+          await this.streamPcmAsMedia(result.audio, turnId, anchor);
           // Consent ordering — the full buffered synth of this turn's text
           // streamed, so the caller heard the COMPLETE real TTS. A zero-length
           // buffer emits no media frames at all (streamPcmAsMedia loops zero
@@ -3819,6 +3828,7 @@ export class TwilioMediaStreamAdapter {
     text: string,
     lang: SessionLanguage,
     turnId: number,
+    anchor: ReplyAnchor | null,
   ): Promise<boolean> {
     let result: Awaited<ReturnType<TtsProvider['synthesize']>> | null = null;
     try {
@@ -3842,7 +3852,7 @@ export class TwilioMediaStreamAdapter {
       turnId === this.state.outboundTurnId &&
       this.state.agentSpeaking
     ) {
-      await this.streamPcmAsMedia(result.audio, turnId);
+      await this.streamPcmAsMedia(result.audio, turnId, anchor);
       // Consent ordering — recovery re-synthesized and streamed the WHOLE
       // turn text, so the caller heard the complete real TTS (after a hiccup).
       // A zero-length buffer is not `playable` (it emits no media frames, so
@@ -3877,7 +3887,7 @@ export class TwilioMediaStreamAdapter {
       const filler = engine.selectNext({ language: lang });
       const pcm = filler ? cache.get(filler.id) : undefined;
       if (pcm) {
-        await this.streamPcmAsMedia(pcm, turnId, /* isFiller */ true);
+        await this.streamPcmAsMedia(pcm, turnId, anchor, /* isFiller */ true);
         // T2-F05 — the apology filler is the last thing the caller hears on
         // this turn; arm so their silence after it still reprompts/escalates.
         this.armSilenceOnTurnEnd(turnId);
@@ -3901,7 +3911,18 @@ export class TwilioMediaStreamAdapter {
    * Pacing: when ≥ TWILIO_MAX_UNACKED_MARKS marks are unacked, we yield
    * to give Twilio a chance to ack before pushing more audio.
    */
-  private async streamPcmAsMedia(pcm: Buffer, turnId: number, isFiller = false): Promise<void> {
+  private async streamPcmAsMedia(
+    pcm: Buffer,
+    turnId: number,
+    /**
+     * U1 — the final this stream answers, captured by the caller when the
+     * stream was launched. Reply-timing marks use THIS anchor, never the
+     * adapter's current `state.replyAnchor`: a later final can replace that
+     * while this stream is still emitting frames.
+     */
+    anchor: ReplyAnchor | null,
+    isFiller = false,
+  ): Promise<void> {
     if (!this.state.streamSid) return;
     const FRAME_BYTES_16K = 640; // 20 ms @ 16 kHz, 16-bit mono
     const MARK_EVERY_N_FRAMES = 25; // ~500ms at 20ms/frame
@@ -3934,13 +3955,20 @@ export class TwilioMediaStreamAdapter {
       // thinking-gap arm is measurable. Still emit audio_frame_emitted only
       // for REAL TTS (awaitingFirstAudioFrame) so TTFA graders stay answer-
       // focused; first-audible is observed via observeTurnLatency once.
+      // Only the CURRENT, still-armed anchor marks: a filler outliving its own
+      // final (a later final replaced the anchor, or its branch was disarmed)
+      // has no say in the new final's timing, and the shared latency clock
+      // already belongs to that later final.
       if (
         isFiller &&
-        !this.state.earlyFillerFirstAudioObserved &&
+        anchor !== null &&
+        anchor === this.state.replyAnchor &&
+        !anchor.audibleMarked &&
+        !anchor.disarmed &&
         this.state.turnLatencyStartMs !== null
       ) {
-        this.state.earlyFillerFirstAudioObserved = true;
-        this.markFirstAudibleFrame(turnId);
+        anchor.audibleMarked = true;
+        this.markFirstAudibleFrame(turnId, anchor);
         observeTurnLatency(this.state.turnLatencyStartMs);
         // Keep turnLatencyStartMs for optional real-TTS delta until real
         // frame arrives; clear so we don't double-observe if only filler.
@@ -3966,7 +3994,7 @@ export class TwilioMediaStreamAdapter {
         // U1 — bracket the first REAL frame with a mark whose ack is the
         // caller-perceived reply gap's stop point (the enqueue is not: an
         // early filler may still be playing ahead of this frame).
-        this.markFirstRealFrame(turnId);
+        this.markFirstRealFrame(turnId, anchor);
       }
       frameCount++;
 
@@ -4008,9 +4036,8 @@ export class TwilioMediaStreamAdapter {
    * re-arms `awaitingFirstAudioFrame`, but the first real frame already
    * decided this turn's gap.
    */
-  private markFirstRealFrame(turnId: number): void {
-    const anchor = this.state.replyAnchor;
-    if (!anchor || anchor.stamped || !this.state.streamSid) return;
+  private markFirstRealFrame(turnId: number, anchor: ReplyAnchor | null): void {
+    if (!anchor || anchor.stamped || anchor.disarmed || !this.state.streamSid) return;
     anchor.stamped = true;
     const name = `${FIRST_REAL_MARK_PREFIX}${turnId}`;
     const timer = setTimeout(() => this.settleReplyMark(name, 'ack_timeout'), REPLY_ACK_TIMEOUT_MS);
@@ -4020,7 +4047,7 @@ export class TwilioMediaStreamAdapter {
       sttFinalMs: anchor.sttFinalMs,
       turnKey: anchor.turnKey,
       ...(anchor.lastWordMs !== undefined ? { lastWordMs: anchor.lastWordMs } : {}),
-      fillerAudible: this.state.earlyFillerFirstAudioObserved,
+      fillerAudible: anchor.audibleMarked,
       timer,
     });
     this.enqueueOutbound('control', {
@@ -4050,9 +4077,8 @@ export class TwilioMediaStreamAdapter {
    * that is never acked (clear / close / timeout) is dropped: `first_audible_at`
    * stays null and no reason is recorded, it is not an SLO field.
    */
-  private markFirstAudibleFrame(turnId: number): void {
-    const anchor = this.state.replyAnchor;
-    if (!anchor || !this.state.streamSid) return;
+  private markFirstAudibleFrame(turnId: number, anchor: ReplyAnchor): void {
+    if (!this.state.streamSid) return;
     const name = `${FIRST_AUDIBLE_MARK_PREFIX}${turnId}`;
     const timer = setTimeout(() => this.settleReplyMark(name, 'ack_timeout'), REPLY_ACK_TIMEOUT_MS);
     if (typeof timer.unref === 'function') timer.unref();
@@ -4078,8 +4104,10 @@ export class TwilioMediaStreamAdapter {
    * still thinking when this one arrived gets its anchor back, untouched.
    */
   private disarmUnansweredReply(anchor: ReplyAnchor): void {
-    if (this.state.replyAnchor !== anchor || anchor.stamped) return;
-    const resume = anchor.resume && !anchor.resume.stamped ? anchor.resume : null;
+    if (anchor.stamped) return;
+    anchor.disarmed = true;
+    if (this.state.replyAnchor !== anchor) return;
+    const resume = anchor.resume && !anchor.resume.stamped && !anchor.resume.disarmed ? anchor.resume : null;
     this.state.replyAnchor = resume;
     this.state.awaitingFirstAudioFrame = resume !== null;
   }

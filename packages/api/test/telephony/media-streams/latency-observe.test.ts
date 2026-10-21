@@ -136,6 +136,8 @@ function setup(
     deferSpeechTurns?: boolean;
     fillerDelayMs?: number;
     withFiller?: boolean;
+    /** Size of the cached filler clip (default: half a frame, i.e. one frame). */
+    fillerBytes?: number;
   } = {},
 ): Harness {
   const recordTurn = vi.fn(async (input: unknown) => input as never);
@@ -175,7 +177,7 @@ function setup(
       },
       ...(opts.withFiller
         ? {
-            fillerCache: { get: () => Buffer.alloc(320), has: () => true, size: () => 1 },
+            fillerCache: { get: () => Buffer.alloc(opts.fillerBytes ?? 320), has: () => true, size: () => 1 },
             fillerEngine: { selectNext: () => ({ id: 'okay', text: 'Okay.', approxDurationMs: 260 }) },
             fillerDelayMs: opts.fillerDelayMs ?? 50,
           }
@@ -877,6 +879,135 @@ describe('U1c first real acked audio', () => {
         expect.objectContaining({ turnIndex: 0, replyGapMs: 3_400 - 800 }),
         expect.objectContaining({ turnIndex: 1, replyGapMs: 4_500 - 900 }),
       ]);
+    });
+
+    it('a filler still streaming for final A never marks, nor suppresses, final B', async () => {
+      // 100 frames: the clip stalls on Twilio backpressure (3 unacked marks) after 75, mid-stream.
+      const h = setup({ deferSpeechTurns: true, withFiller: true, fillerDelayMs: 50, fillerBytes: 640 * 100 });
+      const anchorMs = 37_000_000;
+      vi.setSystemTime(anchorMs - 500);
+      h.ws.inboundJson(startFrame);
+      await flush();
+      vi.setSystemTime(anchorMs);
+      h.ws.inboundJson(mediaFrame);
+      await flush();
+
+      vi.setSystemTime(anchorMs + 2_000);
+      h.opens[0].emit({ transcript: 'my AC is broken', lastWordEndMs: 800 });
+      await flush();
+      await vi.advanceTimersByTimeAsync(60);
+      await flush();
+      // A's filler is audible and mid-stream (stalled on backpressure); A's first_audible mark is out.
+      const [audibleA] = h.ws.markNames('first_audible:');
+      expect(audibleA).toBeDefined();
+      const chunkMarks = h.ws.markNames('turn-');
+      expect(chunkMarks).toHaveLength(3);
+      await ackAndStamps(h, audibleA, anchorMs + 2_100);
+      expect(stampsOf(h)).toEqual([expect.objectContaining({ turnIndex: 0, firstAudibleAt: new Date(anchorMs + 2_100) })]);
+
+      // B's final arrives while A's filler is still streaming and A's speechTurn is pending.
+      vi.setSystemTime(anchorMs + 2_110);
+      h.opens[0].emit({ transcript: 'and it is very hot', lastWordEndMs: 1_900 });
+      await flush();
+
+      // Twilio acks the clip's chunk marks: A's filler resumes and emits its next frames
+      // (well inside B's own 50 ms filler delay).
+      for (const m of chunkMarks) h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: m } });
+      await vi.advanceTimersByTimeAsync(25);
+      await flush();
+      expect(h.ws.markNames('turn-').length).toBeGreaterThan(chunkMarks.length); // A's filler really did resume
+      // ... and those frames marked nothing: no first_audible for B's key, and A's own was one-shot.
+      expect(h.ws.markNames('first_audible:')).toEqual([audibleA]);
+      expect(stampsOf(h)).toHaveLength(1);
+
+      // B's own filler then fires and takes its OWN first-audible measurement (A's frames did not use it up).
+      await vi.advanceTimersByTimeAsync(60);
+      await flush();
+      const audibleMarks = h.ws.markNames('first_audible:');
+      expect(audibleMarks).toHaveLength(2);
+      vi.setSystemTime(anchorMs + 2_400);
+      h.ws.inboundJson({ event: 'mark', streamSid: STREAM_SID, mark: { name: audibleMarks[1] } });
+      await flush();
+
+      // B's row does not exist yet; once A's turn ends and B appends it, B's stamp lands on B alone.
+      vi.setSystemTime(anchorMs + 3_000);
+      h.speechReleases[0]();
+      await flush();
+      expect(stampsOf(h).filter((s) => s.firstAudibleAt !== undefined)).toEqual([
+        expect.objectContaining({ turnIndex: 0, firstAudibleAt: new Date(anchorMs + 2_100) }),
+        expect.objectContaining({ turnIndex: 1, firstAudibleAt: new Date(anchorMs + 2_400) }),
+      ]);
+    });
+
+    describe('a filler frame carries the anchor it was launched for', () => {
+      type Internals = {
+        state: Record<string, unknown> & { replyAnchor: unknown; outboundTurnId: number; unackedMarks: number };
+        streamPcmAsMedia(pcm: Buffer, turnId: number, anchor: unknown, isFiller?: boolean): Promise<void>;
+      };
+      const anchorOf = (turnKey: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+        sttFinalMs: 1,
+        turnKey,
+        stamped: false,
+        audibleMarked: false,
+        disarmed: false,
+        resume: null,
+        ...extra,
+      });
+      /** Each call enqueues an end-of-turn mark; keep Twilio's backpressure out of the way. */
+      const stream = async (adapter: Internals, bytes: number, anchor: unknown, isFiller?: boolean): Promise<void> => {
+        adapter.state.unackedMarks = 0;
+        await adapter.streamPcmAsMedia(Buffer.alloc(bytes), adapter.state.outboundTurnId, anchor, isFiller);
+      };
+      const armed = async (): Promise<{ h: Harness; adapter: Internals }> => {
+        const h = setup({ withFiller: true });
+        h.ws.inboundJson(startFrame);
+        await flush();
+        const adapter = h.adapter as unknown as Internals;
+        adapter.state.agentSpeaking = true;
+        adapter.state.turnLatencyStartMs = Date.now();
+        return { h, adapter };
+      };
+
+      it('a late frame for a replaced or disarmed anchor marks nothing and leaves the current anchor untouched', async () => {
+        const { h, adapter } = await armed();
+        const current = anchorOf('current');
+        adapter.state.replyAnchor = current;
+        const replaced = anchorOf('replaced');
+        const disarmed = anchorOf('disarmed', { disarmed: true });
+
+        for (const stale of [replaced, disarmed, null]) {
+          await stream(adapter, 640, stale, true);
+        }
+        await flush();
+        expect(h.ws.markNames('first_audible:')).toHaveLength(0);
+        expect(replaced.audibleMarked).toBe(false);
+        expect(current.audibleMarked).toBe(false);
+        expect(adapter.state.turnLatencyStartMs).not.toBeNull(); // the shared latency clock was not consumed
+
+        // A disarmed anchor is refused even while it is still the stored one.
+        adapter.state.replyAnchor = disarmed;
+        await stream(adapter, 640, disarmed, true);
+        await flush();
+        expect(h.ws.markNames('first_audible:')).toHaveLength(0);
+
+        // The current, armed anchor marks exactly once.
+        adapter.state.replyAnchor = current;
+        await stream(adapter, 1280, current, true);
+        await flush();
+        expect(h.ws.markNames('first_audible:')).toHaveLength(1);
+        expect(current.audibleMarked).toBe(true);
+      });
+
+      it('a late REAL frame for a disarmed anchor stamps nothing', async () => {
+        const { h, adapter } = await armed();
+        const disarmed = anchorOf('disarmed', { disarmed: true });
+        adapter.state.replyAnchor = disarmed;
+        adapter.state.awaitingFirstAudioFrame = true;
+        await stream(adapter, 640, disarmed);
+        await flush();
+        expect(h.ws.markNames('first_real:')).toHaveLength(0);
+        expect(disarmed.stamped).toBe(false);
+      });
     });
 
     describe('a stamp that fires before its caller row is appended (final queued behind an earlier turn)', () => {
