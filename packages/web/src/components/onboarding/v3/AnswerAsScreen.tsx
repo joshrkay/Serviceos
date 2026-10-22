@@ -378,6 +378,15 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
   };
 
   const cannotHear = step !== null && !listen.available;
+  // Said aloud as well as shown: an owner answering out loud may not be looking at the screen.
+  const toldCannotHear = useRef(false);
+  useEffect(() => {
+    if (!cannotHear || toldCannotHear.current) return;
+    toldCannotHear.current = true;
+    say([CANNOT_HEAR]);
+    // say() speaks and records the line; it runs once, when listening is ruled out.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cannotHear]);
   const showsQuiet = listen.quiet && !resumedAfterQuiet;
   const transcriptLine = listen.partial
     ? listen.partial

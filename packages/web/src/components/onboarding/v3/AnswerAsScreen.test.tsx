@@ -497,6 +497,9 @@ describe('AnswerAsScreen', () => {
       await flush();
       expect(mic()).not.toBeInTheDocument();
       expect(transcript()).toHaveTextContent("I can't hear you on this device, so type your answers below.");
+      await flush();
+      // Said aloud too, not only shown.
+      expect(said()).toContain("I can't hear you on this device, so type your answers below.");
     });
 
     it('coming back with the microphone on after the API refused the cell: the reason is said, then the cell is asked for', async () => {
