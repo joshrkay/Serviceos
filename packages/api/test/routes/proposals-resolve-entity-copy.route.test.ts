@@ -11,15 +11,16 @@
  */
 import request from 'supertest';
 import express, { type NextFunction, type Request, type Response } from 'express';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createProposalsRouter } from '../../src/routes/proposals';
 import { InMemoryProposalRepository, createProposal, type Proposal } from '../../src/proposals/proposal';
 import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { RedraftHandlerFactory } from '../../src/proposals/redraft-handler-factory';
 import type { TaskHandler } from '../../src/ai/tasks/task-handlers';
-import { AppError, ConflictError, ForbiddenError, ValidationError } from '../../src/shared/errors';
+import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../../src/shared/errors';
 import { ownerFacingPickError } from '../../src/proposals/resolve-entity';
+import { resetSentryClient, setSentryClient, type SentryClient } from '../../src/monitoring/sentry';
 
 const TENANT = 'tenant-a34-copy';
 const USER = 'owner-a34-copy';
@@ -218,6 +219,62 @@ describe('A3-4 — resolve-entity owner copy', () => {
     expect((await proposalRepo.findById(TENANT, seeded.id))!.proposalType).toBe('voice_clarification');
   });
 
+  // A4-1 — the owner gets "try again"; Sentry must still get what failed.
+  describe('A4-1 — a 5xx the owner sees as "try again" is reported as the error that happened', () => {
+    let captured: unknown[];
+    beforeEach(() => {
+      captured = [];
+      const capture = (err: Error) => {
+        captured.push(err);
+        return 'event-id';
+      };
+      setSentryClient({
+        captureException: capture,
+        captureMessage: () => 'event-id',
+        setTag: () => undefined,
+        setUser: () => undefined,
+        startTransaction: () => ({ finish: () => undefined, setStatus: () => undefined }),
+        withScope: (cb) => cb({ setTag: () => undefined, captureException: capture }),
+      } as SentryClient);
+    });
+    afterEach(() => resetSentryClient());
+
+    it("Sentry gets the gateway's own error, code and stack; the response keeps the owner copy and none of it", async () => {
+      const original = new AppError(
+        'LLM_PROVIDER_UNAVAILABLE',
+        'All providers failed. Last error: upstream 503',
+        503,
+        { providerPath: ['api.openai.com:gpt-4o-mini', 'openrouter.ai:llama'] },
+      );
+      const seeded = await proposalRepo.create(clarification());
+
+      const res = await pick(app(failing(original)), seeded.id);
+
+      expectOwnerCopy(res, 503, 'That could not be finished right now. Please try again.');
+      expect(res.body).toEqual({
+        error: 'LLM_PROVIDER_UNAVAILABLE',
+        message: 'That could not be finished right now. Please try again.',
+      });
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toBe(original);
+      expect((captured[0] as AppError).code).toBe('LLM_PROVIDER_UNAVAILABLE');
+      expect((captured[0] as AppError).details).toEqual({
+        providerPath: ['api.openai.com:gpt-4o-mini', 'openrouter.ai:llama'],
+      });
+      expect((captured[0] as Error).stack).toBe(original.stack);
+    });
+
+    it('a 429 is still not reported (4xx never captures)', async () => {
+      const seeded = await proposalRepo.create(clarification());
+      const res = await pick(
+        app(failing(new AppError('LLM_RATE_LIMITED', 'AI provider rate limit reached', 429, { retryAfterMs: 500 }))),
+        seeded.id,
+      );
+      expect(res.status).toBe(429);
+      expect(captured).toEqual([]);
+    });
+  });
+
   it('a successful pick still answers 200 with the re-drafted card', async () => {
     const seeded = await proposalRepo.create(clarification());
     const res = await pick(app(drafting), seeded.id);
@@ -247,6 +304,22 @@ describe('A3-4 — ownerFacingPickError', () => {
     ]) {
       expect(ownerFacingPickError(err)).toBe(err);
     }
+  });
+
+  // A4-1 — every re-wording keeps the error it replaced, so nothing that
+  // reads the mapped error (telemetry, logs) loses what actually happened.
+  it.each([
+    ['a gateway 5xx', new AppError('LLM_PROVIDER_UNAVAILABLE', 'All providers failed', 503, { providerPath: ['x'] })],
+    ['a gateway 429', new AppError('LLM_RATE_LIMITED', 'AI provider rate limit reached', 429, { retryAfterMs: 10 })],
+    ['a shared 409', new ConflictError("Cannot transition proposal from 'approved' to 'ready_for_review'")],
+    ['a not-found', new NotFoundError('Proposal', 'p-1')],
+    ['a contract check', new ValidationError("Invalid payload for proposal type 'voice_clarification'")],
+  ])('keeps %s as the cause of the owner copy', (_label, err) => {
+    const mapped = ownerFacingPickError(err) as AppError;
+    expect(mapped).not.toBe(err);
+    expect(mapped.cause).toBe(err);
+    expect(mapped.statusCode).toBe(err.statusCode);
+    expect(mapped.message).not.toBe(err.message);
   });
 
   it('leaves an error that is not an AppError alone (it answers the generic 500)', () => {

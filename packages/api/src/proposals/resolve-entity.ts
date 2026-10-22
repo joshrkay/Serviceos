@@ -157,13 +157,21 @@ const OWN_CONFLICT_COPY: ReadonlySet<string> = new Set([PICK_NOT_SAVED, PICK_CHA
  *    retry-after hint from its details (they name the provider);
  *  - any other ValidationError (a payload contract check) is a plain 400.
  * Anything that is not an AppError is left alone: it answers a generic 500.
+ *
+ * A4-1 — every re-wording carries the error it replaced as its `cause`. The
+ * response shows only the owner copy, and asyncRoute's server-error capture
+ * reports the cause, so a 5xx reaches Sentry as the gateway's own failure
+ * (its code, provider path and stack), not as "try again".
  */
 export function ownerFacingPickError(err: unknown): unknown {
   if (!(err instanceof AppError)) return err;
+  const replaced = { cause: err };
   if (err instanceof ConflictError) {
-    return OWN_CONFLICT_COPY.has(err.message) ? err : new ConflictError(PICK_NOT_SAVED, err.details);
+    return OWN_CONFLICT_COPY.has(err.message) ? err : new ConflictError(PICK_NOT_SAVED, err.details, replaced);
   }
-  if (err instanceof NotFoundError) return new AppError(err.code, PICK_ROW_GONE, err.statusCode);
+  if (err instanceof NotFoundError) {
+    return new AppError(err.code, PICK_ROW_GONE, err.statusCode, undefined, replaced);
+  }
   if (err.statusCode === 429 || err.statusCode >= 500) {
     const retryAfterMs = err.details?.retryAfterMs;
     return new AppError(
@@ -171,10 +179,11 @@ export function ownerFacingPickError(err: unknown): unknown {
       PICK_TRY_AGAIN,
       err.statusCode,
       typeof retryAfterMs === 'number' ? { retryAfterMs } : undefined,
+      replaced,
     );
   }
   if (err instanceof ValidationError && !OWN_VALIDATION_COPY.has(err.message)) {
-    return new ValidationError(PICK_CANNOT_SAVE);
+    return new ValidationError(PICK_CANNOT_SAVE, undefined, replaced);
   }
   return err;
 }
