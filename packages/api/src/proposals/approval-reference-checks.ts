@@ -271,9 +271,9 @@ export function sendRecipientReferenceCheck(deps: {
   customerRepo: Pick<CustomerRepository, 'findById'>;
   /**
    * #1524 — the outbound SMS gate, asked whether a text to the customer's
-   * phone would go out. When a send with no channel named falls back to SMS,
-   * a text the gate would suppress is refused here with its reason. Absent
-   * (no delivery wired) → not asked.
+   * phone would go out. When a send with no channel named goes by text and
+   * there is no email to fall back to (D-045), a text the gate would suppress
+   * is refused here with its reason. Absent (no delivery wired) → not asked.
    */
   smsPreflight?: Pick<GatedMessageDelivery, 'preflightCustomerSms'>;
 }): ApprovalReferenceCheck {
@@ -309,7 +309,9 @@ export function sendRecipientReferenceCheck(deps: {
         to: customer.primaryPhone,
         smsConsent: customer.smsConsent === true,
       });
-      return blocked ? [SMS_BLOCKED_GAP[blocked]] : [];
+      // D-045 — a refused text falls back to the email on file, if any.
+      if (!blocked || onFile(customer.email)) return [];
+      return [SMS_BLOCKED_GAP[blocked]];
     }
     return onFile(channel === 'email' ? customer.email : customer.primaryPhone) ? [] : ['recipient'];
   };

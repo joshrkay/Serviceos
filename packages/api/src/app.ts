@@ -331,6 +331,7 @@ import {
   PgRecipientSmsVolumeLedger,
 } from './notifications/recipient-sms-volume';
 import { SendService } from './notifications/send-service';
+import { createInvoicePaymentLink } from './invoices/invoice-payment-link';
 import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { PublicInvoiceService } from './invoices/public-invoice-service';
@@ -1706,10 +1707,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         customerRepo,
         settingsRepo,
         dispatchRepo,
-        // S5a-1 (U8) — audits `invoice.payment_mode_unavailable` when a
-        // send goes out fail-closed (no pay CTA) because the policy read failed.
+        // S5a-1 (U8) — audits `invoice.payment_mode_unavailable` when the
+        // policy read fails and the send is refused.
         auditRepo,
         publicBaseUrl,
+        // D-045 — an invoice in pay_link mode is sent only once its pay link exists.
+        ensureInvoicePayLink: (tenantId, invoiceId) =>
+          createInvoicePaymentLink(tenantId, invoiceId, {
+            invoiceRepo,
+            provider: paymentLinkProvider,
+            settingsRepo,
+            connectAccountResolver,
+            auditRepo,
+          }),
       })
     : undefined;
 

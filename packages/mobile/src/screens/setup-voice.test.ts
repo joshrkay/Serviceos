@@ -101,6 +101,13 @@ describe('spoken setup screen', () => {
     expect(input.value).toBe('');
   });
 
+  it('the answer box can shrink so Send stays on screen at 320px', () => {
+    // A web <input> has an intrinsic width; without min-w-0 flex-1 can't
+    // shrink below it and pushes Send past the edge (e2e/setup-voice-mobile).
+    render(createElement(SetupVoiceScreen));
+    expect(screen.getByPlaceholderText('Or type your answer').className).toMatch(/\bmin-w-0\b/);
+  });
+
   it('without transcription only typing is offered', () => {
     h.talk = talk({ sttUnavailable: true });
     render(createElement(SetupVoiceScreen));
