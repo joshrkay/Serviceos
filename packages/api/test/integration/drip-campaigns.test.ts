@@ -287,6 +287,24 @@ describe('Postgres integration — drip campaigns (migrations 336/337/350)', () 
     });
     expect(await renewed(gapped.enrollmentId)).toBe(false);
 
+    // A second membership that already existed at enrollment, also ending inside the window:
+    // not a renewal until the owner extends it past the window or turns on auto-renew.
+    const twoTerms = await enrolled('TwoMemberships', { endsOn: daysAhead(10) });
+    const otherTerm = await seedAgreement(twoTerms.customerId, { endsOn: daysAhead(25) });
+    expect(await renewed(twoTerms.enrollmentId)).toBe(false);
+    await pool.query(`UPDATE service_agreements SET ends_on = $2 WHERE id = $1`, [otherTerm, daysAhead(28)]);
+    expect(await renewed(twoTerms.enrollmentId)).toBe(false);
+    await pool.query(`UPDATE service_agreements SET ends_on = $2 WHERE id = $1`, [otherTerm, daysAhead(390)]);
+    expect(await renewed(twoTerms.enrollmentId)).toBe(true);
+
+    const twoTermsAuto = await enrolled('TwoMembershipsAutoRenew', { endsOn: daysAhead(10) });
+    const otherAuto = await seedAgreement(twoTermsAuto.customerId, { endsOn: daysAhead(25) });
+    expect(await renewed(twoTermsAuto.enrollmentId)).toBe(false);
+    await pool.query(`UPDATE service_agreements SET auto_renew = true, renewal_term_months = 12 WHERE id = $1`, [
+      otherAuto,
+    ]);
+    expect(await renewed(twoTermsAuto.enrollmentId)).toBe(true);
+
     const cancelled = await enrolled('Cancelled');
     await pool.query(`UPDATE service_agreements SET status = 'cancelled', ends_on = $2 WHERE id = $1`, [
       cancelled.agreementId,

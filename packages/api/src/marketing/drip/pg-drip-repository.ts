@@ -365,14 +365,23 @@ export class PgDripSignals extends PgBaseRepository implements DripSignals {
     return this.withTenant(tenantId, async (client) => {
       const r = await client.query(
         `SELECT 1 FROM drip_enrollments e
+           JOIN drip_sequences s ON s.tenant_id = e.tenant_id AND s.id = e.sequence_id
            JOIN service_agreements a
              ON a.tenant_id = e.tenant_id AND a.status = 'active'
             AND (a.id = e.source_entity_id
-                 OR (a.customer_id = e.customer_id AND a.created_at > e.enrolled_at
-                     -- a replacement only counts if it starts by the day after the old term ends
+                 OR (a.customer_id = e.customer_id
+                     -- another membership only counts if it starts by the day after the old term ends
                      AND a.starts_on <= e.source_due_on + 1))
           WHERE e.tenant_id = $1 AND e.id = $2 AND e.source_entity_type = 'service_agreement'
-            AND (a.auto_renew = true OR a.ends_on IS NULL OR a.ends_on > e.source_due_on)
+            AND (a.auto_renew = true OR a.ends_on IS NULL
+                 OR a.ends_on > CASE
+                      -- the enrolled membership, or one added since: any end past the old one
+                      WHEN a.id = e.source_entity_id OR a.created_at > e.enrolled_at THEN e.source_due_on
+                      -- one that already existed at enrollment: targeting proved it ended inside
+                      -- the window then, so it counts once it runs past that window
+                      -- (target_days is fixed once the campaign is created)
+                      ELSE (e.enrolled_at + make_interval(days => s.target_days))::date
+                    END)
           LIMIT 1`,
         [tenantId, enrollmentId],
       );
