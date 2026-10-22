@@ -8265,6 +8265,11 @@ export const MIGRATIONS = {
   '332_assignment_overlap_accepted': `
     ALTER TABLE appointment_assignments
       ADD COLUMN IF NOT EXISTS overlap_accepted BOOLEAN NOT NULL DEFAULT false;
+    -- The visits (appointment ids) the dispatcher accepted the overlap with.
+    -- The guard below holds an accepted row to exactly these, so consent
+    -- given for one clash never covers another that appears later.
+    ALTER TABLE appointment_assignments
+      ADD COLUMN IF NOT EXISTS overlap_accepted_with UUID[] NOT NULL DEFAULT '{}';
 
     DO $mig332$
     BEGIN
@@ -8322,16 +8327,18 @@ export const MIGRATIONS = {
     -- An EXCLUDE constraint is symmetric, so a row outside its WHERE is also
     -- invisible to every later row: without this guard a plain booking that
     -- overlapped ONLY an accepted visit would slip past Postgres. This
-    -- trigger is the asymmetric half: an accepted row may overlap anything,
-    -- but an UNaccepted row may overlap nothing active, accepted rows
-    -- included. The per-(tenant, technician) advisory lock serialises
-    -- racing writers for the rest of the transaction, so two dispatchers
-    -- booking the same tech at once cannot both pass the read.
+    -- trigger is the asymmetric, consent-aware half:
+    --   * an UNaccepted row may overlap nothing active, accepted rows included;
+    --   * an accepted row may overlap only the visits it was accepted with
+    --     (overlap_accepted_with), so a clash that appeared after the
+    --     dispatcher looked is still refused.
+    -- Every writer, accepted or not, takes the per-(tenant, technician)
+    -- advisory lock first and holds it to the end of the transaction, so two
+    -- racing bookings for the same tech are checked one after the other.
     CREATE OR REPLACE FUNCTION check_overlap_accepted_guard()
     RETURNS TRIGGER LANGUAGE plpgsql AS $guard$
     BEGIN
-      IF NEW.overlap_accepted
-         OR NEW.appointment_status IN ('canceled', 'no_show')
+      IF NEW.appointment_status IN ('canceled', 'no_show')
          OR NEW.scheduled_start IS NULL OR NEW.scheduled_end IS NULL THEN
         RETURN NEW;
       END IF;
@@ -8345,9 +8352,11 @@ export const MIGRATIONS = {
           AND aa.scheduled_start IS NOT NULL AND aa.scheduled_end IS NOT NULL
           AND tstzrange(aa.scheduled_start, aa.scheduled_end)
               && tstzrange(NEW.scheduled_start, NEW.scheduled_end)
+          AND NOT (NEW.overlap_accepted AND aa.appointment_id = ANY (NEW.overlap_accepted_with))
       ) THEN
-        RAISE EXCEPTION 'DOUBLE_BOOKING: technician % already has an active assignment overlapping [%, %]',
-          NEW.technician_id, NEW.scheduled_start, NEW.scheduled_end
+        RAISE EXCEPTION 'DOUBLE_BOOKING: technician % already has an active assignment overlapping [%, %]%',
+          NEW.technician_id, NEW.scheduled_start, NEW.scheduled_end,
+          CASE WHEN NEW.overlap_accepted THEN ' that the dispatcher did not accept' ELSE '' END
           USING ERRCODE = 'exclusion_violation';
       END IF;
       RETURN NEW;
@@ -8356,7 +8365,8 @@ export const MIGRATIONS = {
 
     DROP TRIGGER IF EXISTS trg_overlap_accepted_guard ON appointment_assignments;
     CREATE TRIGGER trg_overlap_accepted_guard
-      BEFORE INSERT OR UPDATE OF scheduled_start, scheduled_end, appointment_status, overlap_accepted, technician_id
+      BEFORE INSERT OR UPDATE OF scheduled_start, scheduled_end, appointment_status,
+        overlap_accepted, overlap_accepted_with, technician_id
       ON appointment_assignments
       FOR EACH ROW EXECUTE FUNCTION check_overlap_accepted_guard();
 
@@ -8373,7 +8383,11 @@ export const MIGRATIONS = {
                appointment_status = NEW.status,
                overlap_accepted = overlap_accepted
                  AND NEW.scheduled_start IS NOT DISTINCT FROM OLD.scheduled_start
-                 AND NEW.scheduled_end IS NOT DISTINCT FROM OLD.scheduled_end
+                 AND NEW.scheduled_end IS NOT DISTINCT FROM OLD.scheduled_end,
+               overlap_accepted_with = CASE
+                 WHEN NEW.scheduled_start IS NOT DISTINCT FROM OLD.scheduled_start
+                  AND NEW.scheduled_end IS NOT DISTINCT FROM OLD.scheduled_end
+                 THEN overlap_accepted_with ELSE '{}'::uuid[] END
          WHERE appointment_id = NEW.id AND tenant_id = NEW.tenant_id;
       END IF;
       RETURN NEW;

@@ -127,12 +127,24 @@ describe('Postgres integration — dispatcher-accepted overlap (FR-2 phase 3c)',
       isPrimary: true, assignedBy: tenant.userId, assignedAt: new Date(),
     })).rejects.toBeInstanceOf(ConflictError);
     expect(await overlapAcceptedFlag(onlyAccepted)).toBeNull();
+    // An accepted row whose consent names a DIFFERENT visit is refused too:
+    // the guard holds accepted rows to exactly overlap_accepted_with.
+    await expect(assignmentRepo.create({
+      id: crypto.randomUUID(), tenantId: tenant.tenantId, appointmentId: onlyAccepted, technicianId: techId,
+      isPrimary: true, assignedBy: tenant.userId, assignedAt: new Date(),
+      overlapAccepted: true, overlapAcceptedWith: [busy],
+    })).rejects.toBeInstanceOf(ConflictError);
     // ...and the same slot, accepted against the accepted visit, is allowed.
     const stacked = await assignTechnician(
       { tenantId: tenant.tenantId, appointmentId: onlyAccepted, technicianId: techId, technicianRole: 'technician', assignedBy: tenant.userId, acceptOverlapWith: [clash] },
       assignmentRepo, { appointmentRepo, auditRepo, actorRole: 'owner' },
     );
     expect(stacked.overlapAccepted).toBe(true);
+    const { rows } = await pool.query<{ overlap_accepted_with: string[] }>(
+      `SELECT overlap_accepted_with FROM appointment_assignments WHERE tenant_id = $1 AND appointment_id = $2`,
+      [tenant.tenantId, onlyAccepted],
+    );
+    expect(rows[0].overlap_accepted_with).toEqual([clash]);
   });
 
   it('two racing unmarked bookings that overlap only an accepted visit are both refused (the guard serialises them)', async () => {
@@ -174,6 +186,11 @@ describe('Postgres integration — dispatcher-accepted overlap (FR-2 phase 3c)',
     // Moving the visit to a free slot drops the acceptance with it.
     await appointmentRepo.update(tenant.tenantId, clash, { scheduledStart: at(900), scheduledEnd: at(960) });
     expect(await overlapAcceptedFlag(clash)).toBe(false);
+    const cleared = await pool.query<{ overlap_accepted_with: string[] }>(
+      `SELECT overlap_accepted_with FROM appointment_assignments WHERE tenant_id = $1 AND appointment_id = $2`,
+      [tenant.tenantId, clash],
+    );
+    expect(cleared.rows[0].overlap_accepted_with).toEqual([]);
 
     // Back onto the busy slot without a fresh acceptance: refused.
     await expect(
