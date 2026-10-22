@@ -66,10 +66,6 @@ export async function applyDerivedGoogleReviewUrl(
     await settingsRepo.update(tenantId, { googleReviewUrl: null, googleReviewUrlDerived: null });
     return 'cleared';
   }
-  // The owner already has this exact link: remember it as derived so the
-  // next listing can replace it.
-  if (derived && settings.googleReviewUrl?.trim() === derived && settings.googleReviewUrlDerived !== derived) {
-    await settingsRepo.update(tenantId, { googleReviewUrlDerived: derived });
-  }
+  // A link the owner typed stays theirs, even when it matches the listing's.
   return 'kept';
 }

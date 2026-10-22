@@ -233,11 +233,12 @@ export function GoogleBusinessSheet({ onClose, onReviewUrlChange }: GoogleBusine
   const locationState = integration?.locationState;
   // Backoff in the future ⇒ polling is paused (usually broken
   // credentials after the operator revoked access on Google's side).
-  // Google throttling also backs off, but clears on its own and a
-  // reconnect can't fix it, so it doesn't ask the owner to reconnect.
+  // Only a backoff for rejected credentials asks for a reconnect: Google
+  // throttling clears on its own, and an untagged (older) backoff may be
+  // either.
   const needsAttention =
     isConnected &&
-    integration!.backoffReason !== 'quota' &&
+    integration!.backoffReason === 'auth' &&
     integration!.backoffUntil !== null &&
     new Date(integration!.backoffUntil).getTime() > Date.now();
 

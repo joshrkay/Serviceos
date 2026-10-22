@@ -5,7 +5,7 @@
  */
 import request from 'supertest';
 import express, { NextFunction, Request, Response } from 'express';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createGetFoundOnlineRouter } from '../../src/routes/get-found-online';
 import { InMemoryGoogleBusinessIntegrationRepository } from '../../src/reputation/google-business-integration';
 import { InMemoryReviewPollStateRepository } from '../../src/reputation/poll-state';
@@ -94,6 +94,11 @@ describe('/api/get-found-online', () => {
 
     // Google throttling clears on its own: no "reconnect" error.
     await pollStateRepo.recordQuotaError(TENANT, 3600);
+    expect((await request(app()).get('/api/get-found-online')).body.data.allDone).toBe(true);
+
+    // A backoff recorded before the reason existed may be either: no error.
+    const untagged = await pollStateRepo.getPollState(TENANT);
+    vi.spyOn(pollStateRepo, 'getPollState').mockResolvedValueOnce({ ...untagged!, backoffReason: null });
     expect((await request(app()).get('/api/get-found-online')).body.data.allDone).toBe(true);
 
     // Rejected credentials need the owner.

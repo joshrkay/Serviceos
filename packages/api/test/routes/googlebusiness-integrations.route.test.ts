@@ -866,6 +866,31 @@ describe('Google Business integrations routes', () => {
       expect((await pollStateRepo.getPollState(TENANT))?.cursor).toBeNull();
     });
 
+    it('a failed cursor reset leaves the old listing saved, so a retry still restarts polling', async () => {
+      const pollStateRepo = new InMemoryReviewPollStateRepository(() => new Date());
+      await connect({ '123': ONE_LOCATION }, { pollStateRepo });
+      await pollStateRepo.recordSuccess(TENANT, '2026-10-01T00:00:00.000Z');
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch(TWO_LOCATIONS) as unknown as typeof fetch,
+        pollStateRepo,
+      });
+      vi.spyOn(pollStateRepo, 'resetCursor').mockRejectedValueOnce(new Error('db down'));
+      const failed = await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '456', locationId: '555' });
+      expect(failed.status).toBe(500);
+      expect((await integrationRepo.get(TENANT))?.locationId).toBe('999');
+
+      const retried = await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '456', locationId: '555' });
+      expect(retried.status).toBe(200);
+      expect((await pollStateRepo.getPollState(TENANT))?.cursor).toBeNull();
+    });
+
     it('connecting after a disconnect restarts review polling', async () => {
       const pollStateRepo = new InMemoryReviewPollStateRepository(() => new Date());
       await connect({ '123': ONE_LOCATION }, { pollStateRepo });

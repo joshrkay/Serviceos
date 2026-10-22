@@ -82,12 +82,14 @@ describe('applyDerivedGoogleReviewUrl', () => {
     expect((await repo.findByTenant('t1'))?.googleReviewUrl).toBe('https://g.page/r/typed');
   });
 
-  it('adopts a pasted link that matches the listing, so the next listing can replace it', async () => {
+  it('a typed link that matches the listing stays the owner\'s: never replaced or cleared later', async () => {
     const repo = new InMemorySettingsRepository();
     await repo.upsertIdentityFields('t1', { businessName: 'Acme' });
     await repo.update('t1', { googleReviewUrl: 'https://g.page/r/old' });
     expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/old')).toBe('kept');
-    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/new')).toBe('set');
+    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/new')).toBe('kept');
+    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, null)).toBe('kept');
+    expect((await repo.findByTenant('t1'))?.googleReviewUrl).toBe('https://g.page/r/old');
   });
 
   it('clears an app-filled link when the owner switches to a listing with no review link', async () => {

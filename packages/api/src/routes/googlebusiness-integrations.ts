@@ -261,6 +261,11 @@ export function createGoogleBusinessOAuthCallbackRouter(
       }
       const locationCount = locations ? locations.length : previous?.locationCount;
 
+      // Reset the old listing's cursor before the new listing is saved: if
+      // the reset failed after, a retry would see no move and keep it.
+      const reviewCursorReset = selection
+        ? await resetReviewCursorIfMoved(deps, consumed.tenantId, previous, selection)
+        : false;
       const upserted = await deps.integrationRepo.upsert({
         tenantId: consumed.tenantId,
         accessToken: tokens.accessToken,
@@ -270,9 +275,6 @@ export function createGoogleBusinessOAuthCallbackRouter(
         ...(locationCount != null ? { locationCount } : {}),
       });
 
-      const reviewCursorReset = selection
-        ? await resetReviewCursorIfMoved(deps, consumed.tenantId, previous, selection)
-        : false;
       // New credentials: a pause for rejected ones no longer applies.
       const authBackoffCleared = deps.pollStateRepo
         ? await deps.pollStateRepo.clearAuthBackoff(consumed.tenantId)
@@ -595,6 +597,17 @@ export function createGoogleBusinessIntegrationsRouter(
           throw new ValidationError('That location is not on your Google account');
         }
         const previous = await deps.integrationRepo.get(tenantId);
+        if (!previous) {
+          throw new NotFoundError('Google Business integration', 'google_business');
+        }
+        // Cursor first: a reset that failed after the save could never be
+        // retried (the listing would no longer look moved).
+        const reviewCursorReset = await resetReviewCursorIfMoved(
+          deps,
+          tenantId,
+          previous,
+          toSelection(location),
+        );
         const updated = await deps.integrationRepo.selectLocation(
           tenantId,
           toSelection(location),
@@ -602,12 +615,6 @@ export function createGoogleBusinessIntegrationsRouter(
         if (!updated) {
           throw new NotFoundError('Google Business integration', 'google_business');
         }
-        const reviewCursorReset = await resetReviewCursorIfMoved(
-          deps,
-          tenantId,
-          previous,
-          toSelection(location),
-        );
         const reviewUrl = await fillReviewUrl(
           deps,
           tenantId,

@@ -72,6 +72,7 @@ describe('GoogleBusinessSheet', () => {
         data: connectedIntegration({
           // Far-future backoff — credentials are broken until reconnect.
           backoffUntil: '2100-01-01T00:00:00Z',
+          backoffReason: 'auth',
         }),
       }),
     );
