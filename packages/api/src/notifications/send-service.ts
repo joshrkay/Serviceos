@@ -31,29 +31,26 @@ export type SendChannel = 'sms' | 'email' | 'both' | 'auto';
 
 /**
  * D-045 — the channel a send with no channel named goes out on: a text when
- * the customer has a phone on file, agreed to texts and has not opted out;
- * otherwise their email; otherwise a text to whatever phone is on file (the
- * gate then refuses it with the reason); nothing when neither is on file.
- * The one rule the approval-time recipient check and the send itself share.
+ * the customer has a phone on file and agreed to texts; otherwise their
+ * email; otherwise a text to whatever phone is on file (the gate then
+ * refuses it with the reason); nothing when neither is on file. An opt-out
+ * is left to the delivery gate, which reads the current consent ledger (a
+ * START after a STOP clears it there while `consentStatus` stays 'revoked'),
+ * and a text it refuses falls back to the email (`withEmailFallback`). The
+ * one rule the approval-time recipient check and the send itself share.
  * Supersedes #1524's email-first default.
  */
 export function defaultSendChannel(customer: {
   email?: string | null;
   primaryPhone?: string | null;
   smsConsent?: boolean;
-  consentStatus?: 'granted' | 'revoked' | 'unknown';
 }): 'email' | 'sms' | undefined {
   const hasPhone = typeof customer.primaryPhone === 'string' && customer.primaryPhone.trim().length > 0;
   const hasEmail = typeof customer.email === 'string' && customer.email.trim().length > 0;
-  if (hasPhone && canText(customer)) return 'sms';
+  if (hasPhone && customer.smsConsent === true) return 'sms';
   if (hasEmail) return 'email';
   if (hasPhone) return 'sms';
   return undefined;
-}
-
-/** The customer agreed to texts and has not opted out since. */
-function canText(customer: { smsConsent?: boolean; consentStatus?: 'granted' | 'revoked' | 'unknown' }): boolean {
-  return customer.smsConsent === true && customer.consentStatus !== 'revoked';
 }
 
 /**
