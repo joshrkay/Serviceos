@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useAuth } from '@clerk/clerk-expo';
 import { useRouter } from 'expo-router';
 import { PrimaryButton } from '../../src/components/Buttons';
@@ -96,7 +96,11 @@ export default function SetupVoiceScreen() {
   const actionLabel = error ? ERROR_ACTION_LABEL[error.action] : null;
 
   return (
-    <View className="flex-1 bg-background px-6 pb-6 pt-24">
+    // The answer field is bottom-anchored; without this the keyboard covers it (same as the messages composer).
+    <KeyboardAvoidingView
+      className="flex-1 bg-background px-6 pb-6 pt-24"
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
       <Text className="font-heading text-2xl font-semibold text-foreground">Set up by voice</Text>
       <Text className="mt-1 text-base text-mutedForeground">
         Tell me about your business. I&apos;ll ask about your services, prices, team and hours, then you check it
@@ -122,7 +126,7 @@ export default function SetupVoiceScreen() {
           </View>
         ) : null}
 
-        {inReview ? (
+        {inReview && proposalIds.length > 0 ? (
           <View className="mt-2 rounded-lg border border-border bg-card px-4 py-3">
             <Text className="text-base font-semibold text-foreground">Here&apos;s what I&apos;ll set up</Text>
             {items.length > 0 ? (
@@ -177,12 +181,14 @@ export default function SetupVoiceScreen() {
               </Pressable>
             </View>
           ) : null}
-          <PrimaryButton
-            label="Save my setup"
-            loading={status === 'saving' && !error}
-            disabled={eligibleIds.length === 0 || status === 'saving'}
-            onPress={() => void talk.save(eligibleIds)}
-          />
+          {proposalIds.length > 0 ? (
+            <PrimaryButton
+              label="Save my setup"
+              loading={status === 'saving' && !error}
+              disabled={eligibleIds.length === 0 || status === 'saving'}
+              onPress={() => void talk.save(eligibleIds)}
+            />
+          ) : null}
         </View>
       ) : talking ? (
         <View>
@@ -233,6 +239,6 @@ export default function SetupVoiceScreen() {
           <Text className="text-base text-mutedForeground">Skip for now</Text>
         </Pressable>
       ) : null}
-    </View>
+    </KeyboardAvoidingView>
   );
 }

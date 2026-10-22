@@ -98,6 +98,7 @@ export function heldForReviewCopy(count: number): string {
     ? "1 setup item I wasn't sure about needs a closer look. Check it in Approvals before it's saved."
     : `${count} setup items I wasn't sure about need a closer look. Check them in Approvals before they're saved.`;
 }
+export const NOTHING_CAPTURED_COPY = "I didn't get enough to set anything up. Start again and I'll ask once more, or skip for now.";
 export const SAVE_CHECK_FAILED_COPY = "I couldn't check what was already saved. Check your connection and try again.";
 export const SAVE_SLOW_COPY = "Your setup is saved but still being applied. Check again in a moment.";
 export const STATUS_UNKNOWN_COPY = "Your setup is saved, but I couldn't confirm it's finished. Check again in a moment.";
@@ -156,6 +157,8 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
       if (turn.completed) {
         setProposalIds(turn.proposalIds);
         setStatus('review');
+        // The turn cap can end a conversation that captured nothing; never a dead end.
+        if (turn.proposalIds.length === 0) setError({ message: NOTHING_CAPTURED_COPY, action: 'restart' });
       } else {
         setStatus('ready');
       }
@@ -377,6 +380,7 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
     } else if (action === 'restart') {
       sessionId.current = undefined;
       setTurns([]);
+      setProposalIds([]);
       await runTurn(undefined);
     } else if (action === 'retry_save') {
       await runSave(true);

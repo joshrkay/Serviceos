@@ -163,6 +163,15 @@ describe('spoken setup screen', () => {
     expect(button('Check in Approvals')).toBeTruthy();
   });
 
+  it('an empty review shows no list and no Save, only the way to start again', () => {
+    h.talk = talk({ status: 'review', proposalIds: [], error: { message: 'Nothing captured.', action: 'restart' } });
+    render(createElement(SetupVoiceScreen));
+    expect(screen.queryByText("Here's what I'll set up")).toBeNull();
+    expect(screen.queryByText('Save my setup')).toBeNull();
+    fireEvent.click(button('Start again'));
+    expect(h.talk.recover).toHaveBeenCalled();
+  });
+
   it('once setup has applied, "Open my business" opens the app past the gate', () => {
     h.talk = talk({ status: 'finished' });
     render(createElement(SetupVoiceScreen));

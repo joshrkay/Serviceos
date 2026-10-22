@@ -8,6 +8,7 @@ import {
   SAVE_FAILED_COPY,
   SAVE_POLL_ATTEMPTS,
   SAVE_SLOW_COPY,
+  NOTHING_CAPTURED_COPY,
   STATUS_UNKNOWN_COPY,
   STT_UNAVAILABLE_COPY,
   TRANSCRIBE_FAILED_COPY,
@@ -308,6 +309,19 @@ describe('useOnboardingTalk', () => {
     vi.mocked(deps.sendTurn).mockResolvedValueOnce(reply('What trade are you in?'));
     await act(() => result.current.sendText('Walsh Plumbing'));
     expect(isCurrent()).toBe(false);
+  });
+
+  it('a conversation that ends with nothing captured offers "Start again", not a dead end', async () => {
+    const deps = makeDeps();
+    const { result } = await started(deps);
+    vi.mocked(deps.sendTurn).mockResolvedValueOnce(reply('Thanks, that is all I can ask.', { completed: true, proposalIds: [] }));
+    await act(() => result.current.sendText('no idea'));
+    expect(result.current.error).toEqual({ message: NOTHING_CAPTURED_COPY, action: 'restart' });
+    vi.mocked(deps.sendTurn).mockResolvedValueOnce(reply('What do you call the business?', { sessionId: 'new' }));
+    await act(() => result.current.recover());
+    expect(deps.sendTurn).toHaveBeenLastCalledWith({ clientTimezone: 'America/New_York' });
+    expect(result.current.status).toBe('ready');
+    expect(result.current.turns).toHaveLength(1);
   });
 
   it('a status it cannot read is reported as unknown, not as done', async () => {
