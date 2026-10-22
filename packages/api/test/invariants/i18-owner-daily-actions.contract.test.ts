@@ -138,7 +138,8 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 16;
 // #1766: +2 occasional (get-found-online forwarding/check GET/POST — the forwarding test call).
 // D-044 / #1735 / #1737 / #1738: +22 occasional (tenant-site x9, web chat x3, Local Services x5, follow-up campaigns x6 — owner setup/config and reads).
 // #1771: +1 occasional (POST /api/get-found-online/google-website/draft — the approval card for Google's website link).
-const OWNER_ONLY_ROUTES = 121;
+// #1770: +3 occasional (PUT/POST-check/DELETE /api/tenant-site/domain — connect a domain the owner owns).
+const OWNER_ONLY_ROUTES = 124;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 

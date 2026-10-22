@@ -94,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **121** |
+| Owner-only routes in code | **124** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **16** |
-| `cadence: occasional` | **103** |
+| `cadence: occasional` | **106** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **16** |
 
@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 121,
+  "ownerOnlyRoutes": 124,
   "daily": 2,
   "onboarding": 16,
-  "occasional": 103,
+  "occasional": 106,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 16
 }
@@ -247,6 +247,9 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `POST /api/webchat/rotate-token` | occasional | Rotates the web chat embed token (#1737). Rare security action. | false | none | |
 | `PUT /api/webchat/` | occasional | Web chat on/off, allowed sites and daily caps (#1737). Configuration set once. | false | none | |
 | `POST /api/get-found-online/google-website/draft` | occasional | Drafts the approval card that adds the owner's website and booking link to their Google listing (#1771). Nothing is written until the owner taps approve; it is a public change, so it is never automatic. | false | none | |
+| `DELETE /api/tenant-site/domain` | occasional | Disconnects the owner's own domain from the hosted site (#1770). Rare. | false | none | |
+| `POST /api/tenant-site/domain/check` | occasional | Re-checks the owner's domain DNS record after a failure (#1770). The sweep retries on its own; this is an impatient shortcut. | false | none | |
+| `PUT /api/tenant-site/domain` | occasional | Connects a domain the owner already owns to the hosted site (#1770). One-time; we show the single DNS record and verify it ourselves. | false | none | |
 
 <!-- END machine-readable: owner-daily-actions -->
 
