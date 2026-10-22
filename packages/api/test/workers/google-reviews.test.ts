@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createLogger } from '../../src/logging/logger';
-import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
+import {
+  formatCursor,
+  parseCursorDate,
+  runGoogleReviewsSweep,
+} from '../../src/workers/google-reviews';
 import { InMemoryReviewRepository } from '../../src/reputation/review';
 import {
   InMemoryReviewPollStateRepository,
@@ -170,7 +174,7 @@ describe('P7-026 runGoogleReviewsSweep', () => {
     expect(result.failed).toBe(0);
 
     const state = await pollStateRepo.getPollState('t1');
-    expect(state?.cursor).toBe('2026-05-17T11:00:00.000Z');
+    expect(state?.cursor).toBe('L@2026-05-17T11:00:00.000Z');
     expect(state?.consecutive429Count).toBe(0);
   });
 
@@ -201,6 +205,68 @@ describe('P7-026 runGoogleReviewsSweep', () => {
     expect(second.persisted).toBe(0);
   });
 
+  describe('cursor bound to its listing', () => {
+    const olderReviews = async (): Promise<Response> =>
+      jsonResponse({
+        reviews: [
+          makeReviewJson('r2', '2026-05-10T00:00:00Z'),
+          makeReviewJson('r1', '2026-05-01T00:00:00Z'),
+        ],
+      });
+    const sweep = () =>
+      runGoogleReviewsSweep({
+        reviewRepo,
+        pollStateRepo,
+        credentialResolver: makeResolver({
+          credentials: { t1: makeCredRow('t1') },
+        }),
+        listTenantIds: async () => ['t1'],
+        logger,
+        now: () => NOW,
+        fetchFn: olderReviews,
+      });
+
+    it('a late sweep for the old listing cannot make the new one skip older reviews', async () => {
+      // The old listing's sweep finished after the switch reset the cursor
+      // and wrote its own, newer watermark back.
+      await pollStateRepo.recordSuccess('t1', 'OLD@2026-05-15T00:00:00.000Z');
+
+      const result = await sweep();
+
+      expect(result.persisted).toBe(2);
+      const state = await pollStateRepo.getPollState('t1');
+      expect(state?.cursor).toBe('L@2026-05-10T00:00:00.000Z');
+    });
+
+    it("still stops at the current listing's own watermark", async () => {
+      await pollStateRepo.recordSuccess('t1', 'L@2026-05-05T00:00:00.000Z');
+
+      const result = await sweep();
+
+      expect(result.persisted).toBe(1);
+    });
+
+    it('reads a cursor written before the binding as the current listing\'s', async () => {
+      await pollStateRepo.recordSuccess('t1', '2026-05-05T00:00:00.000Z');
+
+      const result = await sweep();
+
+      expect(result.persisted).toBe(1);
+      const state = await pollStateRepo.getPollState('t1');
+      expect(state?.cursor).toBe('L@2026-05-10T00:00:00.000Z');
+    });
+
+    it('parses and formats cursors', () => {
+      const at = new Date('2026-05-05T00:00:00.000Z');
+      const loc = 'accounts/1/locations/2';
+      expect(parseCursorDate(formatCursor(loc, at), loc)).toEqual(at);
+      expect(parseCursorDate(formatCursor(loc, at), 'accounts/1/locations/3')).toBeNull();
+      expect(parseCursorDate('2026-05-05T00:00:00.000Z', loc)).toEqual(at);
+      expect(parseCursorDate(`${loc}@not-a-date`, loc)).toBeNull();
+      expect(parseCursorDate(null, loc)).toBeNull();
+    });
+  });
+
   it('records a quota error and skips the tenant on 429', async () => {
     const fetchFn = async (): Promise<Response> =>
       new Response('quota exceeded', {
@@ -224,6 +290,7 @@ describe('P7-026 runGoogleReviewsSweep', () => {
     expect(result.persisted).toBe(0);
     const state = await pollStateRepo.getPollState('t1');
     expect(state?.consecutive429Count).toBe(1);
+    expect(state?.backoffReason).toBe('quota');
     // Retry-After=30s equals the exponential base of 30s — GREATEST
     // picks either; the resulting backoff is the same.
     expect(state?.backoffUntil?.getTime()).toBe(
@@ -762,7 +829,37 @@ describe('P7-026 runGoogleReviewsSweep — refresh-token handling', () => {
     // Success path resets throttling as usual.
     const state = await pollStateRepo.getPollState('t1');
     expect(state?.backoffUntil).toBeNull();
-    expect(state?.cursor).toBe('2026-05-17T10:00:00.000Z');
+    expect(state?.cursor).toBe('L@2026-05-17T10:00:00.000Z');
+  });
+
+  it('a reconnect during the sweep keeps the old credentials\' failure from pausing the new ones', async () => {
+    const fetchFn = async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) {
+        // The owner finishes reconnecting while this sweep is mid-flight.
+        await pollStateRepo.recordReconnect('t1');
+        return new Response('{"error":"invalid_grant"}', { status: 400 });
+      }
+      return new Response('{"error":"invalid_token"}', { status: 401 });
+    };
+
+    const result = await runGoogleReviewsSweep({
+      reviewRepo,
+      pollStateRepo,
+      credentialResolver: makeResolver({
+        credentials: { t1: staleCredRow('t1') },
+      }),
+      listTenantIds: async () => ['t1'],
+      logger,
+      now: () => NOW,
+      fetchFn,
+      googleConfig: AUTH_CONFIG,
+      credentialStore: { persistRotatedAccessToken: vi.fn(async () => {}) },
+    });
+
+    expect(result.failed).toBe(0);
+    const state = await pollStateRepo.getPollState('t1');
+    expect(state).toMatchObject({ backoffUntil: null, backoffReason: null, authGeneration: 1 });
   });
 
   it('refresh failure lands in the poll-state backoff (visible degradation, not silent)', async () => {
@@ -802,6 +899,8 @@ describe('P7-026 runGoogleReviewsSweep — refresh-token handling', () => {
     expect(state!.backoffUntil!.getTime()).toBe(
       NOW.getTime() + GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS * 1000,
     );
+    // Marked as a credentials problem, so only this asks for a reconnect.
+    expect(state?.backoffReason).toBe('auth');
     expect(state?.consecutive429Count).toBeGreaterThanOrEqual(1);
 
     // And the next sweep skips the tenant entirely (throttled), so we

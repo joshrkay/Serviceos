@@ -150,6 +150,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `DELETE /api/get-found/items/:id/skip` | occasional | Get found online checklist (D-044): brings a skipped setup item back. Optional by construction. | false | none | |
 | `DELETE /api/googlebusiness-integrations/google` | occasional | Disconnects review monitoring — teardown of an optional integration, never part of a working day. | false | none | |
 | `POST /api/googlebusiness-integrations/google/connect` | occasional | Connects the tenant's Google Business profile for review monitoring. Tenant-wide credential, set once; owner-gated so a member cannot repoint it at an account they control. | false | none | |
+| `GET /api/googlebusiness-integrations/google/locations` | occasional | D-044: lists the Google listings on the connected account so the owner can pick one. Only needed when the account has several, or to change it. | false | none | |
+| `PUT /api/googlebusiness-integrations/google/location` | occasional | D-044: chooses which Google listing the tenant is (fills the review link from it). A one-time setup choice, owner-gated like the connection itself. | false | none | |
+| `GET /api/get-found-online/` | occasional | D-044: the home "Get found online" checklist. A read of setup progress that no working day forces; dispatchers and techs never see the card. | false | none | |
+| `POST /api/get-found-online/dismiss` | occasional | D-044: hides the finished checklist. Optional tidy-up, allowed only once every item is done. | false | none | |
 | `POST /api/integrations/quickbooks/connect` | occasional | Connects the tenant's books to a QuickBooks company. Tenant-wide financial integration set up once; owner-gated so a member cannot sync paid invoices/customers into their own Intuit company. | false | none | |
 | `POST /api/integrations/quickbooks/disconnect` | occasional | QuickBooks teardown — never part of a working day. | false | none | |
 | `POST /api/integrations/quickbooks/sync` | occasional | Manual re-sync to QuickBooks; an optional nudge, not something the day forces. Pushes financial data, so owner-gated like connect. | false | none | |
@@ -161,6 +165,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `DELETE /api/estimates/:id` | occasional | Cleanup. The daily path is draft → approve → send, not delete. | false | none | |
 | `DELETE /api/notes/:id` | occasional | Cleanup of a note the day already captured. | false | none | |
 | `DELETE /api/settings/packs/:packId` | occasional | Vertical-pack configuration. | false | none | |
+| `DELETE /api/settings/text-wording/:purpose` | occasional | Resets one customer text (estimate, invoice, portal link, thank-you) back to our wording (D-045). Rare by construction. | false | none | |
 | `DELETE /api/settings/e1-script` | occasional | Reverts the tenant's E1 life-safety script to the hard-flagged placeholder (#1386, O-2) — e.g. a sign-off withdrawn. Rare by construction. | false | none | |
 | `DELETE /api/settings/voice-approval-pin` | occasional | Security configuration for the spoken money/irreversible challenge. | false | none | |
 | `PATCH /api/entity-aliases/:id/deactivate` | occasional | Revokes a learned tenant alias — a correction to what the AI inferred, not a step in a normal day. Owner-only per the router's own header ("Owner-only revoke path for learned tenant aliases"). **Gated inside the handler, not by a middleware guard**, so the executed-guard derivation cannot see it; declared in `IN_HANDLER_OWNER_ROUTES` and cross-checked against the mounted app and the source. | false | none | |
@@ -208,6 +213,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `PUT /api/settings/brand-voice/` | occasional | Brand-voice configuration. Voice can reach it (`update_brand_voice` is `manual` class — owner-only, never auto-approved). | true | voice_intent:update_brand_voice | |
 | `PUT /api/settings/capabilities/:key` | occasional | Per-tenant capability flags (#1011). Configuration. | false | none | |
 | `PUT /api/settings/dunning` | occasional | The tenant's late-fee and dunning policy (#1143). Configuration set once and revisited rarely; the overdue sweep applies it with no owner action on a normal day. | false | none | |
+| `PUT /api/settings/text-wording/:purpose` | occasional | The owner's own wording for one customer text (D-045, Settings → Text wording). Set once and revisited rarely; with none saved, our wording goes out with no owner action. | false | none | |
 | `PUT /api/settings/e1-script` | occasional | Records the reviewed E1 life-safety script with its two reviewer sign-offs (#1386/#1389, O-2: one licensed trade professional AND one counsel, both required; web form at `/settings/e1-script`). Done once per sign-off; until then calls run the hard-flagged placeholder with no owner action. | false | none | |
 | `PUT /api/settings/packs/:packId/activate` | occasional | Vertical-pack activation. | false | none | |
 | `PUT /api/settings/voice-approval-pin` | occasional | Security configuration for the spoken challenge. | false | none | |

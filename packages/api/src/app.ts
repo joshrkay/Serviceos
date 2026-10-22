@@ -392,6 +392,11 @@ import {
   createGoogleBusinessIntegrationsRouter,
   createGoogleBusinessOAuthCallbackRouter,
 } from './routes/googlebusiness-integrations';
+import { createGetFoundOnlineRouter } from './routes/get-found-online';
+import {
+  InMemoryGetFoundOnlineDismissalRepository,
+  PgGetFoundOnlineDismissalRepository,
+} from './onboarding/get-found-online-dismissal';
 import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
 import { SettingsBrandVoiceLoader } from './reputation/settings-brand-voice-loader';
 import { PgCustomerLoader } from './reputation/match-customer';
@@ -405,6 +410,8 @@ import { createMaintenanceContractsRouter } from './routes/maintenance-contracts
 import { PgMaintenanceContractRepository } from './maintenance-contracts/pg-maintenance-contract';
 import { InMemoryMaintenanceContractRepository } from './maintenance-contracts/maintenance-contract';
 import { createMessageTemplateRouter } from './messaging/message-template-router';
+import { createCustomerTextWording } from './notifications/customer-text-wording';
+import { createCustomerTextWordingRouter } from './notifications/customer-text-wording-router';
 import {
   InMemoryPortalSessionRepository,
   PortalSessionRepository,
@@ -1082,6 +1089,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     customerPaymentMethodRepo,
     templateRepo,
     messageTemplateRepo,
+    customerTextWordingRepo,
     bundleRepo,
     qualityMetricsRepo,
     voiceRepo,
@@ -1694,6 +1702,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       })
     : null;
   const publicBaseUrl = config.publicOrigins.web;
+  // D-045 — the owner's own wording for customer texts (Settings → Text wording).
+  const customerTextWording = createCustomerTextWording({
+    repo: customerTextWordingRepo,
+    logger: createLogger({
+      service: 'customer-text-wording',
+      environment: process.env.NODE_ENV || 'development',
+    }),
+  });
   const sendService = messageDelivery && outboundMessaging
     ? new SendService({
         delivery: messageDelivery,
@@ -1708,6 +1724,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         // policy read fails and the send is refused.
         auditRepo,
         publicBaseUrl,
+        wording: customerTextWording,
         // D-045 — an invoice in pay_link mode is sent only once its pay link exists.
         ensureInvoicePayLink: (tenantId, invoiceId) =>
           createInvoicePaymentLink(tenantId, invoiceId, {
@@ -3711,6 +3728,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     googleConfig: googleBusinessOAuthConfig,
     appBaseUrl: config.publicOrigins.web,
     auditRepo,
+    // D-044: a chosen location fills the tenant's Google review link.
+    settingsRepo,
     // Surfaces lastSuccessfulPollAt / backoffUntil on GET / so a broken
     // credential (failed refresh) degrades visibly in Settings.
     ...(googleReviewsPollStateRepo
@@ -5786,6 +5805,21 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     createGoogleBusinessIntegrationsRouter(googleBusinessRouterDeps),
   );
 
+  // D-044 / #1763 — the owner's "Get found online" home checklist, derived
+  // from the Google Business connection and the review-link setting.
+  app.use(
+    '/api/get-found-online',
+    createGetFoundOnlineRouter({
+      integrationRepo: googleBusinessIntegrationRepo,
+      ...(googleReviewsPollStateRepo ? { pollStateRepo: googleReviewsPollStateRepo } : {}),
+      settingsRepo,
+      dismissalRepo: pool
+        ? new PgGetFoundOnlineDismissalRepository(pool)
+        : new InMemoryGetFoundOnlineDismissalRepository(),
+      auditRepo,
+    }),
+  );
+
   app.use(
     '/api/integrations',
     createIntegrationsRouter(integrationsRouterDeps),
@@ -6253,6 +6287,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       }),
     );
   }
+  // D-045 — Settings → Text wording (owner's own wording for customer texts).
+  app.use(
+    '/api/settings/text-wording',
+    createCustomerTextWordingRouter({ repo: customerTextWordingRepo, settingsRepo, auditRepo, publicBaseUrl: config.publicOrigins.web }),
+  );
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo, settingsRepo));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
@@ -7501,6 +7540,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           customerRepo,
           settingsRepo,
           messaging: outboundMessaging,
+          wording: customerTextWording,
           auditRepo,
           logger: thankYouSmsLogger,
           ...(messageDelivery ? { sendWindow: messageDelivery } : {}),

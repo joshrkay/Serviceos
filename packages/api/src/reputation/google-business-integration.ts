@@ -17,8 +17,13 @@
  *     accessTokenEnc:       AES-256-GCM via TENANT_ENCRYPTION_KEY,
  *     refreshTokenEnc:      AES-256-GCM via TENANT_ENCRYPTION_KEY,
  *     accessTokenExpiresAt: ISO timestamp,
- *     providerData: { accountId, locationId },
+ *     providerData: { accountId, locationId, placeId, reviewUrl,
+ *                     locationTitle, locationCount },
  *   }
+ *
+ * `locationCount` is how many locations discovery saw at connect time; with
+ * no `locationId` it tells "the owner must pick one" (>1 or unknown) apart
+ * from "this Google account has no Business Profile yet" (0).
  *
  * Legacy hand-seeded rows with plaintext `accessToken` / top-level
  * `accountId`/`locationId` keys stay readable (the worker always
@@ -69,12 +74,23 @@ function getKey(): string {
   return key;
 }
 
+/** The connected Google listing (D-044) inside `credentials.providerData`. */
+interface StoredProviderData {
+  /** Null once the chosen listing was forgotten (Google stopped listing it). */
+  accountId?: string | null;
+  locationId?: string | null;
+  placeId?: string | null;
+  reviewUrl?: string | null;
+  locationTitle?: string | null;
+  locationCount?: number;
+}
+
 /** The credentials JSONB shape (writer side + both legacy read fallbacks). */
 interface StoredGoogleBusinessCredentials {
   accessTokenEnc?: string;
   refreshTokenEnc?: string;
   accessTokenExpiresAt?: string;
-  providerData?: { accountId?: string; locationId?: string };
+  providerData?: StoredProviderData;
   /** dev/test + legacy hand-seeded plaintext fallbacks */
   accessToken?: string;
   refreshToken?: string;
@@ -144,16 +160,15 @@ export function resolveGoogleBusinessLocation(credRow: CredentialRow): {
   locationId?: string;
 } {
   const creds = (credRow.credentials ?? {}) as StoredGoogleBusinessCredentials;
-  if (creds.providerData) {
-    const { accountId, locationId } = creds.providerData;
-    return {
-      ...(accountId !== undefined ? { accountId } : {}),
-      ...(locationId !== undefined ? { locationId } : {}),
-    };
-  }
+  // Per field: a legacy hand-seeded row keeps its top-level ids even after
+  // providerData gains other fields (e.g. only locationCount); an id
+  // providerData holds, even a forgetLocation null, wins.
+  const pd = creds.providerData;
+  const accountId = pd && 'accountId' in pd ? pd.accountId : creds.accountId;
+  const locationId = pd && 'locationId' in pd ? pd.locationId : creds.locationId;
   return {
-    ...(creds.accountId !== undefined ? { accountId: creds.accountId } : {}),
-    ...(creds.locationId !== undefined ? { locationId: creds.locationId } : {}),
+    ...(accountId != null ? { accountId } : {}),
+    ...(locationId != null ? { locationId } : {}),
   };
 }
 
@@ -231,7 +246,21 @@ export interface GoogleBusinessIntegrationSummary {
   status: string;
   accountId: string | null;
   locationId: string | null;
+  placeId: string | null;
+  reviewUrl: string | null;
+  locationTitle: string | null;
+  /** Locations discovery saw at connect time; null when unknown. */
+  locationCount: number | null;
   updatedAt: Date;
+}
+
+/** The chosen location's listing fields (D-044 "Google listing"). */
+export interface GoogleBusinessLocationSelection {
+  accountId: string;
+  locationId: string;
+  placeId: string | null;
+  reviewUrl: string | null;
+  locationTitle: string | null;
 }
 
 export interface UpsertGoogleBusinessIntegrationInput {
@@ -239,8 +268,24 @@ export interface UpsertGoogleBusinessIntegrationInput {
   accessToken: string;
   refreshToken: string;
   accessTokenExpiresAt: Date;
-  accountId?: string;
-  locationId?: string;
+  /** Present when exactly one location was discovered. */
+  selection?: GoogleBusinessLocationSelection;
+  /** How many locations discovery saw; omitted when discovery failed. */
+  locationCount?: number;
+}
+
+/**
+ * Whether the connected listing is usable: `connected` (a location is
+ * chosen), `needs_pick` (several, or discovery failed — the owner chooses),
+ * or `no_location` (the Google account has no Business Profile yet).
+ */
+export type GoogleBusinessLocationState = 'connected' | 'needs_pick' | 'no_location';
+
+export function googleBusinessLocationState(
+  summary: Pick<GoogleBusinessIntegrationSummary, 'locationId' | 'locationCount'>,
+): GoogleBusinessLocationState {
+  if (summary.locationId) return 'connected';
+  return summary.locationCount === 0 ? 'no_location' : 'needs_pick';
 }
 
 export interface GoogleBusinessIntegrationRepository
@@ -251,6 +296,36 @@ export interface GoogleBusinessIntegrationRepository
   ): Promise<GoogleBusinessIntegrationSummary>;
   /** Metadata for the status endpoint — never returns token material. */
   get(tenantId: string): Promise<GoogleBusinessIntegrationSummary | null>;
+  /** Decoded tokens for owner-initiated calls (location picker). */
+  getTokens(tenantId: string): Promise<GoogleBusinessTokens | null>;
+  /**
+   * Point the integration at one location. Keeps the tokens; replaces the
+   * listing fields. Null when the tenant has no integration row.
+   */
+  selectLocation(
+    tenantId: string,
+    selection: GoogleBusinessLocationSelection,
+  ): Promise<GoogleBusinessIntegrationSummary | null>;
+  /**
+   * Record how many locations a later successful discovery saw (the
+   * connect-time count can be missing when discovery failed then), so
+   * "no location" is reported instead of "pick one". Null when the tenant
+   * has no integration row.
+   */
+  recordLocationCount(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null>;
+  /**
+   * Drop the chosen listing (Google no longer lists it for this
+   * connection) and record the new count, so the owner is asked to pick
+   * again and the poll worker stops polling it. Keeps the tokens. Null
+   * when the tenant has no integration row.
+   */
+  forgetLocation(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null>;
   /**
    * Hard-delete the row. The poll worker treats "no row" as a silent
    * skip (many tenants legitimately have no GBP), so deletion — not a
@@ -269,11 +344,31 @@ function buildCredentialsJson(
     refreshTokenEnc: encrypt(input.refreshToken, key),
     accessTokenExpiresAt: input.accessTokenExpiresAt.toISOString(),
     providerData: {
-      ...(input.accountId !== undefined ? { accountId: input.accountId } : {}),
-      ...(input.locationId !== undefined
-        ? { locationId: input.locationId }
+      ...(input.selection ? selectionProviderData(input.selection) : {}),
+      ...(input.locationCount !== undefined
+        ? { locationCount: input.locationCount }
         : {}),
     },
+  };
+}
+
+const FORGOTTEN_LISTING: StoredProviderData = {
+  accountId: null,
+  locationId: null,
+  placeId: null,
+  reviewUrl: null,
+  locationTitle: null,
+};
+
+function selectionProviderData(
+  selection: GoogleBusinessLocationSelection,
+): StoredProviderData {
+  return {
+    accountId: selection.accountId,
+    locationId: selection.locationId,
+    placeId: selection.placeId,
+    reviewUrl: selection.reviewUrl,
+    locationTitle: selection.locationTitle,
   };
 }
 
@@ -290,12 +385,19 @@ function summaryFromCredentials(
     credentials,
     credential_version: 0,
   });
+  const listing =
+    ((credentials as StoredGoogleBusinessCredentials).providerData ?? {});
   return {
     id,
     tenantId,
     status,
     accountId: accountId ?? null,
     locationId: locationId ?? null,
+    placeId: listing.placeId ?? null,
+    reviewUrl: listing.reviewUrl ?? null,
+    locationTitle: listing.locationTitle ?? null,
+    locationCount:
+      typeof listing.locationCount === 'number' ? listing.locationCount : null,
     updatedAt,
   };
 }
@@ -359,6 +461,58 @@ export class InMemoryGoogleBusinessIntegrationRepository
 
   async disconnect(tenantId: string): Promise<boolean> {
     return this.rows.delete(tenantId);
+  }
+
+  async getTokens(tenantId: string): Promise<GoogleBusinessTokens | null> {
+    const entry = this.rows.get(tenantId);
+    return entry ? resolveGoogleBusinessTokens(entry.row, getKey()) : null;
+  }
+
+  async selectLocation(
+    tenantId: string,
+    selection: GoogleBusinessLocationSelection,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, selectionProviderData(selection));
+  }
+
+  async recordLocationCount(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { locationCount });
+  }
+
+  async forgetLocation(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { ...FORGOTTEN_LISTING, locationCount });
+  }
+
+  private mergeProviderData(
+    tenantId: string,
+    patch: Partial<StoredProviderData>,
+  ): GoogleBusinessIntegrationSummary | null {
+    const entry = this.rows.get(tenantId);
+    if (!entry) return null;
+    const creds = entry.row.credentials as StoredGoogleBusinessCredentials;
+    const credentials: Record<string, unknown> = {
+      ...entry.row.credentials,
+      providerData: { ...creds.providerData, ...patch },
+    };
+    entry.row = {
+      ...entry.row,
+      credentials,
+      credential_version: entry.row.credential_version + 1,
+    };
+    entry.updatedAt = new Date();
+    return summaryFromCredentials(
+      entry.id,
+      tenantId,
+      entry.status,
+      credentials,
+      entry.updatedAt,
+    );
   }
 
   async persistRotatedAccessToken(
@@ -486,6 +640,97 @@ export class PgGoogleBusinessIntegrationRepository
         `${tenantId}:${GOOGLE_BUSINESS_PROVIDER}`,
       ]);
       return (result.rowCount ?? 0) > 0;
+    });
+  }
+
+  async getTokens(tenantId: string): Promise<GoogleBusinessTokens | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT credentials, credential_version
+           FROM tenant_integrations
+          WHERE tenant_id = $1 AND provider = $2`,
+        [tenantId, GOOGLE_BUSINESS_PROVIDER],
+      );
+      if (result.rows.length === 0) return null;
+      const row = result.rows[0] as {
+        credentials: Record<string, unknown>;
+        credential_version: number;
+      };
+      return resolveGoogleBusinessTokens(
+        {
+          tenant_id: tenantId,
+          provider: GOOGLE_BUSINESS_PROVIDER,
+          credentials: row.credentials,
+          credential_version: row.credential_version,
+        },
+        getKey(),
+      );
+    });
+  }
+
+  async selectLocation(
+    tenantId: string,
+    selection: GoogleBusinessLocationSelection,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, selectionProviderData(selection));
+  }
+
+  async recordLocationCount(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { locationCount });
+  }
+
+  async forgetLocation(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { ...FORGOTTEN_LISTING, locationCount });
+  }
+
+  private async mergeProviderData(
+    tenantId: string,
+    patch: Partial<StoredProviderData>,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.withTenant(tenantId, async (client) => {
+      // Merge into providerData: the patched fields are replaced, the
+      // tokens and every other field are kept.
+      const result = await client.query(
+        `UPDATE tenant_integrations
+            SET credentials = jsonb_set(
+                  credentials,
+                  '{providerData}',
+                  COALESCE(credentials->'providerData', '{}'::jsonb) || $3::jsonb
+                ),
+                credential_version = credential_version + 1,
+                updated_at = NOW()
+          WHERE tenant_id = $1 AND provider = $2
+          RETURNING id, status, credentials, updated_at`,
+        [
+          tenantId,
+          GOOGLE_BUSINESS_PROVIDER,
+          JSON.stringify(patch),
+        ],
+      );
+      if (result.rows.length === 0) return null;
+      // The poll worker caches credential rows; the new location must reach it.
+      await client.query(`SELECT pg_notify('tenant_integration_rotated', $1)`, [
+        `${tenantId}:${GOOGLE_BUSINESS_PROVIDER}`,
+      ]);
+      const row = result.rows[0] as {
+        id: string;
+        status: string;
+        credentials: Record<string, unknown>;
+        updated_at: string;
+      };
+      return summaryFromCredentials(
+        row.id,
+        tenantId,
+        row.status,
+        row.credentials,
+        new Date(row.updated_at),
+      );
     });
   }
 

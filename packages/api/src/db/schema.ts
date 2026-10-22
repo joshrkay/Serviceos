@@ -8217,28 +8217,37 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_blocked
       ON message_dispatches (tenant_id, sent_at DESC) WHERE status = 'blocked';
   `,
-
-  // #1750 (D-044) — Get found online checklist facts on tenant_settings.
-  //   presence_path           — the owner's "do you have a website?" answer; NULL = unanswered
-  //   forwarding_mode         — missed calls only (NULL reads as this default) or all calls
-  //   get_found_skipped_items — checklist item ids the owner skipped
-  // The forwarded line and its forwarding check are NOT new: they are 318's
-  // forwarding_source_number / forwarding_verified_at, bound to the line by
-  // forwarding_generation. Skipped-item ids are not CHECKed: the set grows
-  // with each slice and is validated at the request boundary.
-  '330_tenant_settings_get_found': `
+  // D-045 — the owner's own wording for the texts customers get, one row per
+  // text (notifications/customer-text-wording.ts). No row means our wording.
+  '330_customer_text_wording': `
+    CREATE TABLE IF NOT EXISTS customer_text_wording (
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      purpose TEXT NOT NULL CHECK (purpose IN ('estimate_text', 'invoice_text', 'portal_link_text', 'thank_you_text')),
+      body TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 480),
+      language TEXT NOT NULL CHECK (language IN ('en', 'es')),
+      updated_by TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (tenant_id, purpose)
+    );
+    ALTER TABLE customer_text_wording ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_text_wording FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_text_wording ON customer_text_wording;
+    CREATE POLICY tenant_isolation_customer_text_wording ON customer_text_wording
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // D-044 / #1763 — the owner dismissed the "Get found online" home
+  // checklist once every item was done. The card reappears while any item is
+  // open again, so a reopened item is never hidden by an old dismissal.
+  '331_get_found_online': `
     ALTER TABLE tenant_settings
-      ADD COLUMN IF NOT EXISTS presence_path TEXT,
-      ADD COLUMN IF NOT EXISTS forwarding_mode TEXT,
-      ADD COLUMN IF NOT EXISTS get_found_skipped_items TEXT[] NOT NULL DEFAULT '{}';
+      ADD COLUMN IF NOT EXISTS get_found_online_dismissed_at TIMESTAMPTZ;
     ALTER TABLE tenant_settings
-      DROP CONSTRAINT IF EXISTS tenant_settings_presence_path_check,
-      ADD CONSTRAINT tenant_settings_presence_path_check
-        CHECK (presence_path IN ('own_website', 'google_only', 'neither')) NOT VALID;
-    ALTER TABLE tenant_settings
-      DROP CONSTRAINT IF EXISTS tenant_settings_forwarding_mode_check,
-      ADD CONSTRAINT tenant_settings_forwarding_mode_check
-        CHECK (forwarding_mode IN ('missed_calls', 'all_calls')) NOT VALID;
+      ADD COLUMN IF NOT EXISTS google_review_url_derived TEXT;
+    ALTER TABLE review_poll_state
+      ADD COLUMN IF NOT EXISTS backoff_reason TEXT
+        CHECK (backoff_reason IN ('quota', 'auth'));
+    ALTER TABLE review_poll_state
+      ADD COLUMN IF NOT EXISTS auth_generation INTEGER NOT NULL DEFAULT 0;
   `,
 };
 

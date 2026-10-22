@@ -25,7 +25,11 @@ import {
   renderInvoiceSms,
   renderPortalLinkEmail,
   renderPortalLinkSms,
+  smsInvoiceCollectOnSiteLine,
 } from './templates';
+import type { CustomerTextWording, WordingPurpose } from './customer-text-wording';
+import type { Language } from '../ai/i18n/i18n';
+import { formatUsdCentsPlain } from '@ai-service-os/shared';
 import { DeliveryError } from './notification-errors';
 import { createLogger } from '../logging/logger';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
@@ -227,6 +231,11 @@ export interface SendServiceDeps {
    */
   ensureInvoicePayLink: (tenantId: string, invoiceId: string) => Promise<unknown>;
   publicBaseUrl: string;
+  /**
+   * D-045 — the owner's own wording for the estimate, invoice and portal-link
+   * texts. Absent (legacy harnesses) means our wording.
+   */
+  wording?: CustomerTextWording;
 }
 
 /**
@@ -297,6 +306,36 @@ export class SendService {
       recipientEmail: input.recipientEmail,
     });
 
+    // Read the owner's wording once, before any channel goes out: the
+    // channels run in parallel on the request's one connection, and the
+    // read's savepoint must not interleave with their writes. It is prep, so
+    // it runs before the claim below turns 'sending' (never reclaimed).
+    const smsText = channels.some((t) => t.channel === 'sms')
+      ? await this.textInWording({
+          tenantId: input.tenantId,
+          purpose: 'estimate_text',
+          customerLanguage: language,
+          values: {
+            customer_name: customer.displayName,
+            business_name: businessName,
+            number: estimate.estimateNumber,
+            total: formatUsdCentsPlain(estimate.totals.totalCents),
+            link: viewUrl,
+          },
+          note: input.customMessage,
+          builtIn: () =>
+            renderEstimateSms({
+              customerName: customer.displayName,
+              estimateNumber: estimate.estimateNumber,
+              totalCents: estimate.totals.totalCents,
+              businessName,
+              viewUrl,
+              customMessage: input.customMessage,
+              language,
+            }).body,
+        })
+      : '';
+
     // Codex P1 (PR #705) — the provider dispatch begins NOW. Signal any claim
     // wrapper so it flips its claim to 'sending' at this instant (not before
     // the prep above). May reject if the deferred claim CAS was lost to a
@@ -331,15 +370,7 @@ export class SendService {
         ),
         render: () =>
           target.channel === 'sms'
-            ? renderEstimateSms({
-                customerName: customer.displayName,
-                estimateNumber: estimate.estimateNumber,
-                totalCents: estimate.totals.totalCents,
-                businessName,
-                viewUrl,
-                customMessage: input.customMessage,
-                language,
-              }).body
+            ? smsText
             : this.renderEstimateEmailMessage(target.recipient, {
                 customerName: customer.displayName,
                 estimateNumber: estimate.estimateNumber,
@@ -523,6 +554,39 @@ export class SendService {
       });
     }
 
+    // Read the owner's wording once, before any channel goes out: the
+    // channels run in parallel on the request's one connection, and the
+    // read's savepoint must not interleave with their writes.
+    const smsText = channels.some((t) => t.channel === 'sms')
+      ? await this.textInWording({
+          tenantId: input.tenantId,
+          purpose: 'invoice_text',
+          customerLanguage: language,
+          values: {
+            customer_name: customer.displayName,
+            business_name: businessName,
+            number: invoice.invoiceNumber,
+            total: formatUsdCentsPlain(invoice.totals.totalCents),
+            link: viewUrl,
+          },
+          note: input.customMessage,
+          // The owner's wording can't know the invoice is paid in
+          // person, so that line is always ours.
+          extraLines: smsInvoiceCollectOnSiteLine({ businessName, language, paymentCollectionMode }),
+          builtIn: () =>
+            renderInvoiceSms({
+              customerName: customer.displayName,
+              invoiceNumber: invoice.invoiceNumber,
+              totalCents: invoice.totals.totalCents,
+              businessName,
+              viewUrl,
+              dueDateIso: invoice.dueDate?.toISOString(),
+              customMessage: input.customMessage,
+              language,
+              paymentCollectionMode,
+            }).body,
+        })
+      : '';
     const sendStartedAt = Date.now();
     const dispatchTo = (target: ChannelTarget) =>
       this.dispatchOne({
@@ -542,17 +606,7 @@ export class SendService {
         ),
         render: () =>
           target.channel === 'sms'
-            ? renderInvoiceSms({
-                customerName: customer.displayName,
-                invoiceNumber: invoice.invoiceNumber,
-                totalCents: invoice.totals.totalCents,
-                businessName,
-                viewUrl,
-                dueDateIso: invoice.dueDate?.toISOString(),
-                customMessage: input.customMessage,
-                language,
-                paymentCollectionMode,
-              }).body
+            ? smsText
             : this.renderInvoiceEmailMessage(target.recipient, {
                 customerName: customer.displayName,
                 invoiceNumber: invoice.invoiceNumber,
@@ -638,6 +692,23 @@ export class SendService {
       language,
     };
 
+    // Read the owner's wording once, before any channel goes out: the
+    // channels run in parallel on the request's one connection, and the
+    // read's savepoint must not interleave with their writes.
+    const smsText = channels.some((t) => t.channel === 'sms')
+      ? await this.textInWording({
+          tenantId: input.tenantId,
+          purpose: 'portal_link_text',
+          customerLanguage: language,
+          values: {
+            customer_name: customer.displayName,
+            business_name: businessName,
+            link: input.portalUrl,
+          },
+          note: input.customMessage,
+          builtIn: () => renderPortalLinkSms(templateCtx).body,
+        })
+      : '';
     const sendStartedAt = Date.now();
     const results = await Promise.allSettled(
       channels.map((target) =>
@@ -657,7 +728,7 @@ export class SendService {
           ),
           render: () =>
             target.channel === 'sms'
-              ? renderPortalLinkSms(templateCtx).body
+              ? smsText
               : { to: target.recipient, ...renderPortalLinkEmail(templateCtx) },
         })
       )
@@ -680,6 +751,19 @@ export class SendService {
       businessName: settings?.businessName ?? 'Your service team',
       tenantDefaultLanguage: settings?.defaultLanguage ?? null,
     };
+  }
+
+  /** The owner's wording for this text when it applies, else ours (`builtIn`). */
+  private async textInWording(args: {
+    tenantId: string;
+    purpose: WordingPurpose;
+    customerLanguage: Language;
+    values: Record<string, string>;
+    note?: string;
+    extraLines?: readonly string[];
+    builtIn: () => string;
+  }): Promise<string> {
+    return this.deps.wording ? this.deps.wording.textFor(args) : args.builtIn();
   }
 
   private buildViewUrl(prefix: 'e' | 'pay', token: string): string {
