@@ -110,6 +110,8 @@ const SETTINGS_TOGGLE_FIELDS = {
   reviewRequest: 'sendReviewRequest',
   weeklyFeedback: 'weeklyFeedbackEnabled',
   autonomousClose: 'autonomousCloseEnabled',
+  // #1738 — instant reply text for new website-form / portal leads.
+  speedToLead: 'speedToLeadEnabled',
 } as const;
 
 type SettingsToggleField = keyof typeof SETTINGS_TOGGLE_FIELDS;
@@ -211,6 +213,8 @@ export function SettingsPage() {
   const [techAssignmentSms, setTechAssignmentSms] = useState(true);
   const [weeklyFeedback, setWeeklyFeedback] = useState(true);
   const [autonomousClose, setAutonomousClose] = useState(false);
+  // #1738 — speed_to_lead_enabled is NOT NULL DEFAULT FALSE (opt-in).
+  const [speedToLead, setSpeedToLead] = useState(false);
   // The cap is money: held as integer CENTS (the repo invariant) and edited as
   // a dollars string so a half-typed value never round-trips through a float.
   const [closeCapCents, setCloseCapCents] = useState<number | null>(null);
@@ -271,6 +275,7 @@ export function SettingsPage() {
           serviceAreaRadius?: number | null;
           serviceAreaZips?: string[] | null;
           sendThankYouSms?: boolean;
+          speedToLeadEnabled?: boolean;
           sendReviewRequest?: boolean;
           notifyTechniciansBySms?: boolean;
           weeklyFeedbackEnabled?: boolean;
@@ -300,6 +305,7 @@ export function SettingsPage() {
         }
         // #1011 — hydrate the five owner toggles.
         if (typeof data.sendThankYouSms === 'boolean') setThankYouSms(data.sendThankYouSms);
+        if (typeof data.speedToLeadEnabled === 'boolean') setSpeedToLead(data.speedToLeadEnabled);
         if (typeof data.sendReviewRequest === 'boolean') setReviewRequest(data.sendReviewRequest);
         if (typeof data.notifyTechniciansBySms === 'boolean') {
           setTechAssignmentSms(data.notifyTechniciansBySms);
@@ -445,6 +451,7 @@ export function SettingsPage() {
     techAssignmentSms: setTechAssignmentSms,
     weeklyFeedback: setWeeklyFeedback,
     autonomousClose: setAutonomousClose,
+    speedToLead: setSpeedToLead,
   };
 
   function toggleSetting(field: SettingsToggleField, value: boolean) {
@@ -1437,6 +1444,11 @@ export function SettingsPage() {
               label: 'Thank-you text after every job',
               description: 'Text the customer a thank-you about 2 hours after the job is marked done',
               value: thankYouSms, onChange: (v: boolean) => toggleSetting('thankYouSms', v),
+            },
+            {
+              label: 'Text new leads right away',
+              description: 'When someone asks for work on your website form or customer portal and ticks "text me", send them a thank-you text straight away',
+              value: speedToLead, onChange: (v: boolean) => toggleSetting('speedToLead', v),
             },
             {
               label: 'Review request after every job',

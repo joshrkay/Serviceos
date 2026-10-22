@@ -34,8 +34,8 @@ export interface CallPlanUsagePolicy {
 }
 
 export const CALL_PLAN_USAGE: Record<CallPlanId, CallPlanUsagePolicy> = {
-  starter: { monthlyPriceCents: 7_900, includedMinutes: 20, includedUsers: 2 },
-  growth: { monthlyPriceCents: 19_900, includedMinutes: 60, includedUsers: 5 },
+  starter: { monthlyPriceCents: 7_900, includedMinutes: 60, includedUsers: 2 },
+  growth: { monthlyPriceCents: 19_900, includedMinutes: 200, includedUsers: 5 },
 };
 
 function nonNegativeInteger(value: number, name: string): number {

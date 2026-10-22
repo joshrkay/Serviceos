@@ -607,6 +607,8 @@ export const updateSettingsSchema = z.object({
   // Tier 4 — Quick-settings toggles persistence.
   autoApplyInternalUpdates: z.boolean().optional(),
   autoSendAppointmentReminders: z.boolean().optional(),
+  // #1738 — "text new leads right away" (web form / portal; LSA has its own switch).
+  speedToLeadEnabled: z.boolean().optional(),
   notifyTechniciansBySms: z.boolean().optional(),
   // P20-001 — opt into auto-drafting an invoice (as a proposal) on job completion.
   autoInvoiceOnCompletion: z.boolean().optional(),

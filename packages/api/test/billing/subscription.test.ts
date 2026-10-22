@@ -876,11 +876,11 @@ describe('BillingService', () => {
       expect(plans).toEqual([
         {
           id: 'starter', name: 'Rivet Starter', amountCents: 7_900, currency: 'usd', interval: 'month',
-          includedUsers: 2, includedAiMinutes: 20, overageCentsPerAiMinute: 125,
+          includedUsers: 2, includedAiMinutes: 60, overageCentsPerAiMinute: 125,
         },
         {
           id: 'growth', name: 'Rivet Growth', amountCents: 19_900, currency: 'usd', interval: 'month',
-          includedUsers: 5, includedAiMinutes: 60, overageCentsPerAiMinute: 125,
+          includedUsers: 5, includedAiMinutes: 200, overageCentsPerAiMinute: 125,
         },
       ]);
       const serialized = JSON.stringify(plans);

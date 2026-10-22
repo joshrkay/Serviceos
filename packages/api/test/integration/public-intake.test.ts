@@ -24,14 +24,16 @@
  */
 import express from 'express';
 import request from 'supertest';
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import { Pool, PoolClient } from 'pg';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import { createPublicIntakeRouter } from '../../src/routes/public-intake';
 import { PgLeadRepository } from '../../src/leads/pg-lead';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgTenantRepository } from '../../src/auth/pg-tenant';
-import type { SettingsRepository } from '../../src/settings/settings';
+import { ensureTenantSettings, type SettingsRepository } from '../../src/settings/settings';
+import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import { createNewLeadAutoReply } from '../../src/leads/new-lead-auto-reply';
 import type { VerticalPackRegistry } from '../../src/shared/vertical-pack-registry';
 
 // Minimal stubs: the POST path doesn't touch settings or packs. They're
@@ -303,4 +305,48 @@ describe('public intake POST /:tenantId/leads — integration', () => {
       expect(res.body.businessPhone).toBeNull();
     });
   });
+
+  it('#1738: an opted-in tenant texts a consenting visitor once and audits the outcome on the lead', async () => {
+    const settingsRepo = new PgSettingsRepository(pool);
+    const auditRepo = new PgAuditRepository(pool);
+    await ensureTenantSettings(tenantA.tenantId, settingsRepo);
+    await settingsRepo.update(tenantA.tenantId, { speedToLeadEnabled: true, businessName: 'Cool Air' });
+    const send = vi.fn(async () => undefined);
+    const autoApp = express();
+    autoApp.use(express.json());
+    autoApp.use(
+      '/intake',
+      createPublicIntakeRouter(
+        new PgLeadRepository(pool),
+        new PgTenantRepository(pool),
+        auditRepo,
+        settingsRepo,
+        packRegistryStub,
+        pool,
+        createNewLeadAutoReply({ settingsRepo, auditRepo, send }),
+      ),
+    );
+
+    const first = await request(autoApp)
+      .post(`/intake/${tenantA.tenantId}/leads`)
+      .send({ firstName: 'Sandra', primaryPhone: '5125550100', smsConsent: true });
+    expect(first.status).toBe(201);
+    // A repeat submission attaches to the open lead and must not re-text.
+    await request(autoApp)
+      .post(`/intake/${tenantA.tenantId}/leads`)
+      .send({ firstName: 'Sandra', primaryPhone: '5125550100', smsConsent: true })
+      .expect(201);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0]).toMatchObject({
+      tenantId: tenantA.tenantId,
+      leadId: first.body.leadId,
+      body: expect.stringContaining('Cool Air'),
+    });
+    const outcomes = (await auditRepo.findByEntity(tenantA.tenantId, 'lead', first.body.leadId))
+      .filter((e) => e.eventType === 'lead.speed_to_lead')
+      .map((e) => e.metadata?.outcome);
+    expect(outcomes.sort()).toEqual(['existing_lead', 'sent']);
+  });
 });
+

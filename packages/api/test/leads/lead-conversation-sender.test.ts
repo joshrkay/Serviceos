@@ -1,14 +1,16 @@
 import { describe, it, expect, vi } from 'vitest';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
-import { createLsaSpeedToLeadSender } from '../../src/lsa/lsa-speed-to-lead-sender';
+import { createLeadConversationSender, LeadTextUnconfirmedError } from '../../src/leads/lead-conversation-sender';
 import type { Lead } from '../../src/leads/lead';
 
 const TENANT = 'tenant-1';
 
-function setup(opts: { dnc?: boolean } = {}) {
+function setup(opts: { dnc?: boolean; dispatchFails?: boolean; deliveryFails?: boolean } = {}) {
   const conversationRepo = new InMemoryConversationRepository();
   const delivery = {
-    sendSms: vi.fn().mockResolvedValue({ providerMessageId: 'SM-1', provider: 'sms-gateway', channel: 'sms' }),
+    sendSms: opts.deliveryFails
+      ? vi.fn().mockRejectedValue(new Error('twilio 500'))
+      : vi.fn().mockResolvedValue({ providerMessageId: 'SM-1', provider: 'sms-gateway', channel: 'sms' }),
     sendEmail: vi.fn(),
   };
   const auditRepo = { create: vi.fn().mockResolvedValue(undefined) };
@@ -16,14 +18,19 @@ function setup(opts: { dnc?: boolean } = {}) {
     id: 'lead-1', tenantId: TENANT, firstName: 'Jane', lastName: '', primaryPhone: '+15555550123',
     source: 'marketplace', stage: 'new',
   } as Lead;
-  const sender = createLsaSpeedToLeadSender({
+  const sender = createLeadConversationSender({
     reply: {
       conversationRepo,
       customerRepo: { findById: vi.fn().mockResolvedValue(null) },
       leadRepo: { findById: vi.fn().mockResolvedValue(lead) },
       dncRepo: { isOnDnc: vi.fn().mockResolvedValue(opts.dnc ?? false) },
        
-      dispatchRepo: { create: vi.fn().mockImplementation(async (i) => ({ id: 'd1', sentAt: new Date(), ...i })) } as any,
+      dispatchRepo: {
+        create: vi.fn().mockImplementation(async (i) => {
+          if (opts.dispatchFails && i.status === 'sent') throw new Error('db down');
+          return { id: 'd1', sentAt: new Date(), ...i };
+        }),
+      } as any,
        
       delivery: delivery as any,
     },
@@ -31,11 +38,11 @@ function setup(opts: { dnc?: boolean } = {}) {
      
     auditRepo: auditRepo as any,
     getBusinessName: async () => 'Cool Air',
-  });
+  }, { title: 'Google Local Services lead', actorId: 'system:lsa' });
   return { sender, delivery, auditRepo, conversationRepo };
 }
 
-describe('createLsaSpeedToLeadSender (#1738)', () => {
+describe('createLeadConversationSender (#1738)', () => {
   it('sends an SMS reply on the lead conversation', async () => {
     const { sender, delivery } = setup();
     await sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'hello' });
@@ -56,5 +63,27 @@ describe('createLsaSpeedToLeadSender (#1738)', () => {
     await sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'a' });
     await sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'b' });
     expect(await conversationRepo.findByEntity(TENANT, 'lead', 'lead-1')).toHaveLength(1);
+  });
+
+  it('opens the conversation under the caller-supplied title and actor', async () => {
+    const { sender, conversationRepo } = setup();
+    await sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'a' });
+    const [conversation] = await conversationRepo.findByEntity(TENANT, 'lead', 'lead-1');
+    expect(conversation).toMatchObject({ title: 'Google Local Services lead', createdBy: 'system:lsa' });
+  });
+
+  it('a provider failure stays a definite delivery_failed refusal', async () => {
+    const { sender } = setup({ deliveryFails: true });
+    await expect(
+      sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'a' }),
+    ).rejects.toMatchObject({ code: 'delivery_failed' });
+  });
+
+  it('a failure after the provider accepted the text is "unconfirmed", not "not sent"', async () => {
+    const { sender, delivery } = setup({ dispatchFails: true });
+    const err = await sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'a' }).catch((e) => e);
+    expect(delivery.sendSms).toHaveBeenCalledTimes(1);
+    expect(err).toBeInstanceOf(LeadTextUnconfirmedError);
+    expect(err.message).toBe('unconfirmed');
   });
 });

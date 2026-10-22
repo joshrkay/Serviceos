@@ -142,6 +142,16 @@ describe('#1011 — owner-toggle settings reach tenant_settings (real Postgres)'
     expect(await rawColumn(tenantA.tenantId, 'autonomous_close_max_cents')).toBeNull();
   });
 
+  it('#1738: writes speed_to_lead_enabled (default false) and reads it back through the repo', async () => {
+    expect(await rawColumn<boolean>(tenantA.tenantId, 'speed_to_lead_enabled')).toBe(false);
+
+    const res = await request(app).put('/api/settings').send({ speedToLeadEnabled: true });
+    expect(res.status).toBe(200);
+
+    expect(await rawColumn<boolean>(tenantA.tenantId, 'speed_to_lead_enabled')).toBe(true);
+    expect((await settingsRepo.findByTenant(tenantA.tenantId))?.speedToLeadEnabled).toBe(true);
+  });
+
   it('lands a settings.tenant.updated audit row through PgAuditRepository with the key in changedKeys', async () => {
     const res = await request(app).put('/api/settings').send({ sendThankYouSms: false });
     expect(res.status).toBe(200);

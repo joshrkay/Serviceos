@@ -24,6 +24,7 @@
  *   — the router's RV-071 channel gate refuses approval intents outright.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { resolvesCustomer } from '../helpers/resolves-customer';
 
 vi.mock('../../src/analytics/posthog', () => ({
   recordVoiceError: vi.fn(),
@@ -165,6 +166,7 @@ describe('#894 review — voice-action-router: a voicemail transcript is fenced 
       proposalRepo,
       tenantSchedulingResolver: TZ_RESOLVER,
       multiActionEnabled: async () => true,
+      entityResolver: resolvesCustomer(),
     });
   }
 

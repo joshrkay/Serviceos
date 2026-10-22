@@ -119,6 +119,8 @@ interface FormData {
   phone: string;
   email: string;
   address: string;
+  /** #1738 — starts unticked; only a deliberate tick lets the reply text go out. */
+  smsConsent: boolean;
 }
 
 export function IntakeFormPage() {
@@ -132,6 +134,7 @@ export function IntakeFormPage() {
     phone: '',
     email: '',
     address: '',
+    smsConsent: false,
   });
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -203,6 +206,7 @@ export function IntakeFormPage() {
         lastName,
         primaryPhone: data.phone || undefined,
         email: data.email || undefined,
+        smsConsent: data.smsConsent && !!data.phone,
         serviceType: svc?.label ?? undefined,
         urgency: data.urgency ?? undefined,
         description: description || undefined,
@@ -457,6 +461,22 @@ export function IntakeFormPage() {
                 />
               </div>
             ))}
+
+            <label
+              data-testid="intake-sms-consent"
+              className="flex min-h-11 cursor-pointer items-start gap-3 rounded-xl border border-border bg-card px-3 py-2.5"
+            >
+              <input
+                type="checkbox"
+                checked={data.smsConsent}
+                onChange={e => update({ smsConsent: e.target.checked })}
+                className="mt-0.5 h-5 w-5 shrink-0"
+              />
+              <span className="min-w-0 text-sm text-foreground">
+                Text me about this request at this number.{' '}
+                <span className="text-muted-foreground">Msg &amp; data rates may apply. Reply STOP to opt out.</span>
+              </span>
+            </label>
 
             <p className="text-xs text-muted-foreground">
               We'll only use your info to contact you about this service request. No spam.
