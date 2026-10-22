@@ -36,7 +36,10 @@ export async function loadGetFoundFacts(db: Queryable, tenantId: string): Promis
             ) AS has_existing_line,
             ts.forwarding_mode, ts.forwarding_verified_at, ts.get_found_skipped_items,
             -- The first real call (activated_at) proves the number only until
-            -- the number changes; after a change, a call must reach the new one.
+            -- the number changes. After a change, ANY call that reaches the new
+            -- number re-proves it, the owner's own test call included: sessions
+            -- carry no caller number, and what the item asserts is that calls
+            -- reach the AI.
             (ts.activated_at IS NOT NULL AND (
                tw.provider_data->>'phoneE164ChangedAt' IS NULL
                OR EXISTS (SELECT 1 FROM voice_sessions vs
