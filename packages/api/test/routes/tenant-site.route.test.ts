@@ -88,6 +88,7 @@ describe('/api/tenant-site', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual({
       enabled: true,
+      domainConnectEnabled: false,
       baseDomain: BASE,
       site: null,
       suggestedSlug: 'joes-plumbing',

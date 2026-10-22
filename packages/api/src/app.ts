@@ -430,6 +430,9 @@ import { createTenantSiteRouter } from './routes/tenant-site';
 import { InMemoryTenantSiteRepository, PgTenantSiteRepository } from './tenant-site/tenant-site';
 import { createTenantSiteHostMiddleware } from './tenant-site/host-middleware';
 import { loadTenantSiteView } from './tenant-site/view';
+import { createNodeDnsResolver } from './tenant-site/custom-domain';
+import { createRailwayCertificateProvider } from './tenant-site/railway-certificate-provider';
+import { runCustomDomainSweep, CUSTOM_DOMAIN_SWEEP_INTERVAL_MS } from './workers/custom-domain-sweep';
 import { TenantSiteAboutTask } from './ai/tasks/tenant-site-about-task';
 import {
   InMemoryGetFoundOnlineDismissalRepository,
@@ -2660,6 +2663,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     geocodeLocations: 590035,
     // #1735 — outbound drip campaign step sweep. DISTINCT key.
     dripCampaigns: 590036,
+    // #1770 — connected-domain verification sweep. DISTINCT key.
+    customDomains: 590044,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -6010,10 +6015,17 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     pool,
     webOrigin: config.publicOrigins.web,
   };
+  // D-046 / #1770 — connecting an owner's own domain needs a certificate
+  // provider; Railway's custom-domain API is the default and stays inert
+  // (feature off) until RAILWAY_API_TOKEN is set.
+  const customDomainProvider = config.TENANT_SITE_BASE_DOMAIN ? createRailwayCertificateProvider(process.env) : null;
+  const customDomainDns = createNodeDnsResolver();
+  const appHostnames = [config.publicOrigins.web, config.publicOrigins.api].map((o) => new URL(o).hostname);
   if (config.TENANT_SITE_BASE_DOMAIN) {
     tenantSiteHost = createTenantSiteHostMiddleware({
       baseDomain: config.TENANT_SITE_BASE_DOMAIN,
       siteRepo: tenantSiteRepo,
+      appHosts: appHostnames,
       loadView: (tenantId) => loadTenantSiteView(tenantSiteViewDeps, tenantId),
       // Unauthenticated, DB-backed: cap per IP like the other public routes.
       limiter: rateLimit({
@@ -6037,8 +6049,35 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // arrives as an owner-approved proposal.
       aboutTask: new TenantSiteAboutTask(llmGateway),
       proposalRepo,
+      ...(customDomainProvider
+        ? { domain: { provider: customDomainProvider, dns: customDomainDns, reservedHosts: appHostnames } }
+        : {}),
     }),
   );
+  if (shouldRunWorkers && config.TENANT_SITE_BASE_DOMAIN && customDomainProvider) {
+    const customDomainLogger = createLogger({
+      service: 'custom-domain-sweep',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const customDomainBase = config.TENANT_SITE_BASE_DOMAIN;
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.customDomains, async () => {
+        await runCustomDomainSweep({
+          baseDomain: customDomainBase,
+          siteRepo: tenantSiteRepo,
+          settingsRepo,
+          auditRepo,
+          dns: customDomainDns,
+          provider: customDomainProvider,
+          logger: customDomainLogger,
+        });
+      }).catch((err) => {
+        customDomainLogger.error('Custom-domain sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, CUSTOM_DOMAIN_SWEEP_INTERVAL_MS));
+  }
 
   app.use(
     '/api/get-found-online',

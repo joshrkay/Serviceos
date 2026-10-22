@@ -2,12 +2,22 @@ import { useCallback, useEffect, useState } from 'react';
 import { Globe } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
+import { ConnectedDomainSection } from './ConnectedDomainSection';
+import type { ConnectedDomain } from './ConnectedDomainSection';
 
 /** Mirrors GET /api/tenant-site (D-044 / #1768). */
 interface TenantSiteInfo {
   enabled: boolean;
+  /** #1770 — a certificate provider is configured, so an owned domain can be connected. */
+  domainConnectEnabled: boolean;
   baseDomain: string | null;
-  site: { slug: string; published: boolean; publishedAt: string | null; url: string } | null;
+  site: {
+    slug: string;
+    published: boolean;
+    publishedAt: string | null;
+    url: string;
+    domain: ConnectedDomain | null;
+  } | null;
   suggestedSlug: string;
   websiteUrl: string | null;
 }
@@ -391,6 +401,10 @@ export function WebsiteCard() {
                 </p>
               )}
             </div>
+
+            {info.domainConnectEnabled && info.site && (
+              <ConnectedDomainSection domain={info.site.domain} published={published} onChanged={load} />
+            )}
 
             {previewHtml !== null && (
               <div className="mt-4">

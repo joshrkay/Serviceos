@@ -230,3 +230,119 @@ describe('WebsiteCard — AI-drafted about text (#1769)', () => {
     expect(screen.getByRole('button', { name: 'Draft a new one' })).toBeInTheDocument();
   });
 });
+
+describe('WebsiteCard — connect a domain you own (#1770)', () => {
+  const RECORD = { type: 'CNAME', host: 'www.joesplumbing.com', value: 'joes-plumbing.sites.example.com' };
+  const domain = (over: Record<string, unknown> = {}) => ({
+    domain: 'www.joesplumbing.com',
+    status: 'pending_dns',
+    verified: false,
+    record: RECORD,
+    error: null,
+    checkedAt: null,
+    verifiedAt: null,
+    url: 'https://www.joesplumbing.com',
+    ...over,
+  });
+  const info = (siteDomain: unknown, over: Record<string, unknown> = {}) => ({
+    ...INFO,
+    domainConnectEnabled: true,
+    site: { slug: 'joes-plumbing', published: true, publishedAt: null, url: SITE_URL, domain: siteDomain },
+    ...over,
+  });
+
+  it('is hidden when no certificate provider is configured, or there is no site yet', async () => {
+    serve({ 'GET /api/tenant-site': info(null, { domainConnectEnabled: false }), 'GET /api/tenant-site/about': NO_ABOUT });
+    const { unmount } = render(<WebsiteCard />);
+    await screen.findByLabelText(/site address/i);
+    expect(screen.queryByTestId('website-domain')).not.toBeInTheDocument();
+    unmount();
+
+    serve({ 'GET /api/tenant-site': { ...INFO, domainConnectEnabled: true }, 'GET /api/tenant-site/about': NO_ABOUT });
+    render(<WebsiteCard />);
+    await screen.findByLabelText(/site address/i);
+    expect(screen.queryByTestId('website-domain')).not.toBeInTheDocument();
+  });
+
+  it('connects a domain: sends it, then shows the one record to add', async () => {
+    let current: unknown = null;
+    serve({
+      'GET /api/tenant-site': () => json({ data: info(current) }),
+      'GET /api/tenant-site/about': NO_ABOUT,
+      'PUT /api/tenant-site/domain': (init?: RequestInit) => {
+        expect(JSON.parse(String(init?.body))).toEqual({ domain: 'www.joesplumbing.com' });
+        current = domain({ error: { code: 'dns_missing', message: "We can't find the CNAME record yet." } });
+        return json({ data: {} });
+      },
+    });
+    render(<WebsiteCard />);
+    fireEvent.change(await screen.findByLabelText(/your domain/i), { target: { value: 'www.joesplumbing.com' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+
+    expect(await screen.findByTestId('website-domain-record')).toHaveTextContent('joes-plumbing.sites.example.com');
+    expect(screen.getByTestId('website-domain-status')).toHaveTextContent('Waiting for your DNS record');
+    expect(screen.getByTestId('website-domain-error')).toHaveTextContent("can't find the CNAME");
+  });
+
+  it('shows a refusal from the server in plain words', async () => {
+    serve({
+      'GET /api/tenant-site': info(null),
+      'GET /api/tenant-site/about': NO_ABOUT,
+      'PUT /api/tenant-site/domain': json({ message: 'Use a name like www.yourbusiness.com.' }, 400),
+    });
+    render(<WebsiteCard />);
+    fireEvent.change(await screen.findByLabelText(/your domain/i), { target: { value: 'yourbusiness.com' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    expect(await screen.findByTestId('website-domain-problem')).toHaveTextContent('Use a name like www.yourbusiness.com.');
+  });
+
+  it('checks again and removes', async () => {
+    serve({
+      'GET /api/tenant-site': info(domain({ status: 'failed', error: { code: 'dns_wrong', message: 'It points somewhere else.' } })),
+      'GET /api/tenant-site/about': NO_ABOUT,
+      'POST /api/tenant-site/domain/check': { ok: true },
+      'DELETE /api/tenant-site/domain': { ok: true },
+    });
+    render(<WebsiteCard />);
+    expect(await screen.findByTestId('website-domain-status')).toHaveTextContent('Needs your attention');
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await waitFor(() => expect(calls()).toContain('POST /api/tenant-site/domain/check'));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(calls()).toContain('DELETE /api/tenant-site/domain'));
+  });
+
+  it('a verified domain says verified and secure, with no record to add', async () => {
+    serve({
+      'GET /api/tenant-site': info(domain({ status: 'verified', verified: true, verifiedAt: '2026-10-22T12:00:00Z' })),
+      'GET /api/tenant-site/about': NO_ABOUT,
+    });
+    render(<WebsiteCard />);
+    expect(await screen.findByTestId('website-domain-status')).toHaveTextContent('Verified and secure');
+    expect(screen.queryByTestId('website-domain-record')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Check again' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'https://www.joesplumbing.com' })).toBeInTheDocument();
+  });
+
+  it('keeps every domain button and field at least 44px tall (min-h-11)', async () => {
+    serve({ 'GET /api/tenant-site': info(null), 'GET /api/tenant-site/about': NO_ABOUT });
+    const first = render(<WebsiteCard />);
+    const section = await screen.findByTestId('website-domain');
+    for (const el of [...section.querySelectorAll('button'), ...section.querySelectorAll('input')]) {
+      expect(el.className).toContain('min-h-11');
+    }
+    first.unmount();
+
+    serve({
+      'GET /api/tenant-site': info(domain({ error: { code: 'dns_missing', message: 'x' } })),
+      'GET /api/tenant-site/about': NO_ABOUT,
+    });
+    render(<WebsiteCard />);
+    const withDomain = await screen.findByTestId('website-domain-state');
+    expect(withDomain.querySelectorAll('button').length).toBe(3);
+    for (const button of withDomain.querySelectorAll('button')) {
+      expect(button.className).toContain('min-h-11');
+    }
+    // Long values wrap instead of widening the page.
+    expect(screen.getByTestId('website-domain-record').innerHTML).toContain('break-all');
+  });
+});

@@ -653,6 +653,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['341_webchat_usage_daily', '5f6bd3060cdf445b80e622cfbb9737ce2503b63143d71be36a7840889728bb2f'],
   ['342_lsa_integrations', '516ec1d299c0f53b81e5a37994d5610f144902fec44740cc4ccbecd7cc4ea6ea'],
   ['343_lsa_leads', '9d80fb938d2a14f160d186a73f49a98992f63b8f2e4edd52c4d0e4c0ad1c31ab'],
+  ['344_tenant_site_custom_domain', '3b9af9d91eb11ceedf0781fb84c7b7f15e6d867213f0ed3a5da8a3c0321f4dc1'],
+  ['345_tenant_site_custom_domain_due', '9cd0e3cfb2d3236e9bab93c8d8bf5851b81d4a37e1f8239b09c1a90485234182'],
 ];
 
 function hashMigration(value: string): string {

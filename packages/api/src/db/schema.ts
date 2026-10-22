@@ -8558,6 +8558,35 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_lsa_leads ON lsa_leads
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
+  // D-044 / #1770 — a domain the owner already owns, pointed at their tenant
+  // site by one CNAME. The row tracks the claim through verification
+  // (pending_dns -> pending_certificate -> verified, or failed after the
+  // backoff gives up). Only a VERIFIED domain is unique across tenants and
+  // served by Host header: an unverified claim cannot squat a name, and a
+  // domain only verifies for the tenant whose slug its CNAME names.
+  '344_tenant_site_custom_domain': `
+    ALTER TABLE tenant_sites
+      ADD COLUMN IF NOT EXISTS custom_domain TEXT,
+      ADD COLUMN IF NOT EXISTS custom_domain_status TEXT,
+      ADD COLUMN IF NOT EXISTS custom_domain_error TEXT,
+      ADD COLUMN IF NOT EXISTS custom_domain_provider_ref TEXT,
+      ADD COLUMN IF NOT EXISTS custom_domain_attempts INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS custom_domain_next_check_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS custom_domain_checked_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS custom_domain_verified_at TIMESTAMPTZ;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_sites_custom_domain_verified
+      ON tenant_sites (custom_domain)
+      WHERE custom_domain_status = 'verified';
+  `,
+
+  // The verification sweep's work list: claims still waiting on DNS or a
+  // certificate, soonest due first.
+  '345_tenant_site_custom_domain_due': `
+    CREATE INDEX IF NOT EXISTS idx_tenant_sites_custom_domain_due
+      ON tenant_sites (custom_domain_next_check_at)
+      WHERE custom_domain_status IN ('pending_dns', 'pending_certificate');
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

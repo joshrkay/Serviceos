@@ -125,6 +125,59 @@ test.describe('Settings → Website card — mobile layout', () => {
     }
   });
 
+  test('the connect-a-domain section (#1770) fits 320px with long values and ≥44px controls', async ({ page }) => {
+    // The e2e API has no certificate provider, so serve the card the response it would get with one.
+    await page.route('**/api/tenant-site', async (route) => {
+      const real = await route.fetch();
+      const body = (await real.json()) as { data: Record<string, unknown> };
+      const longDomain = 'www.a-very-long-business-name-for-testing-overflow.example-domain.com';
+      await route.fulfill({
+        response: real,
+        json: {
+          data: {
+            ...body.data,
+            enabled: true,
+            domainConnectEnabled: true,
+            site: {
+              slug: SLUG,
+              published: false,
+              publishedAt: null,
+              url: `https://${SLUG}.${BASE_DOMAIN}`,
+              domain: {
+                domain: longDomain,
+                status: 'pending_dns',
+                verified: false,
+                record: { type: 'CNAME', host: longDomain, value: `${SLUG}-with-a-long-address.${BASE_DOMAIN}` },
+                error: { code: 'dns_missing', message: "We can't find the CNAME record yet. Add it at your domain registrar." },
+                checkedAt: null,
+                verifiedAt: null,
+                url: `https://${longDomain}`,
+              },
+            },
+          },
+        },
+      });
+    });
+    await page.goto('/settings?open=website');
+    await dismissWhatsNewModal(page);
+    const section = page.getByTestId('website-domain');
+    await expect(section).toBeVisible({ timeout: 20_000 });
+    await section.scrollIntoViewIfNeeded();
+    await expect(page.getByTestId('website-domain-record')).toBeVisible();
+    expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+
+    const buttons = await section.getByRole('button').all();
+    expect(buttons.length).toBe(3);
+    for (const control of buttons) {
+      await control.scrollIntoViewIfNeeded();
+      const rect = await control.boundingBox();
+      expect(rect).not.toBeNull();
+      expect(Math.round(rect!.height)).toBeGreaterThanOrEqual(44);
+      expect(rect!.x).toBeGreaterThanOrEqual(0);
+      expect(rect!.x + rect!.width).toBeLessThanOrEqual(320);
+    }
+  });
+
   test('a drafted about text opens as an editable proposal that fits 320px', async ({ page }) => {
     await page.goto('/settings?open=website');
     await dismissWhatsNewModal(page);

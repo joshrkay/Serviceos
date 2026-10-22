@@ -235,6 +235,22 @@ To switch it on, ops must:
 The Express app answers those hosts ahead of the SPA; every other host, the app domain included,
 is untouched. Until then the owner's Settings → Website card only offers "I have a website".
 
+### Connecting an owner's own domain (D-046, #1770)
+
+Optional, and **off until configured**: an owner who already owns a domain can point it at their
+site with one CNAME to `<slug>.<TENANT_SITE_BASE_DOMAIN>`. HTTPS comes from Railway's custom-domain
+API. To switch it on, set these on **both** the `web` and `worker` services (the web service takes
+the owner's requests, the worker runs the verification sweep):
+
+| Variable | Purpose |
+|---|---|
+| `RAILWAY_API_TOKEN` | A Railway project token able to manage custom domains |
+| `TENANT_SITE_RAILWAY_SERVICE_ID` | The id of the public `web` service that will serve the domains (not the worker's) |
+
+`RAILWAY_PROJECT_ID` and `RAILWAY_ENVIRONMENT_ID` are injected by Railway. Railway limits the number
+of custom domains per service by plan: check the limit for your plan before inviting owners to use this
+(see the caveats in D-046). Connected domains are listed in the Railway service's Settings → Networking.
+
 ## Observability sink validation (post-deploy)
 
 After each deploy in `dev`, `staging`, and `production`, validate that redaction processors are active on every sink.

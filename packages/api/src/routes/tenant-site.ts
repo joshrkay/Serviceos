@@ -12,6 +12,16 @@ import {
   TenantSiteSlugTakenError,
 } from '../tenant-site/tenant-site';
 import { SLUG_PROBLEM_MESSAGES, normalizeSlug, slugProblem, suggestSlug } from '../tenant-site/slug';
+import {
+  DOMAIN_PROBLEM_MESSAGES,
+  checkCustomDomain,
+  cnameTarget,
+  customDomainErrorMessage,
+  domainProblem,
+  effectiveSiteUrl,
+  normalizeDomain,
+} from '../tenant-site/custom-domain';
+import type { CertificateProvider, DnsResolver } from '../tenant-site/custom-domain';
 import { renderTenantSitePage } from '../tenant-site/render';
 import { loadTenantSiteView } from '../tenant-site/view';
 import type { TenantSiteViewDeps } from '../tenant-site/view';
@@ -30,6 +40,9 @@ import type { Role } from '../auth/rbac';
  *   GET  /api/tenant-site/preview  — the page as it would render, as HTML text
  *   POST /api/tenant-site/publish
  *   POST /api/tenant-site/unpublish
+ *   PUT  /api/tenant-site/domain       — connect a domain the owner already owns (#1770)
+ *   POST /api/tenant-site/domain/check — check the CNAME / HTTPS now, instead of waiting for the sweep
+ *   DELETE /api/tenant-site/domain     — disconnect it
  *   GET  /api/tenant-site/about        — the approved about copy and any draft awaiting approval
  *   POST /api/tenant-site/about/draft  — AI drafts the about copy as an `update_tenant_site_about`
  *                                        proposal; approve / edit / reject use /api/proposals
@@ -49,6 +62,11 @@ export interface TenantSiteRouteDeps {
   /** The about-copy draft goes through the LLM gateway (ai/tasks/tenant-site-about-task.ts). */
   aboutTask: Pick<TenantSiteAboutTask, 'draft'>;
   proposalRepo: ProposalRepository;
+  /**
+   * #1770 — what connecting a domain needs. Undefined when no certificate
+   * provider is configured (D-046): the feature is then off.
+   */
+  domain?: { provider: CertificateProvider; dns: DnsResolver; reservedHosts: readonly string[] } | undefined;
   now?: () => Date;
 }
 
@@ -70,6 +88,22 @@ export function createTenantSiteRouter(deps: TenantSiteRouteDeps): Router {
     return deps.baseDomain;
   }
 
+  function presentDomain(site: TenantSite) {
+    const claim = site.customDomain;
+    if (!claim) return null;
+    return {
+      domain: claim.domain,
+      status: claim.status,
+      verified: claim.status === 'verified',
+      // The one record the owner adds at their registrar.
+      record: { type: 'CNAME', host: claim.domain, value: cnameTarget(site.slug, deps.baseDomain ?? '') },
+      error: claim.error ? { code: claim.error, message: customDomainErrorMessage(claim.error) } : null,
+      checkedAt: claim.checkedAt ? claim.checkedAt.toISOString() : null,
+      verifiedAt: claim.verifiedAt ? claim.verifiedAt.toISOString() : null,
+      url: `https://${claim.domain}`,
+    };
+  }
+
   function present(site: TenantSite | null) {
     return site
       ? {
@@ -77,8 +111,29 @@ export function createTenantSiteRouter(deps: TenantSiteRouteDeps): Router {
           published: site.published,
           publishedAt: site.publishedAt ? site.publishedAt.toISOString() : null,
           url: siteUrl(site.slug),
+          domain: presentDomain(site),
         }
       : null;
+  }
+
+  function requireDomainEnabled() {
+    const baseDomain = requireEnabled();
+    if (!deps.domain) throw new ValidationError('Connecting your own domain is not available yet');
+    return { baseDomain, domain: deps.domain };
+  }
+
+  /** Points `websiteUrl` back at `fallback` (or clears it) when it still names the connected domain. */
+  async function releaseWebsiteFromDomain(tenantId: string, domain: string, fallback: string | null): Promise<boolean> {
+    const settings = await deps.settingsRepo.findByTenant(tenantId);
+    if (settings?.websiteUrl?.trim().toLowerCase() !== `https://${domain}`) return false;
+    await deps.settingsRepo.update(tenantId, { websiteUrl: fallback });
+    return true;
+  }
+
+  async function dropFromProvider(domain: string, ref: string | null): Promise<void> {
+    if (!ref || !deps.domain) return;
+    // Best effort: a slot left on the provider is cleaned up by hand, and must not block the owner.
+    await deps.domain.provider.remove(domain, ref).catch(() => undefined);
   }
 
   async function checkSlug(
@@ -116,6 +171,7 @@ export function createTenantSiteRouter(deps: TenantSiteRouteDeps): Router {
       res.json({
         data: {
           enabled: Boolean(deps.baseDomain),
+          domainConnectEnabled: Boolean(deps.baseDomain && deps.domain),
           baseDomain: deps.baseDomain ?? null,
           site: present(site),
           suggestedSlug: suggestSlug(settings?.businessName ?? ''),
@@ -167,6 +223,12 @@ export function createTenantSiteRouter(deps: TenantSiteRouteDeps): Router {
       }
       if (existing?.slug !== slug) {
         await audit(req, 'tenant_site.address_set', { slug, previousSlug: existing?.slug ?? null });
+        // The CNAME names the address, so a new address means the domain must be pointed and verified again.
+        if (existing?.customDomain) {
+          await releaseWebsiteFromDomain(tenantId, existing.customDomain.domain, null);
+          await dropFromProvider(existing.customDomain.domain, existing.customDomain.providerRef);
+          site = (await deps.siteRepo.restartCustomDomain(tenantId, now())) ?? site;
+        }
       }
       res.json({ data: present(site) });
     }),
@@ -290,11 +352,11 @@ export function createTenantSiteRouter(deps: TenantSiteRouteDeps): Router {
       const settings = await deps.settingsRepo.findByTenant(tenantId);
       const filledWebsite = !settings?.websiteUrl?.trim();
       if (filledWebsite) {
-        await deps.settingsRepo.update(tenantId, { websiteUrl: siteUrl(site.slug) });
+        await deps.settingsRepo.update(tenantId, { websiteUrl: effectiveSiteUrl(site, deps.baseDomain!) });
       }
       await audit(req, 'tenant_site.published', {
         slug: site.slug,
-        url: siteUrl(site.slug),
+        url: effectiveSiteUrl(site, deps.baseDomain!),
         websiteUrlSet: filledWebsite,
       });
       res.json({ data: present(site) });
@@ -315,12 +377,113 @@ export function createTenantSiteRouter(deps: TenantSiteRouteDeps): Router {
       let clearedWebsite = false;
       if (deps.baseDomain) {
         const settings = await deps.settingsRepo.findByTenant(tenantId);
-        if (settings?.websiteUrl?.trim().toLowerCase() === siteUrl(site.slug)) {
+        const current = settings?.websiteUrl?.trim().toLowerCase();
+        // The connected domain serves nothing while unpublished either.
+        if (current === siteUrl(site.slug) || (site.customDomain && current === `https://${site.customDomain.domain}`)) {
           await deps.settingsRepo.update(tenantId, { websiteUrl: null });
           clearedWebsite = true;
         }
       }
       await audit(req, 'tenant_site.unpublished', { slug: site.slug, websiteUrlCleared: clearedWebsite });
+      res.json({ data: present(site) });
+    }),
+  );
+
+  // --- #1770 connect a domain you own ---------------------------------------
+  const domainSchema = z.object({ domain: z.string().max(300) });
+
+  function domainCheckDeps(baseDomain: string, domain: NonNullable<TenantSiteRouteDeps['domain']>) {
+    return {
+      baseDomain,
+      siteRepo: deps.siteRepo,
+      settingsRepo: deps.settingsRepo,
+      auditRepo: deps.auditRepo,
+      dns: domain.dns,
+      provider: domain.provider,
+      now,
+    };
+  }
+
+  router.put(
+    '/domain',
+    ...guard,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const { baseDomain, domain: domainDeps } = requireDomainEnabled();
+      const tenantId = req.auth!.tenantId;
+      const domain = normalizeDomain(domainSchema.parse(req.body).domain);
+      const problem = domainProblem(domain, baseDomain, domainDeps.reservedHosts);
+      if (problem) throw new ValidationError(DOMAIN_PROBLEM_MESSAGES[problem], { problem });
+
+      const existing = await deps.siteRepo.findByTenant(tenantId);
+      if (!existing) throw new ValidationError('Pick an address for your site first');
+      if (existing.customDomain?.domain === domain) {
+        res.json({ data: present(existing) });
+        return;
+      }
+      if (await deps.siteRepo.isDomainTaken(domain, tenantId)) {
+        throw new ConflictError(customDomainErrorMessage('domain_taken') ?? '', { problem: 'domain_taken' });
+      }
+
+      // Replacing a domain releases the old one first, so its slot and website setting do not linger.
+      if (existing.customDomain) {
+        await releaseWebsiteFromDomain(tenantId, existing.customDomain.domain, null);
+        await dropFromProvider(existing.customDomain.domain, existing.customDomain.providerRef);
+      }
+      const claimed = await deps.siteRepo.setCustomDomain(tenantId, domain, now());
+      if (!claimed) throw new NotFoundError('Tenant site', tenantId);
+      await audit(req, 'tenant_site.domain_set', {
+        domain,
+        previousDomain: existing.customDomain?.domain ?? null,
+        target: cnameTarget(claimed.slug, baseDomain),
+      });
+      // The record may already be in place: check now rather than leave the owner waiting on the sweep.
+      const checked = await checkCustomDomain(domainCheckDeps(baseDomain, domainDeps), claimed, {
+        userId: req.auth!.userId,
+        role: req.auth!.role,
+      });
+      res.json({ data: present(checked ?? claimed) });
+    }),
+  );
+
+  router.post(
+    '/domain/check',
+    ...guard,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const { baseDomain, domain: domainDeps } = requireDomainEnabled();
+      const tenantId = req.auth!.tenantId;
+      const existing = await deps.siteRepo.findByTenant(tenantId);
+      if (!existing?.customDomain) throw new ValidationError('Connect a domain first');
+      if (existing.customDomain.status === 'verified') {
+        res.json({ data: present(existing) });
+        return;
+      }
+      // "Check again" also restarts a claim the sweep gave up on.
+      const restarted = await deps.siteRepo.restartCustomDomain(tenantId, now());
+      if (!restarted) throw new NotFoundError('Tenant site', tenantId);
+      await audit(req, 'tenant_site.domain_check_requested', { domain: restarted.customDomain?.domain });
+      const checked = await checkCustomDomain(domainCheckDeps(baseDomain, domainDeps), restarted, {
+        userId: req.auth!.userId,
+        role: req.auth!.role,
+      });
+      res.json({ data: present(checked ?? restarted) });
+    }),
+  );
+
+  router.delete(
+    '/domain',
+    ...guard,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const existing = await deps.siteRepo.findByTenant(tenantId);
+      if (!existing?.customDomain) throw new NotFoundError('Connected domain', tenantId);
+      const { domain, providerRef } = existing.customDomain;
+
+      await dropFromProvider(domain, providerRef);
+      const site = await deps.siteRepo.clearCustomDomain(tenantId);
+      // The website setting goes back to the tenant site while that is live, else it is cleared.
+      const fallback = existing.published && deps.baseDomain ? siteUrl(existing.slug) : null;
+      const websiteUrlReset = await releaseWebsiteFromDomain(tenantId, domain, fallback);
+      await audit(req, 'tenant_site.domain_removed', { domain, websiteUrlReset });
       res.json({ data: present(site) });
     }),
   );

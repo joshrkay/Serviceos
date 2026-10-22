@@ -1986,3 +1986,60 @@ Customer messages and money still never auto-approve (D-004, D-033).
 **Alternatives rejected.** Leaving policy at the call site with a lint rule (the tag still
 lies when wrong); gating email now (needs the email-consent decision first); a big-bang
 rewrite of all senders.
+
+## D-046 — Connected domains terminate TLS behind a `CertificateProvider`; Railway's custom-domain API is the default, inert until configured
+
+**Date:** 2026-10-22
+**Status:** Accepted as the first implementation (agent-made choice on issue #1770, to be confirmed by the owner once Railway's limits are checked against a real project)
+
+**Context.** D-044 point 2 lets an owner point a domain they already own at their tenant site:
+we show one CNAME, verify it, and get HTTPS working. Something has to hold a certificate for
+each such host. Two options: Railway's custom-domain API (register the domain on the serving
+service; Railway's edge issues the certificate), or a TLS-for-SaaS provider (Cloudflare for
+SaaS custom hostnames, or an on-demand-TLS proxy such as Caddy in front).
+
+**Decision.**
+
+1. **A small `CertificateProvider` interface** (`register`, `status`, `remove`) in
+   `packages/api/src/tenant-site/custom-domain.ts`. Everything else (the verification sweep,
+   the owner endpoints, Host serving) depends only on it.
+2. **The default implementation is Railway's GraphQL custom-domain API**
+   (`railway-certificate-provider.ts`). It is **inert unless configured**: it needs
+   `RAILWAY_API_TOKEN`, `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID` (Railway injects the last
+   two) and `TENANT_SITE_RAILWAY_SERVICE_ID` (the public `web` service, never the worker's own
+   id). Without them the Settings card does not offer the feature and the sweep is not started.
+3. **A domain verifies only against the tenant's own address.** The CNAME must name
+   `<slug>.<TENANT_SITE_BASE_DOMAIN>` for that tenant. Only a *verified* domain is unique
+   across tenants and served, so an unverified claim cannot squat a name and one tenant's
+   claim can never pass on a domain pointed at another's address.
+4. **Sweep.** Leader-gated every minute (advisory key 590044); each claim keeps its own backoff
+   (1m doubling to 1h, 60 attempts, about two and a half days) and then rests as `failed`
+   until the owner taps "Check again". The domain is registered with the provider only once DNS
+   points at us, so unverified claims do not consume provider slots.
+5. **We never buy, sell or renew domains.** Unchanged from D-044.
+
+**Caveats (not verifiable offline; check before relying on this at scale).**
+- **Per-service domain limits.** Railway caps custom domains per service by plan (as last
+  known: a small single-digit number on Hobby and tens on Pro, raisable on request). The limit
+  was not checked against the live account, and it is the main reason this is behind an
+  interface: at hundreds of connected domains this default stops being enough. The sweep records
+  a provider failure as "We couldn't start your secure (HTTPS) setup" and retries, so hitting the
+  cap shows up to the owner as a pending error, not silent breakage.
+- **The CNAME chain.** The owner's CNAME points at `<slug>.<base>`, which resolves through our
+  wildcard record to Railway. Whether Railway's own domain check accepts a chain (rather than
+  a CNAME straight at its target) and issues the certificate must be confirmed on first use.
+  If it does not, the provider needs the Railway-assigned target shown instead, which changes
+  the record we display but not the interfaces.
+- The GraphQL shapes (`customDomainCreate`, `customDomain.status.certificateStatus`,
+  `customDomainDelete`) follow Railway's public schema and have not been run against a live
+  project from this code; the provider is unit-tested against a mocked endpoint only.
+- A verified domain is not re-checked for DNS drift. If the owner later removes the CNAME,
+  the site stops being reachable there but stays marked verified until they re-check.
+
+**Migration path.** A Cloudflare-for-SaaS or Caddy on-demand provider is a second class
+implementing `CertificateProvider` plus a different record to display; nothing above the
+interface changes. Choose it when connected domains approach the Railway per-service limit.
+
+**Alternatives rejected.** A TLS-for-SaaS provider first (a second vendor account, and DNS and
+billing to set up before one owner has connected a domain); our own ACME client (certificate
+storage, renewal and rate limits are exactly the work a provider removes).
