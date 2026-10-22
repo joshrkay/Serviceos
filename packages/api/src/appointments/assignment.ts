@@ -133,6 +133,12 @@ export interface AppointmentAssignment {
   /** Denormalised from the parent appointment for the double-booking trigger. */
   scheduledStart?: Date;
   scheduledEnd?: Date;
+  /**
+   * The dispatcher booked this tech knowing the visit overlaps another one
+   * (FR-2 phase 3c). Exempts this row from `no_double_booking` (migration
+   * 332); set only when an overlap actually existed at assignment time.
+   */
+  overlapAccepted?: boolean;
 }
 
 export interface CreateAssignmentInput {
@@ -142,6 +148,8 @@ export interface CreateAssignmentInput {
   technicianRole: string;
   isPrimary?: boolean;
   assignedBy: string;
+  /** The user explicitly chose to book over an existing overlapping visit. */
+  acceptOverlap?: boolean;
 }
 
 export interface AssignmentRepository {
@@ -178,6 +186,19 @@ export async function assertNoDoubleBooking(
   repository: AssignmentRepository,
   appointmentRepo: Pick<AppointmentRepository, 'findById'>,
 ): Promise<void> {
+  const conflicts = await findDoubleBookings(tenantId, technicianId, window, repository, appointmentRepo);
+  if (conflicts.length > 0) {
+    throw new ConflictError(`Technician is already booked at this time: ${conflicts[0].message}`);
+  }
+}
+
+async function findDoubleBookings(
+  tenantId: string,
+  technicianId: string,
+  window: { start: Date; end: Date; excludeAppointmentId?: string },
+  repository: AssignmentRepository,
+  appointmentRepo: Pick<AppointmentRepository, 'findById'>,
+): Promise<ReturnType<typeof detectOverlappingAppointments>> {
   const techAssignments = await repository.findByTechnician(tenantId, technicianId);
   const otherApptIds = Array.from(
     new Set(
@@ -205,16 +226,13 @@ export async function assertNoDoubleBooking(
       });
     }
   }
-  const conflicts = detectOverlappingAppointments(
+  return detectOverlappingAppointments(
     technicianId,
     window.start,
     window.end,
     others,
     window.excludeAppointmentId,
   );
-  if (conflicts.length > 0) {
-    throw new ConflictError(`Technician is already booked at this time: ${conflicts[0].message}`);
-  }
 }
 
 export async function assignTechnician(
@@ -226,6 +244,7 @@ export async function assignTechnician(
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const isPrimary = input.isPrimary ?? true;
+  let overlapAccepted = false;
 
   // Double-booking backstop. When an appointment repo is supplied, refuse
   // to assign a technician who already has an active appointment whose time
@@ -237,13 +256,16 @@ export async function assignTechnician(
   if (deps.appointmentRepo) {
     const target = await deps.appointmentRepo.findById(input.tenantId, input.appointmentId);
     if (target) {
-      await assertNoDoubleBooking(
-        input.tenantId,
-        input.technicianId,
-        { start: target.scheduledStart, end: target.scheduledEnd, excludeAppointmentId: input.appointmentId },
-        repository,
-        deps.appointmentRepo,
-      );
+      const window = { start: target.scheduledStart, end: target.scheduledEnd, excludeAppointmentId: input.appointmentId };
+      if (input.acceptOverlap) {
+        // A booking the user chose over a known overlap is marked only when
+        // the overlap is real, so a stray flag never weakens the DB guard.
+        overlapAccepted =
+          (await findDoubleBookings(input.tenantId, input.technicianId, window, repository, deps.appointmentRepo))
+            .length > 0;
+      } else {
+        await assertNoDoubleBooking(input.tenantId, input.technicianId, window, repository, deps.appointmentRepo);
+      }
 
       // Availability preconditions (contract #12/#13) — see the deps doc.
       await assertTechnicianAvailability(
@@ -288,6 +310,7 @@ export async function assignTechnician(
     scheduledEnd: deps.appointmentRepo
       ? (await deps.appointmentRepo.findById(input.tenantId, input.appointmentId))?.scheduledEnd
       : undefined,
+    ...(overlapAccepted ? { overlapAccepted: true } : {}),
   };
 
   const created = await repository.create(assignment);
@@ -305,6 +328,7 @@ export async function assignTechnician(
           assignmentId: created.id,
           technicianId: input.technicianId,
           isPrimary: created.isPrimary,
+          ...(overlapAccepted ? { overlapAccepted: true } : {}),
         },
       }),
     );

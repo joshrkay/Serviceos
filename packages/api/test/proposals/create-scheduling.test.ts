@@ -155,3 +155,54 @@ describe('createSchedulingProposal — reschedule feasibility', () => {
     expect(res.kind).toBe('missing_technician');
   });
 });
+
+// Dispatch FR-2 phase 3c — "Allow overlap if select by user": the board's
+// explicit "Book anyway" rides the reassign payload as acceptOverlap: true.
+describe('createSchedulingProposal — reassign with a dispatcher-accepted overlap', () => {
+  const TECH_B = '22222222-2222-2222-2222-222222222222';
+
+  function reassignInput(target: Appointment, acceptOverlap: boolean): CreateSchedulingInput {
+    return {
+      tenantId: TENANT,
+      actorId: 'actor-1',
+      proposalType: 'reassign_appointment',
+      payload: { appointmentId: target.id, toTechnicianId: TECH_B, ...(acceptOverlap ? { acceptOverlap: true } : {}) },
+      expectedVersion: target.updatedAt.toISOString(),
+    };
+  }
+
+  it('still refuses the overlap at creation without the flag', async () => {
+    const target = appt('target', '2026-05-21T08:00:00.000Z', '2026-05-21T09:00:00.000Z');
+    const busy = appt('busy', '2026-05-21T08:30:00.000Z', '2026-05-21T09:30:00.000Z');
+    const { proposalRepo, appointmentRepo, feasibilityDeps } = makeDeps({ target, busy }, { [TECH_B]: ['busy'] });
+
+    const res = await createSchedulingProposal(reassignInput(target, false), proposalRepo, appointmentRepo, feasibilityDeps);
+    expect(res.kind).toBe('infeasible');
+  });
+
+  it('creates the proposal with the flag, keeping acceptOverlap on the payload for approval', async () => {
+    const target = appt('target', '2026-05-21T08:00:00.000Z', '2026-05-21T09:00:00.000Z');
+    const busy = appt('busy', '2026-05-21T08:30:00.000Z', '2026-05-21T09:30:00.000Z');
+    const { proposalRepo, appointmentRepo, feasibilityDeps } = makeDeps({ target, busy }, { [TECH_B]: ['busy'] });
+
+    const res = await createSchedulingProposal(reassignInput(target, true), proposalRepo, appointmentRepo, feasibilityDeps);
+    expect(res.kind).toBe('created');
+    if (res.kind !== 'created') return;
+    expect(res.proposal.payload).toMatchObject({ toTechnicianId: TECH_B, acceptOverlap: true });
+  });
+
+  it('the flag does not lift a non-overlap blocker (missing skill)', async () => {
+    const target = appt('target', '2026-05-21T08:00:00.000Z', '2026-05-21T09:00:00.000Z');
+    const busy = appt('busy', '2026-05-21T08:30:00.000Z', '2026-05-21T09:30:00.000Z');
+    const { proposalRepo, appointmentRepo, feasibilityDeps } = makeDeps({ target, busy }, { [TECH_B]: ['busy'] });
+    (feasibilityDeps as { skillMatcher: unknown }).skillMatcher = {
+      requiredSkillsForJob: async () => ['hvac'], skillsForTechnician: async () => [],
+    };
+
+    const res = await createSchedulingProposal(reassignInput(target, true), proposalRepo, appointmentRepo, feasibilityDeps);
+    expect(res.kind).toBe('infeasible');
+    if (res.kind !== 'infeasible') return;
+    expect(res.feasibility.blocking.map((i) => i.check)).toEqual(['skill_match']);
+    expect(res.feasibility.warnings.some((i) => i.check === 'overlap')).toBe(true);
+  });
+});

@@ -8,7 +8,7 @@ import {
   DispatchAnalyticsRepository,
   captureDispatchEvent,
 } from '../../dispatch/analytics';
-import { checkFeasibility } from '../../scheduling/feasibility';
+import { checkFeasibility, withAcceptedOverlap } from '../../scheduling/feasibility';
 import { FeasibilityDependencies, FeasibilityIssue } from '../../scheduling/feasibility-types';
 import { notifyDispatchBoardChanged } from '../../dispatch/board-notify';
 import { AuditRepository } from '../../audit/audit';
@@ -47,6 +47,8 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
     }
 
     let trailingWarnings: FeasibilityIssue[] = [];
+    // FR-2 phase 3c — the dispatcher chose this tech knowing they overlap.
+    const acceptOverlap = payload.acceptOverlap === true;
 
     // Validate appointment exists if repo available
     if (this.appointmentRepo) {
@@ -75,15 +77,18 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
       // Feasibility gate — delegates to scheduling/feasibility.ts so creation- and
       // execution-time checks are identical. Only `blocking[]` short-circuits.
       if (this.feasibilityDeps) {
-        const feasibility = await checkFeasibility(
-          {
-            tenantId: context.tenantId,
-            appointment,
-            proposedTechnicianId: toTechnicianId,
-            proposedScheduledStart: appointment.scheduledStart,
-            proposedScheduledEnd: appointment.scheduledEnd,
-          },
-          this.feasibilityDeps,
+        const feasibility = withAcceptedOverlap(
+          await checkFeasibility(
+            {
+              tenantId: context.tenantId,
+              appointment,
+              proposedTechnicianId: toTechnicianId,
+              proposedScheduledStart: appointment.scheduledStart,
+              proposedScheduledEnd: appointment.scheduledEnd,
+            },
+            this.feasibilityDeps,
+          ),
+          acceptOverlap,
         );
         if (feasibility.blocking.length > 0) {
           return {
@@ -138,6 +143,7 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
         technicianRole: 'technician',
         isPrimary: true,
         assignedBy: context.executedBy,
+        ...(acceptOverlap ? { acceptOverlap: true } : {}),
       }, this.assignmentRepo, {
         appointmentRepo: this.appointmentRepo,
         auditRepo: this.auditRepo,

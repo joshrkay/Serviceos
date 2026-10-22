@@ -549,3 +549,49 @@ describe('assignTechnician — required-skill precondition (Dispatch FR-2)', () 
     expect(a.technicianId).toBe('tech-1');
   });
 });
+
+describe('assignTechnician — dispatcher-accepted overlap (Dispatch FR-2 phase 3c)', () => {
+  let assignmentRepo: InMemoryAssignmentRepository;
+  let appointmentRepo: InMemoryAppointmentRepository;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(() => {
+    assignmentRepo = new InMemoryAssignmentRepository();
+    appointmentRepo = new InMemoryAppointmentRepository();
+    auditRepo = new InMemoryAuditRepository();
+  });
+
+  const makeAppt = (start: string, end: string) =>
+    createAppointment(
+      { tenantId: 'tenant-1', jobId: 'job-1', scheduledStart: new Date(start), scheduledEnd: new Date(end), timezone: 'UTC', createdBy: 'disp-1' },
+      appointmentRepo,
+    );
+  const input = (appointmentId: string, extra: Record<string, unknown> = {}) => ({
+    tenantId: 'tenant-1', appointmentId, technicianId: 'tech-1', technicianRole: 'technician' as const, assignedBy: 'disp-1', ...extra,
+  });
+
+  it('books the overlapping visit when acceptOverlap is set, marks the row and the audit event', async () => {
+    const busy = await makeAppt('2026-06-01T17:00:00Z', '2026-06-01T19:00:00Z');
+    const clash = await makeAppt('2026-06-01T18:00:00Z', '2026-06-01T20:00:00Z');
+    await assignTechnician(input(busy.id), assignmentRepo, { appointmentRepo });
+
+    const created = await assignTechnician(input(clash.id, { acceptOverlap: true }), assignmentRepo, { appointmentRepo, auditRepo });
+
+    expect(created.overlapAccepted).toBe(true);
+    const events = await auditRepo.findByEntity('tenant-1', 'appointment', clash.id);
+    expect(events.find((e) => e.eventType === 'appointment.technician_assigned')?.metadata).toMatchObject({ overlapAccepted: true });
+  });
+
+  it('does not mark a booking that did not actually overlap, even with acceptOverlap set', async () => {
+    const free = await makeAppt('2026-06-01T17:00:00Z', '2026-06-01T18:00:00Z');
+    const created = await assignTechnician(input(free.id, { acceptOverlap: true }), assignmentRepo, { appointmentRepo });
+    expect(created.overlapAccepted).toBeUndefined();
+  });
+
+  it('still refuses the overlap (409) without the explicit flag', async () => {
+    const busy = await makeAppt('2026-06-01T17:00:00Z', '2026-06-01T19:00:00Z');
+    const clash = await makeAppt('2026-06-01T18:00:00Z', '2026-06-01T20:00:00Z');
+    await assignTechnician(input(busy.id), assignmentRepo, { appointmentRepo });
+    await expect(assignTechnician(input(clash.id), assignmentRepo, { appointmentRepo })).rejects.toMatchObject({ statusCode: 409 });
+  });
+});

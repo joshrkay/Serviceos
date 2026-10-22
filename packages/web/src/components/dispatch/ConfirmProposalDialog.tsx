@@ -34,7 +34,11 @@ export interface ConfirmProposalDialogProps {
   editedEnd?: string;
   onEditedTimesChange?: (start: string, end: string) => void;
   isSubmitting?: boolean;
-  onConfirm: () => void;
+  /**
+   * `acceptOverlap` is true only when the dispatcher ticked "Book anyway" on
+   * a reassign whose sole blockers are visits already on the tech's calendar.
+   */
+  onConfirm: (options: { acceptOverlap: boolean }) => void;
   onCancel: () => void;
 }
 
@@ -77,6 +81,12 @@ function feasibilityToConflicts(result: FeasibilityResult): ConflictInfo[] {
   ];
 }
 
+/** Blocked, and every blocker is a clash with a visit already booked. */
+export function overlapOnlyBlocking(result: FeasibilityResult | null | undefined): boolean {
+  if (!result || result.blocking.length === 0) return false;
+  return result.blocking.every((i) => i.check === 'overlap');
+}
+
 export function ConfirmProposalDialog({
   open,
   proposalType,
@@ -95,9 +105,13 @@ export function ConfirmProposalDialog({
 }: ConfirmProposalDialogProps) {
   const tz = useTenantTimezone();
   const [warningsAcknowledged, setWarningsAcknowledged] = useState(false);
+  const [overlapAccepted, setOverlapAccepted] = useState(false);
 
   React.useEffect(() => {
-    if (!open) setWarningsAcknowledged(false);
+    if (!open) {
+      setWarningsAcknowledged(false);
+      setOverlapAccepted(false);
+    }
   }, [open]);
 
   React.useEffect(() => {
@@ -115,13 +129,18 @@ export function ConfirmProposalDialog({
   );
 
   const hasBlocking = (feasibility?.blocking.length ?? 0) > 0;
-  const hasWarningsOnly =
-    (feasibility?.warnings.length ?? 0) > 0 && !hasBlocking;
+  const hasWarnings = (feasibility?.warnings.length ?? 0) > 0;
+  const hasWarningsOnly = hasWarnings && !hasBlocking;
+  // FR-2 phase 3c (Josh, 2026-10-22: "Allow overlap if select by user") — a
+  // reassign blocked ONLY by clashing visits can be booked anyway, but only
+  // through this explicit tick. Skills, hours and time off still block.
+  const canAcceptOverlap = proposalType === 'reassign_appointment' && overlapOnlyBlocking(feasibility);
+  const acceptOverlap = canAcceptOverlap && overlapAccepted;
 
   const confirmDisabled =
     isSubmitting ||
-    hasBlocking ||
-    (hasWarningsOnly && !warningsAcknowledged) ||
+    (hasBlocking && !acceptOverlap) ||
+    (hasWarnings && !warningsAcknowledged) ||
     (allowTimeEdit && (!editedStart || !editedEnd));
 
   if (!open || !proposalType) return null;
@@ -212,6 +231,33 @@ export function ConfirmProposalDialog({
             />
           </div>
         )}
+        {canAcceptOverlap && (
+          <label
+            className="mt-3 flex min-h-11 cursor-pointer items-center gap-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+            data-testid="confirm-accept-overlap"
+          >
+            <input
+              type="checkbox"
+              className="h-5 w-5 shrink-0"
+              checked={overlapAccepted}
+              onChange={(e) => setOverlapAccepted(e.target.checked)}
+              data-testid="confirm-accept-overlap-checkbox"
+            />
+            <span className="break-words">
+              Book anyway: I accept this overlap. The approver will see that you chose it.
+            </span>
+          </label>
+        )}
+        {canAcceptOverlap && overlapAccepted && hasWarnings && !warningsAcknowledged && (
+          <button
+            type="button"
+            className="mt-2 min-h-11 w-full rounded border border-gray-300 px-3 text-sm hover:bg-gray-100 dark:border-gray-600 dark:hover:bg-gray-800"
+            onClick={() => setWarningsAcknowledged(true)}
+            data-testid="confirm-acknowledge-warnings"
+          >
+            Acknowledge the warnings too
+          </button>
+        )}
         <div className="mt-6 flex justify-end gap-2">
           <button
             type="button"
@@ -226,7 +272,7 @@ export function ConfirmProposalDialog({
             type="button"
             className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
             data-testid="confirm-proposal-confirm"
-            onClick={onConfirm}
+            onClick={() => onConfirm({ acceptOverlap })}
             disabled={confirmDisabled}
           >
             {isSubmitting ? 'Creating proposal...' : 'Create proposal'}

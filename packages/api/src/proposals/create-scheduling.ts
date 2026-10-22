@@ -3,7 +3,7 @@ import { AppointmentRepository } from '../appointments/appointment';
 import {
   FeasibilityDependencies, FeasibilityResult, SkillConstraintStatus,
 } from '../scheduling/feasibility-types';
-import { checkFeasibility } from '../scheduling/feasibility';
+import { checkFeasibility, withAcceptedOverlap } from '../scheduling/feasibility';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export type CreateSchedulingProposalResult =
@@ -43,6 +43,7 @@ export interface CreateSchedulingInput {
     fromTechnicianId?: string;
     technicianId?: string;
     reason?: string;
+    acceptOverlap?: true;
   };
   summary?: string;
   expectedVersion: string | null;
@@ -127,13 +128,18 @@ export async function createSchedulingProposal(
   // check was skipped entirely (remove_crew_member, or an unassigned
   // appointment) — the same honest default checkFeasibility itself uses.
   let skillConstraints: SkillConstraintStatus = 'not_evaluated';
+  // FR-2 phase 3c — only a reassign carries the user's "book anyway".
+  const overlapAccepted = input.proposalType === 'reassign_appointment' && input.payload.acceptOverlap === true;
   if (input.proposalType !== 'remove_crew_member' && proposedTechnicianId !== '') {
-    const feasibility = await checkFeasibility(
-      {
-        tenantId: input.tenantId, appointment,
-        proposedTechnicianId, proposedScheduledStart: proposedStart, proposedScheduledEnd: proposedEnd,
-      },
-      feasibilityDeps,
+    const feasibility = withAcceptedOverlap(
+      await checkFeasibility(
+        {
+          tenantId: input.tenantId, appointment,
+          proposedTechnicianId, proposedScheduledStart: proposedStart, proposedScheduledEnd: proposedEnd,
+        },
+        feasibilityDeps,
+      ),
+      overlapAccepted,
     );
     skillConstraints = feasibility.skillConstraints;
     if (feasibility.blocking.length > 0) return { kind: 'infeasible', feasibility };
@@ -175,6 +181,7 @@ export async function createSchedulingProposal(
           proposedScheduledEnd: proposedEnd.toISOString(),
           // 4.9 / #1001 — the explicit skill-constraint outcome, persisted.
           skillConstraints,
+          ...(overlapAccepted ? { overlapAccepted: true } : {}),
         },
       }),
     );

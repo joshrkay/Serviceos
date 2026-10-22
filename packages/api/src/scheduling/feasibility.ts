@@ -287,6 +287,24 @@ function partition(
   };
 }
 
+/**
+ * FR-2 phase 3c — when the user explicitly chose to book over a clash, the
+ * overlap issues stop blocking and ride along as warnings; every other
+ * blocker (skills, hours, time off) still blocks.
+ */
+export function withAcceptedOverlap(result: FeasibilityResult, acceptOverlap: boolean): FeasibilityResult {
+  if (!acceptOverlap) return result;
+  const overlaps = result.blocking.filter((i) => i.check === 'overlap');
+  if (overlaps.length === 0) return result;
+  const blocking = result.blocking.filter((i) => i.check !== 'overlap');
+  return {
+    ...result,
+    feasible: blocking.length === 0,
+    blocking,
+    warnings: [...overlaps.map((i) => ({ ...i, severity: 'warning' as const })), ...result.warnings],
+  };
+}
+
 export async function checkFeasibility(
   input: FeasibilityInput,
   deps: FeasibilityDependencies,
