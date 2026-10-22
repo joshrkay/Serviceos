@@ -41,14 +41,18 @@ export function previewWording(body: string, values: Record<string, string>): st
   return body.trim().replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (full, key: string) => values[key] ?? full);
 }
 
+const LANGUAGE_NAMES: Record<string, string> = { en: 'English', es: 'Spanish' };
+
 function WordingCard({
   text,
   maxLength,
+  businessLanguage,
   api,
   onSaved,
 }: {
   text: WordingText;
   maxLength: number;
+  businessLanguage: string;
   api: TextWordingSheetApi;
   onSaved: (purpose: WordingPurpose, saved: WordingText['saved']) => void;
 }) {
@@ -58,7 +62,8 @@ function WordingCard({
   const area = useRef<HTMLTextAreaElement>(null);
   const { title, when } = TITLES[text.purpose];
   const id = `wording-${text.purpose}`;
-  const changed = draft.trim() !== (text.saved?.body ?? '');
+  const changed =
+    draft.trim() !== (text.saved?.body ?? '') || (!!text.saved && text.saved.language !== businessLanguage);
 
   const insert = (fillIn: string) => {
     const token = `{{${fillIn}}}`;
@@ -125,6 +130,13 @@ function WordingCard({
         </span>
       </div>
       <p className="text-xs text-muted-foreground">{when}</p>
+      {text.saved && text.saved.language !== businessLanguage && (
+        <p className="text-xs text-amber-700" data-testid={`${id}-language-note`}>
+          You wrote this in {LANGUAGE_NAMES[text.saved.language] ?? text.saved.language}, so only customers who read{' '}
+          {LANGUAGE_NAMES[text.saved.language] ?? text.saved.language} get it. Save it again to use it for{' '}
+          {LANGUAGE_NAMES[businessLanguage] ?? businessLanguage}.
+        </p>
+      )}
 
       <label htmlFor={id} className="sr-only">
         {title} wording
@@ -277,7 +289,14 @@ export function TextWordingSheet({
           )}
           {!state && !error && <p className="text-sm text-muted-foreground">Loading…</p>}
           {state?.texts.map((t) => (
-            <WordingCard key={t.purpose} text={t} maxLength={state.maxLength} api={api} onSaved={onSaved} />
+            <WordingCard
+              key={t.purpose}
+              text={t}
+              maxLength={state.maxLength}
+              businessLanguage={state.language}
+              api={api}
+              onSaved={onSaved}
+            />
           ))}
         </div>
       </div>

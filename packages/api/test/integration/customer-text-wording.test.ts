@@ -32,9 +32,9 @@ describe('Postgres integration — customer text wording (D-045)', () => {
   });
 
   it('saves, replaces, lists in order, and resets', async () => {
-    await repo.save(tenantA, 'thank_you_text', 'Thanks!', userId);
-    await repo.save(tenantA, 'estimate_text', 'Quote: {{link}}', userId);
-    const replaced = await repo.save(tenantA, 'thank_you_text', 'Thanks again!', userId);
+    await repo.save(tenantA, 'thank_you_text', 'Thanks!', 'en', userId);
+    await repo.save(tenantA, 'estimate_text', 'Quote: {{link}}', 'en', userId);
+    const replaced = await repo.save(tenantA, 'thank_you_text', 'Thanks again!', 'en', userId);
 
     expect(replaced).toMatchObject({ purpose: 'thank_you_text', body: 'Thanks again!', updatedBy: userId });
     expect(replaced.updatedAt).toBeInstanceOf(Date);
@@ -50,7 +50,7 @@ describe('Postgres integration — customer text wording (D-045)', () => {
   });
 
   it("one business never sees another's wording", async () => {
-    await repo.save(tenantA, 'portal_link_text', 'A only {{link}}', userId);
+    await repo.save(tenantA, 'portal_link_text', 'A only {{link}}', 'en', userId);
 
     expect(await repo.find(tenantB, 'portal_link_text')).toBeNull();
     expect(await repo.list(tenantB)).toEqual([]);
@@ -58,13 +58,19 @@ describe('Postgres integration — customer text wording (D-045)', () => {
     expect(await repo.find(tenantA, 'portal_link_text')).not.toBeNull();
   });
 
+  it('keeps the language each wording was written in', async () => {
+    await repo.save(tenantA, 'invoice_text', 'Factura {{link}}', 'es', userId);
+    expect(await repo.find(tenantA, 'invoice_text')).toMatchObject({ language: 'es' });
+    await expect(repo.save(tenantA, 'invoice_text', 'x {{link}}', 'vi' as never, userId)).rejects.toThrow(/check constraint/);
+  });
+
   it('the table refuses a text it does not know and an over-long body', async () => {
-    await expect(repo.save(tenantA, 'marketing' as never, 'x', userId)).rejects.toThrow(/check constraint/);
-    await expect(repo.save(tenantA, 'thank_you_text', 'x'.repeat(481), userId)).rejects.toThrow(/check constraint/);
+    await expect(repo.save(tenantA, 'marketing' as never, 'x', 'en', userId)).rejects.toThrow(/check constraint/);
+    await expect(repo.save(tenantA, 'thank_you_text', 'x'.repeat(481), 'en', userId)).rejects.toThrow(/check constraint/);
   });
 
   it("a failed read on a send's own transaction falls back to ours and leaves the transaction usable", async () => {
-    await repo.save(tenantA, 'invoice_text', 'Mine {{link}}', userId);
+    await repo.save(tenantA, 'invoice_text', 'Mine {{link}}', 'en', userId);
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -84,7 +90,6 @@ describe('Postgres integration — customer text wording (D-045)', () => {
           tenantId: tenantA,
           purpose: 'invoice_text',
           customerLanguage: 'en',
-          businessLanguage: 'en',
           values: { link: 'L' },
           builtIn: () => 'OURS',
         }),

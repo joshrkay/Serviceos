@@ -272,7 +272,7 @@ test.describe('settings — mobile viewport', () => {
                 link: longLink,
               },
               ours: `Hi Sam Rivera, your invoice is ready.\nPay here: ${longLink}`,
-              saved: { body: 'Hi {{customer_name}}, pay {{total}} here: {{link}}', updatedAt: '2026-10-22T12:00:00Z' },
+              saved: { body: 'Hi {{customer_name}}, pay {{total}} here: {{link}}', language: 'en', updatedAt: '2026-10-22T12:00:00Z' },
             },
           ],
         }),

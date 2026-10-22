@@ -283,7 +283,7 @@ describe('runThankYouSmsSweep', () => {
     await jobRepo.create(job);
     await customerRepo.create(makeCustomer());
     const wordingRepo = new InMemoryCustomerTextWordingRepository();
-    await wordingRepo.save(TENANT, 'thank_you_text', 'Thanks {{customer_name}}, from all of us at {{business_name}}!', 'user-1');
+    await wordingRepo.save(TENANT, 'thank_you_text', 'Thanks {{customer_name}}, from all of us at {{business_name}}!', 'en', 'user-1');
 
     const result = await runThankYouSmsSweep(
       deps([{ id: job.id, tenant_id: TENANT }], {

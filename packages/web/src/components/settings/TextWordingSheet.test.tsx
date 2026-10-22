@@ -27,7 +27,7 @@ function state(over: Partial<TextWordingState> = {}): TextWordingState {
         fillIns: ['customer_name', 'business_name'],
         sampleValues: { customer_name: 'Sam Rivera', business_name: 'Acme HVAC' },
         ours: 'Thanks for choosing Acme HVAC!',
-        saved: { body: 'Thanks {{customer_name}}!', updatedAt: '2026-10-22T12:00:00Z' },
+        saved: { body: 'Thanks {{customer_name}}!', language: 'en', updatedAt: '2026-10-22T12:00:00Z' },
       },
     ],
     ...over,
@@ -37,7 +37,7 @@ function state(over: Partial<TextWordingState> = {}): TextWordingState {
 function mockApi(over: Partial<TextWordingSheetApi> = {}): TextWordingSheetApi {
   return {
     fetch: vi.fn().mockResolvedValue(state()),
-    save: vi.fn(async (_p, body: string) => ({ body: body.trim(), updatedAt: '2026-10-22T13:00:00Z' })),
+    save: vi.fn(async (_p, body: string) => ({ body: body.trim(), language: 'en', updatedAt: '2026-10-22T13:00:00Z' })),
     reset: vi.fn().mockResolvedValue(undefined),
     ...over,
   };
@@ -150,6 +150,18 @@ describe('D-045 — TextWordingSheet', () => {
     expect(await screen.findByText('The text wording could not be loaded.')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /try again/i }));
     expect(await screen.findByTestId('wording-estimate_text-status')).toBeInTheDocument();
+  });
+
+  it('a wording written before the business switched language says who gets it, and can be saved again', async () => {
+    const api = mockApi({ fetch: vi.fn().mockResolvedValue(state({ language: 'es' })) });
+    render(<TextWordingSheet onClose={() => {}} api={api} />);
+    const thanks = await screen.findByRole('region', { name: /thank-you text/i });
+
+    expect(screen.getByTestId('wording-thank_you_text-language-note')).toHaveTextContent(
+      'You wrote this in English, so only customers who read English get it. Save it again to use it for Spanish.',
+    );
+    fireEvent.click(within(thanks).getByRole('button', { name: /^save$/i }));
+    await waitFor(() => expect(api.save).toHaveBeenCalledWith('thank_you_text', 'Thanks {{customer_name}}!'));
   });
 
   it('every button is at least 44px tall (min-h-11)', async () => {

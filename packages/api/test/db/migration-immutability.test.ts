@@ -633,7 +633,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // D-045 — message_dispatches outcome columns (scheduled/blocked) + 3 NOT VALID CHECKs + 3 partial indexes.
   ['329_message_dispatch_outcomes', '928d38a17d9f73b2175b5a0d71557b8fbb15719bec0f0415d007b15731ef3ea4'],
   // D-045 — customer_text_wording (owner's own wording per customer text), RLS, inline CHECKs only.
-  ['330_customer_text_wording', 'fa5192b3005f80bf6c3bfceed0fa723619177b9613ecc085fa1b67a0fe24f381'],
+  ['330_customer_text_wording', 'cb3931893bf7d7fdf018c8fb546cd0d0b15fbf8823a4ce1dbfd67e86195df1b7'],
 ];
 
 function hashMigration(value: string): string {

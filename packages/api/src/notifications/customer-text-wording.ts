@@ -3,8 +3,10 @@
  *
  * An owner can replace our wording for four texts (estimate, invoice,
  * customer-portal link, thank-you) with their own, using `{{fill-ins}}`.
- * Their wording is used only when the customer reads the business's own
- * language; anyone else gets our translated text. Whenever their wording
+ * Each wording is saved with the language it was written in (the business's
+ * language at the time) and goes only to customers who read that language;
+ * anyone else gets our translated text, even after the business switches
+ * its own language. Whenever their wording
  * can't be used (it can't be read, or a fill-in has no value for this
  * send) the customer gets our text and a warning is logged: a send never
  * fails, and never goes out with a raw `{{fill_in}}`, because of wording.
@@ -110,6 +112,8 @@ export function fillOwnerWording(args: {
 export interface SavedWording {
   purpose: WordingPurpose;
   body: string;
+  /** The language it was written in: only customers who read it get it. */
+  language: Language;
   updatedBy: string;
   updatedAt: Date;
 }
@@ -117,7 +121,13 @@ export interface SavedWording {
 export interface CustomerTextWordingRepository {
   list(tenantId: string): Promise<SavedWording[]>;
   find(tenantId: string, purpose: WordingPurpose): Promise<SavedWording | null>;
-  save(tenantId: string, purpose: WordingPurpose, body: string, updatedBy: string): Promise<SavedWording>;
+  save(
+    tenantId: string,
+    purpose: WordingPurpose,
+    body: string,
+    language: Language,
+    updatedBy: string,
+  ): Promise<SavedWording>;
   /** True when there was a wording to remove. */
   remove(tenantId: string, purpose: WordingPurpose): Promise<boolean>;
 }
@@ -137,8 +147,14 @@ export class InMemoryCustomerTextWordingRepository implements CustomerTextWordin
     return row ? { ...row } : null;
   }
 
-  async save(tenantId: string, purpose: WordingPurpose, body: string, updatedBy: string): Promise<SavedWording> {
-    const row: SavedWording = { purpose, body, updatedBy, updatedAt: new Date() };
+  async save(
+    tenantId: string,
+    purpose: WordingPurpose,
+    body: string,
+    language: Language,
+    updatedBy: string,
+  ): Promise<SavedWording> {
+    const row: SavedWording = { purpose, body, language, updatedBy, updatedAt: new Date() };
     this.rows.set(`${tenantId}:${purpose}`, row);
     return { ...row };
   }
@@ -152,6 +168,7 @@ function rowToWording(row: Record<string, unknown>): SavedWording {
   return {
     purpose: row.purpose as WordingPurpose,
     body: row.body as string,
+    language: row.language as Language,
     updatedBy: row.updated_by as string,
     updatedAt: new Date(row.updated_at as string),
   };
@@ -168,7 +185,7 @@ export class PgCustomerTextWordingRepository
   async list(tenantId: string): Promise<SavedWording[]> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
-        `SELECT purpose, body, updated_by, updated_at FROM customer_text_wording
+        `SELECT purpose, body, language, updated_by, updated_at FROM customer_text_wording
           WHERE tenant_id = $1 ORDER BY purpose`,
         [tenantId],
       );
@@ -186,7 +203,7 @@ export class PgCustomerTextWordingRepository
       await client.query('SAVEPOINT text_wording_read');
       try {
         const result = await client.query(
-          `SELECT purpose, body, updated_by, updated_at FROM customer_text_wording
+          `SELECT purpose, body, language, updated_by, updated_at FROM customer_text_wording
             WHERE tenant_id = $1 AND purpose = $2`,
           [tenantId, purpose],
         );
@@ -200,15 +217,22 @@ export class PgCustomerTextWordingRepository
     });
   }
 
-  async save(tenantId: string, purpose: WordingPurpose, body: string, updatedBy: string): Promise<SavedWording> {
+  async save(
+    tenantId: string,
+    purpose: WordingPurpose,
+    body: string,
+    language: Language,
+    updatedBy: string,
+  ): Promise<SavedWording> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
-        `INSERT INTO customer_text_wording (tenant_id, purpose, body, updated_by, updated_at)
-         VALUES ($1, $2, $3, $4, NOW())
+        `INSERT INTO customer_text_wording (tenant_id, purpose, body, language, updated_by, updated_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())
          ON CONFLICT (tenant_id, purpose)
-           DO UPDATE SET body = EXCLUDED.body, updated_by = EXCLUDED.updated_by, updated_at = NOW()
-         RETURNING purpose, body, updated_by, updated_at`,
-        [tenantId, purpose, body, updatedBy],
+           DO UPDATE SET body = EXCLUDED.body, language = EXCLUDED.language,
+                         updated_by = EXCLUDED.updated_by, updated_at = NOW()
+         RETURNING purpose, body, language, updated_by, updated_at`,
+        [tenantId, purpose, body, language, updatedBy],
       );
       return rowToWording(result.rows[0]);
     });
@@ -228,13 +252,12 @@ export class PgCustomerTextWordingRepository
 export interface CustomerTextWording {
   /**
    * The text to send: the owner's wording when they wrote one for `purpose`
-   * and the customer reads the business's language, else `builtIn()`.
+   * in the language the customer reads, else `builtIn()`.
    */
   textFor(args: {
     tenantId: string;
     purpose: WordingPurpose;
     customerLanguage: Language;
-    businessLanguage: Language;
     values: Partial<Record<string, string>>;
     note?: string;
     extraLines?: readonly string[];
@@ -248,7 +271,6 @@ export function createCustomerTextWording(deps: {
 }): CustomerTextWording {
   return {
     async textFor(args) {
-      if (args.customerLanguage !== args.businessLanguage) return args.builtIn();
       let saved: SavedWording | null;
       try {
         saved = await deps.repo.find(args.tenantId, args.purpose);
@@ -260,7 +282,7 @@ export function createCustomerTextWording(deps: {
         });
         return args.builtIn();
       }
-      if (!saved) return args.builtIn();
+      if (!saved || saved.language !== args.customerLanguage) return args.builtIn();
       let text: string | null;
       try {
         text = fillOwnerWording({

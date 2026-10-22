@@ -8224,6 +8224,7 @@ export const MIGRATIONS = {
       tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
       purpose TEXT NOT NULL CHECK (purpose IN ('estimate_text', 'invoice_text', 'portal_link_text', 'thank_you_text')),
       body TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 480),
+      language TEXT NOT NULL CHECK (language IN ('en', 'es')),
       updated_by TEXT NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (tenant_id, purpose)

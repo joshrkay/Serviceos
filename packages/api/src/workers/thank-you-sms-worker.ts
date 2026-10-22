@@ -317,7 +317,6 @@ async function sendOneThankYou(
         tenantId,
         purpose: 'thank_you_text',
         customerLanguage: language,
-        businessLanguage: resolveCustomerLanguage({ tenantDefaultLanguage: settings?.defaultLanguage }),
         values: { business_name: businessName, customer_name: customer?.displayName },
         builtIn,
       })

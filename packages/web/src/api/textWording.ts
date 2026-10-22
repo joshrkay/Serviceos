@@ -10,6 +10,8 @@ export type WordingPurpose = 'estimate_text' | 'invoice_text' | 'portal_link_tex
 
 export interface SavedWording {
   body: string;
+  /** The language it was written in: only customers who read it get it. */
+  language: string;
   updatedAt: string;
 }
 

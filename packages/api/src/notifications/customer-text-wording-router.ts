@@ -126,7 +126,9 @@ export function createCustomerTextWordingRouter(deps: {
             fillIns: WORDING_FILL_INS[purpose],
             sampleValues: sampleValues(purpose, businessName, baseUrl),
             ours: ourWording(purpose, { businessName, language, baseUrl }),
-            saved: mine ? { body: mine.body, updatedAt: mine.updatedAt.toISOString() } : null,
+            saved: mine
+              ? { body: mine.body, language: mine.language, updatedAt: mine.updatedAt.toISOString() }
+              : null,
           };
         }),
       });
@@ -156,7 +158,10 @@ export function createCustomerTextWordingRouter(deps: {
         return;
       }
       const { tenantId, userId, role } = req.auth!;
-      const saved = await deps.repo.save(tenantId, purpose, body, userId);
+      // Saved in the business's language now: only customers who read it get it.
+      const settings = await deps.settingsRepo.findByTenant(tenantId);
+      const language = resolveCustomerLanguage({ tenantDefaultLanguage: settings?.defaultLanguage });
+      const saved = await deps.repo.save(tenantId, purpose, body, language, userId);
       await deps.auditRepo.create(
         createAuditEvent({
           tenantId,
@@ -165,10 +170,13 @@ export function createCustomerTextWordingRouter(deps: {
           eventType: 'customer_text_wording.saved',
           entityType: 'customer_text_wording',
           entityId: purpose,
-          metadata: { purpose, length: body.length },
+          metadata: { purpose, language, length: body.length },
         }),
       );
-      res.json({ purpose, saved: { body: saved.body, updatedAt: saved.updatedAt.toISOString() } });
+      res.json({
+        purpose,
+        saved: { body: saved.body, language: saved.language, updatedAt: saved.updatedAt.toISOString() },
+      });
     }),
   );
 

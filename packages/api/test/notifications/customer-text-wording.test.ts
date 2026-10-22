@@ -93,7 +93,6 @@ describe('createCustomerTextWording.textFor', () => {
     tenantId: TENANT,
     purpose: 'invoice_text' as const,
     customerLanguage: 'en' as const,
-    businessLanguage: 'en' as const,
     values: { customer_name: 'Ana', link: 'https://x/pay/1' },
     builtIn: () => 'OURS',
   };
@@ -105,20 +104,31 @@ describe('createCustomerTextWording.textFor', () => {
 
   it("uses the owner's wording for a customer who reads the business's language", async () => {
     const { repo, wording } = setup();
-    await repo.save(TENANT, 'invoice_text', 'Hey {{customer_name}}, {{link}}', 'user-1');
+    await repo.save(TENANT, 'invoice_text', 'Hey {{customer_name}}, {{link}}', 'en', 'user-1');
     expect(await wording.textFor(base)).toBe('Hey Ana, https://x/pay/1');
   });
 
   it("uses ours, translated, for a customer who reads another language", async () => {
     const { repo, wording } = setup();
-    await repo.save(TENANT, 'invoice_text', 'Hey {{customer_name}}, {{link}}', 'user-1');
+    await repo.save(TENANT, 'invoice_text', 'Hey {{customer_name}}, {{link}}', 'en', 'user-1');
     const builtIn = vi.fn(() => 'NUESTRO');
     expect(await wording.textFor({ ...base, customerLanguage: 'es', builtIn })).toBe('NUESTRO');
   });
 
+  it('goes by the language the wording was written in, so a business that switches language does not send it to the new language', async () => {
+    const { repo, wording } = setup();
+    // Written while the business was English; the business is Spanish now.
+    await repo.save(TENANT, 'invoice_text', 'Hey {{customer_name}}, {{link}}', 'en', 'user-1');
+    expect(await wording.textFor({ ...base, customerLanguage: 'es', builtIn: () => 'NUESTRO' })).toBe('NUESTRO');
+    // Spanish wording goes to Spanish readers.
+    await repo.save(TENANT, 'invoice_text', 'Hola {{customer_name}}, {{link}}', 'es', 'user-1');
+    expect(await wording.textFor({ ...base, customerLanguage: 'es' })).toBe('Hola Ana, https://x/pay/1');
+    expect(await wording.textFor(base)).toBe('OURS');
+  });
+
   it('keeps purposes apart', async () => {
     const { repo, wording } = setup();
-    await repo.save(TENANT, 'estimate_text', 'Estimate {{link}}', 'user-1');
+    await repo.save(TENANT, 'estimate_text', 'Estimate {{link}}', 'en', 'user-1');
     expect(await wording.textFor(base)).toBe('OURS');
   });
 
@@ -134,7 +144,7 @@ describe('createCustomerTextWording.textFor', () => {
 
   it('sends ours and warns when a fill-in has no value for this send', async () => {
     const { repo, logger, wording } = setup();
-    await repo.save(TENANT, 'invoice_text', 'Hey {{customer_name}}, {{link}}', 'user-1');
+    await repo.save(TENANT, 'invoice_text', 'Hey {{customer_name}}, {{link}}', 'en', 'user-1');
     expect(await wording.textFor({ ...base, values: { link: 'L' } })).toBe('OURS');
     expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/no value/), expect.objectContaining({ purpose: 'invoice_text' }));
   });

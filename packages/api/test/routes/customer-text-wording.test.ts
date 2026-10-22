@@ -67,6 +67,19 @@ describe('/api/settings/text-wording (D-045)', () => {
     expect(events.map((e) => e.eventType)).toEqual(['customer_text_wording.saved']);
   });
 
+  it("saves the wording in the business's current language", async () => {
+    await settingsRepo.create({
+      id: 's-1', tenantId: TENANT, businessName: 'Acme', timezone: 'America/Chicago', estimatePrefix: 'EST',
+      invoicePrefix: 'INV', nextEstimateNumber: 1, nextInvoiceNumber: 1, defaultPaymentTermDays: 30,
+      defaultLanguage: 'es', createdAt: new Date(), updatedAt: new Date(),
+    });
+
+    const put = await request(app).put('/api/settings/text-wording/thank_you_text').send({ body: '¡Gracias!' });
+
+    expect(put.body.saved.language).toBe('es');
+    expect(await repo.find(TENANT, 'thank_you_text')).toMatchObject({ language: 'es' });
+  });
+
   it('refuses a wording without the link, saying why, and saves nothing', async () => {
     const res = await request(app).put('/api/settings/text-wording/estimate_text').send({ body: 'Your estimate is ready' });
 
@@ -86,7 +99,7 @@ describe('/api/settings/text-wording (D-045)', () => {
   });
 
   it('reset removes the wording and audits it; a second reset is a quiet no-op', async () => {
-    await repo.save(TENANT, 'thank_you_text', 'Thanks!', USER);
+    await repo.save(TENANT, 'thank_you_text', 'Thanks!', 'en', USER);
 
     const first = await request(app).delete('/api/settings/text-wording/thank_you_text');
     const second = await request(app).delete('/api/settings/text-wording/thank_you_text');

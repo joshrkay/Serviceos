@@ -781,7 +781,7 @@ describe("SendService — the owner's own text wording (D-045)", () => {
     const { j } = await seedJob();
     const est = makeEstimate(j.id);
     await h.estimate.create(est);
-    await wordingRepo.save(TENANT, 'estimate_text', 'Hi {{customer_name}}! {{business_name}} quote {{number}}: {{total}}\n{{link}}', 'user-1');
+    await wordingRepo.save(TENANT, 'estimate_text', 'Hi {{customer_name}}! {{business_name}} quote {{number}}: {{total}}\n{{link}}', 'en', 'user-1');
 
     await send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms', customMessage: 'Good for 30 days' });
 
@@ -793,7 +793,7 @@ describe("SendService — the owner's own text wording (D-045)", () => {
     const { j } = await seedJob();
     const est = makeEstimate(j.id);
     await h.estimate.create(est);
-    await wordingRepo.save(TENANT, 'estimate_text', 'OWNER {{link}}', 'user-1');
+    await wordingRepo.save(TENANT, 'estimate_text', 'OWNER {{link}}', 'en', 'user-1');
 
     await send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'email' });
 
@@ -804,7 +804,7 @@ describe("SendService — the owner's own text wording (D-045)", () => {
     const { j } = await seedJob({ preferredLanguage: 'es-MX' });
     const est = makeEstimate(j.id);
     await h.estimate.create(est);
-    await wordingRepo.save(TENANT, 'estimate_text', 'OWNER {{link}}', 'user-1');
+    await wordingRepo.save(TENANT, 'estimate_text', 'OWNER {{link}}', 'en', 'user-1');
 
     await send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
 
@@ -817,7 +817,7 @@ describe("SendService — the owner's own text wording (D-045)", () => {
     const { j } = await seedJob();
     const inv = makeInvoice(j.id);
     await h.invoice.create(inv);
-    await wordingRepo.save(TENANT, 'invoice_text', 'Invoice {{number}} for {{total}}: {{link}}', 'user-1');
+    await wordingRepo.save(TENANT, 'invoice_text', 'Invoice {{number}} for {{total}}: {{link}}', 'en', 'user-1');
 
     await send.sendInvoice({ tenantId: TENANT, invoiceId: inv.id, channel: 'sms' });
 
@@ -829,7 +829,7 @@ describe("SendService — the owner's own text wording (D-045)", () => {
 
   it('a portal-link text uses the owner wording with the portal link', async () => {
     const { c } = await seedJob();
-    await wordingRepo.save(TENANT, 'portal_link_text', 'Your {{business_name}} account: {{link}}', 'user-1');
+    await wordingRepo.save(TENANT, 'portal_link_text', 'Your {{business_name}} account: {{link}}', 'en', 'user-1');
 
     await send.sendPortalLink({
       tenantId: TENANT,

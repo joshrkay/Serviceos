@@ -959,8 +959,11 @@ export function SettingsPage() {
     {
       title: 'Customer experience',
       items: [
-        // D-045 — the owner's own wording for estimate, invoice, portal-link and thank-you texts.
-        { icon: MessageSquareText, label: 'Text wording', description: 'Your own words for the estimate, invoice, portal-link and thank-you texts', action: () => setTextWordingOpen(true) },
+        // D-045 — the owner's own wording for estimate, invoice, portal-link and
+        // thank-you texts. Owner-only, like its settings:update save.
+        ...(me?.role === 'owner'
+          ? [{ icon: MessageSquareText, label: 'Text wording', description: 'Your own words for the estimate, invoice, portal-link and thank-you texts', action: () => setTextWordingOpen(true) }]
+          : []),
         { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
         { icon: Megaphone, label: 'Email campaigns', description: 'Send promos & announcements to customer segments', action: () => setMarketingOpen(true) },
       ],
@@ -1751,7 +1754,7 @@ export function SettingsPage() {
       {customerGroupsOpen && (
         <CustomerGroupsSheet onClose={() => setCustomerGroupsOpen(false)} />
       )}
-      {textWordingOpen && <TextWordingSheet onClose={() => setTextWordingOpen(false)} />}
+      {textWordingOpen && me?.role === 'owner' && <TextWordingSheet onClose={() => setTextWordingOpen(false)} />}
       {brandVoiceOpen && me?.brand_voice_configurator_enabled && (
         <BrandVoiceSheet onClose={() => setBrandVoiceOpen(false)} />
       )}

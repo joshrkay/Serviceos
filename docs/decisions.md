@@ -1934,9 +1934,11 @@ callers write a proposal's status directly, and the repository checks no transit
 4. **Wording.** Each purpose has a default message: the owner's saved template for it if
    there is one, otherwise the built-in text. Any single send may add an owner note on top.
    *As built (Settings → Text wording, migration 330):* the owner can word the estimate,
-   invoice, customer-portal link and thank-you texts with `{{fill-ins}}`. Their wording goes
-   only to customers who read the business's language; everyone else keeps the built-in
-   translated text (pending the owner's call on wording for other languages). Wording that
+   invoice, customer-portal link and thank-you texts with `{{fill-ins}}` (owner only). Each
+   wording is saved with the business's language at the time and goes only to customers who
+   read that language, so switching the business's language never sends it to the new one;
+   everyone else keeps the built-in translated text (pending the owner's call on wording for
+   other languages). Wording that
    can't be read or filled falls back to the built-in text with a logged warning, never a
    failed send or a raw `{{fill_in}}`; an invoice paid in person keeps the built-in
    in-person line. Emails keep the built-in wording.

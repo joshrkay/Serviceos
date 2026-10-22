@@ -284,7 +284,6 @@ export class SendService {
       customerPreferredLanguage: customer.preferredLanguage,
       tenantDefaultLanguage,
     });
-    const businessLanguage = resolveCustomerLanguage({ tenantDefaultLanguage });
     const viewToken = estimate.viewToken ?? generateViewToken();
     const viewTokenExpiresAt =
       estimate.viewTokenExpiresAt ?? new Date(Date.now() + ESTIMATE_TOKEN_TTL_MS);
@@ -345,7 +344,6 @@ export class SendService {
                 tenantId: input.tenantId,
                 purpose: 'estimate_text',
                 customerLanguage: language,
-                businessLanguage,
                 values: {
                   customer_name: customer.displayName,
                   business_name: businessName,
@@ -533,9 +531,6 @@ export class SendService {
       customerPreferredLanguage: customer.preferredLanguage,
       tenantDefaultLanguage: settingsRow?.defaultLanguage ?? null,
     });
-    const businessLanguage = resolveCustomerLanguage({
-      tenantDefaultLanguage: settingsRow?.defaultLanguage ?? null,
-    });
     const viewToken = invoice.viewToken ?? generateViewToken();
     const viewTokenExpiresAt =
       invoice.viewTokenExpiresAt ?? new Date(Date.now() + INVOICE_TOKEN_TTL_MS);
@@ -574,7 +569,6 @@ export class SendService {
                 tenantId: input.tenantId,
                 purpose: 'invoice_text',
                 customerLanguage: language,
-                businessLanguage,
                 values: {
                   customer_name: customer.displayName,
                   business_name: businessName,
@@ -675,7 +669,6 @@ export class SendService {
       recipientEmail: input.recipientEmail,
     });
 
-    const businessLanguage = resolveCustomerLanguage({ tenantDefaultLanguage });
     const templateCtx = {
       customerName: customer.displayName,
       businessName,
@@ -708,7 +701,6 @@ export class SendService {
                   tenantId: input.tenantId,
                   purpose: 'portal_link_text',
                   customerLanguage: language,
-                  businessLanguage,
                   values: {
                     customer_name: customer.displayName,
                     business_name: businessName,
@@ -746,7 +738,6 @@ export class SendService {
     tenantId: string;
     purpose: WordingPurpose;
     customerLanguage: Language;
-    businessLanguage: Language;
     values: Record<string, string>;
     note?: string;
     extraLines?: readonly string[];
