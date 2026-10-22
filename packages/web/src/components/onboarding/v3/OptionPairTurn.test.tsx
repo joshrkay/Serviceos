@@ -681,6 +681,18 @@ describe('OptionPairTurn', () => {
       expect(onPick).toHaveBeenCalledWith('b', 'voice');
     });
 
+    it('the same answer heard twice in one moment answers once', async () => {
+      const { onPick } = await openTurn('booking_posture');
+      open();
+      const final = JSON.stringify({ is_final: true, speech_final: true, channel: { alternatives: [{ transcript: 'first' }] } });
+      act(() => {
+        socket().onmessage?.({ data: final });
+        socket().onmessage?.({ data: final });
+      });
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenCalledWith('a', 'voice');
+    });
+
     it('a miss says what it heard and how to answer; the second miss adds an example; nothing is picked', async () => {
       const { onPick } = await openTurn('booking_posture');
       open();

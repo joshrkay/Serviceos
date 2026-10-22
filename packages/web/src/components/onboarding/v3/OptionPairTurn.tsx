@@ -62,7 +62,13 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
   const [resumedAfterQuiet, setResumedAfterQuiet] = useState(false);
   // An answer was sent from this turn: stop listening until it fails (the shell moves on when it saves),
   // so the moment between "saved" and the next turn never opens another socket.
-  const [sent, setSent] = useState(false);
+  const [sent, setSentState] = useState(false);
+  // Read synchronously: two finals in one tick ("first… first") arrive before `sent` re-renders.
+  const sentRef = useRef(false);
+  const setSent = (value: boolean) => {
+    sentRef.current = value;
+    setSentState(value);
+  };
   useEffect(() => {
     if (!busy && (error || notice)) setSent(false);
   }, [busy, error, notice]);
@@ -73,6 +79,7 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
     screen: listenFor,
     enabled: !busy && !typing && !sent,
     onResult: (said) => {
+      if (sentRef.current) return;
       if (said.kind !== 'pick') {
         setHeard(null);
         return;

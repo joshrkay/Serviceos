@@ -39,7 +39,10 @@ import { fakeDeepgram } from './helpers/fake-deepgram';
  * e2e/helpers/fake-deepgram.ts intercepts the browser's Deepgram socket and
  * plays transcripts back in Deepgram's message shape. Proven: a spoken answer
  * picks the card and moves on (`answer_mode: 'voice'`), and a miss is shown and
- * said aloud. That real speech is recognised (audio/mp4 accepted by the stream,
+ * said aloud; and fifteen everyday and edge answers (ordinals, fillers, prices, card
+ * words, a full pass by voice, misses, negation, ambiguity, unfinished words,
+ * the same words twice, tap then speak) each save exactly what was meant, or
+ * nothing. That real speech is recognised (audio/mp4 accepted by the stream,
  * the transcript card on a phone) needs a Deepgram key and a microphone: a
  * device run through the web verify skill (owner action).
  *
@@ -501,5 +504,223 @@ test.describe('v3 listening with scripted speech (voice-only onboarding PR 1) at
       ['trip_fee_and_rate', 'voice'],
     ]);
     await expect(page.getByRole('alert')).toHaveCount(0);
+  });
+});
+
+/**
+ * Fifteen spoken answers an owner really gives, everyday and edge, each in a fresh shop on the real
+ * stack with scripted speech. A spoken answer is proven by what was saved (the PUT the real API took),
+ * never by the screen alone; a non-answer by nothing being saved.
+ */
+test.describe('v3 spoken answers, everyday and edge (voice-only onboarding PR 1) at 320x568', () => {
+  test.use({ viewport: { width: 320, height: 568 }, permissions: ['microphone'] });
+
+  interface Saved {
+    key: string;
+    option?: string;
+    status?: number;
+  }
+
+  /** Every choice the shell saved, with the option it sent and what the API answered. */
+  function recordSaves(page: Page): Saved[] {
+    const saves: Saved[] = [];
+    const byRequest = new Map<Request, Saved>();
+    page.on('request', (req) => {
+      const m = /\/api\/onboarding\/draft\/choices\/([a-z_]+)$/.exec(new URL(req.url()).pathname);
+      if (!m || req.method() !== 'PUT') return;
+      const body = (req.postDataJSON() ?? {}) as { choice?: { option?: string } };
+      const save: Saved = { key: m[1]!, option: body.choice?.option };
+      saves.push(save);
+      byRequest.set(req, save);
+    });
+    page.on('response', (res) => {
+      const save = byRequest.get(res.request());
+      if (save) save.status = res.status();
+    });
+    return saves;
+  }
+
+  /** A fresh shop on the greeting turn with the mic live and the fake socket open. */
+  async function listeningOnGreeting(page: Page, label: string) {
+    await signInAsFreshOwner(page, `variation_${label}`);
+    await watchVoiceAndFunnel(page);
+    const saves = recordSaves(page);
+    const deepgram = await fakeDeepgram(page);
+    await startShop(page);
+    await page.getByRole('button', { name: 'Make it mine, 7 choices' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[0] })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Answer out loud' })).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => deepgram.urls.length).toBe(1);
+    return { saves, deepgram };
+  }
+
+  /** Waits for turn `n` (0-based) to be up and listening on its own socket. */
+  async function onTurn(page: Page, deepgram: Awaited<ReturnType<typeof fakeDeepgram>>, n: number): Promise<void> {
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[n] })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Answer out loud' })).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => deepgram.urls.length).toBeGreaterThanOrEqual(n + 1);
+  }
+
+  const saved = (saves: Saved[]) => saves.map((s) => [s.key, s.option]);
+
+  /** Nothing was saved and nothing is picked: the owner is still on `question`, asked again. */
+  async function expectNothingPicked(page: Page, saves: Saved[], question: string): Promise<void> {
+    // Long enough for a save to have gone out had the shell taken the words as an answer.
+    await page.waitForTimeout(1_500);
+    expect(saves).toEqual([]);
+    await expect(page.getByRole('heading', { level: 1, name: question })).toBeVisible();
+    await expect(page.getByRole('radio', { checked: true })).toHaveCount(0);
+  }
+
+  const pickCases = [
+    { name: '1. "first" picks the first card', says: 'first', option: 'a' },
+    { name: '2. "second" picks the second card', says: 'second', option: 'b' },
+    { name: '3. "Number two." (capitals and a full stop) picks the second card', says: 'Number two.', option: 'b' },
+    { name: '4. "Um, uh, the first one please" (fillers) picks the first card', says: 'Um, uh, the first one please', option: 'a' },
+  ] as const;
+  for (const c of pickCases) {
+    test(c.name, { tag: '@chromium' }, async ({ page }) => {
+      test.setTimeout(90_000);
+      const { saves, deepgram } = await listeningOnGreeting(page, c.option + c.says.length);
+      deepgram.say(c.says);
+      await expect.poll(() => saved(saves)).toEqual([['greeting', c.option]]);
+      await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[1] })).toBeVisible();
+      expect(saves[0]!.status).toBe(200);
+      expect((await v3Events(page, 'v3_choice_made')).map((e) => e.answer_mode)).toEqual(['voice']);
+    });
+  }
+
+  const priceCases = [
+    { name: '5. Saying the price, "eighty-nine", picks the $89 card', says: 'eighty-nine', option: 'a' },
+    { name: '6. "a hundred and twenty nine dollars" picks the $129 card', says: 'a hundred and twenty nine dollars', option: 'b' },
+  ] as const;
+  for (const c of priceCases) {
+    test(c.name, { tag: '@chromium' }, async ({ page }) => {
+      test.setTimeout(90_000);
+      const { saves, deepgram } = await listeningOnGreeting(page, `price_${c.option}`);
+      deepgram.say('first');
+      await onTurn(page, deepgram, 1);
+      deepgram.say(c.says);
+      await expect.poll(() => saved(saves)).toEqual([
+        ['greeting', 'a'],
+        ['trip_fee_and_rate', c.option],
+      ]);
+      await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[2] })).toBeVisible();
+    });
+  }
+
+  test('7. Words from a card, "hold it for me", pick that card', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'label');
+    deepgram.say('first');
+    await onTurn(page, deepgram, 1);
+    deepgram.say('first');
+    await onTurn(page, deepgram, 2);
+    deepgram.say('hold it for me');
+    await expect.poll(() => saved(saves).at(-1)).toEqual(['booking_posture', 'b']);
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[3] })).toBeVisible();
+  });
+
+  test('8. All seven turns answered by voice reach the read-back, every one saved as said', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(150_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'all_seven');
+    const answers = ['first', 'second', 'the first one', 'second', 'first', 'the second', 'first'] as const;
+    for (let n = 0; n < answers.length; n += 1) {
+      await onTurn(page, deepgram, n);
+      deepgram.say(answers[n]!);
+      await expect.poll(() => saves.length).toBe(n + 1);
+    }
+    await expect(page.getByRole('heading', { level: 1, name: READBACK_HEADING })).toBeVisible();
+    expect(saved(saves)).toEqual(CHOICE_KEYS.map((k, i) => [k, /second/.test(answers[i]!) ? 'b' : 'a']));
+    expect(saves.every((s) => s.status === 200)).toBe(true);
+    expect((await v3Events(page, 'v3_choice_made')).map((e) => e.answer_mode)).toEqual(CHOICE_KEYS.map(() => 'voice'));
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expectScreenFits(page);
+  });
+
+  test('9. Tap, then speak, then tap: each turn records how it was answered', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'mixed');
+    await page.getByRole('radio').nth(1).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await onTurn(page, deepgram, 1);
+    deepgram.say('first');
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[2] })).toBeVisible();
+    await page.getByRole('radio').nth(0).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[3] })).toBeVisible();
+    expect(saved(saves)).toEqual([
+      ['greeting', 'b'],
+      ['trip_fee_and_rate', 'a'],
+      ['booking_posture', 'a'],
+    ]);
+    expect((await v3Events(page, 'v3_choice_made')).map((e) => e.answer_mode)).toEqual(['tap', 'voice', 'tap']);
+  });
+
+  test('10. Two misses: the second adds an example; then "first" answers and the miss card goes', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'two_misses');
+    const transcript = page.getByTestId('rivet-transcript');
+    deepgram.say('banana');
+    await expect(transcript).toHaveText('I heard “banana”. Tap one, or say first or second.');
+    deepgram.say('purple monkey');
+    await expect(transcript).toHaveText('I heard “purple monkey”. Tap one, or say first or second. For example, say “first”.');
+    expect(saves).toEqual([]);
+    deepgram.say('first');
+    await expect.poll(() => saved(saves)).toEqual([['greeting', 'a']]);
+    await onTurn(page, deepgram, 1);
+    await expect(page.getByText(/I heard “/)).toHaveCount(0);
+  });
+
+  test('11. "Not the first one" is never taken as the first card', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'negation');
+    deepgram.say('not the first one');
+    await expect(page.getByTestId('rivet-transcript')).toContainText('I heard “not the first one”.');
+    await expectNothingPicked(page, saves, QUESTIONS[0]);
+  });
+
+  test('12. "Either one, first or second" picks neither: no guess is made', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'ambiguous');
+    deepgram.say('either one, first or second');
+    await expect(page.getByTestId('rivet-transcript')).toContainText('I heard “either one, first or second”.');
+    await expectNothingPicked(page, saves, QUESTIONS[0]);
+  });
+
+  test('13. Words heard mid-sentence that never finish ("the sec") answer nothing', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'interim');
+    deepgram.interim('the sec');
+    await expectNothingPicked(page, saves, QUESTIONS[0]);
+    await expect(page.getByText(/I heard “/)).toHaveCount(0);
+  });
+
+  test('14. The same answer heard twice saves once and never answers the next turn', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'double');
+    deepgram.say('first');
+    deepgram.say('first');
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[1] })).toBeVisible();
+    await page.waitForTimeout(1_500);
+    expect(saved(saves)).toEqual([['greeting', 'a']]);
+    await expect(page.getByRole('radio', { checked: true })).toHaveCount(0);
+  });
+
+  test('15. Tapping a card then saying the other one: the spoken answer wins, said once', { tag: '@chromium' }, async ({ page }) => {
+    // A tap only selects (and plays what callers hear); Next or a spoken answer is what answers.
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'tap_then_say');
+    await page.getByRole('radio').nth(0).click();
+    await expect(page.getByRole('radio', { checked: true })).toHaveCount(1);
+    expect(saves).toEqual([]);
+    deepgram.say('no, the second one');
+    await expect.poll(() => saved(saves)).toEqual([['greeting', 'b']]);
+    await onTurn(page, deepgram, 1);
+    // A late copy of those words on the turn just left answers nothing here.
+    deepgram.sayOn(0, 'second');
+    await page.waitForTimeout(1_500);
+    expect(saved(saves)).toEqual([['greeting', 'b']]);
+    expect((await v3Events(page, 'v3_choice_made')).map((e) => e.answer_mode)).toEqual(['voice']);
   });
 });
