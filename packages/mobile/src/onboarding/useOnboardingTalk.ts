@@ -1,0 +1,260 @@
+/**
+ * State machine for the spoken setup screen (app/(onboarding)/talk.tsx).
+ *
+ *   starting → ready ⇄ sending → review → saving → finished
+ *
+ * `start` asks the server for the greeting. Each owner turn (a transcribed
+ * clip, or typed text) goes to the setup conversation and Rivet's reply is
+ * shown and spoken. When the conversation completes, its setup items are
+ * listed for review; "Save my setup" approves them in one batch (they are
+ * capture-class, `onboarding_*`), then waits for the business-identity step
+ * to finish executing so the app can unlock.
+ *
+ * All I/O is injected so the hook is tested without a device. Every failure
+ * leaves a visible message and a way forward; nothing is retried quietly.
+ */
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { BatchApproveResult } from '../proposals/useApproveBatch';
+import {
+  approvalFailureCopy,
+  type OnboardingTurnOutcome,
+  type OnboardingTurnRequest,
+} from './talkThrough';
+
+export type TranscribeOutcome = { transcript: string } | { notConfigured: true };
+
+export interface OnboardingTalkDeps {
+  sendTurn: (req: OnboardingTurnRequest) => Promise<OnboardingTurnOutcome>;
+  /** Clip URI → transcript. Throws on a network/server failure. */
+  transcribe: (fileUri: string) => Promise<TranscribeOutcome>;
+  /** Speak one of Rivet's lines. Best-effort: resolves even when nothing plays. */
+  speak: (text: string) => Promise<void> | void;
+  /** Batch-approve the setup items. Throws on a non-2xx. */
+  approve: (proposalIds: string[]) => Promise<BatchApproveResult>;
+  /** Whether the business-identity step is done: true, false, or null when the status could not be read. */
+  identityDone: () => Promise<boolean | null>;
+  /** Device IANA zone; undefined when unknown (the server then asks). */
+  timezone: string | undefined;
+  /** Injected for tests. */
+  wait?: (ms: number) => Promise<void>;
+}
+
+export type OnboardingTalkStatus = 'starting' | 'ready' | 'sending' | 'review' | 'saving' | 'finished';
+
+export interface TalkTurn {
+  id: string;
+  role: 'owner' | 'rivet';
+  text: string;
+}
+
+export interface TalkError {
+  message: string;
+  /** What the one button next to the message does. */
+  action: 'retry_turn' | 'restart' | 'retry_save' | 'check_again' | 'none';
+}
+
+export interface UseOnboardingTalk {
+  status: OnboardingTalkStatus;
+  turns: TalkTurn[];
+  proposalIds: string[];
+  error: TalkError | null;
+  /** The server has no transcription: typing only. */
+  sttUnavailable: boolean;
+  sendText: (text: string) => Promise<void>;
+  sendAudio: (fileUri: string) => Promise<void>;
+  /** The error's action: re-send the last turn, start a new conversation, re-save, or re-check. */
+  recover: () => Promise<void>;
+  save: () => Promise<void>;
+}
+
+/** After approval the settings execute once the 5 s undo window closes; this is how long the screen waits. */
+export const SAVE_POLL_INTERVAL_MS = 2_000;
+export const SAVE_POLL_ATTEMPTS = 15;
+
+export const NOT_HEARD_COPY = "I didn't catch that. Hold the mic and try again, or type it.";
+export const TRANSCRIBE_FAILED_COPY = "I couldn't hear that clip. Try again, or type it.";
+export const STT_UNAVAILABLE_COPY = "Voice isn't available right now. Type your answer instead.";
+export const SAVE_FAILED_COPY = "I couldn't save your setup. Check your connection and try again.";
+export const SAVE_SLOW_COPY = "Your setup is saved but still being applied. Check again in a moment.";
+export const STATUS_UNKNOWN_COPY = "Your setup is saved, but I couldn't confirm it's finished. Check again in a moment.";
+
+const defaultWait = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
+  const depsRef = useRef(deps);
+  depsRef.current = deps;
+
+  const [status, setStatus] = useState<OnboardingTalkStatus>('starting');
+  const [turns, setTurns] = useState<TalkTurn[]>([]);
+  const [proposalIds, setProposalIds] = useState<string[]>([]);
+  const [error, setError] = useState<TalkError | null>(null);
+  const [sttUnavailable, setSttUnavailable] = useState(false);
+
+  const sessionId = useRef<string | undefined>(undefined);
+  const lastMessage = useRef<string | undefined>(undefined);
+  const counter = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const push = useCallback((role: TalkTurn['role'], text: string) => {
+    counter.current += 1;
+    const turn = { id: `t${counter.current}`, role, text };
+    setTurns((t) => [...t, turn]);
+  }, []);
+
+  /** One round-trip. `userMessage` undefined = the opening greeting. */
+  const runTurn = useCallback(
+    async (userMessage: string | undefined) => {
+      const { sendTurn, speak, timezone } = depsRef.current;
+      setStatus(userMessage === undefined ? 'starting' : 'sending');
+      setError(null);
+      lastMessage.current = userMessage;
+      const outcome = await sendTurn({
+        ...(sessionId.current ? { sessionId: sessionId.current } : {}),
+        ...(userMessage !== undefined ? { userMessage } : {}),
+        ...(timezone ? { clientTimezone: timezone } : {}),
+      });
+      if (!mounted.current) return;
+      if (outcome.kind !== 'turn') {
+        if (outcome.kind === 'session_gone' || outcome.kind === 'conflict') sessionId.current = undefined;
+        setError({
+          message: outcome.message,
+          action: outcome.kind === 'forbidden' ? 'none' : outcome.kind === 'failed' ? 'retry_turn' : 'restart',
+        });
+        setStatus(sessionId.current ? 'ready' : 'starting');
+        return;
+      }
+      const { turn } = outcome;
+      sessionId.current = turn.sessionId;
+      push('rivet', turn.assistantMessage);
+      void speak(turn.assistantMessage);
+      if (turn.completed) {
+        setProposalIds(turn.proposalIds);
+        setStatus('review');
+      } else {
+        setStatus('ready');
+      }
+    },
+    [push],
+  );
+
+  const started = useRef(false);
+  useEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    void runTurn(undefined);
+  }, [runTurn]);
+
+  const sendText = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      push('owner', trimmed);
+      await runTurn(trimmed);
+    },
+    [push, runTurn],
+  );
+
+  const sendAudio = useCallback(
+    async (fileUri: string) => {
+      setStatus('sending');
+      setError(null);
+      let result: TranscribeOutcome;
+      try {
+        result = await depsRef.current.transcribe(fileUri);
+      } catch {
+        if (!mounted.current) return;
+        setError({ message: TRANSCRIBE_FAILED_COPY, action: 'none' });
+        setStatus('ready');
+        return;
+      }
+      if (!mounted.current) return;
+      if ('notConfigured' in result) {
+        setSttUnavailable(true);
+        setError({ message: STT_UNAVAILABLE_COPY, action: 'none' });
+        setStatus('ready');
+        return;
+      }
+      if (!result.transcript.trim()) {
+        setError({ message: NOT_HEARD_COPY, action: 'none' });
+        setStatus('ready');
+        return;
+      }
+      await sendText(result.transcript);
+    },
+    [sendText],
+  );
+
+  /** Wait for the identity step to finish executing after approval. */
+  const awaitIdentity = useCallback(async () => {
+    const { identityDone, wait = defaultWait } = depsRef.current;
+    let lastKnown: boolean | null = null;
+    for (let attempt = 0; attempt < SAVE_POLL_ATTEMPTS; attempt += 1) {
+      let done: boolean | null;
+      try {
+        done = await identityDone();
+      } catch {
+        done = null;
+      }
+      if (!mounted.current) return;
+      if (done === true) {
+        setStatus('finished');
+        return;
+      }
+      lastKnown = done;
+      await wait(SAVE_POLL_INTERVAL_MS);
+      if (!mounted.current) return;
+    }
+    setError({ message: lastKnown === null ? STATUS_UNKNOWN_COPY : SAVE_SLOW_COPY, action: 'check_again' });
+  }, []);
+
+  const save = useCallback(async () => {
+    const ids = proposalIds;
+    setStatus('saving');
+    setError(null);
+    let result: BatchApproveResult;
+    try {
+      result = await depsRef.current.approve(ids);
+    } catch {
+      if (!mounted.current) return;
+      setError({ message: SAVE_FAILED_COPY, action: 'retry_save' });
+      setStatus('review');
+      return;
+    }
+    if (!mounted.current) return;
+    if (result.failed.length > 0) {
+      // Keep only what is still waiting, so "Try again" never re-sends an approved item.
+      setProposalIds(result.failed.map((f) => f.id));
+      setError({ message: approvalFailureCopy(result.failed), action: 'retry_save' });
+      setStatus('review');
+      return;
+    }
+    await awaitIdentity();
+  }, [proposalIds, awaitIdentity]);
+
+  const recover = useCallback(async () => {
+    const action = error?.action;
+    if (action === 'retry_turn') {
+      await runTurn(lastMessage.current);
+    } else if (action === 'restart') {
+      sessionId.current = undefined;
+      setTurns([]);
+      await runTurn(undefined);
+    } else if (action === 'retry_save') {
+      await save();
+    } else if (action === 'check_again') {
+      setError(null);
+      await awaitIdentity();
+    }
+  }, [error, runTurn, save, awaitIdentity]);
+
+  return { status, turns, proposalIds, error, sttUnavailable, sendText, sendAudio, recover, save };
+}
