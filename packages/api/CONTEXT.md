@@ -147,6 +147,9 @@ Terms for how the product states what it can prove about itself. The PRD's
   that passes when it arrives back on our number.
 - **Get found online checklist** — the derived home-page checklist of
   web-presence setup. Separate from onboarding steps, which gate activation.
+- **Presence path** — the owner's one answer to "do you have a website?":
+  *own website*, *Google only*, or *neither*. It decides which checklist items
+  show. _Avoid_: website status.
 
 ## Outbound messaging and drafting (D-045)
 
