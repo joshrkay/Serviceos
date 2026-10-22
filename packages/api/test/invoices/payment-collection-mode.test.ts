@@ -881,7 +881,16 @@ import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 describe('owner invoice routes honour payment_collection_mode', () => {
-  async function buildOwnerApp(mode: 'pay_link' | 'collect_on_site' | null, settingsRepo?: SettingsRepository) {
+  // The request-transaction middleware rolls back any >=400 response unless
+  // the route sets res.locals.forceCommit; captured at response time.
+  let lastForceCommit: unknown;
+
+  async function buildOwnerApp(
+    mode: 'pay_link' | 'collect_on_site' | null,
+    settingsRepo?: SettingsRepository,
+    customerOverrides: Partial<Customer> = {},
+  ) {
+    lastForceCommit = undefined;
     const customerRepo = new InMemoryCustomerRepository();
     const jobRepo = new InMemoryJobRepository();
     const invoiceRepo = new InMemoryInvoiceRepository();
@@ -889,7 +898,7 @@ describe('owner invoice routes honour payment_collection_mode', () => {
     const delivery = new InMemoryDeliveryProvider();
     const audit = new InMemoryAuditRepository();
     const provider = new CountingProvider();
-    const customer = makeCustomer();
+    const customer = makeCustomer(customerOverrides);
     await customerRepo.create(customer);
     const job = makeJob(customer.id);
     await jobRepo.create(job);
@@ -909,8 +918,11 @@ describe('owner invoice routes honour payment_collection_mode', () => {
     });
     const app = express();
     app.use(express.json());
-    app.use((req: Request, _res: Response, next: NextFunction) => {
+    app.use((req: Request, res: Response, next: NextFunction) => {
       (req as AuthenticatedRequest).auth = { userId: 'user-1', sessionId: 's', tenantId: TENANT, role: 'owner' };
+      res.on('finish', () => {
+        lastForceCommit = res.locals.forceCommit;
+      });
       next();
     });
     app.use(
@@ -958,6 +970,27 @@ describe('owner invoice routes honour payment_collection_mode', () => {
     const rows = await h.audit.findByEntity(TENANT, 'invoice', h.invoice.id);
     expect(rows.find((r) => r.eventType === 'invoice.sent')).toBeUndefined();
     expect(rows.filter((r) => r.eventType === 'invoice.payment_mode_unavailable')).toHaveLength(1);
+    // The 503 commits, or the request transaction would roll the audit row back.
+    expect(lastForceCommit).toBe(true);
+  });
+
+  it('POST /:id/send with no recipient on file → 400 before any pay link is made', async () => {
+    const h = await buildOwnerApp('pay_link', undefined, { primaryPhone: undefined, email: undefined });
+    const res = await request(h.app).post(`/api/invoices/${h.invoice.id}/send`).send({ channel: 'sms' });
+    expect(res.status).toBe(400);
+    expect(h.provider.mintRequests).toHaveLength(0);
+    expect(lastForceCommit).toBeUndefined();
+  });
+
+  it('POST /:id/send: every channel fails after the link was made → the response commits, so the link stays on the invoice', async () => {
+    const h = await buildOwnerApp('pay_link');
+    vi.spyOn(h.delivery, 'sendSms').mockRejectedValue(new Error('carrier down'));
+    const res = await request(h.app).post(`/api/invoices/${h.invoice.id}/send`).send({ channel: 'sms' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/failed on all channels/);
+    expect(h.provider.mintRequests).toHaveLength(1);
+    expect(lastForceCommit).toBe(true);
+    expect((await h.invoiceRepo.findById(TENANT, h.invoice.id))?.stripePaymentLinkUrl).toMatch(/^https:\/\/pay\.mock\.com\//);
   });
 
   it('POST /:id/send in pay_link mode mints the pay link before the text goes out', async () => {

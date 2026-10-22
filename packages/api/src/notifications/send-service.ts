@@ -479,6 +479,14 @@ export class SendService {
     }
     const paymentCollectionMode = modeRead.mode;
     const settingsRow = modeRead.settings;
+    // Who it goes to is settled before a pay link is made, so a send with no
+    // recipient never mints a Stripe link it then rolls back.
+    const channels = resolveChannels({
+      channel: input.channel,
+      customer,
+      recipientPhone: input.recipientPhone,
+      recipientEmail: input.recipientEmail,
+    });
     if (paymentCollectionMode === 'pay_link' && invoice.amountDueCents > 0) {
       try {
         await this.deps.ensureInvoicePayLink(input.tenantId, invoice.id);
@@ -508,13 +516,6 @@ export class SendService {
         updatedAt: new Date(),
       });
     }
-
-    const channels = resolveChannels({
-      channel: input.channel,
-      customer,
-      recipientPhone: input.recipientPhone,
-      recipientEmail: input.recipientEmail,
-    });
 
     const sendStartedAt = Date.now();
     const dispatchTo = (target: ChannelTarget) =>
@@ -581,9 +582,7 @@ export class SendService {
     });
 
     if (sent.length === 0) {
-      throw new ValidationError(
-        `Invoice send failed on all channels: ${errors.join('; ')}`
-      );
+      throw new InvoiceNotDeliveredError(errors);
     }
 
     // Codex P1 #2 follow-up — see the matching call in sendEstimate above.
@@ -922,6 +921,19 @@ export class PayLinkUnavailableError extends AppError {
       503,
     );
     this.name = 'PayLinkUnavailableError';
+  }
+}
+
+/**
+ * Every channel of an invoice send failed. By then the send may have made the
+ * invoice's pay link and its view token, so the owner route commits with this
+ * error (res.locals.forceCommit): a rollback would leave a live Stripe link no
+ * invoice points at, and the retry would mint another.
+ */
+export class InvoiceNotDeliveredError extends ValidationError {
+  constructor(errors: string[]) {
+    super(`Invoice send failed on all channels: ${errors.join('; ')}`);
+    this.name = 'InvoiceNotDeliveredError';
   }
 }
 

@@ -201,5 +201,49 @@ describe('InvoicesPage send sheet — a draft whose first send is refused (D-045
       '/api/invoices/i-draft/send',
     ]);
   });
+
+  it('closed and reopened after the refusal, the sheet sees the invoice open and does not issue again', async () => {
+    let status = 'draft';
+    const draft = () => ({ ...openInvoice, id: 'i-draft', invoiceNumber: 'INV-DRAFT', status });
+    const posts: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(String(input), 'http://app.test');
+        const method = init?.method ?? 'GET';
+        if (method === 'POST') posts.push(url.pathname);
+        if (method === 'POST' && url.pathname === '/api/invoices/i-draft/issue') {
+          if (status !== 'draft') return Promise.resolve(json(400, { message: 'Invalid transition from open to open' }));
+          status = 'open';
+          return Promise.resolve(json(200, draft()));
+        }
+        if (method === 'POST' && url.pathname === '/api/invoices/i-draft/send') {
+          return Promise.resolve(json(503, { error: 'PAY_LINK_UNAVAILABLE', message: 'Invoice INV-DRAFT was not sent.' }));
+        }
+        if (method === 'GET' && url.pathname === '/api/invoices/i-draft') return Promise.resolve(json(200, draft()));
+        if (method === 'GET' && url.pathname === '/api/invoices') {
+          return Promise.resolve(json(200, { data: [draft()], total: 1, page: 1, pageSize: 25 }));
+        }
+        if (method === 'GET') return Promise.resolve(json(200, []));
+        return Promise.reject(new Error(`unexpected request ${method} ${url.pathname}`));
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i-draft" />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /^send payment link$/i }));
+    fireEvent.click(screen.getAllByRole('button', { name: /^send payment link$/i }).at(-1)!);
+    expect(await screen.findByText(/Send failed: Invoice INV-DRAFT was not sent/)).toBeInTheDocument();
+
+    // Close the sheet; the refetch after the issue shows the invoice open.
+    fireEvent.click(document.querySelector('.fixed.inset-0') as Element);
+    fireEvent.click(await screen.findByRole('button', { name: /^resend payment link$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^send payment link$/i }));
+    await waitFor(() => expect(posts.filter((p) => p.endsWith('/send'))).toHaveLength(2));
+    expect(posts.filter((p) => p.endsWith('/issue'))).toHaveLength(1);
+  });
 });
 

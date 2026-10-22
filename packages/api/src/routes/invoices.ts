@@ -25,7 +25,7 @@ import { AuditRepository, createAuditEvent, createAuditEventBestEffort } from '.
 import { resolveDefaultTaxRateBps, SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { applyDepositCreditToInvoice } from '../invoices/deposit-credit';
-import { SendService } from '../notifications/send-service';
+import { SendService, PayLinkUnavailableError, InvoiceNotDeliveredError } from '../notifications/send-service';
 import { Job, JobRepository } from '../jobs/job';
 import { Customer, CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
@@ -711,6 +711,13 @@ export function createInvoiceRouter(
         // where SendService transitions the estimate to 'sent' internally.
         res.status(202).json(result);
       } catch (err) {
+        // D-045 — a refused send keeps what it wrote: the audit of a payment
+        // setting that couldn't be read, or the pay link it already made
+        // before every channel failed. A rollback would erase the only record
+        // of the refusal, or orphan a live Stripe link.
+        if (err instanceof PayLinkUnavailableError || err instanceof InvoiceNotDeliveredError) {
+          res.locals.forceCommit = true;
+        }
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }
