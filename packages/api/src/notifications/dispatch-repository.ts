@@ -88,8 +88,9 @@ export interface MessageDispatch {
 /**
  * One message's outcome, recorded by outbound messaging under its dedupe key.
  * A later outcome for the same key replaces an earlier scheduled or blocked
- * one; a sent or delivered row is never overwritten, except that a real
- * receipt replaces a backfilled placeholder (`UNKNOWN_PROVIDER`).
+ * one; a row that reached a provider (sent, delivered, failed, bounced) is
+ * never overwritten, except that a real receipt replaces a backfilled
+ * placeholder (`UNKNOWN_PROVIDER`).
  */
 export interface RecordOutcomeInput {
   tenantId: string;
@@ -345,7 +346,7 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
     const c = outcomeColumns(input);
     return this.withTenant(input.tenantId, async (client) => {
       // One row per message: a later outcome replaces a scheduled or blocked
-      // one, and a row that reached the customer is never overwritten (save a
+      // one, and a row that reached a provider is never overwritten (save a
       // backfilled placeholder, which a real receipt fills in). Same rule as
       // `replaces` below.
       const { rows } = await client.query(
@@ -364,7 +365,7 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
            purpose = EXCLUDED.purpose, scheduled_for = EXCLUDED.scheduled_for,
            block_reason = EXCLUDED.block_reason, block_permanent = EXCLUDED.block_permanent,
            sent_at = NOW()
-         WHERE message_dispatches.status NOT IN ('sent', 'delivered')
+         WHERE message_dispatches.status IN ('scheduled', 'blocked')
             OR (message_dispatches.status = 'sent'
                 AND message_dispatches.provider = '${UNKNOWN_PROVIDER}'
                 AND EXCLUDED.status = 'sent'
@@ -503,7 +504,7 @@ function outcomeColumns(input: RecordOutcomeInput): Omit<MessageDispatch, 'id' |
 
 /** Whether a new outcome may replace the recorded one for the same message. */
 function replaces(existing: MessageDispatch, input: RecordOutcomeInput): boolean {
-  if (existing.status !== 'sent' && existing.status !== 'delivered') return true;
+  if (existing.status === 'scheduled' || existing.status === 'blocked') return true;
   return (
     existing.status === 'sent' &&
     existing.provider === UNKNOWN_PROVIDER &&

@@ -55,6 +55,20 @@ describe('InMemoryDispatchRepository', () => {
       expect(row).toMatchObject({ provider: 'sms-gateway', providerMessageId: 'SM1', recipient: '+15550001111' });
     });
 
+    it('keeps a failed or bounced row when a retry backfills sent', async () => {
+      const repo = new InMemoryDispatchRepository();
+      const sent = await repo.recordOutcome({
+        ...base,
+        idempotencyKey: 'k-1',
+        outcome: { status: 'sent', provider: 'twilio-sms', providerMessageId: 'SM1' },
+      });
+      await repo.updateStatus(TENANT, sent.id, 'failed', undefined, 'undeliverable');
+
+      const after = await repo.recordOutcome({ ...base, recipient: '', idempotencyKey: 'k-1', outcome: { status: 'sent', provider: 'unknown' } });
+
+      expect(after).toMatchObject({ status: 'failed', providerMessageId: 'SM1', errorMessage: 'undeliverable' });
+    });
+
     it('filters the list by status, customer and job', async () => {
       const repo = new InMemoryDispatchRepository();
       await repo.recordOutcome({ ...base, idempotencyKey: 'k-1', outcome: { status: 'blocked', reason: 'dnc', permanent: true } });

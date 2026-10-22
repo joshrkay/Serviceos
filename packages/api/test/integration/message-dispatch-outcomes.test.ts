@@ -91,6 +91,19 @@ describe('Postgres integration — message dispatch outcomes', () => {
     expect(after).toMatchObject({ providerMessageId: 'SM3', recipient: '+15550001111' });
   });
 
+  it('never turns a later delivery failure back into sent', async () => {
+    const input = await base();
+    const sent = await repo.recordOutcome({
+      ...input,
+      outcome: { status: 'sent', provider: 'twilio-sms', providerMessageId: 'SM4' },
+    });
+    await repo.updateStatus(input.tenantId, sent.id, 'bounced', undefined, 'carrier rejected');
+
+    const after = await repo.recordOutcome({ ...input, recipient: '', outcome: { status: 'sent', provider: 'unknown' } });
+
+    expect(after).toMatchObject({ status: 'bounced', providerMessageId: 'SM4', errorMessage: 'carrier rejected' });
+  });
+
   it('stores when a held text will go, and keeps it out of findByEntity', async () => {
     const input = await base();
     const opens = new Date('2026-10-23T15:00:00Z');
