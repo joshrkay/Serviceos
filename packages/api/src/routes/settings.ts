@@ -548,7 +548,13 @@ export function createSettingsRouter(
           // voice owner line, one-tap links), and it approves with the
           // backup's own role. A role without proposals:approve would be an
           // approval phone that can approve nothing.
-          if (!isValidRole(backup.role) || !hasPermission(backup.role, 'proposals:approve')) {
+          // B1 follow-up — the rule is about who is being MADE the backup. A
+          // backup named before B1 (e.g. a technician) and sent back
+          // unchanged with another field is accepted: it already carries no
+          // approval authority, and refusing it blocked every save.
+          const stored = await getSettings(req.auth!.tenantId, settingsRepo);
+          const unchanged = stored?.backupSupervisorUserId === parsed.backupSupervisorUserId;
+          if (!unchanged && (!isValidRole(backup.role) || !hasPermission(backup.role, 'proposals:approve'))) {
             throw new ValidationError(
               "That team member can't approve work, so they can't be your backup.",
               { field: 'backupSupervisorUserId' },

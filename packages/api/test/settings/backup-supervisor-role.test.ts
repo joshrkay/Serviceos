@@ -76,4 +76,45 @@ describe('PUT /api/settings — backupSupervisorUserId must be able to approve (
     expect(res.status).toBe(200);
     expect(res.body.backupSupervisorUserId).toBe(id);
   });
+
+  // B1 follow-up — a tenant whose backup was a technician before B1 got the
+  // 400 on EVERY save of the section (it re-sends the stored backup with the
+  // routing). The rule is about who is being made the backup: an unchanged
+  // legacy value is accepted (it carries no approval authority after B1).
+  describe('a legacy technician backup already on file', () => {
+    let legacy: string;
+    beforeEach(async () => {
+      legacy = await member('technician');
+      await settingsRepo.update(TENANT, { backupSupervisorUserId: legacy });
+    });
+
+    it('re-sending the unchanged backup with a routing change saves', async () => {
+      const res = await request(app)
+        .put('/api/settings')
+        .send({ backupSupervisorUserId: legacy, unsupervisedProposalRouting: 'queue_only' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.backupSupervisorUserId).toBe(legacy);
+      expect((await getSettings(TENANT, settingsRepo))?.unsupervisedProposalRouting).toBe('queue_only');
+    });
+
+    it('changing to another technician is still refused', async () => {
+      const other = await member('technician');
+
+      const res = await request(app).put('/api/settings').send({ backupSupervisorUserId: other });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe("That team member can't approve work, so they can't be your backup.");
+      expect((await getSettings(TENANT, settingsRepo))?.backupSupervisorUserId).toBe(legacy);
+    });
+
+    it('changing to a dispatcher saves', async () => {
+      const dispatcher = await member('dispatcher');
+
+      const res = await request(app).put('/api/settings').send({ backupSupervisorUserId: dispatcher });
+
+      expect(res.status).toBe(200);
+      expect(res.body.backupSupervisorUserId).toBe(dispatcher);
+    });
+  });
 });
